@@ -253,6 +253,33 @@ class _BasisNeutralOpaqueCost:
         )
 
 
+class _TransformAwareNonunitaryOpaqueCost:
+    """Price transformed measurement/reset behavior from the full context."""
+
+    def __call__(self, ctx: qm.OpaqueCallContext) -> qm.ResourceEstimate:
+        """Return an implementation-specific transformed nonunitary cost.
+
+        Args:
+            ctx (qm.OpaqueCallContext): Active opaque invocation context.
+
+        Returns:
+            qm.ResourceEstimate: Callback-owned measurement and reset cost.
+        """
+        events = ctx.total_controls + 1
+        return qm.ResourceEstimate(
+            measurements=qm.MeasurementResources(total=events),
+            resets=qm.ResetResources(total=events),
+            depth=qm.DepthResources(
+                depth=2 * events,
+                measurement_depth=events,
+                reset_depth=events,
+            ),
+            calls=qm.CallResources(
+                calls_by_name={f"transform={ctx.transform.value}": 1}
+            ),
+        )
+
+
 class _UnsupportedQuantumOperation(Operation):
     """Represent a future quantum IR operation unknown to the estimator."""
 
@@ -306,7 +333,9 @@ def test_raw_projection_axis_includes_semantic_basis_changes(
     estimate = qm.estimate_resources(block)
 
     assert estimate.gates.total == expected_gates
+    assert estimate.measurements.total == 1
     assert estimate.depth.depth == expected_depth
+    assert estimate.depth.gate_depth == expected_gates
     assert estimate.depth.measurement_depth == 1
 
 
@@ -1116,6 +1145,108 @@ def test_pauli_evolve_applies_unknown_policy_and_register_requirement() -> None:
     assert bound.substitute(width=3).gates.total == 1
 
 
+def test_fixed_nonunitary_opaque_cost_is_allowed_only_for_direct_calls() -> None:
+    """Fixed measurement/reset costs fail closed under unitary transforms."""
+    oracle = qm.opaque(
+        "fixed_nonunitary_oracle",
+        num_qubits=1,
+        cost=qm.ResourceEstimate(
+            measurements=qm.MeasurementResources(total=2),
+            resets=qm.ResetResources(total=1),
+            depth=qm.DepthResources(
+                depth=3,
+                measurement_depth=2,
+                reset_depth=1,
+            ),
+        ),
+    )
+
+    @qm.qkernel
+    def layer(target: qm.Qubit) -> qm.Qubit:
+        """Invoke the fixed-cost bodyless oracle."""
+        (target,) = oracle(target)
+        return target
+
+    @qm.qkernel
+    def direct() -> qm.Qubit:
+        """Invoke the fixed cost without a coherent transform."""
+        return layer(qm.qubit("target"))
+
+    @qm.qkernel
+    def controlled() -> tuple[qm.Qubit, qm.Qubit]:
+        """Attempt to control the fixed nonunitary cost."""
+        return qm.control(layer)(
+            qm.qubit("control"),
+            qm.qubit("target"),
+        )
+
+    @qm.qkernel
+    def inverted() -> qm.Qubit:
+        """Attempt to invert the fixed nonunitary cost."""
+        return qm.inverse(layer)(qm.qubit("target"))
+
+    direct_estimate = direct.estimate_resources()
+    assert direct_estimate.gates.total == 0
+    assert direct_estimate.measurements.total == 2
+    assert direct_estimate.resets.total == 1
+    assert direct_estimate.depth.depth == 3
+    assert direct_estimate.depth.gate_depth == 0
+    assert direct_estimate.depth.measurement_depth == 2
+    assert direct_estimate.depth.reset_depth == 1
+
+    with pytest.raises(ValueError, match="context-aware opaque cost model"):
+        controlled.estimate_resources()
+    with pytest.raises(ValueError, match="context-aware opaque cost model"):
+        inverted.estimate_resources()
+
+
+def test_context_aware_opaque_cost_can_price_nonunitary_transforms() -> None:
+    """A callback may authoritatively model controlled and inverse costs."""
+    oracle = qm.opaque(
+        "callback_nonunitary_oracle",
+        num_qubits=1,
+        cost=_TransformAwareNonunitaryOpaqueCost(),
+    )
+
+    @qm.qkernel
+    def layer(target: qm.Qubit) -> qm.Qubit:
+        """Invoke the context-aware bodyless oracle."""
+        (target,) = oracle(target)
+        return target
+
+    @qm.qkernel
+    def controlled() -> tuple[qm.Qubit, qm.Qubit]:
+        """Control the callback-priced invocation."""
+        return qm.control(layer)(
+            qm.qubit("control"),
+            qm.qubit("target"),
+        )
+
+    @qm.qkernel
+    def inverted() -> qm.Qubit:
+        """Invert the callback-priced invocation."""
+        return qm.inverse(layer)(qm.qubit("target"))
+
+    controlled_estimate = controlled.estimate_resources()
+    inverse_estimate = inverted.estimate_resources()
+
+    assert controlled_estimate.measurements.total == 2
+    assert controlled_estimate.resets.total == 2
+    assert controlled_estimate.depth.depth == 4
+    assert controlled_estimate.depth.gate_depth == 0
+    assert controlled_estimate.depth.measurement_depth == 2
+    assert controlled_estimate.depth.reset_depth == 2
+    assert controlled_estimate.calls.calls_by_name == {"transform=direct": 1}
+
+    assert inverse_estimate.measurements.total == 1
+    assert inverse_estimate.resets.total == 1
+    assert inverse_estimate.depth.depth == 2
+    assert inverse_estimate.depth.gate_depth == 0
+    assert inverse_estimate.depth.measurement_depth == 1
+    assert inverse_estimate.depth.reset_depth == 1
+    assert inverse_estimate.calls.calls_by_name == {"transform=inverse": 1}
+
+
 @pytest.mark.parametrize(
     ("num_controls", "expected_total", "expected_clean_ancillas"),
     [
@@ -1814,6 +1945,58 @@ def test_quality_and_basis_provenance_survive_resource_algebra() -> None:
     assert lowered.to_dict()["precision"] == 1e-4
 
 
+def test_nonunitary_resources_compose_substitute_and_serialize() -> None:
+    """Measurement/reset fields survive composition and symbolic rewrites."""
+    events = sp.Symbol("events", integer=True, nonnegative=True)
+    primitive = qm.ResourceEstimate(
+        measurements=qm.MeasurementResources(total=1),
+        resets=qm.ResetResources(total=1),
+        depth=qm.DepthResources(
+            depth=2,
+            measurement_depth=1,
+            reset_depth=1,
+        ),
+    )
+
+    sequential = primitive.seq(primitive)
+    parallel = primitive.parallel(primitive)
+    repeated = primitive.repeat(events)
+
+    assert sequential.measurements.total == 2
+    assert sequential.resets.total == 2
+    assert sequential.depth.depth == 4
+    assert sequential.depth.measurement_depth == 2
+    assert sequential.depth.reset_depth == 2
+
+    assert parallel.measurements.total == 2
+    assert parallel.resets.total == 2
+    assert parallel.depth.depth == 2
+    assert parallel.depth.measurement_depth == 1
+    assert parallel.depth.reset_depth == 1
+
+    assert repeated.parameters == {"events": events}
+    assert repeated.measurements.total == events
+    assert repeated.resets.total == events
+    assert repeated.depth.depth == 2 * events
+    assert repeated.depth.measurement_depth == events
+    assert repeated.depth.reset_depth == events
+
+    substituted = repeated.substitute(events=3)
+    assert substituted.parameters == {}
+    assert substituted.measurements.total == 3
+    assert substituted.resets.total == 3
+    assert substituted.depth.depth == 6
+    assert substituted.depth.measurement_depth == 3
+    assert substituted.depth.reset_depth == 3
+
+    serialized = repeated.to_dict()
+    assert serialized["measurements"] == {"total": "events"}
+    assert serialized["resets"] == {"total": "events"}
+    assert serialized["depth"]["gate_depth"] == "0"
+    assert serialized["depth"]["measurement_depth"] == "events"
+    assert serialized["depth"]["reset_depth"] == "events"
+
+
 def test_resource_algebra_rejects_mixed_gate_bases() -> None:
     """Basis-sensitive estimates cannot be silently combined and relabeled."""
     portable = qm.ResourceEstimate(
@@ -1827,6 +2010,60 @@ def test_resource_algebra_rejects_mixed_gate_bases() -> None:
 
     with pytest.raises(ValueError, match="different gate bases"):
         portable.seq(logical)
+
+
+def test_legacy_unclassified_depth_remains_gate_basis_sensitive() -> None:
+    """A pre-gate-depth opaque cost cannot be silently relabeled."""
+    portable = qm.ResourceEstimate(
+        gates=qm.GateResources(total=1, single_qubit=1),
+        basis=qm.GateBasis.PORTABLE,
+    )
+    legacy = qm.ResourceEstimate(
+        depth=qm.DepthResources(depth=1),
+        basis=qm.GateBasis.LOGICAL,
+    )
+
+    with pytest.raises(ValueError, match="different gate bases"):
+        portable.seq(legacy)
+
+
+@pytest.mark.parametrize(
+    "resource_type",
+    [qm.MeasurementResources, qm.ResetResources],
+)
+@pytest.mark.parametrize(
+    "invalid_count",
+    [True, False, np.bool_(True), -1, 0.5, sp.oo],
+)
+def test_event_resources_reject_invalid_concrete_counts(
+    resource_type: type[qm.MeasurementResources] | type[qm.ResetResources],
+    invalid_count: object,
+) -> None:
+    """Public event resources reject non-count concrete values."""
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        resource_type(total=invalid_count)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "resource_type"),
+    [
+        ("measurements", qm.MeasurementResources),
+        ("resets", qm.ResetResources),
+    ],
+)
+def test_event_resources_accept_nonnegative_symbols_and_validate_substitution(
+    field_name: str,
+    resource_type: type[qm.MeasurementResources] | type[qm.ResetResources],
+) -> None:
+    """Symbolic event counts retain their nonnegative integer domain."""
+    events = sp.Symbol("events", integer=True, nonnegative=True)
+    resource = resource_type(total=events)
+    estimate = qm.ResourceEstimate(**{field_name: resource})
+
+    assert resource_type(total=0).total == 0
+    assert estimate.substitute(events=0).parameters == {}
+    with pytest.raises(ValueError, match="Cannot substitute negative"):
+        estimate.substitute(events=-1)
 
 
 def test_basis_provenance_does_not_simplify_accumulated_metrics(

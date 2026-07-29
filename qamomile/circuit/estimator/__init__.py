@@ -8,6 +8,8 @@ body-wide shared control ladders when concrete structure permits them.
 (surface-code) conversion in :mod:`qamomile.circuit.estimator.physical`
 remains experimental and intentionally is not re-exported here, keeping
 algorithmic estimation and physical assumptions clearly separated.
+Measurements and resets are reported independently from gates, while depth
+retains both the complete critical path and per-operation-class layers.
 """
 
 from qamomile.circuit.estimator.resource_estimator import (
@@ -16,7 +18,9 @@ from qamomile.circuit.estimator.resource_estimator import (
     EstimateQuality,
     GateBasis,
     GateResources,
+    MeasurementResources,
     OpaqueCallContext,
+    ResetResources,
     ResourceAssumption,
     ResourceEstimate,
     ResourceEstimator,
@@ -33,7 +37,9 @@ __all__ = [
     "EstimateQuality",
     "GateBasis",
     "GateResources",
+    "MeasurementResources",
     "OpaqueCallContext",
+    "ResetResources",
     "ResourceAssumption",
     "ResourceEstimate",
     "ResourceEstimator",

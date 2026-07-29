@@ -85,8 +85,8 @@ def test_project_x_and_project_y_lower_through_basis_changes(
     assert gate_types == basis_gates
 
 
-def test_measure_reset_resource_estimate_counts_reset_as_primitive():
-    """``measure_reset`` is estimable as projective measure plus reset."""
+def test_measure_reset_resource_estimate_separates_nonunitary_primitives():
+    """``measure_reset`` separates measurements and reset from gate cost."""
 
     @qmc.qkernel
     def kernel() -> qmc.Bit:
@@ -96,9 +96,14 @@ def test_measure_reset_resource_estimate_counts_reset_as_primitive():
         return qmc.measure(q)
 
     estimate = kernel.estimate_resources(trace=True).simplify()
-    assert estimate.gates.total == 2
-    assert estimate.gates.single_qubit == 2
+    assert estimate.gates.total == 1
+    assert estimate.gates.single_qubit == 1
+    assert estimate.measurements.total == 2
+    assert estimate.resets.total == 1
+    assert estimate.depth.depth == 4
+    assert estimate.depth.gate_depth == 1
     assert estimate.depth.measurement_depth == 2
+    assert estimate.depth.reset_depth == 1
     assert estimate.trace is not None
     assert "reset" in estimate.trace.render()
 

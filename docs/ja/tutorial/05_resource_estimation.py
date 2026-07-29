@@ -19,13 +19,14 @@
 #
 # # リソース推定
 #
-# 量子カーネルを実機で実行する前に、必要な量子ビット数やゲート数を把握したい場合があります。Qamomileの`estimate_resources()`を使うと、**量子カーネルを実行せずに**リソースを推定できます。ハードウェアのnative gateではなくalgorithmic levelのリソースを扱い、既定の`portable` basisではQamomile共通の制御分解を使いますが、target固有の最適化は適用しません。concreteな量子カーネルとsymbolicな（パラメータ付き）量子カーネルの両方に対応しています。
+# 量子カーネルを実機で実行する前に、必要な量子ビット幅、ゲート数、測定・reset回数、depthを把握したい場合があります。Qamomileの`estimate_resources()`を使うと、**量子カーネルを実行せずに**リソースを推定できます。ハードウェアのnative gateではなくalgorithmic levelのリソースを扱い、既定の`portable` basisではQamomile共通の制御分解を使いますが、target固有の最適化は適用しません。concreteな量子カーネルとsymbolicな（パラメータ付き）量子カーネルの両方に対応しています。
 #
 # この章では以下を扱います：
 #
 # - 固定量子カーネルの基本的なリソース推定
 # - `portable`、`logical`、`clifford_t`モデルの選択
 # - 制御、inverse call、SELECT、Pauli evolution、control flowの組み合わせ
+# - ゲート、測定、resetリソースの分離
 # - パラメータ付き量子カーネルのsymbolicなリソース推定
 # - 構造上の要件、opaque boundary、trace、JSON向け出力
 # - `.substitute()`によるスケーリング分析
@@ -69,6 +70,13 @@ print("single-qubit gates:", est.gates.single_qubit)
 assert est.gates.single_qubit == 1
 print("two-qubit gates:", est.gates.two_qubit)
 assert est.gates.two_qubit == 2
+print("measurements:", est.measurements.total)
+assert est.measurements.total == 3
+assert est.resets.total == 0
+assert est.depth.depth == 4
+assert est.depth.gate_depth == 3
+assert est.depth.measurement_depth == 1
+assert est.depth.reset_depth == 0
 
 # %% [markdown]
 # ## 推定モデルの選択
@@ -237,7 +245,12 @@ assert vector_est.parameters == {}
 # | `est.gates.t_gates` | Tゲート数 |
 # | `est.gates.clifford_gates` | Cliffordゲート数 |
 # | `est.gates.rotation_gates` | 回転ゲート数 |
-# | `est.depth.depth` | dependencyを考慮したalgorithmic depth |
+# | `est.measurements.total` | 1回のlogical executionで量子ビットを測定する回数 |
+# | `est.resets.total` | 1回のlogical executionで明示的に量子ビットをresetする回数 |
+# | `est.depth.depth` | dependencyを考慮した全操作のalgorithmic depth |
+# | `est.depth.gate_depth` | ゲートだけのalgorithmic depth |
+# | `est.depth.measurement_depth` | 測定だけのalgorithmic depth |
+# | `est.depth.reset_depth` | resetだけのalgorithmic depth |
 # | `est.calls.calls_by_name` | 名前別のbodyless/opaque boundary call回数 |
 # | `est.calls.queries_by_name` | 名前別のopaque query complexity |
 # | `est.parameters` | シンボル名からSymPyシンボルへの辞書 |
@@ -247,7 +260,9 @@ assert vector_est.parameters == {}
 # | `est.assumptions` | 推定時に有効なモデル上の仮定 |
 # | `est.trace` / `est.explain()` | 任意で保持する説明treeとそのテキスト表示 |
 #
-# 数値リソースのフィールドはSymPy式です。固定量子カーネルの場合は通常の整数に評価されます。`calls_by_name`は通常の本体を持つ量子カーネルのcallを意図的に数えません。その本体はすでに展開され、gate、幅、depthに反映されているためです。ここに記録するのは、明示的なopaque costまたはunknown call policyによるopaque boundaryだけです。
+# 数値リソースのフィールドはSymPy式です。固定量子カーネルの場合は通常の整数に評価されます。測定とresetはゲートとして数えません。`N`量子ビットのvectorを測定すると`measurements.total`は`N`増えますが、並列に読み出せる場合の`measurement_depth`は1 layerです。countは量子カーネルをlogicalに1回実行した場合の値で、shots倍しません。`qmc.expval`はobservable grouping、basis rotation、shotsがExecutorに依存するため、`measurements.total`を0のままにします。ここでの0は「測定不要」ではなく「この推定には含めていない」という意味で、その不確実性は`modeled` quality、assumption、abstract query、measurement layerで明示します。`resets.total`が数えるのは明示的な`qmc.reset`だけで、`|0>`状態の新規確保やbackendがtargetに合わせて挿入するresetは含みません。各種類のdepthは独立してscheduleされるため、加減算から`depth.depth`を復元することはできません。
+#
+# `calls_by_name`は通常の本体を持つ量子カーネルのcallを意図的に数えません。その本体はすでに展開され、gate、幅、depth、測定、resetに反映されているためです。ここに記録するのは、明示的なopaque costまたはunknown call policyによるopaque boundaryだけです。
 
 # %% [markdown]
 # ## Opaque boundary、condition-aware provenance、trace
@@ -374,17 +389,21 @@ shor_est = order_finding.estimate_resources()
 
 print("portable peak qubits:", shor_est.qubits)
 print("portable total gates:", shor_est.gates.total)
+print("measurements:", shor_est.measurements.total)
+print("resets:", shor_est.resets.total)
 print("estimate quality:", shor_est.quality)
 
 assert shor_est.parameters == {}
 assert shor_est.width.allocated_qubits == 21
 assert shor_est.width.clean_ancilla_qubits == 2
 assert shor_est.qubits == 23
-assert shor_est.gates.total == 4665
+assert shor_est.gates.total == 4585
+assert shor_est.measurements.total == 80
+assert shor_est.resets.total == 80
 assert str(shor_est.quality) == "upper_bound"
 
 # %% [markdown]
-# この実装は`2*n`量子ビットのcountingレジスタを同時に保持しません。1つの位相量子ビットを測定・リセットして再利用し、それまでに得たビットで半古典的inverse QFTの位相補正を行います。
+# この実装は`2*n`量子ビットのcountingレジスタを同時に保持しません。1つの位相量子ビットを測定・resetして再利用し、それまでに得たビットで半古典的inverse QFTの位相補正を行います。上の80回の測定・resetのうち、8回はこの位相読み出しと再利用、72回は算術内部のmeasurement-assisted carry ventingによるものです。明示的なresetは`gates.total`ではなく`resets.total`に反映されます。
 #
 # 固定window幅を`w`とすると、制御分解前の回路本体のpeak-live allocationは`3*n + w + 7`論理量子ビットになります。
 #
@@ -462,7 +481,9 @@ print("windowed arithmetic gates:", window_est.gates.total)
 assert window_est.width.allocated_qubits == 3 * 4 + 2 + 7
 assert window_est.width.clean_ancilla_qubits == 2
 assert window_est.qubits == 3 * 4 + 2 + 9
-assert window_est.gates.total == 2308
+assert window_est.gates.total == 2272
+assert window_est.measurements.total == 36
+assert window_est.resets.total == 36
 
 # %% [markdown]
 # standalone版では、無条件実行を表す内部controlが位相量子ビットの代わりになるため、回路本体は位数探索全体と同じ`3*n + w + 7`量子ビットを確保します。既定の`portable`におけるpeak幅は、制御分解用のclean ancillaにより2量子ビット大きくなります。`modmul_const()`は`x < modulus`の領域では`|x> -> |a*x mod modulus>`を実行し、領域外の基底状態はunitaryを保つため変更しません。
@@ -489,14 +510,16 @@ print("Ekerå–Håstad portable gates:", short_dlp_est.gates.total)
 assert short_dlp_est.width.allocated_qubits == 3 * 3 + 2 + 7
 assert short_dlp_est.width.clean_ancilla_qubits == 2
 assert short_dlp_est.qubits == 3 * 3 + 2 + 9
-assert short_dlp_est.gates.total == 5031
+assert short_dlp_est.gates.total == 4950
+assert short_dlp_est.measurements.total == 81
+assert short_dlp_est.resets.total == 81
 assert short_dlp.output_types == [qmc.Vector[qmc.Bit]]
 
 
 # %% [markdown]
 # ## まとめ
 #
-# - `estimate_resources()`は実行せずにalgorithmic levelの量子ビット数とゲートコストを算出します。
+# - `estimate_resources()`は実行せずにalgorithmic levelの量子ビット幅、ゲート、測定・reset回数、depthを算出します。
 # - 既定の`portable` basisは量子制御を再帰的に分解して必要なclean ancillaを報告し、`logical`はソース上の抽象gateを維持し、`clifford_t`は対応している合成モデルを適用します。
 # - call、inverse call、SELECT、global phase、Pauli evolution、control flowは1gateに縮約せず、本体と実行上の意味を組み合わせて推定します。
 # - `expval`は抽象的なqueryとmeasurement layerとして`modeled`推定にし、grouping、basis変換、shotのコストは選択したexecutorに委ねます。

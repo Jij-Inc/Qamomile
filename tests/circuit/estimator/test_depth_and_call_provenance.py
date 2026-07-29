@@ -173,8 +173,10 @@ def test_array_aliases_share_physical_wire_dependencies() -> None:
     estimate = circuit.estimate_resources()
 
     assert estimate.gates.total == 2
+    assert estimate.measurements.total == 3
     assert estimate.depth.depth == 2
     assert estimate.depth.clifford_depth == 1
+    assert estimate.depth.gate_depth == 1
     assert estimate.depth.measurement_depth == 1
 
 
@@ -255,14 +257,25 @@ def test_symbolic_vector_broadcast_has_layer_depth_not_element_depth() -> None:
     )
 
     assert symbolic.gates.total == 2 * width
+    assert symbolic.measurements.total == width
     assert symbolic.depth.depth.subs(width, 3) == 3
     assert symbolic.depth.depth.subs(width, 0) == 0
+    assert symbolic.depth.gate_depth.subs(width, 3) == 2
+    assert symbolic.depth.gate_depth.subs(width, 0) == 0
+    assert symbolic.depth.measurement_depth.subs(width, 3) == 1
+    assert symbolic.depth.measurement_depth.subs(width, 0) == 0
     assert symbolic.quality is qm.EstimateQuality.EXACT
     assert concrete.gates.total == 6
+    assert concrete.measurements.total == 3
     assert concrete.depth.depth == 3
+    assert concrete.depth.gate_depth == 2
+    assert concrete.depth.measurement_depth == 1
     assert concrete.quality is qm.EstimateQuality.EXACT
     assert empty.gates.total == 0
+    assert empty.measurements.total == 0
     assert empty.depth.depth == 0
+    assert empty.depth.gate_depth == 0
+    assert empty.depth.measurement_depth == 0
     assert empty.quality is qm.EstimateQuality.EXACT
 
 
@@ -280,9 +293,33 @@ def test_concrete_loop_parallelizes_disjoint_array_elements() -> None:
     estimate = circuit.estimate_resources()
 
     assert estimate.gates.total == 4
+    assert estimate.measurements.total == 4
     assert estimate.depth.depth == 2
     assert estimate.depth.clifford_depth == 1
+    assert estimate.depth.gate_depth == 1
     assert estimate.depth.measurement_depth == 1
+
+
+def test_parallel_measurement_and_reset_counts_do_not_inflate_depth() -> None:
+    """Independent gates, resets, and measurements each form one layer."""
+
+    @qm.qkernel
+    def circuit() -> qm.Vector[qm.Bit]:
+        """Reset and measure two independently prepared qubits."""
+        register = qm.x(qm.qubit_array(2, "register"))
+        for index in qm.range(2):
+            register[index] = qm.reset(register[index])
+        return qm.measure(register)
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.gates.total == 2
+    assert estimate.measurements.total == 2
+    assert estimate.resets.total == 2
+    assert estimate.depth.depth == 3
+    assert estimate.depth.gate_depth == 1
+    assert estimate.depth.measurement_depth == 1
+    assert estimate.depth.reset_depth == 1
 
 
 def test_reusable_clean_ancilla_pool_serializes_independent_fallbacks() -> None:
@@ -743,7 +780,9 @@ def test_qfixed_measurement_tracks_cast_carriers_and_measurement_depth() -> None
     estimate = circuit.estimate_resources()
 
     assert estimate.gates.total == 1
+    assert estimate.measurements.total == 3
     assert estimate.depth.depth == 2
+    assert estimate.depth.gate_depth == 1
     assert estimate.depth.measurement_depth == 1
     assert estimate.width.allocated_qubits == 3
     assert estimate.width.peak_qubits == 3
@@ -769,8 +808,13 @@ def test_qfixed_view_measurement_aliases_only_covered_root_wires() -> None:
         measured = qm.measure(fixed)
         return measured, register[0]
 
-    assert covered.estimate_resources().depth.depth == 2
-    assert sibling.estimate_resources().depth.depth == 1
+    covered_estimate = covered.estimate_resources()
+    sibling_estimate = sibling.estimate_resources()
+
+    assert covered_estimate.measurements.total == 2
+    assert covered_estimate.depth.depth == 2
+    assert sibling_estimate.measurements.total == 2
+    assert sibling_estimate.depth.depth == 1
 
 
 def test_empty_qfixed_measurement_has_zero_depth() -> None:
@@ -785,7 +829,9 @@ def test_empty_qfixed_measurement_has_zero_depth() -> None:
     estimate = circuit.estimate_resources()
 
     assert estimate.qubits == 0
+    assert estimate.measurements.total == 0
     assert estimate.depth.depth == 0
+    assert estimate.depth.gate_depth == 0
     assert estimate.depth.measurement_depth == 0
 
 
@@ -808,6 +854,7 @@ def test_expval_is_a_modeled_runtime_observation() -> None:
 
     assert estimate.calls.calls_by_name == {"expval": 1}
     assert estimate.calls.queries_by_name == {"expval": 1}
+    assert estimate.measurements.total == 1
     assert estimate.gates.total == 2
     assert estimate.parameters == {}
     assert estimate.quality is qm.EstimateQuality.MODELED
@@ -825,6 +872,7 @@ def test_expval_runtime_taint_does_not_change_kernel_effects() -> None:
     assert circuit.effects is qm.KernelEffect.NONE
     estimate = circuit.estimate_resources(inputs={"observable": qm_o.Z(0)})
     assert estimate.calls.queries_by_name == {"expval": 1}
+    assert estimate.measurements.total == 0
 
 
 def test_expval_destructively_releases_input_liveness() -> None:
@@ -867,6 +915,7 @@ def test_tuple_expval_forms_a_barrier_and_releases_each_carrier() -> None:
     observable = qm_o.Z(0) + qm_o.Z(1)
     estimate = circuit.estimate_resources(inputs={"observable": observable})
 
+    assert estimate.measurements.total == 2
     assert estimate.depth.depth == 3
     assert estimate.depth.measurement_depth == 2
     assert estimate.width.allocated_qubits == 4

@@ -81,8 +81,12 @@ def test_shor_skips_identity_modular_multiplication_rounds() -> None:
         modulus=15,
     ).estimate_resources(basis=qmc.GateBasis.LOGICAL)
 
-    assert arithmetic_rounds.gates.total == 3260
-    assert full_schedule.gates.total == 3305
+    assert arithmetic_rounds.gates.total == 3186
+    assert arithmetic_rounds.measurements.total == 74
+    assert arithmetic_rounds.resets.total == 74
+    assert full_schedule.gates.total == 3225
+    assert full_schedule.measurements.total == 80
+    assert full_schedule.resets.total == 80
     assert full_schedule.gates.two_qubit == arithmetic_rounds.gates.two_qubit
     assert full_schedule.gates.multi_qubit == arithmetic_rounds.gates.multi_qubit
 

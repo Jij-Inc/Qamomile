@@ -19,13 +19,14 @@
 #
 # # Resource Estimation
 #
-# Before running a quantum kernel on real hardware, you may want to know its required resources, such as qubit count and gate count. Qamomile's `estimate_resources()` fills this need **without executing the qkernel**. It reports algorithmic resources rather than hardware-native gates: the default `portable` basis follows Qamomile's backend-neutral control decomposition, but does not apply target-specific optimization. It works with both concrete and symbolic (parameterized) qkernels.
+# Before running a quantum kernel on real hardware, you may want to know its qubit width, gate count, measurement and reset events, and depth. Qamomile's `estimate_resources()` fills this need **without executing the qkernel**. It reports algorithmic resources rather than hardware-native gates: the default `portable` basis follows Qamomile's backend-neutral control decomposition, but does not apply target-specific optimization. It works with both concrete and symbolic (parameterized) qkernels.
 #
 # This chapter covers:
 #
 # - Basic resource estimation for fixed qkernels
 # - Choosing between `portable`, `logical`, and `clifford_t` models
 # - How controls, inverse calls, SELECT, Pauli evolution, and control flow compose
+# - Separating gate, measurement, and reset resources
 # - Symbolic resource estimation for parameterized qkernels
 # - Structural requirements, opaque boundaries, traces, and JSON-friendly output
 # - Scaling analysis with `.substitute()`
@@ -69,6 +70,13 @@ print("single-qubit gates:", est.gates.single_qubit)
 assert est.gates.single_qubit == 1
 print("two-qubit gates:", est.gates.two_qubit)
 assert est.gates.two_qubit == 2
+print("measurements:", est.measurements.total)
+assert est.measurements.total == 3
+assert est.resets.total == 0
+assert est.depth.depth == 4
+assert est.depth.gate_depth == 3
+assert est.depth.measurement_depth == 1
+assert est.depth.reset_depth == 0
 
 # %% [markdown]
 # ## Choosing the Estimation Model
@@ -237,7 +245,12 @@ assert vector_est.parameters == {}
 # | `est.gates.t_gates` | T-gate count |
 # | `est.gates.clifford_gates` | Clifford gate count |
 # | `est.gates.rotation_gates` | Rotation gate count |
-# | `est.depth.depth` | Dependency-aware algorithmic depth |
+# | `est.measurements.total` | Per-qubit measurement events in one logical execution |
+# | `est.resets.total` | Explicit per-qubit reset events in one logical execution |
+# | `est.depth.depth` | Complete dependency-aware algorithmic depth |
+# | `est.depth.gate_depth` | Gate-only algorithmic depth |
+# | `est.depth.measurement_depth` | Measurement-only algorithmic depth |
+# | `est.depth.reset_depth` | Reset-only algorithmic depth |
 # | `est.calls.calls_by_name` | Bodyless/opaque boundary calls by name |
 # | `est.calls.queries_by_name` | Opaque query complexity by name |
 # | `est.parameters` | Dict of symbol names → SymPy symbols |
@@ -247,7 +260,9 @@ assert vector_est.parameters == {}
 # | `est.assumptions` | Active modeling assumptions made by the estimator |
 # | `est.trace` / `est.explain()` | Optional explanation tree and its text rendering |
 #
-# Numeric resource fields are SymPy expressions. For fixed qkernels they evaluate to plain integers. `calls_by_name` deliberately does **not** count ordinary body-backed qkernel calls: those bodies have already been expanded into gates, width, and depth. It records only opaque boundaries, either from an explicit opaque cost or from an unknown-call policy.
+# Numeric resource fields are SymPy expressions. For fixed qkernels they evaluate to plain integers. Measurements and resets are not gates: measuring an `N`-qubit vector contributes `N` to `measurements.total`, while parallel readout can still contribute only one `measurement_depth` layer. Counts describe one logical qkernel execution and are not multiplied by shots. `qmc.expval` leaves `measurements.total` at zero because observable grouping, basis rotations, and shots are executor-dependent; here zero means “not included in this estimate,” not “no measurement is required.” The modeled quality, assumption, abstract query, and measurement layer expose that uncertainty. `resets.total` counts explicit `qmc.reset` operations, not fresh `|0>` allocation or target-dependent resets inserted by a backend. The category depths are scheduled independently, so they must not be subtracted from or summed to reconstruct `depth.depth`.
+#
+# `calls_by_name` deliberately does **not** count ordinary body-backed qkernel calls: those bodies have already been expanded into gates, width, depth, measurements, and resets. It records only opaque boundaries, either from an explicit opaque cost or from an unknown-call policy.
 
 # %% [markdown]
 # ## Opaque Boundaries, Condition-Aware Provenance, and Traces
@@ -373,17 +388,21 @@ shor_est = order_finding.estimate_resources()
 
 print("portable peak qubits:", shor_est.qubits)
 print("portable total gates:", shor_est.gates.total)
+print("measurements:", shor_est.measurements.total)
+print("resets:", shor_est.resets.total)
 print("estimate quality:", shor_est.quality)
 
 assert shor_est.parameters == {}
 assert shor_est.width.allocated_qubits == 21
 assert shor_est.width.clean_ancilla_qubits == 2
 assert shor_est.qubits == 23
-assert shor_est.gates.total == 4665
+assert shor_est.gates.total == 4585
+assert shor_est.measurements.total == 80
+assert shor_est.resets.total == 80
 assert str(shor_est.quality) == "upper_bound"
 
 # %% [markdown]
-# This implementation does not keep a `2*n`-qubit counting register at once. It measures and resets one phase qubit for reuse, applying semiclassical inverse-QFT phase corrections from the previously observed bits.
+# This implementation does not keep a `2*n`-qubit counting register at once. It measures and resets one phase qubit for reuse, applying semiclassical inverse-QFT phase corrections from the previously observed bits. Of the 80 measurement/reset events above, 8 come from that phase readout and reuse, while 72 come from measurement-assisted carry venting inside the arithmetic. All explicit resets appear in `resets.total`, not in `gates.total`.
 #
 # With a fixed lookup-window width `w`, peak-live allocation in the circuit body gives `3*n + w + 7` logical qubits before control decomposition.
 #
@@ -461,7 +480,9 @@ print("windowed arithmetic gates:", window_est.gates.total)
 assert window_est.width.allocated_qubits == 3 * 4 + 2 + 7
 assert window_est.width.clean_ancilla_qubits == 2
 assert window_est.qubits == 3 * 4 + 2 + 9
-assert window_est.gates.total == 2308
+assert window_est.gates.total == 2272
+assert window_est.measurements.total == 36
+assert window_est.resets.total == 36
 
 # %% [markdown]
 # In the standalone primitive, an internal control for the unconditional case takes the phase-qubit role, so its body has the same `3*n + w + 7` allocation as the full order-finding circuit. The default `portable` peak is two qubits larger because of clean control-decomposition ancillas. For `x < modulus`, `modmul_const()` implements `|x> -> |a*x mod modulus>`; it leaves basis states outside that domain unchanged to preserve unitarity.
@@ -488,13 +509,15 @@ print("Ekerå–Håstad portable gates:", short_dlp_est.gates.total)
 assert short_dlp_est.width.allocated_qubits == 3 * 3 + 2 + 7
 assert short_dlp_est.width.clean_ancilla_qubits == 2
 assert short_dlp_est.qubits == 3 * 3 + 2 + 9
-assert short_dlp_est.gates.total == 5031
+assert short_dlp_est.gates.total == 4950
+assert short_dlp_est.measurements.total == 81
+assert short_dlp_est.resets.total == 81
 assert short_dlp.output_types == [qmc.Vector[qmc.Bit]]
 
 # %% [markdown]
 # ## Summary
 #
-# - `estimate_resources()` reports algorithmic qubit and gate costs without executing.
+# - `estimate_resources()` reports algorithmic width, gates, measurement/reset events, and depth without executing.
 # - The default `portable` basis recursively expands coherent controls and reports required clean ancillas; `logical` retains the abstract source-gate view, and `clifford_t` applies the supported synthesis model.
 # - Calls, inverse calls, SELECT, global phase, Pauli evolution, and control flow compose from their bodies and semantics instead of collapsing to one gate.
 # - `expval` is reported as a modeled abstract query and measurement layer; grouping, basis-change, and shot costs are deliberately left to the selected executor.

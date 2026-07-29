@@ -229,6 +229,29 @@ def _combine_quality(
     return left if rank[left] >= rank[right] else right
 
 
+def _validate_event_count(value: ResourceExpr, *, label: str) -> None:
+    """Validate one concrete per-qubit event count.
+
+    Args:
+        value (ResourceExpr): Concrete or symbolic event-count expression.
+        label (str): User-facing resource label for diagnostics.
+
+    Raises:
+        ValueError: If a concrete value is Boolean, negative, non-finite, or
+            non-integral.
+    """
+    sympified = sp.sympify(value)
+    if sympified is sp.true or sympified is sp.false:
+        raise ValueError(f"{label} must be a nonnegative integer, got {value!r}.")
+    expression = cast(sp.Expr, sympified)
+    if expression.is_number and (
+        expression.is_finite is not True
+        or expression.is_negative is True
+        or not _is_concrete_integer(expression)
+    ):
+        raise ValueError(f"{label} must be a nonnegative integer, got {value!r}.")
+
+
 class UnknownResourcePolicy(enum.Enum):
     """Control how the estimator handles bodyless unknown callables.
 
@@ -551,6 +574,96 @@ class GateResources:
 
 
 @dataclasses.dataclass
+class MeasurementResources:
+    """Track logical measurement resources.
+
+    Args:
+        total (ResourceExpr): Number of per-qubit measurement events. Measuring
+            an ``N``-qubit vector contributes ``N``, independently of how many
+            source-level or IR operations express the measurement.
+
+    Raises:
+        ValueError: If ``total`` is a concrete value that is not a
+            nonnegative integer.
+    """
+
+    total: ResourceExpr = _ZERO
+
+    def __post_init__(self) -> None:
+        """Validate the concrete measurement count.
+
+        Raises:
+            ValueError: If ``total`` is a concrete value that is not a
+                nonnegative integer.
+        """
+        _validate_event_count(self.total, label="Measurement count")
+
+    @staticmethod
+    def zero() -> MeasurementResources:
+        """Return a zero measurement estimate.
+
+        Returns:
+            MeasurementResources: Empty measurement resources.
+        """
+        return MeasurementResources()
+
+    def simplify(self) -> MeasurementResources:
+        """Simplify all measurement expressions.
+
+        Returns:
+            MeasurementResources: Simplified copy.
+        """
+        return dataclasses.replace(
+            self,
+            total=_safe_simplify(self.total),
+        )
+
+
+@dataclasses.dataclass
+class ResetResources:
+    """Track logical reset resources.
+
+    Args:
+        total (ResourceExpr): Number of per-qubit reset events.
+
+    Raises:
+        ValueError: If ``total`` is a concrete value that is not a
+            nonnegative integer.
+    """
+
+    total: ResourceExpr = _ZERO
+
+    def __post_init__(self) -> None:
+        """Validate the concrete reset count.
+
+        Raises:
+            ValueError: If ``total`` is a concrete value that is not a
+                nonnegative integer.
+        """
+        _validate_event_count(self.total, label="Reset count")
+
+    @staticmethod
+    def zero() -> ResetResources:
+        """Return a zero reset estimate.
+
+        Returns:
+            ResetResources: Empty reset resources.
+        """
+        return ResetResources()
+
+    def simplify(self) -> ResetResources:
+        """Simplify all reset expressions.
+
+        Returns:
+            ResetResources: Simplified copy.
+        """
+        return dataclasses.replace(
+            self,
+            total=_safe_simplify(self.total),
+        )
+
+
+@dataclasses.dataclass
 class DepthResources:
     """Track logical depth resources.
 
@@ -562,6 +675,8 @@ class DepthResources:
         toffoli_depth (ResourceExpr): Toffoli-layer depth.
         non_clifford_depth (ResourceExpr): Non-Clifford-layer depth.
         measurement_depth (ResourceExpr): Measurement-layer depth.
+        gate_depth (ResourceExpr): Gate-only logical depth.
+        reset_depth (ResourceExpr): Reset-layer depth.
     """
 
     depth: ResourceExpr = _ZERO
@@ -571,6 +686,8 @@ class DepthResources:
     toffoli_depth: ResourceExpr = _ZERO
     non_clifford_depth: ResourceExpr = _ZERO
     measurement_depth: ResourceExpr = _ZERO
+    gate_depth: ResourceExpr = _ZERO
+    reset_depth: ResourceExpr = _ZERO
 
     @staticmethod
     def zero() -> DepthResources:
@@ -596,6 +713,8 @@ class DepthResources:
             toffoli_depth=_safe_simplify(self.toffoli_depth),
             non_clifford_depth=_safe_simplify(self.non_clifford_depth),
             measurement_depth=_safe_simplify(self.measurement_depth),
+            gate_depth=_safe_simplify(self.gate_depth),
+            reset_depth=_safe_simplify(self.reset_depth),
         )
 
 
@@ -1290,6 +1409,8 @@ class ResourceEstimate:
         gates (GateResources): Logical gate-resource estimate.
         depth (DepthResources): Logical depth-resource estimate.
         calls (CallResources): Callable/query-resource estimate.
+        measurements (MeasurementResources): Per-qubit measurement resources.
+        resets (ResetResources): Per-qubit reset resources.
         assumptions (tuple[ResourceAssumption, ...]): Modeling assumptions.
         trace (ResourceTraceNode | None): Explanation tree root. Defaults to
             ``None``.
@@ -1337,6 +1458,10 @@ class ResourceEstimate:
     quality: EstimateQuality = EstimateQuality.EXACT
     basis: GateBasis = GateBasis.PORTABLE
     precision: float | None = None
+    measurements: MeasurementResources = dataclasses.field(
+        default_factory=MeasurementResources.zero
+    )
+    resets: ResetResources = dataclasses.field(default_factory=ResetResources.zero)
     _allocation_sites: dict[str, ResourceExpr] = dataclasses.field(
         default_factory=dict,
         repr=False,
@@ -1566,6 +1691,8 @@ class ResourceEstimate:
             gates=_add_gates(self.gates, other.gates),
             depth=_add_depth(self.depth, other.depth),
             calls=_add_calls(self.calls, other.calls),
+            measurements=_add_measurements(self.measurements, other.measurements),
+            resets=_add_resets(self.resets, other.resets),
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_merge_trace("seq", self.trace, other.trace),
             quality=_combine_quality(self.quality, other.quality),
@@ -1602,6 +1729,8 @@ class ResourceEstimate:
             gates=_add_gates(self.gates, other.gates),
             depth=_max_depth(self.depth, other.depth),
             calls=_add_calls(self.calls, other.calls),
+            measurements=_add_measurements(self.measurements, other.measurements),
+            resets=_add_resets(self.resets, other.resets),
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_merge_trace("parallel", self.trace, other.trace),
             quality=_combine_quality(self.quality, other.quality),
@@ -1649,6 +1778,8 @@ class ResourceEstimate:
             gates=_max_gates(self.gates, other.gates),
             depth=_max_depth(self.depth, other.depth),
             calls=_max_calls(self.calls, other.calls),
+            measurements=_max_measurements(self.measurements, other.measurements),
+            resets=_max_resets(self.resets, other.resets),
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_merge_trace("choice", self.trace, other.trace),
             quality=_combine_quality(
@@ -1715,6 +1846,12 @@ class ResourceEstimate:
             gates=_conditional_gates(self.gates, other.gates, condition),
             depth=_conditional_depth(self.depth, other.depth, condition),
             calls=_conditional_calls(self.calls, other.calls, condition),
+            measurements=_conditional_measurements(
+                self.measurements,
+                other.measurements,
+                condition,
+            ),
+            resets=_conditional_resets(self.resets, other.resets, condition),
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_conditional_trace(condition, self.trace, other.trace),
             quality=_combine_quality(self.quality, other.quality),
@@ -1791,6 +1928,8 @@ class ResourceEstimate:
             gates=_scale_gates(self.gates, f),
             depth=_scale_depth(self.depth, f),
             calls=_scale_calls(self.calls, f),
+            measurements=_scale_measurements(self.measurements, f),
+            resets=_scale_resets(self.resets, f),
             assumptions=self.assumptions,
             trace=_wrap_trace(
                 f"repeat({f})",
@@ -1839,8 +1978,10 @@ class ResourceEstimate:
         opaque placeholders in the total and serial depth. Gate names and
         scheduling are unavailable, so each projected field is an independent
         upper bound over the supported gate kinds. Other aggregate costs remain
-        unchanged and carry an explicit assumption. Body-backed qkernels are
-        controlled by the estimator interpreter instead.
+        unchanged and carry an explicit assumption. Aggregate measurement or
+        reset costs fail closed because no coherent transform can be inferred
+        from counts alone. Body-backed qkernels are controlled by the estimator
+        interpreter instead.
 
         Args:
             num_controls (ResourceExpr | int): Number of active controls.
@@ -1850,7 +1991,8 @@ class ResourceEstimate:
 
         Raises:
             ValueError: If a concrete control count or projected gate count
-                is negative or non-integral.
+                is negative or non-integral, or if the estimate contains
+                measurement or reset resources.
         """
         controls = _expr(num_controls)
         control_constraint = _ResourceConstraint(
@@ -1862,6 +2004,10 @@ class ResourceEstimate:
         control_constraint.validate()
         if controls == _ZERO:
             return self
+        _require_unitary_resource_estimate(
+            self,
+            transform="coherently control",
+        )
         projected, reason = _project_portable_aggregate_controlled_cost(
             self,
             controls,
@@ -1890,6 +2036,8 @@ class ResourceEstimate:
             gates=self.gates,
             depth=self.depth,
             calls=self.calls,
+            measurements=self.measurements,
+            resets=self.resets,
             assumptions=self.assumptions,
             trace=_wrap_trace(f"controlled({controls})", self.trace),
             quality=self.quality,
@@ -1917,12 +2065,22 @@ class ResourceEstimate:
 
         Returns:
             ResourceEstimate: Estimate with identical logical resources.
+
+        Raises:
+            ValueError: If the estimate contains measurement or reset
+                resources and is therefore not unitary.
         """
+        _require_unitary_resource_estimate(
+            self,
+            transform="invert",
+        )
         return ResourceEstimate(
             width=self.width,
             gates=self.gates,
             depth=self.depth,
             calls=self.calls,
+            measurements=self.measurements,
+            resets=self.resets,
             assumptions=self.assumptions,
             trace=_wrap_trace("inverse", self.trace),
             parameters=self.parameters,
@@ -1995,6 +2153,20 @@ class ResourceEstimate:
             gates=_sum_gates(self.gates, loop_symbol, start, step, iterations),
             depth=_sum_depth(self.depth, loop_symbol, start, step, iterations),
             calls=_sum_calls(self.calls, loop_symbol, start, step, iterations),
+            measurements=_sum_measurements(
+                self.measurements,
+                loop_symbol,
+                start,
+                step,
+                iterations,
+            ),
+            resets=_sum_resets(
+                self.resets,
+                loop_symbol,
+                start,
+                step,
+                iterations,
+            ),
             trace=_wrap_trace(
                 f"sum({loop_symbol}={start}..{stop})",
                 self.trace.when(sp.Gt(iterations, _ZERO))
@@ -2155,6 +2327,12 @@ class ResourceEstimate:
                 "toffoli": serialize(self.gates.toffoli),
                 "non_clifford": serialize(self.gates.non_clifford),
             },
+            "measurements": {
+                "total": serialize(self.measurements.total),
+            },
+            "resets": {
+                "total": serialize(self.resets.total),
+            },
             "depth": {
                 "depth": serialize(self.depth.depth),
                 "clifford_depth": serialize(self.depth.clifford_depth),
@@ -2163,6 +2341,8 @@ class ResourceEstimate:
                 "toffoli_depth": serialize(self.depth.toffoli_depth),
                 "non_clifford_depth": serialize(self.depth.non_clifford_depth),
                 "measurement_depth": serialize(self.depth.measurement_depth),
+                "gate_depth": serialize(self.depth.gate_depth),
+                "reset_depth": serialize(self.depth.reset_depth),
             },
             "calls": {
                 "calls_by_name": {
@@ -2273,6 +2453,12 @@ class ResourceEstimate:
                 toffoli=fn(self.gates.toffoli),
                 non_clifford=fn(self.gates.non_clifford),
             ),
+            measurements=MeasurementResources(
+                total=fn(self.measurements.total),
+            ),
+            resets=ResetResources(
+                total=fn(self.resets.total),
+            ),
             depth=DepthResources(
                 depth=fn(self.depth.depth),
                 clifford_depth=fn(self.depth.clifford_depth),
@@ -2281,6 +2467,8 @@ class ResourceEstimate:
                 toffoli_depth=fn(self.depth.toffoli_depth),
                 non_clifford_depth=fn(self.depth.non_clifford_depth),
                 measurement_depth=fn(self.depth.measurement_depth),
+                gate_depth=fn(self.depth.gate_depth),
+                reset_depth=fn(self.depth.reset_depth),
             ),
             calls=mapped_calls,
             trace=(
@@ -2318,12 +2506,12 @@ def _estimate_has_basis_sensitive_resources(estimate: ResourceEstimate) -> bool:
         structurally zero. Symbolic and unevaluated expressions are treated as
         basis-sensitive conservatively.
     """
-    expressions = (
+    expressions = [
         *(
             getattr(estimate.gates, field.name)
             for field in dataclasses.fields(GateResources)
         ),
-        estimate.depth.depth - estimate.depth.measurement_depth,
+        estimate.depth.gate_depth,
         estimate.depth.clifford_depth,
         estimate.depth.rotation_depth,
         estimate.depth.t_depth,
@@ -2331,7 +2519,21 @@ def _estimate_has_basis_sensitive_resources(estimate: ResourceEstimate) -> bool:
         estimate.depth.non_clifford_depth,
         estimate.width.clean_ancilla_qubits,
         estimate.width.dirty_ancilla_qubits,
+    ]
+    has_new_nonunitary_profile = any(
+        expression != _ZERO
+        for expression in (
+            estimate.measurements.total,
+            estimate.resets.total,
+            estimate.depth.reset_depth,
+        )
     )
+    if not has_new_nonunitary_profile:
+        # Before ``gate_depth`` and reset resources existed, an aggregate cost
+        # could distinguish measurement depth only. Preserve that contract:
+        # any remaining legacy depth is gate-sensitive. New measurement/reset
+        # profiles use their explicit counts/categories and ``gate_depth``.
+        expressions.append(estimate.depth.depth - estimate.depth.measurement_depth)
     # This predicate runs for every resource-algebra composition. Calling
     # ``simplify`` here makes a linear fold repeatedly traverse the complete
     # accumulated expression and can turn ordinary algorithm estimates into
@@ -2340,6 +2542,45 @@ def _estimate_has_basis_sensitive_resources(estimate: ResourceEstimate) -> bool:
     # expression whose zero-ness is merely unproven remains basis-sensitive,
     # which is the safe provenance decision.
     return any(expression != _ZERO for expression in expressions)
+
+
+def _require_unitary_resource_estimate(
+    estimate: ResourceEstimate,
+    *,
+    transform: str,
+) -> None:
+    """Reject an aggregate cost that declares non-unitary resources.
+
+    Aggregate measurement and reset costs cannot be coherently transformed
+    without an implementation-specific model. Counts and depth categories are
+    checked independently so legacy costs that expose only measurement depth
+    also fail closed.
+
+    Args:
+        estimate (ResourceEstimate): Aggregate cost to validate.
+        transform (str): Infinitive phrase naming the requested transform for
+            the diagnostic, such as ``"invert"``.
+
+    Raises:
+        ValueError: If measurement or reset resources may be nonzero.
+    """
+    nonunitary = tuple(
+        label
+        for label, expression in (
+            ("measurements.total", estimate.measurements.total),
+            ("resets.total", estimate.resets.total),
+            ("depth.measurement_depth", estimate.depth.measurement_depth),
+            ("depth.reset_depth", estimate.depth.reset_depth),
+        )
+        if _safe_simplify(expression) != _ZERO
+    )
+    if nonunitary:
+        fields = ", ".join(nonunitary)
+        raise ValueError(
+            f"Cannot {transform} a resource estimate with non-unitary "
+            f"resources ({fields}). Use a context-aware opaque cost model "
+            "for an implementation-specific transformed cost."
+        )
 
 
 def _estimate_has_nonzero_depth(estimate: ResourceEstimate) -> bool:
@@ -3949,6 +4190,7 @@ class ResourceInterpreter:
             sp.Gt(measured_qubits, _ZERO),
         )
         return ResourceEstimate(
+            measurements=MeasurementResources(total=measured_qubits),
             depth=DepthResources(depth=layer, measurement_depth=layer),
             trace=ResourceTraceNode(type(operation).__name__, "primitive"),
         )
@@ -4020,6 +4262,7 @@ class ResourceInterpreter:
             ResourceEstimate: Measurement-like resource estimate.
         """
         measurement = ResourceEstimate(
+            measurements=MeasurementResources(total=_ONE),
             depth=DepthResources(depth=_ONE, measurement_depth=_ONE),
             trace=ResourceTraceNode("project_z", "primitive"),
         )
@@ -4067,9 +4310,14 @@ class ResourceInterpreter:
         Returns:
             ResourceEstimate: Reset primitive resource estimate.
         """
-        return ResourceEstimate.primitive(
-            "reset",
-            GateResources(total=_ONE, single_qubit=_ONE),
+        return ResourceEstimate(
+            resets=ResetResources(total=_ONE),
+            depth=DepthResources(depth=_ONE, reset_depth=_ONE),
+            trace=ResourceTraceNode(
+                name="reset",
+                source_kind="primitive",
+                summary="resets=1",
+            ),
         )
 
     def eval_for(
@@ -6173,7 +6421,14 @@ class ResourceInterpreter:
             actual_operands,
             controls=_expr(controls) + operation.num_control_qubits,
         )
-        estimate = body_estimate.inverse()
+        # ``implementation_block`` is already the gate-by-gate inverse
+        # fallback. Applying ``ResourceEstimate.inverse()`` here would
+        # transform an opaque callback result twice and incorrectly reject an
+        # authoritative measurement-assisted inverse implementation.
+        estimate = dataclasses.replace(
+            body_estimate,
+            trace=_wrap_trace("inverse", body_estimate.trace),
+        )
         zero_controls = _zero_control_count(
             operation.num_control_qubits,
             operation.control_value,
@@ -6490,7 +6745,9 @@ class ResourceInterpreter:
             TypeError: If ``cost`` is neither a ``ResourceEstimate`` nor a
                 callable returning one.
             ValueError: If the opaque cost reports basis-sensitive resources
-                for a different basis or synthesis precision.
+                for a different basis or synthesis precision, or if a fixed
+                non-unitary cost is controlled or inverted without a
+                transform-aware callback.
         """
         if isinstance(cost, ResourceEstimate):
             _validate_opaque_cost_provenance(
@@ -6500,6 +6757,8 @@ class ResourceInterpreter:
                 precision=self.config.precision,
             )
             estimate = cost.repeat(ctx.power)
+            if ctx.transform is CallTransform.INVERSE:
+                estimate = estimate.inverse()
             if ctx.total_controls != _ZERO:
                 estimate = estimate.controlled(ctx.total_controls)
             if ctx.own_controls:
@@ -7192,17 +7451,23 @@ def _zero_control_count(
 
 
 def _estimate_activity(estimate: ResourceEstimate) -> ResourceExpr:
-    """Return an expression that is zero only for an empty unitary estimate.
+    """Return an expression that is zero only for an empty operation estimate.
 
     Args:
         estimate (ResourceEstimate): Estimate to inspect.
 
     Returns:
-        ResourceExpr: Gate and callable activity expression.
+        ResourceExpr: Gate, measurement, reset, and callable activity.
     """
     call_activity = sum(estimate.calls.calls_by_name.values(), _ZERO)
     query_activity = sum(estimate.calls.queries_by_name.values(), _ZERO)
-    return estimate.gates.total + call_activity + query_activity
+    return (
+        estimate.gates.total
+        + estimate.measurements.total
+        + estimate.resets.total
+        + call_activity
+        + query_activity
+    )
 
 
 def _canonical_phase_gate_name(phase: sp.Expr) -> str | None:
@@ -7681,6 +7946,7 @@ def _serial_depth_from_gate_resources(gates: GateResources) -> DepthResources:
         t_depth=gates.t,
         toffoli_depth=gates.toffoli,
         non_clifford_depth=gates.non_clifford,
+        gate_depth=gates.total,
     )
 
 
@@ -8106,8 +8372,16 @@ def _aggregate_arity_projection_reason(
             return f"the {label} count exceeds the declared {upper_label} gate count"
     if _safe_simplify(gates.single_qubit + gates.two_qubit) == _ZERO:
         return "the aggregate has no declared one- or two-qubit gate profile"
-    if _safe_simplify(estimate.depth.measurement_depth) != _ZERO:
-        return "controlled opaque costs cannot contain measurement depth"
+    if any(
+        _safe_simplify(expression) != _ZERO
+        for expression in (
+            estimate.measurements.total,
+            estimate.resets.total,
+            estimate.depth.measurement_depth,
+            estimate.depth.reset_depth,
+        )
+    ):
+        return "controlled opaque costs cannot contain measurement or reset resources"
     return None
 
 
@@ -8263,7 +8537,10 @@ def _project_portable_aggregate_controlled_cost(
             total=unresolved_count,
             multi_qubit=estimate.gates.multi_qubit,
         ),
-        depth=DepthResources(depth=unresolved_count),
+        depth=DepthResources(
+            depth=unresolved_count,
+            gate_depth=unresolved_count,
+        ),
         trace=ResourceTraceNode(
             name="unresolved_controlled_aggregate",
             source_kind="opaque_arity_remainder",
@@ -8358,6 +8635,8 @@ def _project_portable_aggregate_controlled_cost(
         gates=projected_gates,
         depth=_max_depth(estimate.depth, projected.depth),
         calls=estimate.calls,
+        measurements=estimate.measurements,
+        resets=estimate.resets,
         assumptions=estimate.assumptions,
         trace=_merge_trace(
             f"controlled_arity_projection({controls})",
@@ -8618,12 +8897,17 @@ def _named_clifford_t_depth(
         )
     if name == "swap":
         if surrounding_controls == _ZERO:
-            return DepthResources(depth=sp.Integer(3), clifford_depth=sp.Integer(3))
+            return DepthResources(
+                depth=sp.Integer(3),
+                clifford_depth=sp.Integer(3),
+                gate_depth=sp.Integer(3),
+            )
         middle = _clifford_t_gate_depth_for_mcx(surrounding_controls + _ONE)
         return dataclasses.replace(
             middle,
             depth=middle.depth + 2,
             clifford_depth=middle.clifford_depth + 2,
+            gate_depth=middle.gate_depth + 2,
         )
     return _serial_depth_from_gate_resources(gates)
 
@@ -9051,15 +9335,23 @@ def _clifford_t_gate_depth(
                     (3 * toffolis, True),
                 )
             ),
+            gate_depth=_resource_expr(
+                sp.Piecewise((_ONE, controls <= 1), (15 * toffolis, True))
+            ),
         )
     if name == "swap":
         if surrounding_controls == 0:
-            return DepthResources(depth=sp.Integer(3), clifford_depth=sp.Integer(3))
+            return DepthResources(
+                depth=sp.Integer(3),
+                clifford_depth=sp.Integer(3),
+                gate_depth=sp.Integer(3),
+            )
         middle = _clifford_t_gate_depth_for_mcx(surrounding_controls + 1)
         return dataclasses.replace(
             middle,
             depth=middle.depth + 2,
             clifford_depth=middle.clifford_depth + 2,
+            gate_depth=middle.gate_depth + 2,
         )
     return _serial_depth_from_gate_resources(
         _classify_clifford_t_gate(name, surrounding_controls, precision)
@@ -9099,6 +9391,9 @@ def _clifford_t_gate_depth_for_mcx(
                 (_ZERO, controls <= 1),
                 (3 * toffolis, True),
             )
+        ),
+        gate_depth=_resource_expr(
+            sp.Piecewise((_ONE, controls <= 1), (15 * toffolis, True))
         ),
     )
 
@@ -9453,6 +9748,54 @@ def _conditional_gates(
     )
 
 
+def _conditional_measurements(
+    true_value: MeasurementResources,
+    false_value: MeasurementResources,
+    condition: sp.Basic,
+) -> MeasurementResources:
+    """Select measurement resources with a symbolic condition.
+
+    Args:
+        true_value (MeasurementResources): True-branch measurements.
+        false_value (MeasurementResources): False-branch measurements.
+        condition (sp.Basic): SymPy Boolean predicate.
+
+    Returns:
+        MeasurementResources: Field-wise piecewise measurement resources.
+    """
+    return MeasurementResources(
+        total=_piecewise(
+            true_value.total,
+            false_value.total,
+            condition,
+        )
+    )
+
+
+def _conditional_resets(
+    true_value: ResetResources,
+    false_value: ResetResources,
+    condition: sp.Basic,
+) -> ResetResources:
+    """Select reset resources with a symbolic condition.
+
+    Args:
+        true_value (ResetResources): True-branch resets.
+        false_value (ResetResources): False-branch resets.
+        condition (sp.Basic): SymPy Boolean predicate.
+
+    Returns:
+        ResetResources: Field-wise piecewise reset resources.
+    """
+    return ResetResources(
+        total=_piecewise(
+            true_value.total,
+            false_value.total,
+            condition,
+        )
+    )
+
+
 def _conditional_depth(
     true_value: DepthResources,
     false_value: DepthResources,
@@ -9616,6 +9959,102 @@ def _scale_gates(gates: GateResources, factor: ResourceExpr) -> GateResources:
         toffoli=gates.toffoli * factor,
         non_clifford=gates.non_clifford * factor,
     )
+
+
+def _add_measurements(
+    left: MeasurementResources,
+    right: MeasurementResources,
+) -> MeasurementResources:
+    """Add measurement resources.
+
+    Args:
+        left (MeasurementResources): Left resources.
+        right (MeasurementResources): Right resources.
+
+    Returns:
+        MeasurementResources: Sum.
+    """
+    return MeasurementResources(total=left.total + right.total)
+
+
+def _max_measurements(
+    left: MeasurementResources,
+    right: MeasurementResources,
+) -> MeasurementResources:
+    """Take element-wise maxima of measurement resources.
+
+    Args:
+        left (MeasurementResources): Left resources.
+        right (MeasurementResources): Right resources.
+
+    Returns:
+        MeasurementResources: Element-wise maximum.
+    """
+    return MeasurementResources(total=sp.Max(left.total, right.total))
+
+
+def _scale_measurements(
+    measurements: MeasurementResources,
+    factor: ResourceExpr,
+) -> MeasurementResources:
+    """Scale measurement resources.
+
+    Args:
+        measurements (MeasurementResources): Measurement resources.
+        factor (ResourceExpr): Multiplicative factor.
+
+    Returns:
+        MeasurementResources: Scaled resources.
+    """
+    return MeasurementResources(total=measurements.total * factor)
+
+
+def _add_resets(
+    left: ResetResources,
+    right: ResetResources,
+) -> ResetResources:
+    """Add reset resources.
+
+    Args:
+        left (ResetResources): Left resources.
+        right (ResetResources): Right resources.
+
+    Returns:
+        ResetResources: Sum.
+    """
+    return ResetResources(total=left.total + right.total)
+
+
+def _max_resets(
+    left: ResetResources,
+    right: ResetResources,
+) -> ResetResources:
+    """Take element-wise maxima of reset resources.
+
+    Args:
+        left (ResetResources): Left resources.
+        right (ResetResources): Right resources.
+
+    Returns:
+        ResetResources: Element-wise maximum.
+    """
+    return ResetResources(total=sp.Max(left.total, right.total))
+
+
+def _scale_resets(
+    resets: ResetResources,
+    factor: ResourceExpr,
+) -> ResetResources:
+    """Scale reset resources.
+
+    Args:
+        resets (ResetResources): Reset resources.
+        factor (ResourceExpr): Multiplicative factor.
+
+    Returns:
+        ResetResources: Scaled resources.
+    """
+    return ResetResources(total=resets.total * factor)
 
 
 def _specialize_dependency_expression(
@@ -11846,6 +12285,8 @@ def _add_depth(left: DepthResources, right: DepthResources) -> DepthResources:
         toffoli_depth=left.toffoli_depth + right.toffoli_depth,
         non_clifford_depth=left.non_clifford_depth + right.non_clifford_depth,
         measurement_depth=left.measurement_depth + right.measurement_depth,
+        gate_depth=left.gate_depth + right.gate_depth,
+        reset_depth=left.reset_depth + right.reset_depth,
     )
 
 
@@ -11867,6 +12308,8 @@ def _max_depth(left: DepthResources, right: DepthResources) -> DepthResources:
         toffoli_depth=sp.Max(left.toffoli_depth, right.toffoli_depth),
         non_clifford_depth=sp.Max(left.non_clifford_depth, right.non_clifford_depth),
         measurement_depth=sp.Max(left.measurement_depth, right.measurement_depth),
+        gate_depth=sp.Max(left.gate_depth, right.gate_depth),
+        reset_depth=sp.Max(left.reset_depth, right.reset_depth),
     )
 
 
@@ -11888,6 +12331,8 @@ def _scale_depth(depth: DepthResources, factor: ResourceExpr) -> DepthResources:
         toffoli_depth=depth.toffoli_depth * factor,
         non_clifford_depth=depth.non_clifford_depth * factor,
         measurement_depth=depth.measurement_depth * factor,
+        gate_depth=depth.gate_depth * factor,
+        reset_depth=depth.reset_depth * factor,
     )
 
 
@@ -12787,6 +13232,80 @@ def _sum_depth(
             step,
             iterations,
         ),
+        gate_depth=_sum_expr(
+            depth.gate_depth,
+            loop_symbol,
+            start,
+            step,
+            iterations,
+        ),
+        reset_depth=_sum_expr(
+            depth.reset_depth,
+            loop_symbol,
+            start,
+            step,
+            iterations,
+        ),
+    )
+
+
+def _sum_measurements(
+    measurements: MeasurementResources,
+    loop_symbol: sp.Symbol,
+    start: ResourceExpr,
+    step: ResourceExpr,
+    iterations: ResourceExpr,
+) -> MeasurementResources:
+    """Sum measurement resources over a loop.
+
+    Args:
+        measurements (MeasurementResources): Measurement resources.
+        loop_symbol (sp.Symbol): Loop variable symbol.
+        start (ResourceExpr): Start bound.
+        step (ResourceExpr): Step value.
+        iterations (ResourceExpr): Number of iterations.
+
+    Returns:
+        MeasurementResources: Summed measurement resources.
+    """
+    return MeasurementResources(
+        total=_sum_expr(
+            measurements.total,
+            loop_symbol,
+            start,
+            step,
+            iterations,
+        )
+    )
+
+
+def _sum_resets(
+    resets: ResetResources,
+    loop_symbol: sp.Symbol,
+    start: ResourceExpr,
+    step: ResourceExpr,
+    iterations: ResourceExpr,
+) -> ResetResources:
+    """Sum reset resources over a loop.
+
+    Args:
+        resets (ResetResources): Reset resources.
+        loop_symbol (sp.Symbol): Loop variable symbol.
+        start (ResourceExpr): Start bound.
+        step (ResourceExpr): Step value.
+        iterations (ResourceExpr): Number of iterations.
+
+    Returns:
+        ResetResources: Summed reset resources.
+    """
+    return ResetResources(
+        total=_sum_expr(
+            resets.total,
+            loop_symbol,
+            start,
+            step,
+            iterations,
+        )
     )
 
 
@@ -12841,6 +13360,7 @@ def _depth_from_gate_resources(gates: GateResources) -> DepthResources:
         t_depth=active if gates.t != 0 else _ZERO,
         toffoli_depth=active if gates.toffoli != 0 else _ZERO,
         non_clifford_depth=active if gates.non_clifford != 0 else _ZERO,
+        gate_depth=active,
     )
 
 
@@ -13032,6 +13552,8 @@ def _all_exprs(estimate: ResourceEstimate) -> list[ResourceExpr]:
         estimate.gates.t,
         estimate.gates.toffoli,
         estimate.gates.non_clifford,
+        estimate.measurements.total,
+        estimate.resets.total,
         estimate.depth.depth,
         estimate.depth.clifford_depth,
         estimate.depth.rotation_depth,
@@ -13039,6 +13561,8 @@ def _all_exprs(estimate: ResourceEstimate) -> list[ResourceExpr]:
         estimate.depth.toffoli_depth,
         estimate.depth.non_clifford_depth,
         estimate.depth.measurement_depth,
+        estimate.depth.gate_depth,
+        estimate.depth.reset_depth,
         *estimate.calls.calls_by_name.values(),
         *estimate.calls.queries_by_name.values(),
         *estimate._output_sizes.values(),

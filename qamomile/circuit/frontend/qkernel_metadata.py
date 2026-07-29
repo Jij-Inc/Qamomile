@@ -93,7 +93,8 @@ def estimate_qkernel_resources(
         precision (float): Rotation-synthesis precision. Defaults to ``1e-10``.
 
     Returns:
-        ResourceEstimate: Estimated qubit, gate, and parameter resources.
+        ResourceEstimate: Estimated width, gate, measurement, reset, depth,
+            call, and parameter resources.
 
     Raises:
         ValueError: If an input, estimation configuration, callable resource

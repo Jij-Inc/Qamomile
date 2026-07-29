@@ -18,7 +18,9 @@ import qamomile.circuit as qmc
 import qamomile.circuit.stdlib as stdlib
 import qamomile.circuit.stdlib.block_encoding as block_encoding
 from qamomile.circuit.estimator.resource_estimator import (
+    MeasurementResources,
     OpaqueCallContext,
+    ResetResources,
     ResourceEstimator,
     UnknownResourcePolicy,
 )
@@ -120,6 +122,14 @@ def test_callable_helpers_are_publicly_reexported():
         assert name in qmc.__all__, (
             f"{name!r} should be listed in qamomile.circuit.__all__"
         )
+
+
+def test_nonunitary_resource_types_are_publicly_reexported() -> None:
+    """Measurement and reset resource records are part of the circuit API."""
+    assert qmc.MeasurementResources is MeasurementResources
+    assert qmc.ResetResources is ResetResources
+    assert "MeasurementResources" in qmc.__all__
+    assert "ResetResources" in qmc.__all__
 
 
 def test_struct_is_publicly_reexported() -> None:
