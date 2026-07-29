@@ -269,7 +269,7 @@ assert vector_est.parameters == {}
 #
 # A bodyless callable has no honest gate cost unless you provide one. The default `UnknownResourcePolicy.ERROR` therefore raises. Prefer declaring an explicit `ResourceEstimate` cost on `qmc.opaque(...)` when one is known. For exploratory work, `OPAQUE_CALL` records a named call and query with `modeled` quality, while `ZERO_WITH_WARNING` records a zero-cost assumption. Neither policy pretends the unknown body was decomposed.
 #
-# A fixed opaque cost can still support a useful controlled estimate when its `portable` profile declares any `single_qubit` or `two_qubit` gates. Qamomile controls the known primitives with conservative gate-kind upper bounds, serializes them through the shared controls, and reports their fallback clean ancillas. Gates outside those buckets remain one opaque operation each in the total and serial depth because their controlled decomposition is unavailable. An unclassified remainder is not mislabeled as `multi_qubit`; that field continues to mean gates known to act on three or more qubits. Arity alone cannot distinguish, for example, X from H or CX from SWAP, nor can it reveal an undeclared global phase that becomes observable under control. The result therefore remains `modeled` and records the unknown controlled overhead in `assumptions`. Use a context-dependent `cost(ctx)` model when gate-specific control costs or phase behavior are known. A callback is authoritative for the complete invocation and can price all coherent controls exactly once through `ctx.total_controls`.
+# A fixed opaque cost can still support a useful controlled estimate when its `portable` profile declares any `single_qubit` or `two_qubit` gates. With at least two modeled operations under at least two controls, Qamomile computes the controls' AND once, projects every known primitive under that one effective control, and uncomputes the shared ladder after the body. A one-operation or one-control profile keeps the ordinary per-primitive fallback. The arity fields are bounded independently over Qamomile's supported portable primitive families, so they need not sum to `total`. Because an aggregate profile has no gate names, its gate-name-independent two-control model may differ in either direction from the path selected for a concrete body. Gates outside the known arity buckets remain one opaque operation each in the total and serial depth because their controlled decomposition is unavailable. An unclassified remainder is not mislabeled as `multi_qubit`; that field continues to mean gates known to act on three or more qubits. Arity alone cannot reveal an undeclared global phase that becomes observable under control either. The result therefore remains `modeled` and records these limitations in `assumptions`. Use a context-dependent `cost(ctx)` model when gate-specific control costs or phase behavior are known. A callback is authoritative for the complete invocation and can price all coherent controls exactly once through `ctx.total_controls`.
 
 
 # %%
@@ -304,8 +304,8 @@ def controlled_costed_oracle() -> tuple[qmc.Qubit, qmc.Qubit]:
 
 # %%
 costed_est = controlled_costed_oracle.estimate_resources()
-assert costed_est.gates.total == 15
-assert costed_est.depth.depth == 15
+assert costed_est.gates.total == 9
+assert costed_est.depth.depth == 9
 assert costed_est.width.clean_ancilla_qubits == 2
 assert costed_est.calls.queries_by_name == {"costed_oracle": 1}
 assert costed_est.quality is qmc.EstimateQuality.MODELED
@@ -313,6 +313,10 @@ assert any(
     "2 gate(s) with unclassified arity" in assumption.message
     for assumption in costed_est.assumptions
 )
+
+
+# %% [markdown]
+# The total of 9 is two Toffolis for the shared two-control ladder, two singly controlled one-qubit entries, a three-gate upper bound for the singly controlled two-qubit entry, and two unresolved unit placeholders. The two clean ancillas are one outer-ladder ancilla held across the body plus the peak one-ancilla demand of its known primitive projections.
 
 
 # %%

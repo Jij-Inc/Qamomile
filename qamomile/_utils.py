@@ -31,3 +31,35 @@ def is_plain_int(value: object) -> bool:
         bool: ``True`` when ``value`` is an ``int`` and not a ``bool``.
     """
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def coerce_nonnegative_integral(value: object, *, label: str) -> int:
+    """Normalize a Python integer or whole float to a nonnegative integer.
+
+    Args:
+        value (object): Candidate numeric value.
+        label (str): User-facing field label used in diagnostics.
+
+    Returns:
+        int: Equivalent nonnegative Python integer.
+
+    Raises:
+        TypeError: If ``value`` is Boolean, is neither an ``int`` nor
+            ``float``, or is a non-integral float.
+        ValueError: If the normalized integer is negative.
+    """
+    if isinstance(value, bool):
+        raise TypeError(f"{label} must be a nonnegative integer, got bool ({value}).")
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise TypeError(
+                f"{label} must be an integer, got non-integer float {value}."
+            )
+        value = int(value)
+    if not isinstance(value, int):
+        raise TypeError(
+            f"{label} must be a nonnegative integer, got {type(value).__name__}."
+        )
+    if value < 0:
+        raise ValueError(f"{label} must be nonnegative, got {value}.")
+    return value

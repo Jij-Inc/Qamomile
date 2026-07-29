@@ -7,7 +7,7 @@ import enum
 import itertools
 import math
 import numbers
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, cast
 
@@ -286,7 +286,13 @@ class GateBasis(enum.StrEnum):
 
 
 class EstimateQuality(enum.StrEnum):
-    """Describe how directly an estimate follows executable semantics."""
+    """Describe how directly resource counts follow the selected circuit model.
+
+    ``EXACT`` means that the reported resources exactly count the selected
+    circuit representation. It does not imply that the circuit itself exactly
+    realizes an ideal mathematical operation when an assumption records an
+    approximation such as a product formula.
+    """
 
     EXACT = "exact"
     UPPER_BOUND = "upper_bound"
@@ -1714,6 +1720,32 @@ class ResourceEstimate:
             ),
         )
 
+    @staticmethod
+    def seq_all(estimates: Iterable[ResourceEstimate]) -> ResourceEstimate:
+        """Compose estimates with a streaming, order-preserving reduction.
+
+        Repeated left-folding copies accumulated guarded metadata at every
+        step. The binary-counter reduction preserves :meth:`seq` semantics,
+        avoids quadratic copy growth, and retains only logarithmically many
+        intermediate estimates while consuming an iterable.
+
+        Args:
+            estimates (Iterable[ResourceEstimate]): Estimates in execution
+                order.
+
+        Returns:
+            ResourceEstimate: Sequential composition, or an exact zero
+            estimate for an empty sequence.
+
+        Raises:
+            ValueError: If the estimates use incompatible basis or precision
+                provenance.
+        """
+        composer = _SequentialEstimateComposer()
+        for estimate in estimates:
+            composer.append(estimate)
+        return composer.finish()
+
     def parallel(self, other: ResourceEstimate) -> ResourceEstimate:
         """Compose this estimate in parallel with another estimate.
 
@@ -1930,12 +1962,12 @@ class ResourceEstimate:
             calls=_scale_calls(self.calls, f),
             measurements=_scale_measurements(self.measurements, f),
             resets=_scale_resets(self.resets, f),
-            assumptions=self.assumptions,
+            assumptions=(),
             trace=_wrap_trace(
                 f"repeat({f})",
                 self.trace.when(active_when) if self.trace is not None else None,
             ),
-            quality=self.quality,
+            quality=EstimateQuality.EXACT,
             basis=self.basis,
             precision=self.precision,
             _allocation_sites=active_sites,
@@ -1973,11 +2005,15 @@ class ResourceEstimate:
         """Estimate controls on an aggregate cost from its known arity profile.
 
         A portable estimate with declared one- or two-qubit gates projects
-        those known primitives through a conservative per-primitive control
+        those known primitives through an aggregate-level batching model. At
+        least two modeled operations under at least two controls share one
+        body-wide control ladder; smaller cases retain the per-primitive
         fallback. Gates outside the supported arity buckets remain unit-cost
         opaque placeholders in the total and serial depth. Gate names and
         scheduling are unavailable, so each projected field is an independent
-        upper bound over the supported gate kinds. Other aggregate costs remain
+        upper bound over the supported portable primitive families. The
+        selected gate-name-independent two-control model may differ from a
+        concrete body's gate-name-specific path. Other aggregate costs remain
         unchanged and carry an explicit assumption. Aggregate measurement or
         reset costs fail closed because no coherent transform can be inferred
         from counts alone. Body-backed qkernels are controlled by the estimator
@@ -2004,6 +2040,7 @@ class ResourceEstimate:
         control_constraint.validate()
         if controls == _ZERO:
             return self
+        activity = _estimate_activity(self)
         _require_unitary_resource_estimate(
             self,
             transform="coherently control",
@@ -2054,10 +2091,19 @@ class ResourceEstimate:
             _guarded_qualities=self._guarded_qualities,
             _symbol_aliases=self._symbol_aliases,
         )
+        # A raw zero aggregate may still omit a global phase. In contrast, a
+        # symbolic nonzero body that specializes to zero has proven inactivity,
+        # so its transform metadata must disappear with that specialization.
+        activity_guard = (
+            sp.true if activity == _ZERO else _resource_activity_condition(activity)
+        )
         return controlled_estimate._with_metadata(
             assumptions=(assumption,),
             quality=EstimateQuality.MODELED,
-            active_when=sp.Gt(controls, _ZERO),
+            active_when=sp.And(
+                sp.Gt(controls, _ZERO),
+                activity_guard,
+            ),
         )
 
     def inverse(self) -> ResourceEstimate:
@@ -2217,11 +2263,12 @@ class ResourceEstimate:
             active_when=sp.Gt(iterations, _ZERO),
         )
 
-    def substitute(self, **values: int | float) -> ResourceEstimate:
+    def substitute(self, **values: object) -> ResourceEstimate:
         """Substitute concrete values for symbolic parameters.
 
         Args:
-            **values (int | float): Mapping from parameter name to value.
+            **values (object): Mapping from parameter name to a concrete
+                numeric scalar.
 
         Returns:
             ResourceEstimate: Estimate with substituted expressions.
@@ -2229,11 +2276,8 @@ class ResourceEstimate:
         Raises:
             ValueError: If a name is not a parameter, or a supplied value
                 violates an integer or nonnegative parameter domain.
+            TypeError: If a supplied value is not a concrete numeric scalar.
         """
-        symbols_by_name: dict[str, set[sp.Symbol]] = {}
-        for symbol in _free_symbols(self):
-            symbols_by_name.setdefault(_symbol_display_name(symbol), set()).add(symbol)
-
         subs: dict[sp.Symbol, sp.Expr] = {}
         for name, value in values.items():
             parameter = self.parameters.get(name)
@@ -2242,32 +2286,36 @@ class ResourceEstimate:
                 raise ValueError(
                     f"Unknown resource parameter '{name}'; available: {available}."
                 )
-            same_name = symbols_by_name.get(name, set())
-            matching = (
-                same_name
-                if same_name
-                and not any(isinstance(symbol, sp.Dummy) for symbol in same_name)
-                else {parameter}
-            )
-            replacement = cast(sp.Expr, sp.sympify(value))
+            if isinstance(value, bool) or not (
+                isinstance(value, numbers.Real)
+                or (isinstance(value, sp.Expr) and value.is_number)
+            ):
+                raise TypeError(
+                    f"Resource parameter '{name}' requires a concrete numeric "
+                    f"scalar, got {type(value).__name__} ({value!r})."
+                )
+            scalar = value.item() if hasattr(value, "item") else value
+            replacement = sp.sympify(scalar)
+            if not isinstance(replacement, sp.Expr):
+                raise TypeError(
+                    f"Resource parameter '{name}' requires a concrete numeric "
+                    f"SymPy expression, got {type(value).__name__} ({value!r})."
+                )
             if (
                 replacement.is_number
-                and any(symbol.is_integer is True for symbol in matching)
+                and parameter.is_integer is True
                 and not _is_concrete_integer(replacement)
             ):
                 raise ValueError(
                     f"Cannot substitute non-integer value {value!r} for "
                     f"integer resource parameter '{name}'."
                 )
-            if replacement.is_negative is True and any(
-                symbol.is_nonnegative is True for symbol in matching
-            ):
+            if replacement.is_negative is True and parameter.is_nonnegative is True:
                 raise ValueError(
                     f"Cannot substitute negative value {value!r} for "
                     f"nonnegative resource parameter '{name}'."
                 )
-            for symbol in matching:
-                subs[symbol] = replacement
+            subs[parameter] = replacement
         return self._map_expr(
             lambda expr: _substitute_resource_expr(expr, subs),
             constraint_fn=lambda expr: _safe_constraint_substitute(expr, subs),
@@ -2493,6 +2541,55 @@ class ResourceEstimate:
             _symbol_aliases=self._symbol_aliases,
         )
         return mapped
+
+
+class _SequentialEstimateComposer:
+    """Compose a stream of estimates with logarithmic intermediate storage."""
+
+    def __init__(self) -> None:
+        """Initialize an empty binary-counter reduction."""
+        self._levels: list[ResourceEstimate | None] = []
+
+    def append(self, estimate: ResourceEstimate) -> None:
+        """Append one estimate after all previously supplied estimates.
+
+        Args:
+            estimate (ResourceEstimate): Next estimate in execution order.
+
+        Raises:
+            ValueError: If composition encounters incompatible basis or
+                precision provenance.
+        """
+        carry = estimate
+        level = 0
+        while level < len(self._levels) and self._levels[level] is not None:
+            earlier = self._levels[level]
+            assert earlier is not None
+            carry = earlier.seq(carry)
+            self._levels[level] = None
+            level += 1
+        if level == len(self._levels):
+            self._levels.append(carry)
+        else:
+            self._levels[level] = carry
+
+    def finish(self) -> ResourceEstimate:
+        """Return the order-preserving composition accumulated so far.
+
+        Returns:
+            ResourceEstimate: Sequential composition, or exact zero when no
+            estimate was appended.
+
+        Raises:
+            ValueError: If composition encounters incompatible basis or
+                precision provenance.
+        """
+        result: ResourceEstimate | None = None
+        for estimate in reversed(self._levels):
+            if estimate is None:
+                continue
+            result = estimate if result is None else result.seq(estimate)
+        return result if result is not None else ResourceEstimate.zero()
 
 
 def _estimate_has_basis_sensitive_resources(estimate: ResourceEstimate) -> bool:
@@ -3141,6 +3238,14 @@ class ResourceInterpreter:
         # constraint. Repeated body invocations commonly rediscover the same
         # element bounds, so retain whether each one was already proven.
         self._array_constraint_proven: dict[_ResourceConstraint, bool] = {}
+        # Dependency analysis depends only on operation-list identity, not the
+        # resolver used for a particular concrete loop iteration. Keep the
+        # sequence strongly referenced so an ``id`` cannot be reused for an
+        # unrelated transient list during this interpretation.
+        self._operation_taint_cache: dict[
+            int,
+            tuple[list[Operation], frozenset[str]],
+        ] = {}
         # Synthetic tuple carriers retain physical parent UUIDs rather than
         # Value ancestry. Keep the corresponding allocation-owner identity
         # across nested control-flow and callable evaluation scopes.
@@ -3524,14 +3629,20 @@ class ResourceInterpreter:
             return self._with_shared_control_ladder(body, control_count)
 
         previous_taint = self._measurement_derived
-        graph = build_dependency_graph(operations)
-        local_taint = find_measurement_derived_values(
-            graph,
-            _find_runtime_observation_results(operations),
-        )
+        cache_entry = self._operation_taint_cache.get(id(operations))
+        if cache_entry is not None and cache_entry[0] is operations:
+            local_taint = cache_entry[1]
+        else:
+            graph = build_dependency_graph(operations)
+            local_taint = frozenset(
+                find_measurement_derived_values(
+                    graph,
+                    _find_runtime_observation_results(operations),
+                )
+            )
+            self._operation_taint_cache[id(operations)] = (operations, local_taint)
         self._measurement_derived = previous_taint | local_taint
         try:
-            estimate = ResourceEstimate.zero()
             scheduled: list[tuple[Operation, ResourceEstimate]] = []
             seen_array_constraints: set[_ResourceConstraint] = set()
             for operation in operations:
@@ -3588,7 +3699,9 @@ class ResourceInterpreter:
                     ),
                 )
                 scheduled.append((operation, operation_estimate))
-                estimate = estimate.seq(operation_estimate)
+            estimate = ResourceEstimate.seq_all(
+                operation_estimate for _, operation_estimate in scheduled
+            )
             dependency_keys: set[WireKey] = set()
             for operation, operation_estimate in scheduled:
                 if not _estimate_has_nonzero_depth(operation_estimate):
@@ -3650,6 +3763,10 @@ class ResourceInterpreter:
 
         Returns:
             ResourceEstimate: Operation resource estimate.
+
+        Raises:
+            NotImplementedError: If the operation kind is not supported by
+                resource estimation.
         """
         match operation:
             case GateOperation():
@@ -4509,7 +4626,7 @@ class ResourceInterpreter:
             arg.block_arg.uuid: self._apply_condition_values(resolver.resolve(arg.init))
             for arg in operation.region_args
         }
-        estimate = ResourceEstimate.zero()
+        composer = _SequentialEstimateComposer()
         iteration_width = WidthResources.zero()
         anonymous_allocated = _ZERO
         body = _LocalBlock(operation.operations)
@@ -4533,7 +4650,7 @@ class ResourceInterpreter:
                     self._allocation_owners_by_uuid,
                 ),
             )
-            estimate = estimate.seq(iteration_estimate)
+            composer.append(iteration_estimate)
             iteration_width = _max_width(iteration_width, iteration_estimate.width)
             anonymous_allocated = sp.Max(
                 anonymous_allocated,
@@ -4550,6 +4667,7 @@ class ResourceInterpreter:
             }
         for arg in operation.region_args:
             resolver.bind(arg.result, carried[arg.block_arg.uuid])
+        estimate = composer.finish()
         return dataclasses.replace(
             estimate,
             width=_width_with_identity_aware_allocations(
@@ -5292,6 +5410,10 @@ class ResourceInterpreter:
         Returns:
             ResourceEstimate: Exact estimate for bound dictionaries, otherwise a
             cardinality-based symbolic estimate.
+
+        Raises:
+            NotImplementedError: If an unbound loop-carried value has a
+                recurrence that depends on the current item key or value.
         """
         entries = self._for_items_entries(operation)
         if entries is not None:
@@ -5416,7 +5538,7 @@ class ResourceInterpreter:
                 per-entry maximum, while allocated width is the union of
                 distinct QInit identities.
         """
-        estimate = ResourceEstimate.zero()
+        composer = _SequentialEstimateComposer()
         iteration_width = WidthResources.zero()
         anonymous_allocated = _ZERO
         for key, value in entries:
@@ -5438,7 +5560,7 @@ class ResourceInterpreter:
                     self._allocation_owners_by_uuid,
                 ),
             )
-            estimate = estimate.seq(entry_estimate)
+            composer.append(entry_estimate)
             iteration_width = _max_width(iteration_width, entry_estimate.width)
             anonymous_allocated = sp.Max(
                 anonymous_allocated,
@@ -5450,6 +5572,7 @@ class ResourceInterpreter:
         # ``seq`` counts every concrete visit to a QInit. Keep sequential
         # gate/depth/call totals, take reusable width fields per-entry, and
         # replace only allocated_qubits with the distinct static-site union.
+        estimate = composer.finish()
         return dataclasses.replace(
             estimate,
             width=_width_with_identity_aware_allocations(
@@ -5483,7 +5606,7 @@ class ResourceInterpreter:
             arg.block_arg.uuid: self._apply_condition_values(resolver.resolve(arg.init))
             for arg in operation.region_args
         }
-        estimate = ResourceEstimate.zero()
+        composer = _SequentialEstimateComposer()
         iteration_width = WidthResources.zero()
         anonymous_allocated = _ZERO
         for key, value in entries:
@@ -5505,7 +5628,7 @@ class ResourceInterpreter:
                     self._allocation_owners_by_uuid,
                 ),
             )
-            estimate = estimate.seq(iteration_estimate)
+            composer.append(iteration_estimate)
             iteration_width = _max_width(iteration_width, iteration_estimate.width)
             anonymous_allocated = sp.Max(
                 anonymous_allocated,
@@ -5522,6 +5645,7 @@ class ResourceInterpreter:
             }
         for arg in operation.region_args:
             resolver.bind(arg.result, carried[arg.block_arg.uuid])
+        estimate = composer.finish()
         return dataclasses.replace(
             estimate,
             width=_width_with_identity_aware_allocations(
@@ -5712,6 +5836,10 @@ class ResourceInterpreter:
 
         Returns:
             dict[str, sp.Expr]: UUID-keyed scalar iteration context.
+
+        Raises:
+            ValueError: If a tuple-key value does not match the declared key
+                arity.
         """
         context: dict[str, sp.Expr] = {}
         key_values = list(operation.key_var_values or ())
@@ -5726,8 +5854,17 @@ class ResourceInterpreter:
                 key,
                 context,
             )
-        elif len(key_values) > 1 and isinstance(key, Sequence):
-            for ir_value, concrete in zip(key_values, key, strict=False):
+        elif len(key_values) > 1:
+            if (
+                not isinstance(key, Sequence)
+                or isinstance(key, (str, bytes))
+                or len(key) != len(key_values)
+            ):
+                raise ValueError(
+                    "ForItems tuple key must contain exactly "
+                    f"{len(key_values)} element(s), got {key!r}."
+                )
+            for ir_value, concrete in zip(key_values, key, strict=True):
                 context[ir_value.uuid] = _sympify_resource_value(
                     concrete, ir_value.name
                 )
@@ -5959,6 +6096,11 @@ class ResourceInterpreter:
 
         Returns:
             ResourceEstimate: Controlled unitary estimate.
+
+        Raises:
+            ValueError: If the controlled callable has no body and the unknown
+                resource policy is ``ERROR``, or if a structural width or
+                control requirement is invalid.
         """
         local_controls, _num_targets = _resolve_controlled_u(operation, resolver)
         total_controls = _expr(controls) + _expr(local_controls)
@@ -6065,9 +6207,13 @@ class ResourceInterpreter:
                 controls=total_controls,
             )
             body_dependency_estimate = body
-            broadcast = _controlled_u_broadcast_factor(
-                operation,
+            broadcast = _scalar_target_broadcast_factor(
                 operation.block,
+                [
+                    operand
+                    for operand in _controlled_u_body_operands(operation)
+                    if operand.type.is_quantum()
+                ],
                 resolver,
             )
             repetitions = power * broadcast
@@ -6259,14 +6405,14 @@ class ResourceInterpreter:
         )
         for constraint in case_width_constraints:
             constraint.validate()
-        estimate = ResourceEstimate.zero()
+        case_estimates: list[ResourceEstimate] = []
         for case_index, case_block in enumerate(operation.case_blocks):
             child = _select_case_child_resolver(operation, case_block, resolver)
             actual_operands = [
                 *operation.target_operands,
                 *operation.param_operands,
             ]
-            broadcast = _select_case_broadcast_factor(
+            broadcast = _scalar_target_broadcast_factor(
                 case_block,
                 operation.target_operands,
                 resolver,
@@ -6324,7 +6470,8 @@ class ResourceInterpreter:
                     source_kind="body",
                 ),
             )
-            estimate = estimate.seq(case_estimate)
+            case_estimates.append(case_estimate)
+        estimate = ResourceEstimate.seq_all(case_estimates)
         return _with_constraints(
             _namespace_allocation_sites(
                 dataclasses.replace(
@@ -6359,6 +6506,11 @@ class ResourceInterpreter:
 
         Returns:
             ResourceEstimate: Inverse implementation estimate.
+
+        Raises:
+            ValueError: If the inverse callable has no implementation body and
+                the unknown resource policy is ``ERROR``, or if a structural
+                width requirement is invalid.
         """
         name = operation.name or "inverse_block"
         width_constraints = _quantum_operand_width_constraints(
@@ -6506,6 +6658,7 @@ class ResourceInterpreter:
         from qamomile.observable.hamiltonian import (
             HERMITIAN_IMAG_ATOL,
             PAULI_TERM_ZERO_ATOL,
+            _pauli_strings_anticommute,
         )
 
         hamiltonian = self._resolve_hamiltonian_binding(operation, resolver)
@@ -6562,7 +6715,8 @@ class ResourceInterpreter:
                 "constant), but the constant has a nonzero imaginary part."
             )
 
-        estimate = ResourceEstimate.zero()
+        term_estimates: list[ResourceEstimate] = []
+        active_pauli_terms: list[tuple[qm_o.PauliOperator, ...]] = []
         for operators, coefficient in hamiltonian:
             resolved_coefficient = complex(coefficient)
             if abs(resolved_coefficient.imag) > HERMITIAN_IMAG_ATOL:
@@ -6573,6 +6727,7 @@ class ResourceInterpreter:
                 )
             if abs(resolved_coefficient) < PAULI_TERM_ZERO_ATOL or not operators:
                 continue
+            active_pauli_terms.append(operators)
             x_count = sum(operator.pauli == qm_o.Pauli.X for operator in operators)
             y_count = sum(operator.pauli == qm_o.Pauli.Y for operator in operators)
             basis_h_gate = _estimate_named_gate_in_basis(
@@ -6613,24 +6768,48 @@ class ResourceInterpreter:
                     rotation=rotation.depth,
                 ),
             )
-            estimate = estimate.seq(term)
+            term_estimates.append(term)
 
         if abs(constant) >= PAULI_TERM_ZERO_ATOL:
             phase = -gamma * sp.Float(constant.real)
-            estimate = estimate.seq(
+            term_estimates.append(
                 self._estimate_global_phase_expression(
                     cast(sp.Expr, phase),
                     controls=controls,
                 )
             )
+        estimate = ResourceEstimate.seq_all(term_estimates)
+        trotter_assumption = None
+        if not _pauli_terms_share_local_basis(active_pauli_terms) and any(
+            _pauli_strings_anticommute(left, right)
+            for index, left in enumerate(active_pauli_terms)
+            for right in active_pauli_terms[index + 1 :]
+        ):
+            trotter_assumption = ResourceAssumption(
+                "Noncommuting Pauli terms are counted as one first-order "
+                "Lie-Trotter product-formula step in Hamiltonian term order. "
+                "EXACT quality, when present, describes the resource count of "
+                "that selected circuit, not exact full-Hamiltonian evolution.",
+                source="PauliEvolveOp",
+            )
+        trace = _wrap_trace(
+            "pauli_evolve",
+            estimate.trace,
+            source_kind="body",
+        )
+        if trotter_assumption is not None:
+            trace = dataclasses.replace(
+                trace,
+                assumptions=(*trace.assumptions, trotter_assumption),
+            )
         active_estimate = dataclasses.replace(
             estimate,
-            trace=_wrap_trace(
-                "pauli_evolve",
-                estimate.trace,
-                source_kind="body",
-            ),
+            trace=trace,
         )
+        if trotter_assumption is not None:
+            active_estimate = active_estimate._with_metadata(
+                assumptions=(trotter_assumption,)
+            )
         if gamma.is_zero is not False:
             active_estimate = ResourceEstimate.zero("pauli_evolve").conditional(
                 active_estimate,
@@ -6749,6 +6928,8 @@ class ResourceInterpreter:
                 non-unitary cost is controlled or inverted without a
                 transform-aware callback.
         """
+        if ctx.power == _ZERO:
+            return ResourceEstimate.zero(f"{operation.custom_name}^0")
         if isinstance(cost, ResourceEstimate):
             _validate_opaque_cost_provenance(
                 cost,
@@ -6801,7 +6982,10 @@ class ResourceInterpreter:
                 strategy=ctx.strategy,
             ),
         )
-        return estimate._with_metadata(quality=EstimateQuality.MODELED)
+        return estimate._with_metadata(
+            quality=EstimateQuality.MODELED,
+            active_when=ctx.power,
+        )
 
     def _estimate_invoke_body(
         self,
@@ -8486,11 +8670,69 @@ def _aggregate_arity_projection_constraints(
                     unit="gate",
                 )
             )
-    active_when = sp.Gt(controls, _ZERO)
+    active_when = sp.And(
+        sp.Gt(controls, _ZERO),
+        _resource_activity_condition(_estimate_activity(estimate)),
+    )
     guarded = tuple(requirement.when(active_when) for requirement in requirements)
     for requirement in guarded:
         requirement.validate()
     return guarded
+
+
+def _portable_shared_aggregate_control_ladder(
+    body: ResourceEstimate,
+    controls: ResourceExpr,
+) -> ResourceEstimate:
+    """Wrap a singly controlled aggregate body in one shared AND ladder.
+
+    The caller supplies the body cost after every modeled primitive has been
+    reduced to one effective control. The outer ladder remains live while that
+    body runs, so its clean workspace is added rather than reused.
+
+    Args:
+        body (ResourceEstimate): Aggregate body projected beneath one effective
+            coherent control.
+        controls (ResourceExpr): Original positive control count. A symbolic
+            zero branch is restored by :meth:`ResourceEstimate.controlled`
+            after this helper returns.
+
+    Returns:
+        ResourceEstimate: Body-wide portable control projection with one
+        compute/uncompute ladder and concurrently held clean ancillas.
+    """
+    outer_clean_ancillas = controls - _ONE
+    toffoli = _portable_primitive_estimate("toffoli")
+    compute = toffoli.repeat(outer_clean_ancillas)
+    ladder = toffoli.repeat(2 * outer_clean_ancillas)
+    estimate = ladder.seq(body)
+    trace_children = tuple(
+        node for node in (compute.trace, body.trace, compute.trace) if node is not None
+    )
+    return dataclasses.replace(
+        estimate,
+        width=dataclasses.replace(
+            body.width,
+            clean_ancilla_qubits=(
+                body.width.clean_ancilla_qubits + outer_clean_ancillas
+            ),
+            peak_qubits=body.width.peak_qubits + outer_clean_ancillas,
+        ),
+        trace=ResourceTraceNode(
+            name=f"shared_control_ladder({controls})",
+            source_kind="portable_fallback",
+            summary=(
+                f"toffoli_steps={2 * outer_clean_ancillas}, "
+                f"clean_ancillas={outer_clean_ancillas}"
+            ),
+            children=trace_children,
+        ),
+        _output_sizes=body._output_sizes,
+        _input_sizes=body._input_sizes,
+        _has_output_summary=body._has_output_summary,
+        _dependency_keys=body._dependency_keys,
+        _symbol_aliases=body._symbol_aliases,
+    )._with_metadata(quality=EstimateQuality.UPPER_BOUND)
 
 
 def _project_portable_aggregate_controlled_cost(
@@ -8499,10 +8741,12 @@ def _project_portable_aggregate_controlled_cost(
 ) -> tuple[ResourceEstimate | None, str]:
     """Project the known part of an aggregate arity profile through controls.
 
-    The projection serializes every primitive because all transformed gates
-    share the added controls. Gate-name uncertainty is represented by
-    field-wise one- and two-qubit envelopes. Any remaining gate count stays as
-    a unit-cost opaque serial placeholder without being assigned a false arity.
+    The projection uses one shared conjunction when both the control count and
+    modeled operation count reach the aggregate batching threshold.
+    Otherwise, it keeps the per-primitive projection used for a one-operation
+    controlled body. Gate-name uncertainty is represented by field-wise one-
+    and two-qubit envelopes. Any remaining gate count stays as a unit-cost
+    opaque serial placeholder without being assigned a false arity.
     Decomposition ancillas for the known portion are added to any scratch width
     already declared by the opaque cost.
 
@@ -8523,12 +8767,10 @@ def _project_portable_aggregate_controlled_cost(
         controls,
     )
 
-    single = _portable_controlled_arity_envelope(1, controls).repeat(
+    single = _portable_controlled_arity_envelope(1, _ONE).repeat(
         estimate.gates.single_qubit
     )
-    two = _portable_controlled_arity_envelope(2, controls).repeat(
-        estimate.gates.two_qubit
-    )
+    two = _portable_controlled_arity_envelope(2, _ONE).repeat(estimate.gates.two_qubit)
     unresolved_count = _safe_simplify(
         estimate.gates.total - estimate.gates.single_qubit - estimate.gates.two_qubit
     )
@@ -8550,7 +8792,29 @@ def _project_portable_aggregate_controlled_cost(
         basis=estimate.basis,
         precision=estimate.precision,
     )
-    projected = single.seq(two).seq(unresolved)
+    projected_body = single.seq(two).seq(unresolved)
+    shared_projection = _portable_shared_aggregate_control_ladder(
+        projected_body,
+        controls,
+    )
+    per_primitive_projection = (
+        _portable_controlled_arity_envelope(1, controls)
+        .repeat(estimate.gates.single_qubit)
+        .seq(
+            _portable_controlled_arity_envelope(2, controls).repeat(
+                estimate.gates.two_qubit
+            )
+        )
+        .seq(unresolved)
+    )
+    shares_control_ladder = sp.And(
+        sp.Ge(controls, _CONTROL_BATCH_MIN_WEIGHT),
+        sp.Ge(estimate.gates.total, _CONTROL_BATCH_MIN_WEIGHT),
+    )
+    projected = shared_projection.conditional(
+        per_primitive_projection,
+        shares_control_ladder,
+    )
     has_unresolved_gates = sp.Gt(unresolved_count, _ZERO)
     projected_gates = dataclasses.replace(
         projected.gates,
@@ -8605,9 +8869,17 @@ def _project_portable_aggregate_controlled_cost(
     )
     complete_assumption = ResourceAssumption(
         message=(
-            "controlled aggregate cost uses conservative per-primitive "
-            "portable upper bounds for all declared one- and two-qubit gates; "
-            "gate kinds and scheduling are unavailable, fallback clean "
+            "controlled aggregate cost uses an aggregate-level portable "
+            "batching model: at least two modeled operations under at least two "
+            "active controls share one computed AND ladder and use "
+            "conservative single-control arity upper bounds; smaller cases use "
+            "conservative per-primitive arity upper bounds. "
+            "Arity fields are independent field-wise upper bounds and may not "
+            "sum to total. "
+            "The bounds range over Qamomile's supported portable primitive "
+            "families. Gate kinds and original scheduling are unavailable, so "
+            "the selected gate-name-independent two-control model may differ "
+            "from a concrete body's gate-name-specific path. Fallback clean "
             "ancillas are counted in addition to declared opaque workspace, "
             "and any undeclared controlled global-phase overhead is outside "
             "this model"
@@ -8618,16 +8890,25 @@ def _project_portable_aggregate_controlled_cost(
     )
     partial_assumption = ResourceAssumption(
         message=(
-            "controlled aggregate cost uses conservative per-primitive "
-            "portable upper bounds for declared one- and two-qubit gates; "
+            "controlled aggregate cost uses an aggregate-level portable "
+            "batching model: at least two modeled operations under at least two "
+            "active controls share one computed AND ladder and use "
+            "conservative single-control arity upper bounds; smaller cases use "
+            "conservative per-primitive arity upper bounds; "
             f"{unresolved_count} gate(s) outside those buckets remain one "
             "modeled operation each in total and serial depth, including "
             f"{unclassified_remainder} gate(s) with unclassified arity; "
             "their controlled decomposition and additional clean ancillas "
             "are unavailable, unclassified gates are not reported as "
-            "multi_qubit, declared gate-family counts are retained only as "
-            "field-wise floors, and any undeclared controlled global-phase "
-            "overhead is outside this model"
+            "multi_qubit. Arity fields are independent field-wise upper bounds "
+            "and may not sum to total. The supported arity bounds range over "
+            "Qamomile's portable primitive families, but the overall result is "
+            "a model rather than a full upper bound because the remainder "
+            "decomposition is unavailable. The selected gate-name-independent "
+            "two-control model may differ from a concrete body's "
+            "gate-name-specific path. Declared gate-family counts are retained "
+            "only as field-wise floors, and any undeclared controlled "
+            "global-phase overhead is outside this model"
         )
     )
     controlled = ResourceEstimate(
@@ -8660,7 +8941,10 @@ def _project_portable_aggregate_controlled_cost(
         _guarded_qualities=estimate._guarded_qualities,
         _symbol_aliases=estimate._symbol_aliases,
     )
-    active_controls = sp.Gt(controls, _ZERO)
+    active_controls = sp.And(
+        sp.Gt(controls, _ZERO),
+        _resource_activity_condition(_estimate_activity(estimate)),
+    )
     if unresolved_count == _ZERO:
         controlled = controlled._with_metadata(
             assumptions=(complete_assumption,),
@@ -9000,11 +9284,10 @@ def _classify_clifford_t_gate(
     """Lower one logical primitive to aggregate Clifford+T resources.
 
     Exact canonical decompositions are used for X-family, Pauli, SWAP, and
-    fixed phase fallbacks. Arbitrary axial rotations use the Ross-Selinger
-    asymptotic upper bound ``ceil(3 log2(1 / precision))`` T gates. Generic
-    controlled one-qubit gates use a conservative Euler decomposition, while
-    extra controls are aggregated and uncomputed with clean-ancilla Toffoli
-    ladders.
+    fixed phase fallbacks. Arbitrary uncontrolled axial rotations use the
+    Ross-Selinger asymptotic upper bound
+    ``ceil(3 log2(1 / precision))`` T gates. A controlled primitive is
+    rejected unless this estimator defines an explicit Clifford+T lowering.
 
     Args:
         gate_name (str): Lowercase logical gate name.
@@ -9092,13 +9375,12 @@ def _classify_controlled_clifford_t_gate(
     num_controls: ResourceExpr,
     precision: float,
 ) -> GateResources:
-    """Return a conservative Clifford+T lowering for a controlled primitive.
+    """Return the defined Clifford+T lowering for a controlled primitive.
 
     Multi-control lowering mirrors the portable fallback: clean ancillas
     compute a reusable conjunction, one singly controlled primitive is
-    applied, and the conjunction is uncomputed. Specialized X, Pauli, SWAP,
-    phase, and rotation paths avoid treating an arbitrary control arity as one
-    opaque gate.
+    applied, and the conjunction is uncomputed. Specialized Pauli, SWAP, and
+    phase paths avoid treating an arbitrary control arity as one opaque gate.
 
     Args:
         gate_name (str): Lowercase logical gate name.
@@ -9106,7 +9388,10 @@ def _classify_controlled_clifford_t_gate(
         precision (float): Rotation-synthesis precision.
 
     Returns:
-        GateResources: Aggregate upper-bound decomposition resources.
+        GateResources: Aggregate decomposition resources.
+
+    Raises:
+        ValueError: If no explicit controlled Clifford+T lowering is defined.
     """
     if gate_name == "swap":
         middle = _multi_controlled_x_clifford_t(num_controls + _ONE)
@@ -9156,64 +9441,10 @@ def _classify_controlled_clifford_t_gate(
             2 * num_controls,
         )
         return _add_gates(ladder, _classify_uncontrolled_gate(gate_name))
-    if gate_name in {"rx", "ry", "rz"}:
-        ladder = _clifford_t_control_ladder(num_controls)
-        rotation_t = sp.Integer(math.ceil(3 * math.log2(1 / precision)))
-        extra_single = 2 if gate_name == "rx" else 0
-        extra_single_expr = sp.Integer(extra_single)
-        central = GateResources(
-            total=sp.Integer(2) * rotation_t + extra_single_expr + sp.Integer(2),
-            single_qubit=sp.Integer(2) * rotation_t + extra_single_expr,
-            two_qubit=sp.Integer(2),
-            clifford=sp.Integer(extra_single + 2),
-            t=sp.Integer(2) * rotation_t,
-            non_clifford=sp.Integer(2) * rotation_t,
-        )
-        return _add_gates(ladder, central)
-    if gate_name == "rzz":
-        controlled_rz = _classify_controlled_clifford_t_gate(
-            "rz",
-            num_controls,
-            precision,
-        )
-        return _add_gates(
-            controlled_rz,
-            GateResources(
-                total=sp.Integer(2),
-                two_qubit=sp.Integer(2),
-                clifford=sp.Integer(2),
-            ),
-        )
-
-    ladder = _clifford_t_control_ladder(num_controls)
-    rotation_t = sp.Integer(math.ceil(3 * math.log2(1 / precision)))
-    # A controlled one-qubit unitary has a two-CNOT Euler decomposition. Six
-    # synthesized axial rotations plus four basis-change Cliffords form a
-    # deliberately conservative target-independent bound.
-    central = GateResources(
-        total=sp.Integer(6) * rotation_t + sp.Integer(6),
-        single_qubit=sp.Integer(6) * rotation_t + sp.Integer(4),
-        two_qubit=sp.Integer(2),
-        clifford=sp.Integer(6),
-        t=sp.Integer(6) * rotation_t,
-        non_clifford=sp.Integer(6) * rotation_t,
-    )
-    return _add_gates(ladder, central)
-
-
-def _clifford_t_control_ladder(num_controls: ResourceExpr) -> GateResources:
-    """Compute and uncompute a conjunction for a controlled primitive.
-
-    Args:
-        num_controls (ResourceExpr): Number of controls before aggregation.
-
-    Returns:
-        GateResources: Clifford+T cost of the clean-ancilla Toffoli ladder.
-    """
-    steps = 2 * sp.Max(_ZERO, num_controls - _ONE)
-    return _scale_gates(
-        _multi_controlled_x_clifford_t(sp.Integer(2)),
-        steps,
+    raise ValueError(
+        "Clifford+T lowering is not defined for controlled gate "
+        f"'{gate_name}'. Use the logical or portable basis, or provide an "
+        "explicit cost model."
     )
 
 
@@ -9309,52 +9540,11 @@ def _clifford_t_gate_depth(
     name = operation.gate_type.name.lower() if operation.gate_type else "unknown"
     if name == "ccx":
         name = "toffoli"
-    inherent_controls = {"x": 0, "cx": 1, "toffoli": 2}
-    if name in inherent_controls:
-        controls = surrounding_controls + inherent_controls[name]
-        toffolis = sp.Max(_ZERO, 2 * controls - 3)
-        return DepthResources(
-            depth=_resource_expr(
-                sp.Piecewise((_ONE, controls <= 1), (15 * toffolis, True))
-            ),
-            clifford_depth=_resource_expr(
-                sp.Piecewise(
-                    (_ONE, controls <= 1),
-                    (8 * toffolis, True),
-                )
-            ),
-            t_depth=_resource_expr(
-                sp.Piecewise(
-                    (_ZERO, controls <= 1),
-                    (3 * toffolis, True),
-                )
-            ),
-            non_clifford_depth=_resource_expr(
-                sp.Piecewise(
-                    (_ZERO, controls <= 1),
-                    (3 * toffolis, True),
-                )
-            ),
-            gate_depth=_resource_expr(
-                sp.Piecewise((_ONE, controls <= 1), (15 * toffolis, True))
-            ),
-        )
-    if name == "swap":
-        if surrounding_controls == 0:
-            return DepthResources(
-                depth=sp.Integer(3),
-                clifford_depth=sp.Integer(3),
-                gate_depth=sp.Integer(3),
-            )
-        middle = _clifford_t_gate_depth_for_mcx(surrounding_controls + 1)
-        return dataclasses.replace(
-            middle,
-            depth=middle.depth + 2,
-            clifford_depth=middle.clifford_depth + 2,
-            gate_depth=middle.gate_depth + 2,
-        )
-    return _serial_depth_from_gate_resources(
-        _classify_clifford_t_gate(name, surrounding_controls, precision)
+    gates = _classify_clifford_t_gate(name, surrounding_controls, precision)
+    return _named_clifford_t_depth(
+        name,
+        surrounding_controls,
+        gates,
     )
 
 
@@ -9483,47 +9673,29 @@ def _classify_controlled_gate(
     )
 
 
-def _classify_pauli_evolve(hamiltonian: Any) -> GateResources:
-    """Estimate Pauli evolution resources from a concrete Hamiltonian.
+def _pauli_terms_share_local_basis(
+    terms: Sequence[Sequence[Any]],
+) -> bool:
+    """Return whether every qubit uses at most one Pauli basis across terms.
+
+    Terms drawn from one local tensor-product basis commute pairwise. This
+    linear fast path covers diagonal Ising/QUBO Hamiltonians without scanning
+    every term pair; mixed-basis commuting sets fall back to the exact
+    pairwise anticommutation test.
 
     Args:
-        hamiltonian (Any): Concrete Qamomile Hamiltonian.
+        terms (Sequence[Sequence[Any]]): Active non-identity Pauli strings.
 
     Returns:
-        GateResources: Logical gate resources for Pauli gadget decomposition.
+        bool: Whether one consistent Pauli basis exists at every qubit index.
     """
-    import qamomile.observable as qm_o
-
-    total_single = _ZERO
-    total_two = _ZERO
-    total_clifford = _ZERO
-    total_rotation = _ZERO
-    total = _ZERO
-    for operators, coeff in hamiltonian:
-        if abs(complex(coeff)) < 1e-15 or not operators:
-            continue
-        size = len(operators)
-        x_count = sum(1 for operator in operators if operator.pauli == qm_o.Pauli.X)
-        y_count = sum(1 for operator in operators if operator.pauli == qm_o.Pauli.Y)
-        basis_single = sp.Integer(2 * x_count + 4 * y_count)
-        rz_count = _ONE
-        cx_count = sp.Integer(2 * max(0, size - 1))
-        total_single += basis_single + rz_count
-        total_two += cx_count
-        total_clifford += basis_single + cx_count
-        total_rotation += rz_count
-        total += basis_single + rz_count + cx_count
-    return GateResources(
-        total=total,
-        single_qubit=total_single,
-        two_qubit=total_two,
-        multi_qubit=_ZERO,
-        clifford=total_clifford,
-        rotation=total_rotation,
-        t=_ZERO,
-        toffoli=_ZERO,
-        non_clifford=total - total_clifford,
-    )
+    basis_by_qubit: dict[int, Any] = {}
+    for term in terms:
+        for operator in term:
+            previous = basis_by_qubit.setdefault(operator.index, operator.pauli)
+            if previous != operator.pauli:
+                return False
+    return True
 
 
 def _classify_pauli_evolve_depth(
@@ -9858,7 +10030,7 @@ def _conditional_calls(
                 false_map.get(name, _ZERO),
                 condition,
             )
-            for name in set(true_map) | set(false_map)
+            for name in sorted(set(true_map) | set(false_map))
         }
 
     return CallResources(
@@ -9887,7 +10059,7 @@ def _max_maps(
         dict[str, ResourceExpr]: Merged mapping.
     """
     merged: dict[str, ResourceExpr] = {}
-    for key in set(left) | set(right):
+    for key in sorted(set(left) | set(right)):
         merged[key] = sp.Max(left.get(key, _ZERO), right.get(key, _ZERO))
     return merged
 
@@ -10122,12 +10294,74 @@ def _quantum_element_index_expression(
     """
     if value.parent_array is None or len(value.element_indices) != 1:
         return None
-    index: ResourceExpr = _specialize_dependency_expression(
+    resolved = _resolve_root_array_index_expression(
+        value.parent_array,
         resolver.resolve(value.element_indices[0]),
+        resolver,
         scalar_values,
         used_names,
     )
-    current = value.parent_array
+    return None if resolved is None else resolved[1]
+
+
+def _resolve_root_array_index_expression(
+    array: ArrayValue,
+    local_index: ResourceExpr,
+    resolver: ExprResolver,
+    scalar_values: Mapping[str, sp.Expr] | None = None,
+    used_names: set[str] | None = None,
+) -> tuple[ArrayValue, ResourceExpr] | None:
+    """Compose one array index through a validated symbolic view chain.
+
+    This is the resolver-aware counterpart of
+    :func:`resolve_root_array_index`. Each concrete affine component is
+    checked at the hop where it appears so malformed raw IR cannot compose an
+    invalid negative stride into an apparently valid root index.
+
+    Args:
+        array (ArrayValue): Array whose local index is being resolved.
+        local_index (ResourceExpr): Index relative to ``array``.
+        resolver (ExprResolver): Resolver for symbolic view bounds.
+        scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
+            dependency values. Defaults to ``None``.
+        used_names (set[str] | None): Optional set updated with used input
+            names. Defaults to ``None``.
+
+    Returns:
+        tuple[ArrayValue, ResourceExpr] | None: Root array and composed index,
+        or ``None`` when a component is missing, unresolved for a concrete
+        address, or violates the nonnegative-start/positive-step contract.
+    """
+
+    def valid_concrete_component(
+        expression: ResourceExpr,
+        *,
+        positive: bool,
+    ) -> bool:
+        """Validate one concrete index, start, or stride expression.
+
+        Args:
+            expression (ResourceExpr): Component to inspect.
+            positive (bool): Require strict positivity instead of
+                nonnegativity.
+
+        Returns:
+            bool: ``False`` only for a concrete malformed component.
+        """
+        if not expression.is_number:
+            return True
+        if not _is_concrete_integer(expression):
+            return False
+        return bool(expression > 0) if positive else bool(expression >= 0)
+
+    index = _specialize_dependency_expression(
+        local_index,
+        scalar_values,
+        used_names,
+    )
+    if not valid_concrete_component(index, positive=False):
+        return None
+    current = array
     while current.slice_of is not None:
         if current.slice_start is None or current.slice_step is None:
             return None
@@ -10141,9 +10375,14 @@ def _quantum_element_index_expression(
             scalar_values,
             used_names,
         )
+        if not valid_concrete_component(
+            start,
+            positive=False,
+        ) or not valid_concrete_component(step, positive=True):
+            return None
         index = cast(ResourceExpr, start + step * index)
         current = current.slice_of
-    return index
+    return current, index
 
 
 def _quantum_element_wire_index(
@@ -10271,33 +10510,23 @@ def _array_wire_key_at_index(
             offset cannot be resolved safely.
     """
     owner = _quantum_allocation_owner(array)
-    resolved_index = index
-    current = array
-    while current.slice_of is not None:
-        if current.slice_start is None or current.slice_step is None:
-            return owner, None
-        start = _specialize_dependency_expression(
-            resolver.resolve(current.slice_start),
-            scalar_values,
-            used_names,
-        )
-        step = _specialize_dependency_expression(
-            resolver.resolve(current.slice_step),
-            scalar_values,
-            used_names,
-        )
-        if (
-            not start.is_number
-            or not step.is_number
-            or not _is_concrete_integer(start)
-            or not _is_concrete_integer(step)
-            or start < 0
-            or step <= 0
-        ):
-            return owner, None
-        resolved_index = int(start) + int(step) * resolved_index
-        current = current.slice_of
-    return owner, resolved_index
+    resolved = _resolve_root_array_index_expression(
+        array,
+        sp.Integer(index),
+        resolver,
+        scalar_values,
+        used_names,
+    )
+    if resolved is None:
+        return owner, None
+    resolved_index = resolved[1]
+    if (
+        not resolved_index.is_number
+        or not _is_concrete_integer(resolved_index)
+        or resolved_index < 0
+    ):
+        return owner, None
+    return owner, int(resolved_index)
 
 
 def _map_value_dependency_keys(
@@ -14182,7 +14411,9 @@ def _apply_inputs(
         ValueError: If an input name is neither a free symbol of the
             estimate nor a declared kernel argument, or a negative input is
             supplied for a nonnegative resource symbol.
-        TypeError: If a boolean is supplied for a non-Bit scalar input.
+        TypeError: If a boolean is supplied for a non-Bit scalar input, or if
+            a string is supplied where a scalar value or explicit SymPy
+            expression is required.
     """
     # SymPy treats same-named symbols with different assumptions as distinct, so
     # a name can map to more than one symbol object; substitute every match.
@@ -14211,6 +14442,11 @@ def _apply_inputs(
     subs: dict[sp.Symbol, sp.Expr] = {}
     ignored: list[str] = []
     for name, value in inputs.items():
+        if isinstance(value, (str, bytes)):
+            raise TypeError(
+                f"resource input '{name}' requires a numeric scalar or explicit "
+                f"SymPy expression, got {type(value).__name__} ({value!r})."
+            )
         if isinstance(value, bool) and (
             name in declared_types and not isinstance(declared_types[name], BitType)
         ):
@@ -14225,6 +14461,13 @@ def _apply_inputs(
             if name not in referenced:
                 ignored.append(name)
             continue
+        if not (
+            isinstance(value, (bool, numbers.Complex)) or isinstance(value, sp.Expr)
+        ):
+            raise TypeError(
+                f"resource input '{name}' requires a numeric scalar or explicit "
+                f"SymPy expression, got {type(value).__name__} ({value!r})."
+            )
         if isinstance(value, bool):
             sympified: sp.Basic = sp.Integer(int(value))
         else:
@@ -14466,55 +14709,23 @@ def _select_case_child_resolver(
     return resolver.isolated_scope(case_block, extra)
 
 
-def _select_case_broadcast_factor(
-    case_block: Block,
+def _scalar_target_broadcast_factor(
+    body: Block,
     target_operands: Sequence[Value],
     resolver: ExprResolver,
 ) -> ResourceExpr:
-    """Return the scalar-case broadcast count for one SELECT case.
+    """Return the broadcast count for a scalar body applied to one vector.
 
     Args:
-        case_block (Block): SELECT case body being evaluated.
-        target_operands (Sequence[Value]): Actual quantum targets supplied to
-            the SELECT operation.
+        body (Block): Callable body with formal quantum inputs.
+        target_operands (Sequence[Value]): Actual quantum targets supplied at
+            the call site.
         resolver (ExprResolver): Resolver for symbolic target dimensions.
 
     Returns:
         ResourceExpr: Vector width when one scalar formal target is applied to
         one vector actual target, otherwise one.
     """
-    if len(target_operands) != 1 or not isinstance(target_operands[0], ArrayValue):
-        return _ONE
-    quantum_inputs = [
-        value for value in case_block.input_values if value.type.is_quantum()
-    ]
-    if len(quantum_inputs) != 1 or isinstance(quantum_inputs[0], ArrayValue):
-        return _ONE
-    return _qubit_value_size(target_operands[0], resolver)
-
-
-def _controlled_u_broadcast_factor(
-    operation: ControlledUOperation,
-    body: Block,
-    resolver: ExprResolver,
-) -> ResourceExpr:
-    """Return the scalar-target broadcast count for a controlled qkernel.
-
-    Args:
-        operation (ControlledUOperation): Controlled call carrying the actual
-            target operands.
-        body (Block): Wrapped qkernel body with formal quantum inputs.
-        resolver (ExprResolver): Resolver for symbolic target dimensions.
-
-    Returns:
-        ResourceExpr: Vector width when one scalar formal target is applied to
-        one vector actual target, otherwise one.
-    """
-    target_operands = [
-        operand
-        for operand in _controlled_u_body_operands(operation)
-        if operand.type.is_quantum()
-    ]
     if len(target_operands) != 1 or not isinstance(target_operands[0], ArrayValue):
         return _ONE
     quantum_inputs = [value for value in body.input_values if value.type.is_quantum()]

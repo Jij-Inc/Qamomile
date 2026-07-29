@@ -369,6 +369,26 @@ def test_inputs_accept_shift_expression() -> None:
     assert sp.simplify(est.qubits - (n + 1)) == 0
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("8", id="numeric-string"),
+        pytest.param("m", id="symbol-string"),
+        pytest.param("2*k+1", id="expression-string"),
+        pytest.param([1], id="list"),
+        pytest.param(None, id="none"),
+    ],
+)
+def test_scalar_resource_parameters_reject_non_numeric_values(value: object) -> None:
+    """Only numeric scalars or explicit SymPy input expressions are accepted."""
+    symbolic = _sized_kernel.estimate_resources()
+
+    with pytest.raises(TypeError, match=r"requires a .*numeric scalar"):
+        _sized_kernel.estimate_resources(inputs={"n": value})
+    with pytest.raises(TypeError, match=r"requires a .*numeric scalar"):
+        symbolic.substitute(n=value)
+
+
 def test_input_typo_raises() -> None:
     """A name that is neither a free symbol nor a kernel argument raises."""
     with pytest.raises(ValueError, match="neither free symbols"):

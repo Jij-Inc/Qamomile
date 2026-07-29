@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 import sympy as sp
@@ -17,6 +21,63 @@ from qamomile.circuit.estimator.resource_estimator import (
     _ConstraintRange,
     _ResourceConstraint,
 )
+
+
+def test_call_map_merge_order_is_hash_seed_independent() -> None:
+    """Merged call maps and same-name aliases are deterministic across runs."""
+    script = """
+import json
+import sympy as sp
+import qamomile.circuit as qm
+
+left_symbol = sp.Symbol("k", integer=True, positive=True)
+right_symbol = sp.Symbol("k", integer=True, nonnegative=True)
+left = qm.ResourceEstimate(
+    calls=qm.CallResources(
+        calls_by_name={"charlie": 1, "alpha": left_symbol},
+    ),
+)
+right = qm.ResourceEstimate(
+    calls=qm.CallResources(
+        calls_by_name={"delta": 1, "bravo": right_symbol},
+    ),
+)
+flag = sp.Symbol("flag", integer=True, nonnegative=True)
+
+def payload(estimate):
+    serialized_calls = estimate.to_dict()["calls"]["calls_by_name"]
+    return {
+        "keys": list(serialized_calls),
+        "values": serialized_calls,
+        "parameters": list(estimate.parameters),
+    }
+
+print(json.dumps({
+    "conditional": payload(left.conditional(right, flag > 0)),
+    "choice": payload(left.choice(right)),
+}))
+"""
+    repository = Path(__file__).resolve().parents[3]
+    payloads: list[dict[str, object]] = []
+    for seed in ("1", "2", "3", "4"):
+        environment = dict(os.environ)
+        environment["PYTHONHASHSEED"] = seed
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=repository,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        payloads.append(json.loads(completed.stdout))
+
+    assert all(payload == payloads[0] for payload in payloads)
+    for composition in payloads[0].values():
+        assert isinstance(composition, dict)
+        keys = composition["keys"]
+        assert isinstance(keys, list)
+        assert keys == sorted(keys)
 
 
 def test_large_quantified_finite_requirement_does_not_ignore_a_pole() -> None:

@@ -12,6 +12,7 @@ import sympy as sp
 import qamomile.circuit as qm
 import qamomile.observable as qm_o
 from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.operation.callable import CallableRef, InvokeOperation
 from qamomile.circuit.ir.operation.gate import ProjectOperation
 from qamomile.circuit.ir.operation.operation import (
     Operation,
@@ -1012,6 +1013,92 @@ def test_controlled_pauli_evolve_resolves_binding_and_constant() -> None:
     assert triple.gates.toffoli == 4
     assert triple.gates.rotation == 2
     assert triple.width.clean_ancilla_qubits == 2
+    assert not any(
+        assumption.source == "PauliEvolveOp"
+        for estimate in (single, triple)
+        for assumption in estimate.assumptions
+    )
+
+
+def test_noncommuting_pauli_evolve_reports_trotter_assumption() -> None:
+    """Noncommuting sums distinguish circuit-count exactness from simulation."""
+    symbolic = _renamed_pauli_evolution.estimate_resources(
+        inputs={
+            "register": 1,
+            "observable": qm_o.X(0) + qm_o.Z(0),
+        },
+        trace=True,
+    )
+    active = symbolic.substitute(time=0.25)
+    zero_time = symbolic.substitute(time=0.0)
+    expected_message = (
+        "Noncommuting Pauli terms are counted as one first-order Lie-Trotter "
+        "product-formula step in Hamiltonian term order. EXACT quality, when "
+        "present, describes the resource count of that selected circuit, not "
+        "exact full-Hamiltonian evolution."
+    )
+
+    assert active.gates.total == 4
+    assert active.quality is qm.EstimateQuality.EXACT
+    assert [
+        assumption.message
+        for assumption in active.assumptions
+        if assumption.source == "PauliEvolveOp"
+    ] == [expected_message]
+    assert expected_message in active.explain()
+    assert not any(
+        assumption.source == "PauliEvolveOp" for assumption in zero_time.assumptions
+    )
+    assert expected_message not in zero_time.explain()
+
+
+def test_commuting_pauli_evolve_needs_no_trotter_assumption() -> None:
+    """Pairwise-commuting Pauli sums are exact without a product-formula caveat."""
+    commuting = qm_o.X(0) * qm_o.X(1) + qm_o.Y(0) * qm_o.Y(1) + qm_o.Z(0) * qm_o.Z(1)
+    estimate = _renamed_pauli_evolution.estimate_resources(
+        inputs={
+            "register": 2,
+            "observable": commuting,
+            "time": 0.25,
+        }
+    )
+
+    assert estimate.quality is qm.EstimateQuality.EXACT
+    assert not any(
+        assumption.source == "PauliEvolveOp" for assumption in estimate.assumptions
+    )
+
+
+def test_controlled_noncommuting_pauli_evolve_keeps_trotter_assumption() -> None:
+    """Coherent control preserves the noncommuting product-formula caveat."""
+
+    @qm.qkernel
+    def controlled(
+        observable: qm.Observable,
+    ) -> tuple[qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
+        """Apply a noncommuting evolution under two coherent controls."""
+        controls = qm.qubit_array(2, "controls")
+        target = qm.qubit_array(1, "target")
+        *_, target = qm.control(
+            _renamed_pauli_evolution,
+            num_controls=2,
+        )(
+            controls,
+            target,
+            observable,
+            qm.float_(0.25),
+        )
+        return controls, target
+
+    estimate = controlled.estimate_resources(
+        inputs={"observable": qm_o.X(0) + qm_o.Z(0)}
+    )
+
+    assert any(
+        "one first-order Lie-Trotter product-formula step" in assumption.message
+        for assumption in estimate.assumptions
+        if assumption.source == "PauliEvolveOp"
+    )
 
 
 def test_pauli_evolve_zero_time_specialization_removes_all_resources() -> None:
@@ -1251,8 +1338,8 @@ def test_context_aware_opaque_cost_can_price_nonunitary_transforms() -> None:
     ("num_controls", "expected_total", "expected_clean_ancillas"),
     [
         (1, 5, 1),
-        (2, 13, 2),
-        (4, 25, 4),
+        (2, 7, 2),
+        (4, 11, 4),
     ],
 )
 def test_controlled_fixed_opaque_cost_projects_complete_arity_profile(
@@ -1297,8 +1384,133 @@ def test_controlled_fixed_opaque_cost_projects_complete_arity_profile(
     assert estimate.calls.queries_by_name == {"arity_oracle": 1}
     assert estimate.quality is qm.EstimateQuality.MODELED
     assert any(
-        "for all declared one- and two-qubit gates" in assumption.message
+        "uses an aggregate-level portable batching model" in assumption.message
         for assumption in estimate.assumptions
+    )
+    assert any(
+        "Arity fields are independent field-wise upper bounds and may not sum to total"
+        in assumption.message
+        for assumption in estimate.assumptions
+    )
+
+
+def test_fixed_opaque_zero_power_is_exact_identity() -> None:
+    """Literal and specialized zero powers add no modeled control cost."""
+    from qamomile.circuit.estimator.resource_estimator import (
+        ResourceEstimatorConfig,
+        ResourceInterpreter,
+    )
+
+    operation = InvokeOperation(
+        target=CallableRef(namespace="test", name="zero_power_oracle"),
+    )
+    assumption = qm.ResourceAssumption("declared modeled cost")
+    cost = qm.ResourceEstimate(
+        gates=qm.GateResources(total=1, single_qubit=1),
+        assumptions=(assumption,),
+        quality=qm.EstimateQuality.MODELED,
+    )
+    interpreter = ResourceInterpreter(
+        config=ResourceEstimatorConfig(),
+        bindings={},
+    )
+
+    def context(power: sp.Expr) -> qm.OpaqueCallContext:
+        """Build an inherited two-control opaque-call context.
+
+        Args:
+            power (sp.Expr): Repetition power for the synthetic invocation.
+
+        Returns:
+            qm.OpaqueCallContext: Context supplied directly to the interpreter.
+        """
+        return qm.OpaqueCallContext(
+            callable_ref=operation.target,
+            argument_values=(),
+            operand_shapes={},
+            attrs={},
+            loop_symbols={},
+            controls=sp.Integer(2),
+            power=power,
+        )
+
+    literal_zero = interpreter._estimate_opaque_cost(
+        operation,
+        cost,
+        context(sp.Integer(0)),
+    )
+    power = sp.Symbol("power", integer=True, nonnegative=True)
+    symbolic = interpreter._estimate_opaque_cost(
+        operation,
+        cost,
+        context(power),
+    )
+
+    for estimate in (literal_zero, symbolic.substitute(power=0)):
+        assert estimate.gates.total == 0
+        assert estimate.depth.depth == 0
+        assert estimate.width.clean_ancilla_qubits == 0
+        assert estimate.assumptions == ()
+        assert estimate.quality is qm.EstimateQuality.EXACT
+
+    active = symbolic.substitute(power=1)
+    assert active.gates.total > 0
+    assert active.quality is qm.EstimateQuality.MODELED
+    assert assumption in active.assumptions
+
+
+def test_fixed_opaque_projection_matches_shared_qkernel_ladder_cost() -> None:
+    """A multi-gate opaque profile shares the same outer ladder as a qkernel."""
+    oracle = qm.opaque(
+        "four_h_cost",
+        num_qubits=1,
+        cost=qm.ResourceEstimate(
+            gates=qm.GateResources(
+                total=4,
+                single_qubit=4,
+            ),
+        ),
+    )
+
+    @qm.qkernel
+    def opaque_circuit() -> qm.Qubit:
+        """Apply the aggregate four-gate profile under three controls."""
+        control_0 = qm.qubit("control_0")
+        control_1 = qm.qubit("control_1")
+        control_2 = qm.qubit("control_2")
+        target = qm.qubit("target")
+        *_, target = qm.control(oracle, num_controls=3)(
+            control_0,
+            control_1,
+            control_2,
+            target,
+        )
+        return target
+
+    @qm.qkernel
+    def body_circuit() -> qm.Qubit:
+        """Apply the equivalent body-backed qkernel under three controls."""
+        control_0 = qm.qubit("control_0")
+        control_1 = qm.qubit("control_1")
+        control_2 = qm.qubit("control_2")
+        target = qm.qubit("target")
+        *_, target = qm.control(_four_h_body, num_controls=3)(
+            control_0,
+            control_1,
+            control_2,
+            target,
+        )
+        return target
+
+    opaque_estimate = opaque_circuit.estimate_resources()
+    body_estimate = body_circuit.estimate_resources()
+
+    assert opaque_estimate.gates.total == body_estimate.gates.total == 8
+    assert opaque_estimate.depth.depth == body_estimate.depth.depth == 8
+    assert (
+        opaque_estimate.width.clean_ancilla_qubits
+        == body_estimate.width.clean_ancilla_qubits
+        == 2
     )
 
 
@@ -1334,8 +1546,8 @@ def test_open_control_brackets_wrap_projected_fixed_opaque_cost() -> None:
 
     estimate = circuit.estimate_resources()
 
-    assert estimate.gates.total == 15
-    assert estimate.depth.depth == 15
+    assert estimate.gates.total == 9
+    assert estimate.depth.depth == 9
     assert estimate.width.clean_ancilla_qubits == 2
     assert estimate.calls.queries_by_name == {"open_arity_oracle": 1}
 
@@ -1375,14 +1587,25 @@ def test_incomplete_opaque_arity_profile_projects_known_gate_counts() -> None:
         )
     ).controlled(2)
 
-    assert estimate.gates.total == 15
-    assert estimate.depth.depth == 15
+    assert estimate.gates.total == 9
+    assert estimate.depth.depth == 9
     assert estimate.width.clean_ancilla_qubits == 2
     assert estimate.gates.single_qubit == complete.gates.single_qubit
     assert estimate.gates.two_qubit == complete.gates.two_qubit
     assert estimate.gates.multi_qubit == complete.gates.multi_qubit
+    assert (
+        estimate.gates.single_qubit
+        + estimate.gates.two_qubit
+        + estimate.gates.multi_qubit
+        != estimate.gates.total
+    )
     assert any(
         "2 gate(s) with unclassified arity" in assumption.message
+        for assumption in estimate.assumptions
+    )
+    assert any(
+        "Arity fields are independent field-wise upper bounds and may not sum to total"
+        in assumption.message
         for assumption in estimate.assumptions
     )
 
@@ -1405,8 +1628,8 @@ def test_partial_opaque_projection_preserves_declared_multi_qubit_gates() -> Non
         )
     ).controlled(2)
 
-    assert partial.gates.total == 14
-    assert partial.depth.depth == 14
+    assert partial.gates.total == 8
+    assert partial.depth.depth == 8
     assert partial.width.clean_ancilla_qubits == 2
     assert partial.gates.multi_qubit == complete.gates.multi_qubit + 1
     assert any(
@@ -1461,7 +1684,7 @@ def test_total_only_opaque_cost_is_not_presented_as_a_partial_projection() -> No
 
 
 def test_opaque_control_projection_adds_to_declared_clean_workspace() -> None:
-    """Fallback ancillas remain separate from opaque scratch workspace."""
+    """A one-operation profile keeps its per-primitive fallback workspace."""
     estimate = qm.ResourceEstimate(
         width=qm.WidthResources(
             clean_ancilla_qubits=3,
@@ -1476,6 +1699,60 @@ def test_opaque_control_projection_adds_to_declared_clean_workspace() -> None:
     assert estimate.gates.total == 7
     assert estimate.width.clean_ancilla_qubits == 5
     assert estimate.width.peak_qubits == 5
+
+
+@pytest.mark.parametrize(
+    ("num_controls", "expected_total", "expected_clean_ancillas"),
+    [
+        (2, 7, 2),
+        (3, 9, 3),
+    ],
+)
+def test_single_opaque_primitive_does_not_trigger_shared_ladder(
+    num_controls: int,
+    expected_total: int,
+    expected_clean_ancillas: int,
+) -> None:
+    """One modeled operation stays on the ordinary per-primitive fallback."""
+    estimate = qm.ResourceEstimate(
+        gates=qm.GateResources(
+            total=1,
+            two_qubit=1,
+        ),
+    ).controlled(num_controls)
+
+    assert estimate.gates.total == expected_total
+    assert estimate.depth.depth == expected_total
+    assert estimate.width.clean_ancilla_qubits == expected_clean_ancillas
+
+
+def test_symbolic_opaque_gate_count_selects_shared_ladder_at_two() -> None:
+    """A symbolic aggregate switches from per-primitive to shared projection."""
+    total = sp.Symbol("total", integer=True, nonnegative=True)
+    controls = sp.Symbol("controls", integer=True, nonnegative=True)
+    base = qm.ResourceEstimate(
+        gates=qm.GateResources(
+            total=total,
+            two_qubit=total,
+        ),
+    )
+    estimate = base.controlled(controls)
+
+    two_control_single = estimate.substitute(total=1, controls=2)
+    two_control_shared = estimate.substitute(total=2, controls=2)
+    three_control_single = estimate.substitute(total=1, controls=3)
+    three_control_shared = estimate.substitute(total=2, controls=3)
+    zero_control = estimate.substitute(total=2, controls=0)
+
+    assert two_control_single.gates.total == 7
+    assert two_control_single.width.clean_ancilla_qubits == 2
+    assert two_control_shared.gates.total == 8
+    assert two_control_shared.width.clean_ancilla_qubits == 2
+    assert three_control_single.gates.total == 9
+    assert three_control_single.width.clean_ancilla_qubits == 3
+    assert three_control_shared.gates.total == 10
+    assert three_control_shared.width.clean_ancilla_qubits == 3
+    assert zero_control.gates == qm.GateResources(total=2, two_qubit=2)
 
 
 def test_symbolic_opaque_control_projection_preserves_zero_control_cost() -> None:
@@ -1514,7 +1791,7 @@ def test_symbolic_opaque_control_projection_preserves_zero_control_cost() -> Non
     assert zero.calls == base.calls
     assert zero.assumptions == base.assumptions
     assert zero.quality is base.quality
-    assert symbolic.substitute(controls=2).gates.total == 13
+    assert symbolic.substitute(controls=2).gates.total == 7
 
 
 def test_symbolic_opaque_arity_constraints_reject_invalid_specialization() -> None:
@@ -1532,7 +1809,7 @@ def test_symbolic_opaque_arity_constraints_reject_invalid_specialization() -> No
 
     valid = estimate.substitute(gates=2, rotations=1, controls=2)
 
-    assert valid.gates.total == 6
+    assert valid.gates.total == 4
     assert "rotations" in estimate.parameters
     assert any(
         requirement["label"]
@@ -1559,8 +1836,8 @@ def test_symbolic_partial_arity_remainder_is_validated_only_under_control() -> N
     estimate = base.controlled(controls)
     valid = estimate.substitute(total=5, single=2, controls=2)
 
-    assert valid.gates.total == 9
-    assert valid.depth.depth == 9
+    assert valid.gates.total == 7
+    assert valid.depth.depth == 7
     assert any(
         requirement["label"] == "Portable aggregate unclassified arity remainder"
         for requirement in estimate.to_dict()["requirements"]
@@ -1616,9 +1893,9 @@ def test_symbolic_zero_known_arity_uses_total_only_control_branch() -> None:
         "no declared one- or two-qubit gate profile" in assumption.message
         for assumption in positive.assumptions
     )
-    assert complete.gates.total == 15
+    assert complete.gates.total == 7
     assert any(
-        "for all declared one- and two-qubit gates" in assumption.message
+        "uses an aggregate-level portable batching model" in assumption.message
         for assumption in complete.assumptions
     )
     assert not any(

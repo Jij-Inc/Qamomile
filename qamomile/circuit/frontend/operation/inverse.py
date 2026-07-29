@@ -81,7 +81,13 @@ from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.primitives import FloatType, UIntType
-from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase, ValueLike
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    Value,
+    ValueBase,
+    ValueLike,
+    static_quantum_width,
+)
 from qamomile.circuit.ir.value_mapping import ValueSubstitutor
 
 if TYPE_CHECKING:
@@ -249,33 +255,6 @@ def _as_value(value: ValueBase, context: str) -> Value:
     raise TypeError(f"{context} requires a Value, got {type(value).__name__}.")
 
 
-def _static_quantum_width(value: ValueBase) -> int | None:
-    """Return the compile-time scalar qubit width of a quantum value.
-
-    Args:
-        value (ValueBase): Scalar qubit or quantum array value. The width
-            is computed as the product over all shape dimensions so the
-            result stays correct for any array rank.
-
-    Returns:
-        int | None: Number of scalar qubits represented by ``value`` when
-            statically known, or None when the value is an array with no
-            shape or with any non-constant dimension.
-    """
-    if isinstance(value, ArrayValue):
-        if not value.shape:
-            return None
-        width = 1
-        for dim in value.shape:
-            if not dim.is_constant():
-                return None
-            const = dim.get_const()
-            assert const is not None
-            width *= int(const)
-        return width
-    return 1
-
-
 def _complete_resource_contract_widths(
     attrs: dict[str, Any],
     *,
@@ -316,7 +295,7 @@ def _inverse_invoke_target_width(
             width, otherwise the invocation's recorded target width.
     """
     target_values = list(current_qubits[len(op.control_qubits) :])
-    widths = [_static_quantum_width(value) for value in target_values]
+    widths = [static_quantum_width(value) for value in target_values]
     if widths and all(width is not None for width in widths):
         return sum(cast(int, width) for width in widths)
     return op.num_target_qubits
@@ -1510,6 +1489,8 @@ class _BlockInverter:
                 power=power,
                 block=inverse_block,
                 num_control_args=op.num_control_args,
+                callable_ref=op.callable_ref,
+                callable_attrs=dict(op.callable_attrs),
             )
         elif isinstance(op, ConcreteControlledU):
             operands = [*current_results, *mapped_params]
@@ -2339,7 +2320,7 @@ class InverseGate:
         )
         quantum_bindings = [binding for binding in bindings if binding.is_quantum]
         has_static_widths = all(
-            _static_quantum_width(binding.active_handle.value) is not None
+            static_quantum_width(binding.active_handle.value) is not None
             for binding in quantum_bindings
         )
         has_contract_widths = (
@@ -2367,6 +2348,10 @@ class InverseGate:
             tuple[InverseBlockOperation, list[_InputBinding], list[Value]]:
                 Operation, quantum bindings, and fresh result values ready for
                 ownership commit and emission.
+
+        Raises:
+            RuntimeError: If neither the call-site values nor a complete
+                resource contract provide the inverse target width.
         """
         shape_value_map: dict[str, ValueBase] = {}
         for binding in bindings:
@@ -2394,7 +2379,7 @@ class InverseGate:
         # `InverseBlockOperation` stores the scalar backend width separately
         # from operand/results lists: a Vector[Qubit] contributes many scalar
         # qubits here but remains a single operand/result value.
-        static_widths = [_static_quantum_width(value) for value in quantum_values]
+        static_widths = [static_quantum_width(value) for value in quantum_values]
         if all(width is not None for width in static_widths):
             target_width = sum(cast(int, width) for width in static_widths)
         else:

@@ -103,18 +103,19 @@ def estimate_qkernel_resources(
         NotImplementedError: If the qkernel contains a construct not supported
             by resource estimation.
     """
-    from qamomile.circuit.estimator.resource_estimator import (
-        GateBasis,
-        UnknownResourcePolicy,
-        estimate_resources,
-    )
+    from qamomile.circuit.estimator.resource_estimator import estimate_resources
+
+    estimator_options: dict[str, Any] = {}
+    if unknown_policy is not None:
+        estimator_options["unknown_policy"] = unknown_policy
+    if basis is not None:
+        estimator_options["basis"] = basis
 
     return estimate_resources(
         kernel,
         inputs=inputs,
         strategies=strategies,
         trace=trace,
-        unknown_policy=unknown_policy or UnknownResourcePolicy.ERROR,
-        basis=basis or GateBasis.PORTABLE,
         precision=precision,
+        **estimator_options,
     )

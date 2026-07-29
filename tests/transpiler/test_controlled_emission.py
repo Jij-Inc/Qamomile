@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 import qamomile.circuit as qmc
+from qamomile._utils import coerce_nonnegative_integral
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.callable import (
     CallableDef,
@@ -25,6 +26,9 @@ from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import FloatType, QubitType, UIntType
 from qamomile.circuit.ir.value import Value
+from qamomile.circuit.transpiler.errors import EmitError, ValidationError
+from qamomile.circuit.transpiler.passes.analyze import AnalyzePass
+from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
 from qamomile.circuit.transpiler.passes.emit_support import (
     controlled_emission,
     inverse_emission,
@@ -72,11 +76,11 @@ class _ResolverOnlyEmitPass:
         )
 
 
-def _controlled_u_with_power(power: int | Value) -> ConcreteControlledU:
+def _controlled_u_with_power(power: Any) -> ConcreteControlledU:
     """Build a minimal one-control operation with the requested power.
 
     Args:
-        power (int | Value): Concrete or symbolic controlled-call power.
+        power (Any): Concrete, symbolic, or deliberately malformed power.
 
     Returns:
         ConcreteControlledU: Operation over one control and one target with an
@@ -139,7 +143,7 @@ def test_controlled_power_analysis_propagates_invalid_values() -> None:
     operation = _controlled_u_with_power(-1)
     emit_pass = _ResolverOnlyEmitPass()
 
-    with pytest.raises(EmitError, match="power must be non-negative"):
+    with pytest.raises(EmitError, match="power must be nonnegative"):
         controlled_emission.allocate_controlled_workspaces(
             emit_pass,
             [operation],
@@ -147,7 +151,7 @@ def test_controlled_power_analysis_propagates_invalid_values() -> None:
             {},
             {},
         )
-    with pytest.raises(EmitError, match="power must be non-negative"):
+    with pytest.raises(EmitError, match="power must be nonnegative"):
         controlled_emission._batch_op_weight(
             emit_pass,
             operation,
@@ -240,6 +244,65 @@ def test_controlled_power_analysis_accepts_integral_float_binding() -> None:
         )
         == 1
     )
+
+
+@pytest.mark.parametrize(
+    ("candidate", "expected"),
+    [
+        pytest.param(0, 0, id="zero"),
+        pytest.param(2, 2, id="integer"),
+        pytest.param(2.0, 2, id="whole-float"),
+    ],
+)
+def test_controlled_power_layers_share_accepted_values(
+    candidate: object,
+    expected: int,
+) -> None:
+    """Analysis, folding, and emission accept the shared integral domain."""
+    operation = _controlled_u_with_power(candidate)
+
+    assert coerce_nonnegative_integral(candidate, label="ControlledU power") == expected
+    AnalyzePass()._validate_controlled_u_fields([operation])
+    assert ConstantFoldingPass._strict_int_cast(candidate) == expected
+    assert (
+        controlled_emission._resolve_power_if_bound(
+            _ResolverOnlyEmitPass(),
+            operation,
+            {},
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("candidate", "exception_type", "match"),
+    [
+        pytest.param(True, TypeError, "bool", id="bool"),
+        pytest.param(-1, ValueError, "nonnegative", id="negative"),
+        pytest.param(1.5, TypeError, "non-integer float", id="fractional-float"),
+        pytest.param("2", TypeError, "str", id="string"),
+    ],
+)
+def test_controlled_power_layers_share_rejected_values(
+    candidate: object,
+    exception_type: type[Exception],
+    match: str,
+) -> None:
+    """Analysis, folding, and emission reject the same malformed powers."""
+    operation = _controlled_u_with_power(candidate)
+
+    with pytest.raises(exception_type, match=match):
+        coerce_nonnegative_integral(candidate, label="ControlledU power")
+    with pytest.raises(ValidationError, match=match):
+        AnalyzePass()._validate_controlled_u_fields([operation])
+    with pytest.raises(ValueError, match=match):
+        ConstantFoldingPass._strict_int_cast(candidate)
+    with pytest.raises(EmitError, match=match):
+        controlled_emission._resolve_power_if_bound(
+            _ResolverOnlyEmitPass(),
+            operation,
+            {},
+        )
 
 
 def test_controlled_power_analysis_defers_only_unresolved_values() -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import math
 import numbers
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import cast
 
@@ -26,7 +26,10 @@ from qamomile.circuit.frontend.static_binding import (
     StaticBindingSpec,
     register_static_binding,
 )
-from qamomile.circuit.ir._resource_contract import quantum_operand_widths
+from qamomile.circuit.ir._resource_contract import (
+    QuantumOperandWidth,
+    merge_quantum_operand_widths,
+)
 from qamomile.circuit.ir.operation.callable import CallPolicy
 from qamomile.circuit.stdlib.state_preparation.mottonen_amplitude_encoding import (
     _mottonen_composite,
@@ -185,51 +188,19 @@ def _with_block_encoding_resource_contract(
         ValueError: If the callable already carries incompatible resource
             metadata or a malformed resource-contract mapping.
     """
-    attrs = qkernel_callable_attrs(unitary)
-    existing_contract = attrs.get("resource_contract")
-    if existing_contract is None:
-        contract: dict[str, object] = {}
-    elif isinstance(existing_contract, Mapping):
-        contract = dict(existing_contract)
-    else:
-        raise ValueError("unitary resource_contract must be a mapping.")
-
-    operand_widths = [
-        {"index": 0, "name": "signal", "width": signal_width},
-        {"index": 1, "name": "system", "width": system_width},
-    ]
-    existing_widths = contract.get("quantum_operand_widths")
-    if existing_widths is not None:
-        existing_entries = quantum_operand_widths(
-            {"resource_contract": contract},
-            source="unitary",
-        )
-        existing_signature = sorted(
-            (entry.index, entry.name, entry.width) for entry in existing_entries
-        )
-        expected_signature = [
-            (0, "signal", signal_width),
-            (1, "system", system_width),
-        ]
-        if existing_signature != expected_signature:
-            existing_by_name = {entry.name: entry.width for entry in existing_entries}
-            for field_name, register_name, width in (
-                ("num_signal_qubits", "signal", signal_width),
-                ("num_system_qubits", "system", system_width),
-            ):
-                if (
-                    register_name in existing_by_name
-                    and existing_by_name[register_name] != width
-                ):
-                    raise ValueError(
-                        f"{field_name} conflicts with the unitary's existing "
-                        "resource contract."
-                    )
-            raise ValueError(
-                "unitary already carries incompatible block-encoding operand widths."
-            )
-    contract["quantum_operand_widths"] = operand_widths
-    attrs["resource_contract"] = contract
+    attrs = merge_quantum_operand_widths(
+        qkernel_callable_attrs(unitary),
+        (
+            QuantumOperandWidth(index=0, name="signal", width=signal_width),
+            QuantumOperandWidth(index=1, name="system", width=system_width),
+        ),
+        source="unitary",
+        operand_count=2,
+        conflict_labels={
+            0: "num_signal_qubits",
+            1: "num_system_qubits",
+        },
+    )
     return unitary._clone_with_callable_attrs(attrs)
 
 

@@ -6,6 +6,7 @@ import dataclasses
 import numbers
 from typing import Any
 
+from qamomile._utils import coerce_nonnegative_integral
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.dataflow import (
     build_dependency_graph,
@@ -3829,26 +3830,10 @@ class AnalyzePass(Pass[Block, Block]):
             Raises:
                 ValidationError: If the candidate is not a nonnegative integer.
             """
-            if isinstance(value, bool):
-                raise ValidationError(
-                    f"ControlledU power must be a nonnegative integer, "
-                    f"got bool ({value})."
-                )
-            if not isinstance(value, (int, float)):
-                raise ValidationError(
-                    f"ControlledU power must be a nonnegative integer, "
-                    f"got {type(value).__name__}."
-                )
-            if isinstance(value, float) and value != int(value):
-                raise ValidationError(
-                    f"ControlledU power must be an integer, "
-                    f"got non-integer float {value}."
-                )
-            int_val = int(value)
-            if int_val < 0:
-                raise ValidationError(
-                    f"ControlledU power must be nonnegative, got {int_val}."
-                )
+            try:
+                coerce_nonnegative_integral(value, label="ControlledU power")
+            except (TypeError, ValueError) as error:
+                raise ValidationError(str(error)) from error
 
         class ControlledUValidator(ControlFlowVisitor):
             """Validate controlled-call powers across nested operation lists."""

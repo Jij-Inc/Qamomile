@@ -9,12 +9,19 @@ import sympy as sp
 
 import qamomile.circuit as qm
 import qamomile.observable as qm_o
+from qamomile.circuit.estimator._resolver import ExprResolver
+from qamomile.circuit.estimator.resource_estimator import (
+    _array_wire_key_at_index,
+    _quantum_element_index_expression,
+    _quantum_element_wire_index,
+    _quantum_value_wire_keys,
+)
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
-from qamomile.circuit.ir.types.primitives import QubitType
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+from qamomile.circuit.ir.value import ArrayValue, Value
 
 
 @qm.qkernel
@@ -192,6 +199,34 @@ def test_array_view_aliases_its_root_register() -> None:
         return qm.measure(view)
 
     assert circuit.estimate_resources().depth.depth == 2
+
+
+def test_malformed_negative_step_view_uses_owner_wide_dependencies() -> None:
+    """Malformed raw views must not resolve to plausible but incorrect slots."""
+    root_size = Value(type=UIntType(), name="root_size").with_const(4)
+    view_size = Value(type=UIntType(), name="view_size").with_const(2)
+    root = ArrayValue(type=QubitType(), name="root", shape=(root_size,))
+    view = ArrayValue(
+        type=QubitType(),
+        name="view",
+        shape=(view_size,),
+        slice_of=root,
+        slice_start=Value(type=UIntType(), name="start").with_const(2),
+        slice_step=Value(type=UIntType(), name="step").with_const(-1),
+    )
+    element = Value(
+        type=QubitType(),
+        name="element",
+        parent_array=view,
+        element_indices=(Value(type=UIntType(), name="index").with_const(1),),
+    )
+    resolver = ExprResolver()
+
+    assert _quantum_element_index_expression(element, resolver) is None
+    assert _quantum_element_wire_index(element, resolver) is None
+    assert _quantum_value_wire_keys(element, resolver) == {(root.logical_id, None)}
+    assert _quantum_value_wire_keys(view, resolver) == {(root.logical_id, None)}
+    assert _array_wire_key_at_index(view, 1, resolver) == (root.logical_id, None)
 
 
 def test_disjoint_concrete_array_view_does_not_alias_the_whole_root() -> None:

@@ -22,6 +22,7 @@ import dataclasses
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from qamomile._utils import coerce_nonnegative_integral
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
@@ -1781,54 +1782,23 @@ def _resolve_power_if_bound(
     """
     power = op.power
 
-    if isinstance(power, bool):
-        raise EmitError(
-            f"ControlledU power must be a nonnegative integer, got bool ({power}).",
-            operation="ControlledUOperation",
-        )
-
-    if isinstance(power, int):
-        resolved_power = power
-
-    elif isinstance(power, Value):
+    if isinstance(power, Value):
         resolved = emit_pass._resolver.resolve_classical_value(power, bindings)
         if resolved is None:
             return None
-        if isinstance(resolved, bool):
-            raise EmitError(
-                f"ControlledU power must be a nonnegative integer, "
-                f"got bool ({resolved}).",
-                operation="ControlledUOperation",
-            )
-        if isinstance(resolved, float):
-            if not resolved.is_integer():
-                raise EmitError(
-                    f"ControlledU power must be an integer, "
-                    f"got non-integer float {resolved}.",
-                    operation="ControlledUOperation",
-                )
-            resolved_power = int(resolved)
-        elif isinstance(resolved, int):
-            resolved_power = resolved
-        else:
-            raise EmitError(
-                f"ControlledU power must be an integer, got {type(resolved).__name__}.",
-                operation="ControlledUOperation",
-            )
-
+        candidate: object = resolved
     else:
-        raise EmitError(
-            f"ControlledU power has unexpected type "
-            f"{type(power).__name__}. Expected int or Value.",
-            operation="ControlledUOperation",
+        candidate = power
+    try:
+        return coerce_nonnegative_integral(
+            candidate,
+            label="ControlledU power",
         )
-
-    if resolved_power < 0:
+    except (TypeError, ValueError) as error:
         raise EmitError(
-            f"ControlledU power must be non-negative, got {resolved_power}.",
+            str(error),
             operation="ControlledUOperation",
-        )
-    return resolved_power
+        ) from error
 
 
 def resolve_power(

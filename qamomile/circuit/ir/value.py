@@ -7,7 +7,7 @@ import typing
 import uuid
 from collections.abc import Mapping, Sequence
 
-from .types import DictType, ValueType
+from .types import DictType, QFixedType, QubitType, QUIntType, ValueType
 
 if typing.TYPE_CHECKING:
     from .types.primitives import TupleType
@@ -682,6 +682,83 @@ class ArrayValue(Value[T]):
             ``True`` iff ``slice_of`` is non-``None``.
         """
         return self.slice_of is not None
+
+
+def static_quantum_width(value: ValueBase) -> int | None:
+    """Return a quantum value's compile-time scalar-qubit width.
+
+    The helper understands both ordinary qubit arrays and packed quantum
+    register carriers. Runtime carrier metadata is preferred when present
+    because it records the physical scalar values represented by a packed
+    value even when its type-level width is symbolic.
+
+    Args:
+        value (ValueBase): Quantum scalar, array, or packed register value.
+
+    Returns:
+        int | None: Non-negative scalar-qubit width, or ``None`` when the
+            value is non-quantum or any required dimension remains symbolic.
+    """
+    if not value.type.is_quantum():
+        return None
+
+    if isinstance(value, ArrayValue):
+        if value.shape:
+            element_count = 1
+            for dimension in value.shape:
+                size = _static_nonnegative_integer(dimension)
+                if size is None:
+                    return None
+                element_count *= size
+        else:
+            runtime = value.metadata.array_runtime
+            if runtime is None or not runtime.element_uuids:
+                return None
+            element_count = len(runtime.element_uuids)
+    else:
+        element_count = 1
+
+    qfixed = value.metadata.qfixed if not isinstance(value, ArrayValue) else None
+    if qfixed is not None:
+        element_width = _static_nonnegative_integer(qfixed.num_bits)
+    elif (
+        not isinstance(value, ArrayValue)
+        and value.metadata.cast is not None
+        and value.metadata.cast.qubit_uuids
+    ):
+        element_width = len(value.metadata.cast.qubit_uuids)
+    elif isinstance(value.type, QUIntType):
+        element_width = _static_nonnegative_integer(value.type.width)
+    elif isinstance(value.type, QFixedType):
+        integer_bits = _static_nonnegative_integer(value.type.integer_bits)
+        fractional_bits = _static_nonnegative_integer(value.type.fractional_bits)
+        if integer_bits is None or fractional_bits is None:
+            return None
+        element_width = integer_bits + fractional_bits
+    elif isinstance(value.type, QubitType):
+        element_width = 1
+    else:
+        return None
+
+    if element_width is None:
+        return None
+    return element_count * element_width
+
+
+def _static_nonnegative_integer(value: int | Value) -> int | None:
+    """Return a statically known non-negative integer component.
+
+    Args:
+        value (int | Value): Literal or scalar IR value to inspect.
+
+    Returns:
+        int | None: Concrete non-negative integer, or ``None`` when the value
+            is symbolic, non-integral, Boolean, or negative.
+    """
+    concrete = value.get_const() if isinstance(value, Value) else value
+    if type(concrete) is not int or concrete < 0:
+        return None
+    return concrete
 
 
 def resolve_root_array_index(

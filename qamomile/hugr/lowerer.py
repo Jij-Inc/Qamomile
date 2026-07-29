@@ -8,7 +8,7 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any, TypeAlias, cast
 
-from qamomile._utils import is_close_zero
+from qamomile._utils import coerce_nonnegative_integral, is_close_zero
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
@@ -3535,20 +3535,22 @@ def _resolve_transformed_power(
     if not isinstance(operation, ControlledUOperation):
         return 1
     power = operation.power
-    if isinstance(power, bool):
-        resolved: Any = None
-    elif isinstance(power, int):
-        resolved = power
+    if isinstance(power, (bool, int, float)):
+        resolved: Any = power
     elif power.is_constant():
         resolved = power.get_const()
     else:
         resolved = environment.get(f"__index__:{power.uuid}")
-    if isinstance(resolved, bool) or not isinstance(resolved, int) or resolved < 0:
-        raise EmitError(
-            "HUGR transformed call power must be a compile-time nonnegative integer",
-            operation="ControlledUOperation",
+    try:
+        return coerce_nonnegative_integral(
+            resolved,
+            label="HUGR transformed call power",
         )
-    return resolved
+    except (TypeError, ValueError) as error:
+        raise EmitError(
+            str(error),
+            operation="ControlledUOperation",
+        ) from error
 
 
 def _publish_transformed_result(

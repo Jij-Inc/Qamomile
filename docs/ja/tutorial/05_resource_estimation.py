@@ -269,7 +269,7 @@ assert vector_est.parameters == {}
 #
 # 本体を持たないcallableは、コストを指定しない限り正確なgate数が分かりません。そのため既定の`UnknownResourcePolicy.ERROR`ではエラーになります。コストが分かっている場合は、`qmc.opaque(...)`に明示的な`ResourceEstimate`を指定してください。探索的な用途では、`OPAQUE_CALL`は名前付きのcallとqueryを記録してqualityを`modeled`とし、`ZERO_WITH_WARNING`はコスト0という仮定を記録します。どちらも未知の本体を分解したかのようには扱いません。
 #
-# 固定されたopaque costでも、`portable` profileに`single_qubit`または`two_qubit`の内訳があれば、制御後の有用な推定値を算出できます。Qamomileは既知のprimitiveをゲート種別に対する保守的な上界で制御化し、共通する制御量子ビットによって直列化して、分解に必要なclean ancillaも報告します。これらの内訳に含まれないゲートは制御後の分解が不明なため、総ゲート数と直列depthに1ゲートずつのopaqueな処理として残します。arityが不明な残差を`multi_qubit`へ誤って分類することはなく、このフィールドは3量子ビット以上に作用すると分かっているゲートだけを表します。arityだけではXとH、CXとSWAPなどを区別できず、制御によって観測可能になる未申告のglobal phaseも把握できません。そのため結果は`modeled`のままとし、不明な制御コストを`assumptions`へ記録します。ゲート固有の制御コストやphaseの振る舞いが分かっている場合は、context-dependentな`cost(ctx)`モデルを使います。callbackは呼び出し全体に対してauthoritativeで、`ctx.total_controls`からすべてのcoherent controlを一度だけ価格付けできます。
+# 固定されたopaque costでも、`portable` profileに`single_qubit`または`two_qubit`の内訳があれば、制御後の有用な推定値を算出できます。2個以上のモデル化されたoperationを2個以上のcontrolで制御する場合、QamomileはcontrolのANDを1回だけ計算し、既知の各primitiveをその1個の実効controlの下へ投影して、本体の後で共有ladderを逆計算します。operationが1個だけ、またはcontrolが1個だけのprofileでは、通常のprimitiveごとのfallbackを維持します。arity fieldはQamomileが対応するportable primitive familyの範囲で個別に上界を取るため、その和が`total`と一致するとは限りません。aggregate profileにはgate名がないため、gate名に依存しない2制御modelのcountは、具体的な本体で選ばれる経路とどちらの方向にも異なる可能性があります。既知のarity bucketに含まれないgateは制御後の分解が不明なため、総gate数と直列depthに1gateずつのopaqueな処理として残します。arityが不明な残差を`multi_qubit`へ誤って分類することはなく、このfieldは3量子ビット以上に作用すると分かっているgateだけを表します。arityだけでは、制御によって観測可能になる未申告のglobal phaseも把握できません。そのため結果は`modeled`のままとし、これらの制限を`assumptions`へ記録します。gate固有の制御costやphaseの振る舞いが分かっている場合は、context-dependentな`cost(ctx)` modelを使います。callbackは呼び出し全体に対してauthoritativeで、`ctx.total_controls`からすべてのcoherent controlを一度だけ価格付けできます。
 
 
 # %%
@@ -304,8 +304,8 @@ def controlled_costed_oracle() -> tuple[qmc.Qubit, qmc.Qubit]:
 
 # %%
 costed_est = controlled_costed_oracle.estimate_resources()
-assert costed_est.gates.total == 15
-assert costed_est.depth.depth == 15
+assert costed_est.gates.total == 9
+assert costed_est.depth.depth == 9
 assert costed_est.width.clean_ancilla_qubits == 2
 assert costed_est.calls.queries_by_name == {"costed_oracle": 1}
 assert costed_est.quality is qmc.EstimateQuality.MODELED
@@ -313,6 +313,10 @@ assert any(
     "2 gate(s) with unclassified arity" in assumption.message
     for assumption in costed_est.assumptions
 )
+
+
+# %% [markdown]
+# 総gate数9の内訳は、共有する2制御ladderのToffoliが2個、1個の実効controlを付けた1量子ビットentryが2個、1個の実効controlを付けた2量子ビットentryの上界が3gate、未解決のplaceholderが2個です。2個のclean ancillaは、本体の実行中に保持する外側ladder用の1個と、既知primitiveの投影がpeak時に要求する1個の合計です。
 
 
 # %%

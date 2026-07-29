@@ -48,6 +48,7 @@ from qamomile.circuit.ir.serialize.encode import (
     _EncodeContext,
 )
 from qamomile.circuit.ir.types.primitives import FloatType, QubitType, UIntType
+from qamomile.circuit.ir.types.q_register import QFixedType, QUIntType
 from qamomile.circuit.ir.uuid_remapper import UUIDRemapper
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.serialization import (
@@ -59,6 +60,7 @@ from qamomile.circuit.serialization import (
 from qamomile.circuit.serialization.decode import from_dict as kernel_from_dict
 from qamomile.circuit.serialization.encode import to_dict as kernel_to_dict
 from qamomile.circuit.serialization.graph_protobuf import _OPERATION_TO_PROTO
+from qamomile.circuit.serialization.kernel import _StaticBindingResolver
 from qamomile.circuit.serialization.proto import qamomile_ir_pb2 as pb
 from qamomile.circuit.serialization.validation import validate_qkernel_ir
 from qamomile.qiskit import QiskitTranspiler
@@ -1978,6 +1980,37 @@ def test_serialized_symbolic_inverse_refreshes_bound_scalar_width() -> None:
     executable = QiskitTranspiler().transpile(restored, bindings={"width": 3})
     result = executable.sample(QiskitTranspiler().executor(), shots=16).result()
     assert result.results == [((1, 0, 0), 16)]
+
+
+@pytest.mark.parametrize(
+    "register_type",
+    [
+        QUIntType(width=3),
+        QFixedType(integer_bits=1, fractional_bits=2),
+    ],
+)
+def test_serialized_inverse_preserves_packed_register_width(
+    register_type: QUIntType | QFixedType,
+) -> None:
+    """Static-binding validation retains packed-register scalar widths."""
+    target = Value(type=register_type, name="target")
+    operation = InverseBlockOperation(
+        operands=[target],
+        results=[target.next_version()],
+        num_target_qubits=3,
+        callable_attrs={
+            "resource_contract": {
+                "quantum_operand_widths": [
+                    {"index": 0, "name": "target", "width": 3},
+                ],
+            },
+        },
+    )
+    resolver = object.__new__(_StaticBindingResolver)
+
+    resolver._validate_operation_call_widths(operation, {}, {})
+
+    assert operation.num_target_qubits == 3
 
 
 def test_serialized_controlled_static_inverse_refreshes_call_site_width() -> None:

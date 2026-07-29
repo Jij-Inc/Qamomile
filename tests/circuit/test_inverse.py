@@ -28,7 +28,6 @@ from qamomile.circuit.estimator import estimate_resources
 from qamomile.circuit.frontend.operation.inverse import (
     _BlockInverter,
     _InverseRotationCallable,
-    _static_quantum_width,
 )
 from qamomile.circuit.frontend.tracer import get_current_tracer, trace
 from qamomile.circuit.ir.block import Block, BlockKind
@@ -52,7 +51,13 @@ from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
-from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
+from qamomile.circuit.ir.types.q_register import QFixedType, QUIntType
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    DictValue,
+    Value,
+    static_quantum_width,
+)
 from qamomile.circuit.stdlib import (
     modular_decrement,
     modular_increment,
@@ -1638,7 +1643,7 @@ def test_inverse_controlled_concrete_roundtrip_statevector(qiskit_transpiler) ->
 
 
 def test_inverse_controlled_symbolic_operation() -> None:
-    """inverse(qkernel) preserves SymbolicControlledUOperation shape."""
+    """inverse(qkernel) preserves symbolic operation shape and callable metadata."""
 
     @qmc.qkernel
     def controlled_symbolic_layer(
@@ -1667,6 +1672,11 @@ def test_inverse_controlled_symbolic_operation() -> None:
         )
         return controls, target
 
+    source_op = next(
+        op
+        for op in controlled_symbolic_layer.block.operations
+        if isinstance(op, SymbolicControlledU)
+    )
     block = _single_inverse_implementation(circuit.build())
     ctrl_ops = [op for op in block.operations if isinstance(op, ControlledUOperation)]
 
@@ -1674,6 +1684,11 @@ def test_inverse_controlled_symbolic_operation() -> None:
     assert isinstance(ctrl_ops[0], SymbolicControlledU)
     assert ctrl_ops[0].block is not None
     assert ctrl_ops[0].block.name == "_phase_layer_inverse"
+    assert source_op.callable_ref is not None
+    assert source_op.callable_attrs
+    assert ctrl_ops[0].callable_ref == source_op.callable_ref
+    assert ctrl_ops[0].callable_attrs == source_op.callable_attrs
+    assert ctrl_ops[0].callable_attrs is not source_op.callable_attrs
 
 
 def test_inverse_controlled_index_operation() -> None:
@@ -3721,7 +3736,7 @@ def test_inverse_nested_invoke_keeps_vector_target_width() -> None:
 
 
 # ---------------------------------------------------------------------------
-# InverseBlockOperation construction validation and _static_quantum_width
+# InverseBlockOperation construction validation and static_quantum_width
 # ---------------------------------------------------------------------------
 
 
@@ -3805,8 +3820,36 @@ def test_inverse_block_operation_rejects_arrayness_mismatch() -> None:
         )
 
 
+def test_inverse_block_operation_rejects_partial_contract_width_mismatch() -> None:
+    """A declared target width must match a known static width in a partial contract."""
+    left_dim = Value(type=UIntType(), name="left_dim").with_const(2)
+    right_dim = Value(type=UIntType(), name="right_dim").with_const(3)
+    left = ArrayValue(type=QubitType(), name="left", shape=(left_dim,))
+    right = ArrayValue(type=QubitType(), name="right", shape=(right_dim,))
+    attrs = {
+        "resource_contract": {
+            "quantum_operand_widths": [
+                {"index": 1, "name": "right", "width": 2},
+            ],
+        },
+    }
+
+    with pytest.raises(
+        ValueError,
+        match=r"right register width contract expects 2 qubit\(s\), got 3",
+    ):
+        InverseBlockOperation(
+            operands=[left, right],
+            results=[left.next_version(), right.next_version()],
+            num_control_qubits=0,
+            num_target_qubits=5,
+            custom_name="partial_contract_inverse",
+            callable_attrs=attrs,
+        )
+
+
 def test_static_quantum_width_multiplies_all_dimensions() -> None:
-    """``_static_quantum_width`` counts scalar qubits across every dimension.
+    """``static_quantum_width`` counts scalar qubits across every dimension.
 
     The width helper must stay correct for any array rank so that
     ``InverseBlockOperation.num_target_qubits`` can never understate a
@@ -3818,17 +3861,71 @@ def test_static_quantum_width_multiplies_all_dimensions() -> None:
         return Value(type=UIntType(), name="dim").with_const(value)
 
     scalar = Value(type=QubitType(), name="q")
-    assert _static_quantum_width(scalar) == 1
+    assert static_quantum_width(scalar) == 1
 
     vector = ArrayValue(type=QubitType(), name="v", shape=(dim(3),))
-    assert _static_quantum_width(vector) == 3
+    assert static_quantum_width(vector) == 3
 
     matrix = ArrayValue(type=QubitType(), name="m", shape=(dim(2), dim(3)))
-    assert _static_quantum_width(matrix) == 6
+    assert static_quantum_width(matrix) == 6
 
     symbolic = ArrayValue(
         type=QubitType(),
         name="s",
         shape=(dim(2), Value(type=UIntType(), name="n")),
     )
-    assert _static_quantum_width(symbolic) is None
+    assert static_quantum_width(symbolic) is None
+
+
+def test_static_quantum_width_handles_packed_register_carriers() -> None:
+    """Static width includes QUInt, QFixed, and runtime carrier metadata."""
+    quint = Value(type=QUIntType(width=3), name="quint")
+    qfixed = Value(
+        type=QFixedType(integer_bits=1, fractional_bits=2),
+        name="qfixed",
+    )
+    runtime_qfixed = Value(
+        type=QFixedType(
+            integer_bits=Value(type=UIntType(), name="integer_bits"),
+            fractional_bits=Value(type=UIntType(), name="fractional_bits"),
+        ),
+        name="runtime_qfixed",
+    ).with_qfixed_metadata(
+        qubit_uuids=("q0", "q1", "q2", "q3"),
+        num_bits=4,
+        int_bits=1,
+    )
+    runtime_array = ArrayValue(type=QubitType(), name="runtime_array")
+    runtime_array = runtime_array.with_array_runtime_metadata(
+        element_uuids=("q0", "q1", "q2"),
+    )
+
+    assert static_quantum_width(quint) == 3
+    assert static_quantum_width(qfixed) == 3
+    assert static_quantum_width(runtime_qfixed) == 4
+    assert static_quantum_width(runtime_array) == 3
+
+
+def test_inverse_block_accepts_matching_packed_register_contracts() -> None:
+    """Width contracts accept statically matching QUInt and QFixed operands."""
+    for target in (
+        Value(type=QUIntType(width=3), name="quint"),
+        Value(
+            type=QFixedType(integer_bits=1, fractional_bits=2),
+            name="qfixed",
+        ),
+    ):
+        InverseBlockOperation(
+            operands=[target],
+            results=[target.next_version()],
+            num_control_qubits=0,
+            num_target_qubits=3,
+            custom_name="packed_inverse",
+            callable_attrs={
+                "resource_contract": {
+                    "quantum_operand_widths": [
+                        {"index": 0, "name": "target", "width": 3},
+                    ],
+                },
+            },
+        )

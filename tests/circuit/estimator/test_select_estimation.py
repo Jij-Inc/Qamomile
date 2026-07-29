@@ -158,8 +158,8 @@ def test_select_phase_survives_inverse_and_outer_control() -> None:
         assert restored.quality is expected.quality
 
 
-def test_select_clifford_t_bounds_controlled_hadamard_case() -> None:
-    """SELECT uses the generic Clifford+T control fallback for Hadamard."""
+def test_select_clifford_t_rejects_undefined_controlled_hadamard() -> None:
+    """SELECT rejects a Clifford+T control lowering that is not defined."""
 
     @qm.qkernel
     def circuit() -> tuple[qm.Qubit, qm.Qubit]:
@@ -168,11 +168,8 @@ def test_select_clifford_t_bounds_controlled_hadamard_case() -> None:
         target = qm.qubit("target")
         return qm.select([_identity_case, qm.h])(index, target)
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
-
-    assert estimate.gates.total > 1
-    assert estimate.gates.t > 0
-    assert estimate.quality is qm.EstimateQuality.UPPER_BOUND
+    with pytest.raises(ValueError, match="controlled gate 'h'"):
+        circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
 
 
 def test_select_estimator_broadcasts_scalar_case_over_vector_target() -> None:

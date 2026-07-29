@@ -32,7 +32,7 @@ from qamomile.circuit.ir.types import BitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.errors import EmitError, ValidationError
 from qamomile.hugr import HugrTranspiler
-from qamomile.hugr.lowerer import _lower_while
+from qamomile.hugr.lowerer import _lower_while, _resolve_transformed_power
 
 
 def _hugr_operation_names(package: Package) -> list[str]:
@@ -2312,6 +2312,62 @@ def test_hugr_rejects_runtime_controlled_power_explicitly() -> None:
         )
 
     assert error.value.operation == "ControlledUOperation"
+
+
+@pytest.mark.hugr
+@pytest.mark.parametrize(
+    ("candidate", "expected"),
+    [
+        pytest.param(0, 0, id="zero"),
+        pytest.param(2, 2, id="integer"),
+        pytest.param(2.0, 2, id="whole-float"),
+    ],
+)
+def test_hugr_transformed_power_accepts_shared_integral_domain(
+    candidate: object,
+    expected: int,
+) -> None:
+    """HUGR accepts the same nonnegative integral powers as other layers."""
+    operation = next(
+        op
+        for op in _hugr_controlled_program.block.operations
+        if isinstance(op, ControlledUOperation)
+    )
+
+    assert (
+        _resolve_transformed_power(
+            dataclasses.replace(operation, power=candidate),
+            {},
+        )
+        == expected
+    )
+
+
+@pytest.mark.hugr
+@pytest.mark.parametrize(
+    ("candidate", "match"),
+    [
+        pytest.param(True, "bool", id="bool"),
+        pytest.param(-1, "nonnegative", id="negative"),
+        pytest.param(1.5, "non-integer float", id="fractional-float"),
+    ],
+)
+def test_hugr_transformed_power_rejects_shared_invalid_domain(
+    candidate: object,
+    match: str,
+) -> None:
+    """HUGR rejects the same malformed numeric powers as other layers."""
+    operation = next(
+        op
+        for op in _hugr_controlled_program.block.operations
+        if isinstance(op, ControlledUOperation)
+    )
+
+    with pytest.raises(EmitError, match=match):
+        _resolve_transformed_power(
+            dataclasses.replace(operation, power=candidate),
+            {},
+        )
 
 
 @pytest.mark.hugr

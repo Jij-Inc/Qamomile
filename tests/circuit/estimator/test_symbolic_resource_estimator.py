@@ -212,16 +212,20 @@ def test_pauli_evolve_parallelizes_basis_changes_within_a_term() -> None:
     assert estimate.depth.rotation_depth == 1
 
 
-def test_gate_basis_accepts_strings_and_rejects_unknown_values() -> None:
+def test_gate_basis_accepts_string_values() -> None:
     """The public basis option accepts notebook-friendly strings safely."""
     estimate = _basis_probe.estimate_resources(basis="logical")
     assert estimate.gates.total == 2
 
+
+@pytest.mark.parametrize("basis", ["surface_code", ""])
+def test_gate_basis_rejects_unknown_string_values(basis: str) -> None:
+    """Unknown and empty strings are not replaced by the default basis."""
     with pytest.raises(
         ValueError,
         match="expected one of: portable, logical, clifford_t",
     ):
-        _basis_probe.estimate_resources(basis="surface_code")
+        _basis_probe.estimate_resources(basis=basis)
 
 
 def test_clifford_t_basis_lowers_controlled_toffoli_with_clean_ancilla() -> None:
@@ -250,12 +254,17 @@ def test_clifford_t_basis_lowers_controlled_toffoli_with_clean_ancilla() -> None
 
     assert estimate.gates.t == 21
     assert estimate.gates.total == 45
+    assert estimate.depth.depth == 45
+    assert estimate.depth.clifford_depth == 24
+    assert estimate.depth.t_depth == 9
+    assert estimate.depth.non_clifford_depth == 9
+    assert estimate.depth.gate_depth == 45
     assert estimate.width.clean_ancilla_qubits == 1
     assert estimate.qubits == 5
 
 
-def test_clifford_t_basis_bounds_generic_controlled_gate_lowering() -> None:
-    """A controlled fixed gate uses the generic Euler upper-bound fallback."""
+def test_clifford_t_basis_rejects_missing_controlled_gate_lowering() -> None:
+    """Unsupported controlled gates fail instead of reporting guessed counts."""
 
     @qm.composite_gate
     def hadamard(target: qm.Qubit) -> qm.Qubit:
@@ -270,15 +279,12 @@ def test_clifford_t_basis_bounds_generic_controlled_gate_lowering() -> None:
         controlled_hadamard = qm.control(hadamard)
         return controlled_hadamard(control, target)
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
-
-    assert estimate.gates.total > 1
-    assert estimate.gates.t > 0
-    assert estimate.quality is qm.EstimateQuality.UPPER_BOUND
+    with pytest.raises(ValueError, match="controlled gate 'h'"):
+        circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
 
 
-def test_clifford_t_basis_bounds_controlled_rotation_lowering() -> None:
-    """A controlled rotation is synthesized through a two-CNOT fallback."""
+def test_clifford_t_basis_rejects_controlled_rotation_lowering() -> None:
+    """Controlled rotations fail when no decomposition contract is defined."""
 
     @qm.composite_gate
     def rotate(target: qm.Qubit, theta: qm.Float) -> qm.Qubit:
@@ -293,11 +299,8 @@ def test_clifford_t_basis_bounds_controlled_rotation_lowering() -> None:
         controlled_rotate = qm.control(rotate)
         return controlled_rotate(control, target, theta)
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
-
-    assert estimate.gates.two_qubit == 2
-    assert estimate.gates.t > 0
-    assert estimate.quality is qm.EstimateQuality.UPPER_BOUND
+    with pytest.raises(ValueError, match="controlled gate 'ry'"):
+        circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
 
 
 @qm.qkernel
@@ -1206,6 +1209,54 @@ def test_for_items_vector_key_elements_are_bound_per_concrete_entry() -> None:
     assert estimate.parameters == {}
 
 
+def test_for_items_tuple_key_binds_every_declared_component() -> None:
+    """A concrete tuple key binds each component used by the loop body."""
+
+    @qm.qkernel
+    def circuit(
+        data: qm.Dict[qm.Tuple[qm.UInt, qm.UInt], qm.Float],
+    ) -> qm.Qubit:
+        """Apply one gate per unit represented by both tuple components."""
+        q = qm.qubit("q")
+        for (left, right), _value in qm.items(data):
+            for _ in qm.range(left):
+                q = qm.h(q)
+            for _ in qm.range(right):
+                q = qm.x(q)
+        return q
+
+    estimate = circuit.estimate_resources(inputs={"data": {(1, 2): 0.1}})
+
+    assert estimate.gates.total == 3
+    assert estimate.parameters == {}
+
+
+@pytest.mark.parametrize(
+    "malformed_key",
+    [
+        pytest.param((3,), id="missing-component"),
+        pytest.param("ab", id="string-is-not-a-tuple-key"),
+        pytest.param((1, 2, 4), id="extra-component"),
+    ],
+)
+def test_for_items_tuple_key_rejects_wrong_shape(malformed_key: object) -> None:
+    """Tuple-key bindings require the declared arity exactly."""
+
+    @qm.qkernel
+    def circuit(
+        data: qm.Dict[qm.Tuple[qm.UInt, qm.UInt], qm.Float],
+    ) -> qm.Qubit:
+        """Use both tuple components as resource-sensitive loop bounds."""
+        q = qm.qubit("q")
+        for (left, right), _value in qm.items(data):
+            for _ in qm.range(left + right):
+                q = qm.h(q)
+        return q
+
+    with pytest.raises(ValueError, match="must contain exactly 2 element"):
+        circuit.estimate_resources(inputs={"data": {malformed_key: 0.1}})
+
+
 def test_for_items_dynamic_vector_key_index_fails_closed() -> None:
     """Concrete Vector keys never degrade to an unbound element symbol."""
 
@@ -1377,20 +1428,31 @@ def test_while_classical_recurrence_fails_closed() -> None:
         circuit.estimate_resources()
 
 
-def test_resource_substitute_matches_symbols_by_printed_name() -> None:
-    """Substitution replaces same-named symbols with different assumptions."""
+def test_resource_substitute_uses_public_alias_symbol_identity() -> None:
+    """Same-named symbols are substituted independently by public alias."""
     positive_n = sp.Symbol("n", integer=True, positive=True)
     nonnegative_n = sp.Symbol("n", integer=True, nonnegative=True)
+    expression = positive_n + 10 * nonnegative_n
     estimate = qm.ResourceEstimate(
-        width=qm.WidthResources(peak_qubits=positive_n + nonnegative_n),
-        gates=qm.GateResources(total=nonnegative_n),
-        parameters={"n": positive_n},
+        gates=qm.GateResources(total=expression),
     )
 
-    concrete = estimate.substitute(n=2)
+    assert list(estimate.parameters) == ["n", "n__2"]
+    first = estimate.parameters["n"]
+    second = estimate.parameters["n__2"]
 
-    assert concrete.qubits == 4
-    assert concrete.gates.total == 2
+    partially_bound = estimate.substitute(n=2)
+    assert partially_bound.gates.total == expression.xreplace({first: sp.Integer(2)})
+    assert partially_bound.parameters == {"n__2": second}
+
+    expected = expression.xreplace(
+        {
+            first: sp.Integer(2),
+            second: sp.Integer(5),
+        }
+    )
+    assert estimate.substitute(n=2, n__2=5).gates.total == expected
+    assert estimate.substitute(n__2=5, n=2).gates.total == expected
 
 
 def test_resource_substitute_rejects_unknown_parameter_names() -> None:
@@ -1564,6 +1626,16 @@ def test_controlled_swap_uses_portable_fredkin_decomposition() -> None:
     assert estimate.gates.two_qubit == 2
     assert estimate.gates.multi_qubit == 1
     assert estimate.gates.toffoli == 1
+
+    clifford_t = circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
+
+    assert clifford_t.gates.total == 17
+    assert clifford_t.gates.t == 7
+    assert clifford_t.depth.depth == 17
+    assert clifford_t.depth.clifford_depth == 10
+    assert clifford_t.depth.t_depth == 3
+    assert clifford_t.depth.non_clifford_depth == 3
+    assert clifford_t.depth.gate_depth == 17
 
 
 def test_for_items_width_reuses_wires_across_entries() -> None:
@@ -1939,3 +2011,27 @@ def test_zero_trip_repeat_disables_internal_allocation_sites() -> None:
     assert repeated.width.allocated_qubits == 0
     assert repeated.width.peak_qubits == 0
     assert repeated._allocation_sites == {"body": sp.Integer(0)}
+
+
+def test_zero_trip_repeat_prunes_quality_and_assumptions() -> None:
+    """Literal and specialized zero repeats contribute no modeled metadata."""
+    assumption = qm.ResourceAssumption("modeled body")
+    body = qm.ResourceEstimate(
+        gates=qm.GateResources(total=1),
+        assumptions=(assumption,),
+        quality=qm.EstimateQuality.MODELED,
+    )
+    repetitions = sp.Symbol("repetitions", integer=True, nonnegative=True)
+
+    literal_zero = body.repeat(0)
+    symbolic_zero = body.repeat(repetitions).substitute(repetitions=0)
+
+    for estimate in (literal_zero, symbolic_zero):
+        assert estimate.gates.total == 0
+        assert estimate.assumptions == ()
+        assert estimate.quality is qm.EstimateQuality.EXACT
+
+    active = body.repeat(repetitions).substitute(repetitions=2)
+    assert active.gates.total == 2
+    assert active.assumptions == (assumption,)
+    assert active.quality is qm.EstimateQuality.MODELED
