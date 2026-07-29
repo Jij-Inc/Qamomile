@@ -56,7 +56,8 @@ class QKernelBuildMixin:
                 basis. Defaults to ``1e-10``.
 
         Returns:
-            ResourceEstimate: Logical symbolic resource estimate.
+            ResourceEstimate: Portable algorithmic resource estimate, or an
+                estimate in the explicitly requested basis.
 
         Raises:
             ValueError: If an input, estimation configuration, callable
