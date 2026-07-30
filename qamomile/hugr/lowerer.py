@@ -3128,6 +3128,17 @@ def _lower_transformed_call(
         control_offset += width
         wire: Any = selected if isinstance(result, ArrayValue) else selected[0]
         _publish_transformed_result(source, result, wire, environment, live_qubits)
+    if power == 0:
+        for source, result in zip(targets, result_targets, strict=True):
+            wire = _resolve_wire(source, environment)
+            _publish_transformed_result(
+                source,
+                result,
+                wire,
+                environment,
+                live_qubits,
+            )
+        return
     for source, result, formal in zip(
         targets, result_targets, quantum_exit, strict=True
     ):

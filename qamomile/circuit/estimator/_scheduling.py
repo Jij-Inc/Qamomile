@@ -84,6 +84,7 @@ if TYPE_CHECKING:
     from qamomile.circuit.frontend.qkernel import QKernel
 
 WireKey = tuple[str, int | None]
+_WireFootprint = tuple[frozenset[WireKey], frozenset[WireKey]]
 
 
 def _estimate_has_nonzero_depth(estimate: ResourceEstimate) -> bool:
@@ -1070,9 +1071,23 @@ def _disjoint_concrete_loop_depth(
     if len(iterations) > 4096:
         return None
 
-    seen: set[tuple[str, int | None]] = set()
+    seen: dict[str, set[int] | None] = {}
     fields = tuple(field.name for field in dataclasses.fields(DepthResources))
     peaks: dict[str, ResourceExpr] = {field: _ZERO for field in fields}
+    depth_expressions = {
+        field: cast(sp.Expr, getattr(body_depth, field)) for field in fields
+    }
+    varying_depths = {
+        field: expression
+        for field, expression in depth_expressions.items()
+        if loop_symbol in expression.free_symbols
+    }
+    if len(iterations) > 0:
+        for field, expression in depth_expressions.items():
+            if field in varying_depths:
+                continue
+            invariant_depth = _safe_simplify(cast(sp.Expr, expression.doit()))
+            peaks[field] = sp.Max(_ZERO, invariant_depth)
     for loop_value in iterations:
         value = sp.Integer(loop_value)
         if operation.loop_var_value is None:
@@ -1095,11 +1110,9 @@ def _disjoint_concrete_loop_depth(
             getattr(body_depth, field) != _ZERO for field in fields
         ):
             return None
-        if _wire_footprints_overlap(seen, footprint):
+        if not _record_disjoint_wire_footprint(seen, footprint):
             return None
-        seen |= footprint
-        for field in fields:
-            expression = cast(sp.Expr, getattr(body_depth, field))
+        for field, expression in varying_depths.items():
             iteration_depth = _safe_simplify(
                 cast(sp.Expr, expression.subs(loop_symbol, value).doit())
             )
@@ -1107,25 +1120,42 @@ def _disjoint_concrete_loop_depth(
     return DepthResources(**peaks)
 
 
-def _wire_footprints_overlap(
-    left: set[tuple[str, int | None]],
-    right: set[tuple[str, int | None]],
+def _record_disjoint_wire_footprint(
+    seen: dict[str, set[int] | None],
+    footprint: set[WireKey],
 ) -> bool:
-    """Return whether two physical owner/index footprints may alias.
+    """Record one footprint only when it is disjoint from all prior wires.
+
+    An owner-wide ``None`` index aliases every scalar index for the same
+    allocation owner. Exact indices are retained in per-owner sets so checking
+    one new iteration is linear in only that iteration's footprint.
 
     Args:
-        left (set[tuple[str, int | None]]): Existing physical wire keys.
-        right (set[tuple[str, int | None]]): Candidate physical wire keys.
+        seen (dict[str, set[int] | None]): Previously recorded exact indices by
+            owner, with ``None`` marking an owner-wide dependency.
+        footprint (set[WireKey]): Candidate physical wire keys.
 
     Returns:
-        bool: Whether any owner-wide or matching scalar key overlaps.
+        bool: Whether the candidate was disjoint and has been recorded.
     """
-    return any(
-        left_owner == right_owner
-        and (left_index is None or right_index is None or left_index == right_index)
-        for left_owner, left_index in left
-        for right_owner, right_index in right
-    )
+    for owner, index in footprint:
+        if owner not in seen:
+            continue
+        seen_indices = seen[owner]
+        if seen_indices is None or index is None or index in seen_indices:
+            return False
+    for owner, index in footprint:
+        if owner not in seen:
+            seen[owner] = None if index is None else {index}
+            continue
+        seen_indices = seen[owner]
+        if seen_indices is None:
+            continue
+        if index is None:
+            seen[owner] = None
+        else:
+            seen_indices.add(index)
+    return True
 
 
 def _loop_body_has_symbolic_quantum_index(
@@ -1251,7 +1281,10 @@ def _symbolic_disjoint_loop_depth(
         return None
     for indices in indices_by_owner.values():
         representative = indices[0]
-        if any(_safe_simplify(index - representative) != _ZERO for index in indices):
+        if any(
+            index != representative and _safe_simplify(index - representative) != _ZERO
+            for index in indices
+        ):
             return None
         slope = _safe_simplify(cast(ResourceExpr, sp.diff(representative, loop_symbol)))
         if loop_symbol in slope.free_symbols or slope.is_zero is not False:
@@ -1265,30 +1298,34 @@ def _symbolic_disjoint_loop_depth(
 
 def _dependency_depth(
     scheduled: Sequence[tuple[Operation, ResourceEstimate]],
-    resolver: ExprResolver,
+    wire_footprints: Sequence[_WireFootprint | None],
     *,
     measurement_derived: set[str] | None = None,
-    scalar_values: Mapping[str, sp.Expr] | None = None,
-    used_names: set[str] | None = None,
 ) -> DepthResources:
     """Schedule operation summaries by wire dependencies and hybrid barriers.
 
     Args:
         scheduled (Sequence[tuple[Operation, ResourceEstimate]]): Operations in
             program order paired with their internally computed summaries.
-        resolver (ExprResolver): Resolver for array element and view indices.
+        wire_footprints (Sequence[_WireFootprint | None]): Precomputed read and
+            write keys aligned with ``scheduled``. Zero-depth operations use
+            ``None``.
         measurement_derived (set[str] | None): Classical values transitively
             derived from runtime quantum observations. Operations that consume
             them, plus other unschedulable hybrid/control operations, form
             global ordering barriers. Defaults to ``None``.
-        scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
-            dependency values. Defaults to ``None``.
-        used_names (set[str] | None): Optional set updated with used input
-            names. Defaults to ``None``.
 
     Returns:
         DepthResources: Critical-path depth for every tracked gate family.
+
+    Raises:
+        AssertionError: If a footprint is missing or not aligned with a
+            nonzero-depth scheduled operation.
     """
+    if len(scheduled) != len(wire_footprints):
+        raise AssertionError(
+            "Scheduled operations and wire footprints must have equal lengths."
+        )
     fields = tuple(field.name for field in dataclasses.fields(DepthResources))
     availability: dict[
         str,
@@ -1296,19 +1333,18 @@ def _dependency_depth(
     ] = {field: {} for field in fields}
     barrier_availability: dict[str, ResourceExpr] = {field: _ZERO for field in fields}
     peaks: dict[str, ResourceExpr] = {field: _ZERO for field in fields}
-    for operation, estimate in scheduled:
+    for (operation, estimate), footprint in zip(
+        scheduled,
+        wire_footprints,
+    ):
         if not _estimate_has_nonzero_depth(estimate):
             continue
-        if estimate._dependency_keys is None:
-            reads, writes = _quantum_wire_keys(
-                operation,
-                resolver,
-                scalar_values=scalar_values,
-                used_names=used_names,
+        if footprint is None:
+            raise AssertionError(
+                "A nonzero-depth scheduled operation requires a wire footprint."
             )
-        else:
-            reads = set(estimate._dependency_keys)
-            writes = set(estimate._dependency_keys)
+        reads = set(footprint[0])
+        writes = set(footprint[1])
         if estimate.width.clean_ancilla_qubits != _ZERO:
             # Width reports one reusable clean-ancilla pool (a maximum across
             # sequential operations). Treat that pool as a shared dependency

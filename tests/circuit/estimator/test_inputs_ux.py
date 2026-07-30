@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import sympy as sp
@@ -460,8 +462,14 @@ def test_inputs_trace_structural_values_and_specialize_scalars() -> None:
 
 @pytest.mark.parametrize(
     "angles",
-    [np.array([0.1, 0.2, 0.3]), [0.1, 0.2, 0.3]],
-    ids=["numpy", "list"],
+    [
+        np.array([0.1, 0.2, 0.3]),
+        [0.1, 0.2, 0.3],
+        (0.1, 0.2, 0.3),
+        range(3),
+        SimpleNamespace(shape=(3,)),
+    ],
+    ids=["numpy", "list", "tuple", "sequence", "shape-attribute"],
 )
 def test_numeric_vector_input_specializes_shape(angles: object) -> None:
     """A numeric vector input determines symbolic loop and register sizes."""
@@ -480,3 +488,22 @@ def test_numeric_vector_input_specializes_shape(angles: object) -> None:
     assert estimate.gates.total == 3
     assert estimate.parameters == {}
     assert estimate.assumptions == ()
+
+
+def test_ragged_matrix_input_is_rejected() -> None:
+    """Resource inputs reject ragged nested sequences before specialization."""
+
+    @qmc.qkernel
+    def matrix_probe(values: qmc.Matrix[qmc.Float]) -> qmc.Vector[qmc.Qubit]:
+        """Allocate one qubit for every supplied matrix row.
+
+        Args:
+            values (qmc.Matrix[qmc.Float]): Matrix whose row count sets width.
+
+        Returns:
+            qmc.Vector[qmc.Qubit]: Register with one qubit per matrix row.
+        """
+        return qmc.qubit_array(values.shape[0], "reg")
+
+    with pytest.raises(ValueError, match="must be rectangular"):
+        matrix_probe.estimate_resources(inputs={"values": [[0.1], [0.2, 0.3]]})

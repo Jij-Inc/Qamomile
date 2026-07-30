@@ -15,6 +15,7 @@ from qamomile.circuit.estimator._scheduling import (
     _quantum_element_index_expression,
     _quantum_element_wire_index,
     _quantum_value_wire_keys,
+    _record_disjoint_wire_footprint,
 )
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.callable import InvokeOperation
@@ -22,6 +23,18 @@ from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
+
+
+def test_wire_footprint_index_preserves_owner_wide_aliasing() -> None:
+    """The linear overlap index keeps exact and owner-wide alias rules."""
+    seen: dict[str, set[int] | None] = {}
+
+    assert _record_disjoint_wire_footprint(seen, {("left", 0)})
+    assert _record_disjoint_wire_footprint(seen, {("left", 1)})
+    assert not _record_disjoint_wire_footprint(seen, {("left", 0)})
+    assert not _record_disjoint_wire_footprint(seen, {("left", None)})
+    assert _record_disjoint_wire_footprint(seen, {("right", None)})
+    assert not _record_disjoint_wire_footprint(seen, {("right", 7)})
 
 
 @qm.qkernel

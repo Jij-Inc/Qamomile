@@ -300,6 +300,54 @@ def _hugr_zero_power_control_value(
 
 
 @qmc.qkernel
+def _hugr_conditional_swap_body(
+    left: qmc.Qubit,
+    right: qmc.Qubit,
+    selector: qmc.UInt,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Conditionally exchange target handles across a synthetic merge.
+
+    Args:
+        left (qmc.Qubit): First target handle.
+        right (qmc.Qubit): Second target handle.
+        selector (qmc.UInt): Whether to exchange the handles.
+
+    Returns:
+        tuple[qmc.Qubit, qmc.Qubit]: Handles in the selected order.
+    """
+    if selector == 1:
+        left, right = right, left
+    return left, right
+
+
+@qmc.qkernel
+def _hugr_zero_power_conditional_swap(
+    power: qmc.UInt,
+    selector: qmc.UInt,
+) -> tuple[qmc.Bit, qmc.Bit, qmc.Bit]:
+    """Apply a conditionally permuting body at a symbolic power.
+
+    Args:
+        power (qmc.UInt): Number of controlled body applications.
+        selector (qmc.UInt): Body-local target permutation selector.
+
+    Returns:
+        tuple[qmc.Bit, qmc.Bit, qmc.Bit]: Control and target measurements.
+    """
+    control = qmc.qubit("control")
+    left = qmc.qubit("left")
+    right = qmc.qubit("right")
+    control, left, right = qmc.control(_hugr_conditional_swap_body)(
+        control,
+        left,
+        right,
+        selector,
+        power=power,
+    )
+    return qmc.measure(control), qmc.measure(left), qmc.measure(right)
+
+
+@qmc.qkernel
 def _hugr_inverse_global_phase(theta: qmc.Float) -> qmc.Bit:
     """Invert a reusable helper containing global phase."""
     qubit = qmc.qubit("qubit")
@@ -2383,6 +2431,36 @@ def test_hugr_zero_power_skips_body_and_control_value_brackets() -> None:
     names = _hugr_operation_names(package)
     assert "tket.quantum.X" not in names
     assert "tket.global_phase.global_phase" not in names
+
+
+@pytest.mark.hugr
+def test_hugr_zero_power_preserves_targets_across_synthetic_body_exits() -> None:
+    """A zero power maps each target result directly to its source wire."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_zero_power_conditional_swap,
+        bindings={"power": 0, "selector": 1},
+    )
+
+    transpiler.target.validate(package)
+    graph = package.modules[0]
+    allocations = [
+        node
+        for node, data in graph.nodes()
+        if callable(name := getattr(data.op, "name", None))
+        and str(name()) == "tket.quantum.QAlloc"
+    ]
+    measurements = [
+        node
+        for node, data in graph.nodes()
+        if callable(name := getattr(data.op, "name", None))
+        and str(name()) == "tket.quantum.Measure"
+    ]
+
+    assert len(allocations) == len(measurements) == 3
+    assert [list(graph.input_neighbours(node)) for node in measurements] == [
+        [node] for node in allocations
+    ]
 
 
 @pytest.mark.hugr

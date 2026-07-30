@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -32,6 +34,7 @@ def _reverse_array_use_kernel(angles: qmc.Vector[qmc.Float]) -> qmc.Bit:
     "binding",
     [
         [[0.0, 0.25], [np.pi, 0.5]],
+        ((0.0, 0.25), (np.pi, 0.5)),
         np.array([[0.0, 0.25], [np.pi, 0.5]]),
     ],
 )
@@ -92,4 +95,48 @@ def test_overlong_vector_runtime_binding_is_rejected() -> None:
             transpiler.executor(),
             shots=1,
             bindings={"angles": [0.0, 0.0, 0.0, 0.0]},
+        )
+
+
+def test_ragged_runtime_parameter_binding_is_rejected() -> None:
+    """Runtime bindings reject nested sequences with inconsistent shapes."""
+    pytest.importorskip("qiskit")
+    from qamomile.qiskit import QiskitTranspiler
+
+    transpiler = QiskitTranspiler()
+    executable = transpiler.transpile(_matrix_rotation_kernel, parameters=["angles"])
+
+    with pytest.raises(ValueError, match="must be rectangular"):
+        executable.sample(
+            transpiler.executor(),
+            shots=1,
+            bindings={"angles": [[0.0], [0.25, 0.5]]},
+        )
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        pytest.param(range(2), id="range"),
+        pytest.param(SimpleNamespace(shape=(2,)), id="shape-only"),
+    ],
+)
+def test_nonflattenable_array_like_runtime_binding_is_rejected(
+    binding: object,
+) -> None:
+    """Array-like objects outside the public binding protocol fail early."""
+    pytest.importorskip("qiskit")
+    from qamomile.qiskit import QiskitTranspiler
+
+    transpiler = QiskitTranspiler()
+    executable = transpiler.transpile(
+        _reverse_array_use_kernel,
+        parameters=["angles"],
+    )
+
+    with pytest.raises(ValueError, match="requires rank 1"):
+        executable.sample(
+            transpiler.executor(),
+            shots=1,
+            bindings={"angles": binding},
         )

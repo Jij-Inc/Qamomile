@@ -23,6 +23,12 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from qamomile._utils import coerce_nonnegative_integral
+from qamomile.circuit._control_batching import (
+    CONTROL_BATCH_MIN_WEIGHT,
+    capped_controlled_batch_weight,
+    should_batch_controlled_body,
+    static_controlled_batch_weight,
+)
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
@@ -443,25 +449,6 @@ def _body_allocates_workspace(operations: list[Operation]) -> bool:
     return False
 
 
-_BATCH_MIN_WEIGHT = 2
-
-# Gate types that are already cheap under two composed controls (a native
-# Toffoli / Hadamard-conjugated Toffoli) or that QURI Parts lowers to a
-# Toffoli pair even under a single control (RZZ). Batching a body made up
-# only of these behind one AND ancilla at exactly two controls is a wash
-# or a loss, so the ``num == 2`` fast path skips it.
-_BATCH_NATIVE_AT_TWO_CONTROLS = frozenset(
-    {
-        GateOperationType.X,
-        GateOperationType.Z,
-        GateOperationType.CX,
-        GateOperationType.CZ,
-        GateOperationType.TOFFOLI,
-        GateOperationType.RZZ,
-    }
-)
-
-
 def _batch_op_weight(
     emit_pass: "StandardEmitPass",
     op: Operation,
@@ -491,20 +478,14 @@ def _batch_op_weight(
     if isinstance(op, (CompOp, CondOp, NotOp)):
         evaluate_classical_predicate(emit_pass, op, bindings)
         return 0
-    if isinstance(op, ReturnOperation):
-        return 0
-    if isinstance(op, QInitOperation):
-        # Allocation reserves workspace but emits no controlled instruction.
-        return 0
-    if isinstance(op, GateOperation):
-        return 1
+    static_weight = static_controlled_batch_weight(op)
+    if static_weight is not None:
+        return static_weight
     if isinstance(op, ControlledUOperation):
         power = _resolve_power_if_bound(emit_pass, op, bindings)
         # A loop-local power is resolved when its iteration is replayed. Count
         # that unresolved operation as real work without hiding invalid values.
         return 1 if power is None or power > 0 else 0
-    if isinstance(op, PauliEvolveOp):
-        return 2
     if isinstance(op, ForOperation):
         return _for_batch_weight(emit_pass, op, bindings)
     if isinstance(op, IfOperation):
@@ -547,8 +528,6 @@ def _batch_op_weight(
             block.operations,
             local_bindings,
         )
-    if isinstance(op, SelectOperation):
-        return 1
     # Unsupported op kinds are rejected by the walker further down; if a
     # ladder is emitted before that failure the whole transpile aborts, so
     # counting them as real work here is harmless.
@@ -591,7 +570,7 @@ def _for_batch_weight(
     body_weight = _controlled_body_batch_weight(emit_pass, op.operations, bindings)
     if iteration_count == 1:
         return body_weight
-    return _BATCH_MIN_WEIGHT if body_weight >= 1 else 0
+    return CONTROL_BATCH_MIN_WEIGHT if body_weight >= 1 else 0
 
 
 def _controlled_body_batch_weight(
@@ -607,49 +586,13 @@ def _controlled_body_batch_weight(
         bindings (dict[str, Any]): Bindings visible inside the block.
 
     Returns:
-        int: The total weight, clamped to ``_BATCH_MIN_WEIGHT`` once reached
-            (callers only compare against that threshold).
+        int: The total weight, clamped to ``CONTROL_BATCH_MIN_WEIGHT`` once
+            reached (callers only compare against that threshold).
     """
     local_bindings = bindings.copy()
-    total = 0
-    for op in operations:
-        total += _batch_op_weight(emit_pass, op, local_bindings)
-        if total >= _BATCH_MIN_WEIGHT:
-            return _BATCH_MIN_WEIGHT
-    return total
-
-
-def _body_has_rotation_like_leaf(operations: list[Operation]) -> bool:
-    """Return True when the body has a gate that batching helps at two controls.
-
-    Used only for the ``num == 2`` guard: X / Z / CX / CZ / TOFFOLI / RZZ
-    gain nothing (or lose) from a two-control AND ladder, but any other
-    single-qubit rotation, or any nested construct that recurses into
-    further controlled lowering, does benefit.
-
-    Args:
-        operations (list[Operation]): Controlled block body operations.
-
-    Returns:
-        bool: True if at least one op benefits from batching at two controls.
-    """
-    for op in operations:
-        if isinstance(op, GateOperation):
-            if op.gate_type not in _BATCH_NATIVE_AT_TWO_CONTROLS:
-                return True
-        elif isinstance(
-            op,
-            (
-                ControlledUOperation,
-                ForOperation,
-                InvokeOperation,
-                InverseBlockOperation,
-                PauliEvolveOp,
-                SelectOperation,
-            ),
-        ):
-            return True
-    return False
+    return capped_controlled_batch_weight(
+        _batch_op_weight(emit_pass, op, local_bindings) for op in operations
+    )
 
 
 def try_emit_batched_controlled_operations(
@@ -696,12 +639,15 @@ def try_emit_batched_controlled_operations(
     pool = emit_pass._mc_ancilla_pool
     if pool is None:
         return False
-    if (
-        _controlled_body_batch_weight(emit_pass, operations, bindings)
-        < _BATCH_MIN_WEIGHT
+    if not should_batch_controlled_body(
+        num_controls=num_controls,
+        body_weight=_controlled_body_batch_weight(
+            emit_pass,
+            operations,
+            bindings,
+        ),
+        operations=operations,
     ):
-        return False
-    if num_controls == 2 and not _body_has_rotation_like_leaf(operations):
         return False
     with pool.try_hold(num_controls - 1) as ancillas:
         if ancillas is None:

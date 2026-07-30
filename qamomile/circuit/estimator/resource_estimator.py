@@ -13,6 +13,13 @@ from typing import TYPE_CHECKING, Any, cast
 
 import sympy as sp
 
+from qamomile.circuit._array_shape import _rectangular_array_shape
+from qamomile.circuit._control_batching import (
+    CONTROL_BATCH_MIN_WEIGHT,
+    capped_controlled_batch_weight,
+    should_batch_controlled_body,
+    static_controlled_batch_weight,
+)
 from qamomile.circuit.estimator._loop_executor import symbolic_iterations
 from qamomile.circuit.estimator._metrics import (
     CallResources,
@@ -113,6 +120,7 @@ from qamomile.circuit.estimator._scheduling import (
     _symbolic_disjoint_loop_depth,
     _width_with_identity_aware_allocations,
     _wire_keys_for_values,
+    _WireFootprint,
     _with_aggregate_boundary_depth_metadata,
     _with_body_boundary_depth_metadata,
     _with_operation_output_summary,
@@ -155,6 +163,7 @@ from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     GateOperation,
+    GateOperationType,
     MeasureOperation,
     MeasureQFixedOperation,
     MeasureVectorOperation,
@@ -192,10 +201,6 @@ if TYPE_CHECKING:
 
 _ZERO = sp.Integer(0)
 _ONE = sp.Integer(1)
-_CONTROL_BATCH_MIN_WEIGHT = 2
-_CONTROL_BATCH_NATIVE_AT_TWO_CONTROLS = frozenset(
-    {"x", "z", "cx", "cz", "toffoli", "rzz"}
-)
 _DEFER_RESOURCE_SYMBOL_METADATA = ContextVar(
     "qamomile_defer_resource_symbol_metadata",
     default=False,
@@ -2163,20 +2168,17 @@ class ResourceInterpreter:
         Returns:
             int: Batching weight clamped to zero, one, or two.
         """
+        static_weight = static_controlled_batch_weight(operation)
+        if static_weight is not None:
+            return static_weight
         if isinstance(operation, (BinOp, CompOp, CondOp, NotOp, ReturnOperation)):
             return 0
-        if isinstance(operation, QInitOperation):
-            return 0
-        if isinstance(operation, GateOperation):
-            return 1
         if isinstance(operation, ControlledUOperation):
             power = self._apply_condition_values(
                 resolver.resolve(operation.power),
                 record_usage=False,
             )
             return 0 if power.is_zero is True else 1
-        if isinstance(operation, PauliEvolveOp):
-            return _CONTROL_BATCH_MIN_WEIGHT
         if isinstance(operation, ForOperation):
             if len(operation.operands) < 2:
                 return 0
@@ -2196,7 +2198,7 @@ class ResourceInterpreter:
             )
             if count == 1:
                 return body_weight
-            return _CONTROL_BATCH_MIN_WEIGHT if body_weight >= 1 else 0
+            return CONTROL_BATCH_MIN_WEIGHT if body_weight >= 1 else 0
         if isinstance(operation, IfOperation):
             taken = self._peek_branch_decision(resolver.resolve(operation.condition))
             if taken is None:
@@ -2229,8 +2231,6 @@ class ResourceInterpreter:
                 operation.implementation_block.operations,
                 child,
             )
-        if isinstance(operation, SelectOperation):
-            return 1
         return 1
 
     def _controlled_body_batch_weight(
@@ -2247,48 +2247,10 @@ class ResourceInterpreter:
         Returns:
             int: Sum of operation weights, capped at two.
         """
-        total = 0
-        for operation in operations:
-            total += self._controlled_operation_batch_weight(operation, resolver)
-            if total >= _CONTROL_BATCH_MIN_WEIGHT:
-                return _CONTROL_BATCH_MIN_WEIGHT
-        return total
-
-    def _controlled_body_benefits_from_two_control_batch(
-        self,
-        operations: Sequence[Operation],
-    ) -> bool:
-        """Return whether the emitter batches this body at two controls.
-
-        Args:
-            operations (Sequence[Operation]): Controlled body operations.
-
-        Returns:
-            bool: Whether at least one leaf is not in the emitter's
-            two-control native set.
-        """
-        for operation in operations:
-            if isinstance(operation, GateOperation):
-                name = (
-                    operation.gate_type.name.lower()
-                    if operation.gate_type is not None
-                    else "unknown"
-                )
-                if name not in _CONTROL_BATCH_NATIVE_AT_TWO_CONTROLS:
-                    return True
-            elif isinstance(
-                operation,
-                (
-                    ControlledUOperation,
-                    ForOperation,
-                    InvokeOperation,
-                    InverseBlockOperation,
-                    PauliEvolveOp,
-                    SelectOperation,
-                ),
-            ):
-                return True
-        return False
+        return capped_controlled_batch_weight(
+            self._controlled_operation_batch_weight(operation, resolver)
+            for operation in operations
+        )
 
     def _should_batch_controlled_body(
         self,
@@ -2312,15 +2274,10 @@ class ResourceInterpreter:
         if not controls.is_number or controls.is_integer is not True:
             return False
         count = int(controls)
-        if count < 2:
-            return False
-        if (
-            self._controlled_body_batch_weight(operations, resolver)
-            < _CONTROL_BATCH_MIN_WEIGHT
-        ):
-            return False
-        return count != 2 or self._controlled_body_benefits_from_two_control_batch(
-            operations
+        return should_batch_controlled_body(
+            num_controls=count,
+            body_weight=self._controlled_body_batch_weight(operations, resolver),
+            operations=operations,
         )
 
     def _peek_branch_decision(self, condition: sp.Basic) -> bool | None:
@@ -2514,11 +2471,15 @@ class ResourceInterpreter:
                 operation_estimate for _, operation_estimate in scheduled
             )
             dependency_keys: set[WireKey] = set()
+            wire_footprints: list[_WireFootprint | None] = []
             for operation, operation_estimate in scheduled:
                 if not _estimate_has_nonzero_depth(operation_estimate):
+                    wire_footprints.append(None)
                     continue
                 if operation_estimate._dependency_keys is not None:
-                    dependency_keys.update(operation_estimate._dependency_keys)
+                    footprint_keys = operation_estimate._dependency_keys
+                    wire_footprints.append((footprint_keys, footprint_keys))
+                    dependency_keys.update(footprint_keys)
                     continue
                 reads, writes = _quantum_wire_keys(
                     operation,
@@ -2526,16 +2487,15 @@ class ResourceInterpreter:
                     scalar_values=self.condition_values,
                     used_names=self.branch_condition_names,
                 )
+                wire_footprints.append((frozenset(reads), frozenset(writes)))
                 dependency_keys.update(reads | writes)
             return dataclasses.replace(
                 estimate,
                 depth=(
                     _dependency_depth(
                         scheduled,
-                        resolver,
+                        wire_footprints,
                         measurement_derived=self._measurement_derived,
-                        scalar_values=self.condition_values,
-                        used_names=self.branch_condition_names,
                     )
                     if _expr(controls) == _ZERO
                     else estimate.depth
@@ -3297,25 +3257,25 @@ class ResourceInterpreter:
             estimate = inner.sum_over(loop_symbol, start, stop, step)
             parallel_depth: DepthResources | None = None
             if _expr(controls) == _ZERO:
-                parallel_depth = _disjoint_concrete_loop_depth(
+                parallel_depth = _symbolic_disjoint_loop_depth(
                     operation,
-                    resolver,
+                    child,
                     inner.depth,
-                    start=start,
-                    stop=stop,
-                    step=step,
                     loop_symbol=loop_symbol,
+                    iterations=iterations,
                     clean_ancillas=inner.width.clean_ancilla_qubits,
                     scalar_values=self.condition_values,
                     used_names=self.branch_condition_names,
                 )
                 if parallel_depth is None:
-                    parallel_depth = _symbolic_disjoint_loop_depth(
+                    parallel_depth = _disjoint_concrete_loop_depth(
                         operation,
-                        child,
+                        resolver,
                         inner.depth,
+                        start=start,
+                        stop=stop,
+                        step=step,
                         loop_symbol=loop_symbol,
-                        iterations=iterations,
                         clean_ancillas=inner.width.clean_ancilla_qubits,
                         scalar_values=self.condition_values,
                         used_names=self.branch_condition_names,
@@ -6756,31 +6716,157 @@ def _resolve_controlled_u(
     return controls, targets
 
 
-_CLIFFORD_GATES = {"h", "x", "y", "z", "s", "sdg", "cx", "cz", "swap"}
-_T_GATES = {"t", "tdg"}
-_SINGLE_QUBIT_GATES = {
-    "h",
-    "x",
-    "y",
-    "z",
-    "s",
-    "sdg",
-    "t",
-    "tdg",
-    "rx",
-    "ry",
-    "rz",
-    "p",
-    "u",
-    "u1",
-    "u2",
-    "u3",
+_IR_SINGLE_QUBIT_GATE_TYPES = frozenset(
+    {
+        GateOperationType.H,
+        GateOperationType.X,
+        GateOperationType.Y,
+        GateOperationType.Z,
+        GateOperationType.S,
+        GateOperationType.SDG,
+        GateOperationType.T,
+        GateOperationType.TDG,
+        GateOperationType.RX,
+        GateOperationType.RY,
+        GateOperationType.RZ,
+        GateOperationType.P,
+    }
+)
+_IR_TWO_QUBIT_GATE_TYPES = frozenset(
+    {
+        GateOperationType.CX,
+        GateOperationType.CZ,
+        GateOperationType.SWAP,
+        GateOperationType.CP,
+        GateOperationType.RZZ,
+    }
+)
+_IR_MULTI_QUBIT_GATE_TYPES = frozenset({GateOperationType.TOFFOLI})
+_PORTABLE_EXPLICIT_MULTI_TARGET_GATE_TYPES = frozenset(
+    {
+        GateOperationType.CX,
+        GateOperationType.CZ,
+        GateOperationType.SWAP,
+        GateOperationType.CP,
+        GateOperationType.RZZ,
+        GateOperationType.TOFFOLI,
+    }
+)
+
+
+def _validate_ir_gate_arity_profiles() -> None:
+    """Require one and only one arity profile for every IR gate type.
+
+    Raises:
+        RuntimeError: If a ``GateOperationType`` is missing from the resource
+            arity profile or appears in more than one arity class.
+    """
+    groups = (
+        _IR_SINGLE_QUBIT_GATE_TYPES,
+        _IR_TWO_QUBIT_GATE_TYPES,
+        _IR_MULTI_QUBIT_GATE_TYPES,
+    )
+    covered = frozenset().union(*groups)
+    duplicated = {
+        gate_type
+        for gate_type in covered
+        if sum(gate_type in group for group in groups) != 1
+    }
+    missing = set(GateOperationType) - covered
+    multi_target = _IR_TWO_QUBIT_GATE_TYPES | _IR_MULTI_QUBIT_GATE_TYPES
+    missing_portable = multi_target - _PORTABLE_EXPLICIT_MULTI_TARGET_GATE_TYPES
+    extraneous_portable = _PORTABLE_EXPLICIT_MULTI_TARGET_GATE_TYPES - multi_target
+    if missing or duplicated or missing_portable or extraneous_portable:
+        missing_names = sorted(gate_type.name for gate_type in missing)
+        duplicated_names = sorted(gate_type.name for gate_type in duplicated)
+        missing_portable_names = sorted(
+            gate_type.name for gate_type in missing_portable
+        )
+        extraneous_portable_names = sorted(
+            gate_type.name for gate_type in extraneous_portable
+        )
+        raise RuntimeError(
+            "Resource estimation requires an exhaustive, disjoint IR gate "
+            "arity profile; "
+            f"missing={missing_names}, duplicated={duplicated_names}, "
+            f"missing_portable_multi_target={missing_portable_names}, "
+            f"extraneous_portable_multi_target={extraneous_portable_names}."
+        )
+
+
+_validate_ir_gate_arity_profiles()
+
+_GATE_OPERATION_ARITY: dict[GateOperationType, int] = {
+    **{gate_type: 1 for gate_type in _IR_SINGLE_QUBIT_GATE_TYPES},
+    **{gate_type: 2 for gate_type in _IR_TWO_QUBIT_GATE_TYPES},
+    **{gate_type: 3 for gate_type in _IR_MULTI_QUBIT_GATE_TYPES},
 }
-_TWO_QUBIT_GATES = {"cx", "cz", "swap", "cp", "rzz"}
-_ROTATION_GATES = {"rx", "ry", "rz", "p", "cp", "rzz"}
-_MULTI_QUBIT_GATES = {"toffoli", "ccx"}
-_GATE_BASE_QUBITS: dict[str, int] = {"toffoli": 3, "ccx": 3}
-_CONTROLLED_CLIFFORD_GATES = {"x", "y", "z"}
+
+_CLIFFORD_GATE_TYPES = frozenset(
+    {
+        GateOperationType.H,
+        GateOperationType.X,
+        GateOperationType.Y,
+        GateOperationType.Z,
+        GateOperationType.S,
+        GateOperationType.SDG,
+        GateOperationType.CX,
+        GateOperationType.CZ,
+        GateOperationType.SWAP,
+    }
+)
+_T_GATE_TYPES = frozenset({GateOperationType.T, GateOperationType.TDG})
+_ROTATION_GATE_TYPES = frozenset(
+    {
+        GateOperationType.RX,
+        GateOperationType.RY,
+        GateOperationType.RZ,
+        GateOperationType.P,
+        GateOperationType.CP,
+        GateOperationType.RZZ,
+    }
+)
+_CONTROLLED_CLIFFORD_GATE_TYPES = frozenset(
+    {
+        GateOperationType.X,
+        GateOperationType.Y,
+        GateOperationType.Z,
+    }
+)
+
+
+def _gate_type_names(gate_types: Iterable[GateOperationType]) -> set[str]:
+    """Return canonical lowercase names for IR gate types.
+
+    Args:
+        gate_types (Iterable[GateOperationType]): IR gate types to name.
+
+    Returns:
+        set[str]: Canonical lowercase enum names.
+    """
+    return {gate_type.name.lower() for gate_type in gate_types}
+
+
+_SYNTHETIC_SINGLE_QUBIT_GATE_NAMES = {"u", "u1", "u2", "u3"}
+_SYNTHETIC_MULTI_QUBIT_GATE_NAMES = {"ccx"}
+_CLIFFORD_GATES = _gate_type_names(_CLIFFORD_GATE_TYPES)
+_T_GATES = _gate_type_names(_T_GATE_TYPES)
+_SINGLE_QUBIT_GATES = (
+    _gate_type_names(_IR_SINGLE_QUBIT_GATE_TYPES) | _SYNTHETIC_SINGLE_QUBIT_GATE_NAMES
+)
+_TWO_QUBIT_GATES = _gate_type_names(_IR_TWO_QUBIT_GATE_TYPES)
+_ROTATION_GATES = _gate_type_names(_ROTATION_GATE_TYPES)
+_MULTI_QUBIT_GATES = (
+    _gate_type_names(_IR_MULTI_QUBIT_GATE_TYPES) | _SYNTHETIC_MULTI_QUBIT_GATE_NAMES
+)
+_GATE_BASE_QUBITS: dict[str, int] = {
+    **{
+        gate_type.name.lower(): arity
+        for gate_type, arity in _GATE_OPERATION_ARITY.items()
+    },
+    "ccx": 3,
+}
+_CONTROLLED_CLIFFORD_GATES = _gate_type_names(_CONTROLLED_CLIFFORD_GATE_TYPES)
 
 
 def _serial_depth_from_gate_resources(gates: GateResources) -> DepthResources:
@@ -7478,8 +7564,8 @@ def _project_portable_aggregate_controlled_cost(
         .seq(unresolved)
     )
     shares_control_ladder = sp.And(
-        sp.Ge(controls, _CONTROL_BATCH_MIN_WEIGHT),
-        sp.Ge(estimate.gates.total, _CONTROL_BATCH_MIN_WEIGHT),
+        sp.Ge(controls, CONTROL_BATCH_MIN_WEIGHT),
+        sp.Ge(estimate.gates.total, CONTROL_BATCH_MIN_WEIGHT),
     )
     projected = shared_projection.conditional(
         per_primitive_projection,
@@ -7691,8 +7777,26 @@ def _estimate_portable_gate(
 
     Returns:
         ResourceEstimate: Portable logical decomposition estimate.
+
+    Raises:
+        NotImplementedError: If the operation has no registered IR arity or a
+            multi-target gate lacks an explicit portable lowering.
     """
-    name = operation.gate_type.name.lower() if operation.gate_type else "unknown"
+    gate_type = operation.gate_type
+    if (
+        not isinstance(gate_type, GateOperationType)
+        or gate_type not in _GATE_OPERATION_ARITY
+    ):
+        raise NotImplementedError(
+            f"Portable resource estimation is not defined for IR gate {gate_type!r}."
+        )
+    arity = _GATE_OPERATION_ARITY[gate_type]
+    if arity > 1 and gate_type not in _PORTABLE_EXPLICIT_MULTI_TARGET_GATE_TYPES:
+        raise NotImplementedError(
+            "Portable resource estimation requires an explicit multi-target "
+            f"lowering for IR gate {gate_type.name}."
+        )
+    name = gate_type.name.lower()
     return _estimate_portable_named_gate(name, controls)
 
 
@@ -9200,18 +9304,11 @@ def _concrete_input_shape(value: Any) -> tuple[int, ...]:
     Returns:
         tuple[int, ...]: Concrete dimensions, or an empty tuple when the value
         has no discoverable array shape.
+
+    Raises:
+        ValueError: If nested sequences have inconsistent shapes.
     """
-    shape = getattr(value, "shape", None)
-    if shape is not None:
-        return tuple(int(dimension) for dimension in shape)
-    dimensions: list[int] = []
-    current = value
-    while isinstance(current, Sequence) and not isinstance(current, (str, bytes)):
-        dimensions.append(len(current))
-        if not current:
-            break
-        current = current[0]
-    return tuple(dimensions)
+    return _rectangular_array_shape(value)
 
 
 def _scalar_values(values: Mapping[str, Any]) -> dict[str, sp.Expr]:
