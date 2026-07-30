@@ -468,8 +468,18 @@ def test_inputs_trace_structural_values_and_specialize_scalars() -> None:
         (0.1, 0.2, 0.3),
         range(3),
         SimpleNamespace(shape=(3,)),
+        SimpleNamespace(shape=(np.int64(3),)),
+        SimpleNamespace(shape=(sp.Integer(3),)),
     ],
-    ids=["numpy", "list", "tuple", "sequence", "shape-attribute"],
+    ids=[
+        "numpy",
+        "list",
+        "tuple",
+        "sequence",
+        "shape-attribute",
+        "numpy-shape-dimension",
+        "sympy-shape-dimension",
+    ],
 )
 def test_numeric_vector_input_specializes_shape(angles: object) -> None:
     """A numeric vector input determines symbolic loop and register sizes."""
@@ -488,6 +498,34 @@ def test_numeric_vector_input_specializes_shape(angles: object) -> None:
     assert estimate.gates.total == 3
     assert estimate.parameters == {}
     assert estimate.assumptions == ()
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        pytest.param((3.5,), id="fractional"),
+        pytest.param((True,), id="boolean"),
+        pytest.param((np.bool_(True),), id="numpy-boolean"),
+        pytest.param((-1,), id="negative"),
+    ],
+)
+def test_invalid_array_shape_dimensions_are_rejected(shape: tuple[object, ...]) -> None:
+    """Resource inputs reject shape entries that are not nonnegative integers."""
+
+    @qmc.qkernel
+    def vector_probe(values: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Qubit]:
+        """Allocate one qubit for every supplied vector entry.
+
+        Args:
+            values (qmc.Vector[qmc.Float]): Vector whose length sets width.
+
+        Returns:
+            qmc.Vector[qmc.Qubit]: Register with one qubit per vector entry.
+        """
+        return qmc.qubit_array(values.shape[0], "reg")
+
+    with pytest.raises(ValueError, match="nonnegative integers"):
+        vector_probe.estimate_resources(inputs={"values": SimpleNamespace(shape=shape)})
 
 
 def test_ragged_matrix_input_is_rejected() -> None:

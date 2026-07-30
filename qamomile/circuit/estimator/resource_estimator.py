@@ -9306,7 +9306,8 @@ def _concrete_input_shape(value: Any) -> tuple[int, ...]:
         has no discoverable array shape.
 
     Raises:
-        ValueError: If nested sequences have inconsistent shapes.
+        ValueError: If shape dimensions are not nonnegative integers or nested
+            sequences have inconsistent shapes.
     """
     return _rectangular_array_shape(value)
 

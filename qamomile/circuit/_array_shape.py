@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from numbers import Integral
 from typing import Any
 
 
@@ -17,11 +18,21 @@ def _rectangular_array_shape(value: Any) -> tuple[int, ...]:
         tuple[int, ...]: Concrete dimensions; scalars have rank zero.
 
     Raises:
-        ValueError: If nested sequences have inconsistent shapes.
+        ValueError: If shape dimensions are not nonnegative integers or nested
+            sequences have inconsistent shapes.
     """
     shape = getattr(value, "shape", None)
     if shape is not None:
-        return tuple(int(dimension) for dimension in shape)
+        dimensions: list[int] = []
+        for dimension in shape:
+            if (
+                isinstance(dimension, bool)
+                or not isinstance(dimension, Integral)
+                or dimension < 0
+            ):
+                raise ValueError("Array shape dimensions must be nonnegative integers.")
+            dimensions.append(int(dimension))
+        return tuple(dimensions)
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         return ()
     if isinstance(value, range):
