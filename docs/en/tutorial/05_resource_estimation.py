@@ -19,12 +19,12 @@
 #
 # # Resource Estimation
 #
-# Before running a quantum kernel on real hardware, you may want to know its qubit width, gate count, measurement and reset events, and depth. Qamomile's `estimate_resources()` fills this need **without executing the qkernel**. It reports algorithmic resources rather than hardware-native gates: the default `portable` basis follows Qamomile's backend-neutral control decomposition, but does not apply target-specific optimization. It works with both concrete and symbolic (parameterized) qkernels.
+# Before running a quantum kernel on real hardware, you may want to know its qubit width, gate count, measurement and reset events, and depth. Qamomile's `estimate_resources()` fills this need **without executing the qkernel**. It reports algorithmic resources rather than hardware-native gates. By default, it uses Qamomile's logical gate vocabulary together with its clean-ancilla Toffoli control-decomposition model, without applying target-specific optimization. It works with both concrete and symbolic (parameterized) qkernels.
 #
 # This chapter covers:
 #
 # - Basic resource estimation for fixed qkernels
-# - Choosing between `portable`, `logical`, and `clifford_t` models
+# - Choosing a gate basis and a coherent-control decomposition independently
 # - How controls, inverse calls, SELECT, Pauli evolution, and control flow compose
 # - Separating gate, measurement, and reset resources
 # - Symbolic resource estimation for parameterized qkernels
@@ -79,9 +79,9 @@ assert est.depth.measurement_depth == 1
 assert est.depth.reset_depth == 0
 
 # %% [markdown]
-# ## Choosing the Estimation Model
+# ## Choosing the Gate Basis and Control Decomposition
 #
-# The default `portable` basis recursively inspects called qkernels. When coherent controls are present, it applies Qamomile's backend-neutral fallback to each primitive and includes reusable clean ancillas. For example, a three-controlled H uses four Toffoli gates, one controlled-H gate, and two clean ancillas.
+# `basis` selects the gate vocabulary reported in the result, while `control_decomposition` selects how coherent controls are represented. The defaults are `GateBasis.LOGICAL` and `ControlDecomposition.CLEAN_ANCILLA_TOFFOLI`. Called qkernels are recursively inspected in either control model. For example, the default model represents a three-controlled H with four Toffoli gates, one controlled-H gate, and two clean ancillas.
 
 
 # %%
@@ -99,21 +99,29 @@ def controlled_h() -> qmc.Qubit:
 
 
 # %%
-portable = controlled_h.estimate_resources()
-assert portable.basis is qmc.GateBasis.PORTABLE
-assert portable.gates.total == 5
-assert portable.gates.toffoli == 4
-assert portable.width.clean_ancilla_qubits == 2
-assert portable.qubits == 6
-assert portable.quality is qmc.EstimateQuality.UPPER_BOUND
+decomposed_controls = controlled_h.estimate_resources()
+assert decomposed_controls.basis is qmc.GateBasis.LOGICAL
+assert (
+    decomposed_controls.control_decomposition
+    is qmc.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
+)
+assert decomposed_controls.gates.total == 5
+assert decomposed_controls.gates.toffoli == 4
+assert decomposed_controls.width.clean_ancilla_qubits == 2
+assert decomposed_controls.qubits == 6
+assert decomposed_controls.quality is qmc.EstimateQuality.UPPER_BOUND
 
-abstract = controlled_h.estimate_resources(basis=qmc.GateBasis.LOGICAL)
-assert abstract.gates.total == 1
-assert abstract.width.clean_ancilla_qubits == 0
-assert abstract.qubits == 4
+abstract_controls = controlled_h.estimate_resources(
+    control_decomposition=qmc.ControlDecomposition.ABSTRACT,
+)
+assert abstract_controls.basis is qmc.GateBasis.LOGICAL
+assert abstract_controls.control_decomposition is qmc.ControlDecomposition.ABSTRACT
+assert abstract_controls.gates.total == 1
+assert abstract_controls.width.clean_ancilla_qubits == 0
+assert abstract_controls.qubits == 4
 
 # %% [markdown]
-# `portable` mirrors Qamomile's backend-neutral control fallback at the algorithmic level. When a concrete controlled body contains enough work, its gates share one computed control conjunction; isolated primitives and symbolic structures retain a conservative per-primitive fallback. A backend with a native multi-controlled gate may use fewer resources. Select `logical` when you intentionally want the higher-level view in which each source primitive remains one abstract gate regardless of control count. Select `clifford_t` for aggregate Clifford+T resources of supported operations; `precision` controls arbitrary-rotation synthesis. Unsupported Clifford+T lowering raises an error instead of inventing a cost. None of these models performs routing, hardware-native optimization, or error-correction costing.
+# `CLEAN_ANCILLA_TOFFOLI` is a fixed algorithmic model used by the resource estimator for coherent controls. Each ordinary gate contributes one unit of modeled work. When two or more controls surround at least two units of active work, the model computes their conjunction once and shares it across the body; a one-operation or one-control body retains a conservative per-primitive decomposition. The work count follows resolved qkernel calls, inverse blocks, branches, and concrete loops, so merely factoring the same body into another qkernel does not change the result. Nested control boundaries, active SELECT cases, and Pauli evolution may represent enough internal controlled work to select sharing as one structural leaf. This resource model is deliberately independent from an engine's emission policy: an engine may retain a direct path or use native multi-controlled gates without changing the estimate. Select `ABSTRACT` when you intentionally want each controlled source primitive to remain one operation regardless of control count. Independently, select `CLIFFORD_T` for aggregate Clifford+T resources of supported operations; `precision` controls arbitrary-rotation synthesis. An abstract controlled primitive cannot itself be reported as a Clifford+T breakdown, and unsupported Clifford+T lowering raises an error instead of inventing a cost. These settings do not perform routing, hardware-native optimization, or error-correction costing.
 
 
 # %%
@@ -154,12 +162,50 @@ assert phase_est.substitute(theta=0.3).quality is qmc.EstimateQuality.UPPER_BOUN
 # | Construct | Estimation behavior |
 # |---|---|
 # | Body-backed qkernel calls and `qmc.inverse(...)` | Recursively traverse the selected implementation body. Inversion preserves gate counts while reversing the unitary semantics; it does not collapse a large body to one call. |
-# | `qmc.control(...)` | Propagate every surrounding control into nested bodies. In `portable`, multi-control fallback gates and reusable clean ancillas are included. Open controls also include their X brackets. |
+# | `qmc.control(...)` | Propagate every surrounding control into nested bodies. With `CLEAN_ANCILLA_TOFFOLI`, multi-control decomposition gates and reusable clean ancillas are included. With `ABSTRACT`, each controlled primitive remains one abstract operation. Open controls also include their X brackets. |
 # | `qmc.select(...)` | Sum every emitted controlled case body, including index-bit controls, open-control brackets, vector broadcast, and surrounding controls. The declared index width must match its operands and address all cases. |
-# | `qmc.pauli_evolve(...)` | For a supplied Hermitian Hamiltonian, count Pauli-basis changes, parity ladders, axial rotations, and any controlled constant-term phase. The target register must cover the Hamiltonian support. |
+# | `qmc.pauli_evolve(...)` | For a supplied Hermitian Hamiltonian, count Pauli-basis changes, parity ladders, axial rotations, and any controlled constant-term phase. A noncommuting Pauli sum is one first-order Lie–Trotter step in Hamiltonian term order and is marked `approximate`. The target register must cover the Hamiltonian support. |
 # | `if`, `for`, `for_items`, and `while` | Keep compile-time conditions and loop bounds symbolic when possible. Gate and width metrics for a parameter branch use `Piecewise`; a measurement-backed branch uses a conservative maximum. Dependency depth can remain an `upper_bound` when symbolic aliases or multi-wire boundaries prevent an exact schedule. Loop work accumulates while reusable width follows liveness. Unsupported carried recurrences fail explicitly or add a visible assumption. |
-# | `qmc.expval(...)` | Record one abstract expectation query and one measurement layer. Observable grouping, basis rotations, shot count, and executor sampling policy remain backend/executor-dependent, so the result is `modeled` with a visible assumption rather than a fabricated gate count. |
+# | `qmc.expval(...)` | Record one abstract expectation query and one measurement layer. Observable grouping, basis rotations, shot count, and executor sampling policy remain engine/executor-dependent, so the result is `modeled` with a visible assumption rather than a fabricated gate count. |
 # | LCU block encodings | Preserve exact signal- and system-register requirements through direct, controlled, inverse, descriptor-bound, and serialized forms. |
+
+# %% [markdown]
+# ### Resource-count quality versus mathematical approximation
+#
+# `EstimateQuality` describes how directly the reported resource counts follow the selected circuit model. Independently, `estimate.approximation` reports whether that selected circuit approximates its ideal mathematical operation. For example, a finite-precision Clifford+T synthesis of an arbitrary rotation and a one-step product formula for noncommuting Pauli terms both report `ApproximationStatus.APPROXIMATE`.
+
+
+# %%
+import qamomile.observable as qmo
+
+
+@qmc.qkernel
+def pauli_sum_evolution(
+    hamiltonian: qmc.Observable,
+    time: qmc.Float,
+) -> qmc.Vector[qmc.Qubit]:
+    target = qmc.qubit_array(2, name="target")
+    return qmc.pauli_evolve(target, hamiltonian, time)
+
+
+noncommuting_hamiltonian = qmo.X(0) + qmo.Z(0)
+noncommuting_est = pauli_sum_evolution.estimate_resources(
+    inputs={"hamiltonian": noncommuting_hamiltonian, "time": 0.25},
+)
+zero_time_est = pauli_sum_evolution.estimate_resources(
+    inputs={"hamiltonian": noncommuting_hamiltonian, "time": 0.0},
+)
+commuting_est = pauli_sum_evolution.estimate_resources(
+    inputs={"hamiltonian": qmo.Z(0) + qmo.Z(1), "time": 0.25},
+)
+
+assert noncommuting_est.quality is qmc.EstimateQuality.EXACT
+assert noncommuting_est.approximation is qmc.ApproximationStatus.APPROXIMATE
+assert zero_time_est.approximation is qmc.ApproximationStatus.EXACT
+assert commuting_est.approximation is qmc.ApproximationStatus.EXACT
+
+# %% [markdown]
+# The noncommuting result has exact counts for the selected one-step circuit but approximates the ideal exponential. Its assumption names the first-order Lie–Trotter formula. Zero evolution time removes that operation, and commuting Pauli terms need no product-formula approximation, so both report `ApproximationStatus.EXACT`.
 
 # %% [markdown]
 # ## Symbolic Resource Estimation
@@ -224,7 +270,7 @@ assert vector_est.gates.total == 8
 assert vector_est.parameters == {}
 
 # %% [markdown]
-# Widths, indices, and arities are resource requirements, not hints. The estimator retains requirements for nonnegative integer allocations, array accesses and views, control indices, SELECT index width, Pauli support, and block-encoding signal/system registers. A descriptor-produced block encoding carries its exact one-dimensional quantum-port widths, so `encoding.unitary.estimate_resources()` applies them automatically. Supplying `inputs={"signal": encoding.num_signal_qubits, "system": encoding.num_system_qubits}` remains useful for wrapper qkernels and explicitly validates the same contract. Requirements are checked both when `inputs` are supplied and after `.substitute()`, including through controlled and inverse forms. Invalid values raise `ValueError` instead of being clamped into a plausible-looking estimate. Serialized output exposes these checks in the `requirements` list.
+# Widths, indices, and arities are resource requirements, not hints. The estimator retains requirements for nonnegative integer allocations, array accesses and views, control indices, SELECT index width and nonempty target width, Pauli support, and block-encoding signal/system registers. A descriptor-produced block encoding carries its exact one-dimensional quantum-port widths, so `encoding.unitary.estimate_resources()` applies them automatically. Supplying `inputs={"signal": encoding.num_signal_qubits, "system": encoding.num_system_qubits}` remains useful for wrapper qkernels and explicitly validates the same contract. Requirements are checked both when `inputs` are supplied and after `.substitute()`, including through controlled and inverse forms. Invalid values raise `ValueError` instead of being clamped into a plausible-looking estimate. Serialized output exposes these checks in the `requirements` list.
 #
 # Supply concrete structural values through `inputs` in the original `estimate_resources()` call whenever possible. This lets the dependency scheduler resolve physical array indices, views, and loop-carried wire identities before it builds the depth expression. Calling `.substitute()` later safely evaluates the symbolic estimate and validates retained requirements, but it cannot rebuild an already conservative alias schedule; its depth may therefore remain an `upper_bound` even after every symbol is concrete.
 
@@ -251,25 +297,43 @@ assert vector_est.parameters == {}
 # | `est.depth.gate_depth` | Gate-only algorithmic depth |
 # | `est.depth.measurement_depth` | Measurement-only algorithmic depth |
 # | `est.depth.reset_depth` | Reset-only algorithmic depth |
-# | `est.calls.calls_by_name` | Bodyless/opaque boundary calls by name |
-# | `est.calls.queries_by_name` | Opaque query complexity by name |
+# | `est.calls.calls_by_name` | Unexpanded named semantic-boundary calls |
+# | `est.calls.queries_by_name` | Algorithmic query complexity by name |
 # | `est.parameters` | Dict of symbol names → SymPy symbols |
-# | `est.basis` | Selected gate basis (`portable`, `logical`, or `clifford_t`) |
+# | `est.basis` | Selected gate basis (`logical` or `clifford_t`) |
+# | `est.control_decomposition` | Selected coherent-control model (`abstract` or `clean_ancilla_toffoli`) |
 # | `est.precision` | Rotation-synthesis precision for `clifford_t` |
 # | `est.quality` | `exact`, `upper_bound`, or `modeled` |
+# | `est.approximation` | `exact` or `approximate`: whether the selected circuit approximates an ideal operation |
 # | `est.assumptions` | Active modeling assumptions made by the estimator |
 # | `est.trace` / `est.explain()` | Optional explanation tree and its text rendering |
 #
-# Numeric resource fields are SymPy expressions. For fixed qkernels they evaluate to plain integers. Measurements and resets are not gates: measuring an `N`-qubit vector contributes `N` to `measurements.total`, while parallel readout can still contribute only one `measurement_depth` layer. Counts describe one logical qkernel execution and are not multiplied by shots. `qmc.expval` leaves `measurements.total` at zero because observable grouping, basis rotations, and shots are executor-dependent; here zero means “not included in this estimate,” not “no measurement is required.” The modeled quality, assumption, abstract query, and measurement layer expose that uncertainty. `resets.total` counts explicit `qmc.reset` operations, not fresh `|0>` allocation or target-dependent resets inserted by a backend. The category depths are scheduled independently, so they must not be subtracted from or summed to reconstruct `depth.depth`.
+# Numeric resource fields are SymPy expressions. For fixed qkernels they evaluate to plain integers. `quality` concerns the resource counts, while `approximation` independently concerns the selected circuit's mathematical fidelity to the ideal operation. Measurements and resets are not gates: measuring an `N`-qubit vector contributes `N` to `measurements.total`, while parallel readout can still contribute only one `measurement_depth` layer. Counts describe one logical qkernel execution and are not multiplied by shots. `qmc.expval` leaves `measurements.total` at zero because observable grouping, basis rotations, and shots are executor-dependent; here zero means “not included in this estimate,” not “no measurement is required.” The modeled quality, assumption, abstract query, and measurement layer expose that uncertainty. `resets.total` counts explicit `qmc.reset` operations, not fresh `|0>` allocation or target-dependent resets inserted by an engine. The category depths are scheduled independently, so they must not be subtracted from or summed to reconstruct `depth.depth`.
 #
-# `calls_by_name` deliberately does **not** count ordinary body-backed qkernel calls: those bodies have already been expanded into gates, width, depth, measurements, and resets. It records only opaque boundaries, either from an explicit opaque cost or from an unknown-call policy.
+# `calls_by_name` deliberately does **not** count ordinary body-backed qkernel calls: those bodies have already been expanded into gates, width, depth, measurements, and resets. It records named boundaries that remain unexpanded in the selected model. These include explicit or unknown opaque calls and modeled semantic boundaries such as `qmc.expval`, whose concrete sampling implementation is executor-dependent. One `expval` therefore records `calls_by_name={"expval": 1}` and `queries_by_name={"expval": 1}` in addition to its modeled measurement layer.
 
 # %% [markdown]
 # ## Opaque Boundaries, Condition-Aware Provenance, and Traces
 #
 # A bodyless callable has no honest gate cost unless you provide one. The default `UnknownResourcePolicy.ERROR` therefore raises. Prefer declaring an explicit `ResourceEstimate` cost on `qmc.opaque(...)` when one is known. For exploratory work, `OPAQUE_CALL` records a named call and query with `modeled` quality, while `ZERO_WITH_WARNING` records a zero-cost assumption. Neither policy pretends the unknown body was decomposed.
 #
-# A fixed opaque cost can still support a useful controlled estimate when its `portable` profile declares any `single_qubit` or `two_qubit` gates. With at least two modeled operations under at least two controls, Qamomile computes the controls' AND once, projects every known primitive under that one effective control, and uncomputes the shared ladder after the body. A one-operation or one-control profile keeps the ordinary per-primitive fallback. The arity fields are bounded independently over Qamomile's supported portable primitive families, so they need not sum to `total`. Because an aggregate profile has no gate names, its gate-name-independent two-control model may differ in either direction from the path selected for a concrete body. Gates outside the known arity buckets remain one opaque operation each in the total and serial depth because their controlled decomposition is unavailable. An unclassified remainder is not mislabeled as `multi_qubit`; that field continues to mean gates known to act on three or more qubits. Arity alone cannot reveal an undeclared global phase that becomes observable under control either. The result therefore remains `modeled` and records these limitations in `assumptions`. Use a context-dependent `cost(ctx)` model when gate-specific control costs or phase behavior are known. A callback is authoritative for the complete invocation and can price all coherent controls exactly once through `ctx.total_controls`.
+# A fixed `ResourceEstimate` and a context-dependent `cost(ctx)` callback share one contract: each describes the base cost of applying the Oracle definition once. That base cost already includes controls declared by `qmc.opaque(..., num_control_qubits=...)`, but it excludes controls added later with `qmc.control(oracle, ...)` and controls inherited from a surrounding controlled qkernel. The estimator applies inverse and those external controls after receiving either form of base cost.
+#
+# The callback receives an `OpaqueCostContext`, not the complete call site. It can read `target_qubits`, per-target `target_shapes`, `definition_control_qubits`, `basis`, `control_decomposition`, `precision`, and an optional base `strategy`. Added and inherited controls, inverse, and open-control values are deliberately absent: the callback describes only the definition-level base cost, while the estimator has sole responsibility for those call-site transforms. As with every user-supplied cost, the callback author remains responsible for returning a base cost that follows this contract.
+#
+# A fixed cost containing gate-model-sensitive fields also fixes their provenance. Estimating that Oracle with a different `basis`, `control_decomposition`, or Clifford+T `precision` raises an error instead of silently relabeling the same gate numbers. A basis-neutral cost, such as one containing only calls and queries, can be reused across models because there is no gate breakdown to reinterpret. A callback can support several gate models by constructing its result with `basis=ctx.basis`, `control_decomposition=ctx.control_decomposition`, and `precision=ctx.precision`.
+#
+# | Control source | Visible to the callback? | Who includes its cost? |
+# |---|---|---|
+# | Declared by `num_control_qubits` when the Oracle is defined | `ctx.definition_control_qubits` | The fixed cost or callback includes it in the base cost. |
+# | Added later by `qmc.control(oracle, ...)` | No | The estimator applies it after receiving the base cost. |
+# | Inherited from a surrounding controlled qkernel | No | The estimator applies it after receiving the base cost. |
+#
+# With either explicit cost form, only the `calls_by_name` and `queries_by_name` entries supplied in that cost are recorded; the estimator does not add another Oracle call or query. A base cost containing measurements or resets can be used only by an uncontrolled, non-inverted definition. Declared, added, or inherited coherent controls and inverse all reject such a cost because counts alone do not define those transformed implementations.
+#
+# Under `ABSTRACT`, external controls keep `total` unchanged and move known arity buckets: a one-qubit gate becomes two-qubit under one control and multi-qubit under two or more. Unclassified arity remains unclassified. Under `CLEAN_ANCILLA_TOFFOLI`, a logical profile with known `single_qubit` or `two_qubit` gates supports a decomposed estimate. With at least two modeled operations and at least two external controls, this estimation model computes the controls' AND once, projects every known primitive under that one effective control, and uncomputes the shared ladder after the body. A one-operation or one-control profile keeps the per-primitive decomposition. `CLEAN_ANCILLA_TOFFOLI` names a fixed resource-estimation model; its formulas do not automatically change when an engine's emission policy changes.
+#
+# Aggregate profiles have no gate names or original schedule. Their arity and gate-family fields are therefore independent field-wise bounds and need not sum to `total`; unclassified gates are not mislabeled as `multi_qubit`. The result remains `modeled` and records the limitation in `assumptions`. An externally controlled aggregate Clifford+T gate profile is rejected because arity counts alone do not identify the Clifford+T lowering. A calls/query-only cost has no gate profile to transform, so those counters remain unchanged with a visible assumption. Use a body-backed callable when gate-specific transformed costs are required, or define a separate Oracle whose declared controls and base cost already describe that implementation.
 
 
 # %%
@@ -316,7 +380,7 @@ assert any(
 
 
 # %% [markdown]
-# The total of 9 is two Toffolis for the shared two-control ladder, two singly controlled one-qubit entries, a three-gate upper bound for the singly controlled two-qubit entry, and two unresolved unit placeholders. The two clean ancillas are one outer-ladder ancilla held across the body plus the peak one-ancilla demand of its known primitive projections.
+# This profile has five modeled operations and two controls, so the fixed recipe uses one shared ladder. Computing and uncomputing the controls' AND costs two Toffolis. Beneath the resulting effective control, the two one-qubit entries cost two gates, the conservative two-qubit envelope costs three gates, and the two unresolved placeholders remain two unit-cost operations. The total is therefore `2 + 2 + 3 + 2 = 9`. The two clean ancillas combine one ladder ancilla with the largest workspace needed inside the conservative two-qubit envelope.
 
 
 # %%
@@ -355,15 +419,17 @@ assert "conditional_oracle" in opaque_branch.explain()
 # %% [markdown]
 # ### JSON-friendly output
 #
-# `to_dict()` produces a JSON-friendly snapshot. Symbolic expressions and structural requirements are stored as strings, alongside basis, precision, quality, and assumptions. The opt-in trace is intentionally rendered separately with `explain()` rather than embedded in this compact payload.
+# `to_dict()` produces a JSON-friendly snapshot. Symbolic expressions and structural requirements are stored as strings, alongside basis, precision, quality, approximation status, and assumptions. The opt-in trace is intentionally rendered separately with `explain()` rather than embedded in this compact payload.
 
 
 # %%
 import json
 
 payload = json.loads(json.dumps(conditional_est.to_dict()))
-assert payload["basis"] == "portable"
+assert payload["basis"] == "logical"
+assert payload["control_decomposition"] == "clean_ancilla_toffoli"
 assert payload["quality"] == "modeled"
+assert payload["approximation"] == "exact"
 assert "requirements" in payload
 
 # %% [markdown]
@@ -390,8 +456,8 @@ for n_val in [4, 8, 16, 32]:
 order_finding = qmc.shor_order_finding(base=2, modulus=15)
 shor_est = order_finding.estimate_resources()
 
-print("portable peak qubits:", shor_est.qubits)
-print("portable total gates:", shor_est.gates.total)
+print("default peak qubits:", shor_est.qubits)
+print("default total gates:", shor_est.gates.total)
 print("measurements:", shor_est.measurements.total)
 print("resets:", shor_est.resets.total)
 print("estimate quality:", shor_est.quality)
@@ -419,7 +485,7 @@ assert str(shor_est.quality) == "upper_bound"
 # | Lookup address | `w` |
 # | Carry, vent, overflow, reduction, domain, and enable | `6` |
 #
-# The default is `w=2`, giving a body allocation of `3*n + 9`. For modulus 15, `n=4`, so the body contributes 21 qubits. The default `portable` model also reports two reusable clean ancillas needed by its multi-control fallback, producing a peak and static circuit width of 23. The explicit `logical` model keeps the pre-decomposition width of 21. These values come from the executed qkernel body and its transforms, not an external cost formula registered with `estimate_resources()`.
+# The default is `w=2`, giving a body allocation of `3*n + 9`. For modulus 15, `n=4`, so the body contributes 21 qubits. The default `CLEAN_ANCILLA_TOFFOLI` model also reports two reusable clean ancillas, producing a peak and static circuit width of 23. Selecting `ABSTRACT` keeps the pre-decomposition width of 21. These values come from the executed qkernel body and its transforms, not an external cost formula registered with `estimate_resources()`.
 
 # %%
 import sympy as sp
@@ -427,14 +493,14 @@ from IPython.display import Math, display
 
 symbolic_n, symbolic_w = sp.symbols("n w", integer=True, positive=True)
 shor_body_width = 3 * symbolic_n + symbolic_w + 7
-shor_portable_width = shor_body_width + 2
+shor_decomposed_width = shor_body_width + 2
 display(Math(rf"N_\mathrm{{body}} = {sp.latex(shor_body_width)}"))
-display(Math(rf"N_\mathrm{{portable}} = {sp.latex(shor_portable_width)}"))
+display(Math(rf"N_\mathrm{{decomposed}} = {sp.latex(shor_decomposed_width)}"))
 assert (
     shor_body_width.subs({symbolic_n: 4, symbolic_w: 2})
     == shor_est.width.allocated_qubits
 )
-assert shor_portable_width.subs({symbolic_n: 4, symbolic_w: 2}) == shor_est.qubits
+assert shor_decomposed_width.subs({symbolic_n: 4, symbolic_w: 2}) == shor_est.qubits
 
 # %% [markdown]
 # The gate breakdown for modulus 15 is derived by traversing that same body to completion.
@@ -450,7 +516,7 @@ assert shor_est.gates.total == (
 )
 
 # %% [markdown]
-# `quality` is `upper_bound` because branches selected by mid-circuit measurements and classical feed-forward are counted conservatively, and `portable` uses a conservative multi-control fallback. These remain algorithmic circuit resources: they do not include decomposition to device-native gates, routing, error correction, or magic-state production.
+# `quality` is `upper_bound` because branches selected by mid-circuit measurements and classical feed-forward are counted conservatively, and `CLEAN_ANCILLA_TOFFOLI` is a conservative multi-control model. These remain algorithmic circuit resources: they do not include decomposition to device-native gates, routing, error correction, or magic-state production.
 
 # %% [markdown]
 # ### Why the gate count is `O(n^3)`
@@ -489,14 +555,14 @@ assert window_est.measurements.total == 36
 assert window_est.resets.total == 36
 
 # %% [markdown]
-# In the standalone primitive, an internal control for the unconditional case takes the phase-qubit role, so its body has the same `3*n + w + 7` allocation as the full order-finding circuit. The default `portable` peak is two qubits larger because of clean control-decomposition ancillas. For `x < modulus`, `modmul_const()` implements `|x> -> |a*x mod modulus>`; it leaves basis states outside that domain unchanged to preserve unitarity.
+# In the standalone primitive, an internal control for the unconditional case takes the phase-qubit role, so its body has the same `3*n + w + 7` allocation as the full order-finding circuit. The default peak is two qubits larger because of clean control-decomposition ancillas. For `x < modulus`, `modmul_const()` implements `|x> -> |a*x mod modulus>`; it leaves basis states outside that domain unchanged to preserve unitarity.
 
 # %% [markdown]
 # ### Ekerå–Håstad short-exponent schedule
 #
 # `qmc.ekera_hastad_factoring()` constructs the short-discrete-logarithm quantum stage of the [Ekerå–Håstad method](https://arxiv.org/abs/1702.00249) for factoring a product of two similarly sized primes. Qamomile sets `m = ceil(n / 2) + 1` and measures schedules of lengths `2*m` and `m` sequentially.
 #
-# Rather than retain two exponent registers coherently, it reuses the same phase qubit and arithmetic workspace. Its body allocation is consequently the same `3*n + w + 7` as Shor's order finding, with the same additional clean ancillas in `portable`; the number of controlled modular multiplications differs. The returned `Vector[Bit]` contains the first `2*m` little-endian bits from the long schedule and the remaining `m` bits from the short schedule.
+# Rather than retain two exponent registers coherently, it reuses the same phase qubit and arithmetic workspace. Its body allocation is consequently the same `3*n + w + 7` as Shor's order finding, with the same additional clean ancillas under `CLEAN_ANCILLA_TOFFOLI`; the number of controlled modular multiplications differs. The returned `Vector[Bit]` contains the first `2*m` little-endian bits from the long schedule and the remaining `m` bits from the short schedule.
 #
 # The modulus-5 instance below is a compact resource-estimation fixture, not a complete factoring example. A factoring application supplies the composite modulus whose two prime factors are to be recovered.
 
@@ -508,8 +574,8 @@ short_dlp = qmc.ekera_hastad_factoring(
 )
 short_dlp_est = short_dlp.estimate_resources()
 
-print("Ekerå–Håstad portable qubits:", short_dlp_est.qubits)
-print("Ekerå–Håstad portable gates:", short_dlp_est.gates.total)
+print("Ekerå–Håstad default qubits:", short_dlp_est.qubits)
+print("Ekerå–Håstad default gates:", short_dlp_est.gates.total)
 assert short_dlp_est.width.allocated_qubits == 3 * 3 + 2 + 7
 assert short_dlp_est.width.clean_ancilla_qubits == 2
 assert short_dlp_est.qubits == 3 * 3 + 2 + 9
@@ -522,17 +588,17 @@ assert short_dlp.output_types == [qmc.Vector[qmc.Bit]]
 # ## Summary
 #
 # - `estimate_resources()` reports algorithmic width, gates, measurement/reset events, and depth without executing.
-# - The default `portable` basis recursively expands coherent controls and reports required clean ancillas; `logical` retains the abstract source-gate view, and `clifford_t` applies the supported synthesis model.
+# - Gate vocabulary and coherent-control decomposition are separate choices. The defaults are `logical` and `clean_ancilla_toffoli`; select `abstract` to retain controlled source primitives without decomposition, or `clifford_t` for supported Clifford+T lowering.
 # - Calls, inverse calls, SELECT, global phase, Pauli evolution, and control flow compose from their bodies and semantics instead of collapsing to one gate.
 # - `expval` is reported as a modeled abstract query and measurement layer; grouping, basis-change, and shot costs are deliberately left to the selected executor.
 # - For parameterized qkernels, results are SymPy expressions showing scaling within the selected model.
 # - `inputs` can supply classical values, array shapes, and an integer width for a one-dimensional quantum Vector; retained requirements reject invalid widths and indices.
-# - Check `basis`, `quality`, `assumptions`, and opt-in traces before interpreting a result as an exact implementation cost. Condition selection removes inactive provenance.
-# - `calls_by_name` describes opaque boundaries only. Body-backed calls are recursively expanded; a fixed opaque cost projects its known one-/two-qubit portion through the portable control fallback and keeps any remaining gates as visible modeled placeholders.
+# - Check `basis`, `quality`, `approximation`, `assumptions`, and opt-in traces before interpreting a result. `quality` classifies resource-count confidence, while `approximation` independently identifies a mathematical approximation of an ideal operation. Condition selection removes inactive provenance.
+# - `calls_by_name` describes unexpanded named boundaries, including opaque calls and modeled semantic operations such as `expval`. Body-backed calls are recursively expanded. Fixed and callback opaque costs both describe one base Oracle application; the estimator applies later-added and inherited controls, projects the known one-/two-qubit portion through the selected control decomposition, and keeps any remaining gates as visible modeled placeholders.
 # - `to_dict()` exports symbolic metrics and requirements in a JSON-friendly form.
 # - Use `.substitute(n=...)` to evaluate an existing estimate at specific sizes and check feasibility; use initial `inputs` when concrete structure should sharpen dependency scheduling.
 # - The FTQC Shor and Ekerå–Håstad factories share the same `O(n^2)` windowed modular-multiplication body and one reused phase qubit.
-# - At fixed window width, the circuit body allocates `3*n + w + 7` qubits; the current default `portable` fallback adds up to two reusable clean ancillas, and Shor's default-precision gate count is `O(n^3)`.
+# - At fixed window width, the circuit body allocates `3*n + w + 7` qubits; the default clean-ancilla Toffoli decomposition adds up to two reusable clean ancillas, and Shor's default-precision gate count is `O(n^3)`.
 # - Problem-specialized FTQC factories expose concrete width and gate estimates derived from their executable bodies.
 #
 # **Next**: [Execution Models](06_execution_models.ipynb) — `sample()` vs `run()`, observables, and bit ordering.

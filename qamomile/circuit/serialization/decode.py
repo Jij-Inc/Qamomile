@@ -35,6 +35,7 @@ from qamomile.circuit.ir.serialize.decode import (
 from qamomile.circuit.ir.types import DictType, QFixedType, ValueType
 from qamomile.circuit.ir.value import ArrayValue, ValueLike
 
+from ._opaque_cost import decode_opaque_cost
 from .kernel import SerializedQKernel
 from .schema import QAMOMILE_VERSION
 from .validation import validate_qkernel_ir
@@ -94,7 +95,11 @@ def from_dict(envelope: dict[str, Any]) -> SerializedQKernel:
     if not isinstance(value_table, list) or not isinstance(callable_table, list):
         raise ValueError("envelope is missing value or callable tables")
 
-    ctx = _DecodeContext(value_table, callable_table)
+    ctx = _DecodeContext(
+        value_table,
+        callable_table,
+        opaque_cost_decoder=decode_opaque_cost,
+    )
     ctx.populate_definitions()
     raw_body = artifact.get("body")
     if not isinstance(raw_body, dict):

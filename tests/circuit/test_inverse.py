@@ -1898,8 +1898,8 @@ _opaque_oracle = qmc.Oracle(
 )
 
 
-def test_inverse_oracle_builds_opaque_inverse() -> None:
-    """inverse(qkernel) keeps an oracle cost on an opaque inverse."""
+def test_inverse_oracle_builds_transformed_opaque_call() -> None:
+    """inverse(qkernel) preserves an Oracle definition under inverse transform."""
 
     @qmc.qkernel
     def oracle_layer(q: qmc.Qubit) -> qmc.Qubit:
@@ -1927,7 +1927,8 @@ def test_inverse_oracle_builds_opaque_inverse() -> None:
         if isinstance(op, InvokeOperation)
     ]
     assert len(inner_invokes) == 1
-    assert inner_invokes[0].attrs["custom_name"] == "opaque_inverse_gate_inv"
+    assert inner_invokes[0].attrs["custom_name"] == "opaque_inverse_gate"
+    assert inner_invokes[0].transform is CallTransform.INVERSE
     assert inner_invokes[0].body is None
     assert inner_invokes[0].definition is not None
     assert inner_invokes[0].definition.opaque_cost is _OPAQUE_COST

@@ -61,7 +61,7 @@ from qamomile.circuit.ir.types.primitives import FloatType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 
 if TYPE_CHECKING:
-    from qamomile.circuit.frontend.oracle import Oracle
+    from qamomile.circuit.frontend.oracle import Oracle, TransformedOracle
 from qamomile.circuit.frontend.qkernel import QKernel
 from qamomile.circuit.frontend.qkernel_like import QKernelLike
 
@@ -289,6 +289,7 @@ class ControlledGate:
         control_value: int | None = None,
         callable_ref: CallableRef | None = None,
         callable_attrs: dict[str, Any] | None = None,
+        target_inverse: bool = False,
     ) -> None:
         """Wrap a ``QKernel`` as a controlled operation.
 
@@ -314,6 +315,8 @@ class ControlledGate:
                 Defaults to the wrapped qkernel's callable ref.
             callable_attrs (dict[str, Any] | None): Optional serializer-friendly
                 attrs for the source callable. Defaults to qkernel attrs.
+            target_inverse (bool): Whether the controlled target is the
+                inverse of ``qkernel``. Defaults to ``False``.
 
         Raises:
             TypeError: If ``num_controls`` is a ``bool``, ``control_value`` is
@@ -392,6 +395,109 @@ class ControlledGate:
         self._target_callable_ref = callable_ref
         self._target_callable_attrs = (
             dict(callable_attrs) if callable_attrs is not None else None
+        )
+        self._target_inverse = target_inverse
+
+    def _inverted(self) -> ControlledGate:
+        """Toggle inversion of the controlled target.
+
+        Returns:
+            ControlledGate: Wrapper with the same controls, activation value,
+                and callable identity but the opposite target direction.
+        """
+        return ControlledGate(
+            self._qkernel,
+            num_controls=self._num_controls,
+            control_value=self._control_value,
+            callable_ref=self._target_callable_ref,
+            callable_attrs=self._target_callable_attrs,
+            target_inverse=not self._target_inverse,
+        )
+
+    def _prepend_controls(
+        self,
+        num_controls: int | UInt,
+        *,
+        control_value: int | None = None,
+    ) -> ControlledGate:
+        """Prepend another coherent-control group to this wrapper.
+
+        The newly added controls remain the leading positional arguments.
+        For concrete widths, their LSB-first activation pattern occupies the
+        low bits of the combined ``control_value`` and the existing pattern is
+        shifted above it. Symbolic widths can be composed only when both
+        groups use the ordinary all-ones condition.
+
+        Args:
+            num_controls (int | UInt): Width of the newly prepended control
+                group.
+            control_value (int | None): LSB-first activation value for the new
+                group. ``None`` uses all ones. Defaults to ``None``.
+
+        Returns:
+            ControlledGate: Wrapper with one flattened combined control
+                prefix.
+
+        Raises:
+            TypeError: If ``num_controls`` is ``bool`` or ``control_value`` is
+                not a Python integer or ``None``.
+            ValueError: If a concrete width is not positive, an activation
+                value does not fit its group, or a non-default activation
+                pattern is combined with a symbolic width.
+        """
+        if isinstance(num_controls, bool):
+            raise TypeError(
+                f"num_controls must be a positive integer or UInt, got bool "
+                f"({num_controls})."
+            )
+        if isinstance(num_controls, UInt):
+            if control_value is not None:
+                raise ValueError(
+                    "control_value requires a concrete int num_controls; "
+                    "symbolic UInt widths cannot define a fixed activation "
+                    "state at compose time."
+                )
+            normalized_new_value = None
+        else:
+            normalized_new_value = normalize_control_value(
+                control_value,
+                num_controls,
+            )
+
+        existing_controls = self._num_controls
+        if isinstance(num_controls, UInt) or isinstance(existing_controls, UInt):
+            if normalized_new_value is not None or self._control_value is not None:
+                raise ValueError(
+                    "Nested control with a symbolic total width supports only "
+                    "the ordinary all-ones activation state."
+                )
+            combined_controls = (
+                num_controls + existing_controls
+                if isinstance(num_controls, UInt)
+                else existing_controls + num_controls
+            )
+            combined_value = None
+        else:
+            new_pattern = (
+                (1 << num_controls) - 1
+                if normalized_new_value is None
+                else normalized_new_value
+            )
+            existing_pattern = (
+                (1 << existing_controls) - 1
+                if self._control_value is None
+                else self._control_value
+            )
+            combined_controls = num_controls + existing_controls
+            combined_value = new_pattern | (existing_pattern << num_controls)
+
+        return ControlledGate(
+            self._qkernel,
+            num_controls=combined_controls,
+            control_value=combined_value,
+            callable_ref=self._target_callable_ref,
+            callable_attrs=self._target_callable_attrs,
+            target_inverse=self._target_inverse,
         )
 
     @staticmethod
@@ -668,6 +774,7 @@ class ControlledGate:
         block: Any | None = None,
         *,
         has_call_global_phase: bool = False,
+        definition_block: Block | None = None,
     ) -> ControlledUOperation | InvokeOperation:
         """Create a controlled operation without mutating tracer state.
 
@@ -694,18 +801,19 @@ class ControlledGate:
                 phase augmentation. Such calls remain structural ControlledU
                 operations instead of claiming the source composite's native
                 identity. Defaults to False.
+            definition_block (Block | None): Direct source body retained on a
+                transformed composite definition. Defaults to ``block``.
 
         Returns:
             ControlledUOperation | InvokeOperation: Validated controlled
                 operation ready to emit after ownership commit.
         """
         block = self._qkernel.block if block is None else block
-        is_composite = getattr(self._qkernel, "_callable_kind", None) == "composite"
-        if (
-            is_composite
-            and isinstance(num_controls, int)
-            and power == 1
-            and not has_call_global_phase
+        definition_block = block if definition_block is None else definition_block
+        if self._uses_composite_invoke(
+            num_controls,
+            power,
+            has_call_global_phase=has_call_global_phase,
         ):
             attrs = self._callable_attrs()
             attrs["num_control_qubits"] = num_controls
@@ -717,9 +825,13 @@ class ControlledGate:
                 operands=operands,
                 results=results,
                 target=self._callable_ref(),
-                transform=CallTransform.CONTROLLED,
+                transform=(
+                    CallTransform.CONTROLLED_INVERSE
+                    if self._target_inverse
+                    else CallTransform.CONTROLLED
+                ),
                 attrs=attrs,
-                definition=qkernel_callable_def(self._qkernel, block),
+                definition=qkernel_callable_def(self._qkernel, definition_block),
             )
         elif isinstance(num_controls, Value):
             op = SymbolicControlledU(
@@ -743,6 +855,41 @@ class ControlledGate:
                 callable_attrs=self._callable_attrs(),
             )
         return op
+
+    def _uses_composite_invoke(
+        self,
+        num_controls: int | Value,
+        power: int | Value,
+        *,
+        has_call_global_phase: bool,
+    ) -> bool:
+        """Return whether a controlled composite stays a semantic invocation.
+
+        Args:
+            num_controls (int | Value): Concrete or symbolic control width.
+            power (int | Value): Controlled target application count.
+            has_call_global_phase (bool): Whether a call-site phase augments
+                the target.
+
+        Returns:
+            bool: True when ``InvokeOperation`` can represent the complete
+                controlled transform without structural materialization.
+        """
+        has_controlled_inverse_implementation = any(
+            implementation.transform is CallTransform.CONTROLLED_INVERSE
+            for implementation in getattr(
+                self._qkernel,
+                "_callable_implementations",
+                (),
+            )
+        )
+        return (
+            getattr(self._qkernel, "_callable_kind", None) == "composite"
+            and isinstance(num_controls, int)
+            and power == 1
+            and not has_call_global_phase
+            and (not self._target_inverse or has_controlled_inverse_implementation)
+        )
 
     def _callable_ref(self) -> Any:
         """Return the wrapped qkernel's compiler-facing callable reference.
@@ -785,6 +932,30 @@ class ControlledGate:
         """
         return select_specialized_block(self._qkernel, sub_args_resolved)
 
+    def _operation_block(self, source_block: Block) -> Block:
+        """Return the structural body used by a controlled operation.
+
+        Composite calls remain semantic ``InvokeOperation`` transforms and use
+        their direct definition body. Generic qkernels and powered or phased
+        composite calls carry a structural block, so an inverse target is
+        materialized before that block is attached.
+
+        Args:
+            source_block (Block): Call-site-specialized direct source body.
+
+        Returns:
+            Block: Direct or structurally inverted operation body.
+
+        Raises:
+            NotImplementedError: If the source body contains an operation that
+                generic inversion cannot represent.
+        """
+        if not self._target_inverse:
+            return source_block
+        from qamomile.circuit.frontend.operation.inverse import _BlockInverter
+
+        return _BlockInverter().invert_block(source_block)
+
     def _validate_target_effects(self, block: Block) -> None:
         """Reject effects unsupported by generic structural control.
 
@@ -801,7 +972,11 @@ class ControlledGate:
         """
         definition = qkernel_callable_def(self._qkernel, block)
         require_unitary_effects(
-            definition.effects_for(CallTransform.CONTROLLED),
+            definition.effects_for(
+                CallTransform.CONTROLLED_INVERSE
+                if self._target_inverse
+                else CallTransform.CONTROLLED
+            ),
             operation="qmc.control()",
             target=self._qkernel.name,
             alternative=(
@@ -1537,8 +1712,17 @@ class ControlledGate:
         """
         num_controls = cast(int, self._num_controls)
         prep = self._prepare_concrete(args, sub_kwargs, num_controls)
-        block = self._block_for_sub_call(prep.sub_args_resolved)
-        self._validate_target_effects(block)
+        source_block = self._block_for_sub_call(prep.sub_args_resolved)
+        self._validate_target_effects(source_block)
+        block = (
+            source_block
+            if self._uses_composite_invoke(
+                num_controls,
+                power,
+                has_call_global_phase=global_phase is not None,
+            )
+            else self._operation_block(source_block)
+        )
         block = self._with_global_phase(block, global_phase)
         if global_phase is not None:
             prep.operands.append(global_phase)
@@ -1559,6 +1743,7 @@ class ControlledGate:
             num_target_qubits=num_target_qubits,
             block=block,
             has_call_global_phase=global_phase is not None,
+            definition_block=source_block,
         )
         self._commit_control_entries(
             prep.control_entries,
@@ -2179,8 +2364,9 @@ class ControlledGate:
         assert isinstance(num_controls, UInt)
 
         prep = self._prepare_symbolic(args, sub_kwargs, control_indices)
-        block = self._block_for_sub_call(prep.sub_args_resolved)
-        self._validate_target_effects(block)
+        source_block = self._block_for_sub_call(prep.sub_args_resolved)
+        self._validate_target_effects(source_block)
+        block = self._operation_block(source_block)
         block = self._with_global_phase(block, global_phase)
         if global_phase is not None:
             prep.operands.append(global_phase)
@@ -2684,90 +2870,6 @@ def _control_callable_metadata(
     return qkernel_callable_ref(qkernel_impl), qkernel_callable_attrs(qkernel_impl)
 
 
-@dataclasses.dataclass
-class _ControlledOracle:
-    """Wrap an opaque Oracle behind the ``control`` call protocol.
-
-    Args:
-        oracle (Any): Source ``Oracle`` object to control.
-        num_controls (int): Number of new leading control qubits.
-        control_value (int | None): LSB-first activation value for the new
-            controls. ``None`` uses all ones.
-
-    Raises:
-        TypeError: If the source oracle only supports vector calls or
-            ``control_value`` is not a Python ``int`` or ``None``.
-        ValueError: If ``control_value`` does not fit ``num_controls``.
-    """
-
-    oracle: Any
-    num_controls: int
-    control_value: int | None = None
-
-    def __post_init__(self) -> None:
-        """Validate that the wrapped oracle supports scalar controls.
-
-        Raises:
-            TypeError: If the oracle has no fixed scalar target arity or
-                ``control_value`` is not a Python ``int`` or ``None``.
-            ValueError: If ``control_value`` does not fit ``num_controls``.
-        """
-        if self.oracle.num_qubits is None:
-            raise TypeError(
-                "control(Oracle) supports fixed-width scalar oracles only. "
-                "Vector-signature oracles should be called directly."
-            )
-        self.control_value = normalize_control_value(
-            self.control_value,
-            self.num_controls,
-        )
-
-    def __call__(self, *qubits: Qubit) -> tuple[Qubit, ...]:
-        """Apply the controlled oracle.
-
-        Args:
-            *qubits (Qubit): Leading control qubits followed by target qubits.
-
-        Returns:
-            tuple[Qubit, ...]: Output controls followed by target outputs.
-
-        Raises:
-            ValueError: If too few qubits are supplied.
-        """
-        total_controls = self.oracle.num_control_qubits + self.num_controls
-        if len(qubits) < total_controls:
-            raise ValueError(
-                f"Controlled Oracle '{self.oracle.name}' requires "
-                f"{total_controls} control qubits, got {len(qubits)}."
-            )
-        controls = qubits[:total_controls]
-        targets = qubits[total_controls:]
-        from qamomile.circuit.frontend.oracle import Oracle
-
-        controlled = Oracle(
-            self.oracle.name,
-            self.oracle.num_qubits,
-            num_control_qubits=total_controls,
-            signature=self.oracle.signature,
-            cost=self.oracle.cost,
-        )
-        existing_controls = self.oracle.num_control_qubits
-        combined_control_value = (
-            None
-            if self.control_value is None
-            else self.control_value
-            | (((1 << existing_controls) - 1) << self.num_controls)
-        )
-        return cast(
-            tuple[Qubit, ...],
-            controlled(
-                *targets,
-                controls=controls,
-                control_value=combined_control_value,
-            ),
-        )
-
-
 def _validate_concrete_control_count(num_controls: int | UInt) -> int:
     """Return a concrete control count for wrappers that cannot be symbolic.
 
@@ -2798,8 +2900,30 @@ def control(
     num_controls: int = 1,
     *,
     control_value: int | None = None,
-) -> _ControlledOracle:
+) -> TransformedOracle:
     """Create a controlled wrapper for an opaque Oracle."""
+    ...
+
+
+@overload
+def control(
+    qkernel: TransformedOracle,
+    num_controls: int = 1,
+    *,
+    control_value: int | None = None,
+) -> TransformedOracle:
+    """Add controls to an already transformed opaque Oracle."""
+    ...
+
+
+@overload
+def control(
+    qkernel: ControlledGate,
+    num_controls: int | UInt = 1,
+    *,
+    control_value: int | None = None,
+) -> ControlledGate:
+    """Prepend controls to an already controlled qkernel or composite."""
     ...
 
 
@@ -2815,16 +2939,19 @@ def control(
 
 
 def control(
-    qkernel: Oracle | QKernelLike | Callable[..., Any],
+    qkernel: (
+        Oracle | TransformedOracle | ControlledGate | QKernelLike | Callable[..., Any]
+    ),
     num_controls: int | UInt = 1,
     *,
     control_value: int | None = None,
-) -> ControlledGate | _ControlledOracle:
+) -> ControlledGate | TransformedOracle:
     """Create a controlled version of a quantum gate.
 
     Accepts a ``@qmc.qkernel``-decorated function, a qkernel-backed
-    composite gate callable created by the decorator, an opaque ``Oracle``, or
-    a plain built-in gate callable (``qmc.rx``, ``qmc.h``, ``qmc.cp``, ...).
+    composite gate callable created by the decorator, an existing
+    ``ControlledGate``, an opaque ``Oracle``, or a plain built-in gate callable
+    (``qmc.rx``, ``qmc.h``, ``qmc.cp``, ...).
     When given a plain callable, a thin ``@qkernel``
     wrapper is synthesized automatically by inspecting the callable's
     signature, so users no longer need to write a one-line wrapper just to
@@ -2838,11 +2965,12 @@ def control(
     qkernel whose parameter itself is ``Vector[Qubit]``.
 
     Args:
-        qkernel (Oracle | QKernelLike | Callable[..., Any]): A qkernel-like
-            object defining the gate to control, an ``Oracle``, or a built-in
-            gate callable whose parameters are annotated with ``Qubit``,
-            ``Float`` / ``float``, or ``UInt`` / ``int`` (possibly inside a
-            ``Union`` such as ``Union[Qubit, Vector[Qubit]]``).
+        qkernel (object): A qkernel-like object defining the gate to control,
+            an existing controlled wrapper, an ``Oracle`` or transformed
+            Oracle, or a built-in gate callable whose parameters are annotated
+            with ``Qubit``, ``Float`` / ``float``, or ``UInt`` / ``int``
+            (possibly inside a ``Union`` such as
+            ``Union[Qubit, Vector[Qubit]]``).
         num_controls (int | UInt): Number of control qubits (default: 1).
             Can be ``int`` (concrete) or ``UInt`` (symbolic).
         control_value (int | None): Computational-basis value that activates
@@ -2855,13 +2983,20 @@ def control(
     Returns:
         For a qkernel or gate callable, a ``ControlledGate`` that can be called
         with ``(*controls, *targets, power=..., global_phase=..., **params)``.
+        Controlling an existing ``ControlledGate`` prepends the new controls
+        and returns one flattened wrapper while retaining the target direction
+        and callable metadata.
         The call-site phase has semantics
         ``control((exp(i * global_phase) * U) ** power)`` and therefore becomes
         relative phase on the all-active control subspace. ``power``,
         ``global_phase``, and ``control_indices`` are reserved keyword names;
         a same-named target parameter can still be supplied positionally. For
         an ``Oracle``, an opaque qubit-only controlled wrapper is returned;
-        these call-site modifiers are not supported by that wrapper.
+        these call-site modifiers are not supported by that wrapper. Its
+        positional prefix contains controls added by this transform followed
+        by controls declared on the Oracle. Pass
+        ``declared_control_value=...`` when the declared group uses an open
+        activation pattern.
 
     Raises:
         TypeError: If ``qkernel`` is a callable that cannot be auto-wrapped
@@ -2906,15 +3041,64 @@ def control(
 
             controlled_gate = qmc.control(my_composite_gate)
             ctrl_out, tgt0_out, tgt1_out = controlled_gate(ctrl, tgt0, tgt1)
+
+        Controlled wrappers compose directly. The outer group remains first
+        in positional call order::
+
+            nested = qmc.control(
+                qmc.control(my_gate, num_controls=2),
+                num_controls=1,
+            )
+            outer, inner0, inner1, target = nested(
+                outer, inner0, inner1, target
+            )
     """
-    from qamomile.circuit.frontend.oracle import Oracle
+    from qamomile.circuit.frontend.oracle import Oracle, TransformedOracle
 
     if isinstance(qkernel, Oracle):
         concrete_controls = _validate_concrete_control_count(num_controls)
-        return _ControlledOracle(
-            qkernel,
-            num_controls=concrete_controls,
+        return TransformedOracle(qkernel).controlled(
+            concrete_controls,
             control_value=control_value,
+        )
+    if isinstance(qkernel, TransformedOracle):
+        concrete_controls = _validate_concrete_control_count(num_controls)
+        return qkernel.controlled(
+            concrete_controls,
+            control_value=control_value,
+        )
+    if isinstance(qkernel, ControlledGate):
+        return qkernel._prepend_controls(
+            num_controls,
+            control_value=control_value,
+        )
+
+    from qamomile.circuit.frontend.operation.inverse import (
+        InverseGate,
+        _InverseComposite,
+    )
+
+    if isinstance(qkernel, InverseGate):
+        return ControlledGate(
+            qkernel._qkernel,
+            num_controls=num_controls,
+            control_value=control_value,
+            callable_ref=qkernel._callable_ref(),
+            callable_attrs=qkernel._callable_attrs(),
+            target_inverse=True,
+        )
+    if isinstance(qkernel, _InverseComposite):
+        callable_ref, callable_attrs = _control_callable_metadata(
+            qkernel.kernel,
+            qkernel.kernel,
+        )
+        return ControlledGate(
+            qkernel.kernel,
+            num_controls=num_controls,
+            control_value=control_value,
+            callable_ref=callable_ref,
+            callable_attrs=callable_attrs,
+            target_inverse=True,
         )
 
     qkernel_impl = _qkernel_for_callable(qkernel)

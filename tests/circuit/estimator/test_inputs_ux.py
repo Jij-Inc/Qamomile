@@ -391,6 +391,29 @@ def test_scalar_resource_parameters_reject_non_numeric_values(value: object) -> 
         symbolic.substitute(n=value)
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(complex(1, 1), id="python-complex"),
+        pytest.param(float("nan"), id="python-nan"),
+        pytest.param(float("inf"), id="python-infinity"),
+        pytest.param(sp.I, id="sympy-imaginary"),
+        pytest.param(sp.nan, id="sympy-nan"),
+        pytest.param(sp.oo, id="sympy-infinity"),
+    ],
+)
+def test_scalar_resource_parameters_require_finite_real_values(
+    value: object,
+) -> None:
+    """Concrete resource scalars reject complex and non-finite values."""
+    symbolic = _sized_kernel.estimate_resources()
+
+    with pytest.raises(ValueError, match="finite and real"):
+        _sized_kernel.estimate_resources(inputs={"n": value})
+    with pytest.raises(ValueError, match="finite and real"):
+        symbolic.substitute(n=value)
+
+
 def test_input_typo_raises() -> None:
     """A name that is neither a free symbol nor a kernel argument raises."""
     with pytest.raises(ValueError, match="neither free symbols"):

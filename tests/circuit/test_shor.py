@@ -35,7 +35,10 @@ def test_shor_factory_returns_one_executable_qkernel() -> None:
     assert isinstance(kernel, QKernel)
     estimate = _shor_estimate(2, 15)
     assert estimate.parameters == {}
-    assert estimate.basis is qmc.GateBasis.PORTABLE
+    assert estimate.basis is qmc.GateBasis.LOGICAL
+    assert (
+        estimate.control_decomposition is qmc.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
+    )
     assert estimate.width.allocated_qubits == 21
     assert estimate.width.clean_ancilla_qubits == 2
     assert estimate.width.dirty_ancilla_qubits == 0
@@ -57,7 +60,7 @@ def test_shor_width_is_body_derived_three_n_plus_constant(
     base: int,
     modulus: int,
 ) -> None:
-    """Portable estimates add reusable fallback ancillas to body allocations."""
+    """The clean-ancilla model adds reusable ancillas to body allocations."""
     n = modulus.bit_length()
     estimate = _shor_estimate(base, modulus)
 
@@ -75,11 +78,17 @@ def test_shor_skips_identity_modular_multiplication_rounds() -> None:
         base=2,
         modulus=15,
         precision=2,
-    ).estimate_resources(basis=qmc.GateBasis.LOGICAL)
+    ).estimate_resources(
+        basis=qmc.GateBasis.LOGICAL,
+        control_decomposition=qmc.ControlDecomposition.ABSTRACT,
+    )
     full_schedule = qmc.shor_order_finding(
         base=2,
         modulus=15,
-    ).estimate_resources(basis=qmc.GateBasis.LOGICAL)
+    ).estimate_resources(
+        basis=qmc.GateBasis.LOGICAL,
+        control_decomposition=qmc.ControlDecomposition.ABSTRACT,
+    )
 
     assert arithmetic_rounds.gates.total == 3186
     assert arithmetic_rounds.measurements.total == 74
@@ -158,8 +167,8 @@ def test_four_bit_shor_transpiles_without_statevector_execution(
     """Transpile the 21-allocated-qubit benchmark without statevector execution.
 
     This test covers the realistic four-bit circuit without coupling its
-    runtime to statevector sampling. The portable estimate additionally
-    reserves two clean ancillas for controlled-gate fallback decompositions.
+    runtime to statevector sampling. The default clean-ancilla control model
+    additionally reserves two ancillas for its controlled-gate decomposition.
 
     Args:
         sdk_transpiler: Parametrized SDK backend fixture.
@@ -185,7 +194,10 @@ def test_ekera_hastad_uses_two_short_exponent_registers() -> None:
     estimate = kernel.estimate_resources()
 
     assert isinstance(kernel, QKernel)
-    assert estimate.basis is qmc.GateBasis.PORTABLE
+    assert estimate.basis is qmc.GateBasis.LOGICAL
+    assert (
+        estimate.control_decomposition is qmc.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
+    )
     assert estimate.width.allocated_qubits == 18
     assert estimate.width.clean_ancilla_qubits == 2
     assert estimate.width.peak_qubits == 20

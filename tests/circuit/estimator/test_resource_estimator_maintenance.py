@@ -74,7 +74,7 @@ def test_ir_gate_arity_profile_is_exhaustive_and_disjoint() -> None:
     """Every IR gate has one explicit arity without synthetic-name fallback."""
     assert set(estimator_module._GATE_OPERATION_ARITY) == set(GateOperationType)
     assert set(estimator_module._GATE_OPERATION_ARITY.values()) <= {1, 2, 3}
-    assert estimator_module._PORTABLE_EXPLICIT_MULTI_TARGET_GATE_TYPES == {
+    assert estimator_module._CLEAN_ANCILLA_EXPLICIT_MULTI_TARGET_GATE_TYPES == {
         gate_type
         for gate_type, arity in estimator_module._GATE_OPERATION_ARITY.items()
         if arity > 1
@@ -110,7 +110,7 @@ def test_operation_taint_analysis_is_cached_by_operation_list_identity(
         record_analysis,
     )
     interpreter = estimator_module.ResourceInterpreter(
-        config=estimator_module.ResourceEstimatorConfig(),
+        config=estimator_module._ResourceEstimatorConfig(),
         bindings={},
     )
 
@@ -133,7 +133,7 @@ def test_eval_operations_reuses_precomputed_wire_footprints(
     wire_keys = Mock(wraps=estimator_module._quantum_wire_keys)
     monkeypatch.setattr(estimator_module, "_quantum_wire_keys", wire_keys)
     interpreter = estimator_module.ResourceInterpreter(
-        config=estimator_module.ResourceEstimatorConfig(basis=qmc.GateBasis.LOGICAL),
+        config=estimator_module._ResourceEstimatorConfig(basis=qmc.GateBasis.LOGICAL),
         bindings={},
     )
 

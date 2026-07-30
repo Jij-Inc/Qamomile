@@ -701,9 +701,25 @@ def test_inverse_of_patterned_opaque_oracle_stays_controlled() -> None:
         for operation in outer_inverse.implementation_block.operations
         if isinstance(operation, InvokeOperation)
     ]
-    assert invoke.transform is CallTransform.CONTROLLED
+    assert invoke.transform is CallTransform.CONTROLLED_INVERSE
     assert invoke.control_value == 2
-    assert invoke.target.name == "inverse_control_value_oracle_inv"
+    assert invoke.target.name == "inverse_control_value_oracle"
+
+    restored = deserialize(serialize(inverse_layer)).block
+    [restored_outer_inverse] = [
+        operation
+        for operation in restored.operations
+        if isinstance(operation, InverseBlockOperation)
+    ]
+    assert restored_outer_inverse.implementation_block is not None
+    [restored_invoke] = [
+        operation
+        for operation in restored_outer_inverse.implementation_block.operations
+        if isinstance(operation, InvokeOperation)
+    ]
+    assert restored_invoke.transform is CallTransform.CONTROLLED_INVERSE
+    assert restored_invoke.control_value == 2
+    assert restored_invoke.target == invoke.target
 
 
 def test_control_value_composes_with_existing_oracle_controls() -> None:
@@ -746,7 +762,29 @@ def test_control_value_composes_with_existing_oracle_controls() -> None:
         if isinstance(operation, InvokeOperation)
     ]
     assert invoke.num_control_qubits == 3
+    assert invoke.num_declared_control_qubits == 1
+    assert invoke.num_added_control_qubits == 2
     assert invoke.control_value == 0b110
+    assert invoke.definition is not None
+    assert invoke.definition.attrs["num_control_qubits"] == 1
+    assert invoke.definition.attrs["num_declared_control_qubits"] == 1
+    assert invoke.definition.attrs["num_added_control_qubits"] == 0
+
+    restored = deserialize(serialize(circuit)).block
+    [restored_invoke] = [
+        operation
+        for operation in restored.operations
+        if isinstance(operation, InvokeOperation)
+    ]
+    assert restored_invoke.target == invoke.target
+    assert restored_invoke.num_control_qubits == 3
+    assert restored_invoke.num_declared_control_qubits == 1
+    assert restored_invoke.num_added_control_qubits == 2
+    assert restored_invoke.control_value == 0b110
+    assert restored_invoke.definition is not None
+    assert restored_invoke.definition.attrs["num_control_qubits"] == 1
+    assert restored_invoke.definition.attrs["num_declared_control_qubits"] == 1
+    assert restored_invoke.definition.attrs["num_added_control_qubits"] == 0
 
 
 def test_control_value_round_trips_through_qkernel_serialization() -> None:

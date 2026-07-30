@@ -70,6 +70,41 @@ def _root_array(array: ArrayValue) -> ArrayValue:
     return current
 
 
+def _scalar_quantum_broadcast_pair(
+    block: Block,
+    actuals: Sequence[ValueBase],
+) -> tuple[Value, ArrayValue] | None:
+    """Return the formal and actual values of a scalar quantum broadcast.
+
+    Controlled-U and SELECT support one scalar quantum template applied to
+    every element of one vector actual. The template remains scalar inside its
+    owned block; replacing it with the whole array would produce structurally
+    invalid intermediate operations rather than one per-element validation.
+
+    Args:
+        block (Block): Owned scalar-template block.
+        actuals (Sequence[ValueBase]): Call-site target and parameter values.
+
+    Returns:
+        tuple[Value, ArrayValue] | None: Scalar formal and vector actual for
+            the exact broadcast shape, otherwise ``None``.
+    """
+    formal_quantum = [
+        value
+        for value in block.input_values
+        if isinstance(value, ValueBase) and value.type.is_quantum()
+    ]
+    actual_quantum = [value for value in actuals if value.type.is_quantum()]
+    if (
+        len(formal_quantum) != 1
+        or not isinstance(formal_quantum[0], Value)
+        or len(actual_quantum) != 1
+        or not isinstance(actual_quantum[0], ArrayValue)
+    ):
+        return None
+    return formal_quantum[0], actual_quantum[0]
+
+
 class ArrayBoundsValidationPass(Pass[Block, Block]):
     """Reject reachable element accesses and views outside array bounds.
 
@@ -865,8 +900,23 @@ class ArrayBoundsValidationPass(Pass[Block, Block]):
             block_id = id(block)
             if block_id in owned_blocks_on_path:
                 continue
+            broadcast_pair = _scalar_quantum_broadcast_pair(block, actuals)
+            if broadcast_pair is not None:
+                _formal, actual = broadcast_pair
+                if actual.shape and constant_integer(actual.shape[0]) == 0:
+                    # No scalar-template lane is reachable.
+                    continue
             mapping: dict[str, ValueBase] = {}
             for formal, actual in pair_block_operands(block, actuals):
+                if (
+                    broadcast_pair is not None
+                    and formal.uuid == broadcast_pair[0].uuid
+                    and actual.uuid == broadcast_pair[1].uuid
+                ):
+                    # Keep the owned block's scalar SSA chain scalar. The
+                    # vector actual was already validated as the owning
+                    # operation's direct input.
+                    continue
                 mapping[formal.uuid] = actual
                 if isinstance(formal, ArrayValue) and isinstance(actual, ArrayValue):
                     mapping.update(

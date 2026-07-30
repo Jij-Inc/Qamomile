@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
+from numbers import Real
 from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation.gate import GateOperationType
@@ -14,6 +16,31 @@ from qamomile.circuit.transpiler.passes.emit_support.gate_emission import (
 
 if TYPE_CHECKING:
     from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
+
+
+def is_identity_phase_angle(angle: Any) -> bool:
+    """Return whether a concrete angle is exactly zero modulo two pi.
+
+    The test intentionally uses no tolerance so a tiny but nonzero phase is
+    never discarded. Runtime parameter expressions remain non-identity until
+    an engine resolves them to a concrete number.
+
+    Args:
+        angle (Any): Resolved numeric angle or engine parameter expression.
+
+    Returns:
+        bool: Whether ``angle`` is a finite real number exactly congruent to
+        zero modulo ``2 * pi``.
+    """
+    if isinstance(angle, bool) or not isinstance(angle, Real):
+        return False
+    numeric = float(angle)
+    return math.isfinite(numeric) and math.isclose(
+        math.fmod(numeric, math.tau),
+        0.0,
+        rel_tol=0.0,
+        abs_tol=0.0,
+    )
 
 
 def _require_global_phase_hook(
@@ -122,6 +149,9 @@ def emit_controlled_global_phase(
             provides neither a native primitive nor the shared clean-ancilla
             decomposition.
     """
+    if is_identity_phase_angle(angle):
+        return
+
     num_controls = len(control_indices)
     if num_controls == 0:
         emit_resolved_global_phase(emit_pass, circuit, angle)

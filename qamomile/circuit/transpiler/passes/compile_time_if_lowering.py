@@ -26,10 +26,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CondOp,
     NotOp,
 )
-from qamomile.circuit.ir.operation.callable import (
-    CallTransform,
-    InvokeOperation,
-)
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
@@ -602,8 +599,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 op = self._lower_controlled_block(op, concrete_values)
 
             elif isinstance(op, InvokeOperation) and (
-                op.transform is CallTransform.CONTROLLED
-                or self._under_controlled_unitary
+                op.transform.is_controlled or self._under_controlled_unitary
             ):
                 # A boxed callable reached under structural control also owns
                 # fresh-namespace bodies. Lower every body that controlled

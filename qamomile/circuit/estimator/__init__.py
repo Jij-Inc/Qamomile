@@ -1,10 +1,10 @@
 """Algorithmic symbolic resource estimation for Qamomile circuits.
 
-The default ``portable`` basis recursively expands coherent controls through
-Qamomile's backend-neutral fallback, including reusable clean ancillas and
-body-wide shared control ladders when concrete structure permits them.
-``logical`` retains the former abstract one-source-operation view, and
-``clifford_t`` reports the supported synthesis model. The physical
+The default logical basis uses the clean-ancilla Toffoli control-decomposition
+model, including reusable clean ancillas and body-wide shared control ladders
+when concrete structure permits them. The abstract control model represents
+each controlled source primitive as one logical operation, while the
+``clifford_t`` basis reports the supported synthesis model. The physical
 (surface-code) conversion in :mod:`qamomile.circuit.estimator.physical`
 remains experimental and intentionally is not re-exported here, keeping
 algorithmic estimation and physical assumptions clearly separated.
@@ -13,7 +13,9 @@ retains both the complete critical path and per-operation-class layers.
 """
 
 from qamomile.circuit.estimator._metrics import (
+    ApproximationStatus,
     CallResources,
+    ControlDecomposition,
     DepthResources,
     EstimateQuality,
     GateBasis,
@@ -25,27 +27,27 @@ from qamomile.circuit.estimator._metrics import (
     WidthResources,
 )
 from qamomile.circuit.estimator.resource_estimator import (
-    OpaqueCallContext,
+    OpaqueCostContext,
     ResourceEstimate,
     ResourceEstimator,
-    ResourceEstimatorConfig,
     UnknownResourcePolicy,
     estimate_resources,
 )
 
 __all__ = [
+    "ApproximationStatus",
     "CallResources",
+    "ControlDecomposition",
     "DepthResources",
     "EstimateQuality",
     "GateBasis",
     "GateResources",
     "MeasurementResources",
-    "OpaqueCallContext",
+    "OpaqueCostContext",
     "ResetResources",
     "ResourceAssumption",
     "ResourceEstimate",
     "ResourceEstimator",
-    "ResourceEstimatorConfig",
     "ResourceTraceNode",
     "UnknownResourcePolicy",
     "WidthResources",

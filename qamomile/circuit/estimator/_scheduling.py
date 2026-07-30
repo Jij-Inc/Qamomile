@@ -13,6 +13,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 import sympy as sp
+from sympy.logic.boolalg import Boolean
 
 from qamomile.circuit.estimator._metrics import (
     _ONE,
@@ -25,6 +26,7 @@ from qamomile.circuit.estimator._metrics import (
     _and_conditions,
     _boolean_condition,
     _conditional_depth,
+    _ConditionIndicator,
     _expr,
     _is_concrete_integer,
     _is_structurally_nonnegative,
@@ -43,7 +45,7 @@ from qamomile.circuit.estimator._resolver import (
 )
 from qamomile.circuit.ir._resource_contract import quantum_operand_widths
 from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.operation.callable import CallTransform, InvokeOperation
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     ReturnQuantumArrayElementOperation,
     StoreArrayElementOperation,
@@ -202,7 +204,7 @@ def _specialize_dependency_expression(
         return expression
     return cast(
         ResourceExpr,
-        expression.subs(substitutions, simultaneous=True).doit(),
+        expression.subs(list(substitutions.items()), simultaneous=True).doit(),
     )
 
 
@@ -596,6 +598,90 @@ def _map_body_dependency_keys(
     return frozenset(mapped)
 
 
+def _map_body_dependency_completion(
+    block: Block,
+    body_estimate: ResourceEstimate,
+    actual_operands: Sequence[ValueBase],
+    caller_results: Sequence[ValueBase],
+    resolver: ExprResolver,
+    *,
+    scalar_values: Mapping[str, sp.Expr] | None = None,
+    used_names: set[str] | None = None,
+) -> dict[WireKey, ResourceExpr] | None:
+    """Translate per-wire body completion onto caller-scoped wire keys.
+
+    Args:
+        block (Block): Evaluated callable implementation.
+        body_estimate (ResourceEstimate): Body-scoped estimate carrying
+            per-wire dependency completion depths.
+        actual_operands (Sequence[ValueBase]): Caller operands aligned with
+            the block inputs.
+        caller_results (Sequence[ValueBase]): Caller results aligned with the
+            block outputs.
+        resolver (ExprResolver): Caller-side value resolver.
+        scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
+            values. Defaults to ``None``.
+        used_names (set[str] | None): Optional set updated with used input
+            names. Defaults to ``None``.
+
+    Returns:
+        dict[WireKey, ResourceExpr] | None: Caller-scoped completion depths,
+        or ``None`` when the body did not provide them.
+    """
+    completion = body_estimate._dependency_completion
+    if completion is None:
+        return None
+    mapped: dict[WireKey, ResourceExpr] = {}
+
+    def map_value(source: Value, actual: Value) -> None:
+        """Map all completion depths owned by one body value.
+
+        Args:
+            source (Value): Body-side quantum value.
+            actual (Value): Corresponding caller-side quantum value.
+        """
+        source_owner = _quantum_allocation_owner(source)
+        for key, depth in completion.items():
+            if key[0] != source_owner:
+                continue
+            caller_keys = _map_value_dependency_keys(
+                source,
+                actual,
+                frozenset((key,)),
+                resolver,
+                scalar_values=scalar_values,
+                used_names=used_names,
+            )
+            for caller_key in caller_keys:
+                mapped[caller_key] = _resource_max(
+                    mapped.get(caller_key, _ZERO),
+                    depth,
+                )
+
+    for formal, actual in pair_block_operands(block, actual_operands):
+        if (
+            isinstance(formal, Value)
+            and isinstance(actual, Value)
+            and formal.type.is_quantum()
+            and actual.type.is_quantum()
+        ):
+            map_value(formal, actual)
+    if len(block.output_values) == len(caller_results):
+        for output, result in zip(
+            block.output_values,
+            caller_results,
+            strict=True,
+        ):
+            if (
+                isinstance(output, Value)
+                and isinstance(result, Value)
+                and output.type.is_quantum()
+                and result.type.is_quantum()
+            ):
+                map_value(output, result)
+    return mapped
+
+
 def _wire_keys_for_values(
     values: Sequence[Value],
     resolver: ExprResolver,
@@ -727,15 +813,48 @@ def _with_aggregate_boundary_depth_metadata(
         "latency to multiple touched wires",
         source=source,
     )
-    condition = (
-        _resource_activity_condition(estimate.depth.depth)
-        if active_when is None
-        else active_when
-    )
+    mismatch_condition = _aggregate_completion_mismatch(dependency_estimate)
+    if mismatch_condition is sp.false:
+        return estimate
+    if mismatch_condition is None:
+        condition = _resource_activity_condition(estimate.depth.depth)
+    else:
+        condition = mismatch_condition
+    if active_when is not None:
+        condition = _and_conditions(condition, active_when)
     return estimate._with_metadata(
         assumptions=(assumption,),
         quality=EstimateQuality.UPPER_BOUND,
         active_when=condition,
+    )
+
+
+def _aggregate_completion_mismatch(
+    estimate: ResourceEstimate,
+) -> Boolean | None:
+    """Return when scalar call latency overstates a visible wire completion.
+
+    Args:
+        estimate (ResourceEstimate): Estimate carrying per-wire completion.
+
+    Returns:
+        Boolean | None: Exact symbolic mismatch predicate, or ``None`` when
+        caller-visible completion depths are unavailable.
+    """
+    completion = estimate._dependency_completion
+    if completion is None:
+        return None
+    aggregate = estimate.depth.depth
+    return _boolean_condition(
+        sp.Or(
+            *(
+                sp.And(
+                    _resource_activity_condition(depth),
+                    _resource_activity_condition(cast(ResourceExpr, aggregate - depth)),
+                )
+                for depth in completion.values()
+            )
+        )
     )
 
 
@@ -745,8 +864,9 @@ def _with_body_boundary_depth_metadata(
     *,
     source: str,
     zero_controls: ResourceExpr | int = 0,
+    scalar_broadcast: ResourceExpr | int = 1,
 ) -> ResourceEstimate:
-    """Classify aggregate call depth and open-control exit latency.
+    """Classify conservative completion at a callable boundary.
 
     Args:
         estimate (ResourceEstimate): Caller-scoped body estimate.
@@ -754,6 +874,8 @@ def _with_body_boundary_depth_metadata(
         source (str): Callable name for the modeling assumption.
         zero_controls (ResourceExpr | int): Open-control X brackets surrounding
             the body. Defaults to zero.
+        scalar_broadcast (ResourceExpr | int): Number of actual target
+            elements receiving one scalar body. Defaults to one.
 
     Returns:
         ResourceEstimate: Estimate with conservative boundary metadata.
@@ -781,6 +903,21 @@ def _with_body_boundary_depth_metadata(
             assumptions=(assumption,),
             quality=EstimateQuality.UPPER_BOUND,
             active_when=bracket_condition,
+        )
+    broadcast_condition = _and_conditions(
+        sp.Gt(_expr(scalar_broadcast), _ONE),
+        _resource_activity_condition(estimate.depth.depth),
+    )
+    if broadcast_condition is not sp.false:
+        assumption = ResourceAssumption(
+            "scalar-to-vector broadcast uses aggregate call latency for each "
+            "target element's completion",
+            source=source,
+        )
+        estimate = estimate._with_metadata(
+            assumptions=(assumption,),
+            quality=EstimateQuality.UPPER_BOUND,
+            active_when=broadcast_condition,
         )
     return estimate
 
@@ -1296,12 +1433,33 @@ def _symbolic_disjoint_loop_depth(
     )
 
 
+def _conditional_completion(
+    active: ResourceExpr,
+    inactive: ResourceExpr,
+    condition: Boolean,
+) -> ResourceExpr:
+    """Select a completion depth without expanding a Boolean to ``ITE``.
+
+    Args:
+        active (ResourceExpr): Completion when the operation executes.
+        inactive (ResourceExpr): Previous completion when it does not.
+        condition (Boolean): Symbolic operation-activity predicate.
+
+    Returns:
+        ResourceExpr: Binder-safe conditional completion expression.
+    """
+    return cast(
+        ResourceExpr,
+        inactive + _ConditionIndicator(condition) * (active - inactive),
+    )
+
+
 def _dependency_depth(
     scheduled: Sequence[tuple[Operation, ResourceEstimate]],
     wire_footprints: Sequence[_WireFootprint | None],
     *,
     measurement_derived: set[str] | None = None,
-) -> DepthResources:
+) -> tuple[DepthResources, dict[WireKey, ResourceExpr]]:
     """Schedule operation summaries by wire dependencies and hybrid barriers.
 
     Args:
@@ -1316,7 +1474,9 @@ def _dependency_depth(
             global ordering barriers. Defaults to ``None``.
 
     Returns:
-        DepthResources: Critical-path depth for every tracked gate family.
+        tuple[DepthResources, dict[WireKey, ResourceExpr]]: Critical-path
+        depths and caller-visible completion time of each touched wire for the
+        total-depth field.
 
     Raises:
         AssertionError: If a footprint is missing or not aligned with a
@@ -1401,16 +1561,24 @@ def _dependency_depth(
                 barrier_availability[field] = (
                     finish
                     if operation_active is sp.true
-                    else _piecewise(finish, previous_barrier, operation_active)
+                    else _conditional_completion(
+                        finish,
+                        previous_barrier,
+                        operation_active,
+                    )
                 )
             for key in touched:
                 previous = wire_depth.get(key, _ZERO)
                 wire_depth[key] = (
                     finish
                     if operation_active is sp.true
-                    else _piecewise(finish, previous, operation_active)
+                    else _conditional_completion(
+                        finish,
+                        previous,
+                        operation_active,
+                    )
                 )
-    return DepthResources(**peaks)
+    return DepthResources(**peaks), dict(availability["depth"])
 
 
 def _block_input_allocations(
@@ -1971,10 +2139,7 @@ def _invoke_quantum_output_sizes(
         owner and whether the positional mapping was complete.
     """
     sources: list[tuple[ValueBase, ExprResolver]] = []
-    if (
-        operation.transform is CallTransform.CONTROLLED
-        and not body_implements_transform
-    ):
+    if operation.transform.is_controlled and not body_implements_transform:
         control_count = operation.num_control_qubits
         sources.extend(
             (operand, caller_resolver) for operand in operation.operands[:control_count]

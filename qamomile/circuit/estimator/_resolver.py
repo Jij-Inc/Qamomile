@@ -307,7 +307,7 @@ class ExprResolver:
 
         actual_operands = call_op.operands
         if (
-            getattr(call_op, "transform", None) is CallTransform.CONTROLLED
+            getattr(call_op, "transform", CallTransform.DIRECT).is_controlled
             and not body_implements_transform
         ):
             actual_operands = actual_operands[call_op.num_control_qubits :]

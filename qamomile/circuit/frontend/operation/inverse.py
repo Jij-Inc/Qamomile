@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 from qamomile.circuit.frontend.handle import Handle
 from qamomile.circuit.frontend.handle.array import ArrayBase, VectorView
 from qamomile.circuit.frontend.operation.control import (
+    ControlledGate,
     _control_callable_metadata,
     _qkernel_for_callable,
 )
@@ -92,6 +93,8 @@ from qamomile.circuit.ir.value_mapping import ValueSubstitutor
 
 if TYPE_CHECKING:
     from inspect import BoundArguments
+
+    from qamomile.circuit.frontend.oracle import Oracle, TransformedOracle
 
 
 _SELF_INVERSE_GATES: frozenset[GateOperationType] = frozenset(
@@ -967,12 +970,12 @@ class _BlockInverter:
             for param in op.parameters
         ]
 
-        if op.transform is CallTransform.INVERSE:
+        if op.transform.is_inverse:
             direct_op = InvokeOperation(
                 operands=[*current_qubits, *mapped_params],
                 results=new_results,
                 target=op.target,
-                transform=CallTransform.DIRECT,
+                transform=op.transform.inverted(),
                 attrs=dict(op.attrs),
                 definition=op.definition,
             )
@@ -987,17 +990,15 @@ class _BlockInverter:
         target = op.target
         body = op.body
         opaque_cost = op.definition.opaque_cost if op.definition is not None else None
-        if op.transform is CallTransform.CONTROLLED:
-            transform = CallTransform.CONTROLLED
-        else:
-            transform = CallTransform.INVERSE
+        transform = op.transform.inverted()
 
         gate_type_name = str(attrs.get("gate_type", "CUSTOM"))
         source_block = None
+        preserve_definition = False
 
         body_ref = op.body_ref
         if body_ref is not None and body_ref.kind == "static_binding":
-            if op.transform is CallTransform.CONTROLLED:
+            if op.transform.is_controlled:
                 raise NotImplementedError(
                     "inverse() cannot represent the inverse of a controlled "
                     "deferred static-binding invocation directly. Control the "
@@ -1032,7 +1033,7 @@ class _BlockInverter:
             body = iqft.block
             transform = (
                 CallTransform.CONTROLLED
-                if op.transform is CallTransform.CONTROLLED
+                if op.transform.is_controlled
                 else CallTransform.DIRECT
             )
         elif gate_type_name == CompositeGateType.IQFT.name:
@@ -1048,7 +1049,7 @@ class _BlockInverter:
             body = qft.block
             transform = (
                 CallTransform.CONTROLLED
-                if op.transform is CallTransform.CONTROLLED
+                if op.transform.is_controlled
                 else CallTransform.DIRECT
             )
         elif op.body is not None:
@@ -1057,8 +1058,10 @@ class _BlockInverter:
             opaque_cost = None
             attrs["gate_type"] = CompositeGateType.CUSTOM.name
             attrs["custom_name"] = f"{op.name}_inverse"
-        elif attrs.get("kind") in {"composite", "oracle"}:
-            if attrs.get("kind") == "composite" and gate_type_name not in {
+        elif attrs.get("kind") == "oracle":
+            preserve_definition = True
+        elif attrs.get("kind") == "composite":
+            if gate_type_name not in {
                 CompositeGateType.CUSTOM.name,
                 "",
             }:
@@ -1099,13 +1102,10 @@ class _BlockInverter:
         else:
             policy = op.default_policy if body is not None else CallPolicy.PRESERVE_BOX
             attrs["default_policy"] = policy.name
-            inverse_op = InvokeOperation(
-                operands=[*current_qubits, *mapped_params],
-                results=new_results,
-                target=target,
-                transform=transform,
-                attrs=attrs,
-                definition=CallableDef(
+            definition = (
+                op.definition
+                if preserve_definition
+                else CallableDef(
                     ref=target,
                     signature=(
                         signature_from_block(body)
@@ -1119,7 +1119,15 @@ class _BlockInverter:
                     opaque_cost=opaque_cost,
                     default_policy=policy,
                     attrs=attrs,
-                ),
+                )
+            )
+            inverse_op = InvokeOperation(
+                operands=[*current_qubits, *mapped_params],
+                results=new_results,
+                target=target,
+                transform=transform,
+                attrs=attrs,
+                definition=definition,
             )
 
         for operand, result in zip(op.control_qubits + op.target_qubits, new_results):
@@ -2636,7 +2644,9 @@ def _inverse_native_gate_target(target: Any) -> Any | None:
     return None
 
 
-def inverse(target: QKernelLike | Callable[..., Any]) -> Any:
+def inverse(
+    target: Oracle | TransformedOracle | QKernelLike | Callable[..., Any],
+) -> Any:
     """Create an inverse operation wrapper.
 
     Native Qamomile gate functions are first synthesized into tiny
@@ -2644,10 +2654,15 @@ def inverse(target: QKernelLike | Callable[..., Any]) -> Any:
     user-defined kernels. Qkernel-like composite gate callables created by
     ``qmc.composite_gate`` reuse their wrapped qkernel body. Known QFT/IQFT
     functions map directly to their counterpart so backend-native composite
-    emission remains available.
+    emission remains available. Opaque Oracles retain their original
+    definition and cost boundary while the call records an inverse transform;
+    the result can be passed directly to ``qmc.control``. Inverting an already
+    controlled Oracle produces the same transformed invocation as controlling
+    its inverse.
 
     Args:
-        target (QKernelLike | Callable[..., Any]): Native gate function,
+        target (Oracle | TransformedOracle | QKernelLike | Callable[..., Any]):
+            Opaque Oracle, transformed Oracle, native gate function,
             qkernel-like object, or supported stdlib function to invert.
 
     Returns:
@@ -2680,6 +2695,16 @@ def inverse(target: QKernelLike | Callable[..., Any]) -> Any:
         ...     q = qmc.inverse(layer)(q, angle)
         ...     return q
     """
+    from qamomile.circuit.frontend.oracle import Oracle, TransformedOracle
+
+    if isinstance(target, Oracle):
+        return TransformedOracle(target, inverse=True)
+    if isinstance(target, TransformedOracle):
+        return target.inverted()
+    if isinstance(target, ControlledGate):
+        return target._inverted()
+    if isinstance(target, InverseGate):
+        return target._qkernel
     if isinstance(target, _InverseComposite):
         return target.kernel
     known_inverse = _inverse_known_qft_target(target)

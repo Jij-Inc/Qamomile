@@ -134,12 +134,22 @@ class _DecodeContext:
 
     Holds the value-table dicts keyed by UUID so the recursive
     materializer can resolve cross-references depth-first.
+
+    Args:
+        value_table (list[dict[str, Any]]): Serialized value definitions.
+        callable_table (list[dict[str, Any]] | None): Serialized callable
+            definitions. Defaults to an empty registry.
+        opaque_cost_decoder (Callable[[Any], Any] | None): Optional outer-layer
+            adapter that reconstructs an opaque callable cost from its IR
+            payload. Defaults to identity conversion.
     """
 
     def __init__(
         self,
         value_table: list[dict[str, Any]],
         callable_table: list[dict[str, Any]] | None = None,
+        *,
+        opaque_cost_decoder: Callable[[Any], Any] | None = None,
     ) -> None:
         """Initialize a decode context.
 
@@ -149,6 +159,9 @@ class _DecodeContext:
                 ``uuid`` field; duplicates are an error.
             callable_table (list[dict[str, Any]] | None): Callable definitions
                 keyed by module-local IDs. Defaults to an empty registry.
+            opaque_cost_decoder (Callable[[Any], Any] | None): Optional
+                outer-layer adapter for opaque callable cost payloads. Defaults
+                to ``None``, which preserves decoded payloads unchanged.
 
         Raises:
             ValueError: If a value-table dict lacks a ``uuid`` or if
@@ -170,6 +183,7 @@ class _DecodeContext:
         self._blocks: list[Block] = []
         self._definition_entries: dict[str, dict[str, Any]] = {}
         self._definitions: dict[str, CallableDef] = {}
+        self._opaque_cost_decoder = opaque_cost_decoder
         for entry in callable_table:
             if not isinstance(entry, dict):
                 raise ValueError("callable_table entries must be dicts")
@@ -187,6 +201,20 @@ class _DecodeContext:
             ref = _decode_callable_ref(definition_payload.get("ref"))
             self._definition_entries[definition_id] = definition_payload
             self._definitions[definition_id] = CallableDef(ref=ref)
+
+    def decode_opaque_cost(self, payload: Any) -> Any:
+        """Reconstruct one opaque callable cost from an IR-owned payload.
+
+        Args:
+            payload (Any): Decoded serializer-friendly opaque-cost payload.
+
+        Returns:
+            Any: Cost value produced by the configured adapter, or ``payload``
+            unchanged when no adapter is configured.
+        """
+        if self._opaque_cost_decoder is None:
+            return payload
+        return self._opaque_cost_decoder(payload)
 
     def register_block(self, block: Block) -> Block:
         """Register a decoded block for post-link metadata refresh.
@@ -2250,6 +2278,10 @@ def _decode_callable_def(d: Any, ctx: _DecodeContext) -> CallableDef:
         attrs = {}
     if not isinstance(attrs, dict):
         raise ValueError("CallableDef attrs must decode to a dict")
+    raw_opaque_cost = d.get("opaque_cost")
+    opaque_cost = None
+    if raw_opaque_cost is not None:
+        opaque_cost = ctx.decode_opaque_cost(_decode_payload(raw_opaque_cost))
     raw_policy = d.get("default_policy", CallPolicy.INLINE.name)
     return CallableDef(
         ref=_decode_callable_ref(d.get("ref")),
@@ -2260,7 +2292,7 @@ def _decode_callable_def(d: Any, ctx: _DecodeContext) -> CallableDef:
             _decode_callable_implementation(impl, ctx)
             for impl in d.get("implementations", [])
         ],
-        opaque_cost=None,
+        opaque_cost=opaque_cost,
         default_policy=_enum_by_name(CallPolicy, raw_policy, "CallPolicy"),
         attrs=attrs,
     )

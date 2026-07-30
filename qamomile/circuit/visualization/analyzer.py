@@ -24,7 +24,6 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
 )
 from qamomile.circuit.ir.operation.callable import (
     CallPolicy,
-    CallTransform,
     InvokeOperation,
 )
 from qamomile.circuit.ir.operation.cast import CastOperation
@@ -571,10 +570,11 @@ class CircuitAnalyzer:
         the same logical_id, so we only need logical_id-based tracking.
 
         Args:
-            graph: Computation block.
+            graph (Block): Computation block.
 
         Returns:
-            Tuple of (qubit_map, qubit_names, num_qubits).
+            tuple[dict[str, int], dict[int, str], int]: Logical-ID-to-wire
+            mapping, display names by wire index, and total wire count.
         """
         qubit_map: dict[str, int] = {}
         qubit_names: dict[int, str] = {}
@@ -833,7 +833,7 @@ class CircuitAnalyzer:
                         call_results = (
                             op.results
                             if body_implements_transform
-                            or op.transform is not CallTransform.CONTROLLED
+                            or not op.transform.is_controlled
                             else op.results[op.num_control_qubits :]
                         )
                         map_callable_outputs(
@@ -1572,7 +1572,7 @@ class CircuitAnalyzer:
             label = op.name.upper()
             box_width = self._estimate_block_label_box_width(label)
             control_indices: list[int] = []
-            if op.transform is CallTransform.CONTROLLED:
+            if op.transform.is_controlled:
                 for operand in op.control_qubits:
                     indices = self._resolve_operand_to_qubit_indices(
                         operand, qubit_map, logical_id_remap, param_values
@@ -1598,7 +1598,7 @@ class CircuitAnalyzer:
                         )
                         if indices is not None:
                             qubit_indices.extend(indices)
-            is_controlled = op.transform is CallTransform.CONTROLLED
+            is_controlled = op.transform.is_controlled
             control_pattern = self._control_pattern_for_resolved_wires(
                 op.control_value,
                 op.num_control_qubits,
@@ -1926,7 +1926,7 @@ class CircuitAnalyzer:
             block_value = op.effective_body()
             assert isinstance(block_value, Block)
             control_qubit_indices = []
-            if op.transform is CallTransform.CONTROLLED:
+            if op.transform.is_controlled:
                 control_value = op.control_value
                 expected_control_width = op.num_control_qubits
                 for operand in op.control_qubits:

@@ -34,6 +34,44 @@ class CallTransform(enum.Enum):
     DIRECT = "direct"
     INVERSE = "inverse"
     CONTROLLED = "controlled"
+    CONTROLLED_INVERSE = "controlled_inverse"
+
+    @property
+    def is_controlled(self) -> bool:
+        """Return whether the transform adds coherent controls.
+
+        Returns:
+            bool: Whether the invocation has a control prefix.
+        """
+        return self in {
+            CallTransform.CONTROLLED,
+            CallTransform.CONTROLLED_INVERSE,
+        }
+
+    @property
+    def is_inverse(self) -> bool:
+        """Return whether the transform requests inverse application.
+
+        Returns:
+            bool: Whether the callable is applied in reverse.
+        """
+        return self in {
+            CallTransform.INVERSE,
+            CallTransform.CONTROLLED_INVERSE,
+        }
+
+    def inverted(self) -> CallTransform:
+        """Toggle inverse application while preserving coherent control.
+
+        Returns:
+            CallTransform: Transform with the inverse component toggled.
+        """
+        return {
+            CallTransform.DIRECT: CallTransform.INVERSE,
+            CallTransform.INVERSE: CallTransform.DIRECT,
+            CallTransform.CONTROLLED: CallTransform.CONTROLLED_INVERSE,
+            CallTransform.CONTROLLED_INVERSE: CallTransform.CONTROLLED,
+        }[self]
 
 
 class CallPolicy(enum.Enum):
@@ -895,10 +933,11 @@ class InvokeOperation(Operation):
                 ``None``, in which case one is created from ``target``.
 
         Raises:
-            TypeError: If a controlled invocation's ``control_value`` is not
-                a Python ``int`` or ``None``.
+            TypeError: If a controlled invocation's ``control_value`` or an
+                Oracle control-partition field has an invalid Python type.
             ValueError: If ``control_value`` is used on a non-controlled call
-                or does not fit the controlled invocation's width.
+                or does not fit the controlled invocation's width, or if
+                Oracle invocation and definition control metadata disagree.
         """
         self.operands = cast(
             list[Value],
@@ -917,7 +956,7 @@ class InvokeOperation(Operation):
         self.attrs = dict(attrs) if attrs is not None else {}
         raw_control_value = self.attrs.pop("control_value", None)
         if raw_control_value is not None:
-            if self.transform is not CallTransform.CONTROLLED:
+            if not self.transform.is_controlled:
                 raise ValueError(
                     "control_value is only valid for a controlled invocation."
                 )
@@ -929,6 +968,95 @@ class InvokeOperation(Operation):
                 self.attrs["control_value"] = normalized_control_value
         self.definition = definition
         self._ensure_definition()
+        self._validate_oracle_control_partition()
+        self._validate_oracle_definition_control_partition()
+
+    def _validate_oracle_control_partition(self) -> None:
+        """Validate declared and added Oracle control metadata.
+
+        Oracle invocations must describe a nonnegative partition whose sum
+        equals the operation's complete local control width.
+
+        Raises:
+            TypeError: If a partition field is not a plain Python integer.
+            ValueError: If the invocation kind disagrees with its definition,
+                a partition field is negative, or the partition does not sum
+                to ``num_control_qubits``.
+        """
+        if self.attrs.get("kind") != "oracle":
+            return
+        if (
+            self.definition is not None
+            and self.definition.attrs.get("kind") != "oracle"
+        ):
+            raise ValueError("Oracle invocation kind disagrees with its definition.")
+        partition_keys = (
+            "num_declared_control_qubits",
+            "num_added_control_qubits",
+        )
+        present = tuple(key in self.attrs for key in partition_keys)
+        if not all(present):
+            raise ValueError(
+                "Oracle control metadata must provide both "
+                "num_declared_control_qubits and num_added_control_qubits."
+            )
+        total = self.num_control_qubits
+        raw_declared = self.attrs["num_declared_control_qubits"]
+        raw_added = self.attrs["num_added_control_qubits"]
+        for key, value in zip(
+            partition_keys,
+            (raw_declared, raw_added),
+            strict=True,
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{key} must be a plain Python int, got {value!r}.")
+            if value < 0:
+                raise ValueError(f"{key} must be nonnegative, got {value}.")
+        if raw_declared + raw_added != total:
+            raise ValueError(
+                "Oracle control metadata is inconsistent: "
+                f"declared ({raw_declared}) + added ({raw_added}) "
+                f"!= total ({total})."
+            )
+
+    def _validate_oracle_definition_control_partition(self) -> None:
+        """Validate an Oracle's base definition against its invocation.
+
+        The definition records the base ABI and therefore contains only the
+        controls declared by the Oracle. The invocation may prepend additional
+        controls introduced by a later transform.
+
+        Raises:
+            ValueError: If definition metadata is incomplete or disagrees with
+                the invocation's declared-control and target widths.
+        """
+        if self.attrs.get("kind") != "oracle" or self.definition is None:
+            return
+        definition_attrs = self.definition.attrs
+        partition_keys = (
+            "num_declared_control_qubits",
+            "num_added_control_qubits",
+        )
+        if not all(key in definition_attrs for key in partition_keys):
+            raise ValueError(
+                "Oracle definition control metadata must provide both "
+                "num_declared_control_qubits and num_added_control_qubits."
+            )
+        declared = self.num_declared_control_qubits
+        expected = {
+            "num_control_qubits": declared,
+            "num_declared_control_qubits": declared,
+            "num_added_control_qubits": 0,
+            "num_target_qubits": self.num_target_qubits,
+        }
+        for key, value in expected.items():
+            if definition_attrs.get(key) != value:
+                raise ValueError(
+                    f"Oracle definition attribute {key!r} must be {value!r} "
+                    "for the invocation's base ABI."
+                )
+        if definition_attrs.get("kind") != "oracle":
+            raise ValueError("Oracle invocation kind disagrees with its definition.")
 
     def _ensure_definition(self) -> None:
         """Ensure the invocation has a compiler-facing callable definition."""
@@ -1026,7 +1154,7 @@ class InvokeOperation(Operation):
         Returns:
             str: The callable name, optionally prefixed for transforms.
         """
-        if self.transform == CallTransform.INVERSE:
+        if self.transform.is_inverse:
             return f"{self.target.name}†"
         return self.target.name
 
@@ -1038,6 +1166,24 @@ class InvokeOperation(Operation):
             int: Control arity recorded in ``attrs``. Defaults to ``0``.
         """
         return int(self.attrs.get("num_control_qubits", 0))
+
+    @property
+    def num_declared_control_qubits(self) -> int:
+        """Return controls included in an opaque Oracle's base definition.
+
+        Returns:
+            int: Definition-declared control arity.
+        """
+        return int(self.attrs.get("num_declared_control_qubits", 0))
+
+    @property
+    def num_added_control_qubits(self) -> int:
+        """Return controls introduced by a frontend control transform.
+
+        Returns:
+            int: Added control arity, or zero for direct calls.
+        """
+        return int(self.attrs.get("num_added_control_qubits", 0))
 
     @property
     def control_value(self) -> int | None:

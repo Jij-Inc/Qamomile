@@ -21,7 +21,12 @@ from qamomile.circuit.frontend.operation.control import ControlledGate, control
 from qamomile.circuit.frontend.tracer import trace
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import GlobalPhaseOperation
-from qamomile.circuit.ir.operation.callable import CallTransform, InvokeOperation
+from qamomile.circuit.ir.operation.callable import (
+    CallableDef,
+    CallableRef,
+    CallTransform,
+    InvokeOperation,
+)
 from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.operation import OperationKind
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
@@ -1381,6 +1386,28 @@ class TestControlledAcceptsBuiltinGate:
 class TestControlledOracle:
     """``control(Oracle)`` routes through controlled InvokeOperation."""
 
+    @pytest.mark.parametrize("num_control_qubits", [True, 1.0])
+    def test_oracle_rejects_non_integer_declared_control_count(
+        self,
+        num_control_qubits: object,
+    ) -> None:
+        """Oracle definitions require a plain Python integer control count."""
+        with pytest.raises(TypeError, match="plain Python int"):
+            qmc.opaque(
+                "invalid_control_count",
+                num_qubits=1,
+                num_control_qubits=num_control_qubits,  # type: ignore[arg-type]
+            )
+
+    def test_oracle_rejects_negative_declared_control_count(self) -> None:
+        """Oracle definitions reject a negative declared control count."""
+        with pytest.raises(ValueError, match="nonnegative"):
+            qmc.opaque(
+                "negative_control_count",
+                num_qubits=1,
+                num_control_qubits=-1,
+            )
+
     def test_controlled_oracle_emits_controlled_invoke(self):
         """control(Oracle) emits a controlled bodyless oracle invocation."""
         cost = qmc.ResourceEstimate(
@@ -1404,10 +1431,90 @@ class TestControlledOracle:
         assert op.transform is CallTransform.CONTROLLED
         assert op.attrs["kind"] == "oracle"
         assert op.num_control_qubits == 1
+        assert op.num_declared_control_qubits == 0
+        assert op.num_added_control_qubits == 1
         assert op.num_target_qubits == 1
         assert op.body is None
         assert op.definition is not None
         assert op.definition.opaque_cost is cost
+        assert op.definition.attrs["num_control_qubits"] == 0
+        assert op.definition.attrs["num_declared_control_qubits"] == 0
+        assert op.definition.attrs["num_added_control_qubits"] == 0
+
+    def test_controlled_bodyless_oracle_fails_emission(
+        self,
+        qiskit_transpiler: "QiskitTranspiler",
+    ) -> None:
+        """Control batching never erases an Oracle without an implementation."""
+        oracle = qmc.opaque("missing_controlled_implementation", num_qubits=1)
+
+        @qmc.qkernel
+        def body(target: qmc.Qubit) -> qmc.Qubit:
+            """Invoke the bodyless Oracle under an outer controlled kernel."""
+            (target,) = oracle(target)
+            return target
+
+        @qmc.qkernel
+        def circuit() -> tuple[qmc.Bit, qmc.Bit, qmc.Bit]:
+            """Apply the unavailable body with two coherent controls."""
+            control_0 = qmc.qubit("control_0")
+            control_1 = qmc.qubit("control_1")
+            target = qmc.qubit("target")
+            control_0, control_1, target = qmc.control(
+                body,
+                num_controls=2,
+            )(control_0, control_1, target)
+            return (
+                qmc.measure(control_0),
+                qmc.measure(control_1),
+                qmc.measure(target),
+            )
+
+        with pytest.raises(EmitError, match="without an implementation"):
+            qiskit_transpiler.transpile(circuit)
+
+    def test_oracle_control_partition_requires_both_fields(self):
+        """Oracle IR rejects a half-specified declared/added partition."""
+        ref = CallableRef(namespace="user.oracle", name="partial_partition")
+        attrs = {
+            "kind": "oracle",
+            "num_control_qubits": 1,
+            "num_declared_control_qubits": 0,
+            "num_target_qubits": 1,
+        }
+
+        with pytest.raises(ValueError, match="must provide both"):
+            InvokeOperation(
+                target=ref,
+                transform=CallTransform.CONTROLLED,
+                attrs=attrs,
+                definition=CallableDef(ref=ref, attrs=attrs),
+            )
+
+    def test_oracle_definition_partition_must_describe_base_abi(self):
+        """Oracle IR rejects definitions that include added call-site controls."""
+        ref = CallableRef(namespace="user.oracle", name="mismatched_partition")
+        attrs = {
+            "kind": "oracle",
+            "num_control_qubits": 2,
+            "num_declared_control_qubits": 1,
+            "num_added_control_qubits": 1,
+            "num_target_qubits": 1,
+        }
+        definition_attrs = {
+            **attrs,
+            "num_control_qubits": 2,
+            "num_declared_control_qubits": 1,
+            "num_added_control_qubits": 1,
+        }
+
+        with pytest.raises(ValueError, match="base ABI"):
+            InvokeOperation(
+                target=ref,
+                transform=CallTransform.CONTROLLED,
+                attrs=attrs,
+                definition=CallableDef(ref=ref, attrs=definition_attrs),
+            )
 
     def test_controlled_oracle_rejects_symbolic_control_count(self):
         """control(Oracle) rejects symbolic control counts for now."""
@@ -3642,6 +3749,97 @@ class TestControlledVectorClassicalParameter:
 
 class TestControlledBroadcastWithVectorFloatParameter:
     """Controlled custom kernels that broadcast over sliced vector targets."""
+
+    def test_qiskit_empty_open_control_broadcast_emits_no_brackets(self):
+        """An empty broadcast is an identity before open-control bracketing."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def scalar_body(target: qmc.Qubit) -> qmc.Qubit:
+            """Use private workspace before updating one scalar target."""
+            workspace = qmc.qubit("workspace")
+            workspace = qmc.h(workspace)
+            return qmc.x(target)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            """Broadcast an open-controlled workspace body over no targets."""
+            control = qmc.qubit("control")
+            targets = qmc.qubit_array(0, "targets")
+            control, targets = qmc.control(scalar_body, control_value=0)(
+                control,
+                targets,
+            )
+            return qmc.measure(control)
+
+        executable = QiskitTranspiler().transpile(circuit)
+
+        assert dict(executable.quantum_circuit.count_ops()) == {"measure": 1}
+
+    def test_qiskit_inverse_scalar_body_broadcasts_over_vector(self):
+        """A nested inverse keeps its scalar template during vector broadcast."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def scalar_x(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply one scalar X gate."""
+            return qmc.x(target)
+
+        @qmc.qkernel
+        def inverse_body(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply the inverse scalar body."""
+            return qmc.inverse(scalar_x)(target)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            """Broadcast the controlled inverse over two vector elements."""
+            qubits = qmc.qubit_array(3, "qubits")
+            qubits[0] = qmc.x(qubits[0])
+            control, targets = qmc.control(inverse_body)(
+                qubits[0],
+                qubits[1:3],
+            )
+            qubits[0] = control
+            qubits[1:3] = targets
+            return qmc.measure(qubits)
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(circuit)
+        result = executable.sample(transpiler.executor(), shots=128).result()
+
+        assert _counts_dict(result.results) == {(1, 1, 1): 128}
+
+    def test_qiskit_empty_inverse_scalar_broadcast_is_identity(self):
+        """A zero-lane inverse template is unreachable and emits no brackets."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def scalar_x(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply one scalar X gate."""
+            return qmc.x(target)
+
+        @qmc.qkernel
+        def inverse_body(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply the inverse scalar body."""
+            return qmc.inverse(scalar_x)(target)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            """Broadcast the controlled inverse over an empty vector."""
+            control = qmc.qubit("control")
+            targets = qmc.qubit_array(0, "targets")
+            control, targets = qmc.control(inverse_body, control_value=0)(
+                control,
+                targets,
+            )
+            return qmc.measure(control)
+
+        executable = QiskitTranspiler().transpile(circuit)
+
+        assert dict(executable.quantum_circuit.count_ops()) == {"measure": 1}
 
     @pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
     def test_broadcast_slice_sampling_runs(self, transpiler_factory):

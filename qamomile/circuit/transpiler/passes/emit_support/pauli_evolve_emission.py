@@ -11,6 +11,7 @@ the corresponding ``_emit_pauli_evolve`` method; calling
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -51,6 +52,25 @@ def _resolve_gamma(
         EmitError: If gamma cannot be represented as an angle.
     """
     return resolve_angle_value(emit_pass, op.gamma, bindings)
+
+
+def is_zero_evolution_time(gamma: Any) -> bool:
+    """Return whether a resolved evolution time is the numeric identity.
+
+    Backend parameter objects deliberately remain nonzero here: their runtime
+    value is unknown even if they support comparison with Python numbers.
+
+    Args:
+        gamma (Any): Concrete float or backend-native parameter expression.
+
+    Returns:
+        bool: ``True`` only for a concrete numeric zero.
+    """
+    return (
+        isinstance(gamma, (int, float))
+        and not isinstance(gamma, bool)
+        and math.isclose(float(gamma), 0.0, rel_tol=0.0, abs_tol=0.0)
+    )
 
 
 def _scale_gamma(gamma: Any, factor: float) -> Any:
@@ -109,6 +129,50 @@ def validate_hamiltonian_within_register(
             f"Hamiltonian acts on {num_h_qubits} qubits. "
             f"The Hamiltonian must not be larger than the register.",
             operation="PauliEvolveOp",
+        )
+
+
+def _map_pauli_evolve_results(
+    emit_pass: "StandardEmitPass",
+    op: PauliEvolveOp,
+    qubit_indices: list[int],
+    qubit_map: QubitMap,
+    bindings: dict[str, Any],
+) -> None:
+    """Map an evolved register to the unchanged physical input qubits.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        op (PauliEvolveOp): Evolution operation whose result is mapped.
+        qubit_indices (list[int]): Physical input qubits acted on by the
+            Hamiltonian.
+        qubit_map (QubitMap): Mutable semantic-to-physical mapping.
+        bindings (dict[str, Any]): Active emit-time bindings.
+
+    Returns:
+        None: ``qubit_map`` is updated in place.
+
+    Raises:
+        EmitError: If the evolved register's slice chain cannot be resolved.
+    """
+    result_array = op.evolved_qubits
+    assert isinstance(result_array, ArrayValue)
+    result_root, result_start, result_step = emit_pass._resolver.resolve_slice_chain(
+        result_array,
+        bindings,
+        operation="PauliEvolveOp",
+    )
+    for index, physical_index in enumerate(qubit_indices):
+        qubit_map.setdefault(
+            QubitAddress(result_array.uuid, index),
+            physical_index,
+        )
+        qubit_map.setdefault(
+            QubitAddress(
+                result_root.uuid,
+                result_start + result_step * index,
+            ),
+            physical_index,
         )
 
 
@@ -196,6 +260,16 @@ def emit_pauli_evolve(
                 operation="PauliEvolveOp",
             )
 
+    if is_zero_evolution_time(gamma):
+        _map_pauli_evolve_results(
+            emit_pass,
+            op,
+            qubit_indices,
+            qubit_map,
+            bindings,
+        )
+        return
+
     if constant.real:
         emit_resolved_global_phase(
             emit_pass,
@@ -261,19 +335,10 @@ def emit_pauli_evolve(
                 emit_pass._emitter.emit_s(circuit, qi)
             # Z and I: no basis change
 
-    # Map result array to same physical qubits. Resolve the result's
-    # own slice chain so downstream ``resolve_qubit_index_detailed``
-    # callers that walk to the root find the registered mapping, while
-    # direct lookups via the result array's own uuid also still work.
-    result_array = op.evolved_qubits
-    assert isinstance(result_array, ArrayValue)
-    result_root, result_start, result_step = emit_pass._resolver.resolve_slice_chain(
-        result_array, bindings, operation="PauliEvolveOp"
+    _map_pauli_evolve_results(
+        emit_pass,
+        op,
+        qubit_indices,
+        qubit_map,
+        bindings,
     )
-    for i, phys_idx in enumerate(qubit_indices):
-        direct_addr = QubitAddress(result_array.uuid, i)
-        if direct_addr not in qubit_map:
-            qubit_map[direct_addr] = phys_idx
-        root_addr = QubitAddress(result_root.uuid, result_start + result_step * i)
-        if root_addr not in qubit_map:
-            qubit_map[root_addr] = phys_idx

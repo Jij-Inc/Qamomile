@@ -1991,7 +1991,7 @@ def _implementation_from_proto(
 
 
 def _callable_definition_to_proto(value: dict[str, Any]) -> pb.CallableDefinition:
-    """Encode a callable definition without resource-estimation annotations.
+    """Encode a callable definition with an optional fixed opaque cost.
 
     Args:
         value (dict[str, Any]): Callable-definition graph record.
@@ -2015,6 +2015,8 @@ def _callable_definition_to_proto(value: dict[str, Any]) -> pb.CallableDefinitio
         _implementation_to_proto(item) for item in value["implementations"]
     )
     message.attrs.CopyFrom(_payload_to_proto(value["attrs"]))
+    if value.get("opaque_cost") is not None:
+        message.opaque_cost.CopyFrom(_payload_to_proto(value["opaque_cost"]))
     return message
 
 
@@ -2027,7 +2029,8 @@ def _callable_definition_from_proto(
         message (pb.CallableDefinition): Typed algorithm definition.
 
     Returns:
-        dict[str, Any]: Internal definition record with no ``opaque_cost``.
+        dict[str, Any]: Internal definition record with an optional fixed
+            ``opaque_cost`` payload.
 
     Raises:
         ValueError: If nested graph records are malformed.
@@ -2048,6 +2051,11 @@ def _callable_definition_from_proto(
         "implementations": [
             _implementation_from_proto(item) for item in message.implementations
         ],
+        "opaque_cost": (
+            _payload_from_proto(message.opaque_cost)
+            if message.HasField("opaque_cost")
+            else None
+        ),
         "default_policy": message.default_policy,
         "attrs": _payload_from_proto(message.attrs),
     }

@@ -88,7 +88,7 @@ def test_modmul_const_non_cyclic_estimates_its_executable_body() -> None:
 
 
 def test_modmul_const_body_growth_is_quadratic_at_fixed_window() -> None:
-    """Portable estimates retain body width and add fallback clean ancillas."""
+    """The clean-ancilla model retains body width and adds recipe ancillas."""
     cases = [(2, 2, 3), (3, 2, 5), (4, 2, 15)]
     normalized = []
     for width, multiplier, modulus in cases:
@@ -106,7 +106,11 @@ def test_modmul_const_body_growth_is_quadratic_at_fixed_window() -> None:
 
         estimate = mul.estimate_resources()
         allocated = 3 * width + 2 + 7
-        assert estimate.basis is qmc.GateBasis.PORTABLE
+        assert estimate.basis is qmc.GateBasis.LOGICAL
+        assert (
+            estimate.control_decomposition
+            is qmc.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
+        )
         assert estimate.width.allocated_qubits == allocated
         assert estimate.width.clean_ancilla_qubits == 2
         assert estimate.width.peak_qubits == allocated + 2

@@ -53,6 +53,8 @@ def __emit_oracle(
         "kind": "oracle",
         "gate_type": CompositeGateType.CUSTOM.name,
         "num_control_qubits": 0,
+        "num_declared_control_qubits": 0,
+        "num_added_control_qubits": 0,
         "num_target_qubits": 0,
         "custom_name": name,
     }

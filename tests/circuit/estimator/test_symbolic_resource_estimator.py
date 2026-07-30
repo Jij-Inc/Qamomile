@@ -74,6 +74,7 @@ def test_clifford_t_basis_lowers_body_gates_and_reports_quality() -> None:
     assert lowered.gates.t == 16
     assert lowered.gates.rotation == 0
     assert lowered.quality is qm.EstimateQuality.UPPER_BOUND
+    assert lowered.approximation is qm.ApproximationStatus.APPROXIMATE
 
 
 def test_estimation_derives_public_symbol_metadata_once(
@@ -218,14 +219,87 @@ def test_gate_basis_accepts_string_values() -> None:
     assert estimate.gates.total == 2
 
 
-@pytest.mark.parametrize("basis", ["surface_code", ""])
+def test_qkernel_wrapper_defers_precision_default_to_core(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The qkernel facade does not pin a second synthesis-precision default."""
+    estimate_resources = Mock(return_value=qm.ResourceEstimate())
+    monkeypatch.setattr(
+        resource_estimator_module,
+        "estimate_resources",
+        estimate_resources,
+    )
+
+    _basis_probe.estimate_resources()
+
+    assert "precision" not in estimate_resources.call_args.kwargs
+
+
+def test_unknown_resource_policy_accepts_string_values() -> None:
+    """All public estimator entry points normalize resource-policy strings."""
+    oracle = qm.opaque("string_policy_oracle", num_qubits=1)
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Invoke one bodyless Oracle whose resources are unknown."""
+        (target,) = oracle(qm.qubit("target"))
+        return target
+
+    estimator = qm.ResourceEstimator(unknown_policy="opaque_call")
+    estimates = (
+        estimator.estimate(circuit),
+        qm.estimate_resources(circuit, unknown_policy="opaque_call"),
+        circuit.estimate_resources(unknown_policy="opaque_call"),
+    )
+
+    assert estimator.config.unknown_policy is qm.UnknownResourcePolicy.OPAQUE_CALL
+    assert all(
+        estimate.calls.calls_by_name == {"string_policy_oracle": 1}
+        for estimate in estimates
+    )
+
+
+def test_control_decomposition_accepts_string_values() -> None:
+    """The control model accepts stable string identifiers."""
+    estimate = _basis_probe.estimate_resources(
+        control_decomposition="abstract",
+    )
+
+    assert estimate.control_decomposition is qm.ControlDecomposition.ABSTRACT
+
+
+@pytest.mark.parametrize("policy", ["ignore", ""])
+def test_unknown_resource_policy_rejects_unknown_strings(policy: str) -> None:
+    """Unknown policy identifiers report every supported stable value."""
+    with pytest.raises(
+        ValueError,
+        match="expected one of: error, opaque_call, zero_with_warning",
+    ):
+        _basis_probe.estimate_resources(unknown_policy=policy)
+
+
+@pytest.mark.parametrize("basis", ["unknown", "surface_code", ""])
 def test_gate_basis_rejects_unknown_string_values(basis: str) -> None:
     """Unknown and empty strings are not replaced by the default basis."""
     with pytest.raises(
         ValueError,
-        match="expected one of: portable, logical, clifford_t",
+        match="expected one of: logical, clifford_t",
     ):
         _basis_probe.estimate_resources(basis=basis)
+
+
+@pytest.mark.parametrize("decomposition", ["ancilla_free", ""])
+def test_control_decomposition_rejects_unknown_strings(
+    decomposition: str,
+) -> None:
+    """Unknown control recipes are rejected instead of using the default."""
+    with pytest.raises(
+        ValueError,
+        match="expected one of: abstract, clean_ancilla_toffoli",
+    ):
+        _basis_probe.estimate_resources(
+            control_decomposition=decomposition,
+        )
 
 
 def test_clifford_t_basis_lowers_controlled_toffoli_with_clean_ancilla() -> None:
@@ -261,6 +335,71 @@ def test_clifford_t_basis_lowers_controlled_toffoli_with_clean_ancilla() -> None
     assert estimate.depth.gate_depth == 45
     assert estimate.width.clean_ancilla_qubits == 1
     assert estimate.qubits == 5
+
+
+@pytest.mark.parametrize(
+    ("basis", "control_decomposition", "should_fail"),
+    [
+        pytest.param(
+            qm.GateBasis.LOGICAL,
+            qm.ControlDecomposition.ABSTRACT,
+            False,
+            id="logical-abstract",
+        ),
+        pytest.param(
+            qm.GateBasis.LOGICAL,
+            qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+            False,
+            id="logical-clean-ancilla",
+        ),
+        pytest.param(
+            qm.GateBasis.CLIFFORD_T,
+            qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+            False,
+            id="clifford-t-clean-ancilla",
+        ),
+        pytest.param(
+            qm.GateBasis.CLIFFORD_T,
+            qm.ControlDecomposition.ABSTRACT,
+            True,
+            id="clifford-t-abstract",
+        ),
+    ],
+)
+def test_gate_basis_and_control_decomposition_cross_product(
+    basis: qm.GateBasis,
+    control_decomposition: qm.ControlDecomposition,
+    should_fail: bool,
+) -> None:
+    """Basis and control axes compose except for an undecomposable abstract control."""
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Qubit, qm.Qubit]:
+        """Apply one controlled X."""
+        control = qm.qubit("control")
+        target = qm.qubit("target")
+        return qm.control(qm.x)(control, target)
+
+    if should_fail:
+        with pytest.raises(ValueError, match="cannot preserve a controlled primitive"):
+            circuit.estimate_resources(
+                basis=basis,
+                control_decomposition=control_decomposition,
+            )
+        return
+
+    estimate = circuit.estimate_resources(
+        basis=basis,
+        control_decomposition=control_decomposition,
+    )
+
+    assert estimate.basis is basis
+    assert estimate.control_decomposition is control_decomposition
+    assert estimate.gates.total == 1
+    assert estimate.gates.two_qubit == 1
+    assert estimate.gates.clifford == 1
+    assert estimate.width.clean_ancilla_qubits == 0
+    assert estimate.quality is qm.EstimateQuality.EXACT
 
 
 def test_clifford_t_basis_rejects_missing_controlled_gate_lowering() -> None:
@@ -658,6 +797,55 @@ def test_symbolic_loop_width_finds_piecewise_condition_boundaries() -> None:
     assert concrete.quality is qm.EstimateQuality.EXACT
 
 
+def test_sum_over_reduces_loop_guarded_metadata_by_reachable_iterations() -> None:
+    """Loop metadata remains active only when some iteration reaches its guard."""
+    index = sp.Symbol("index", integer=True, nonnegative=True)
+    assumption = qm.ResourceAssumption("guarded loop body")
+    active_body = qm.ResourceEstimate(
+        gates=qm.GateResources(total=1, single_qubit=1),
+        assumptions=(assumption,),
+        quality=qm.EstimateQuality.MODELED,
+        approximation=qm.ApproximationStatus.APPROXIMATE,
+    )
+    empty = qm.ResourceEstimate.zero()
+
+    never = active_body.conditional(empty, sp.Gt(index, 10)).sum_over(
+        index,
+        sp.Integer(0),
+        sp.Integer(2),
+    )
+    sometimes = active_body.conditional(empty, sp.Eq(index, 1)).sum_over(
+        index,
+        sp.Integer(0),
+        sp.Integer(2),
+    )
+    iterations = sp.Symbol("iterations", integer=True, nonnegative=True)
+    symbolic = active_body.conditional(empty, sp.Eq(index, 1)).sum_over(
+        index,
+        sp.Integer(0),
+        iterations,
+    )
+
+    assert never.gates.total == 0
+    assert never.assumptions == ()
+    assert never.quality is qm.EstimateQuality.EXACT
+    assert never.approximation is qm.ApproximationStatus.EXACT
+
+    assert sometimes.gates.total == 1
+    assert sometimes.assumptions == (assumption,)
+    assert sometimes.quality is qm.EstimateQuality.MODELED
+    assert sometimes.approximation is qm.ApproximationStatus.APPROXIMATE
+
+    before_guard = symbolic.substitute(iterations=1)
+    after_guard = symbolic.substitute(iterations=2)
+    assert before_guard.assumptions == ()
+    assert before_guard.quality is qm.EstimateQuality.EXACT
+    assert before_guard.approximation is qm.ApproximationStatus.EXACT
+    assert after_guard.assumptions == (assumption,)
+    assert after_guard.quality is qm.EstimateQuality.MODELED
+    assert after_guard.approximation is qm.ApproximationStatus.APPROXIMATE
+
+
 def test_trace_is_opt_in_and_honors_the_flag() -> None:
     """Default estimates stay compact while trace=True retains explanations."""
 
@@ -902,10 +1090,22 @@ def test_float_region_carry_fallback_remains_real() -> None:
     assert fallback.is_real is True
     assert fallback.is_integer is None
     assert estimate.gates.total == sp.Piecewise(
-        (3, sp.Eq(fallback, sp.Float(0.25))),
+        (
+            3,
+            sp.And(
+                sp.Ne(estimate.parameters["n"], 0),
+                sp.Eq(fallback, sp.Float(0.25)),
+            ),
+        ),
         (1, True),
     )
-    assert estimate.substitute(total_after_loop=0.25).gates.total == 3
+    assert estimate.substitute(n=1, total_after_loop=0.25).gates.total == 3
+    zero_trip = estimate.substitute(n=0)
+    assert zero_trip.gates.total == 1
+    assert not any(
+        "recurrence could not be reduced" in assumption.message
+        for assumption in zero_trip.assumptions
+    )
     assert any(
         "recurrence could not be reduced" in a.message for a in estimate.assumptions
     )
@@ -1028,8 +1228,8 @@ def test_runtime_if_bit_merge_symbol_keeps_ir_domain() -> None:
     """An undecidable Bit merge remains a nonnegative integer."""
     from qamomile.circuit.estimator._resolver import ExprResolver
     from qamomile.circuit.estimator.resource_estimator import (
-        ResourceEstimatorConfig,
         ResourceInterpreter,
+        _ResourceEstimatorConfig,
         build_if_scopes,
     )
     from qamomile.circuit.ir.operation.control_flow import IfOperation
@@ -1050,7 +1250,7 @@ def test_runtime_if_bit_merge_symbol_keeps_ir_domain() -> None:
     resolver = ExprResolver()
     true_resolver, false_resolver = build_if_scopes(operation, resolver)
     interpreter = ResourceInterpreter(
-        config=ResourceEstimatorConfig(),
+        config=_ResourceEstimatorConfig(),
         bindings={},
     )
     interpreter._publish_if_results(
@@ -1069,14 +1269,14 @@ def test_runtime_if_bit_merge_symbol_keeps_ir_domain() -> None:
 def test_condition_values_never_capture_identity_fresh_fallbacks() -> None:
     """Public condition inputs specialize symbols but not same-named dummies."""
     from qamomile.circuit.estimator.resource_estimator import (
-        ResourceEstimatorConfig,
         ResourceInterpreter,
+        _ResourceEstimatorConfig,
     )
 
     public = sp.Symbol("flag", integer=True, nonnegative=True)
     internal = sp.Dummy("flag", integer=True, nonnegative=True)
     interpreter = ResourceInterpreter(
-        config=ResourceEstimatorConfig(),
+        config=_ResourceEstimatorConfig(),
         bindings={},
         condition_values={"flag": sp.Integer(1)},
     )
@@ -1455,6 +1655,56 @@ def test_resource_substitute_uses_public_alias_symbol_identity() -> None:
     assert estimate.substitute(n__2=5, n=2).gates.total == expected
 
 
+def test_resource_algebra_preserves_partial_public_symbol_aliases() -> None:
+    """Every resource-algebra path retains a surviving suffixed alias."""
+    positive_n = sp.Symbol("n", integer=True, positive=True)
+    nonnegative_n = sp.Symbol("n", integer=True, nonnegative=True)
+    original = qm.ResourceEstimate(
+        gates=qm.GateResources(total=positive_n + nonnegative_n),
+    )
+    remaining = original.parameters["n__2"]
+    partial = original.substitute(n=1)
+    zero = qm.ResourceEstimate.zero()
+    flag = sp.Symbol("flag", integer=True, nonnegative=True)
+    loop_symbol = sp.Dummy("index", integer=True, nonnegative=True)
+    dependent = qm.ResourceEstimate(
+        gates=qm.GateResources(total=partial.gates.total + loop_symbol),
+        _symbol_aliases=partial._symbol_aliases,
+    )
+
+    results = {
+        "seq-left-zero": zero.seq(partial),
+        "seq-right-zero": partial.seq(zero),
+        "seq-all": qm.ResourceEstimate.seq_all((zero, partial)),
+        "parallel": partial.parallel(zero),
+        "choice": partial.choice(zero),
+        "conditional": partial.conditional(zero, sp.Gt(flag, 0)),
+        "repeat": partial.repeat(2),
+        "inverse": partial.inverse(),
+        "sum-independent": partial.sum_over(loop_symbol, 0, 2),
+        "sum-dependent": dependent.sum_over(loop_symbol, 0, 2),
+        "controlled": partial.controlled(1),
+        "simplify": partial.simplify(),
+    }
+
+    for name, result in results.items():
+        assert result.parameters["n__2"] == remaining, name
+
+
+def test_binary_resource_algebra_resolves_alias_claims_left_first() -> None:
+    """The left operand keeps a colliding alias regardless of expression order."""
+    left_symbol = sp.Dummy("n", integer=True, nonnegative=True)
+    right_symbol = sp.Dummy("n", integer=True, nonnegative=True)
+    left = qm.ResourceEstimate(gates=qm.GateResources(total=left_symbol))
+    right = qm.ResourceEstimate(gates=qm.GateResources(total=right_symbol))
+
+    left_first = left.seq(right)
+    right_first = right.seq(left)
+
+    assert left_first.parameters == {"n": left_symbol, "n__2": right_symbol}
+    assert right_first.parameters == {"n": right_symbol, "n__2": left_symbol}
+
+
 def test_resource_substitute_rejects_unknown_parameter_names() -> None:
     """A typo cannot silently leave a symbolic estimate unchanged."""
     n = sp.Symbol("n", integer=True, nonnegative=True)
@@ -1601,7 +1851,7 @@ def test_controlled_composite_body_counts_own_control() -> None:
     assert ctrl.gates.two_qubit == 1
 
 
-def test_controlled_swap_uses_portable_fredkin_decomposition() -> None:
+def test_controlled_swap_uses_clean_ancilla_fredkin_decomposition() -> None:
     """A controlled SWAP expands to two CNOTs and one Toffoli."""
 
     @qm.composite_gate(name="one_swap")
@@ -1959,9 +2209,9 @@ def test_branch_allocations_specialize_or_union_by_condition_kind() -> None:
 
 def test_constant_conditional_ignores_unreachable_provenance() -> None:
     """A decided condition never merges the unreachable branch metadata."""
-    portable = qm.ResourceEstimate(
+    logical = qm.ResourceEstimate(
         gates=qm.GateResources(total=1),
-        basis=qm.GateBasis.PORTABLE,
+        basis=qm.GateBasis.LOGICAL,
     )
     clifford_t = qm.ResourceEstimate(
         gates=qm.GateResources(total=100),
@@ -1971,8 +2221,8 @@ def test_constant_conditional_ignores_unreachable_provenance() -> None:
         precision=1e-3,
     )
 
-    assert portable.conditional(clifford_t, sp.true) is portable
-    assert portable.conditional(clifford_t, sp.false) is clifford_t
+    assert logical.conditional(clifford_t, sp.true) is logical
+    assert logical.conditional(clifford_t, sp.false) is clifford_t
 
 
 def test_quantum_block_input_width_requires_an_integer() -> None:
@@ -2020,6 +2270,7 @@ def test_zero_trip_repeat_prunes_quality_and_assumptions() -> None:
         gates=qm.GateResources(total=1),
         assumptions=(assumption,),
         quality=qm.EstimateQuality.MODELED,
+        approximation=qm.ApproximationStatus.APPROXIMATE,
     )
     repetitions = sp.Symbol("repetitions", integer=True, nonnegative=True)
 
@@ -2030,8 +2281,10 @@ def test_zero_trip_repeat_prunes_quality_and_assumptions() -> None:
         assert estimate.gates.total == 0
         assert estimate.assumptions == ()
         assert estimate.quality is qm.EstimateQuality.EXACT
+        assert estimate.approximation is qm.ApproximationStatus.EXACT
 
     active = body.repeat(repetitions).substitute(repetitions=2)
     assert active.gates.total == 2
     assert active.assumptions == (assumption,)
     assert active.quality is qm.EstimateQuality.MODELED
+    assert active.approximation is qm.ApproximationStatus.APPROXIMATE

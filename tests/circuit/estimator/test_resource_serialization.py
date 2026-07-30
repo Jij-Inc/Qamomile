@@ -13,6 +13,8 @@ import sympy as sp
 
 import qamomile.circuit as qm
 from qamomile.circuit.estimator._metrics import (
+    ResourceTraceNode,
+    _ConditionIndicator,
     _ConstraintRange,
     _ResourceConstraint,
 )
@@ -21,6 +23,11 @@ from qamomile.circuit.estimator._serialization import (
     normalize_expression,
     stringify_expression,
 )
+from qamomile.circuit.estimator._wire import (
+    resource_estimate_from_wire,
+    resource_estimate_to_wire,
+)
+from qamomile.circuit.estimator.resource_estimator import _CappedRangeSum
 
 
 def test_call_map_merge_order_is_hash_seed_independent() -> None:
@@ -305,3 +312,94 @@ def test_resource_dict_uses_one_name_for_quantified_dummy_expressions() -> None:
     assert "_target_index" not in serialized_requirement["expected"]
     assert serialized_requirement["ranges"][0]["symbol"] == "target_index"
     assert restored == normalize_expression(constrained)
+
+
+def test_resource_wire_rejects_executable_expression_syntax() -> None:
+    """Opaque cost decoding accepts constructors but never Python execution."""
+    wire = resource_estimate_to_wire(
+        qm.ResourceEstimate(gates=qm.GateResources(total=1))
+    )
+    wire["gates"]["total"] = "__import__('os').system('false')"
+
+    with pytest.raises(
+        ValueError,
+        match="outside safe constructors|non-constructor",
+    ):
+        resource_estimate_from_wire(wire)
+
+
+def test_resource_wire_preserves_trace_only_symbol_identity() -> None:
+    """Trace guards round-trip even when no metric exposes their symbol."""
+    trace_flag = sp.Dummy("trace_flag", integer=True, nonnegative=True)
+    estimate = qm.ResourceEstimate(
+        trace=ResourceTraceNode(
+            name="conditional trace",
+            source_kind="test",
+            active_when=sp.Gt(trace_flag, 0),
+        )
+    )
+
+    restored = resource_estimate_from_wire(resource_estimate_to_wire(estimate))
+
+    assert restored.parameters == {}
+    assert restored.explain() == (
+        "Resource estimate\n  conditional trace [test] when=trace_flag > 0"
+    )
+
+
+def test_resource_wire_round_trips_capped_symbolic_loop_work() -> None:
+    """A bounded batching sum remains specializable after wire serialization."""
+    index = sp.Dummy("index", integer=True, nonnegative=True)
+    repetitions = sp.Symbol("repetitions", integer=True, nonnegative=True)
+    work = _CappedRangeSum(
+        sp.Lambda(index, _ConditionIndicator(sp.Gt(index, 0))),
+        sp.Integer(0),
+        sp.Integer(1),
+        repetitions,
+    )
+    estimate = qm.ResourceEstimate(gates=qm.GateResources(total=work))
+
+    restored = resource_estimate_from_wire(resource_estimate_to_wire(estimate))
+
+    assert set(restored.parameters) == {"repetitions"}
+    assert restored.substitute(repetitions=0).gates.total == 0
+    assert restored.substitute(repetitions=1).gates.total == 0
+    assert restored.substitute(repetitions=2).gates.total == 1
+    assert restored.substitute(repetitions=3).gates.total == 2
+
+
+def test_separately_decoded_costs_keep_independent_symbol_identities() -> None:
+    """Independent fixed-cost payloads do not merge same-named parameters."""
+    left_symbol = sp.Dummy("n", integer=True, nonnegative=True)
+    right_symbol = sp.Dummy("n", integer=True, nonnegative=True)
+    left = qm.ResourceEstimate(
+        gates=qm.GateResources(total=left_symbol),
+    )
+    right = qm.ResourceEstimate(
+        gates=qm.GateResources(total=right_symbol),
+    )
+
+    restored_left = resource_estimate_from_wire(resource_estimate_to_wire(left))
+    restored_right = resource_estimate_from_wire(resource_estimate_to_wire(right))
+    combined = restored_left.seq(restored_right)
+
+    assert set(combined.parameters) == {"n", "n__2"}
+    assert combined.substitute(n=2, n__2=5).gates.total == 7
+
+
+def test_separately_decoded_costs_preserve_shared_symbol_identity() -> None:
+    """Fixed-cost payloads retain an intentionally shared model parameter."""
+    shared_symbol = sp.Dummy("n", integer=True, nonnegative=True)
+    left = qm.ResourceEstimate(
+        gates=qm.GateResources(total=shared_symbol),
+    )
+    right = qm.ResourceEstimate(
+        gates=qm.GateResources(total=shared_symbol),
+    )
+
+    restored_left = resource_estimate_from_wire(resource_estimate_to_wire(left))
+    restored_right = resource_estimate_from_wire(resource_estimate_to_wire(right))
+    combined = restored_left.seq(restored_right)
+
+    assert set(combined.parameters) == {"n"}
+    assert combined.substitute(n=3).gates.total == 6

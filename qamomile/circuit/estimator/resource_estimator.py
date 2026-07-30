@@ -1,4 +1,4 @@
-"""Estimate logical resources by abstractly interpreting qkernel IR."""
+"""Estimate algorithmic resources by abstractly interpreting qkernel IR."""
 
 from __future__ import annotations
 
@@ -9,20 +9,23 @@ import math
 import numbers
 from collections.abc import Iterable, Mapping, Sequence
 from contextvars import ContextVar
+from functools import partial
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
 
 import sympy as sp
+from sympy.logic.boolalg import Boolean
 
 from qamomile.circuit._array_shape import _rectangular_array_shape
-from qamomile.circuit._control_batching import (
-    CONTROL_BATCH_MIN_WEIGHT,
-    capped_controlled_batch_weight,
-    should_batch_controlled_body,
-    static_controlled_batch_weight,
+from qamomile.circuit.estimator._control_decomposition import (
+    CLEAN_ANCILLA_BATCH_MIN_WORK,
+    static_clean_ancilla_batch_profile,
 )
 from qamomile.circuit.estimator._loop_executor import symbolic_iterations
 from qamomile.circuit.estimator._metrics import (
+    ApproximationStatus,
     CallResources,
+    ControlDecomposition,
     DepthResources,
     EstimateQuality,
     GateBasis,
@@ -33,6 +36,8 @@ from qamomile.circuit.estimator._metrics import (
     ResourceExpr,
     ResourceTraceNode,
     WidthResources,
+    _activation_over_range,
+    _active_approximation,
     _active_assumptions,
     _active_quality,
     _add_calls,
@@ -41,6 +46,7 @@ from qamomile.circuit.estimator._metrics import (
     _add_measurements,
     _add_resets,
     _boolean_condition,
+    _combine_approximation,
     _combine_quality,
     _conditional_calls,
     _conditional_depth,
@@ -49,8 +55,10 @@ from qamomile.circuit.estimator._metrics import (
     _conditional_resets,
     _conditional_trace,
     _conditional_width,
+    _ConditionIndicator,
     _depth_from_gate_resources,
     _expr,
+    _GuardedApproximation,
     _GuardedAssumption,
     _GuardedQuality,
     _is_concrete_integer,
@@ -77,10 +85,12 @@ from qamomile.circuit.estimator._metrics import (
     _substitute_resource_expr,
     _sum_calls,
     _sum_depth,
+    _sum_expr,
     _sum_gates,
     _sum_measurements,
     _sum_resets,
     _symbol_display_name,
+    _unresolved_condition_guard,
     _wrap_trace,
 )
 from qamomile.circuit.estimator._resolver import (
@@ -106,6 +116,7 @@ from qamomile.circuit.estimator._scheduling import (
     _liveness_width,
     _LocalBlock,
     _loop_body_has_symbolic_quantum_index,
+    _map_body_dependency_completion,
     _map_body_dependency_keys,
     _maximum_width_over_range,
     _merge_allocation_sites,
@@ -143,10 +154,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     UnaryMathOp,
     UnaryMathOpKind,
 )
-from qamomile.circuit.ir.operation.callable import (
-    CallTransform,
-    InvokeOperation,
-)
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     ReturnQuantumArrayElementOperation,
@@ -197,10 +205,12 @@ from qamomile.circuit.transpiler.block_parameter_binding import pair_block_opera
 
 if TYPE_CHECKING:
     from qamomile.circuit.frontend.qkernel import QKernel
-    from qamomile.circuit.ir.operation.callable import CallableRef
 
 _ZERO = sp.Integer(0)
 _ONE = sp.Integer(1)
+_DEFAULT_GATE_BASIS = GateBasis.LOGICAL
+_DEFAULT_CONTROL_DECOMPOSITION = ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
+_DEFAULT_ROTATION_SYNTHESIS_PRECISION = 1e-10
 _DEFER_RESOURCE_SYMBOL_METADATA = ContextVar(
     "qamomile_defer_resource_symbol_metadata",
     default=False,
@@ -214,6 +224,421 @@ _PHASE_CLASS_CODES = {
     "tdg": 5,
     "p": -1,
 }
+_CONCRETE_REGION_REPLAY_LIMIT = 64
+
+
+class _CappedRangeSum(sp.Function):
+    """Represent a loop-local batching sum with its induction variable bound.
+
+    The control batching policy only needs to distinguish zero, one, and at
+    least two units of work. Keeping the summand inside a ``Lambda`` prevents
+    SymPy from releasing a ``Sum`` dummy into public parameters when a
+    surrounding ``Piecewise`` is simplified.
+    """
+
+    nargs = 4
+    is_integer = True
+    is_nonnegative = True
+
+    @classmethod
+    def eval(
+        cls,
+        summand: sp.Basic,
+        start: sp.Expr,
+        step: sp.Expr,
+        iterations: sp.Expr,
+    ) -> sp.Expr | None:
+        """Evaluate a capped sum once its loop range is concrete.
+
+        Args:
+            summand (sp.Basic): One-argument Lambda for per-iteration work.
+            start (sp.Expr): First Python-range value.
+            step (sp.Expr): Python-range step.
+            iterations (sp.Expr): Number of executed iterations.
+
+        Returns:
+            sp.Expr | None: Integer in ``[0, 2]`` when decidable, otherwise
+            ``None`` to retain the bound symbolic node.
+        """
+        if not isinstance(summand, sp.Lambda) or len(summand.variables) != 1:
+            return None
+        if iterations.is_zero is True:
+            return _ZERO
+        loop_symbol = summand.variables[0]
+        expression = cast(sp.Expr, summand.expr)
+        if loop_symbol not in expression.free_symbols and expression.is_number:
+            return cast(sp.Expr, sp.Min(2, expression * iterations))
+        if not (
+            start.is_integer is True
+            and start.is_number
+            and step.is_integer is True
+            and step.is_number
+            and iterations.is_integer is True
+            and iterations.is_number
+        ):
+            return None
+        count = int(iterations)
+        if count <= 0:
+            return _ZERO
+        offset = sp.Dummy("batch_offset", integer=True, nonnegative=True)
+        transformed = expression.subs(
+            loop_symbol,
+            start + step * offset,
+        )
+        capped = _capped_nonnegative_integer_sum(
+            transformed,
+            offset,
+            count,
+        )
+        if capped is not None:
+            return sp.Integer(capped)
+        expanded = expression.replace(
+            lambda node: isinstance(node, _ConditionIndicator),
+            lambda node: sp.Piecewise(
+                (_ONE, cast(sp.Basic, node.args[0])),
+                (_ZERO, True),
+            ),
+        )
+        transformed = expanded.subs(
+            loop_symbol,
+            start + step * offset,
+        )
+        evaluated = cast(
+            sp.Expr,
+            sp.Sum(transformed, (offset, 0, count - 1)).doit(),
+        )
+        if evaluated.is_integer is True and evaluated.is_number:
+            return sp.Integer(min(2, max(0, int(evaluated))))
+        return None
+
+
+def _simplify_public_resource_expression(
+    expression: ResourceExpr,
+) -> ResourceExpr:
+    """Simplify a public metric unless it contains a bound batching summary.
+
+    ``_CappedRangeSum`` deliberately keeps a loop induction variable inside a
+    ``Lambda``, while ``_ConditionIndicator`` keeps a Boolean predicate opaque
+    to ``Piecewise`` rewriting. SymPy's global simplifier spends substantial
+    time exploring those nodes, usually returning an expression of the same
+    shape and occasionally attempting to release a bound variable. Concrete
+    substitution evaluates them directly, so retaining the symbolic form is
+    both faster and safer.
+
+    Args:
+        expression (ResourceExpr): Public resource expression to normalize.
+
+    Returns:
+        ResourceExpr: Safely simplified expression, or the original
+            binder-preserving expression.
+    """
+    normalized = _expr(expression)
+    if normalized.has(_CappedRangeSum, _ConditionIndicator):
+        return normalized
+    return _safe_simplify(normalized)
+
+
+def _capped_nonnegative_integer_sum(
+    expression: sp.Expr,
+    symbol: sp.Symbol,
+    count: int,
+) -> int | None:
+    """Return a nonnegative integer range sum capped at two.
+
+    Args:
+        expression (sp.Expr): Per-position nonnegative integer expression.
+        symbol (sp.Symbol): Zero-based range-position symbol.
+        count (int): Number of positions.
+
+    Returns:
+        int | None: Exact capped sum, or ``None`` when the expression grammar
+        cannot be decided without expanding the range.
+    """
+    if count <= 0 or expression == _ZERO:
+        return 0
+    if symbol not in expression.free_symbols and expression.is_number:
+        return min(2, max(0, int(expression) * count))
+    if isinstance(expression, _ConditionIndicator):
+        return _capped_integer_condition_count(
+            cast(sp.Basic, expression.args[0]),
+            symbol,
+            count,
+        )
+    coefficient, remainder = expression.as_coeff_Mul()
+    if (
+        coefficient.is_integer is True
+        and coefficient.is_nonnegative is True
+        and isinstance(remainder, _ConditionIndicator)
+    ):
+        active_count = _capped_integer_condition_count(
+            cast(sp.Basic, remainder.args[0]),
+            symbol,
+            count,
+        )
+        if active_count is None:
+            return None
+        return min(2, int(coefficient) * active_count)
+    if isinstance(expression, sp.Add):
+        total = 0
+        for term in expression.args:
+            term_sum = _capped_nonnegative_integer_sum(
+                cast(sp.Expr, term),
+                symbol,
+                count,
+            )
+            if term_sum is None:
+                return None
+            total = min(2, total + term_sum)
+            if total == 2:
+                return 2
+        return total
+    if isinstance(expression, sp.Min) and _expr(2) in expression.args:
+        remaining = [arg for arg in expression.args if arg != _expr(2)]
+        if len(remaining) == 1:
+            return _capped_nonnegative_integer_sum(
+                cast(sp.Expr, remaining[0]),
+                symbol,
+                count,
+            )
+    return None
+
+
+def _capped_integer_condition_count(
+    condition: sp.Basic,
+    symbol: sp.Symbol,
+    count: int,
+) -> int | None:
+    """Count satisfying integer range positions, capped at two.
+
+    Args:
+        condition (sp.Basic): Boolean condition over ``symbol``.
+        symbol (sp.Symbol): Zero-based integer position.
+        count (int): Exclusive upper bound.
+
+    Returns:
+        int | None: Exact capped cardinality, or ``None`` for an unsupported
+        symbolic set.
+    """
+    normalized = _boolean_condition(condition)
+    if normalized is sp.false or count <= 0:
+        return 0
+    if normalized is sp.true:
+        return min(2, count)
+    if normalized.free_symbols - {symbol}:
+        return None
+    try:
+        satisfying = sp.Intersection(
+            normalized.as_set(),
+            sp.Range(0, count),
+        )
+    except (
+        ArithmeticError,
+        AttributeError,
+        NotImplementedError,
+        RecursionError,
+        TypeError,
+        ValueError,
+    ):
+        return None
+    return _capped_integer_set_cardinality(satisfying)
+
+
+def _capped_integer_set_cardinality(values: sp.Set) -> int | None:
+    """Return an integer set's cardinality capped at two.
+
+    Args:
+        values (sp.Set): Integer-valued set.
+
+    Returns:
+        int | None: Exact capped cardinality, or ``None`` when unavailable.
+    """
+    if values is sp.S.EmptySet or values.is_empty is True:
+        return 0
+    if isinstance(values, sp.FiniteSet):
+        return min(2, len(values))
+    if isinstance(values, sp.Range):
+        size = values.size
+        if size.is_integer is True and size.is_number:
+            return min(2, max(0, int(size)))
+        return None
+    if isinstance(values, sp.Union):
+        total = 0
+        for subset in values.args:
+            subset_count = _capped_integer_set_cardinality(cast(sp.Set, subset))
+            if subset_count is None:
+                return None
+            total = min(2, total + subset_count)
+            if total == 2:
+                return 2
+        return total
+    return None
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _EstimatorControlBatchProfile:
+    """Track symbolic work needed to choose a shared control carrier.
+
+    ``work`` is capped at two because the fixed resource model only
+    distinguishes empty, singleton, and multi-operation bodies.
+
+    Args:
+        work (ResourceExpr | int): Symbolic controlled work, capped at two.
+    """
+
+    work: ResourceExpr | int = _ZERO
+
+    def __post_init__(self) -> None:
+        """Normalize the work expression."""
+        object.__setattr__(self, "work", _expr(self.work))
+
+    @property
+    def active(self) -> Boolean:
+        """Return whether this profile contains any controlled work.
+
+        Returns:
+            sp.Basic: Symbolic nonempty-work predicate.
+        """
+        work = cast(ResourceExpr, self.work)
+        if work == _ZERO:
+            return sp.false
+        if work.is_positive is True:
+            return sp.true
+        if isinstance(work, _ConditionIndicator):
+            return _boolean_condition(work.args[0])
+        coefficient, remainder = work.as_coeff_Mul()
+        if coefficient.is_positive and isinstance(remainder, _ConditionIndicator):
+            return _boolean_condition(remainder.args[0])
+        return _boolean_condition(sp.Gt(work, _ZERO))
+
+    @property
+    def has_multiple_work(self) -> Boolean:
+        """Return whether the profile contains at least two work units.
+
+        Returns:
+            sp.Basic: Symbolic batching-threshold predicate.
+        """
+        work = cast(ResourceExpr, self.work)
+        if work.is_number:
+            return sp.true if work >= 2 else sp.false
+        coefficient, remainder = work.as_coeff_Mul()
+        if coefficient >= 2 and isinstance(remainder, _ConditionIndicator):
+            return _boolean_condition(remainder.args[0])
+        if isinstance(work, sp.Min) and _expr(2) in work.args:
+            remaining = [arg for arg in work.args if arg != _expr(2)]
+            if len(remaining) == 1:
+                return _boolean_condition(sp.Ge(remaining[0], 2))
+        return _boolean_condition(sp.Ge(work, 2))
+
+    def when(self, condition: sp.Basic) -> _EstimatorControlBatchProfile:
+        """Guard this profile by one symbolic activation condition.
+
+        Args:
+            condition (sp.Basic): Condition under which the work executes.
+
+        Returns:
+            _EstimatorControlBatchProfile: Conditionally active profile.
+        """
+        predicate = _boolean_condition(condition)
+        indicator = cast(ResourceExpr, _ConditionIndicator(predicate))
+        return _EstimatorControlBatchProfile(
+            work=cast(ResourceExpr, self.work) * indicator,
+        )
+
+    def as_shared_leaf(self) -> _EstimatorControlBatchProfile:
+        """Promote any active work to one independently batch-worthy leaf.
+
+        Nested controlled calls, SELECT cases, and Pauli evolution already
+        contain an intrinsic control boundary. One active instance therefore
+        justifies composing that boundary with an outer shared carrier.
+
+        Returns:
+            _EstimatorControlBatchProfile: Heavy profile guarded by activity.
+        """
+        active = self.active
+        indicator = cast(ResourceExpr, _ConditionIndicator(active))
+        return _EstimatorControlBatchProfile(
+            work=2 * indicator,
+        )
+
+    def conditional(
+        self,
+        other: _EstimatorControlBatchProfile,
+        condition: sp.Basic,
+    ) -> _EstimatorControlBatchProfile:
+        """Select between two profiles with a symbolic condition.
+
+        Args:
+            other (_EstimatorControlBatchProfile): False-branch profile.
+            condition (sp.Basic): Predicate selecting ``self`` when true.
+
+        Returns:
+            _EstimatorControlBatchProfile: Exact symbolic branch profile.
+        """
+        predicate = _boolean_condition(condition)
+        true_indicator = cast(ResourceExpr, _ConditionIndicator(predicate))
+        false_indicator = cast(
+            ResourceExpr,
+            _ConditionIndicator(sp.Not(predicate)),
+        )
+        return _EstimatorControlBatchProfile(
+            work=(
+                cast(ResourceExpr, self.work) * true_indicator
+                + cast(ResourceExpr, other.work) * false_indicator
+            ),
+        )
+
+    def sum_over(
+        self,
+        loop_symbol: sp.Symbol,
+        start: ResourceExpr,
+        step: ResourceExpr,
+        iterations: ResourceExpr,
+    ) -> _EstimatorControlBatchProfile:
+        """Accumulate a profile over Python ``range`` semantics.
+
+        Args:
+            loop_symbol (sp.Symbol): Symbolic loop induction variable.
+            start (ResourceExpr): First loop value.
+            step (ResourceExpr): Loop step.
+            iterations (ResourceExpr): Number of executed iterations.
+
+        Returns:
+            _EstimatorControlBatchProfile: Capped aggregate loop profile.
+        """
+        work = _CappedRangeSum(
+            sp.Lambda(loop_symbol, cast(ResourceExpr, self.work)),
+            start,
+            step,
+            iterations,
+        )
+        return _EstimatorControlBatchProfile(work=work)
+
+    @classmethod
+    def combine(
+        cls,
+        profiles: Iterable[_EstimatorControlBatchProfile],
+    ) -> _EstimatorControlBatchProfile:
+        """Combine sequential operation profiles with capped work.
+
+        Args:
+            profiles (Iterable[_EstimatorControlBatchProfile]): Profiles in
+                program order.
+
+        Returns:
+            _EstimatorControlBatchProfile: Combined symbolic body profile.
+        """
+        work_items: list[ResourceExpr] = []
+        for profile in profiles:
+            profile_work = cast(ResourceExpr, profile.work)
+            if profile_work != _ZERO:
+                work_items.append(profile_work)
+        if not work_items:
+            work = _ZERO
+        elif len(work_items) == 1:
+            work = work_items[0]
+        else:
+            work = cast(ResourceExpr, sp.Min(2, sp.Add(*work_items)))
+        return cls(work=work)
 
 
 class _CanonicalPhaseClass(sp.Function):
@@ -237,6 +662,71 @@ class _CanonicalPhaseClass(sp.Function):
             return None
         gate_name = _canonical_phase_gate_name(normalized)
         return sp.Integer(_PHASE_CLASS_CODES[gate_name])
+
+
+def _normalize_resource_scalar(
+    value: object,
+    *,
+    label: str,
+    allow_symbolic: bool,
+    allow_bool: bool,
+) -> sp.Expr:
+    """Normalize a public resource scalar and reject invalid number domains.
+
+    Args:
+        value (object): Candidate Python or SymPy scalar.
+        label (str): User-facing parameter label for diagnostics.
+        allow_symbolic (bool): Whether a non-numeric SymPy expression may
+            remain in the estimate.
+        allow_bool (bool): Whether a Boolean may be normalized to zero or one.
+
+    Returns:
+        sp.Expr: Normalized finite-real scalar or permitted symbolic
+            expression.
+
+    Raises:
+        TypeError: If the value is Boolean when disallowed, is a string, or is
+            not a supported numeric/SymPy scalar.
+        ValueError: If a concrete number is non-real or non-finite, or a
+            symbolic expression is provably non-real or non-finite.
+    """
+    expected = (
+        "a numeric scalar or explicit SymPy expression"
+        if allow_symbolic
+        else "a concrete numeric scalar"
+    )
+    if isinstance(value, bool):
+        if allow_bool:
+            return sp.Integer(int(value))
+        raise TypeError(f"{label} requires {expected}, got bool ({value!r}).")
+    if isinstance(value, (str, bytes)) or not (
+        isinstance(value, numbers.Complex) or isinstance(value, sp.Expr)
+    ):
+        raise TypeError(
+            f"{label} requires {expected}, got {type(value).__name__} ({value!r})."
+        )
+    scalar = value.item() if hasattr(value, "item") else value
+    try:
+        normalized = sp.sympify(scalar)
+    except (TypeError, ValueError, sp.SympifyError) as error:
+        raise TypeError(
+            f"{label} requires {expected}, got {type(value).__name__} ({value!r})."
+        ) from error
+    if not isinstance(normalized, sp.Expr):
+        raise TypeError(
+            f"{label} requires {expected}, got {type(value).__name__} ({value!r})."
+        )
+    if normalized.is_number is not True:
+        if not allow_symbolic:
+            raise TypeError(
+                f"{label} requires {expected}, got {type(value).__name__} ({value!r})."
+            )
+        if normalized.is_real is False or normalized.is_finite is False:
+            raise ValueError(f"{label} must be finite and real, got {value!r}.")
+        return cast(sp.Expr, normalized)
+    if normalized.is_real is not True or normalized.is_finite is not True:
+        raise ValueError(f"{label} must be finite and real, got {value!r}.")
+    return cast(sp.Expr, normalized)
 
 
 def _typed_value_symbol(
@@ -266,7 +756,7 @@ def _typed_value_symbol(
     return factory(name)
 
 
-class UnknownResourcePolicy(enum.Enum):
+class UnknownResourcePolicy(enum.StrEnum):
     """Control how the estimator handles bodyless unknown callables.
 
     Values:
@@ -282,7 +772,7 @@ class UnknownResourcePolicy(enum.Enum):
 
 @dataclasses.dataclass
 class ResourceEstimate:
-    """Carry the full logical resource estimate for a qkernel or block.
+    """Carry the full algorithmic resource estimate for a qkernel or block.
 
     Args:
         width (WidthResources): Logical width and ancilla estimate.
@@ -298,8 +788,14 @@ class ResourceEstimate:
             keyed by unique public aliases. Defaults to an empty dict.
         quality (EstimateQuality): Confidence classification. Defaults to
             ``EXACT`` for body-derived logical estimates.
+        approximation (ApproximationStatus): Whether the selected circuit
+            approximates an ideal mathematical operation. Defaults to
+            ``EXACT``.
         basis (GateBasis): Gate basis used for the estimate. Defaults to the
-            backend-neutral ``PORTABLE`` basis.
+            logical algorithmic basis.
+        control_decomposition (ControlDecomposition): Coherent-control
+            decomposition used for the estimate. Defaults to the clean-ancilla
+            Toffoli model.
         precision (float | None): Rotation-synthesis precision when the basis
             uses approximate synthesis. Defaults to ``None``.
         _allocation_sites (dict[str, ResourceExpr]): Internal QInit-site sizes
@@ -318,12 +814,20 @@ class ResourceEstimate:
         _dependency_keys (frozenset[WireKey] | None): Internal caller-scoped
             quantum wires that contribute nonzero depth. ``None`` requests the
             enclosing operation's conservative ordinary footprint.
+        _dependency_completion (dict[WireKey, ResourceExpr] | None): Internal
+            caller-visible completion depth for each dependency wire.
+            ``None`` requests conservative reconstruction from
+            ``_dependency_keys`` or the enclosing operation footprint.
         _guarded_assumptions (tuple[_GuardedAssumption, ...] | None): Internal
             condition-aware assumption provenance. ``None`` initializes facts
             from the public ``assumptions`` tuple.
         _guarded_qualities (tuple[_GuardedQuality, ...] | None): Internal
             condition-aware non-exact quality provenance. ``None`` initializes
             a fact from the public ``quality`` value.
+        _guarded_approximations (tuple[_GuardedApproximation, ...] | None):
+            Internal condition-aware mathematical approximation provenance.
+            ``None`` initializes a fact from the public ``approximation``
+            value.
         _symbol_aliases (dict[sp.Symbol, str]): Internal stable public aliases
             retained across expression rewrites and partial substitution.
     """
@@ -336,7 +840,9 @@ class ResourceEstimate:
     trace: ResourceTraceNode | None = None
     parameters: dict[str, sp.Symbol] = dataclasses.field(default_factory=dict)
     quality: EstimateQuality = EstimateQuality.EXACT
-    basis: GateBasis = GateBasis.PORTABLE
+    approximation: ApproximationStatus = ApproximationStatus.EXACT
+    basis: GateBasis = _DEFAULT_GATE_BASIS
+    control_decomposition: ControlDecomposition = _DEFAULT_CONTROL_DECOMPOSITION
     precision: float | None = None
     measurements: MeasurementResources = dataclasses.field(
         default_factory=MeasurementResources.zero
@@ -371,6 +877,11 @@ class ResourceEstimate:
         repr=False,
         compare=False,
     )
+    _dependency_completion: dict[WireKey, ResourceExpr] | None = dataclasses.field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
     _guarded_assumptions: tuple[_GuardedAssumption, ...] | None = dataclasses.field(
         default=None,
         repr=False,
@@ -380,6 +891,13 @@ class ResourceEstimate:
         default=None,
         repr=False,
         compare=False,
+    )
+    _guarded_approximations: tuple[_GuardedApproximation, ...] | None = (
+        dataclasses.field(
+            default=None,
+            repr=False,
+            compare=False,
+        )
     )
     _symbol_aliases: dict[sp.Symbol, str] = dataclasses.field(
         default_factory=dict,
@@ -422,6 +940,23 @@ class ResourceEstimate:
             )
         self.assumptions = _active_assumptions(self._guarded_assumptions)
         self.quality = _active_quality(self._guarded_qualities)
+        if self._guarded_approximations is None:
+            self._guarded_approximations = (
+                (_GuardedApproximation(sp.true, self.approximation),)
+                if self.approximation is not ApproximationStatus.EXACT
+                else ()
+            )
+        elif _combine_approximation(
+            _active_approximation(self._guarded_approximations),
+            self.approximation,
+        ) is self.approximation and self.approximation is not _active_approximation(
+            self._guarded_approximations
+        ):
+            self._guarded_approximations = (
+                *self._guarded_approximations,
+                _GuardedApproximation(sp.true, self.approximation),
+            )
+        self.approximation = _active_approximation(self._guarded_approximations)
         if not _DEFER_RESOURCE_SYMBOL_METADATA.get():
             self._refresh_symbol_metadata()
 
@@ -449,15 +984,18 @@ class ResourceEstimate:
         *,
         assumptions: Sequence[ResourceAssumption] = (),
         quality: EstimateQuality = EstimateQuality.EXACT,
+        approximation: ApproximationStatus = ApproximationStatus.EXACT,
         active_when: sp.Basic = sp.true,
     ) -> ResourceEstimate:
-        """Append guarded assumptions and quality provenance.
+        """Append guarded assumption, quality, and approximation provenance.
 
         Args:
             assumptions (Sequence[ResourceAssumption]): Assumptions to append.
                 Defaults to none.
             quality (EstimateQuality): Quality fact to append. ``EXACT`` adds
                 no fact. Defaults to ``EXACT``.
+            approximation (ApproximationStatus): Mathematical approximation
+                fact to append. ``EXACT`` adds no fact. Defaults to ``EXACT``.
             active_when (sp.Basic): Activation condition shared by the new
                 facts. Defaults to true.
 
@@ -467,6 +1005,7 @@ class ResourceEstimate:
         condition = _boolean_condition(active_when)
         guarded_assumptions = self._guarded_assumptions or ()
         guarded_qualities = self._guarded_qualities or ()
+        guarded_approximations = self._guarded_approximations or ()
         return dataclasses.replace(
             self,
             _guarded_assumptions=(
@@ -481,6 +1020,14 @@ class ResourceEstimate:
                 *(
                     (_GuardedQuality(condition, quality),)
                     if quality is not EstimateQuality.EXACT
+                    else ()
+                ),
+            ),
+            _guarded_approximations=(
+                *guarded_approximations,
+                *(
+                    (_GuardedApproximation(condition, approximation),)
+                    if approximation is not ApproximationStatus.EXACT
                     else ()
                 ),
             ),
@@ -565,7 +1112,10 @@ class ResourceEstimate:
         Returns:
             ResourceEstimate: Sequentially composed estimate.
         """
-        basis, precision = _merge_estimate_provenance(self, other)
+        basis, control_decomposition, precision = _merge_estimate_provenance(
+            self,
+            other,
+        )
         return ResourceEstimate(
             width=_seq_width(self.width, other.width),
             gates=_add_gates(self.gates, other.gates),
@@ -576,7 +1126,12 @@ class ResourceEstimate:
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_merge_trace("seq", self.trace, other.trace),
             quality=_combine_quality(self.quality, other.quality),
+            approximation=_combine_approximation(
+                self.approximation,
+                other.approximation,
+            ),
             basis=basis,
+            control_decomposition=control_decomposition,
             precision=precision,
             _allocation_sites=_merge_allocation_sites(
                 self._allocation_sites,
@@ -584,6 +1139,7 @@ class ResourceEstimate:
             ),
             _constraints=(*self._constraints, *other._constraints),
             _dependency_keys=_merge_dependency_keys(self, other),
+            _dependency_completion=_seq_dependency_completion(self, other),
             _guarded_assumptions=(
                 *(self._guarded_assumptions or ()),
                 *(other._guarded_assumptions or ()),
@@ -592,6 +1148,11 @@ class ResourceEstimate:
                 *(self._guarded_qualities or ()),
                 *(other._guarded_qualities or ()),
             ),
+            _guarded_approximations=(
+                *(self._guarded_approximations or ()),
+                *(other._guarded_approximations or ()),
+            ),
+            _symbol_aliases=_merge_symbol_aliases(self, other),
         )
 
     @staticmethod
@@ -629,7 +1190,10 @@ class ResourceEstimate:
         Returns:
             ResourceEstimate: Parallel composition.
         """
-        basis, precision = _merge_estimate_provenance(self, other)
+        basis, control_decomposition, precision = _merge_estimate_provenance(
+            self,
+            other,
+        )
         return ResourceEstimate(
             width=_parallel_width(self.width, other.width),
             gates=_add_gates(self.gates, other.gates),
@@ -640,7 +1204,12 @@ class ResourceEstimate:
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_merge_trace("parallel", self.trace, other.trace),
             quality=_combine_quality(self.quality, other.quality),
+            approximation=_combine_approximation(
+                self.approximation,
+                other.approximation,
+            ),
             basis=basis,
+            control_decomposition=control_decomposition,
             precision=precision,
             _allocation_sites=_merge_allocation_sites(
                 self._allocation_sites,
@@ -648,6 +1217,7 @@ class ResourceEstimate:
             ),
             _constraints=(*self._constraints, *other._constraints),
             _dependency_keys=_merge_dependency_keys(self, other),
+            _dependency_completion=_max_dependency_completion(self, other),
             _guarded_assumptions=(
                 *(self._guarded_assumptions or ()),
                 *(other._guarded_assumptions or ()),
@@ -656,6 +1226,11 @@ class ResourceEstimate:
                 *(self._guarded_qualities or ()),
                 *(other._guarded_qualities or ()),
             ),
+            _guarded_approximations=(
+                *(self._guarded_approximations or ()),
+                *(other._guarded_approximations or ()),
+            ),
+            _symbol_aliases=_merge_symbol_aliases(self, other),
         )
 
     def choice(self, other: ResourceEstimate) -> ResourceEstimate:
@@ -667,7 +1242,10 @@ class ResourceEstimate:
         Returns:
             ResourceEstimate: Element-wise maximum of both branches.
         """
-        basis, precision = _merge_estimate_provenance(self, other)
+        basis, control_decomposition, precision = _merge_estimate_provenance(
+            self,
+            other,
+        )
         allocation_sites = _merge_allocation_sites(
             self._allocation_sites,
             other._allocation_sites,
@@ -692,11 +1270,17 @@ class ResourceEstimate:
                 EstimateQuality.UPPER_BOUND,
                 _combine_quality(self.quality, other.quality),
             ),
+            approximation=_combine_approximation(
+                self.approximation,
+                other.approximation,
+            ),
             basis=basis,
+            control_decomposition=control_decomposition,
             precision=precision,
             _allocation_sites=allocation_sites,
             _constraints=(*self._constraints, *other._constraints),
             _dependency_keys=_merge_dependency_keys(self, other),
+            _dependency_completion=_max_dependency_completion(self, other),
             _guarded_assumptions=(
                 *(self._guarded_assumptions or ()),
                 *(other._guarded_assumptions or ()),
@@ -706,6 +1290,11 @@ class ResourceEstimate:
                 *(other._guarded_qualities or ()),
                 _GuardedQuality(sp.true, EstimateQuality.UPPER_BOUND),
             ),
+            _guarded_approximations=(
+                *(self._guarded_approximations or ()),
+                *(other._guarded_approximations or ()),
+            ),
+            _symbol_aliases=_merge_symbol_aliases(self, other),
         )
 
     def conditional(
@@ -728,7 +1317,10 @@ class ResourceEstimate:
             return self
         if condition is sp.false:
             return other
-        basis, precision = _merge_estimate_provenance(self, other)
+        basis, control_decomposition, precision = _merge_estimate_provenance(
+            self,
+            other,
+        )
         allocation_sites = _merge_allocation_sites(
             _activate_allocation_sites(self._allocation_sites, condition),
             _activate_allocation_sites(
@@ -761,7 +1353,12 @@ class ResourceEstimate:
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_conditional_trace(condition, self.trace, other.trace),
             quality=_combine_quality(self.quality, other.quality),
+            approximation=_combine_approximation(
+                self.approximation,
+                other.approximation,
+            ),
             basis=basis,
+            control_decomposition=control_decomposition,
             precision=precision,
             _allocation_sites=allocation_sites,
             _constraints=(
@@ -772,6 +1369,11 @@ class ResourceEstimate:
                 ),
             ),
             _dependency_keys=dependency_keys,
+            _dependency_completion=_conditional_dependency_completion(
+                self,
+                other,
+                condition,
+            ),
             _guarded_assumptions=(
                 *(fact.when(condition) for fact in (self._guarded_assumptions or ())),
                 *(
@@ -786,6 +1388,17 @@ class ResourceEstimate:
                     for fact in (other._guarded_qualities or ())
                 ),
             ),
+            _guarded_approximations=(
+                *(
+                    fact.when(condition)
+                    for fact in (self._guarded_approximations or ())
+                ),
+                *(
+                    fact.when(sp.Not(condition))
+                    for fact in (other._guarded_approximations or ())
+                ),
+            ),
+            _symbol_aliases=_merge_symbol_aliases(self, other),
         )
         masks_differ = self._dependency_keys != other._dependency_keys
         if masks_differ and (dependency_keys is None or len(dependency_keys) > 1):
@@ -797,6 +1410,7 @@ class ResourceEstimate:
             estimate = estimate._with_metadata(
                 assumptions=(assumption,),
                 quality=EstimateQuality.UPPER_BOUND,
+                active_when=_unresolved_condition_guard(condition),
             )
         return estimate
 
@@ -842,7 +1456,9 @@ class ResourceEstimate:
                 self.trace.when(active_when) if self.trace is not None else None,
             ),
             quality=EstimateQuality.EXACT,
+            approximation=ApproximationStatus.EXACT,
             basis=self.basis,
+            control_decomposition=self.control_decomposition,
             precision=self.precision,
             _allocation_sites=active_sites,
             _constraints=tuple(
@@ -850,12 +1466,33 @@ class ResourceEstimate:
             )
             + ((factor_constraint,) if not f.is_number else ()),
             _dependency_keys=(frozenset() if f == _ZERO else self._dependency_keys),
+            _dependency_completion=(
+                {
+                    key: cast(
+                        ResourceExpr,
+                        _ConditionIndicator(
+                            sp.And(
+                                active_when,
+                                _resource_activity_condition(completion),
+                            )
+                        )
+                        * ((f - _ONE) * self.depth.depth + completion),
+                    )
+                    for key, completion in self._dependency_completion.items()
+                }
+                if self._dependency_completion is not None
+                else None
+            ),
             _guarded_assumptions=tuple(
                 fact.when(active_when) for fact in (self._guarded_assumptions or ())
             ),
             _guarded_qualities=tuple(
                 fact.when(active_when) for fact in (self._guarded_qualities or ())
             ),
+            _guarded_approximations=tuple(
+                fact.when(active_when) for fact in (self._guarded_approximations or ())
+            ),
+            _symbol_aliases=self._symbol_aliases,
         )
         if (
             f.is_positive is not True
@@ -878,20 +1515,19 @@ class ResourceEstimate:
     def controlled(self, num_controls: ResourceExpr | int) -> ResourceEstimate:
         """Estimate controls on an aggregate cost from its known arity profile.
 
-        A portable estimate with declared one- or two-qubit gates projects
-        those known primitives through an aggregate-level batching model. At
-        least two modeled operations under at least two controls share one
-        body-wide control ladder; smaller cases retain the per-primitive
-        fallback. Gates outside the supported arity buckets remain unit-cost
-        opaque placeholders in the total and serial depth. Gate names and
-        scheduling are unavailable, so each projected field is an independent
-        upper bound over the supported portable primitive families. The
-        selected gate-name-independent two-control model may differ from a
-        concrete body's gate-name-specific path. Other aggregate costs remain
-        unchanged and carry an explicit assumption. Aggregate measurement or
-        reset costs fail closed because no coherent transform can be inferred
-        from counts alone. Body-backed qkernels are controlled by the estimator
-        interpreter instead.
+        Under ``ABSTRACT``, every source primitive remains one logical
+        operation, declared arity buckets shift by the control count, and
+        shared controls serialize aggregate gate depth. Under
+        ``CLEAN_ANCILLA_TOFFOLI``, declared one- or two-qubit gates are
+        projected through a fixed aggregate-level batching model. Two or more
+        controls around at least two modeled operations share one body-wide
+        control ladder; smaller cases retain per-primitive lowering. Gate
+        names and scheduling are unavailable, so gate-family fields use
+        independent upper bounds over the supported logical primitive
+        families. Profiles without enough information remain unchanged with
+        an explicit assumption. Unsupported gate bases and aggregate
+        measurement or reset costs fail closed. Body-backed qkernels are
+        controlled by the estimator interpreter instead.
 
         Args:
             num_controls (ResourceExpr | int): Number of active controls.
@@ -901,7 +1537,8 @@ class ResourceEstimate:
 
         Raises:
             ValueError: If a concrete control count or projected gate count
-                is negative or non-integral, or if the estimate contains
+                is negative or non-integral, if the selected gate basis has no
+                aggregate controlled projection, or if the estimate contains
                 measurement or reset resources.
         """
         controls = _expr(num_controls)
@@ -919,10 +1556,31 @@ class ResourceEstimate:
             self,
             transform="coherently control",
         )
-        projected, reason = _project_portable_aggregate_controlled_cost(
-            self,
-            controls,
-        )
+        if not _estimate_has_basis_sensitive_resources(self):
+            projected = None
+            reason = _aggregate_arity_profile_reason(self) or (
+                "the aggregate has no gate-model-sensitive resource profile"
+            )
+        elif self.basis is not GateBasis.LOGICAL:
+            raise ValueError(
+                "Controlled aggregate resource projection is not defined for "
+                f"gate basis {self.basis.value!r} with control decomposition "
+                f"{self.control_decomposition.value!r}. Use the logical basis "
+                "or a body-backed callable with a defined controlled lowering."
+            )
+        elif (
+            self.basis is GateBasis.LOGICAL
+            and self.control_decomposition is ControlDecomposition.ABSTRACT
+        ):
+            projected, reason = _project_abstract_aggregate_controlled_cost(
+                self,
+                controls,
+            )
+        else:
+            projected, reason = _project_clean_ancilla_aggregate_controlled_cost(
+                self,
+                controls,
+            )
         if projected is not None:
             if not controls.is_number:
                 projected = self.conditional(
@@ -952,7 +1610,9 @@ class ResourceEstimate:
             assumptions=self.assumptions,
             trace=_wrap_trace(f"controlled({controls})", self.trace),
             quality=self.quality,
+            approximation=self.approximation,
             basis=self.basis,
+            control_decomposition=self.control_decomposition,
             precision=self.precision,
             _allocation_sites=self._allocation_sites,
             _constraints=self._constraints
@@ -961,8 +1621,10 @@ class ResourceEstimate:
             _input_sizes=self._input_sizes,
             _has_output_summary=self._has_output_summary,
             _dependency_keys=self._dependency_keys,
+            _dependency_completion=self._dependency_completion,
             _guarded_assumptions=self._guarded_assumptions,
             _guarded_qualities=self._guarded_qualities,
+            _guarded_approximations=self._guarded_approximations,
             _symbol_aliases=self._symbol_aliases,
         )
         # A raw zero aggregate may still omit a global phase. In contrast, a
@@ -1005,7 +1667,9 @@ class ResourceEstimate:
             trace=_wrap_trace("inverse", self.trace),
             parameters=self.parameters,
             quality=self.quality,
+            approximation=self.approximation,
             basis=self.basis,
+            control_decomposition=self.control_decomposition,
             precision=self.precision,
             _allocation_sites=self._allocation_sites,
             _constraints=self._constraints,
@@ -1013,8 +1677,11 @@ class ResourceEstimate:
             _input_sizes=self._input_sizes,
             _has_output_summary=self._has_output_summary,
             _dependency_keys=self._dependency_keys,
+            _dependency_completion=self._dependency_completion,
             _guarded_assumptions=self._guarded_assumptions,
             _guarded_qualities=self._guarded_qualities,
+            _guarded_approximations=self._guarded_approximations,
+            _symbol_aliases=self._symbol_aliases,
         )
 
     def sum_over(
@@ -1094,6 +1761,7 @@ class ResourceEstimate:
                 else None,
             ),
             basis=self.basis,
+            control_decomposition=self.control_decomposition,
             precision=self.precision,
             _allocation_sites=allocation_sites,
             _constraints=(
@@ -1109,28 +1777,72 @@ class ResourceEstimate:
                 ),
             ),
             _dependency_keys=self._dependency_keys,
-            _guarded_assumptions=tuple(
-                (
-                    fact.when(sp.Gt(iterations, _ZERO))
-                    if loop_symbol not in fact.active_when.free_symbols
-                    else dataclasses.replace(
-                        fact,
-                        active_when=sp.Gt(iterations, _ZERO),
+            _dependency_completion=(
+                {
+                    key: cast(
+                        ResourceExpr,
+                        _ConditionIndicator(
+                            _activation_over_range(
+                                _resource_activity_condition(completion),
+                                loop_symbol,
+                                start,
+                                step,
+                                iterations,
+                            )
+                        )
+                        * _sum_expr(
+                            self.depth.depth,
+                            loop_symbol,
+                            start,
+                            step,
+                            iterations,
+                        ),
                     )
+                    for key, completion in self._dependency_completion.items()
+                }
+                if self._dependency_completion is not None
+                else None
+            ),
+            _guarded_assumptions=tuple(
+                dataclasses.replace(
+                    fact,
+                    active_when=_activation_over_range(
+                        fact.active_when,
+                        loop_symbol,
+                        start,
+                        step,
+                        iterations,
+                    ),
                 )
                 for fact in (self._guarded_assumptions or ())
             ),
             _guarded_qualities=tuple(
-                (
-                    fact.when(sp.Gt(iterations, _ZERO))
-                    if loop_symbol not in fact.active_when.free_symbols
-                    else dataclasses.replace(
-                        fact,
-                        active_when=sp.Gt(iterations, _ZERO),
-                    )
+                dataclasses.replace(
+                    fact,
+                    active_when=_activation_over_range(
+                        fact.active_when,
+                        loop_symbol,
+                        start,
+                        step,
+                        iterations,
+                    ),
                 )
                 for fact in (self._guarded_qualities or ())
             ),
+            _guarded_approximations=tuple(
+                dataclasses.replace(
+                    fact,
+                    active_when=_activation_over_range(
+                        fact.active_when,
+                        loop_symbol,
+                        start,
+                        step,
+                        iterations,
+                    ),
+                )
+                for fact in (self._guarded_approximations or ())
+            ),
+            _symbol_aliases=self._symbol_aliases,
         )._with_metadata(
             assumptions=assumptions,
             quality=quality,
@@ -1160,21 +1872,12 @@ class ResourceEstimate:
                 raise ValueError(
                     f"Unknown resource parameter '{name}'; available: {available}."
                 )
-            if isinstance(value, bool) or not (
-                isinstance(value, numbers.Real)
-                or (isinstance(value, sp.Expr) and value.is_number)
-            ):
-                raise TypeError(
-                    f"Resource parameter '{name}' requires a concrete numeric "
-                    f"scalar, got {type(value).__name__} ({value!r})."
-                )
-            scalar = value.item() if hasattr(value, "item") else value
-            replacement = sp.sympify(scalar)
-            if not isinstance(replacement, sp.Expr):
-                raise TypeError(
-                    f"Resource parameter '{name}' requires a concrete numeric "
-                    f"SymPy expression, got {type(value).__name__} ({value!r})."
-                )
+            replacement = _normalize_resource_scalar(
+                value,
+                label=f"Resource parameter '{name}'",
+                allow_symbolic=False,
+                allow_bool=False,
+            )
             if (
                 replacement.is_number
                 and parameter.is_integer is True
@@ -1190,9 +1893,15 @@ class ResourceEstimate:
                     f"nonnegative resource parameter '{name}'."
                 )
             subs[parameter] = replacement
+        substitute_expression = partial(
+            _substitute_resource_expr,
+            substitutions=subs,
+        )
         return self._map_expr(
-            lambda expr: _substitute_resource_expr(expr, subs),
+            substitute_expression,
             constraint_fn=lambda expr: _safe_constraint_substitute(expr, subs),
+            guard_fn=substitute_expression,
+            dependency_fn=substitute_expression,
         )
 
     def simplify(self) -> ResourceEstimate:
@@ -1201,7 +1910,22 @@ class ResourceEstimate:
         Returns:
             ResourceEstimate: Simplified estimate.
         """
-        return self._map_expr(_safe_simplify)
+        return self._map_expr(
+            _simplify_public_resource_expression,
+            # Guards are already normalized while they are composed.
+            # Re-running SymPy's global Boolean simplifier here is
+            # disproportionately expensive for loop-derived predicates and
+            # can expose bound variables. Concrete substitution still
+            # rewrites and resolves every guard through the default path.
+            guard_fn=lambda expression: expression,
+            # Dependency completion is private scheduling state. All call
+            # boundary decisions have already consumed it by the time the
+            # root estimate is simplified, and recursively simplifying these
+            # substantially larger expressions does not change public
+            # metrics. Substitution still rewrites this state through the
+            # default path so a returned estimate remains composable.
+            dependency_fn=lambda expression: expression,
+        )
 
     def explain(self, metric: str | None = None) -> str:
         """Render the resource-estimation trace.
@@ -1284,7 +2008,9 @@ class ResourceEstimate:
                 name: registry.name(symbol) for name, symbol in self.parameters.items()
             },
             "quality": self.quality.value,
+            "approximation": self.approximation.value,
             "basis": self.basis.value,
+            "control_decomposition": self.control_decomposition.value,
             "precision": self.precision,
             "requirements": [
                 {
@@ -1319,6 +2045,8 @@ class ResourceEstimate:
         fn: Any,
         *,
         constraint_fn: Any | None = None,
+        guard_fn: Any | None = None,
+        dependency_fn: Any | None = None,
     ) -> ResourceEstimate:
         """Apply a function to every symbolic expression.
 
@@ -1326,23 +2054,37 @@ class ResourceEstimate:
             fn (Any): Callable that accepts and returns a SymPy expression.
             constraint_fn (Any | None): Optional non-clamping rewrite for
                 structural constraints. Defaults to ``fn``.
+            guard_fn (Any | None): Optional rewrite for guarded assumption,
+                quality, and approximation predicates. Defaults to
+                ``constraint_fn``.
+            dependency_fn (Any | None): Optional rewrite for private
+                per-wire completion depths. Defaults to ``constraint_fn``.
 
         Returns:
             ResourceEstimate: Rewritten estimate.
         """
         rewrite_constraint = fn if constraint_fn is None else constraint_fn
+        rewrite_guard = rewrite_constraint if guard_fn is None else guard_fn
+        rewrite_dependency = (
+            rewrite_constraint if dependency_fn is None else dependency_fn
+        )
         mapped_constraints = tuple(
             constraint.mapped(rewrite_constraint) for constraint in self._constraints
         )
         mapped_assumptions = tuple(
             mapped
             for fact in (self._guarded_assumptions or ())
-            if (mapped := fact.mapped(rewrite_constraint)) is not None
+            if (mapped := fact.mapped(rewrite_guard)) is not None
         )
         mapped_qualities = tuple(
             mapped
             for fact in (self._guarded_qualities or ())
-            if (mapped := fact.mapped(rewrite_constraint)) is not None
+            if (mapped := fact.mapped(rewrite_guard)) is not None
+        )
+        mapped_approximations = tuple(
+            mapped
+            for fact in (self._guarded_approximations or ())
+            if (mapped := fact.mapped(rewrite_guard)) is not None
         )
         mapped_calls = CallResources(
             calls_by_name={
@@ -1399,6 +2141,7 @@ class ResourceEstimate:
                 else None
             ),
             basis=self.basis,
+            control_decomposition=self.control_decomposition,
             precision=self.precision,
             _allocation_sites={
                 site: fn(size) for site, size in self._allocation_sites.items()
@@ -1410,8 +2153,13 @@ class ResourceEstimate:
             _input_sizes={owner: fn(size) for owner, size in self._input_sizes.items()},
             _has_output_summary=self._has_output_summary,
             _dependency_keys=self._dependency_keys,
+            _dependency_completion=_map_dependency_completion(
+                self._dependency_completion,
+                rewrite_dependency,
+            ),
             _guarded_assumptions=mapped_assumptions,
             _guarded_qualities=mapped_qualities,
+            _guarded_approximations=mapped_approximations,
             _symbol_aliases=self._symbol_aliases,
         )
         return mapped
@@ -1549,8 +2297,8 @@ def _require_unitary_resource_estimate(
         fields = ", ".join(nonunitary)
         raise ValueError(
             f"Cannot {transform} a resource estimate with non-unitary "
-            f"resources ({fields}). Use a context-aware opaque cost model "
-            "for an implementation-specific transformed cost."
+            f"resources ({fields}). Move measurement and reset outside the "
+            "coherent transform, or describe a unitary base implementation."
         )
 
 
@@ -1572,22 +2320,25 @@ def _precisions_match(left: float | None, right: float | None) -> bool:
 def _merge_estimate_provenance(
     left: ResourceEstimate,
     right: ResourceEstimate,
-) -> tuple[GateBasis, float | None]:
-    """Merge compatible basis provenance for resource algebra.
+) -> tuple[GateBasis, ControlDecomposition, float | None]:
+    """Merge compatible gate-model provenance for resource algebra.
 
-    Basis-neutral width and call estimates may compose with any gate basis.
-    Two estimates carrying basis-sensitive metrics must agree on both the
-    basis and, for Clifford+T, synthesis precision.
+    Gate-model-neutral width and call estimates may compose with any basis and
+    control decomposition. Two estimates carrying gate-model-sensitive metrics
+    must agree on the basis, control decomposition, and, for Clifford+T,
+    synthesis precision.
 
     Args:
         left (ResourceEstimate): Left operand.
         right (ResourceEstimate): Right operand.
 
     Returns:
-        tuple[GateBasis, float | None]: Basis and precision for the result.
+        tuple[GateBasis, ControlDecomposition, float | None]: Basis, control
+            decomposition, and precision for the result.
 
     Raises:
-        ValueError: If basis-sensitive estimates use incompatible provenance.
+        ValueError: If gate-model-sensitive estimates use incompatible
+            provenance.
     """
     left_sensitive = _estimate_has_basis_sensitive_resources(left)
     right_sensitive = _estimate_has_basis_sensitive_resources(right)
@@ -1597,6 +2348,13 @@ def _merge_estimate_provenance(
                 "Cannot compose resource estimates from different gate "
                 f"bases: {left.basis.value!r} and {right.basis.value!r}."
             )
+        if left.control_decomposition is not right.control_decomposition:
+            raise ValueError(
+                "Cannot compose resource estimates from different control "
+                "decompositions: "
+                f"{left.control_decomposition.value!r} and "
+                f"{right.control_decomposition.value!r}."
+            )
         if left.basis is GateBasis.CLIFFORD_T and not _precisions_match(
             left.precision,
             right.precision,
@@ -1605,12 +2363,40 @@ def _merge_estimate_provenance(
                 "Cannot compose Clifford+T estimates with different "
                 f"precisions: {left.precision!r} and {right.precision!r}."
             )
-        return left.basis, left.precision
+        return left.basis, left.control_decomposition, left.precision
     if left_sensitive:
-        return left.basis, left.precision
+        return left.basis, left.control_decomposition, left.precision
     if right_sensitive:
-        return right.basis, right.precision
-    return left.basis, left.precision
+        return right.basis, right.control_decomposition, right.precision
+    return left.basis, left.control_decomposition, left.precision
+
+
+def _merge_symbol_aliases(
+    *estimates: ResourceEstimate,
+) -> dict[sp.Symbol, str]:
+    """Merge stable public symbol aliases in operand order.
+
+    The first estimate claiming a public alias retains it. When another
+    symbol claims the same alias, omitting that later preference lets
+    ``SymbolRegistry`` assign a collision-free suffix while protecting the
+    earlier symbol's published name.
+
+    Args:
+        *estimates (ResourceEstimate): Estimates whose preferred aliases are
+            merged from left to right.
+
+    Returns:
+        dict[sp.Symbol, str]: Left-biased, collision-free preferred aliases.
+    """
+    merged: dict[sp.Symbol, str] = {}
+    claimed_aliases: set[str] = set()
+    for estimate in estimates:
+        for symbol, alias in estimate._symbol_aliases.items():
+            if symbol in merged or alias in claimed_aliases:
+                continue
+            merged[symbol] = alias
+            claimed_aliases.add(alias)
+    return merged
 
 
 def _validate_opaque_cost_provenance(
@@ -1618,6 +2404,7 @@ def _validate_opaque_cost_provenance(
     *,
     name: str,
     basis: GateBasis,
+    control_decomposition: ControlDecomposition,
     precision: float,
 ) -> None:
     """Validate a fixed or callback-produced opaque cost model.
@@ -1626,6 +2413,8 @@ def _validate_opaque_cost_provenance(
         estimate (ResourceEstimate): Opaque cost result to validate.
         name (str): User-facing callable name for diagnostics.
         basis (GateBasis): Basis requested by the active estimator.
+        control_decomposition (ControlDecomposition): Coherent-control
+            decomposition requested by the active estimator.
         precision (float): Clifford+T synthesis precision requested by the
             active estimator.
 
@@ -1640,6 +2429,12 @@ def _validate_opaque_cost_provenance(
             f"Opaque cost for '{name}' uses basis {estimate.basis.value!r}, "
             f"but the estimator uses {basis.value!r}."
         )
+    if estimate.control_decomposition is not control_decomposition:
+        raise ValueError(
+            f"Opaque cost for '{name}' uses control decomposition "
+            f"{estimate.control_decomposition.value!r}, but the estimator "
+            f"uses {control_decomposition.value!r}."
+        )
     if basis is GateBasis.CLIFFORD_T and not _precisions_match(
         estimate.precision,
         precision,
@@ -1650,84 +2445,172 @@ def _validate_opaque_cost_provenance(
         )
 
 
-@dataclasses.dataclass(frozen=True)
-class OpaqueCallContext:
-    """Describe one bodyless callable invocation for cost evaluation.
+@dataclasses.dataclass(frozen=True, slots=True)
+class OpaqueCostContext:
+    """Describe the base Oracle definition requested from a cost callback.
 
-    A context-aware cost callback is authoritative for the complete invocation,
-    including repetition, the invocation's explicit controls and activation
-    value, and controls inherited from surrounding controlled regions. The
-    callback should use :attr:`total_controls` when pricing coherent-control
-    overhead; the estimator validates and records its result without applying
-    those controls a second time. Fixed ``ResourceEstimate`` costs remain
-    transform-agnostic and are projected automatically by the estimator.
+    The callback models one ordinary application of the definition. Its
+    result therefore includes ``definition_control_qubits`` but never controls
+    added by a later ``qmc.control`` call or inherited from an enclosing
+    controlled qkernel. The estimator applies those call-site transforms after
+    the callback returns.
 
     Args:
-        callable_ref (CallableRef | None): Stable callable identity.
-        argument_values (tuple[Value, ...]): IR operand values from the call
-            site.
-        operand_shapes (Mapping[str, ResourceExpr]): Resolved operand shape
-            expressions keyed by operand name.
-        attrs (Mapping[str, Any]): Callable attrs copied from the invocation,
-            including ``control_value`` when explicit controls use a
-            non-default activation state.
-        loop_symbols (Mapping[str, sp.Symbol]): Loop symbols in scope.
-        controls (ResourceExpr): Number of controls inherited from surrounding
-            controlled regions, excluding the invocation's own explicit
-            controls.
-        power (ResourceExpr): Repetition power that a context-aware callback
-            must include in its returned cost. Defaults to one.
-        transform (CallTransform): Requested call transform.
-        strategy (str | None): Selected resource strategy.
-        bindings (Mapping[str, Any]): Concrete bindings supplied by the user.
-        basis (GateBasis): Gate basis requested from the estimator. Defaults
-            to ``PORTABLE``.
-        precision (float | None): Requested Clifford+T synthesis precision, or
-            ``None`` for other bases. Defaults to ``None``.
+        callable_name (str): Human-readable callable name.
+        target_shapes (Mapping[str, tuple[ResourceExpr, ...]]): Definition
+            target shapes keyed by formal operand name. A scalar qubit has an
+            empty shape tuple.
+        definition_control_qubits (int): Controls declared by the Oracle
+            definition and already included in the callback's base cost.
+        strategy (str | None): Selected base resource strategy. Defaults to
+            ``None``.
+        basis (GateBasis): Requested output gate basis. Defaults to
+            ``LOGICAL``.
+        control_decomposition (ControlDecomposition): Requested coherent
+            control model. Defaults to ``CLEAN_ANCILLA_TOFFOLI``.
+        precision (float | None): Clifford+T synthesis precision, or ``None``
+            for other bases. Defaults to ``None``.
     """
 
-    callable_ref: "CallableRef | None"
-    argument_values: tuple[Value, ...]
-    operand_shapes: Mapping[str, ResourceExpr]
-    attrs: Mapping[str, Any]
-    loop_symbols: Mapping[str, sp.Expr]
-    controls: ResourceExpr = _ZERO
-    power: ResourceExpr = _ONE
-    transform: CallTransform = CallTransform.DIRECT
+    callable_name: str
+    target_shapes: Mapping[str, tuple[ResourceExpr, ...]]
+    definition_control_qubits: int
     strategy: str | None = None
-    bindings: Mapping[str, Any] = dataclasses.field(default_factory=dict)
-    basis: GateBasis = GateBasis.PORTABLE
+    basis: GateBasis = _DEFAULT_GATE_BASIS
+    control_decomposition: ControlDecomposition = _DEFAULT_CONTROL_DECOMPOSITION
     precision: float | None = None
 
-    @property
-    def own_controls(self) -> int:
-        """Return the invocation's own control-qubit count.
+    def __post_init__(self) -> None:
+        """Validate and freeze definition-level callback inputs.
 
-        Reads ``attrs["num_control_qubits"]`` when the call is controlled. This
-        is the control the callable is applied *with* (e.g. Shor conditioning a
-        modular multiplication on an exponent qubit), distinct from inherited
-        controls in :attr:`controls`. A context-aware cost callback must include
-        both sources exactly once in its returned estimate.
+        Raises:
+            TypeError: If the callable name, target names, target shapes, or
+                definition control count have invalid Python types.
+            ValueError: If the definition control count is negative.
+        """
+        if not isinstance(self.callable_name, str):
+            raise TypeError("callable_name must be a string.")
+        if isinstance(self.definition_control_qubits, bool) or not isinstance(
+            self.definition_control_qubits, int
+        ):
+            raise TypeError("definition_control_qubits must be a plain Python int.")
+        if self.definition_control_qubits < 0:
+            raise ValueError("definition_control_qubits must be nonnegative.")
+        normalized_shapes: dict[str, tuple[ResourceExpr, ...]] = {}
+        for name, shape in self.target_shapes.items():
+            if not isinstance(name, str):
+                raise TypeError("target shape names must be strings.")
+            if not isinstance(shape, tuple):
+                raise TypeError(f"target shape for {name!r} must be a tuple.")
+            normalized_shapes[name] = tuple(_expr(dimension) for dimension in shape)
+        object.__setattr__(
+            self,
+            "target_shapes",
+            MappingProxyType(normalized_shapes),
+        )
+
+    @property
+    def target_qubits(self) -> ResourceExpr:
+        """Return the flattened width of all definition targets.
 
         Returns:
-            int: Own control-qubit count, or ``0`` for a direct call.
+            ResourceExpr: Sum of scalar targets and products of array
+            dimensions.
         """
-        if self.transform is not CallTransform.CONTROLLED:
-            return 0
-        return int(self.attrs.get("num_control_qubits", 0) or 0)
+        return _safe_simplify(
+            _expr(
+                sum(
+                    (
+                        sp.prod(shape) if shape else _ONE
+                        for shape in self.target_shapes.values()
+                    ),
+                    _ZERO,
+                )
+            )
+        )
+
+
+def _opaque_call_relative_width(width: WidthResources) -> WidthResources:
+    """Remove a standalone estimate's caller-owned width baseline.
+
+    Explicit opaque costs may be copied from a root qkernel estimate, whose
+    ``peak_qubits`` includes ``input_qubits``. At an Invoke boundary those
+    operands are already live in the caller, so only the peak above that
+    baseline belongs to the call body.
+
+    Args:
+        width (WidthResources): Definition-level standalone width.
+
+    Returns:
+        WidthResources: Body-relative width for one opaque invocation.
+    """
+    return dataclasses.replace(
+        width,
+        input_qubits=_ZERO,
+        peak_qubits=_safe_simplify(
+            sp.Max(
+                _ZERO,
+                width.peak_qubits - width.input_qubits,
+            )
+        ),
+    )
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _OpaqueInvocationTransform:
+    """Carry call-site transforms kept out of ``OpaqueCostContext``.
+
+    Args:
+        declared_controls (int): Controls represented by the base definition.
+        added_controls (int): Controls prepended by a frontend transform.
+        inherited_controls (ResourceExpr): Controls inherited from enclosing
+            controlled bodies.
+        inverse (bool): Whether to invert the base definition.
+        control_value (int | None): Combined LSB-first activation value for
+            added then declared local controls.
+    """
+
+    declared_controls: int
+    added_controls: int
+    inherited_controls: ResourceExpr
+    inverse: bool
+    control_value: int | None
 
     @property
-    def total_controls(self) -> ResourceExpr:
-        """Return every coherent control the cost callback must price.
+    def external_controls(self) -> ResourceExpr:
+        """Return controls the estimator applies to the base cost.
 
         Returns:
-            ResourceExpr: Sum of inherited and invocation-owned controls.
+            ResourceExpr: Added plus inherited controls.
         """
-        return self.controls + self.own_controls
+        return self.inherited_controls + self.added_controls
+
+    @property
+    def local_controls(self) -> int:
+        """Return the controls normalized by this Oracle invocation.
+
+        Returns:
+            int: Added plus definition-declared controls.
+        """
+        return self.added_controls + self.declared_controls
+
+    @property
+    def zero_controls(self) -> int:
+        """Return zero-valued controls in the combined local condition.
+
+        Returns:
+            int: Number of local controls activated by zero.
+        """
+        return int(
+            _zero_control_count(
+                self.local_controls,
+                self.control_value,
+            )
+        )
 
 
 @dataclasses.dataclass
-class ResourceEstimatorConfig:
+class _ResourceEstimatorConfig:
     """Configure ``ResourceEstimator`` behavior.
 
     Args:
@@ -1736,7 +2619,9 @@ class ResourceEstimatorConfig:
         simplify (bool): Whether to simplify the final estimate.
         unknown_policy (UnknownResourcePolicy): Handling for unknown opaque
             callables.
-        basis (GateBasis): Output gate basis. Defaults to ``PORTABLE``.
+        basis (GateBasis): Output gate basis. Defaults to ``LOGICAL``.
+        control_decomposition (ControlDecomposition): Coherent-control
+            decomposition. Defaults to ``CLEAN_ANCILLA_TOFFOLI``.
         precision (float): Approximation precision for rotation synthesis in
             ``CLIFFORD_T`` basis. Defaults to ``1e-10``.
     """
@@ -1745,12 +2630,13 @@ class ResourceEstimatorConfig:
     trace: bool = False
     simplify: bool = True
     unknown_policy: UnknownResourcePolicy = UnknownResourcePolicy.ERROR
-    basis: GateBasis = GateBasis.PORTABLE
-    precision: float = 1e-10
+    basis: GateBasis = _DEFAULT_GATE_BASIS
+    control_decomposition: ControlDecomposition = _DEFAULT_CONTROL_DECOMPOSITION
+    precision: float = _DEFAULT_ROTATION_SYNTHESIS_PRECISION
 
 
 class ResourceEstimator:
-    """Estimate logical resources for qkernels and IR blocks."""
+    """Estimate algorithmic resources for qkernels and IR blocks."""
 
     def __init__(
         self,
@@ -1758,9 +2644,11 @@ class ResourceEstimator:
         strategies: dict[str, str] | None = None,
         trace: bool = False,
         simplify: bool = True,
-        unknown_policy: UnknownResourcePolicy = UnknownResourcePolicy.ERROR,
-        basis: str | GateBasis = GateBasis.PORTABLE,
-        precision: float = 1e-10,
+        unknown_policy: str | UnknownResourcePolicy = UnknownResourcePolicy.ERROR,
+        basis: str | GateBasis = _DEFAULT_GATE_BASIS,
+        control_decomposition: str
+        | ControlDecomposition = _DEFAULT_CONTROL_DECOMPOSITION,
+        precision: float = _DEFAULT_ROTATION_SYNTHESIS_PRECISION,
     ) -> None:
         """Initialize a resource estimator.
 
@@ -1771,19 +2659,30 @@ class ResourceEstimator:
                 ``False``.
             simplify (bool): Whether to simplify the final estimate. Defaults
                 to ``True``.
-            unknown_policy (UnknownResourcePolicy): Handling for unknown
+            unknown_policy (str | UnknownResourcePolicy): Handling for unknown
                 bodyless callables. Defaults to ``ERROR``.
             basis (str | GateBasis): Output gate basis. Defaults to
-                ``PORTABLE``.
+                ``LOGICAL``.
+            control_decomposition (str | ControlDecomposition):
+                Coherent-control decomposition. Defaults to
+                ``CLEAN_ANCILLA_TOFFOLI``.
             precision (float): Rotation-synthesis precision for
                 ``CLIFFORD_T`` basis. Defaults to ``1e-10``.
 
         Raises:
-            ValueError: If ``basis`` is unknown or ``precision`` is outside
-                ``(0, 1)``.
+            ValueError: If ``unknown_policy``, ``basis``, or
+                ``control_decomposition`` is unknown, or ``precision`` is
+                outside ``(0, 1)``.
         """
         if not 0 < precision < 1:
             raise ValueError("precision must satisfy 0 < precision < 1.")
+        try:
+            normalized_unknown_policy = UnknownResourcePolicy(unknown_policy)
+        except ValueError as error:
+            valid = ", ".join(member.value for member in UnknownResourcePolicy)
+            raise ValueError(
+                f"unknown resource policy {unknown_policy!r}; expected one of: {valid}"
+            ) from error
         try:
             normalized_basis = GateBasis(basis)
         except ValueError as error:
@@ -1791,12 +2690,23 @@ class ResourceEstimator:
             raise ValueError(
                 f"unknown gate basis {basis!r}; expected one of: {valid}"
             ) from error
-        self.config = ResourceEstimatorConfig(
+        try:
+            normalized_control_decomposition = ControlDecomposition(
+                control_decomposition
+            )
+        except ValueError as error:
+            valid = ", ".join(member.value for member in ControlDecomposition)
+            raise ValueError(
+                "unknown control decomposition "
+                f"{control_decomposition!r}; expected one of: {valid}"
+            ) from error
+        self.config = _ResourceEstimatorConfig(
             strategies=dict(strategies or {}),
             trace=trace,
             simplify=simplify,
-            unknown_policy=unknown_policy,
+            unknown_policy=normalized_unknown_policy,
             basis=normalized_basis,
+            control_decomposition=normalized_control_decomposition,
             precision=precision,
         )
 
@@ -1807,7 +2717,7 @@ class ResourceEstimator:
         inputs: dict[str, Any] | None = None,
         strategies: dict[str, str] | None = None,
     ) -> ResourceEstimate:
-        """Estimate logical resources for a qkernel, block, or operation list.
+        """Estimate algorithmic resources for a qkernel, block, or operations.
 
         Args:
             kernel (QKernel[Any, Any] | Block | Sequence[Operation]): Object to
@@ -1821,7 +2731,7 @@ class ResourceEstimator:
                 estimator-level strategies. Defaults to ``None``.
 
         Returns:
-            ResourceEstimate: Logical resource estimate.
+            ResourceEstimate: Algorithmic resource estimate.
 
         Raises:
             ValueError: If an input name is unknown, a callable resource
@@ -1950,6 +2860,7 @@ class ResourceEstimator:
         estimate = dataclasses.replace(
             estimate,
             basis=config.basis,
+            control_decomposition=config.control_decomposition,
             precision=(
                 config.precision if config.basis is GateBasis.CLIFFORD_T else None
             ),
@@ -2025,14 +2936,14 @@ class ResourceInterpreter:
     def __init__(
         self,
         *,
-        config: ResourceEstimatorConfig,
+        config: _ResourceEstimatorConfig,
         bindings: Mapping[str, Any],
         condition_values: Mapping[str, sp.Expr] | None = None,
     ) -> None:
         """Initialize an interpreter.
 
         Args:
-            config (ResourceEstimatorConfig): Estimator configuration.
+            config (_ResourceEstimatorConfig): Estimator configuration.
             bindings (Mapping[str, Any]): Concrete user bindings.
             condition_values (Mapping[str, sp.Expr] | None): Numeric scalar
                 input values used to decide compile-time ``if`` branches and
@@ -2071,6 +2982,14 @@ class ResourceInterpreter:
         # recurrences fail early; a terminating concrete recursion has no
         # estimator-specific depth ceiling.
         self._active_call_states: dict[int, list[tuple[sp.Expr, ...]]] = {}
+        # Batch-profile discovery recursively follows callable bodies before
+        # their resource evaluation. Track resolved call states independently
+        # so concrete recursion may reach its base case while symbolic cycles
+        # stop without exhausting Python's call stack.
+        self._active_batch_profile_states: dict[
+            int,
+            list[tuple[sp.Expr, ...]],
+        ] = {}
         # While loops have no source-level induction variable, so expose a
         # deterministic traversal-order name for each independent trip count.
         # Retaining ``|while|`` for the first loop preserves the original API.
@@ -2150,69 +3069,139 @@ class ResourceInterpreter:
             *_block_input_constraints(block, resolver),
         )
 
-    def _controlled_operation_batch_weight(
+    def _controlled_operation_batch_profile(
         self,
         operation: Operation,
         resolver: ExprResolver,
-    ) -> int:
-        """Return the shared-control batching weight of one operation.
+    ) -> _EstimatorControlBatchProfile:
+        """Return the symbolic control-batching profile of one operation.
 
-        The weight mirrors the portable emitter: zero means no emitted
-        controlled work, one means one leaf, and two means the operation can
-        justify a body-wide shared AND ladder by itself.
+        The profile retains parameter-dependent activity rather than choosing
+        a decomposition before public inputs are substituted. This keeps
+        symbolic specialization and direct input specialization on the same
+        fixed clean-ancilla resource-model path.
 
         Args:
             operation (Operation): Operation inside a controlled body.
             resolver (ExprResolver): Resolver for compile-time structure.
 
         Returns:
-            int: Batching weight clamped to zero, one, or two.
+            _EstimatorControlBatchProfile: Capped symbolic work.
         """
-        static_weight = static_controlled_batch_weight(operation)
-        if static_weight is not None:
-            return static_weight
+        static_profile = static_clean_ancilla_batch_profile(operation)
+        if static_profile is not None:
+            return _EstimatorControlBatchProfile(work=static_profile.work)
         if isinstance(operation, (BinOp, CompOp, CondOp, NotOp, ReturnOperation)):
-            return 0
+            return _EstimatorControlBatchProfile()
+        if isinstance(operation, GlobalPhaseOperation):
+            phase = self._apply_condition_values(
+                resolver.resolve(operation.phase),
+                record_usage=False,
+            )
+            return _EstimatorControlBatchProfile(work=1).when(
+                sp.Ne(
+                    _CanonicalPhaseClass(phase),
+                    _PHASE_CLASS_CODES[None],
+                )
+            )
+        if isinstance(operation, PauliEvolveOp):
+            gamma = self._apply_condition_values(
+                resolver.resolve(operation.gamma),
+                record_usage=False,
+            )
+            return _EstimatorControlBatchProfile(work=2).when(
+                sp.Ne(gamma, _ZERO),
+            )
         if isinstance(operation, ControlledUOperation):
             power = self._apply_condition_values(
                 resolver.resolve(operation.power),
                 record_usage=False,
             )
-            return 0 if power.is_zero is True else 1
+            active = _boolean_condition(sp.Gt(power, _ZERO))
+            if not isinstance(operation.block, Block):
+                return _EstimatorControlBatchProfile()
+            body_operands = _controlled_u_body_operands(operation)
+            broadcast = self._apply_condition_values(
+                _scalar_target_broadcast_factor(
+                    operation.block,
+                    [operand for operand in body_operands if operand.type.is_quantum()],
+                    resolver,
+                ),
+                record_usage=False,
+            )
+            active = sp.And(active, sp.Gt(broadcast, _ZERO))
+            child = _controlled_u_child_resolver(operation, resolver)
+            body_profile = self._controlled_body_batch_profile(
+                operation.block.operations,
+                child,
+            )
+            # Every valid ControlledU owns at least one local control. Once
+            # the body is active, composing that control with an outer carrier
+            # is itself enough to justify the shared path.
+            return body_profile.when(active).as_shared_leaf()
         if isinstance(operation, ForOperation):
             if len(operation.operands) < 2:
-                return 0
-            child, start, stop, step, _loop_symbol = build_for_loop_scope(
+                return _EstimatorControlBatchProfile()
+            child, start, stop, step, loop_symbol = build_for_loop_scope(
                 operation,
                 resolver,
             )
+            start = self._apply_condition_values(start, record_usage=False)
+            stop = self._apply_condition_values(stop, record_usage=False)
+            step = self._apply_condition_values(step, record_usage=False)
             iterations = symbolic_iterations(start, stop, step)
-            count = self._concrete_scalar(iterations)
-            if count is None:
-                return 0
-            if count <= 0:
-                return 0
-            body_weight = self._controlled_body_batch_weight(
+            if operation.region_args:
+                return self._controlled_region_for_batch_profile(
+                    operation,
+                    resolver,
+                    start=start,
+                    step=step,
+                    iterations=iterations,
+                    loop_symbol=loop_symbol,
+                )
+            return self._controlled_body_batch_profile(
                 operation.operations,
                 child,
+            ).sum_over(
+                loop_symbol,
+                start,
+                step,
+                iterations,
             )
-            if count == 1:
-                return body_weight
-            return CONTROL_BATCH_MIN_WEIGHT if body_weight >= 1 else 0
         if isinstance(operation, IfOperation):
-            taken = self._peek_branch_decision(resolver.resolve(operation.condition))
-            if taken is None:
-                return 1
+            condition = self._apply_condition_values(
+                resolver.resolve(operation.condition),
+                record_usage=False,
+            )
             true_child, false_child = build_if_scopes(operation, resolver)
-            return self._controlled_body_batch_weight(
-                (operation.true_operations if taken else operation.false_operations),
-                true_child if taken else false_child,
+            decision = self._peek_branch_decision(condition)
+            if decision is True:
+                return self._controlled_body_batch_profile(
+                    operation.true_operations,
+                    true_child,
+                )
+            if decision is False:
+                return self._controlled_body_batch_profile(
+                    operation.false_operations,
+                    false_child,
+                )
+            true_profile = self._controlled_body_batch_profile(
+                operation.true_operations,
+                true_child,
+            )
+            false_profile = self._controlled_body_batch_profile(
+                operation.false_operations,
+                false_child,
+            )
+            return true_profile.conditional(
+                false_profile,
+                _boolean_condition(condition),
             )
         if isinstance(operation, InvokeOperation):
             strategy = self._strategy_for(operation)
             body = operation.effective_body(strategy=strategy)
             if not isinstance(body, Block):
-                return 0
+                return _EstimatorControlBatchProfile()
             selected_impl = operation.implementation_for(strategy=strategy)
             body_implements_transform = (
                 selected_impl is not None and selected_impl.body is body
@@ -2222,43 +3211,319 @@ class ResourceInterpreter:
                 called_block=body,
                 body_implements_transform=body_implements_transform,
             )
-            return self._controlled_body_batch_weight(body.operations, child)
+            body_identity = id(body)
+            call_state = tuple(
+                self._apply_condition_values(
+                    child.resolve(formal),
+                    record_usage=False,
+                )
+                for formal in body.input_values
+                if not formal.type.is_quantum()
+            )
+            active_states = self._active_batch_profile_states.setdefault(
+                body_identity,
+                [],
+            )
+            repeated_state = call_state in active_states
+            concrete_progress = bool(active_states) and any(
+                current != previous and current.is_number and previous.is_number
+                for current, previous in zip(
+                    call_state,
+                    active_states[-1],
+                    strict=True,
+                )
+            )
+            if repeated_state or (active_states and not concrete_progress):
+                return _EstimatorControlBatchProfile(work=2)
+            active_states.append(call_state)
+            try:
+                body_profile = self._controlled_body_batch_profile(
+                    body.operations,
+                    child,
+                )
+            finally:
+                active_states.pop()
+                if not active_states:
+                    self._active_batch_profile_states.pop(body_identity, None)
+            own_controls = (
+                operation.num_control_qubits
+                if operation.transform.is_controlled and not body_implements_transform
+                else 0
+            )
+            if own_controls:
+                return body_profile.as_shared_leaf()
+            return body_profile
+        if isinstance(operation, SelectOperation):
+            case_profiles: list[_EstimatorControlBatchProfile] = []
+            for case_block in operation.case_blocks:
+                child = _select_case_child_resolver(
+                    operation,
+                    case_block,
+                    resolver,
+                )
+                broadcast = self._apply_condition_values(
+                    _scalar_target_broadcast_factor(
+                        case_block,
+                        operation.target_operands,
+                        resolver,
+                    ),
+                    record_usage=False,
+                )
+                case_profiles.append(
+                    self._controlled_body_batch_profile(
+                        case_block.operations,
+                        child,
+                    ).when(sp.Gt(broadcast, _ZERO))
+                )
+            # SELECT contributes at least one index control to every active
+            # case, so one active leaf already benefits from composing that
+            # control with the outer carrier.
+            return _EstimatorControlBatchProfile.combine(case_profiles).as_shared_leaf()
         if isinstance(operation, InverseBlockOperation):
             if not isinstance(operation.implementation_block, Block):
-                return 0
+                return _EstimatorControlBatchProfile()
             child = _inverse_block_child_resolver(operation, resolver)
-            return self._controlled_body_batch_weight(
+            body_profile = self._controlled_body_batch_profile(
                 operation.implementation_block.operations,
                 child,
             )
-        return 1
+            if operation.num_control_qubits:
+                return body_profile.as_shared_leaf()
+            return body_profile
+        return _EstimatorControlBatchProfile(work=1)
 
-    def _controlled_body_batch_weight(
+    def _controlled_region_for_batch_profile(
+        self,
+        operation: ForOperation,
+        resolver: ExprResolver,
+        *,
+        start: ResourceExpr,
+        step: ResourceExpr,
+        iterations: ResourceExpr,
+        loop_symbol: sp.Symbol,
+    ) -> _EstimatorControlBatchProfile:
+        """Build a batching profile with loop-carried values in scope.
+
+        Args:
+            operation (ForOperation): Loop carrying explicit region values.
+            resolver (ExprResolver): Enclosing expression resolver.
+            start (ResourceExpr): First Python-range value.
+            step (ResourceExpr): Python-range step.
+            iterations (ResourceExpr): Number of executed iterations.
+            loop_symbol (sp.Symbol): Symbolic loop induction variable.
+
+        Returns:
+            _EstimatorControlBatchProfile: Exact affine-carry profile, or a
+            conservative nonempty-loop profile for unsupported recurrences.
+        """
+        concrete_profile = self._concrete_region_batch_profile(
+            operation,
+            resolver,
+            start=start,
+            step=step,
+            iterations=iterations,
+            maximum_iterations=_CONCRETE_REGION_REPLAY_LIMIT,
+        )
+        if concrete_profile is not None:
+            return concrete_profile
+        carry_symbols = {
+            arg.block_arg.uuid: _typed_value_symbol(
+                arg.block_arg,
+                f"{arg.var_name}_batch_carry",
+                fresh=True,
+            )
+            for arg in operation.region_args
+        }
+        probe_context: dict[str, sp.Expr] = dict(carry_symbols)
+        if operation.loop_var_value is not None:
+            probe_context[operation.loop_var_value.uuid] = loop_symbol
+        body = _LocalBlock(operation.operations)
+        probe = resolver.child_scope(
+            inner_block=body,
+            extra_context=probe_context,
+            extra_loop_vars={operation.loop_var: loop_symbol},
+        )
+        self.eval_operations(
+            operation.operations,
+            probe,
+            controls=_ZERO,
+            initial_allocations=_captured_quantum_allocations(
+                operation.operations,
+                probe,
+                self._allocation_owners_by_uuid,
+            ),
+            allow_control_batching=False,
+        )
+
+        at_iteration: dict[str, sp.Expr] = {}
+        all_carry_symbols = set(carry_symbols.values())
+        for arg in operation.region_args:
+            init = self._apply_condition_values(
+                resolver.resolve(arg.init),
+                record_usage=False,
+            )
+            yielded = self._apply_condition_values(
+                probe.resolve(arg.yielded),
+                record_usage=False,
+            )
+            carry_symbol = carry_symbols[arg.block_arg.uuid]
+            recurrence = _solve_affine_recurrence(
+                yielded=yielded,
+                carry_symbol=carry_symbol,
+                other_carry_symbols=all_carry_symbols - {carry_symbol},
+                loop_symbol=loop_symbol,
+                start=start,
+                step=step,
+                iterations=iterations,
+                init=init,
+            )
+            if recurrence is None:
+                concrete_profile = self._concrete_region_batch_profile(
+                    operation,
+                    resolver,
+                    start=start,
+                    step=step,
+                    iterations=iterations,
+                    maximum_iterations=None,
+                )
+                if concrete_profile is not None:
+                    return concrete_profile
+                return _EstimatorControlBatchProfile(work=2).when(
+                    sp.Gt(iterations, _ZERO)
+                )
+            at_iteration[arg.block_arg.uuid] = cast(sp.Expr, recurrence[0])
+
+        body_context = dict(at_iteration)
+        if operation.loop_var_value is not None:
+            body_context[operation.loop_var_value.uuid] = loop_symbol
+        child = resolver.child_scope(
+            inner_block=body,
+            extra_context=body_context,
+            extra_loop_vars={operation.loop_var: loop_symbol},
+        )
+        return self._controlled_body_batch_profile(
+            operation.operations,
+            child,
+        ).sum_over(
+            loop_symbol,
+            start,
+            step,
+            iterations,
+        )
+
+    def _concrete_region_batch_profile(
+        self,
+        operation: ForOperation,
+        resolver: ExprResolver,
+        *,
+        start: ResourceExpr,
+        step: ResourceExpr,
+        iterations: ResourceExpr,
+        maximum_iterations: int | None,
+    ) -> _EstimatorControlBatchProfile | None:
+        """Replay a concrete loop carry for the control-batching decision.
+
+        Args:
+            operation (ForOperation): Loop carrying explicit region values.
+            resolver (ExprResolver): Enclosing expression resolver.
+            start (ResourceExpr): First Python-range value.
+            step (ResourceExpr): Python-range step.
+            iterations (ResourceExpr): Number of executed iterations.
+            maximum_iterations (int | None): Largest range to replay, or
+                ``None`` to replay any concrete range.
+
+        Returns:
+            _EstimatorControlBatchProfile | None: Exact combined profile, or
+            ``None`` while any range value remains symbolic or exceeds the
+            requested replay limit.
+        """
+        concrete_values = tuple(
+            self._concrete_scalar(value) for value in (start, step, iterations)
+        )
+        if any(value is None for value in concrete_values):
+            return None
+        concrete_start, concrete_step, iteration_count = cast(
+            tuple[int, int, int],
+            concrete_values,
+        )
+        if concrete_step == 0 or iteration_count < 0:
+            return None
+        if maximum_iterations is not None and iteration_count > maximum_iterations:
+            return None
+        carried = {
+            arg.block_arg.uuid: self._apply_condition_values(
+                resolver.resolve(arg.init),
+                record_usage=False,
+            )
+            for arg in operation.region_args
+        }
+        profiles: list[_EstimatorControlBatchProfile] = []
+        body = _LocalBlock(operation.operations)
+        for offset in range(iteration_count):
+            loop_value = sp.Integer(concrete_start + concrete_step * offset)
+            context = dict(carried)
+            if operation.loop_var_value is not None:
+                context[operation.loop_var_value.uuid] = loop_value
+            child = resolver.child_scope(
+                inner_block=body,
+                extra_context=context,
+                extra_loop_vars={operation.loop_var: loop_value},
+            )
+            self.eval_operations(
+                operation.operations,
+                child,
+                controls=_ZERO,
+                initial_allocations=_captured_quantum_allocations(
+                    operation.operations,
+                    child,
+                    self._allocation_owners_by_uuid,
+                ),
+                allow_control_batching=False,
+            )
+            profiles.append(
+                self._controlled_body_batch_profile(
+                    operation.operations,
+                    child,
+                )
+            )
+            combined = _EstimatorControlBatchProfile.combine(profiles)
+            if combined.has_multiple_work is sp.true:
+                return combined
+            carried = {
+                arg.block_arg.uuid: self._apply_condition_values(
+                    child.resolve(arg.yielded),
+                    record_usage=False,
+                )
+                for arg in operation.region_args
+            }
+        return _EstimatorControlBatchProfile.combine(profiles)
+
+    def _controlled_body_batch_profile(
         self,
         operations: Sequence[Operation],
         resolver: ExprResolver,
-    ) -> int:
-        """Return a controlled body's batching weight up to the threshold.
+    ) -> _EstimatorControlBatchProfile:
+        """Return a controlled body's recursively resolved batching profile.
 
         Args:
             operations (Sequence[Operation]): Controlled body operations.
             resolver (ExprResolver): Resolver for compile-time structure.
 
         Returns:
-            int: Sum of operation weights, capped at two.
+            _EstimatorControlBatchProfile: Capped symbolic work.
         """
-        return capped_controlled_batch_weight(
-            self._controlled_operation_batch_weight(operation, resolver)
+        return _EstimatorControlBatchProfile.combine(
+            self._controlled_operation_batch_profile(operation, resolver)
             for operation in operations
         )
 
-    def _should_batch_controlled_body(
+    def _controlled_body_batch_condition(
         self,
         operations: Sequence[Operation],
         resolver: ExprResolver,
         controls: ResourceExpr,
-    ) -> bool:
-        """Return whether portable estimation should use one shared ladder.
+    ) -> sp.Basic:
+        """Return when the selected control model uses one shared ladder.
 
         Args:
             operations (Sequence[Operation]): Controlled body operations.
@@ -2266,18 +3531,26 @@ class ResourceInterpreter:
             controls (ResourceExpr): Number of surrounding controls.
 
         Returns:
-            bool: Whether the concrete body matches the emitter's batching
-            policy.
+            sp.Basic: Symbolic predicate defined by the selected fixed
+                resource model after concrete specialization.
         """
-        if self.config.basis is not GateBasis.PORTABLE:
-            return False
-        if not controls.is_number or controls.is_integer is not True:
-            return False
-        count = int(controls)
-        return should_batch_controlled_body(
-            num_controls=count,
-            body_weight=self._controlled_body_batch_weight(operations, resolver),
-            operations=operations,
+        if (
+            self.config.control_decomposition
+            is not ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
+        ):
+            return sp.false
+        control_count = self._apply_condition_values(
+            _expr(controls),
+            record_usage=False,
+        )
+        if control_count.is_zero is True or control_count == _ONE:
+            return sp.false
+        profile = self._controlled_body_batch_profile(operations, resolver)
+        return _boolean_condition(
+            sp.And(
+                sp.Ge(control_count, CLEAN_ANCILLA_BATCH_MIN_WORK),
+                profile.has_multiple_work,
+            )
         )
 
     def _peek_branch_decision(self, condition: sp.Basic) -> bool | None:
@@ -2316,7 +3589,7 @@ class ResourceInterpreter:
             controls (ResourceExpr): Original concrete control count.
 
         Returns:
-            ResourceEstimate: Portable shared-fallback cost with concurrently
+            ResourceEstimate: Clean-ancilla Toffoli cost with concurrently
             held clean ancillas.
         """
         outer_clean_ancillas = controls - _ONE
@@ -2324,9 +3597,11 @@ class ResourceInterpreter:
             "toffoli",
             _ZERO,
             basis=self.config.basis,
+            control_decomposition=self.config.control_decomposition,
             precision=self.config.precision,
         )
         ladder = toffoli.repeat(2 * outer_clean_ancillas)
+        compute_depth = outer_clean_ancillas * toffoli.depth.depth
         estimate = ladder.seq(body)
         trace_children = tuple(
             node
@@ -2345,7 +3620,7 @@ class ResourceInterpreter:
             trace=(
                 ResourceTraceNode(
                     name=f"shared_control_ladder({controls})",
-                    source_kind="portable_fallback",
+                    source_kind="clean_ancilla_toffoli",
                     summary=(
                         f"toffoli_steps={2 * outer_clean_ancillas}, "
                         f"clean_ancillas={outer_clean_ancillas}"
@@ -2359,6 +3634,18 @@ class ResourceInterpreter:
             _input_sizes=body._input_sizes,
             _has_output_summary=body._has_output_summary,
             _dependency_keys=body._dependency_keys,
+            _dependency_completion=(
+                {
+                    key: cast(
+                        ResourceExpr,
+                        _ConditionIndicator(_resource_activity_condition(completion))
+                        * (compute_depth + completion),
+                    )
+                    for key, completion in (body._dependency_completion or {}).items()
+                }
+                if body._dependency_completion is not None
+                else None
+            ),
         )._with_metadata(quality=EstimateQuality.UPPER_BOUND)
 
     def eval_operations(
@@ -2368,6 +3655,7 @@ class ResourceInterpreter:
         *,
         controls: ResourceExpr | int = 0,
         initial_allocations: Mapping[str, ResourceExpr] | None = None,
+        allow_control_batching: bool = True,
     ) -> ResourceEstimate:
         """Evaluate a list of operations sequentially.
 
@@ -2378,23 +3666,57 @@ class ResourceInterpreter:
                 to zero.
             initial_allocations (Mapping[str, ResourceExpr] | None): Live
                 quantum inputs keyed by logical wire ID. Defaults to ``None``.
+            allow_control_batching (bool): Whether this body boundary may
+                choose a shared control ladder. Recursive call boundaries keep
+                their own independent choice. Defaults to ``True``.
 
         Returns:
             ResourceEstimate: Sequential composition of operation resources.
         """
-        control_count = _expr(controls)
-        if self._should_batch_controlled_body(
-            operations,
-            resolver,
-            control_count,
-        ):
+        control_count = self._apply_condition_values(
+            _expr(controls),
+            record_usage=False,
+        )
+        batch_condition = (
+            self._controlled_body_batch_condition(
+                operations,
+                resolver,
+                control_count,
+            )
+            if allow_control_batching
+            else sp.false
+        )
+        if batch_condition is not sp.false:
             body = self.eval_operations(
                 operations,
                 resolver,
                 controls=_ONE,
                 initial_allocations=initial_allocations,
             )
-            return self._with_shared_control_ladder(body, control_count)
+            active = _resource_activity_condition(_estimate_activity(body))
+            shared = self._with_shared_control_ladder(
+                body,
+                control_count,
+            ).conditional(body, active)
+            if batch_condition is sp.true:
+                return shared
+            direct = self.eval_operations(
+                operations,
+                resolver,
+                controls=control_count,
+                initial_allocations=initial_allocations,
+                allow_control_batching=False,
+            )
+            batch_dependency_keys = _merge_dependency_keys(shared, direct)
+            shared = dataclasses.replace(
+                shared,
+                _dependency_keys=batch_dependency_keys,
+            )
+            direct = dataclasses.replace(
+                direct,
+                _dependency_keys=batch_dependency_keys,
+            )
+            return shared.conditional(direct, batch_condition)
 
         previous_taint = self._measurement_derived
         cache_entry = self._operation_taint_cache.get(id(operations))
@@ -2417,7 +3739,7 @@ class ResourceInterpreter:
                 operation_estimate = self.eval_operation(
                     operation,
                     resolver,
-                    controls=controls,
+                    controls=control_count,
                 )
                 if _estimate_has_nonzero_depth(
                     operation_estimate
@@ -2460,6 +3782,7 @@ class ResourceInterpreter:
                 operation_estimate = dataclasses.replace(
                     operation_estimate,
                     basis=self.config.basis,
+                    control_decomposition=self.config.control_decomposition,
                     precision=(
                         self.config.precision
                         if self.config.basis is GateBasis.CLIFFORD_T
@@ -2467,39 +3790,81 @@ class ResourceInterpreter:
                     ),
                 )
                 scheduled.append((operation, operation_estimate))
-            estimate = ResourceEstimate.seq_all(
-                operation_estimate for _, operation_estimate in scheduled
-            )
             dependency_keys: set[WireKey] = set()
             wire_footprints: list[_WireFootprint | None] = []
+            scheduled_with_dependencies: list[tuple[Operation, ResourceEstimate]] = []
             for operation, operation_estimate in scheduled:
                 if not _estimate_has_nonzero_depth(operation_estimate):
                     wire_footprints.append(None)
+                    scheduled_with_dependencies.append(
+                        (
+                            operation,
+                            dataclasses.replace(
+                                operation_estimate,
+                                _dependency_keys=frozenset(),
+                                _dependency_completion={},
+                            ),
+                        )
+                    )
                     continue
                 if operation_estimate._dependency_keys is not None:
                     footprint_keys = operation_estimate._dependency_keys
                     wire_footprints.append((footprint_keys, footprint_keys))
-                    dependency_keys.update(footprint_keys)
-                    continue
-                reads, writes = _quantum_wire_keys(
-                    operation,
-                    resolver,
-                    scalar_values=self.condition_values,
-                    used_names=self.branch_condition_names,
+                    reads = set(footprint_keys)
+                    writes = set(footprint_keys)
+                else:
+                    reads, writes = _quantum_wire_keys(
+                        operation,
+                        resolver,
+                        scalar_values=self.condition_values,
+                        used_names=self.branch_condition_names,
+                    )
+                    footprint_keys = frozenset(reads | writes)
+                    wire_footprints.append((frozenset(reads), frozenset(writes)))
+                dependency_keys.update(footprint_keys)
+                operation_completion = _normalized_dependency_completion(
+                    operation_estimate
                 )
-                wire_footprints.append((frozenset(reads), frozenset(writes)))
-                dependency_keys.update(reads | writes)
+                if operation_completion is None:
+                    operation_completion = {
+                        key: operation_estimate.depth.depth for key in footprint_keys
+                    }
+                scheduled_with_dependencies.append(
+                    (
+                        operation,
+                        dataclasses.replace(
+                            operation_estimate,
+                            _dependency_keys=footprint_keys,
+                            _dependency_completion=operation_completion,
+                        ),
+                    )
+                )
+            scheduled = scheduled_with_dependencies
+            estimate = ResourceEstimate.seq_all(
+                operation_estimate for _, operation_estimate in scheduled
+            )
+            depth_footprints = wire_footprints
+            if _expr(controls) != _ZERO:
+                control_carrier = ("$resource_control_carrier", None)
+                depth_footprints = [
+                    (
+                        (
+                            frozenset((*footprint[0], control_carrier)),
+                            frozenset((*footprint[1], control_carrier)),
+                        )
+                        if footprint is not None
+                        else None
+                    )
+                    for footprint in wire_footprints
+                ]
+            scheduled_depth, scheduled_completion = _dependency_depth(
+                scheduled,
+                depth_footprints,
+                measurement_derived=self._measurement_derived,
+            )
             return dataclasses.replace(
                 estimate,
-                depth=(
-                    _dependency_depth(
-                        scheduled,
-                        wire_footprints,
-                        measurement_derived=self._measurement_derived,
-                    )
-                    if _expr(controls) == _ZERO
-                    else estimate.depth
-                ),
+                depth=scheduled_depth,
                 width=_liveness_width(
                     scheduled,
                     initial_allocations or {},
@@ -2513,6 +3878,11 @@ class ResourceInterpreter:
                     initial_allocations or {},
                 ),
                 _dependency_keys=frozenset(dependency_keys),
+                _dependency_completion={
+                    key: completion
+                    for key, completion in scheduled_completion.items()
+                    if key in dependency_keys
+                },
             )
         finally:
             self._measurement_derived = previous_taint
@@ -2788,9 +4158,29 @@ class ResourceInterpreter:
 
         Returns:
             ResourceEstimate: Primitive gate resources.
+
+        Raises:
+            ValueError: If abstract controls are requested in the Clifford+T
+                basis or the selected basis lacks a controlled lowering.
+            NotImplementedError: If the clean-ancilla model has no registered
+                lowering for the primitive.
         """
-        if self.config.basis is GateBasis.PORTABLE:
-            return _estimate_portable_gate(operation, _expr(controls))
+        if (
+            self.config.basis is GateBasis.LOGICAL
+            and self.config.control_decomposition
+            is ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
+        ):
+            return _estimate_clean_ancilla_gate(operation, _expr(controls))
+        if (
+            self.config.basis is GateBasis.CLIFFORD_T
+            and self.config.control_decomposition is ControlDecomposition.ABSTRACT
+            and _expr(controls) != _ZERO
+        ):
+            raise ValueError(
+                "Clifford+T estimation cannot preserve a controlled primitive "
+                "as abstract. Select the clean-ancilla Toffoli control "
+                "decomposition."
+            )
 
         gates = _classify_gate(
             operation,
@@ -2805,6 +4195,16 @@ class ResourceInterpreter:
             else None
         )
         estimate = ResourceEstimate.primitive(name, gates, depth=depth)
+        estimate = dataclasses.replace(
+            estimate,
+            basis=self.config.basis,
+            control_decomposition=self.config.control_decomposition,
+            precision=(
+                self.config.precision
+                if self.config.basis is GateBasis.CLIFFORD_T
+                else None
+            ),
+        )
         if self.config.basis is GateBasis.CLIFFORD_T:
             clean_ancillas = _clifford_t_clean_ancillas(operation, _expr(controls))
             if clean_ancillas != _ZERO:
@@ -2821,9 +4221,13 @@ class ResourceInterpreter:
                 _expr(controls),
             )
             if upper_bound_when is not sp.false:
-                return estimate._with_metadata(
+                estimate = estimate._with_metadata(
                     quality=EstimateQuality.UPPER_BOUND,
                     active_when=upper_bound_when,
+                )
+            if _gate_has_rotation(operation):
+                estimate = estimate._with_metadata(
+                    approximation=ApproximationStatus.APPROXIMATE,
                 )
         return estimate
 
@@ -2852,7 +4256,7 @@ class ResourceInterpreter:
             ResourceEstimate: Zero when uncontrolled, otherwise one logical
             phase-gate contribution with the correct arity.
         """
-        phase = resolver.resolve(operation.phase)
+        phase = self._apply_condition_values(resolver.resolve(operation.phase))
         return self._estimate_global_phase_expression(phase, controls=controls)
 
     def _estimate_global_phase_expression(
@@ -2890,6 +4294,7 @@ class ResourceInterpreter:
                 gate_name,
                 control_count - _ONE,
                 basis=self.config.basis,
+                control_decomposition=self.config.control_decomposition,
                 precision=self.config.precision,
             )
             return dataclasses.replace(
@@ -2907,7 +4312,7 @@ class ResourceInterpreter:
                 phase_estimate = zero
             else:
                 if self.config.basis is not GateBasis.CLIFFORD_T:
-                    # The shared portable emitter preserves every nontrivial
+                    # The shared control implementation preserves every nontrivial
                     # angle as P(theta), including special Clifford angles.
                     gate_name = "p"
                 phase_estimate = gate_estimate(gate_name)
@@ -2948,6 +4353,8 @@ class ResourceInterpreter:
         One X is applied before and after the controlled region for every
         zero-valued control. ``surrounding_controls`` applies only to those X
         gates, as happens for SELECT nested under an outer controlled region.
+        Brackets that normalize an operation's own controls are unconditional
+        and therefore leave this argument at zero.
 
         Args:
             estimate (ResourceEstimate): Controlled-region estimate.
@@ -2968,6 +4375,7 @@ class ResourceInterpreter:
             "x",
             _expr(surrounding_controls),
             basis=self.config.basis,
+            control_decomposition=self.config.control_decomposition,
             precision=self.config.precision,
         )
         side = bracket_gate.repeat(zeros)
@@ -2986,7 +4394,10 @@ class ResourceInterpreter:
         active = _expr(active_when)
         if active.is_number:
             return bracketed if active > 0 else estimate
-        return bracketed.conditional(estimate, sp.Gt(active, _ZERO))
+        return bracketed.conditional(
+            estimate,
+            _resource_activity_condition(active),
+        )
 
     def eval_qinit(
         self,
@@ -3167,6 +4578,7 @@ class ResourceInterpreter:
                     gate_name,
                     _ZERO,
                     basis=self.config.basis,
+                    control_decomposition=self.config.control_decomposition,
                     precision=self.config.precision,
                 )
             )
@@ -3177,6 +4589,7 @@ class ResourceInterpreter:
                     gate_name,
                     _ZERO,
                     basis=self.config.basis,
+                    control_decomposition=self.config.control_decomposition,
                     precision=self.config.precision,
                 )
             )
@@ -3347,8 +4760,11 @@ class ResourceInterpreter:
         Raises:
             ValueError: If a concrete loop has a zero step.
         """
+        specialized_bounds = tuple(
+            self._apply_condition_values(bound) for bound in (start, stop, step)
+        )
         concrete_bounds = tuple(
-            self._concrete_scalar(bound) for bound in (start, stop, step)
+            self._concrete_scalar(bound) for bound in specialized_bounds
         )
         if all(bound is not None for bound in concrete_bounds):
             concrete_start, concrete_stop, concrete_step = cast(
@@ -3358,12 +4774,21 @@ class ResourceInterpreter:
                 raise ValueError(
                     "Resource estimation cannot evaluate a zero-step loop."
                 )
-            return self._eval_concrete_region_for(
-                operation,
-                resolver,
-                range(concrete_start, concrete_stop, concrete_step),
-                controls=controls,
+            concrete_range = range(
+                concrete_start,
+                concrete_stop,
+                concrete_step,
             )
+            if (
+                len(concrete_range[: _CONCRETE_REGION_REPLAY_LIMIT + 1])
+                <= _CONCRETE_REGION_REPLAY_LIMIT
+            ):
+                return self._eval_concrete_region_for(
+                    operation,
+                    resolver,
+                    concrete_range,
+                    controls=controls,
+                )
         return self._eval_symbolic_region_for(
             operation,
             resolver,
@@ -3505,8 +4930,20 @@ class ResourceInterpreter:
         )
 
         iterations = symbolic_iterations(start, stop, step)
+        specialized_bounds = tuple(
+            self._concrete_scalar(
+                self._apply_condition_values(bound, record_usage=False)
+            )
+            for bound in (start, stop, step)
+        )
+        concrete_fallback = (
+            cast(tuple[int, int, int], specialized_bounds)
+            if all(bound is not None for bound in specialized_bounds)
+            else None
+        )
         at_iteration: dict[str, sp.Expr] = {}
         final_values: dict[str, sp.Expr] = {}
+        unresolved_iteration_values: list[sp.Expr] = []
         assumptions: list[ResourceAssumption] = []
         all_carry_symbols = set(carry_symbols.values())
         for arg in operation.region_args:
@@ -3524,11 +4961,35 @@ class ResourceInterpreter:
                 init=init,
             )
             if recurrence is None:
+                if concrete_fallback is not None:
+                    concrete_start, concrete_stop, concrete_step = concrete_fallback
+                    if concrete_step == 0:
+                        raise ValueError(
+                            "Resource estimation cannot evaluate a zero-step loop."
+                        )
+                    return self._eval_concrete_region_for(
+                        operation,
+                        resolver,
+                        range(
+                            concrete_start,
+                            concrete_stop,
+                            concrete_step,
+                        ),
+                        controls=controls,
+                    )
                 at_value = sp.Function(f"{arg.var_name}_carry")(loop_symbol)
-                final_value = _typed_value_symbol(
+                unresolved_iteration_values.append(at_value)
+                unknown_final_value = _typed_value_symbol(
                     arg.result,
                     f"{arg.var_name}_after_loop",
                     fresh=True,
+                )
+                final_value = cast(
+                    sp.Expr,
+                    sp.Piecewise(
+                        (init, sp.Eq(iterations, _ZERO)),
+                        (unknown_final_value, True),
+                    ),
                 )
                 assumptions.append(
                     ResourceAssumption(
@@ -3561,11 +5022,26 @@ class ResourceInterpreter:
                 self._allocation_owners_by_uuid,
             ),
         )
+        if any(
+            expression.has(unresolved)
+            for expression in _serialization_expressions(inner)
+            if isinstance(expression, sp.Basic)
+            for unresolved in unresolved_iteration_values
+        ):
+            raise NotImplementedError(
+                "Resource estimation cannot keep a symbolic loop compact when "
+                "its quantum resource use depends on an unsupported nonlinear "
+                "loop-carried recurrence. Supply concrete loop-bound inputs or "
+                "use an affine or fixed-point carry."
+            )
         estimate = inner.sum_over(loop_symbol, start, stop, step)
         for arg in operation.region_args:
             resolver.bind(arg.result, final_values[arg.result.uuid])
         if assumptions:
-            estimate = estimate._with_metadata(assumptions=assumptions)
+            estimate = estimate._with_metadata(
+                assumptions=assumptions,
+                active_when=sp.Gt(iterations, _ZERO),
+            )
         return estimate
 
     def _apply_condition_values(
@@ -4830,7 +6306,7 @@ class ResourceInterpreter:
                 self._estimate_invoke_body(operation, body, resolver, controls),
                 *width_constraints,
             )
-        ctx = self._opaque_call_context(
+        cost_context, invocation_transform = self._opaque_cost_context(
             operation,
             resolver,
             controls=_expr(controls),
@@ -4843,11 +6319,16 @@ class ResourceInterpreter:
         )
         if opaque_cost is not None:
             return _with_constraints(
-                self._estimate_opaque_cost(operation, opaque_cost, ctx),
+                self._estimate_opaque_cost(
+                    operation,
+                    opaque_cost,
+                    cost_context,
+                    invocation_transform,
+                ),
                 *width_constraints,
             )
         return _with_constraints(
-            self._handle_unknown_invoke(operation, ctx),
+            self._handle_unknown_invoke(operation, invocation_transform),
             *width_constraints,
         )
 
@@ -4875,7 +6356,14 @@ class ResourceInterpreter:
                 control requirement is invalid.
         """
         local_controls, _num_targets = _resolve_controlled_u(operation, resolver)
-        total_controls = _expr(controls) + _expr(local_controls)
+        local_controls = self._apply_condition_values(
+            _expr(local_controls),
+            record_usage=False,
+        )
+        total_controls = self._apply_condition_values(
+            _expr(controls) + local_controls,
+            record_usage=False,
+        )
         power = self._apply_condition_values(resolver.resolve(operation.power))
         control_pool_width = sum(
             (
@@ -4910,7 +6398,7 @@ class ResourceInterpreter:
                 source=callable_name,
             ),
             _ResourceConstraint(
-                expression=_expr(local_controls),
+                expression=local_controls,
                 minimum=1,
                 label="Controlled operation control count",
                 unit="control qubit",
@@ -4922,7 +6410,7 @@ class ResourceInterpreter:
                     else control_pool_width
                 ),
                 minimum=None,
-                expected=_expr(local_controls),
+                expected=local_controls,
                 label="Controlled operation control operand width",
                 unit="control qubit",
             ),
@@ -4970,8 +6458,25 @@ class ResourceInterpreter:
                 *structural_constraints,
             )
         if isinstance(operation.block, Block):
-            child = _controlled_u_child_resolver(operation, resolver)
             actual_operands = _controlled_u_body_operands(operation)
+            broadcast = self._apply_condition_values(
+                _scalar_target_broadcast_factor(
+                    operation.block,
+                    [
+                        operand
+                        for operand in actual_operands
+                        if operand.type.is_quantum()
+                    ],
+                    resolver,
+                ),
+                record_usage=False,
+            )
+            if broadcast.is_zero is True:
+                return _with_constraints(
+                    ResourceEstimate.zero(f"{callable_name}[empty broadcast]"),
+                    *structural_constraints,
+                )
+            child = _controlled_u_child_resolver(operation, resolver)
             body = self._eval_call_body(
                 operation.block,
                 child,
@@ -4979,15 +6484,6 @@ class ResourceInterpreter:
                 controls=total_controls,
             )
             body_dependency_estimate = body
-            broadcast = _scalar_target_broadcast_factor(
-                operation.block,
-                [
-                    operand
-                    for operand in _controlled_u_body_operands(operation)
-                    if operand.type.is_quantum()
-                ],
-                resolver,
-            )
             repetitions = power * broadcast
             estimate = body.repeat(repetitions)
             zero_controls = _ZERO
@@ -4999,12 +6495,20 @@ class ResourceInterpreter:
                 estimate = self._with_zero_control_bracket(
                     estimate,
                     zero_controls=zero_controls,
-                    surrounding_controls=controls,
-                    active_when=repetitions,
+                    active_when=_estimate_activity(estimate),
                 )
             dependency_keys = _map_body_dependency_keys(
                 operation.block,
                 body_dependency_estimate,
+                actual_operands,
+                operation.results[len(operation.control_operands) :],
+                resolver,
+                scalar_values=self.condition_values,
+                used_names=self.branch_condition_names,
+            )
+            dependency_completion = _map_body_dependency_completion(
+                operation.block,
+                estimate,
                 actual_operands,
                 operation.results[len(operation.control_operands) :],
                 resolver,
@@ -5026,6 +6530,11 @@ class ResourceInterpreter:
                 estimate = dataclasses.replace(
                     estimate,
                     _dependency_keys=frozenset(mapped_keys),
+                    _dependency_completion=_complete_dependency_completion(
+                        dependency_completion,
+                        mapped_keys,
+                        fallback_depth=estimate.depth.depth,
+                    ),
                 )
             estimate = _with_constraints(
                 _namespace_allocation_sites(estimate, operation),
@@ -5043,9 +6552,10 @@ class ResourceInterpreter:
                 )
             return _with_body_boundary_depth_metadata(
                 estimate,
-                body_dependency_estimate,
+                estimate,
                 source=callable_name,
                 zero_controls=zero_controls,
+                scalar_broadcast=broadcast,
             )
 
         name = callable_name
@@ -5075,7 +6585,6 @@ class ResourceInterpreter:
                         int(local_controls),
                         cast(Any, operation).control_value,
                     ),
-                    surrounding_controls=controls,
                     active_when=power,
                 )
             return _with_constraints(estimate, *structural_constraints)
@@ -5105,7 +6614,6 @@ class ResourceInterpreter:
                     int(local_controls),
                     cast(Any, operation).control_value,
                 ),
-                surrounding_controls=controls,
                 active_when=power,
             )
         return _with_constraints(estimate, *structural_constraints)
@@ -5125,7 +6633,7 @@ class ResourceInterpreter:
         in addition to controls surrounding the SELECT itself. Control-value
         LSB-first zero-valued case bits add X brackets around each nonempty
         case. Under an outer controlled region those bracket gates inherit the
-        outer controls, matching the portable SELECT fallback.
+        outer controls, matching the clean-ancilla SELECT decomposition.
 
         Args:
             operation (SelectOperation): SELECT operation to evaluate.
@@ -5136,13 +6644,25 @@ class ResourceInterpreter:
         Returns:
             ResourceEstimate: Sequential estimate of all controlled case
             bodies, including scalar-case broadcast over vector targets.
+
+        Raises:
+            ValueError: If the SELECT index width, flattened index operand
+                width, target operand width, or a case resource contract is
+                invalid.
         """
-        index_controls = (
-            resolver.resolve(operation.num_index_qubits)
-            if isinstance(operation.num_index_qubits, Value)
-            else _expr(operation.num_index_qubits)
+        index_controls = self._apply_condition_values(
+            (
+                resolver.resolve(operation.num_index_qubits)
+                if isinstance(operation.num_index_qubits, Value)
+                else _expr(operation.num_index_qubits)
+            ),
+            record_usage=False,
         )
-        total_controls = _expr(controls) + index_controls
+        surrounding_controls = self._apply_condition_values(
+            _expr(controls),
+            record_usage=False,
+        )
+        total_controls = surrounding_controls + index_controls
         minimum_width = (len(operation.case_blocks) - 1).bit_length()
         index_constraint = _ResourceConstraint(
             expression=index_controls,
@@ -5163,8 +6683,21 @@ class ResourceInterpreter:
             label="SELECT index operand width",
             unit="qubit",
         )
+        target_operand_constraint = _ResourceConstraint(
+            expression=sum(
+                (
+                    _qubit_value_size(value, resolver)
+                    for value in operation.target_operands
+                ),
+                _ZERO,
+            ),
+            minimum=1,
+            label="SELECT target operand width",
+            unit="qubit",
+        )
         index_constraint.validate()
         index_operand_constraint.validate()
+        target_operand_constraint.validate()
         case_width_constraints = tuple(
             constraint
             for case_index, attrs in enumerate(operation.case_callable_attrs)
@@ -5184,10 +6717,13 @@ class ResourceInterpreter:
                 *operation.target_operands,
                 *operation.param_operands,
             ]
-            broadcast = _scalar_target_broadcast_factor(
-                case_block,
-                operation.target_operands,
-                resolver,
+            broadcast = self._apply_condition_values(
+                _scalar_target_broadcast_factor(
+                    case_block,
+                    operation.target_operands,
+                    resolver,
+                ),
+                record_usage=False,
             )
             case_body = self._eval_call_body(
                 case_block,
@@ -5201,12 +6737,21 @@ class ResourceInterpreter:
             case_estimate = self._with_zero_control_bracket(
                 case_estimate,
                 zero_controls=zero_controls,
-                surrounding_controls=controls,
+                surrounding_controls=surrounding_controls,
                 active_when=activity,
             )
             dependency_keys = _map_body_dependency_keys(
                 case_block,
                 case_body,
+                actual_operands,
+                operation.results[operation.num_index_args :],
+                resolver,
+                scalar_values=self.condition_values,
+                used_names=self.branch_condition_names,
+            )
+            dependency_completion = _map_body_dependency_completion(
+                case_block,
+                case_estimate,
                 actual_operands,
                 operation.results[operation.num_index_args :],
                 resolver,
@@ -5227,12 +6772,18 @@ class ResourceInterpreter:
                 case_estimate = dataclasses.replace(
                     case_estimate,
                     _dependency_keys=frozenset(mapped_keys),
+                    _dependency_completion=_complete_dependency_completion(
+                        dependency_completion,
+                        mapped_keys,
+                        fallback_depth=case_estimate.depth.depth,
+                    ),
                 )
             case_estimate = _with_body_boundary_depth_metadata(
                 case_estimate,
-                case_body,
+                case_estimate,
                 source=f"select[{case_index}]",
                 zero_controls=zero_controls,
+                scalar_broadcast=broadcast,
             )
             case_estimate = dataclasses.replace(
                 case_estimate,
@@ -5258,6 +6809,7 @@ class ResourceInterpreter:
             ),
             index_constraint,
             index_operand_constraint,
+            target_operand_constraint,
             *case_width_constraints,
         )
 
@@ -5331,7 +6883,6 @@ class ResourceInterpreter:
                     operation.num_control_qubits,
                     operation.control_value,
                 ),
-                surrounding_controls=controls,
             )
             return _with_constraints(
                 _namespace_allocation_sites(estimate, operation),
@@ -5360,11 +6911,20 @@ class ResourceInterpreter:
         estimate = self._with_zero_control_bracket(
             estimate,
             zero_controls=zero_controls,
-            surrounding_controls=controls,
+            active_when=_estimate_activity(estimate),
         )
         dependency_keys = _map_body_dependency_keys(
             operation.implementation_block,
             body_estimate,
+            actual_operands,
+            operation.results[operation.num_control_qubits :],
+            resolver,
+            scalar_values=self.condition_values,
+            used_names=self.branch_condition_names,
+        )
+        dependency_completion = _map_body_dependency_completion(
+            operation.implementation_block,
+            estimate,
             actual_operands,
             operation.results[operation.num_control_qubits :],
             resolver,
@@ -5385,6 +6945,11 @@ class ResourceInterpreter:
             estimate = dataclasses.replace(
                 estimate,
                 _dependency_keys=frozenset(mapped_keys),
+                _dependency_completion=_complete_dependency_completion(
+                    dependency_completion,
+                    mapped_keys,
+                    fallback_depth=estimate.depth.depth,
+                ),
             )
         estimate = _with_constraints(
             _namespace_allocation_sites(estimate, operation),
@@ -5392,7 +6957,7 @@ class ResourceInterpreter:
         )
         return _with_body_boundary_depth_metadata(
             estimate,
-            body_estimate,
+            estimate,
             source=name,
             zero_controls=zero_controls,
         )
@@ -5417,7 +6982,7 @@ class ResourceInterpreter:
                 Defaults to zero.
 
         Returns:
-            ResourceEstimate: Portable Pauli-gadget resources, or a modeled
+            ResourceEstimate: Clean-ancilla Pauli-gadget resources, or a modeled
             opaque/zero estimate when the configured unknown policy permits
             an unbound Hamiltonian.
 
@@ -5474,29 +7039,29 @@ class ResourceInterpreter:
         register_constraint.validate()
 
         gamma = self._apply_condition_values(resolver.resolve(operation.gamma))
-        if gamma.is_zero is True:
-            return _with_constraints(
-                ResourceEstimate.zero("pauli_evolve"),
-                register_constraint,
-            )
-
         constant = complex(hamiltonian.constant)
         if abs(constant.imag) > HERMITIAN_IMAG_ATOL:
             raise ValueError(
                 "PauliEvolveOp requires a Hermitian Hamiltonian (real "
                 "constant), but the constant has a nonzero imaginary part."
             )
-
-        term_estimates: list[ResourceEstimate] = []
-        active_pauli_terms: list[tuple[qm_o.PauliOperator, ...]] = []
-        for operators, coefficient in hamiltonian:
-            resolved_coefficient = complex(coefficient)
-            if abs(resolved_coefficient.imag) > HERMITIAN_IMAG_ATOL:
+        for _operators, coefficient in hamiltonian:
+            if abs(complex(coefficient).imag) > HERMITIAN_IMAG_ATOL:
                 raise ValueError(
                     "PauliEvolveOp requires a Hermitian Hamiltonian (real "
                     "Pauli coefficients), but a term has a nonzero imaginary "
                     "part."
                 )
+        if gamma.is_zero is True:
+            return _with_constraints(
+                ResourceEstimate.zero("pauli_evolve"),
+                register_constraint,
+            )
+
+        term_estimates: list[ResourceEstimate] = []
+        active_pauli_terms: list[tuple[qm_o.PauliOperator, ...]] = []
+        for operators, coefficient in hamiltonian:
+            resolved_coefficient = complex(coefficient)
             if abs(resolved_coefficient) < PAULI_TERM_ZERO_ATOL or not operators:
                 continue
             active_pauli_terms.append(operators)
@@ -5506,6 +7071,7 @@ class ResourceInterpreter:
                 "h",
                 _ZERO,
                 basis=self.config.basis,
+                control_decomposition=self.config.control_decomposition,
                 precision=self.config.precision,
             )
             basis_h = basis_h_gate.repeat(2 * (x_count + y_count))
@@ -5513,6 +7079,7 @@ class ResourceInterpreter:
                 "s",
                 _ZERO,
                 basis=self.config.basis,
+                control_decomposition=self.config.control_decomposition,
                 precision=self.config.precision,
             )
             basis_s = basis_s_gate.repeat(2 * y_count)
@@ -5520,6 +7087,7 @@ class ResourceInterpreter:
                 "cx",
                 _ZERO,
                 basis=self.config.basis,
+                control_decomposition=self.config.control_decomposition,
                 precision=self.config.precision,
             )
             parity = parity_gate.repeat(2 * max(0, len(operators) - 1))
@@ -5527,6 +7095,7 @@ class ResourceInterpreter:
                 "rz",
                 _expr(controls),
                 basis=self.config.basis,
+                control_decomposition=self.config.control_decomposition,
                 precision=self.config.precision,
             )
             term = basis_h.seq(basis_s).seq(parity).seq(rotation)
@@ -5559,9 +7128,7 @@ class ResourceInterpreter:
         ):
             trotter_assumption = ResourceAssumption(
                 "Noncommuting Pauli terms are counted as one first-order "
-                "Lie-Trotter product-formula step in Hamiltonian term order. "
-                "EXACT quality, when present, describes the resource count of "
-                "that selected circuit, not exact full-Hamiltonian evolution.",
+                "Lie-Trotter product-formula step in Hamiltonian term order.",
                 source="PauliEvolveOp",
             )
         trace = _wrap_trace(
@@ -5580,7 +7147,8 @@ class ResourceInterpreter:
         )
         if trotter_assumption is not None:
             active_estimate = active_estimate._with_metadata(
-                assumptions=(trotter_assumption,)
+                assumptions=(trotter_assumption,),
+                approximation=ApproximationStatus.APPROXIMATE,
             )
         if gamma.is_zero is not False:
             active_estimate = ResourceEstimate.zero("pauli_evolve").conditional(
@@ -5632,15 +7200,15 @@ class ResourceInterpreter:
                 return self.config.strategies[name]
         return operation.strategy_name
 
-    def _opaque_call_context(
+    def _opaque_cost_context(
         self,
         operation: InvokeOperation,
         resolver: ExprResolver,
         *,
         controls: ResourceExpr,
         strategy: str | None,
-    ) -> OpaqueCallContext:
-        """Build an opaque-cost context for a bodyless invocation.
+    ) -> tuple[OpaqueCostContext, _OpaqueInvocationTransform]:
+        """Build definition-cost and private transform contexts.
 
         Args:
             operation (InvokeOperation): Invocation operation.
@@ -5649,45 +7217,67 @@ class ResourceInterpreter:
             strategy (str | None): Selected strategy.
 
         Returns:
-            OpaqueCallContext: Opaque call context.
+            tuple[OpaqueCostContext, _OpaqueInvocationTransform]: Public
+            definition-level callback inputs and private call-site transforms.
         """
-        return OpaqueCallContext(
-            callable_ref=operation.target,
-            argument_values=tuple(operation.operands),
-            operand_shapes=_operand_shapes(operation.operands, resolver),
-            attrs=operation.attrs,
-            loop_symbols=resolver.loop_var_names,
-            controls=controls,
-            transform=operation.transform,
+        is_oracle = operation.attrs.get("kind") == "oracle"
+        declared_controls = operation.num_declared_control_qubits if is_oracle else 0
+        added_controls = (
+            operation.num_added_control_qubits
+            if is_oracle
+            else operation.num_control_qubits
+            if operation.transform.is_controlled
+            else 0
+        )
+        cost_context = OpaqueCostContext(
+            callable_name=operation.custom_name,
+            target_shapes=_opaque_cost_target_shapes(
+                operation,
+                resolver,
+                added_controls=added_controls,
+                declared_controls=declared_controls,
+            ),
+            definition_control_qubits=declared_controls,
             strategy=strategy,
-            bindings=self.bindings,
             basis=self.config.basis,
+            control_decomposition=self.config.control_decomposition,
             precision=(
                 self.config.precision
                 if self.config.basis is GateBasis.CLIFFORD_T
                 else None
             ),
         )
+        invocation_transform = _OpaqueInvocationTransform(
+            declared_controls=declared_controls,
+            added_controls=added_controls,
+            inherited_controls=controls,
+            inverse=operation.transform.is_inverse,
+            control_value=operation.control_value,
+        )
+        return cost_context, invocation_transform
 
     def _estimate_opaque_cost(
         self,
         operation: InvokeOperation,
         cost: Any,
-        ctx: OpaqueCallContext,
+        context: OpaqueCostContext,
+        transform: _OpaqueInvocationTransform,
     ) -> ResourceEstimate:
         """Evaluate an explicit cost attached to a bodyless callable.
 
-        Fixed ``ResourceEstimate`` costs describe a transform-agnostic base
-        implementation, so the estimator applies repetition and all coherent
-        controls automatically. A callable cost is authoritative for the full
-        :class:`OpaqueCallContext`, including ``power`` and
-        ``total_controls``; its result is therefore validated and wrapped
-        without additional transform pricing.
+        Fixed ``ResourceEstimate`` costs and callbacks share one contract:
+        each describes one ordinary application of the callable definition.
+        For an Oracle, that base cost includes its declared controls. The
+        estimator then applies inversion, controls added with ``qmc.control``,
+        and controls inherited from an outer controlled qkernel.
 
         Args:
             operation (InvokeOperation): Invocation operation.
-            cost (Any): ``ResourceEstimate`` or callable accepting ``ctx``.
-            ctx (OpaqueCallContext): Opaque call context.
+            cost (Any): ``ResourceEstimate`` or callable accepting
+                ``context``.
+            context (OpaqueCostContext): Definition-level callback inputs.
+            transform (_OpaqueInvocationTransform): Private call-site
+                transforms applied after the base cost is obtained.
 
         Returns:
             ResourceEstimate: Explicit opaque estimate.
@@ -5695,38 +7285,17 @@ class ResourceInterpreter:
         Raises:
             TypeError: If ``cost`` is neither a ``ResourceEstimate`` nor a
                 callable returning one.
-            ValueError: If the opaque cost reports basis-sensitive resources
-                for a different basis or synthesis precision, or if a fixed
-                non-unitary cost is controlled or inverted without a
-                transform-aware callback.
+            ValueError: If the opaque cost reports gate-model-sensitive
+                resources for a different basis, control decomposition, or
+                synthesis precision, or if a non-unitary cost is controlled or
+                inverted.
         """
-        if ctx.power == _ZERO:
-            return ResourceEstimate.zero(f"{operation.custom_name}^0")
         if isinstance(cost, ResourceEstimate):
-            _validate_opaque_cost_provenance(
-                cost,
-                name=operation.custom_name,
-                basis=self.config.basis,
-                precision=self.config.precision,
-            )
-            estimate = cost.repeat(ctx.power)
-            if ctx.transform is CallTransform.INVERSE:
-                estimate = estimate.inverse()
-            if ctx.total_controls != _ZERO:
-                estimate = estimate.controlled(ctx.total_controls)
-            if ctx.own_controls:
-                estimate = self._with_zero_control_bracket(
-                    estimate,
-                    zero_controls=_zero_control_count(
-                        ctx.own_controls,
-                        cast(int | None, ctx.attrs.get("control_value")),
-                    ),
-                    surrounding_controls=ctx.controls,
-                )
+            estimate = cost
         elif callable(cost):
             defer_token = _DEFER_RESOURCE_SYMBOL_METADATA.set(False)
             try:
-                estimate = cost(ctx)
+                estimate = cost(context)
             finally:
                 _DEFER_RESOURCE_SYMBOL_METADATA.reset(defer_token)
             if not isinstance(estimate, ResourceEstimate):
@@ -5734,16 +7303,50 @@ class ResourceInterpreter:
                     f"Opaque cost for '{operation.custom_name}' must return "
                     "ResourceEstimate."
                 )
-            _validate_opaque_cost_provenance(
-                estimate,
-                name=operation.custom_name,
-                basis=self.config.basis,
-                precision=self.config.precision,
-            )
         else:
             raise TypeError(
                 f"Opaque cost for '{operation.custom_name}' must be a "
                 "ResourceEstimate or callable."
+            )
+        _validate_opaque_cost_provenance(
+            estimate,
+            name=operation.custom_name,
+            basis=self.config.basis,
+            control_decomposition=self.config.control_decomposition,
+            precision=self.config.precision,
+        )
+        # Public resource dataclasses accept ordinary Python numeric values.
+        # Compose one base application through the resource algebra so every
+        # field is normalized before dependency scheduling inspects SymPy
+        # predicates. Root input width and caller-scoped dependency/liveness
+        # maps belong to the qkernel that produced an aggregate cost, not to
+        # this opaque call site. The caller scheduler derives that boundary
+        # information from this InvokeOperation instead.
+        estimate = estimate.repeat(_ONE)
+        estimate = _namespace_allocation_sites(
+            dataclasses.replace(
+                estimate,
+                width=_opaque_call_relative_width(estimate.width),
+                _output_sizes={},
+                _input_sizes={},
+                _has_output_summary=False,
+                _dependency_keys=None,
+            ),
+            operation,
+        )
+        if transform.declared_controls:
+            _require_unitary_resource_estimate(
+                estimate,
+                transform="use as a coherently controlled Oracle",
+            )
+        if transform.inverse:
+            estimate = estimate.inverse()
+        if transform.external_controls != _ZERO:
+            estimate = estimate.controlled(transform.external_controls)
+        if transform.local_controls:
+            estimate = self._with_zero_control_bracket(
+                estimate,
+                zero_controls=transform.zero_controls,
             )
         estimate = dataclasses.replace(
             estimate,
@@ -5751,13 +7354,10 @@ class ResourceInterpreter:
                 operation.custom_name,
                 estimate.trace,
                 source_kind="opaque_cost",
-                strategy=ctx.strategy,
+                strategy=context.strategy,
             ),
         )
-        return estimate._with_metadata(
-            quality=EstimateQuality.MODELED,
-            active_when=ctx.power,
-        )
+        return estimate._with_metadata(quality=EstimateQuality.MODELED)
 
     def _estimate_invoke_body(
         self,
@@ -5768,11 +7368,10 @@ class ResourceInterpreter:
     ) -> ResourceEstimate:
         """Estimate an invocation by traversing its body.
 
-        When the invocation is itself a controlled call
-        (``transform is CallTransform.CONTROLLED``), its own control qubits are
-        added to the surrounding controls so every primitive gate inside the
-        body is classified as controlled, matching how ``eval_controlled_u``
-        treats a block body.
+        When the invocation has a controlled transform, its own control qubits
+        are added to the surrounding controls so every primitive gate inside
+        the body is classified as controlled, matching how
+        ``eval_controlled_u`` treats a block body.
 
         Args:
             operation (InvokeOperation): Invocation operation.
@@ -5795,17 +7394,11 @@ class ResourceInterpreter:
             body_implements_transform=body_implements_transform,
         )
         own_controls = 0
-        if (
-            operation.transform is CallTransform.CONTROLLED
-            and not body_implements_transform
-        ):
+        if operation.transform.is_controlled and not body_implements_transform:
             own_controls = int(operation.attrs.get("num_control_qubits", 0) or 0)
         total_controls = _expr(controls) + own_controls
         actual_operands = operation.operands
-        if (
-            operation.transform is CallTransform.CONTROLLED
-            and not body_implements_transform
-        ):
+        if operation.transform.is_controlled and not body_implements_transform:
             actual_operands = actual_operands[operation.num_control_qubits :]
         body_estimate = self._eval_call_body(
             body,
@@ -5814,10 +7407,7 @@ class ResourceInterpreter:
             controls=total_controls,
         )
         body_dependency_estimate = body_estimate
-        if (
-            operation.transform is CallTransform.INVERSE
-            and not body_implements_transform
-        ):
+        if operation.transform.is_inverse and not body_implements_transform:
             body_estimate = body_estimate.inverse()
         zero_controls = _ZERO
         if own_controls:
@@ -5828,17 +7418,23 @@ class ResourceInterpreter:
             body_estimate = self._with_zero_control_bracket(
                 body_estimate,
                 zero_controls=zero_controls,
-                surrounding_controls=controls,
+                active_when=_estimate_activity(body_estimate),
             )
         caller_results: Sequence[ValueBase] = operation.results
-        if (
-            operation.transform is CallTransform.CONTROLLED
-            and not body_implements_transform
-        ):
+        if operation.transform.is_controlled and not body_implements_transform:
             caller_results = operation.results[operation.num_control_qubits :]
         dependency_keys = _map_body_dependency_keys(
             body,
             body_dependency_estimate,
+            actual_operands,
+            caller_results,
+            resolver,
+            scalar_values=self.condition_values,
+            used_names=self.branch_condition_names,
+        )
+        dependency_completion = _map_body_dependency_completion(
+            body,
+            body_estimate,
             actual_operands,
             caller_results,
             resolver,
@@ -5859,6 +7455,11 @@ class ResourceInterpreter:
             body_estimate = dataclasses.replace(
                 body_estimate,
                 _dependency_keys=frozenset(mapped_keys),
+                _dependency_completion=_complete_dependency_completion(
+                    dependency_completion,
+                    mapped_keys,
+                    fallback_depth=body_estimate.depth.depth,
+                ),
             )
         output_sizes, has_output_summary = _invoke_quantum_output_sizes(
             operation,
@@ -5882,7 +7483,7 @@ class ResourceInterpreter:
         )
         return _with_body_boundary_depth_metadata(
             estimate,
-            body_dependency_estimate,
+            estimate,
             source=operation.custom_name,
             zero_controls=zero_controls,
         )
@@ -5890,13 +7491,14 @@ class ResourceInterpreter:
     def _handle_unknown_invoke(
         self,
         operation: InvokeOperation,
-        ctx: OpaqueCallContext,
+        transform: _OpaqueInvocationTransform,
     ) -> ResourceEstimate:
         """Handle an invocation without a body or opaque cost.
 
         Args:
             operation (InvokeOperation): Invocation operation.
-            ctx (OpaqueCallContext): Call-site context.
+            transform (_OpaqueInvocationTransform): Private call-site
+                transforms.
 
         Returns:
             ResourceEstimate: Opaque or zero estimate when policy permits.
@@ -5908,10 +7510,10 @@ class ResourceInterpreter:
         if self.config.unknown_policy is UnknownResourcePolicy.OPAQUE_CALL:
             estimate = ResourceEstimate(
                 calls=CallResources(
-                    calls_by_name={name: ctx.power},
-                    queries_by_name={name: ctx.power},
+                    calls_by_name={name: _ONE},
+                    queries_by_name={name: _ONE},
                 ),
-                trace=ResourceTraceNode(name, "opaque", summary=f"power={ctx.power}"),
+                trace=ResourceTraceNode(name, "opaque"),
                 quality=EstimateQuality.MODELED,
             )
         elif self.config.unknown_policy is UnknownResourcePolicy.ZERO_WITH_WARNING:
@@ -5929,15 +7531,10 @@ class ResourceInterpreter:
                 f"Cannot estimate resources for callable '{name}': no body or "
                 "opaque cost is available."
             )
-        if ctx.own_controls:
+        if transform.local_controls:
             estimate = self._with_zero_control_bracket(
                 estimate,
-                zero_controls=_zero_control_count(
-                    ctx.own_controls,
-                    cast(int | None, ctx.attrs.get("control_value")),
-                ),
-                surrounding_controls=ctx.controls,
-                active_when=ctx.power,
+                zero_controls=transform.zero_controls,
             )
         return estimate
 
@@ -5948,11 +7545,12 @@ def estimate_resources(
     inputs: dict[str, Any] | None = None,
     strategies: dict[str, str] | None = None,
     trace: bool = False,
-    unknown_policy: UnknownResourcePolicy = UnknownResourcePolicy.ERROR,
-    basis: str | GateBasis = GateBasis.PORTABLE,
-    precision: float = 1e-10,
+    unknown_policy: str | UnknownResourcePolicy = UnknownResourcePolicy.ERROR,
+    basis: str | GateBasis = _DEFAULT_GATE_BASIS,
+    control_decomposition: str | ControlDecomposition = _DEFAULT_CONTROL_DECOMPOSITION,
+    precision: float = _DEFAULT_ROTATION_SYNTHESIS_PRECISION,
 ) -> ResourceEstimate:
-    """Estimate logical resources using the default estimator facade.
+    """Estimate algorithmic resources using the default estimator facade.
 
     Args:
         kernel (QKernel[Any, Any] | Block | Sequence[Operation]): QKernel,
@@ -5966,14 +7564,16 @@ def estimate_resources(
             name. Defaults to ``None``.
         trace (bool): Whether to retain the explanation tree. Defaults to
             ``False``.
-        unknown_policy (UnknownResourcePolicy): Unknown callable handling.
-            Defaults to ``ERROR``.
-        basis (str | GateBasis): Output gate basis. Defaults to ``PORTABLE``.
+        unknown_policy (str | UnknownResourcePolicy): Unknown callable
+            handling. Defaults to ``ERROR``.
+        basis (str | GateBasis): Output gate basis. Defaults to ``LOGICAL``.
+        control_decomposition (str | ControlDecomposition): Coherent-control
+            decomposition. Defaults to ``CLEAN_ANCILLA_TOFFOLI``.
         precision (float): Rotation-synthesis precision for ``CLIFFORD_T``.
             Defaults to ``1e-10``.
 
     Returns:
-        ResourceEstimate: Logical resource estimate.
+        ResourceEstimate: Algorithmic resource estimate.
 
     Raises:
         ValueError: If the basis, precision, input specialization, callable
@@ -6001,6 +7601,7 @@ def estimate_resources(
         trace=trace,
         unknown_policy=unknown_policy,
         basis=basis,
+        control_decomposition=control_decomposition,
         precision=precision,
     )
     return estimator.estimate(
@@ -6026,7 +7627,7 @@ def _require_uncontrolled_operation(
     if control_count != _ZERO:
         raise ValueError(
             f"Cannot estimate controlled {type(operation).__name__}: the "
-            "portable emitter does not support this operation inside a "
+            "shared controlled decomposition does not support this operation inside a "
             "controlled unitary."
         )
 
@@ -6410,6 +8011,167 @@ def _estimate_activity(estimate: ResourceEstimate) -> ResourceExpr:
     )
 
 
+def _normalized_dependency_completion(
+    estimate: ResourceEstimate,
+) -> dict[WireKey, ResourceExpr] | None:
+    """Return an explicit per-wire completion map when one can be recovered.
+
+    Args:
+        estimate (ResourceEstimate): Estimate carrying dependency metadata.
+
+    Returns:
+        dict[WireKey, ResourceExpr] | None: Caller-visible local completion
+        depths, an empty map for a proven empty estimate, or ``None`` for an
+        unknown footprint.
+    """
+    if estimate._dependency_completion is not None:
+        return dict(estimate._dependency_completion)
+    keys = estimate._dependency_keys
+    if keys is None:
+        if not _estimate_has_nonzero_depth(estimate):
+            return {}
+        return None
+    return {key: estimate.depth.depth for key in keys}
+
+
+def _seq_dependency_completion(
+    left: ResourceEstimate,
+    right: ResourceEstimate,
+) -> dict[WireKey, ResourceExpr] | None:
+    """Compose per-wire completion depths sequentially.
+
+    Args:
+        left (ResourceEstimate): First composition operand.
+        right (ResourceEstimate): Second composition operand.
+
+    Returns:
+        dict[WireKey, ResourceExpr] | None: Sequential completion depths, or
+        ``None`` if either nonempty footprint is unknown.
+    """
+    left_completion = _normalized_dependency_completion(left)
+    right_completion = _normalized_dependency_completion(right)
+    if left_completion is None or right_completion is None:
+        return None
+    merged = dict(left_completion)
+    for key, completion in right_completion.items():
+        previous = merged.get(key, _ZERO)
+        active = _ConditionIndicator(_resource_activity_condition(completion))
+        merged[key] = cast(
+            ResourceExpr,
+            previous + active * (left.depth.depth + completion - previous),
+        )
+    return merged
+
+
+def _max_dependency_completion(
+    left: ResourceEstimate,
+    right: ResourceEstimate,
+) -> dict[WireKey, ResourceExpr] | None:
+    """Merge per-wire completion depths by their maximum.
+
+    Args:
+        left (ResourceEstimate): First composition operand.
+        right (ResourceEstimate): Second composition operand.
+
+    Returns:
+        dict[WireKey, ResourceExpr] | None: Per-wire maximums, or ``None`` if
+        either nonempty footprint is unknown.
+    """
+    left_completion = _normalized_dependency_completion(left)
+    right_completion = _normalized_dependency_completion(right)
+    if left_completion is None or right_completion is None:
+        return None
+    return {
+        key: cast(
+            ResourceExpr,
+            sp.Max(
+                left_completion.get(key, _ZERO),
+                right_completion.get(key, _ZERO),
+            ),
+        )
+        for key in left_completion.keys() | right_completion.keys()
+    }
+
+
+def _conditional_dependency_completion(
+    true_estimate: ResourceEstimate,
+    false_estimate: ResourceEstimate,
+    condition: sp.Basic,
+) -> dict[WireKey, ResourceExpr] | None:
+    """Select per-wire completion between two symbolic branches.
+
+    Args:
+        true_estimate (ResourceEstimate): Estimate selected when true.
+        false_estimate (ResourceEstimate): Estimate selected when false.
+        condition (sp.Basic): Branch predicate.
+
+    Returns:
+        dict[WireKey, ResourceExpr] | None: Exact branch-selected completion
+        depths, or ``None`` when either nonempty branch is unknown.
+    """
+    true_completion = _normalized_dependency_completion(true_estimate)
+    false_completion = _normalized_dependency_completion(false_estimate)
+    if true_completion is None or false_completion is None:
+        return None
+    return {
+        key: cast(
+            ResourceExpr,
+            false_completion.get(key, _ZERO)
+            + _ConditionIndicator(condition)
+            * (true_completion.get(key, _ZERO) - false_completion.get(key, _ZERO)),
+        )
+        for key in true_completion.keys() | false_completion.keys()
+    }
+
+
+def _map_dependency_completion(
+    completion: Mapping[WireKey, ResourceExpr] | None,
+    fn: Any,
+) -> dict[WireKey, ResourceExpr] | None:
+    """Rewrite per-wire completion depths and discard zero entries.
+
+    Args:
+        completion (Mapping[WireKey, ResourceExpr] | None): Completion depths
+            to rewrite.
+        fn (Any): Symbolic expression rewrite callable.
+
+    Returns:
+        dict[WireKey, ResourceExpr] | None: Rewritten completion depths.
+    """
+    if completion is None:
+        return None
+    mapped: dict[WireKey, ResourceExpr] = {}
+    for key, value in completion.items():
+        rewritten = cast(ResourceExpr, fn(value))
+        if rewritten != _ZERO:
+            mapped[key] = rewritten
+    return mapped
+
+
+def _complete_dependency_completion(
+    completion: Mapping[WireKey, ResourceExpr] | None,
+    keys: Iterable[WireKey],
+    *,
+    fallback_depth: ResourceExpr,
+) -> dict[WireKey, ResourceExpr]:
+    """Fill missing caller-wire completion with an aggregate depth.
+
+    Args:
+        completion (Mapping[WireKey, ResourceExpr] | None): Precisely mapped
+            completion depths when available.
+        keys (Iterable[WireKey]): Complete caller-visible dependency keys.
+        fallback_depth (ResourceExpr): Aggregate completion used for keys
+            whose individual latency is unavailable.
+
+    Returns:
+        dict[WireKey, ResourceExpr]: Complete per-wire completion map.
+    """
+    completed = dict(completion or {})
+    for key in keys:
+        completed.setdefault(key, fallback_depth)
+    return completed
+
+
 def _canonical_phase_gate_name(phase: sp.Expr) -> str | None:
     """Return the simplest fixed phase gate for a resolved angle.
 
@@ -6555,6 +8317,9 @@ def _solve_affine_recurrence(
         final carry after all iterations, or ``None`` when the recurrence is
         nonlinear, coupled, or has an index-dependent multiplier.
     """
+    fixed_point_residual = sp.simplify(yielded.subs(carry_symbol, init) - init)
+    if fixed_point_residual == _ZERO:
+        return init, init
     coefficient = sp.simplify(sp.diff(yielded, carry_symbol))
     remainder = sp.simplify(yielded - coefficient * carry_symbol)
     if (
@@ -6742,7 +8507,7 @@ _IR_TWO_QUBIT_GATE_TYPES = frozenset(
     }
 )
 _IR_MULTI_QUBIT_GATE_TYPES = frozenset({GateOperationType.TOFFOLI})
-_PORTABLE_EXPLICIT_MULTI_TARGET_GATE_TYPES = frozenset(
+_CLEAN_ANCILLA_EXPLICIT_MULTI_TARGET_GATE_TYPES = frozenset(
     {
         GateOperationType.CX,
         GateOperationType.CZ,
@@ -6774,23 +8539,27 @@ def _validate_ir_gate_arity_profiles() -> None:
     }
     missing = set(GateOperationType) - covered
     multi_target = _IR_TWO_QUBIT_GATE_TYPES | _IR_MULTI_QUBIT_GATE_TYPES
-    missing_portable = multi_target - _PORTABLE_EXPLICIT_MULTI_TARGET_GATE_TYPES
-    extraneous_portable = _PORTABLE_EXPLICIT_MULTI_TARGET_GATE_TYPES - multi_target
-    if missing or duplicated or missing_portable or extraneous_portable:
+    missing_clean_ancilla = (
+        multi_target - _CLEAN_ANCILLA_EXPLICIT_MULTI_TARGET_GATE_TYPES
+    )
+    extraneous_clean_ancilla = (
+        _CLEAN_ANCILLA_EXPLICIT_MULTI_TARGET_GATE_TYPES - multi_target
+    )
+    if missing or duplicated or missing_clean_ancilla or extraneous_clean_ancilla:
         missing_names = sorted(gate_type.name for gate_type in missing)
         duplicated_names = sorted(gate_type.name for gate_type in duplicated)
-        missing_portable_names = sorted(
-            gate_type.name for gate_type in missing_portable
+        missing_clean_ancilla_names = sorted(
+            gate_type.name for gate_type in missing_clean_ancilla
         )
-        extraneous_portable_names = sorted(
-            gate_type.name for gate_type in extraneous_portable
+        extraneous_clean_ancilla_names = sorted(
+            gate_type.name for gate_type in extraneous_clean_ancilla
         )
         raise RuntimeError(
             "Resource estimation requires an exhaustive, disjoint IR gate "
             "arity profile; "
             f"missing={missing_names}, duplicated={duplicated_names}, "
-            f"missing_portable_multi_target={missing_portable_names}, "
-            f"extraneous_portable_multi_target={extraneous_portable_names}."
+            f"missing_clean_ancilla_multi_target={missing_clean_ancilla_names}, "
+            f"extraneous_clean_ancilla_multi_target={extraneous_clean_ancilla_names}."
         )
 
 
@@ -6890,14 +8659,14 @@ def _serial_depth_from_gate_resources(gates: GateResources) -> DepthResources:
     )
 
 
-def _portable_sequence_estimate(
+def _clean_ancilla_sequence_estimate(
     name: str,
     gates: GateResources,
     *,
     clean_ancillas: ResourceExpr = _ZERO,
     quality: EstimateQuality = EstimateQuality.EXACT,
 ) -> ResourceEstimate:
-    """Build one portable logical-decomposition estimate.
+    """Build one clean-ancilla Toffoli decomposition estimate.
 
     Args:
         name (str): Human-readable gate or decomposition name.
@@ -6921,29 +8690,29 @@ def _portable_sequence_estimate(
         quality=quality,
         trace=ResourceTraceNode(
             name=name,
-            source_kind="portable_fallback",
+            source_kind="clean_ancilla_toffoli",
             summary=f"gates={gates.total}, clean_ancillas={clean_ancillas}",
         ),
     )
 
 
-def _portable_primitive_estimate(name: str) -> ResourceEstimate:
+def _clean_ancilla_primitive_estimate(name: str) -> ResourceEstimate:
     """Return one uncontrolled logical primitive estimate.
 
     Args:
         name (str): Lowercase primitive gate name.
 
     Returns:
-        ResourceEstimate: One-gate portable estimate.
+        ResourceEstimate: One-gate logical estimate.
     """
-    return _portable_sequence_estimate(name, _classify_uncontrolled_gate(name))
+    return _clean_ancilla_sequence_estimate(name, _classify_uncontrolled_gate(name))
 
 
-def _portable_single_control_estimate(name: str) -> ResourceEstimate:
+def _clean_ancilla_single_control_estimate(name: str) -> ResourceEstimate:
     """Return one singly controlled logical primitive estimate.
 
-    Fixed S/T-family controls are represented by a controlled phase gate,
-    matching the shared emitter's single-control dispatch.
+    The selected recipe represents fixed S/T-family controls with a controlled
+    phase gate.
 
     Args:
         name (str): Lowercase base gate name.
@@ -6952,22 +8721,22 @@ def _portable_single_control_estimate(name: str) -> ResourceEstimate:
         ResourceEstimate: Singly controlled logical estimate.
     """
     controlled_name = "p" if name in {"s", "sdg", "t", "tdg"} else name
-    return _portable_sequence_estimate(
+    return _clean_ancilla_sequence_estimate(
         f"c-{name}",
         _classify_controlled_gate(controlled_name, _ONE),
     )
 
 
-def _portable_generic_multi_control_estimate(
+def _clean_ancilla_generic_multi_control_estimate(
     name: str,
     controls: ResourceExpr,
 ) -> ResourceEstimate:
-    """Lower a generic multi-controlled single-target gate portably.
+    """Lower a generic gate with the clean-ancilla Toffoli recipe.
 
-    The model mirrors the shared clean-ancilla fallback per primitive: compute
-    the AND of ``n`` controls with ``n - 1`` clean ancillas, apply one singly
-    controlled primitive, then uncompute the ladder. Backend-native gates and
-    whole-body ladder sharing may be cheaper, so the result is an upper bound.
+    The recipe computes the AND of ``n`` controls with ``n - 1`` clean
+    ancillas, applies one singly controlled primitive, then uncomputes the
+    ladder. Other decompositions or whole-body ladder sharing may be cheaper,
+    so the result is an upper bound.
 
     Args:
         name (str): Lowercase single-target base gate name.
@@ -6975,15 +8744,15 @@ def _portable_generic_multi_control_estimate(
             where it is at least two.
 
     Returns:
-        ResourceEstimate: Portable fallback estimate.
+        ResourceEstimate: Clean-ancilla Toffoli estimate.
     """
     ladder_steps = sp.Integer(2) * (controls - _ONE)
     ladder = _scale_gates(
         _classify_uncontrolled_gate("toffoli"),
         ladder_steps,
     )
-    central = _portable_single_control_estimate(name).gates
-    return _portable_sequence_estimate(
+    central = _clean_ancilla_single_control_estimate(name).gates
+    return _clean_ancilla_sequence_estimate(
         f"mc-{name}",
         _add_gates(ladder, central),
         clean_ancillas=controls - _ONE,
@@ -6999,7 +8768,7 @@ def _select_control_count_estimate(
     two: ResourceEstimate,
     many: ResourceEstimate,
 ) -> ResourceEstimate:
-    """Select a portable decomposition by a concrete or symbolic control count.
+    """Select a decomposition by a concrete or symbolic control count.
 
     Args:
         controls (ResourceExpr): Nonnegative control-count expression.
@@ -7032,22 +8801,22 @@ def _select_control_count_estimate(
     return zero.conditional(estimate, sp.Eq(controls, 0))
 
 
-def _portable_single_target_estimate(
+def _clean_ancilla_single_target_estimate(
     name: str,
     controls: ResourceExpr,
 ) -> ResourceEstimate:
-    """Estimate a controlled single-target primitive in the portable basis.
+    """Estimate a controlled primitive with a clean-ancilla Toffoli ladder.
 
     Args:
         name (str): Lowercase base gate name.
         controls (ResourceExpr): Surrounding control count.
 
     Returns:
-        ResourceEstimate: Portable logical estimate.
+        ResourceEstimate: Logical decomposition estimate.
     """
-    zero = _portable_primitive_estimate(name)
-    one = _portable_single_control_estimate(name)
-    generic = _portable_generic_multi_control_estimate(name, controls)
+    zero = _clean_ancilla_primitive_estimate(name)
+    one = _clean_ancilla_single_control_estimate(name)
+    generic = _clean_ancilla_generic_multi_control_estimate(name, controls)
     return _select_control_count_estimate(
         controls,
         zero=zero,
@@ -7057,49 +8826,49 @@ def _portable_single_target_estimate(
     )
 
 
-def _portable_x_estimate(controls: ResourceExpr) -> ResourceEstimate:
+def _clean_ancilla_x_estimate(controls: ResourceExpr) -> ResourceEstimate:
     """Estimate an X gate with the shared multi-control fast paths.
 
     Args:
         controls (ResourceExpr): Number of controls on the X target.
 
     Returns:
-        ResourceEstimate: Portable X-family estimate.
+        ResourceEstimate: Clean-ancilla X-family estimate.
     """
     return _select_control_count_estimate(
         controls,
-        zero=_portable_primitive_estimate("x"),
-        one=_portable_single_control_estimate("x"),
-        two=_portable_primitive_estimate("toffoli"),
-        many=_portable_generic_multi_control_estimate("x", controls),
+        zero=_clean_ancilla_primitive_estimate("x"),
+        one=_clean_ancilla_single_control_estimate("x"),
+        two=_clean_ancilla_primitive_estimate("toffoli"),
+        many=_clean_ancilla_generic_multi_control_estimate("x", controls),
     )
 
 
-def _portable_z_estimate(controls: ResourceExpr) -> ResourceEstimate:
+def _clean_ancilla_z_estimate(controls: ResourceExpr) -> ResourceEstimate:
     """Estimate a Z gate with the shared two-control fast path.
 
     Args:
         controls (ResourceExpr): Number of controls on the Z target.
 
     Returns:
-        ResourceEstimate: Portable Z-family estimate.
+        ResourceEstimate: Clean-ancilla Z-family estimate.
     """
     two = (
-        _portable_primitive_estimate("h")
-        .seq(_portable_primitive_estimate("toffoli"))
-        .seq(_portable_primitive_estimate("h"))
+        _clean_ancilla_primitive_estimate("h")
+        .seq(_clean_ancilla_primitive_estimate("toffoli"))
+        .seq(_clean_ancilla_primitive_estimate("h"))
     )
     two = two._with_metadata(quality=EstimateQuality.UPPER_BOUND)
     return _select_control_count_estimate(
         controls,
-        zero=_portable_primitive_estimate("z"),
-        one=_portable_single_control_estimate("z"),
+        zero=_clean_ancilla_primitive_estimate("z"),
+        one=_clean_ancilla_single_control_estimate("z"),
         two=two,
-        many=_portable_generic_multi_control_estimate("z", controls),
+        many=_clean_ancilla_generic_multi_control_estimate("z", controls),
     )
 
 
-def _portable_controlled_branch(
+def _clean_ancilla_controlled_branch(
     controls: ResourceExpr,
     uncontrolled: ResourceEstimate,
     controlled: ResourceEstimate,
@@ -7119,88 +8888,88 @@ def _portable_controlled_branch(
     return uncontrolled.conditional(controlled, sp.Eq(controls, 0))
 
 
-def _estimate_portable_named_gate(
+def _estimate_clean_ancilla_named_gate(
     name: str,
     controls: ResourceExpr,
 ) -> ResourceEstimate:
-    """Estimate one named gate after portable controlled lowering.
+    """Estimate one named gate after clean-ancilla controlled lowering.
 
     Args:
         name (str): Lowercase Qamomile gate name.
         controls (ResourceExpr): Additional surrounding controls.
 
     Returns:
-        ResourceEstimate: Portable logical decomposition estimate.
+        ResourceEstimate: Logical decomposition estimate.
     """
     if name == "ccx":
         name = "toffoli"
     if name == "x":
-        return _portable_x_estimate(controls)
+        return _clean_ancilla_x_estimate(controls)
     if name == "z":
-        return _portable_z_estimate(controls)
+        return _clean_ancilla_z_estimate(controls)
     if name == "cx":
-        return _portable_controlled_branch(
+        return _clean_ancilla_controlled_branch(
             controls,
-            _portable_primitive_estimate("cx"),
-            _portable_x_estimate(controls + _ONE),
+            _clean_ancilla_primitive_estimate("cx"),
+            _clean_ancilla_x_estimate(controls + _ONE),
         )
     if name == "cz":
-        return _portable_controlled_branch(
+        return _clean_ancilla_controlled_branch(
             controls,
-            _portable_primitive_estimate("cz"),
-            _portable_z_estimate(controls + _ONE),
+            _clean_ancilla_primitive_estimate("cz"),
+            _clean_ancilla_z_estimate(controls + _ONE),
         )
     if name == "cp":
-        return _portable_controlled_branch(
+        return _clean_ancilla_controlled_branch(
             controls,
-            _portable_primitive_estimate("cp"),
-            _portable_single_target_estimate("p", controls + _ONE),
+            _clean_ancilla_primitive_estimate("cp"),
+            _clean_ancilla_single_target_estimate("p", controls + _ONE),
         )
     if name == "toffoli":
-        return _portable_controlled_branch(
+        return _clean_ancilla_controlled_branch(
             controls,
-            _portable_primitive_estimate("toffoli"),
-            _portable_x_estimate(controls + 2),
+            _clean_ancilla_primitive_estimate("toffoli"),
+            _clean_ancilla_x_estimate(controls + 2),
         )
     if name == "swap":
-        middle = _portable_x_estimate(controls + _ONE)
+        middle = _clean_ancilla_x_estimate(controls + _ONE)
         controlled = (
-            _portable_primitive_estimate("cx")
+            _clean_ancilla_primitive_estimate("cx")
             .seq(middle)
-            .seq(_portable_primitive_estimate("cx"))
+            .seq(_clean_ancilla_primitive_estimate("cx"))
         )
         controlled = controlled._with_metadata(
             quality=EstimateQuality.UPPER_BOUND,
         )
-        return _portable_controlled_branch(
+        return _clean_ancilla_controlled_branch(
             controls,
-            _portable_primitive_estimate("swap"),
+            _clean_ancilla_primitive_estimate("swap"),
             controlled,
         )
     if name == "rzz":
         controlled = (
-            _portable_primitive_estimate("cx")
-            .seq(_portable_single_target_estimate("rz", controls))
-            .seq(_portable_primitive_estimate("cx"))
+            _clean_ancilla_primitive_estimate("cx")
+            .seq(_clean_ancilla_single_target_estimate("rz", controls))
+            .seq(_clean_ancilla_primitive_estimate("cx"))
         )
         controlled = controlled._with_metadata(
             quality=EstimateQuality.UPPER_BOUND,
         )
-        return _portable_controlled_branch(
+        return _clean_ancilla_controlled_branch(
             controls,
-            _portable_primitive_estimate("rzz"),
+            _clean_ancilla_primitive_estimate("rzz"),
             controlled,
         )
-    return _portable_single_target_estimate(name, controls)
+    return _clean_ancilla_single_target_estimate(name, controls)
 
 
-def _portable_controlled_arity_envelope(
+def _clean_ancilla_controlled_arity_envelope(
     num_qubits: int,
     controls: ResourceExpr,
 ) -> ResourceEstimate:
     """Bound one unknown primitive from its operand arity.
 
-    Every resource field is maximized independently over the portable gate
+    Every resource field is maximized independently over the supported gate
     kinds of the requested arity. The resulting fields need not describe one
     common gate decomposition, but each is a valid upper bound when the gate
     name is unavailable.
@@ -7211,7 +8980,7 @@ def _portable_controlled_arity_envelope(
         controls (ResourceExpr): Number of added coherent controls.
 
     Returns:
-        ResourceEstimate: Field-wise portable upper bound for one primitive.
+        ResourceEstimate: Field-wise upper bound for one primitive.
 
     Raises:
         ValueError: If ``num_qubits`` is not one or two.
@@ -7222,41 +8991,39 @@ def _portable_controlled_arity_envelope(
         gate_names = sorted(_TWO_QUBIT_GATES)
     else:
         raise ValueError(
-            "Portable aggregate control projection supports only one- and "
+            "Clean-ancilla aggregate control projection supports only one- and "
             f"two-qubit primitives; got arity {num_qubits}."
         )
 
-    envelope = _estimate_portable_named_gate(gate_names[0], controls)
+    envelope = _estimate_clean_ancilla_named_gate(gate_names[0], controls)
     for gate_name in gate_names[1:]:
-        envelope = envelope.choice(_estimate_portable_named_gate(gate_name, controls))
+        envelope = envelope.choice(
+            _estimate_clean_ancilla_named_gate(gate_name, controls)
+        )
     return dataclasses.replace(
         envelope,
         trace=ResourceTraceNode(
             name=f"unknown_{num_qubits}q",
-            source_kind="portable_arity_upper_bound",
+            source_kind="clean_ancilla_arity_upper_bound",
             summary=f"controls={controls}",
             children=(envelope.trace,) if envelope.trace is not None else (),
         ),
     )
 
 
-def _aggregate_arity_projection_reason(
+def _aggregate_arity_profile_reason(
     estimate: ResourceEstimate,
 ) -> str | None:
-    """Return why an aggregate estimate cannot use portable arity projection.
+    """Return why an aggregate gate profile cannot be transformed safely.
 
     Args:
         estimate (ResourceEstimate): Aggregate estimate to inspect.
 
     Returns:
-        str | None: Ineligibility reason, or ``None`` when at least one
-            one- or two-qubit gate can be projected portably.
+        str | None: Invalid or unavailable profile reason, or ``None`` when
+            the declared aggregate fields satisfy the common transform
+            contract.
     """
-    if estimate.basis is not GateBasis.PORTABLE:
-        return (
-            "automatic arity projection is available only in the portable "
-            f"basis, not {estimate.basis.value}"
-        )
     gates = estimate.gates
     has_opaque_calls = any(
         value != _ZERO
@@ -7310,8 +9077,6 @@ def _aggregate_arity_projection_reason(
         excess = _safe_simplify(count - upper)
         if excess.is_positive is True:
             return f"the {label} count exceeds the declared {upper_label} gate count"
-    if _safe_simplify(gates.single_qubit + gates.two_qubit) == _ZERO:
-        return "the aggregate has no declared one- or two-qubit gate profile"
     if any(
         _safe_simplify(expression) != _ZERO
         for expression in (
@@ -7322,6 +9087,38 @@ def _aggregate_arity_projection_reason(
         )
     ):
         return "controlled opaque costs cannot contain measurement or reset resources"
+    return None
+
+
+def _aggregate_arity_projection_reason(
+    estimate: ResourceEstimate,
+) -> str | None:
+    """Return why clean-ancilla aggregate projection is unavailable.
+
+    Args:
+        estimate (ResourceEstimate): Aggregate estimate to inspect.
+
+    Returns:
+        str | None: Ineligibility reason, or ``None`` when at least one
+            one- or two-qubit gate can use the selected control recipe.
+    """
+    if estimate.basis is not GateBasis.LOGICAL:
+        return (
+            "automatic arity projection is available only in the logical "
+            f"basis, not {estimate.basis.value}"
+        )
+    if estimate.control_decomposition is not ControlDecomposition.CLEAN_ANCILLA_TOFFOLI:
+        return (
+            "automatic arity projection is available only with the "
+            "clean-ancilla Toffoli control decomposition, not "
+            f"{estimate.control_decomposition.value}"
+        )
+    reason = _aggregate_arity_profile_reason(estimate)
+    if reason is not None:
+        return reason
+    gates = estimate.gates
+    if _safe_simplify(gates.single_qubit + gates.two_qubit) == _ZERO:
+        return "the aggregate has no declared one- or two-qubit gate profile"
     return None
 
 
@@ -7352,12 +9149,16 @@ def _unprojected_aggregate_control_assumption(
 def _aggregate_arity_projection_constraints(
     estimate: ResourceEstimate,
     controls: ResourceExpr,
+    *,
+    model_label: str,
 ) -> tuple[_ResourceConstraint, ...]:
     """Retain unresolved validity requirements for an arity projection.
 
     Args:
         estimate (ResourceEstimate): Eligible aggregate estimate.
         controls (ResourceExpr): Number of added coherent controls.
+        model_label (str): Human-readable projection model used in
+            requirement diagnostics.
 
     Returns:
         tuple[_ResourceConstraint, ...]: Requirements that become active only
@@ -7381,7 +9182,7 @@ def _aggregate_arity_projection_constraints(
                 _ResourceConstraint(
                     expression=count,
                     minimum=0,
-                    label=f"Portable aggregate {label} gate count",
+                    label=f"{model_label} aggregate {label} gate count",
                     unit="gate",
                 )
             )
@@ -7393,7 +9194,7 @@ def _aggregate_arity_projection_constraints(
             _ResourceConstraint(
                 expression=arity_remainder,
                 minimum=0,
-                label="Portable aggregate unclassified arity remainder",
+                label=f"{model_label} aggregate unclassified arity remainder",
                 unit="gate",
             )
         )
@@ -7420,7 +9221,7 @@ def _aggregate_arity_projection_constraints(
                     expression=upper - count,
                     minimum=0,
                     label=(
-                        f"Portable aggregate {label} count within "
+                        f"{model_label} aggregate {label} count within "
                         f"{upper_label} gate count"
                     ),
                     unit="gate",
@@ -7436,7 +9237,203 @@ def _aggregate_arity_projection_constraints(
     return guarded
 
 
-def _portable_shared_aggregate_control_ladder(
+def _project_abstract_aggregate_controlled_cost(
+    estimate: ResourceEstimate,
+    controls: ResourceExpr,
+) -> tuple[ResourceEstimate | None, str]:
+    """Project an aggregate profile to abstract controlled primitives.
+
+    Each source primitive remains one logical operation. Declared arity
+    buckets shift by the added control count, while an undeclared arity
+    remainder stays unclassified. Because aggregate costs omit gate names,
+    gate-family fields use independent upper bounds over Qamomile's supported
+    logical primitive families. Every projected primitive shares the coherent
+    controls, so its aggregate gate depth is serial.
+
+    Args:
+        estimate (ResourceEstimate): Aggregate logical cost before adding
+            coherent controls.
+        controls (ResourceExpr): Positive or symbolically nonnegative number
+            of added coherent controls.
+
+    Returns:
+        tuple[ResourceEstimate | None, str]: Projected abstract estimate and an
+            empty reason, or ``None`` with the reason the profile cannot be
+            transformed safely.
+    """
+    if estimate.basis is not GateBasis.LOGICAL:
+        return (
+            None,
+            "abstract controlled primitives are available only in the logical "
+            f"basis, not {estimate.basis.value}",
+        )
+    if estimate.control_decomposition is not ControlDecomposition.ABSTRACT:
+        return (
+            None,
+            "abstract aggregate projection requires the abstract control "
+            f"decomposition, not {estimate.control_decomposition.value}",
+        )
+    reason = _aggregate_arity_profile_reason(estimate)
+    if reason is not None:
+        return None, reason
+
+    profile_constraints = _aggregate_arity_projection_constraints(
+        estimate,
+        controls,
+        model_label="Abstract",
+    )
+    gates = estimate.gates
+    known_arity_count = _safe_simplify(
+        gates.single_qubit + gates.two_qubit + gates.multi_qubit
+    )
+    unclassified_count = _safe_simplify(gates.total - known_arity_count)
+    one_control = sp.Eq(controls, _ONE)
+    two_controls = sp.Eq(controls, sp.Integer(2))
+
+    projected_two_qubit = _piecewise(
+        gates.single_qubit,
+        _ZERO,
+        one_control,
+    )
+    projected_multi_qubit = _safe_simplify(known_arity_count - projected_two_qubit)
+
+    # Aggregate profiles do not identify X/Y/Z, CX, or parametric gate names.
+    # Bound every family independently from the largest compatible arity
+    # bucket instead of pretending the fields describe one concrete gate mix.
+    possible_single_qubit = _safe_simplify(
+        gates.total - gates.two_qubit - gates.multi_qubit
+    )
+    possible_two_qubit = _safe_simplify(
+        gates.total - gates.single_qubit - gates.multi_qubit
+    )
+    possible_one_or_two_qubit = _safe_simplify(gates.total - gates.multi_qubit)
+    projected_clifford = _piecewise(
+        possible_single_qubit,
+        _ZERO,
+        one_control,
+    )
+    projected_toffoli = _piecewise(
+        possible_two_qubit,
+        _piecewise(
+            possible_single_qubit,
+            _ZERO,
+            two_controls,
+        ),
+        one_control,
+    )
+    projected_gates = GateResources(
+        total=gates.total,
+        single_qubit=_ZERO,
+        two_qubit=projected_two_qubit,
+        multi_qubit=projected_multi_qubit,
+        clifford=projected_clifford,
+        rotation=possible_one_or_two_qubit,
+        t=_ZERO,
+        toffoli=projected_toffoli,
+        non_clifford=gates.total,
+    )
+    serial_depth = DepthResources(
+        depth=sp.Max(estimate.depth.depth, gates.total),
+        clifford_depth=projected_clifford,
+        rotation_depth=possible_one_or_two_qubit,
+        t_depth=_ZERO,
+        toffoli_depth=projected_toffoli,
+        non_clifford_depth=gates.total,
+        measurement_depth=_ZERO,
+        gate_depth=sp.Max(estimate.depth.gate_depth, gates.total),
+        reset_depth=_ZERO,
+    )
+    controlled = ResourceEstimate(
+        width=estimate.width,
+        gates=projected_gates,
+        depth=serial_depth,
+        calls=estimate.calls,
+        measurements=estimate.measurements,
+        resets=estimate.resets,
+        assumptions=estimate.assumptions,
+        trace=_merge_trace(
+            f"controlled_abstract_projection({controls})",
+            estimate.trace,
+            ResourceTraceNode(
+                name="abstract_controlled_aggregate",
+                source_kind="abstract_control",
+                summary=f"gates={gates.total}, controls={controls}",
+            ),
+        ),
+        quality=estimate.quality,
+        approximation=estimate.approximation,
+        basis=estimate.basis,
+        control_decomposition=estimate.control_decomposition,
+        precision=estimate.precision,
+        _allocation_sites=estimate._allocation_sites,
+        _constraints=(*estimate._constraints, *profile_constraints),
+        _output_sizes=estimate._output_sizes,
+        _input_sizes=estimate._input_sizes,
+        _has_output_summary=estimate._has_output_summary,
+        _dependency_keys=estimate._dependency_keys,
+        _guarded_assumptions=estimate._guarded_assumptions,
+        _guarded_qualities=estimate._guarded_qualities,
+        _guarded_approximations=estimate._guarded_approximations,
+        _symbol_aliases=estimate._symbol_aliases,
+    )
+    common_message = (
+        "controlled aggregate cost uses one abstract operation per source "
+        "primitive and serializes gate depth because every operation shares "
+        "the coherent controls. Gate names and original scheduling are "
+        "unavailable. Gate-family fields are independent field-wise upper "
+        "bounds and may not sum to total; controlled primitives are not "
+        "reported as T gates. Any undeclared controlled global-phase overhead "
+        "is outside this model"
+    )
+    complete_assumption = ResourceAssumption(
+        message=(
+            f"{common_message}. Every declared arity bucket is shifted by the "
+            "added control count"
+        )
+    )
+    partial_assumption = ResourceAssumption(
+        message=(
+            f"{common_message}; {unclassified_count} gate(s) have unclassified "
+            "arity and remain outside single_qubit, two_qubit, and multi_qubit. "
+            "The transformed arity fields therefore may not sum to total"
+        )
+    )
+    active_controls = sp.And(
+        sp.Gt(controls, _ZERO),
+        _resource_activity_condition(_estimate_activity(estimate)),
+    )
+    if unclassified_count == _ZERO:
+        controlled = controlled._with_metadata(
+            assumptions=(complete_assumption,),
+            quality=EstimateQuality.MODELED,
+            active_when=active_controls,
+        )
+    elif unclassified_count.is_positive is True:
+        controlled = controlled._with_metadata(
+            assumptions=(partial_assumption,),
+            quality=EstimateQuality.MODELED,
+            active_when=active_controls,
+        )
+    else:
+        controlled = controlled._with_metadata(
+            assumptions=(complete_assumption,),
+            quality=EstimateQuality.MODELED,
+            active_when=sp.And(
+                active_controls,
+                sp.Eq(unclassified_count, _ZERO),
+            ),
+        )._with_metadata(
+            assumptions=(partial_assumption,),
+            quality=EstimateQuality.MODELED,
+            active_when=sp.And(
+                active_controls,
+                sp.Gt(unclassified_count, _ZERO),
+            ),
+        )
+    return controlled, ""
+
+
+def _clean_ancilla_shared_aggregate_control_ladder(
     body: ResourceEstimate,
     controls: ResourceExpr,
 ) -> ResourceEstimate:
@@ -7454,11 +9451,11 @@ def _portable_shared_aggregate_control_ladder(
             after this helper returns.
 
     Returns:
-        ResourceEstimate: Body-wide portable control projection with one
+        ResourceEstimate: Body-wide clean-ancilla control projection with one
         compute/uncompute ladder and concurrently held clean ancillas.
     """
     outer_clean_ancillas = controls - _ONE
-    toffoli = _portable_primitive_estimate("toffoli")
+    toffoli = _clean_ancilla_primitive_estimate("toffoli")
     compute = toffoli.repeat(outer_clean_ancillas)
     ladder = toffoli.repeat(2 * outer_clean_ancillas)
     estimate = ladder.seq(body)
@@ -7476,7 +9473,7 @@ def _portable_shared_aggregate_control_ladder(
         ),
         trace=ResourceTraceNode(
             name=f"shared_control_ladder({controls})",
-            source_kind="portable_fallback",
+            source_kind="clean_ancilla_toffoli",
             summary=(
                 f"toffoli_steps={2 * outer_clean_ancillas}, "
                 f"clean_ancillas={outer_clean_ancillas}"
@@ -7491,20 +9488,19 @@ def _portable_shared_aggregate_control_ladder(
     )._with_metadata(quality=EstimateQuality.UPPER_BOUND)
 
 
-def _project_portable_aggregate_controlled_cost(
+def _project_clean_ancilla_aggregate_controlled_cost(
     estimate: ResourceEstimate,
     controls: ResourceExpr,
 ) -> tuple[ResourceEstimate | None, str]:
     """Project the known part of an aggregate arity profile through controls.
 
-    The projection uses one shared conjunction when both the control count and
-    modeled operation count reach the aggregate batching threshold.
-    Otherwise, it keeps the per-primitive projection used for a one-operation
-    controlled body. Gate-name uncertainty is represented by field-wise one-
-    and two-qubit envelopes. Any remaining gate count stays as a unit-cost
-    opaque serial placeholder without being assigned a false arity.
-    Decomposition ancillas for the known portion are added to any scratch width
-    already declared by the opaque cost.
+    The projection uses one shared conjunction when at least two controls
+    surround at least two modeled operations. Smaller cases retain the
+    per-primitive projection. Gate-name uncertainty is represented by
+    field-wise one- and two-qubit envelopes. Any remaining gate count stays as
+    a unit-cost opaque serial placeholder without being assigned a false
+    arity. Decomposition ancillas for the known portion are added to any
+    scratch width already declared by the opaque cost.
 
     Args:
         estimate (ResourceEstimate): Aggregate cost before adding controls.
@@ -7521,12 +9517,15 @@ def _project_portable_aggregate_controlled_cost(
     profile_constraints = _aggregate_arity_projection_constraints(
         estimate,
         controls,
+        model_label="Clean-ancilla",
     )
 
-    single = _portable_controlled_arity_envelope(1, _ONE).repeat(
+    single = _clean_ancilla_controlled_arity_envelope(1, _ONE).repeat(
         estimate.gates.single_qubit
     )
-    two = _portable_controlled_arity_envelope(2, _ONE).repeat(estimate.gates.two_qubit)
+    two = _clean_ancilla_controlled_arity_envelope(2, _ONE).repeat(
+        estimate.gates.two_qubit
+    )
     unresolved_count = _safe_simplify(
         estimate.gates.total - estimate.gates.single_qubit - estimate.gates.two_qubit
     )
@@ -7546,30 +9545,35 @@ def _project_portable_aggregate_controlled_cost(
         ),
         quality=EstimateQuality.MODELED,
         basis=estimate.basis,
+        control_decomposition=estimate.control_decomposition,
         precision=estimate.precision,
     )
     projected_body = single.seq(two).seq(unresolved)
-    shared_projection = _portable_shared_aggregate_control_ladder(
+    shared_projection = _clean_ancilla_shared_aggregate_control_ladder(
         projected_body,
         controls,
     )
     per_primitive_projection = (
-        _portable_controlled_arity_envelope(1, controls)
+        _clean_ancilla_controlled_arity_envelope(1, controls)
         .repeat(estimate.gates.single_qubit)
         .seq(
-            _portable_controlled_arity_envelope(2, controls).repeat(
+            _clean_ancilla_controlled_arity_envelope(2, controls).repeat(
                 estimate.gates.two_qubit
             )
         )
         .seq(unresolved)
     )
-    shares_control_ladder = sp.And(
-        sp.Ge(controls, CONTROL_BATCH_MIN_WEIGHT),
-        sp.Ge(estimate.gates.total, CONTROL_BATCH_MIN_WEIGHT),
+    has_batchable_work = sp.Ge(
+        estimate.gates.total,
+        CLEAN_ANCILLA_BATCH_MIN_WORK,
+    )
+    use_shared_ladder = sp.And(
+        sp.Ge(controls, CLEAN_ANCILLA_BATCH_MIN_WORK),
+        has_batchable_work,
     )
     projected = shared_projection.conditional(
         per_primitive_projection,
-        shares_control_ladder,
+        use_shared_ladder,
     )
     has_unresolved_gates = sp.Gt(unresolved_count, _ZERO)
     projected_gates = dataclasses.replace(
@@ -7625,20 +9629,20 @@ def _project_portable_aggregate_controlled_cost(
     )
     complete_assumption = ResourceAssumption(
         message=(
-            "controlled aggregate cost uses an aggregate-level portable "
-            "batching model: at least two modeled operations under at least two "
-            "active controls share one computed AND ladder and use "
-            "conservative single-control arity upper bounds; smaller cases use "
-            "conservative per-primitive arity upper bounds. "
+            "controlled aggregate cost uses the aggregate clean-ancilla "
+            "Toffoli "
+            "batching model: at least two modeled operations under at least "
+            "two active controls share one computed AND ladder and use "
+            "conservative single-control arity upper bounds. Smaller cases "
+            "use conservative per-primitive arity upper bounds. "
             "Arity fields are independent field-wise upper bounds and may not "
             "sum to total. "
-            "The bounds range over Qamomile's supported portable primitive "
+            "The bounds range over Qamomile's supported logical primitive "
             "families. Gate kinds and original scheduling are unavailable, so "
-            "the selected gate-name-independent two-control model may differ "
-            "from a concrete body's gate-name-specific path. Fallback clean "
-            "ancillas are counted in addition to declared opaque workspace, "
-            "and any undeclared controlled global-phase overhead is outside "
-            "this model"
+            "this fixed aggregate recipe may differ from a concrete engine's "
+            "emission choices. Decomposition clean ancillas are counted in "
+            "addition to declared opaque workspace, and any undeclared "
+            "controlled global-phase overhead is outside this model"
         )
     )
     unclassified_remainder = _safe_simplify(
@@ -7646,11 +9650,12 @@ def _project_portable_aggregate_controlled_cost(
     )
     partial_assumption = ResourceAssumption(
         message=(
-            "controlled aggregate cost uses an aggregate-level portable "
-            "batching model: at least two modeled operations under at least two "
-            "active controls share one computed AND ladder and use "
-            "conservative single-control arity upper bounds; smaller cases use "
-            "conservative per-primitive arity upper bounds; "
+            "controlled aggregate cost uses the aggregate clean-ancilla "
+            "Toffoli "
+            "batching model: at least two modeled operations under at least "
+            "two active controls share one computed AND ladder and use "
+            "conservative single-control arity upper bounds. Smaller cases "
+            "use conservative per-primitive arity upper bounds; "
             f"{unresolved_count} gate(s) outside those buckets remain one "
             "modeled operation each in total and serial depth, including "
             f"{unclassified_remainder} gate(s) with unclassified arity; "
@@ -7658,13 +9663,13 @@ def _project_portable_aggregate_controlled_cost(
             "are unavailable, unclassified gates are not reported as "
             "multi_qubit. Arity fields are independent field-wise upper bounds "
             "and may not sum to total. The supported arity bounds range over "
-            "Qamomile's portable primitive families, but the overall result is "
+            "Qamomile's logical primitive families, but the overall result is "
             "a model rather than a full upper bound because the remainder "
-            "decomposition is unavailable. The selected gate-name-independent "
-            "two-control model may differ from a concrete body's "
-            "gate-name-specific path. Declared gate-family counts are retained "
-            "only as field-wise floors, and any undeclared controlled "
-            "global-phase overhead is outside this model"
+            "decomposition is unavailable. This fixed aggregate recipe may "
+            "differ from a concrete engine's emission choices. Declared "
+            "gate-family counts are retained only as field-wise floors, and "
+            "any undeclared controlled global-phase overhead is outside this "
+            "model"
         )
     )
     controlled = ResourceEstimate(
@@ -7681,7 +9686,9 @@ def _project_portable_aggregate_controlled_cost(
             projected.trace,
         ),
         quality=estimate.quality,
+        approximation=estimate.approximation,
         basis=estimate.basis,
+        control_decomposition=estimate.control_decomposition,
         precision=estimate.precision,
         _allocation_sites=estimate._allocation_sites,
         _constraints=(
@@ -7695,6 +9702,7 @@ def _project_portable_aggregate_controlled_cost(
         _dependency_keys=estimate._dependency_keys,
         _guarded_assumptions=estimate._guarded_assumptions,
         _guarded_qualities=estimate._guarded_qualities,
+        _guarded_approximations=estimate._guarded_approximations,
         _symbol_aliases=estimate._symbol_aliases,
     )
     active_controls = sp.And(
@@ -7765,22 +9773,22 @@ def _project_portable_aggregate_controlled_cost(
     return controlled, ""
 
 
-def _estimate_portable_gate(
+def _estimate_clean_ancilla_gate(
     operation: GateOperation,
     controls: ResourceExpr,
 ) -> ResourceEstimate:
-    """Estimate a primitive through the backend-neutral control fallback.
+    """Estimate a primitive through the clean-ancilla Toffoli model.
 
     Args:
         operation (GateOperation): Primitive gate operation.
         controls (ResourceExpr): Surrounding control count.
 
     Returns:
-        ResourceEstimate: Portable logical decomposition estimate.
+        ResourceEstimate: Logical decomposition estimate.
 
     Raises:
         NotImplementedError: If the operation has no registered IR arity or a
-            multi-target gate lacks an explicit portable lowering.
+            multi-target gate lacks an explicit clean-ancilla lowering.
     """
     gate_type = operation.gate_type
     if (
@@ -7788,16 +9796,18 @@ def _estimate_portable_gate(
         or gate_type not in _GATE_OPERATION_ARITY
     ):
         raise NotImplementedError(
-            f"Portable resource estimation is not defined for IR gate {gate_type!r}."
+            "Clean-ancilla Toffoli control decomposition is not defined for "
+            f"IR gate {gate_type!r}."
         )
     arity = _GATE_OPERATION_ARITY[gate_type]
-    if arity > 1 and gate_type not in _PORTABLE_EXPLICIT_MULTI_TARGET_GATE_TYPES:
+    if arity > 1 and gate_type not in _CLEAN_ANCILLA_EXPLICIT_MULTI_TARGET_GATE_TYPES:
         raise NotImplementedError(
-            "Portable resource estimation requires an explicit multi-target "
+            "Clean-ancilla Toffoli control decomposition requires an explicit "
+            "multi-target "
             f"lowering for IR gate {gate_type.name}."
         )
     name = gate_type.name.lower()
-    return _estimate_portable_named_gate(name, controls)
+    return _estimate_clean_ancilla_named_gate(name, controls)
 
 
 def _estimate_named_gate_in_basis(
@@ -7805,9 +9815,10 @@ def _estimate_named_gate_in_basis(
     controls: ResourceExpr,
     *,
     basis: GateBasis,
+    control_decomposition: ControlDecomposition,
     precision: float,
 ) -> ResourceEstimate:
-    """Estimate a named primitive in one public resource basis.
+    """Estimate a named primitive in one public gate model.
 
     This helper is used for decomposition gates introduced by the estimator
     itself, such as control-value brackets and Pauli-gadget basis changes.
@@ -7816,16 +9827,31 @@ def _estimate_named_gate_in_basis(
         name (str): Lowercase gate name.
         controls (ResourceExpr): Number of additional coherent controls.
         basis (GateBasis): Requested output basis.
+        control_decomposition (ControlDecomposition): Requested coherent-control
+            representation.
         precision (float): Rotation-synthesis precision for ``CLIFFORD_T``.
 
     Returns:
         ResourceEstimate: Gate, depth, and decomposition-ancilla resources.
+
+    Raises:
+        ValueError: If the Clifford+T basis is asked to preserve a controlled
+            primitive abstractly or lacks a lowering for the named gate.
     """
-    if basis is GateBasis.PORTABLE:
-        return _estimate_portable_named_gate(name, controls)
+    if (
+        basis is GateBasis.LOGICAL
+        and control_decomposition is ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
+    ):
+        return _estimate_clean_ancilla_named_gate(name, controls)
 
     normalized_name = "toffoli" if name == "ccx" else name
     if basis is GateBasis.CLIFFORD_T:
+        if control_decomposition is ControlDecomposition.ABSTRACT and controls != _ZERO:
+            raise ValueError(
+                "Clifford+T estimation cannot preserve a controlled primitive "
+                "as abstract. Select the clean-ancilla Toffoli control "
+                "decomposition."
+            )
         gates = _classify_clifford_t_gate(
             normalized_name,
             controls,
@@ -7855,6 +9881,7 @@ def _estimate_named_gate_in_basis(
         estimate = dataclasses.replace(
             estimate,
             basis=basis,
+            control_decomposition=control_decomposition,
             precision=precision,
         )
         upper_bound_when = _clifford_t_upper_bound_condition(
@@ -7866,6 +9893,10 @@ def _estimate_named_gate_in_basis(
                 quality=EstimateQuality.UPPER_BOUND,
                 active_when=upper_bound_when,
             )
+        if normalized_name in _ROTATION_GATES:
+            estimate = estimate._with_metadata(
+                approximation=ApproximationStatus.APPROXIMATE,
+            )
         return estimate
 
     gates = (
@@ -7876,6 +9907,7 @@ def _estimate_named_gate_in_basis(
     return dataclasses.replace(
         ResourceEstimate.primitive(normalized_name, gates),
         basis=basis,
+        control_decomposition=control_decomposition,
         precision=None,
     )
 
@@ -7900,7 +9932,7 @@ def _clifford_t_clean_ancillas_for_name(
     name: str,
     surrounding_controls: ResourceExpr,
 ) -> ResourceExpr:
-    """Return clean ancillas for one canonical Clifford+T fallback.
+    """Return clean ancillas for one canonical Clifford+T lowering.
 
     Args:
         name (str): Lowercase logical gate name.
@@ -7974,8 +10006,8 @@ def _classify_gate(
     operation: GateOperation,
     *,
     num_controls: ResourceExpr | int = 0,
-    basis: GateBasis = GateBasis.LOGICAL,
-    precision: float = 1e-10,
+    basis: GateBasis = _DEFAULT_GATE_BASIS,
+    precision: float = _DEFAULT_ROTATION_SYNTHESIS_PRECISION,
 ) -> GateResources:
     """Classify one primitive gate into logical gate resources.
 
@@ -8058,7 +10090,7 @@ def _classify_clifford_t_gate(
     """Lower one logical primitive to aggregate Clifford+T resources.
 
     Exact canonical decompositions are used for X-family, Pauli, SWAP, and
-    fixed phase fallbacks. Arbitrary uncontrolled axial rotations use the
+    fixed phases. Arbitrary uncontrolled axial rotations use the
     Ross-Selinger asymptotic upper bound
     ``ceil(3 log2(1 / precision))`` T gates. A controlled primitive is
     rejected unless this estimator defines an explicit Clifford+T lowering.
@@ -8151,7 +10183,7 @@ def _classify_controlled_clifford_t_gate(
 ) -> GateResources:
     """Return the defined Clifford+T lowering for a controlled primitive.
 
-    Multi-control lowering mirrors the portable fallback: clean ancillas
+    Multi-control lowering uses the clean-ancilla Toffoli model: clean ancillas
     compute a reusable conjunction, one singly controlled primitive is
     applied, and the conjunction is uncomputed. Specialized Pauli, SWAP, and
     phase paths avoid treating an arbitrary control arity as one opaque gate.
@@ -8217,8 +10249,8 @@ def _classify_controlled_clifford_t_gate(
         return _add_gates(ladder, _classify_uncontrolled_gate(gate_name))
     raise ValueError(
         "Clifford+T lowering is not defined for controlled gate "
-        f"'{gate_name}'. Use the logical or portable basis, or provide an "
-        "explicit cost model."
+        f"'{gate_name}'. Use the logical basis or provide an explicit cost "
+        "model."
     )
 
 
@@ -8680,6 +10712,7 @@ def _free_symbols(estimate: ResourceEstimate) -> set[sp.Symbol]:
     for fact in (
         *(estimate._guarded_assumptions or ()),
         *(estimate._guarded_qualities or ()),
+        *(estimate._guarded_approximations or ()),
     ):
         symbols.update(cast(set[sp.Symbol], sp.sympify(fact.active_when).free_symbols))
     return symbols
@@ -8721,6 +10754,7 @@ def _serialization_expressions(
         for fact in (
             *(estimate._guarded_assumptions or ()),
             *(estimate._guarded_qualities or ()),
+            *(estimate._guarded_approximations or ()),
         )
     )
     return expressions
@@ -9439,28 +11473,19 @@ def _apply_inputs(
             if name not in referenced:
                 ignored.append(name)
             continue
-        if not (
-            isinstance(value, (bool, numbers.Complex)) or isinstance(value, sp.Expr)
-        ):
-            raise TypeError(
-                f"resource input '{name}' requires a numeric scalar or explicit "
-                f"SymPy expression, got {type(value).__name__} ({value!r})."
-            )
-        if isinstance(value, bool):
-            sympified: sp.Basic = sp.Integer(int(value))
-        else:
-            try:
-                sympified = sp.sympify(value)
-            except (TypeError, ValueError, sp.SympifyError) as error:
-                raise ValueError(
-                    f"Cannot apply non-scalar value {value!r} to resource "
-                    f"parameter '{name}'."
-                ) from error
-        if not isinstance(sympified, sp.Expr):
-            raise ValueError(
-                f"Cannot apply non-numeric value {value!r} to resource "
-                f"parameter '{name}'."
-            )
+        _validate_finite_source_domain_input(
+            estimate,
+            symbols_by_name[name],
+            value,
+        )
+        sympified = _normalize_resource_scalar(
+            value,
+            label=f"resource input '{name}'",
+            allow_symbolic=True,
+            allow_bool=(
+                name not in declared_types or isinstance(declared_types[name], BitType)
+            ),
+        )
         if (
             sympified.is_number
             and any(symbol.is_integer is True for symbol in symbols_by_name[name])
@@ -9496,27 +11521,82 @@ def _apply_inputs(
     return substituted
 
 
-def _operand_shapes(
-    operands: Sequence[Value],
-    resolver: ExprResolver,
-) -> dict[str, ResourceExpr]:
-    """Resolve array operand shapes for a resource context.
+def _validate_finite_source_domain_input(
+    estimate: ResourceEstimate,
+    symbols: Sequence[sp.Symbol],
+    value: object,
+) -> None:
+    """Preserve source-operation diagnostics for finite-domain inputs.
+
+    Unary mathematical operations retain their own finite-domain constraints.
+    Validate those constraints before the generic public-scalar guard so an
+    invalid concrete input reports the operation whose domain was violated.
+    Other structural inputs still use the generic finite-real diagnostic.
 
     Args:
-        operands (Sequence[Value]): Invocation operands.
+        estimate (ResourceEstimate): Estimate carrying source-domain
+            constraints.
+        symbols (Sequence[sp.Symbol]): Internal symbols represented by the
+            public input name.
+        value (object): Candidate input value.
+
+    Raises:
+        ValueError: If a concrete value violates a retained finite-domain
+            constraint.
+    """
+    scalar = value.item() if hasattr(value, "item") else value
+    try:
+        normalized = sp.sympify(scalar)
+    except (TypeError, ValueError, sp.SympifyError):
+        return
+    if not isinstance(normalized, sp.Expr) or normalized.is_number is not True:
+        return
+    substitutions = {symbol: normalized for symbol in symbols}
+    symbol_set = set(symbols)
+    for constraint in estimate._constraints:
+        if not constraint.finite or constraint.expression not in symbol_set:
+            continue
+        constraint.mapped(lambda expr: _safe_constraint_substitute(expr, substitutions))
+
+
+def _opaque_cost_target_shapes(
+    operation: InvokeOperation,
+    resolver: ExprResolver,
+    *,
+    added_controls: int,
+    declared_controls: int,
+) -> dict[str, tuple[ResourceExpr, ...]]:
+    """Resolve definition target shapes for an opaque-cost callback.
+
+    Args:
+        operation (InvokeOperation): Bodyless invocation being modeled.
         resolver (ExprResolver): Resolver for symbolic shapes.
+        added_controls (int): Call-site control prefix excluded from the
+            definition.
+        declared_controls (int): Definition control prefix excluded from
+            target shapes.
 
     Returns:
-        dict[str, ResourceExpr]: Mapping from operand name to scalar width for
-        one-dimensional arrays.
+        dict[str, tuple[ResourceExpr, ...]]: Target shapes keyed by definition
+        formal name. Scalar qubits use an empty tuple.
     """
-    shapes: dict[str, ResourceExpr] = {}
-    for operand in operands:
-        if isinstance(operand, ArrayValue) and operand.shape:
-            count: ResourceExpr = _ONE
-            for dim in operand.shape:
-                count *= resolver.resolve(dim)
-            shapes[operand.name] = count
+    base_operands = operation.operands[added_controls:]
+    signature = operation.definition.signature if operation.definition else None
+    hints = signature.operands if signature is not None else []
+    target_operands = base_operands[declared_controls:]
+    target_hints = hints[declared_controls:]
+    shapes: dict[str, tuple[ResourceExpr, ...]] = {}
+    for index, operand in enumerate(target_operands):
+        if not operand.type.is_quantum():
+            continue
+        hint = target_hints[index] if index < len(target_hints) else None
+        name = hint.name if hint is not None else operand.name or f"target_{index}"
+        shape = (
+            tuple(resolver.resolve(dimension) for dimension in operand.shape)
+            if isinstance(operand, ArrayValue)
+            else ()
+        )
+        shapes[name] = shape
     return shapes
 
 

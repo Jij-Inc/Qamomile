@@ -1234,7 +1234,7 @@ class _StaticBindingResolver:
         concrete_definition = self._definition_for(
             slot_name,
             member_name,
-            require_inverse=operation.transform is CallTransform.INVERSE,
+            require_inverse=operation.transform.is_inverse,
         )
         resolved_attrs = dict(concrete_definition.attrs)
         for key in (

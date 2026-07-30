@@ -3015,7 +3015,7 @@ def _lower_transformed_call(
             for value in operation.operands
             if value.type.is_classical() or value.type.is_object()
         ]
-        inverse = operation.transform is CallTransform.INVERSE
+        inverse = operation.transform.is_inverse
         display_name = operation.target.name
     if body is None:
         raise EmitError(f"Transformed HUGR callable {display_name!r} is opaque")
@@ -3175,10 +3175,7 @@ def _transformed_control_value(
     """
     if isinstance(operation, (ConcreteControlledU, InverseBlockOperation)):
         return operation.control_value
-    if (
-        isinstance(operation, InvokeOperation)
-        and operation.transform is CallTransform.CONTROLLED
-    ):
+    if isinstance(operation, InvokeOperation) and operation.transform.is_controlled:
         return operation.control_value
     return None
 

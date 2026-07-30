@@ -1663,7 +1663,7 @@ def _validate_invoke(operation: InvokeOperation, location: str) -> None:
     if operation_kind != definition_kind:
         raise ValueError(f"{location} kind disagrees with its definition")
     control_count = 0
-    if operation.transform is CallTransform.CONTROLLED:
+    if operation.transform.is_controlled:
         raw_control_count = operation.attrs.get("num_control_qubits")
         if (
             not isinstance(raw_control_count, int)
@@ -1700,8 +1700,11 @@ def _validate_invoke(operation: InvokeOperation, location: str) -> None:
     signature = operation.definition.signature
     if signature is None:
         return
-    signature_includes_controls = operation_kind == "oracle"
-    signature_offset = 0 if signature_includes_controls else control_count
+    signature_offset = (
+        operation.num_added_control_qubits
+        if operation_kind == "oracle"
+        else control_count
+    )
     operands = operation.operands[signature_offset:]
     results = operation.results[signature_offset:]
     if len(signature.operands) != len(operands) or len(signature.results) != len(

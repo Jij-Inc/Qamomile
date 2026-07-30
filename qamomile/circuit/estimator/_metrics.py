@@ -11,12 +11,15 @@ from __future__ import annotations
 import dataclasses
 import enum
 from collections.abc import Mapping, Sequence
+from functools import lru_cache
 from typing import Any, cast
 
 import sympy as sp
 from sympy.calculus.util import minimum as calculus_minimum
 from sympy.core.relational import Relational
 from sympy.logic.boolalg import Boolean
+
+from qamomile.circuit.estimator._serialization import stringify_expression
 
 ResourceExpr = sp.Expr
 _ZERO = sp.Integer(0)
@@ -82,6 +85,24 @@ def _combine_quality(
     return left if rank[left] >= rank[right] else right
 
 
+def _combine_approximation(
+    left: ApproximationStatus,
+    right: ApproximationStatus,
+) -> ApproximationStatus:
+    """Return whether either composed estimate uses an approximation.
+
+    Args:
+        left (ApproximationStatus): Left approximation status.
+        right (ApproximationStatus): Right approximation status.
+
+    Returns:
+        ApproximationStatus: ``APPROXIMATE`` if either input is approximate.
+    """
+    if ApproximationStatus.APPROXIMATE in {left, right}:
+        return ApproximationStatus.APPROXIMATE
+    return ApproximationStatus.EXACT
+
+
 def _validate_event_count(value: ResourceExpr, *, label: str) -> None:
     """Validate one concrete per-qubit event count.
 
@@ -109,33 +130,57 @@ class GateBasis(enum.StrEnum):
     """Select the gate basis reported by resource estimation.
 
     Values:
-        PORTABLE: Recursively lower coherent controls through Qamomile's
-            backend-neutral fallback, including clean ancillas and shared
-            body-control ladders when concrete structure permits them. This is
-            the default algorithmic estimate.
-        LOGICAL: Keep every source primitive as one abstract logical gate,
-            regardless of control arity.
+        LOGICAL: Report gates in Qamomile's logical algorithmic vocabulary.
         CLIFFORD_T: Lower the supported logical operations to aggregate
             Clifford+T resources at the requested synthesis precision.
     """
 
-    PORTABLE = "portable"
     LOGICAL = "logical"
     CLIFFORD_T = "clifford_t"
+
+
+class ControlDecomposition(enum.StrEnum):
+    """Select how coherent controls are represented in resource estimates.
+
+    Values:
+        ABSTRACT: Keep each controlled primitive as one abstract logical
+            operation, independently of its control arity. A nonzero abstract
+            control cannot be expressed in the ``CLIFFORD_T`` basis, so that
+            combination fails instead of inventing a decomposition.
+        CLEAN_ANCILLA_TOFFOLI: Use the fixed clean-ancilla Toffoli-ladder
+            resource model, including its body-wide sharing rule. This
+            algorithmic model is independent of any engine's native or
+            fallback emission policy.
+    """
+
+    ABSTRACT = "abstract"
+    CLEAN_ANCILLA_TOFFOLI = "clean_ancilla_toffoli"
 
 
 class EstimateQuality(enum.StrEnum):
     """Describe how directly resource counts follow the selected circuit model.
 
-    ``EXACT`` means that the reported resources exactly count the selected
-    circuit representation. It does not imply that the circuit itself exactly
-    realizes an ideal mathematical operation when an assumption records an
-    approximation such as a product formula.
+    This axis concerns the resource counts themselves. Mathematical
+    approximations in the selected circuit are tracked independently by
+    :class:`ApproximationStatus`.
     """
 
     EXACT = "exact"
     UPPER_BOUND = "upper_bound"
     MODELED = "modeled"
+
+
+class ApproximationStatus(enum.StrEnum):
+    """Describe whether the selected circuit approximates an ideal operation.
+
+    Values:
+        EXACT: No mathematical approximation is known to the estimator.
+        APPROXIMATE: At least one selected circuit construction approximates
+            its ideal mathematical operation.
+    """
+
+    EXACT = "exact"
+    APPROXIMATE = "approximate"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -238,6 +283,49 @@ class _GuardedQuality:
         return dataclasses.replace(self, active_when=active_when)
 
 
+@dataclasses.dataclass(frozen=True)
+class _GuardedApproximation:
+    """Associate an approximation status with a symbolic activation guard.
+
+    Args:
+        active_when (sp.Basic): Condition under which the approximation is
+            present.
+        approximation (ApproximationStatus): Non-exact approximation status.
+    """
+
+    active_when: sp.Basic
+    approximation: ApproximationStatus
+
+    def when(self, condition: sp.Basic) -> _GuardedApproximation:
+        """Conjoin another activation condition.
+
+        Args:
+            condition (sp.Basic): Additional branch or repetition guard.
+
+        Returns:
+            _GuardedApproximation: Status guarded by both conditions.
+        """
+        return dataclasses.replace(
+            self,
+            active_when=_and_conditions(self.active_when, condition),
+        )
+
+    def mapped(self, fn: Any) -> _GuardedApproximation | None:
+        """Rewrite the guard and prune an inactive approximation.
+
+        Args:
+            fn (Any): Symbolic-expression rewrite function.
+
+        Returns:
+            _GuardedApproximation | None: Rewritten status, or ``None`` when
+                its guard resolves false.
+        """
+        active_when = _rewrite_condition(self.active_when, fn)
+        if active_when is sp.false:
+            return None
+        return dataclasses.replace(self, active_when=active_when)
+
+
 def _active_assumptions(
     facts: Sequence[_GuardedAssumption],
 ) -> tuple[ResourceAssumption, ...]:
@@ -271,6 +359,27 @@ def _active_quality(facts: Sequence[_GuardedQuality]) -> EstimateQuality:
         if fact.active_when is not sp.false:
             quality = _combine_quality(quality, fact.quality)
     return quality
+
+
+def _active_approximation(
+    facts: Sequence[_GuardedApproximation],
+) -> ApproximationStatus:
+    """Return the active or potentially active approximation status.
+
+    Args:
+        facts (Sequence[_GuardedApproximation]): Guarded approximation facts.
+
+    Returns:
+        ApproximationStatus: Combined active approximation status.
+    """
+    approximation = ApproximationStatus.EXACT
+    for fact in facts:
+        if fact.active_when is not sp.false:
+            approximation = _combine_approximation(
+                approximation,
+                fact.approximation,
+            )
+    return approximation
 
 
 @dataclasses.dataclass
@@ -705,7 +814,11 @@ class ResourceTraceNode:
         prefix = " " * indent
         strategy = f" strategy={self.strategy}" if self.strategy else ""
         summary = f" {self.summary}" if self.summary else ""
-        guard = "" if self.active_when is sp.true else f" when={self.active_when}"
+        guard = (
+            ""
+            if self.active_when is sp.true
+            else f" when={stringify_expression(self.active_when)}"
+        )
         lines = [f"{prefix}{self.name} [{self.source_kind}{strategy}]{summary}{guard}"]
         for assumption in self.assumptions:
             source = f" ({assumption.source})" if assumption.source else ""
@@ -1282,10 +1395,9 @@ def _substitute_resource_expr(
         sp.Expr: Substituted expression, or zero for a concrete negative
             resource count.
     """
-    normalized = _expr(expression)
     substituted = cast(
         sp.Expr,
-        normalized.subs(substitutions, simultaneous=True),
+        _substitute_basic_lazily(_expr(expression), substitutions),
     )
     resolved = cast(sp.Expr, substituted.doit())
     if not resolved.free_symbols <= substituted.free_symbols:
@@ -1295,6 +1407,70 @@ def _substitute_resource_expr(
     return resolved
 
 
+def _substitute_basic_lazily(
+    expression: sp.Basic,
+    substitutions: Mapping[sp.Symbol, sp.Expr],
+) -> sp.Basic:
+    """Apply simultaneous substitutions without visiting inactive branches.
+
+    SymPy's ordinary substitution eagerly rebuilds every ``Piecewise`` value
+    before deciding its conditions. A concrete resource input can therefore
+    evaluate a large ``Sum`` in a branch that is immediately discarded. This
+    walker resolves conditions first and stops at the first definitely active
+    branch while preserving exact symbol-identity replacement everywhere
+    else.
+
+    Args:
+        expression (sp.Basic): Symbolic expression or predicate to rewrite.
+        substitutions (Mapping[sp.Symbol, sp.Expr]): Simultaneous free-symbol
+            replacements.
+
+    Returns:
+        sp.Basic: Rewritten expression with unreachable branches untouched.
+    """
+    if not substitutions or not expression.free_symbols.intersection(substitutions):
+        return expression
+    replacement = substitutions.get(cast(sp.Symbol, expression))
+    if replacement is not None and isinstance(expression, sp.Symbol):
+        return replacement
+    if isinstance(expression, sp.Piecewise):
+        branches: list[tuple[sp.Expr, Boolean | bool]] = []
+        for branch in expression.args:
+            value, condition = branch.args
+            rewritten_condition = _boolean_condition(
+                _substitute_basic_lazily(
+                    cast(sp.Basic, condition),
+                    substitutions,
+                )
+            )
+            if rewritten_condition is sp.false:
+                continue
+            rewritten_value = cast(
+                sp.Expr,
+                _substitute_basic_lazily(
+                    cast(sp.Basic, value),
+                    substitutions,
+                ),
+            )
+            if rewritten_condition is sp.true:
+                if not branches:
+                    return rewritten_value
+                branches.append((rewritten_value, True))
+                break
+            branches.append((rewritten_value, rewritten_condition))
+        if not branches:
+            return sp.nan
+        return sp.Piecewise(*branches)
+    rewritten_args = tuple(
+        _substitute_basic_lazily(cast(sp.Basic, argument), substitutions)
+        for argument in expression.args
+    )
+    if rewritten_args == expression.args:
+        return expression
+    return cast(sp.Basic, expression.func(*rewritten_args))
+
+
+@lru_cache(maxsize=4096)
 def _safe_simplify(expression: ResourceExpr) -> ResourceExpr:
     """Simplify an expression without releasing internal bound symbols.
 
@@ -1314,7 +1490,13 @@ def _safe_simplify(expression: ResourceExpr) -> ResourceExpr:
     normalized = _expr(expression)
     try:
         simplified = cast(ResourceExpr, sp.simplify(normalized))
-    except (ArithmeticError, RecursionError):
+    except (
+        ArithmeticError,
+        AttributeError,
+        NotImplementedError,
+        RecursionError,
+        TypeError,
+    ):
         return normalized
     if simplified.free_symbols <= normalized.free_symbols:
         return simplified
@@ -1334,10 +1516,9 @@ def _safe_constraint_substitute(
     Returns:
         ResourceExpr: Safely evaluated substituted expression.
     """
-    normalized = _expr(expression)
     substituted = cast(
         ResourceExpr,
-        normalized.subs(substitutions, simultaneous=True),
+        _substitute_basic_lazily(_expr(expression), substitutions),
     )
     evaluated = cast(ResourceExpr, substituted.doit())
     if not evaluated.free_symbols <= substituted.free_symbols:
@@ -1405,6 +1586,224 @@ def _boolean_condition(condition: sp.Basic) -> Boolean:
     return cast(Boolean, sp.Ne(condition, 0))
 
 
+def _unresolved_condition_guard(condition: sp.Basic) -> Boolean:
+    """Keep metadata active only while a branch predicate remains symbolic.
+
+    A symbolic condition indicator is intentionally compared with both of its
+    concrete values. SymPy cannot resolve either comparison until parameter
+    substitution chooses zero or one, at which point the conjunction becomes
+    false and guarded branch-union metadata is pruned.
+
+    Args:
+        condition (sp.Basic): Branch predicate whose resolution state guards
+            conservative metadata.
+
+    Returns:
+        Boolean: Potentially active guard while ``condition`` is symbolic, or
+            false after it resolves to either Boolean value.
+    """
+    indicator = _ConditionIndicator(_boolean_condition(condition))
+    return cast(
+        Boolean,
+        sp.And(
+            sp.Ne(indicator, _ZERO),
+            sp.Ne(indicator, _ONE),
+        ),
+    )
+
+
+class _ConditionIndicator(sp.Function):
+    """Encode a Boolean predicate as a binder-safe zero-or-one expression.
+
+    This node stays opaque to SymPy's ``piecewise_fold`` while symbolic.
+    A nested ``Piecewise`` under ``Sum`` can otherwise release the sum's bound
+    variable into a public resource expression.
+    """
+
+    nargs = 1
+    is_integer = True
+    is_nonnegative = True
+
+    @classmethod
+    def eval(cls, condition: sp.Basic) -> sp.Integer | None:
+        """Reduce a concrete Boolean predicate to zero or one.
+
+        Args:
+            condition (sp.Basic): Boolean predicate to encode.
+
+        Returns:
+            sp.Integer | None: One for true, zero for false, or ``None`` while
+            the predicate remains symbolic.
+        """
+        if condition is sp.true:
+            return _ONE
+        if condition is sp.false:
+            return _ZERO
+        return None
+
+
+_RANGE_ANY_REPLAY_LIMIT = 1024
+
+
+class _RangeAny(sp.Function):
+    """Represent whether any value in a finite integer range satisfies a guard.
+
+    The predicate is stored in a one-argument ``Lambda`` so its induction
+    variable remains bound across substitution and ``Piecewise`` rewriting.
+    Small concrete ranges are replayed directly. Affine relational predicates
+    over larger concrete ranges are decided from their finitely many truth
+    boundaries. Nonlinear or symbolic large ranges retain this expression
+    instead of asking SymPy to perform expensive general set construction.
+    """
+
+    nargs = 4
+    is_integer = True
+    is_nonnegative = True
+
+    @classmethod
+    def eval(
+        cls,
+        predicate: sp.Basic,
+        start: sp.Expr,
+        step: sp.Expr,
+        iterations: sp.Expr,
+    ) -> sp.Integer | None:
+        """Resolve a finite existential guard over a concrete range.
+
+        Args:
+            predicate (sp.Basic): One-argument Boolean Lambda.
+            start (sp.Expr): First Python-range value.
+            step (sp.Expr): Python-range step.
+            iterations (sp.Expr): Number of executed iterations.
+
+        Returns:
+            sp.Integer | None: One when any position satisfies the predicate,
+            zero when none do, or ``None`` when symbolic or unresolved.
+        """
+        if not isinstance(predicate, sp.Lambda) or len(predicate.variables) != 1:
+            return None
+        if iterations.is_zero is True:
+            return _ZERO
+        loop_symbol = predicate.variables[0]
+        condition = _boolean_condition(cast(sp.Basic, predicate.expr))
+        if loop_symbol not in condition.free_symbols:
+            if condition is sp.true:
+                if iterations.is_positive is True:
+                    return _ONE
+                return None
+            if condition is sp.false:
+                return _ZERO
+            return None
+        if not (
+            start.is_integer is True
+            and start.is_number
+            and step.is_integer is True
+            and step.is_number
+            and iterations.is_integer is True
+            and iterations.is_number
+        ):
+            return None
+        count = int(iterations)
+        if count <= 0:
+            return _ZERO
+        if condition.free_symbols - {loop_symbol}:
+            return None
+        if count > _RANGE_ANY_REPLAY_LIMIT:
+            return _resolve_large_affine_range_any(
+                condition,
+                loop_symbol,
+                start,
+                step,
+                count,
+            )
+        unresolved = False
+        for offset in range(count):
+            transformed = _boolean_condition(
+                cast(
+                    sp.Basic,
+                    condition.subs(loop_symbol, start + step * offset),
+                )
+            )
+            if transformed is sp.true:
+                return _ONE
+            if transformed is not sp.false:
+                unresolved = True
+        return None if unresolved else _ZERO
+
+
+def _resolve_large_affine_range_any(
+    condition: Boolean,
+    loop_symbol: sp.Symbol,
+    start: sp.Expr,
+    step: sp.Expr,
+    count: int,
+) -> sp.Integer | None:
+    """Decide an affine Boolean guard from its finite truth boundaries.
+
+    After mapping the Python-range value to a zero-based position, a Boolean
+    combination of affine relational atoms can change truth only at an atom's
+    root. Testing both endpoints, every integral root, and the adjacent integer
+    positions therefore decides existence independently of the range length.
+
+    Args:
+        condition (Boolean): Guard whose only free symbol is ``loop_symbol``.
+        loop_symbol (sp.Symbol): Symbol representing the Python-range value.
+        start (sp.Expr): Concrete first range value.
+        step (sp.Expr): Concrete nonzero range step.
+        count (int): Positive number of range positions.
+
+    Returns:
+        sp.Integer | None: One when a position satisfies the guard, zero when
+        none do, or ``None`` when the predicate is not an affine relational
+        Boolean formula or a candidate cannot be resolved exactly.
+    """
+    position = sp.Dummy("range_position", integer=True, nonnegative=True)
+    transformed = _boolean_condition(
+        cast(
+            sp.Basic,
+            condition.subs(loop_symbol, start + step * position),
+        )
+    )
+    boundaries, supported = _linear_condition_boundaries(
+        transformed,
+        position,
+    )
+    if not supported:
+        return None
+
+    candidates = {0, count - 1}
+    for boundary in boundaries:
+        if boundary.is_number is not True or boundary.is_finite is not True:
+            return None
+        floor = cast(sp.Expr, sp.floor(boundary))
+        ceiling = cast(sp.Expr, sp.ceiling(boundary))
+        for candidate in (
+            floor - _ONE,
+            floor,
+            ceiling,
+            ceiling + _ONE,
+        ):
+            if candidate.is_number is not True or not _is_concrete_integer(candidate):
+                return None
+            candidates.add(int(candidate))
+
+    unresolved = False
+    for candidate in candidates:
+        if not 0 <= candidate < count:
+            continue
+        resolved = _boolean_condition(
+            cast(
+                sp.Basic,
+                transformed.subs(position, sp.Integer(candidate)),
+            )
+        )
+        if resolved is sp.true:
+            return _ONE
+        if resolved is not sp.false:
+            unresolved = True
+    return None if unresolved else _ZERO
+
+
 def _resource_activity_condition(expression: ResourceExpr) -> Boolean:
     """Return a conservative nonzero-resource guard with bound hygiene.
 
@@ -1425,6 +1824,24 @@ def _resource_activity_condition(expression: ResourceExpr) -> Boolean:
         return sp.false
     if expression.is_positive is True:
         return sp.true
+    if isinstance(expression, sp.Piecewise):
+        remaining: Boolean = sp.true
+        active_branches: list[Boolean] = []
+        for branch in expression.args:
+            value, condition = branch.args
+            branch_condition = _boolean_condition(cast(sp.Basic, condition))
+            effective_condition = _and_conditions(remaining, branch_condition)
+            branch_activity = _resource_activity_condition(cast(ResourceExpr, value))
+            active_branches.append(
+                _and_conditions(effective_condition, branch_activity)
+            )
+            remaining = _and_conditions(
+                remaining,
+                cast(Boolean, sp.Not(branch_condition)),
+            )
+            if remaining is sp.false:
+                break
+        return cast(Boolean, sp.Or(*active_branches))
     replacements: dict[sp.Sum, ResourceExpr] = {}
     for summation in expression.atoms(sp.Sum):
         range_conditions: list[Boolean] = []
@@ -2527,6 +2944,39 @@ def _sum_expr(
     if not evaluated.free_symbols <= summation.free_symbols:
         return cast(ResourceExpr, summation)
     return cast(ResourceExpr, evaluated)
+
+
+def _activation_over_range(
+    condition: sp.Basic,
+    loop_symbol: sp.Symbol,
+    start: ResourceExpr,
+    step: ResourceExpr,
+    iterations: ResourceExpr,
+) -> sp.Basic:
+    """Return whether a guarded fact is active in any loop iteration.
+
+    Args:
+        condition (sp.Basic): Per-iteration activation condition.
+        loop_symbol (sp.Symbol): Loop variable symbol.
+        start (ResourceExpr): First loop value.
+        step (ResourceExpr): Loop step.
+        iterations (ResourceExpr): Number of executed iterations.
+
+    Returns:
+        sp.Basic: Condition that is true exactly when at least one reachable
+            iteration activates the fact.
+    """
+    active = _boolean_condition(condition)
+    nonempty = sp.Gt(iterations, _ZERO)
+    if loop_symbol not in active.free_symbols:
+        return _boolean_condition(sp.And(nonempty, active))
+    active_iterations = _RangeAny(
+        sp.Lambda(loop_symbol, active),
+        start,
+        step,
+        iterations,
+    )
+    return _boolean_condition(sp.Ne(active_iterations, _ZERO))
 
 
 def _simplify_sum_range_guards(

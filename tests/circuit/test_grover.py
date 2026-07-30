@@ -34,17 +34,16 @@ def mark_all_ones(reg: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
 class _QueryCost:
     """Report one opaque query of cost ``l + n`` per oracle call."""
 
-    def __call__(self, ctx: qmc.OpaqueCallContext) -> qmc.ResourceEstimate:
+    def __call__(self, ctx: qmc.OpaqueCostContext) -> qmc.ResourceEstimate:
         """Return an ``O(l + n)`` gate + one-query estimate.
 
         Args:
-            ctx (qmc.OpaqueCallContext): Call-site context; the register width is
-                read from the operand shape.
+            ctx (qmc.OpaqueCostContext): Definition-level cost context.
 
         Returns:
             qmc.ResourceEstimate: One-query gate/call estimate.
         """
-        n = sum(ctx.operand_shapes.values()) if ctx.operand_shapes else sp.Symbol("n")
+        n = ctx.target_qubits
         cost = sp.Symbol("l", positive=True) + n
         return qmc.ResourceEstimate(
             gates=qmc.GateResources(total=cost, non_clifford=cost),
@@ -163,8 +162,8 @@ def test_grover_optimal_query_complexity_via_inputs() -> None:
         assert int(queries.subs({n: nn, m: mm})) == grover_iteration_count(nn, mm)
 
 
-def test_grover_qubit_count_includes_portable_control_ancillas() -> None:
-    """Grover reports source width and portable control ancillas separately."""
+def test_grover_qubit_count_includes_clean_control_ancillas() -> None:
+    """Grover reports source width and clean control ancillas separately."""
     est = _grover_estimate_kernel.estimate_resources()
     n = est.parameters["n"]
     assert est.width.allocated_qubits == n

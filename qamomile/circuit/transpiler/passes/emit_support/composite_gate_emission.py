@@ -15,7 +15,6 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation.callable import (
-    CallTransform,
     CompositeGateType,
     InvokeOperation,
 )
@@ -117,7 +116,7 @@ def emit_composite_gate(
         update_composite_result_mapping(op, qubit_groups, qubit_map)
         return
 
-    if op.transform is CallTransform.CONTROLLED:
+    if op.transform.is_controlled:
         from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
             emit_controlled_composite_at_indices,
         )
@@ -133,7 +132,7 @@ def emit_composite_gate(
         update_composite_result_mapping(op, qubit_groups, qubit_map)
         return
 
-    if op.transform is CallTransform.INVERSE:
+    if op.transform.is_inverse:
         implementation = op.implementation_for(
             backend=getattr(emit_pass, "backend_name", None)
         )

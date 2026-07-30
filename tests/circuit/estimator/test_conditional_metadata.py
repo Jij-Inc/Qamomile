@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import pytest
 import sympy as sp
 
 import qamomile.circuit as qmc
+from qamomile.circuit.estimator._metrics import _RangeAny
+
+_RANGE_GUARD_SYMBOL = sp.Symbol("range_guard", integer=True)
 
 
 def test_conditional_algebra_prunes_inactive_metadata_and_calls() -> None:
@@ -99,3 +103,182 @@ def test_call_resources_simplify_prunes_exact_zero_entries() -> None:
 
     assert calls.calls_by_name == {"one": 1}
     assert calls.queries_by_name == {}
+
+
+def test_large_concrete_range_prunes_unreachable_guarded_metadata() -> None:
+    """An affine guard false over a large range leaves no modeled metadata."""
+    iteration = sp.Symbol("iteration", integer=True)
+    note = qmc.ResourceAssumption("large-range modeled branch")
+    modeled = qmc.ResourceEstimate(
+        assumptions=(note,),
+        quality=qmc.EstimateQuality.MODELED,
+    )
+
+    estimate = modeled.conditional(
+        qmc.ResourceEstimate.zero(),
+        sp.Gt(iteration, 10_000),
+    ).sum_over(
+        iteration,
+        sp.Integer(0),
+        sp.Integer(5_000),
+    )
+
+    assert estimate.assumptions == ()
+    assert estimate.quality is qmc.EstimateQuality.EXACT
+
+
+def test_large_concrete_range_keeps_reachable_guarded_metadata() -> None:
+    """An affine guard reached through a large descending range stays active."""
+    iteration = sp.Symbol("iteration", integer=True)
+    note = qmc.ResourceAssumption("large-range modeled branch")
+    modeled = qmc.ResourceEstimate(
+        assumptions=(note,),
+        quality=qmc.EstimateQuality.MODELED,
+    )
+
+    estimate = modeled.conditional(
+        qmc.ResourceEstimate.zero(),
+        sp.And(
+            sp.Ge(iteration, -4_000),
+            sp.Lt(iteration, -3_990),
+        ),
+    ).sum_over(
+        iteration,
+        sp.Integer(0),
+        sp.Integer(-5_000),
+        sp.Integer(-1),
+    )
+
+    assert estimate.assumptions == (note,)
+    assert estimate.quality is qmc.EstimateQuality.MODELED
+    assert estimate._guarded_qualities
+    assert estimate._guarded_qualities[0].active_when is sp.true
+
+
+@pytest.mark.parametrize(
+    ("condition", "start", "step", "iterations", "expected"),
+    (
+        (sp.Gt(_RANGE_GUARD_SYMBOL, 4_999), 0, 1, 5_000, 0),
+        (sp.Ge(_RANGE_GUARD_SYMBOL, 4_999), 0, 1, 5_000, 1),
+        (sp.Lt(_RANGE_GUARD_SYMBOL, 0), 0, 1, 5_000, 0),
+        (sp.Le(_RANGE_GUARD_SYMBOL, 0), 0, 1, 5_000, 1),
+        (sp.Eq(_RANGE_GUARD_SYMBOL, 4_999), 0, 1, 5_000, 1),
+        (sp.Eq(_RANGE_GUARD_SYMBOL, 5_000), 0, 1, 5_000, 0),
+        (sp.Ne(_RANGE_GUARD_SYMBOL, 0), 0, 1, 5_000, 1),
+        (sp.Eq(_RANGE_GUARD_SYMBOL, 3_999), 1, 2, 5_000, 1),
+        (sp.Eq(_RANGE_GUARD_SYMBOL, 4_000), 1, 2, 5_000, 0),
+        (sp.Eq(_RANGE_GUARD_SYMBOL, -4_997), 10_000, -3, 5_000, 1),
+        (sp.Lt(_RANGE_GUARD_SYMBOL, -4_999), 0, -1, 5_000, 0),
+        (
+            sp.Or(
+                sp.And(
+                    sp.Gt(_RANGE_GUARD_SYMBOL, 10_000),
+                    sp.Lt(_RANGE_GUARD_SYMBOL, 11_000),
+                ),
+                sp.Not(sp.Ge(_RANGE_GUARD_SYMBOL, 0)),
+            ),
+            0,
+            1,
+            5_000,
+            0,
+        ),
+    ),
+)
+def test_large_affine_range_any_resolves_integer_boundaries(
+    condition: sp.Basic,
+    start: int,
+    step: int,
+    iterations: int,
+    expected: int,
+) -> None:
+    """Large affine guards resolve exactly at integer relation boundaries."""
+    result = _RangeAny(
+        sp.Lambda(_RANGE_GUARD_SYMBOL, condition),
+        sp.Integer(start),
+        sp.Integer(step),
+        sp.Integer(iterations),
+    )
+
+    assert result == expected
+
+
+def test_empty_range_prunes_guarded_metadata() -> None:
+    """A zero-trip range removes guarded quality and assumptions exactly."""
+    iteration = sp.Symbol("iteration", integer=True)
+    note = qmc.ResourceAssumption("empty-range modeled branch")
+    modeled = qmc.ResourceEstimate(
+        assumptions=(note,),
+        quality=qmc.EstimateQuality.MODELED,
+    )
+
+    estimate = modeled.conditional(
+        qmc.ResourceEstimate.zero(),
+        sp.Eq(iteration, 5),
+    ).sum_over(
+        iteration,
+        sp.Integer(5),
+        sp.Integer(5),
+    )
+
+    assert estimate.assumptions == ()
+    assert estimate.quality is qmc.EstimateQuality.EXACT
+
+
+def test_large_range_keeps_unsupported_guards_symbolic() -> None:
+    """External, nonlinear, and Piecewise predicates remain conservative."""
+    threshold = sp.Symbol("threshold", integer=True)
+    external = _RangeAny(
+        sp.Lambda(
+            _RANGE_GUARD_SYMBOL,
+            sp.Gt(_RANGE_GUARD_SYMBOL, threshold),
+        ),
+        sp.Integer(0),
+        sp.Integer(1),
+        sp.Integer(5_000),
+    )
+    piecewise = _RangeAny(
+        sp.Lambda(
+            _RANGE_GUARD_SYMBOL,
+            sp.Gt(
+                sp.Piecewise(
+                    (sp.Integer(1), sp.Lt(_RANGE_GUARD_SYMBOL, 2_500)),
+                    (sp.Integer(0), True),
+                ),
+                0,
+            ),
+        ),
+        sp.Integer(0),
+        sp.Integer(1),
+        sp.Integer(5_000),
+    )
+    nonlinear = _RangeAny(
+        sp.Lambda(
+            _RANGE_GUARD_SYMBOL,
+            sp.Eq(_RANGE_GUARD_SYMBOL**2, 4),
+        ),
+        sp.Integer(0),
+        sp.Integer(1),
+        sp.Integer(5_000),
+    )
+
+    assert isinstance(external, _RangeAny)
+    assert external.subs(threshold, 6_000) == 0
+    assert external.subs(threshold, 4_000) == 1
+    assert isinstance(piecewise, _RangeAny)
+    assert isinstance(nonlinear, _RangeAny)
+
+
+def test_large_affine_range_any_cost_is_independent_of_trip_count() -> None:
+    """An enormous range resolves from affine boundaries without replay."""
+    iterations = 10**30
+    result = _RangeAny(
+        sp.Lambda(
+            _RANGE_GUARD_SYMBOL,
+            sp.Eq(_RANGE_GUARD_SYMBOL, iterations - 1),
+        ),
+        sp.Integer(0),
+        sp.Integer(1),
+        sp.Integer(iterations),
+    )
+
+    assert result == 1

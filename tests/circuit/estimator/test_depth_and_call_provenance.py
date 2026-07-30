@@ -179,6 +179,30 @@ def _resource_recursive_circuit(k: qm.UInt) -> qm.Bit:
     return qm.measure(target)
 
 
+@qm.qkernel
+def _controlled_resource_recursive_circuit(k: qm.UInt) -> qm.Bit:
+    """Apply a self-recursive qkernel under three coherent controls."""
+    controls = qm.qubit_array(3, "controls")
+    target = qm.qubit("target")
+    *_, target = qm.control(
+        _resource_recursive_body,
+        num_controls=3,
+    )(controls, k, target)
+    return qm.measure(target)
+
+
+@qm.qkernel
+def _controlled_resource_recursive_reference() -> qm.Bit:
+    """Apply the recursive base-case leaf under three coherent controls."""
+    controls = qm.qubit_array(3, "controls")
+    target = qm.qubit("target")
+    *_, target = qm.control(
+        _resource_recursive_leaf,
+        num_controls=3,
+    )(controls, target)
+    return qm.measure(target)
+
+
 def test_array_aliases_share_physical_wire_dependencies() -> None:
     """Element gates precede whole-register measurement without serializing siblings."""
 
@@ -573,13 +597,15 @@ def test_selected_control_pool_slot_does_not_block_a_sibling_slot() -> None:
 
     disjoint = circuit.estimate_resources(
         inputs={"width": 1, "index": 0},
-        basis=qm.GateBasis.LOGICAL,
+        control_decomposition=qm.ControlDecomposition.ABSTRACT,
     )
     overlapping = circuit.estimate_resources(
         inputs={"width": 1, "index": 1},
-        basis=qm.GateBasis.LOGICAL,
+        control_decomposition=qm.ControlDecomposition.ABSTRACT,
     )
-    symbolic = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    symbolic = circuit.estimate_resources(
+        control_decomposition=qm.ControlDecomposition.ABSTRACT,
+    )
     substituted = symbolic.substitute(width=1, index=0)
 
     assert disjoint.depth.depth == 1
@@ -1025,3 +1051,31 @@ def test_symbolic_recursive_resource_driver_fails_with_guidance() -> None:
         match="Supply a concrete recursion-driving value in inputs",
     ):
         _resource_recursive_circuit.estimate_resources()
+
+
+@pytest.mark.parametrize("k", [0, 1, 3, 64])
+def test_controlled_recursive_resource_driver_reaches_base_case(k: int) -> None:
+    """A controlled concrete recursion profiles only its terminating path.
+
+    Args:
+        k (int): Number of recursive steps before the base case.
+    """
+    estimate = _controlled_resource_recursive_circuit.estimate_resources(
+        inputs={"k": k}
+    )
+    reference = _controlled_resource_recursive_reference.estimate_resources()
+
+    assert estimate.gates == reference.gates
+    assert estimate.depth == reference.depth
+    assert estimate.width == reference.width
+    assert estimate.quality is reference.quality
+    assert estimate.assumptions == reference.assumptions
+
+
+def test_symbolic_controlled_recursive_driver_fails_with_guidance() -> None:
+    """A controlled symbolic recursion stops before structural profile cycling."""
+    with pytest.raises(
+        ValueError,
+        match="Supply a concrete recursion-driving value in inputs",
+    ):
+        _controlled_resource_recursive_circuit.estimate_resources()
