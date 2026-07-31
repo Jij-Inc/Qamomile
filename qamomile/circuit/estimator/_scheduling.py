@@ -9,6 +9,8 @@ policy.
 from __future__ import annotations
 
 import dataclasses
+import enum
+import functools
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
@@ -85,8 +87,280 @@ if TYPE_CHECKING:
     from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
     from qamomile.circuit.frontend.qkernel import QKernel
 
-WireKey = tuple[str, int | None]
+
+class _WireIndexMarker(enum.Enum):
+    """Identify a scalar wire address that could not be resolved."""
+
+    UNKNOWN = enum.auto()
+
+
+_UNKNOWN_WIRE_INDEX = _WireIndexMarker.UNKNOWN
+
+
+@dataclasses.dataclass(frozen=True)
+class _WireRangeIndex:
+    """Describe scalar addresses touched across a symbolic loop range.
+
+    Args:
+        index_at_offset (ResourceExpr): Root-array index as a function of the
+            canonical zero-based iteration offset.
+        iterations (ResourceExpr): Number of offsets represented.
+    """
+
+    index_at_offset: ResourceExpr
+    iterations: ResourceExpr
+
+    def mapped(self, fn: Any) -> _WireRangeIndex:
+        """Rewrite symbols in both range expressions.
+
+        Args:
+            fn (Any): Symbolic expression rewrite callable.
+
+        Returns:
+            _WireRangeIndex: Rewritten symbolic range descriptor.
+        """
+        return _WireRangeIndex(
+            index_at_offset=cast(ResourceExpr, fn(self.index_at_offset)),
+            iterations=cast(ResourceExpr, fn(self.iterations)),
+        )
+
+
+WireIndex = int | ResourceExpr | _WireIndexMarker | _WireRangeIndex | None
+WireKey = tuple[str, WireIndex]
 _WireFootprint = tuple[frozenset[WireKey], frozenset[WireKey]]
+_WIRE_RANGE_OFFSET = sp.Dummy(
+    "wire_range_offset",
+    integer=True,
+    nonnegative=True,
+)
+_MAX_EXACT_LOOP_WIRE_EXPANSION = 256
+_MAX_EXACT_LOOP_DISJOINTNESS_EXPANSION = 4096
+_MAX_CONCRETE_VIEW_WIRE_EXPANSION = 4096
+
+
+class _WireRelation(enum.Enum):
+    """Classify whether two physical wire addresses overlap."""
+
+    DEFINITE_OVERLAP = enum.auto()
+    DISJOINT = enum.auto()
+    POSSIBLE_OVERLAP = enum.auto()
+
+
+def _symbolic_wire_range_index(
+    index: ResourceExpr,
+    symbol: sp.Symbol,
+    *,
+    start: ResourceExpr,
+    step: ResourceExpr,
+    iterations: ResourceExpr,
+) -> _WireRangeIndex:
+    """Canonicalize one loop-dependent scalar address range.
+
+    Args:
+        index (ResourceExpr): Root-array index using the local loop symbol.
+        symbol (sp.Symbol): Local loop symbol leaving scope.
+        start (ResourceExpr): First Python-range value.
+        step (ResourceExpr): Python-range step.
+        iterations (ResourceExpr): Number of executed iterations.
+
+    Returns:
+        _WireRangeIndex: Binder-independent range descriptor.
+    """
+    index_at_offset = cast(
+        ResourceExpr,
+        index.subs(
+            symbol,
+            start + step * _WIRE_RANGE_OFFSET,
+            simultaneous=True,
+        ),
+    )
+    return _WireRangeIndex(
+        index_at_offset=_safe_simplify(index_at_offset),
+        iterations=_safe_simplify(iterations),
+    )
+
+
+@dataclasses.dataclass
+class _OwnerWireIndices:
+    """Index previously scheduled addresses for one allocation owner.
+
+    Args:
+        concrete (set[int]): Concrete scalar indices.
+        symbolic (set[ResourceExpr]): Symbolic scalar indices.
+        symbolic_offsets (dict[ResourceExpr, dict[ResourceExpr, ResourceExpr]]):
+            Symbolic indices grouped by their nonconstant expression and
+            additive offset.
+        residual_symbolic (set[ResourceExpr]): Symbolic indices without a
+            usable additive-offset signature.
+        ranges (set[_WireRangeIndex]): Symbolic loop-range footprints.
+        whole_owner (bool): Whether the whole allocation was touched.
+        unknown (bool): Whether an unresolved scalar footprint was touched.
+    """
+
+    concrete: set[int] = dataclasses.field(default_factory=set)
+    symbolic: set[ResourceExpr] = dataclasses.field(default_factory=set)
+    symbolic_offsets: dict[
+        ResourceExpr,
+        dict[ResourceExpr, ResourceExpr],
+    ] = dataclasses.field(default_factory=dict)
+    residual_symbolic: set[ResourceExpr] = dataclasses.field(default_factory=set)
+    ranges: set[_WireRangeIndex] = dataclasses.field(default_factory=set)
+    whole_owner: bool = False
+    unknown: bool = False
+
+    def add(self, index: WireIndex) -> None:
+        """Record one owner-local wire address.
+
+        Args:
+            index (WireIndex): Concrete, symbolic, owner-wide, or unknown
+                address to record.
+        """
+        if index is None:
+            self.whole_owner = True
+        elif index is _UNKNOWN_WIRE_INDEX:
+            self.unknown = True
+        elif isinstance(index, int):
+            self.concrete.add(index)
+        elif isinstance(index, _WireRangeIndex):
+            self.ranges.add(index)
+        else:
+            self.symbolic.add(index)
+            signature = _symbolic_offset_signature(index)
+            if signature is None:
+                self.residual_symbolic.add(index)
+            else:
+                base, offset = signature
+                self.symbolic_offsets.setdefault(base, {})[offset] = index
+
+    def candidates(self, index: WireIndex) -> tuple[WireIndex, ...]:
+        """Return prior addresses that may overlap a queried address.
+
+        Concrete queries use constant-time lookup for other concrete
+        addresses and compare only against symbolic addresses. Symbolic,
+        owner-wide, and unknown queries must inspect every prior address.
+
+        Args:
+            index (WireIndex): Owner-local address being queried.
+
+        Returns:
+            tuple[WireIndex, ...]: Prior addresses whose relation may be
+                overlap rather than proven disjointness.
+        """
+        common: list[WireIndex] = []
+        if self.whole_owner:
+            common.append(None)
+        if self.unknown:
+            common.append(_UNKNOWN_WIRE_INDEX)
+        if isinstance(index, int):
+            if index in self.concrete:
+                common.append(index)
+            common.extend(self.symbolic)
+            common.extend(self.ranges)
+            return tuple(common)
+        common.extend(self.concrete)
+        if isinstance(index, sp.Expr):
+            signature = _symbolic_offset_signature(index)
+            if signature is None:
+                common.extend(self.symbolic)
+            else:
+                base, offset = signature
+                same_family = self.symbolic_offsets.get(base)
+                if same_family is not None and offset in same_family:
+                    common.append(same_family[offset])
+                common.extend(self.residual_symbolic)
+                for other_base, members in self.symbolic_offsets.items():
+                    if other_base != base:
+                        common.extend(members.values())
+        else:
+            common.extend(self.symbolic)
+        common.extend(self.ranges)
+        return tuple(common)
+
+
+def _symbolic_offset_signature(
+    index: ResourceExpr,
+) -> tuple[ResourceExpr, ResourceExpr] | None:
+    """Split a symbolic integer index into a base and numeric offset.
+
+    Equal bases with distinct numeric offsets are provably disjoint without
+    comparing every pair through SymPy. Indices with different bases remain
+    candidates because they may still coincide for some input values.
+
+    Args:
+        index (ResourceExpr): Normalized symbolic wire index.
+
+    Returns:
+        tuple[ResourceExpr, ResourceExpr] | None: Nonconstant base and numeric
+            additive offset, or ``None`` when this bounded proof does not
+            apply.
+    """
+    offset, base = index.as_coeff_Add()
+    normalized_base = _safe_simplify(cast(ResourceExpr, base))
+    normalized_offset = _safe_simplify(cast(ResourceExpr, offset))
+    if (
+        normalized_base == _ZERO
+        or normalized_offset.is_number is not True
+        or normalized_offset.is_finite is not True
+    ):
+        return None
+    return normalized_base, normalized_offset
+
+
+def _normalize_wire_index(expression: ResourceExpr | int) -> WireIndex:
+    """Normalize one root-array index for dependency comparisons.
+
+    Args:
+        expression (ResourceExpr | int): Concrete or symbolic root-array
+            index.
+
+    Returns:
+        WireIndex: A concrete nonnegative integer, a simplified symbolic
+            expression, or the unknown marker when the expression is not
+            provably a finite integer or a concrete value is negative.
+    """
+    normalized = _safe_simplify(_expr(expression))
+    if not normalized.is_number:
+        return (
+            normalized
+            if normalized.is_integer is True and normalized.is_finite is True
+            else _UNKNOWN_WIRE_INDEX
+        )
+    if not _is_concrete_integer(normalized) or normalized < 0:
+        return _UNKNOWN_WIRE_INDEX
+    return int(normalized)
+
+
+@functools.lru_cache(maxsize=4096)
+def _wire_index_relation(left: WireIndex, right: WireIndex) -> _WireRelation:
+    """Classify overlap between two indices of the same allocation owner.
+
+    ``None`` is the owner-wide address and therefore overlaps every scalar
+    address. The unknown marker may overlap any same-owner address. Symbolic
+    scalar addresses are compared only with deterministic SymPy facts; an
+    unproved relation remains conservative.
+
+    Args:
+        left (WireIndex): First owner-local wire index.
+        right (WireIndex): Second owner-local wire index.
+
+    Returns:
+        _WireRelation: Proven overlap, proven disjointness, or possible
+            overlap.
+    """
+    if left is None or right is None:
+        return _WireRelation.DEFINITE_OVERLAP
+    if left is _UNKNOWN_WIRE_INDEX or right is _UNKNOWN_WIRE_INDEX:
+        return _WireRelation.POSSIBLE_OVERLAP
+    if left == right:
+        return _WireRelation.DEFINITE_OVERLAP
+    if isinstance(left, _WireRangeIndex) or isinstance(right, _WireRangeIndex):
+        return _WireRelation.POSSIBLE_OVERLAP
+    difference = _safe_simplify(cast(ResourceExpr, _expr(left) - _expr(right)))
+    if difference == _ZERO or difference.is_zero is True:
+        return _WireRelation.DEFINITE_OVERLAP
+    if difference.is_zero is False:
+        return _WireRelation.DISJOINT
+    return _WireRelation.POSSIBLE_OVERLAP
 
 
 def _estimate_has_nonzero_depth(estimate: ResourceEstimate) -> bool:
@@ -365,13 +639,14 @@ def _quantum_value_wire_keys(
     *,
     scalar_values: Mapping[str, sp.Expr] | None = None,
     used_names: set[str] | None = None,
-) -> set[tuple[str, int | None]]:
+) -> set[WireKey]:
     """Return dependency keys for one quantum value.
 
     A scalar array element uses its root allocation and physical scalar index.
-    A whole register, view, or unresolved element uses an owner-wide key whose
-    ``None`` index aliases every scalar key for that allocation. Independent
-    scalar qubits use their own logical identity with an owner-wide key.
+    Small concrete views expand to their physical scalar keys. Whole
+    registers and larger views use an owner-wide key, while an unresolved
+    scalar retains an unknown-scalar marker. Independent scalar qubits use
+    their own logical identity with an owner-wide key.
 
     Args:
         value (Value): Quantum scalar, array, or array view.
@@ -382,7 +657,7 @@ def _quantum_value_wire_keys(
             names. Defaults to ``None``.
 
     Returns:
-        set[tuple[str, int | None]]: Root-owner and optional scalar-index keys.
+        set[WireKey]: Root-owner and optional scalar-index keys.
     """
     carrier_keys = _cast_carrier_wire_keys(value)
     if carrier_keys is not None:
@@ -396,7 +671,11 @@ def _quantum_value_wire_keys(
             scalar_values,
             used_names,
         )
-        if size.is_number and _is_concrete_integer(size) and 0 <= size <= 4096:
+        if (
+            size.is_number
+            and _is_concrete_integer(size)
+            and 0 <= size <= _MAX_CONCRETE_VIEW_WIRE_EXPANSION
+        ):
             return {
                 _array_wire_key_at_index(
                     value,
@@ -410,22 +689,23 @@ def _quantum_value_wire_keys(
         return {(owner, None)}
     if value.parent_array is None:
         return {(owner, None)}
+    index = _quantum_element_index_expression(
+        value,
+        resolver,
+        scalar_values=scalar_values,
+        used_names=used_names,
+    )
     return {
         (
             owner,
-            _quantum_element_wire_index(
-                value,
-                resolver,
-                scalar_values=scalar_values,
-                used_names=used_names,
-            ),
+            (None if index is None else _normalize_wire_index(index)),
         )
     }
 
 
 def _array_wire_key_at_index(
     array: ArrayValue,
-    index: int,
+    index: ResourceExpr | int,
     resolver: ExprResolver,
     *,
     scalar_values: Mapping[str, sp.Expr] | None = None,
@@ -435,7 +715,8 @@ def _array_wire_key_at_index(
 
     Args:
         array (ArrayValue): Actual array or view supplied at a call boundary.
-        index (int): Concrete element index relative to ``array``.
+        index (ResourceExpr | int): Concrete or symbolic element index
+            relative to ``array``.
         resolver (ExprResolver): Resolver for view starts and strides.
         scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
             dependency values. Defaults to ``None``.
@@ -443,27 +724,21 @@ def _array_wire_key_at_index(
             names. Defaults to ``None``.
 
     Returns:
-        WireKey: Root-owner scalar key, or an owner-wide key when a view
-            offset cannot be resolved safely.
+        WireKey: Root-owner scalar key, including a symbolic root index when
+            available, or an owner-wide key when the address cannot be
+            resolved safely.
     """
     owner = _quantum_allocation_owner(array)
     resolved = _resolve_root_array_index_expression(
         array,
-        sp.Integer(index),
+        _expr(index),
         resolver,
         scalar_values,
         used_names,
     )
     if resolved is None:
         return owner, None
-    resolved_index = resolved[1]
-    if (
-        not resolved_index.is_number
-        or not _is_concrete_integer(resolved_index)
-        or resolved_index < 0
-    ):
-        return owner, None
-    return owner, int(resolved_index)
+    return owner, _normalize_wire_index(resolved[1])
 
 
 def _map_value_dependency_keys(
@@ -504,6 +779,28 @@ def _map_value_dependency_keys(
                     used_names=used_names,
                 )
             )
+        elif index is _UNKNOWN_WIRE_INDEX:
+            mapped.add((_quantum_allocation_owner(actual), _UNKNOWN_WIRE_INDEX))
+        elif isinstance(index, _WireRangeIndex):
+            mapped_owner, mapped_index = _array_wire_key_at_index(
+                actual,
+                index.index_at_offset,
+                resolver,
+                scalar_values=scalar_values,
+                used_names=used_names,
+            )
+            if isinstance(mapped_index, (int, sp.Expr)):
+                mapped.add(
+                    (
+                        mapped_owner,
+                        _WireRangeIndex(
+                            index_at_offset=_expr(mapped_index),
+                            iterations=index.iterations,
+                        ),
+                    )
+                )
+            else:
+                mapped.add((mapped_owner, mapped_index))
         else:
             mapped.add(
                 _array_wire_key_at_index(
@@ -738,8 +1035,9 @@ def _controlled_u_control_wire_keys(
             names. Defaults to ``None``.
 
     Returns:
-        set[WireKey]: Selected physical control keys. Unresolved selections
-            conservatively use the whole pool owner.
+        set[WireKey]: Selected physical control keys. Symbolic selections keep
+            symbolic scalar addresses, and malformed or otherwise unresolved
+            selections keep an unknown-scalar marker.
     """
     controls = operation.control_operands
     if not resolved_indices:
@@ -759,103 +1057,16 @@ def _controlled_u_control_wire_keys(
     pool = controls[0]
     keys: set[WireKey] = set()
     for index in resolved_indices:
-        if index.is_number and _is_concrete_integer(index) and index >= 0:
-            keys.add(
-                _array_wire_key_at_index(
-                    pool,
-                    int(index),
-                    resolver,
-                    scalar_values=scalar_values,
-                    used_names=used_names,
-                )
-            )
-        else:
-            keys.add((_quantum_allocation_owner(pool), None))
-    return keys
-
-
-def _with_aggregate_boundary_depth_metadata(
-    estimate: ResourceEstimate,
-    dependency_estimate: ResourceEstimate,
-    *,
-    source: str,
-    boundary: str,
-    active_when: sp.Basic | None = None,
-) -> ResourceEstimate:
-    """Mark a multi-wire aggregate boundary as a conservative upper bound.
-
-    One scalar duration is attached to every touched outer wire. This can
-    over-serialize a later gate when independent touched wires finish at
-    different internal layers.
-
-    Args:
-        estimate (ResourceEstimate): Outer-scoped estimate to classify.
-        dependency_estimate (ResourceEstimate): Estimate whose touched-wire
-            mask determines whether aggregation is conservative.
-        source (str): Operation or callable name for the assumption.
-        boundary (str): Human-readable boundary kind, such as ``"call"`` or
-            ``"control-flow"``.
-        active_when (sp.Basic | None): Optional boundary-activity condition.
-            Defaults to whether the aggregate depth is positive.
-
-    Returns:
-        ResourceEstimate: Estimate with conditional quality metadata.
-    """
-    keys = dependency_estimate._dependency_keys
-    if (
-        keys is None
-        or len(keys) <= 1
-        or not _estimate_has_nonzero_depth(dependency_estimate)
-    ):
-        return estimate
-    assumption = ResourceAssumption(
-        f"{boundary} boundary depth conservatively applies one aggregate "
-        "latency to multiple touched wires",
-        source=source,
-    )
-    mismatch_condition = _aggregate_completion_mismatch(dependency_estimate)
-    if mismatch_condition is sp.false:
-        return estimate
-    if mismatch_condition is None:
-        condition = _resource_activity_condition(estimate.depth.depth)
-    else:
-        condition = mismatch_condition
-    if active_when is not None:
-        condition = _and_conditions(condition, active_when)
-    return estimate._with_metadata(
-        assumptions=(assumption,),
-        quality=EstimateQuality.UPPER_BOUND,
-        active_when=condition,
-    )
-
-
-def _aggregate_completion_mismatch(
-    estimate: ResourceEstimate,
-) -> Boolean | None:
-    """Return when scalar call latency overstates a visible wire completion.
-
-    Args:
-        estimate (ResourceEstimate): Estimate carrying per-wire completion.
-
-    Returns:
-        Boolean | None: Exact symbolic mismatch predicate, or ``None`` when
-        caller-visible completion depths are unavailable.
-    """
-    completion = estimate._dependency_completion
-    if completion is None:
-        return None
-    aggregate = estimate.depth.depth
-    return _boolean_condition(
-        sp.Or(
-            *(
-                sp.And(
-                    _resource_activity_condition(depth),
-                    _resource_activity_condition(cast(ResourceExpr, aggregate - depth)),
-                )
-                for depth in completion.values()
+        keys.add(
+            _array_wire_key_at_index(
+                pool,
+                index,
+                resolver,
+                scalar_values=scalar_values,
+                used_names=used_names,
             )
         )
-    )
+    return keys
 
 
 def _with_body_boundary_depth_metadata(
@@ -883,12 +1094,6 @@ def _with_body_boundary_depth_metadata(
     keys = body_estimate._dependency_keys
     if keys is None or not _estimate_has_nonzero_depth(body_estimate):
         return estimate
-    estimate = _with_aggregate_boundary_depth_metadata(
-        estimate,
-        body_estimate,
-        source=source,
-        boundary="call",
-    )
     bracket_condition = _and_conditions(
         sp.Gt(_expr(zero_controls), _ZERO),
         _resource_activity_condition(estimate.depth.depth),
@@ -928,7 +1133,7 @@ def _quantum_wire_keys(
     *,
     scalar_values: Mapping[str, sp.Expr] | None = None,
     used_names: set[str] | None = None,
-) -> tuple[set[tuple[str, int | None]], set[tuple[str, int | None]]]:
+) -> tuple[set[WireKey], set[WireKey]]:
     """Collect quantum logical wires read and written by one operation.
 
     Args:
@@ -940,12 +1145,11 @@ def _quantum_wire_keys(
             names. Defaults to ``None``.
 
     Returns:
-        tuple[set[tuple[str, int | None]], set[tuple[str, int | None]]]:
-            Physical owner/index keys read and written. Nested control flow
-            conservatively treats every touched wire as both read and written
-            at the enclosing boundary.
+        tuple[set[WireKey], set[WireKey]]: Physical owner/index keys read and
+            written. Nested control flow conservatively treats every touched
+            wire as both read and written at the enclosing boundary.
     """
-    reads: set[tuple[str, int | None]] = set()
+    reads: set[WireKey] = set()
     for value in operation.all_input_values():
         if isinstance(value, Value) and value.type.is_quantum():
             reads.update(
@@ -956,7 +1160,7 @@ def _quantum_wire_keys(
                     used_names=used_names,
                 )
             )
-    writes: set[tuple[str, int | None]] = set()
+    writes: set[WireKey] = set()
     for value in operation.results:
         if value.type.is_quantum():
             writes.update(
@@ -968,7 +1172,7 @@ def _quantum_wire_keys(
                 )
             )
     if isinstance(operation, HasNestedOps):
-        nested_keys: set[tuple[str, int | None]] = set()
+        nested_keys: set[WireKey] = set()
         for body in operation.nested_op_lists():
             for child in body:
                 child_reads, child_writes = _quantum_wire_keys(
@@ -1016,57 +1220,26 @@ def _operation_has_unresolved_quantum_index(
                 scalar_values=scalar_values,
                 used_names=used_names,
             )
-            if (_quantum_allocation_owner(value), None) in keys:
+            owner = _quantum_allocation_owner(value)
+            if (owner, None) in keys or (owner, _UNKNOWN_WIRE_INDEX) in keys:
                 return True
             continue
         if (
             not isinstance(value, Value)
             or not value.type.is_quantum()
             or value.parent_array is None
-            or _quantum_element_wire_index(
-                value,
-                resolver,
-                scalar_values=scalar_values,
-                used_names=used_names,
-            )
-            is not None
         ):
             continue
-        expressions = [
-            _specialize_dependency_expression(
-                resolver.resolve(index),
-                scalar_values,
-                used_names,
-            )
-            for index in value.element_indices
-        ]
-        current = value.parent_array
-        while current.slice_of is not None:
-            if current.slice_start is not None:
-                expressions.append(
-                    _specialize_dependency_expression(
-                        resolver.resolve(current.slice_start),
-                        scalar_values,
-                        used_names,
-                    )
-                )
-            if current.slice_step is not None:
-                expressions.append(
-                    _specialize_dependency_expression(
-                        resolver.resolve(current.slice_step),
-                        scalar_values,
-                        used_names,
-                    )
-                )
-            current = current.slice_of
-        free_symbols = {
-            symbol for expression in expressions for symbol in expression.free_symbols
-        }
-        if free_symbols and all(
-            isinstance(symbol, sp.Dummy) for symbol in free_symbols
+        index = _quantum_element_index_expression(
+            value,
+            resolver,
+            scalar_values=scalar_values,
+            used_names=used_names,
+        )
+        if (
+            index is not None
+            and _normalize_wire_index(index) is not _UNKNOWN_WIRE_INDEX
         ):
-            # A ForOperation owns this symbolic index. Its loop-level
-            # disjointness proof decides whether sequential depth is exact.
             continue
         return True
     return False
@@ -1150,6 +1323,102 @@ def _operation_depth_is_dependency_schedulable(
             for body in operation.nested_op_lists()
             for child in body
         )
+    if not isinstance(operation, HasNestedOps) and not any(
+        isinstance(value, Value) and value.type.is_quantum()
+        for value in (*operation.all_input_values(), *operation.results)
+    ):
+        # Pure classical address arithmetic has no quantum duration. Once
+        # measurement-derived inputs have been excluded above, it cannot turn
+        # an otherwise schedulable nested quantum body into a global barrier.
+        return True
+    return False
+
+
+def _operation_has_uniform_intrinsic_completion(
+    operation: Operation,
+    estimate: ResourceEstimate,
+    dependency_keys: frozenset[WireKey],
+    *,
+    surrounding_controls: ResourceExpr,
+) -> bool:
+    """Return whether one atomic operation finishes all operands uniformly.
+
+    Aggregate operations such as Pauli evolution and opaque calls may contain
+    different internal exit layers even when they do not expose a dependency
+    summary. A lowered multi-layer gate may likewise finish its controls,
+    targets, or hidden ancillas on different layers. Only operations whose
+    one-step resource semantics proves one uniform layer are accepted here.
+
+    Args:
+        operation (Operation): Operation whose intrinsic completion contract
+            should be classified.
+        estimate (ResourceEstimate): Resource summary produced for the
+            operation.
+        dependency_keys (frozenset[WireKey]): Caller-visible wires touched by
+            the operation.
+        surrounding_controls (ResourceExpr): Number of coherent controls
+            surrounding the operation.
+
+    Returns:
+        bool: Whether all operand completions equal every aggregate depth-field
+            peak for this atomic operation.
+    """
+    if not isinstance(
+        operation,
+        (
+            GateOperation,
+            QInitOperation,
+            MeasureOperation,
+            MeasureVectorOperation,
+            MeasureQFixedOperation,
+            ProjectOperation,
+            ResetOperation,
+            GlobalPhaseOperation,
+            ExpvalOp,
+        ),
+    ):
+        return False
+    if any(
+        demand != _ZERO
+        for demand in (
+            estimate.width.clean_ancilla_qubits,
+            estimate.width.dirty_ancilla_qubits,
+        )
+    ):
+        return False
+    if (
+        surrounding_controls == _ZERO
+        and len(dependency_keys) <= 1
+        or surrounding_controls == _ONE
+        and not dependency_keys
+    ):
+        return True
+    return _expressions_proven_equal_without_simplify(estimate.depth.depth, _ONE)
+
+
+def _expressions_proven_equal_without_simplify(
+    left: ResourceExpr,
+    right: ResourceExpr,
+) -> bool:
+    """Prove equality without sending the expression to general simplify.
+
+    This helper is used only to prove completion uniformity. Declining an
+    expensive proof makes the estimate conservative but cannot undercount its
+    gate or depth resources.
+
+    Args:
+        left (ResourceExpr): First resource expression.
+        right (ResourceExpr): Second resource expression.
+
+    Returns:
+        bool: Whether structural comparison or SymPy assumptions prove
+            equality.
+    """
+    if left == right:
+        return True
+    difference = cast(ResourceExpr, left - right)
+    if difference == _ZERO or difference.is_zero is True:
+        return True
     return False
 
 
@@ -1158,30 +1427,39 @@ def _disjoint_concrete_loop_depth(
     resolver: ExprResolver,
     body_depth: DepthResources,
     *,
+    body_dependency_keys: frozenset[WireKey] | None = None,
     start: ResourceExpr,
     stop: ResourceExpr,
     step: ResourceExpr,
     loop_symbol: sp.Symbol,
+    allocated_qubits: ResourceExpr,
     clean_ancillas: ResourceExpr,
+    dirty_ancillas: ResourceExpr,
     scalar_values: Mapping[str, sp.Expr] | None = None,
     used_names: set[str] | None = None,
 ) -> DepthResources | None:
     """Parallelize concrete loop iterations with disjoint quantum footprints.
 
     This optimization is deliberately bounded: it proves pairwise-disjoint
-    physical owner/index keys for at most 4096 concrete iterations. Whole
-    registers, unresolved views, shared clean ancillas, or any overlapping
+    physical owner/index keys only for a small concrete loop. Whole registers,
+    unresolved views, shared clean ancillas, large loops, or any overlapping
     element conservatively retain sequential loop depth.
 
     Args:
         operation (ForOperation): Loop whose independent body was summarized.
         resolver (ExprResolver): Resolver for the enclosing scope.
         body_depth (DepthResources): One symbolic body-iteration depth.
+        body_dependency_keys (frozenset[WireKey] | None): Evaluated body
+            footprint, including nested operation summaries when available.
+            Defaults to ``None``.
         start (ResourceExpr): Inclusive Python-range start.
         stop (ResourceExpr): Exclusive Python-range stop.
         step (ResourceExpr): Python-range step.
         loop_symbol (sp.Symbol): Internal body loop-variable symbol.
+        allocated_qubits (ResourceExpr): Body-local allocation demand reused
+            between sequential iterations.
         clean_ancillas (ResourceExpr): Shared fallback ancilla demand.
+        dirty_ancillas (ResourceExpr): Shared dirty-ancilla demand.
         scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
             dependency values. Defaults to ``None``.
         used_names (set[str] | None): Optional set updated with used input
@@ -1191,24 +1469,20 @@ def _disjoint_concrete_loop_depth(
         DepthResources | None: Parallel critical-path depth when disjointness
             is proven, otherwise ``None``.
     """
-    bounds = tuple(
-        _specialize_dependency_expression(
-            bound,
-            scalar_values,
-            used_names,
-        )
-        for bound in (start, stop, step)
+    iterations = _bounded_concrete_loop_values(
+        start,
+        stop,
+        step,
+        limit=_MAX_EXACT_LOOP_DISJOINTNESS_EXPANSION,
+        scalar_values=scalar_values,
+        used_names=used_names,
     )
-    if not all(value.is_number and _is_concrete_integer(value) for value in bounds):
-        return None
-    concrete_start, concrete_stop, concrete_step = (int(value) for value in bounds)
-    if concrete_step == 0 or clean_ancillas != _ZERO:
-        return None
-    iterations = range(concrete_start, concrete_stop, concrete_step)
-    if len(iterations) > 4096:
+    if iterations is None or any(
+        demand != _ZERO for demand in (allocated_qubits, clean_ancillas, dirty_ancillas)
+    ):
         return None
 
-    seen: dict[str, set[int] | None] = {}
+    seen: dict[str, _OwnerWireIndices] = {}
     fields = tuple(field.name for field in dataclasses.fields(DepthResources))
     peaks: dict[str, ResourceExpr] = {field: _ZERO for field in fields}
     depth_expressions = {
@@ -1234,15 +1508,25 @@ def _disjoint_concrete_loop_depth(
             extra_context={operation.loop_var_value.uuid: value},
             extra_loop_vars={operation.loop_var: value},
         )
-        footprint: set[tuple[str, int | None]] = set()
-        for body_operation in operation.operations:
-            reads, writes = _quantum_wire_keys(
-                body_operation,
-                child,
-                scalar_values=scalar_values,
-                used_names=used_names,
-            )
-            footprint |= reads | writes
+        footprint: set[WireKey] = set()
+        if body_dependency_keys is not None:
+            for key in body_dependency_keys:
+                footprint.update(
+                    _specialize_loop_dependency_key(
+                        key,
+                        loop_symbol,
+                        value,
+                    )
+                )
+        else:
+            for body_operation in operation.operations:
+                reads, writes = _quantum_wire_keys(
+                    body_operation,
+                    child,
+                    scalar_values=scalar_values,
+                    used_names=used_names,
+                )
+                footprint |= reads | writes
         if not footprint and any(
             getattr(body_depth, field) != _ZERO for field in fields
         ):
@@ -1257,42 +1541,326 @@ def _disjoint_concrete_loop_depth(
     return DepthResources(**peaks)
 
 
+def _bounded_concrete_loop_values(
+    start: ResourceExpr,
+    stop: ResourceExpr,
+    step: ResourceExpr,
+    *,
+    limit: int = _MAX_EXACT_LOOP_WIRE_EXPANSION,
+    scalar_values: Mapping[str, sp.Expr] | None = None,
+    used_names: set[str] | None = None,
+) -> range | None:
+    """Return a safely bounded concrete Python range for wire analysis.
+
+    Args:
+        start (ResourceExpr): Inclusive Python-range start.
+        stop (ResourceExpr): Exclusive Python-range stop.
+        step (ResourceExpr): Python-range step.
+        limit (int): Maximum iteration count to enumerate. Defaults to the
+            compact dependency-metadata expansion budget.
+        scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
+            dependency values. Defaults to ``None``.
+        used_names (set[str] | None): Optional set updated with used input
+            names. Defaults to ``None``.
+
+    Returns:
+        range | None: Concrete range within the exact-expansion budget, or
+            ``None`` when a bound is unresolved, malformed, or too large.
+    """
+    bounds = tuple(
+        _specialize_dependency_expression(
+            bound,
+            scalar_values,
+            used_names,
+        )
+        for bound in (start, stop, step)
+    )
+    if not all(value.is_number and _is_concrete_integer(value) for value in bounds):
+        return None
+    concrete_start, concrete_stop, concrete_step = (int(value) for value in bounds)
+    if concrete_step == 0:
+        return None
+    iterations = range(concrete_start, concrete_stop, concrete_step)
+    return iterations if len(iterations) <= limit else None
+
+
+def _concrete_loop_dependency_completion(
+    completion: Mapping[WireKey, ResourceExpr] | None,
+    loop_symbol: sp.Symbol,
+    *,
+    start: ResourceExpr,
+    stop: ResourceExpr,
+    step: ResourceExpr,
+    scalar_values: Mapping[str, sp.Expr] | None = None,
+    used_names: set[str] | None = None,
+) -> dict[WireKey, ResourceExpr] | None:
+    """Project exact local wire completion through a small concrete loop.
+
+    A disjoint loop runs every iteration from the same logical start layer.
+    Its caller-visible completion therefore comes from the corresponding
+    iteration-local completion, not from the sequential sum used before the
+    disjoint-depth proof.
+
+    Args:
+        completion (Mapping[WireKey, ResourceExpr] | None): One-iteration
+            body completion map.
+        loop_symbol (sp.Symbol): Internal loop-variable symbol.
+        start (ResourceExpr): Inclusive Python-range start.
+        stop (ResourceExpr): Exclusive Python-range stop.
+        step (ResourceExpr): Python-range step.
+        scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
+            dependency values. Defaults to ``None``.
+        used_names (set[str] | None): Optional set updated with used input
+            names. Defaults to ``None``.
+
+    Returns:
+        dict[WireKey, ResourceExpr] | None: Exact projected completion map, or
+            ``None`` when exact bounded projection is unavailable.
+    """
+    if completion is None:
+        return None
+    iterations = _bounded_concrete_loop_values(
+        start,
+        stop,
+        step,
+        scalar_values=scalar_values,
+        used_names=used_names,
+    )
+    if iterations is None:
+        return None
+    projected: dict[WireKey, ResourceExpr] = {}
+    for loop_value in iterations:
+        value = sp.Integer(loop_value)
+        for key, depth in completion.items():
+            local_depth = _safe_simplify(
+                cast(
+                    ResourceExpr,
+                    depth.subs(
+                        loop_symbol,
+                        value,
+                        simultaneous=True,
+                    ).doit(),
+                )
+            )
+            for specialized_key in _specialize_loop_dependency_key(
+                key,
+                loop_symbol,
+                value,
+            ):
+                projected[specialized_key] = _resource_max(
+                    projected.get(specialized_key, _ZERO),
+                    local_depth,
+                )
+    return projected
+
+
+def _uniform_parallel_loop_dependency_completion(
+    completion: Mapping[WireKey, ResourceExpr] | None,
+    *,
+    body_depth: ResourceExpr,
+    projected_keys: frozenset[WireKey] | None,
+    parallel_depth: ResourceExpr,
+    loop_symbol: sp.Symbol,
+) -> dict[WireKey, ResourceExpr] | None:
+    """Recover compact completion for an invariant uniform loop body.
+
+    This path avoids enumerating a large or symbolic disjoint loop. It is
+    exact only when every body-visible wire finishes at the body's aggregate
+    depth and that depth does not vary with the loop induction value.
+
+    Args:
+        completion (Mapping[WireKey, ResourceExpr] | None): One-iteration
+            body completion map.
+        body_depth (ResourceExpr): One-iteration aggregate depth.
+        projected_keys (frozenset[WireKey] | None): Caller-visible loop
+            footprint after range projection.
+        parallel_depth (ResourceExpr): Aggregate depth after the disjoint-loop
+            proof.
+        loop_symbol (sp.Symbol): Internal loop-variable symbol.
+
+    Returns:
+        dict[WireKey, ResourceExpr] | None: Compact exact completion map, or
+            ``None`` when uniformity cannot be proven.
+    """
+    if completion is None or projected_keys is None:
+        return None
+    if loop_symbol in body_depth.free_symbols:
+        return None
+    if any(
+        not _expressions_proven_equal_without_simplify(depth, body_depth)
+        for depth in completion.values()
+    ):
+        return None
+    return {key: parallel_depth for key in projected_keys}
+
+
+def _specialize_loop_dependency_key(
+    key: WireKey,
+    loop_symbol: sp.Symbol,
+    loop_value: sp.Integer,
+) -> set[WireKey]:
+    """Specialize and, when finite, expand one loop-body dependency key.
+
+    Args:
+        key (WireKey): Body-scoped dependency address.
+        loop_symbol (sp.Symbol): Loop-local symbol being bound.
+        loop_value (sp.Integer): Concrete value for one loop iteration.
+
+    Returns:
+        set[WireKey]: Specialized scalar or symbolic-range addresses.
+    """
+    owner, index = key
+    if isinstance(index, sp.Expr):
+        return {
+            (
+                owner,
+                _normalize_wire_index(
+                    cast(
+                        ResourceExpr,
+                        index.subs(
+                            loop_symbol,
+                            loop_value,
+                            simultaneous=True,
+                        ),
+                    )
+                ),
+            )
+        }
+    if not isinstance(index, _WireRangeIndex):
+        return {key}
+    specialized = index.mapped(
+        lambda expression: expression.subs(
+            loop_symbol,
+            loop_value,
+            simultaneous=True,
+        )
+    )
+    iterations = specialized.iterations
+    if (
+        not iterations.is_number
+        or not _is_concrete_integer(iterations)
+        or not 0 <= iterations <= _MAX_EXACT_LOOP_WIRE_EXPANSION
+    ):
+        return {(owner, specialized)}
+    return {
+        (
+            owner,
+            _normalize_wire_index(
+                cast(
+                    ResourceExpr,
+                    specialized.index_at_offset.subs(
+                        _WIRE_RANGE_OFFSET,
+                        offset,
+                        simultaneous=True,
+                    ),
+                )
+            ),
+        )
+        for offset in range(int(iterations))
+    }
+
+
 def _record_disjoint_wire_footprint(
-    seen: dict[str, set[int] | None],
+    seen: dict[str, _OwnerWireIndices],
     footprint: set[WireKey],
 ) -> bool:
     """Record one footprint only when it is disjoint from all prior wires.
 
     An owner-wide ``None`` index aliases every scalar index for the same
-    allocation owner. Exact indices are retained in per-owner sets so checking
-    one new iteration is linear in only that iteration's footprint.
+    allocation owner. Scalar indices are retained in per-owner sets and
+    compared with the same symbolic relation used by the dependency scheduler.
 
     Args:
-        seen (dict[str, set[int] | None]): Previously recorded exact indices by
-            owner, with ``None`` marking an owner-wide dependency.
+        seen (dict[str, _OwnerWireIndices]): Previously recorded addresses
+            indexed by allocation owner.
         footprint (set[WireKey]): Candidate physical wire keys.
 
     Returns:
         bool: Whether the candidate was disjoint and has been recorded.
     """
     for owner, index in footprint:
-        if owner not in seen:
+        owner_indices = seen.get(owner)
+        if owner_indices is None:
             continue
-        seen_indices = seen[owner]
-        if seen_indices is None or index is None or index in seen_indices:
+        if any(
+            _wire_index_relation(index, previous) is not _WireRelation.DISJOINT
+            for previous in owner_indices.candidates(index)
+        ):
             return False
     for owner, index in footprint:
-        if owner not in seen:
-            seen[owner] = None if index is None else {index}
-            continue
-        seen_indices = seen[owner]
-        if seen_indices is None:
-            continue
-        if index is None:
-            seen[owner] = None
-        else:
-            seen_indices.add(index)
+        seen.setdefault(owner, _OwnerWireIndices()).add(index)
     return True
+
+
+def _aggregate_completion_overlap_condition(
+    scheduled: Sequence[tuple[Operation, ResourceEstimate]],
+    wire_footprints: Sequence[_WireFootprint | None],
+) -> Boolean:
+    """Return when an aggregate completion can delay a later operation.
+
+    A nonuniform operation is harmless when it is the last user of its wires:
+    its aggregate critical-path depth is still exact. The resource estimate
+    becomes conservative only when that scalar latency is reused as a
+    caller-visible wire completion for a subsequent operation.
+
+    Args:
+        scheduled (Sequence[tuple[Operation, ResourceEstimate]]): Operations
+            paired with their resource summaries in program order.
+        wire_footprints (Sequence[_WireFootprint | None]): Read/write
+            footprints aligned with ``scheduled``.
+
+    Returns:
+        Boolean: Guard under which a nonuniform aggregate may over-serialize
+            a later wire dependency.
+
+    Raises:
+        AssertionError: If the operation and footprint sequences differ in
+            length.
+    """
+    if len(scheduled) != len(wire_footprints):
+        raise AssertionError(
+            "Scheduled operations and wire footprints must have equal lengths."
+        )
+    uncertain_indices: dict[str, _OwnerWireIndices] = {}
+    uncertain_activity: dict[WireKey, Boolean] = {}
+    overlap_conditions: set[Boolean] = set()
+    for (_operation, estimate), footprint in zip(
+        scheduled,
+        wire_footprints,
+        strict=True,
+    ):
+        if not _estimate_has_nonzero_depth(estimate):
+            continue
+        if footprint is None:
+            raise AssertionError(
+                "A nonzero-depth scheduled operation requires a wire footprint."
+            )
+        reads, writes = map(set, footprint)
+        active = _resource_activity_condition(estimate.depth.depth)
+        for owner, index in reads:
+            owner_indices = uncertain_indices.get(owner)
+            if owner_indices is None:
+                continue
+            for candidate in owner_indices.candidates(index):
+                if _wire_index_relation(index, candidate) is _WireRelation.DISJOINT:
+                    continue
+                condition = _and_conditions(
+                    uncertain_activity[(owner, candidate)],
+                    active,
+                )
+                if condition is not sp.false:
+                    overlap_conditions.add(condition)
+        if estimate._dependency_completion_uniform is True:
+            continue
+        for key in reads | writes:
+            owner, index = key
+            uncertain_indices.setdefault(owner, _OwnerWireIndices()).add(index)
+            previous = uncertain_activity.get(key, sp.false)
+            uncertain_activity[key] = cast(Boolean, sp.Or(previous, active))
+    return cast(
+        Boolean,
+        sp.Or(*overlap_conditions) if overlap_conditions else sp.false,
+    )
 
 
 def _loop_body_has_symbolic_quantum_index(
@@ -1336,6 +1904,33 @@ def _loop_body_has_symbolic_quantum_index(
     )
 
 
+def _dependency_keys_depend_on_symbol(
+    keys: frozenset[WireKey] | None,
+    symbol: sp.Symbol,
+) -> bool:
+    """Return whether an evaluated footprint still depends on a local symbol.
+
+    Args:
+        keys (frozenset[WireKey] | None): Evaluated dependency footprint, or
+            ``None`` when no precise footprint is available.
+        symbol (sp.Symbol): Loop-local symbol to find.
+
+    Returns:
+        bool: Whether a scalar address or symbolic range uses ``symbol``.
+    """
+    if keys is None:
+        return False
+    for _owner, index in keys:
+        if isinstance(index, _WireRangeIndex):
+            if symbol in (
+                index.index_at_offset.free_symbols | index.iterations.free_symbols
+            ):
+                return True
+        elif isinstance(index, sp.Expr) and symbol in index.free_symbols:
+            return True
+    return False
+
+
 def _symbolic_disjoint_loop_depth(
     operation: ForOperation,
     resolver: ExprResolver,
@@ -1343,7 +1938,9 @@ def _symbolic_disjoint_loop_depth(
     *,
     loop_symbol: sp.Symbol,
     iterations: ResourceExpr,
+    allocated_qubits: ResourceExpr,
     clean_ancillas: ResourceExpr,
+    dirty_ancillas: ResourceExpr,
     scalar_values: Mapping[str, sp.Expr] | None = None,
     used_names: set[str] | None = None,
 ) -> DepthResources | None:
@@ -1361,7 +1958,10 @@ def _symbolic_disjoint_loop_depth(
         body_depth (DepthResources): One iteration's dependency depth.
         loop_symbol (sp.Symbol): Symbol representing the loop value.
         iterations (ResourceExpr): Python-range iteration count.
+        allocated_qubits (ResourceExpr): Body-local allocation demand reused
+            between sequential iterations.
         clean_ancillas (ResourceExpr): Shared decomposition ancilla demand.
+        dirty_ancillas (ResourceExpr): Shared dirty-ancilla demand.
         scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
             dependency values. Defaults to ``None``.
         used_names (set[str] | None): Optional set updated with used input
@@ -1371,7 +1971,9 @@ def _symbolic_disjoint_loop_depth(
         DepthResources | None: One-iteration depth guarded by a nonempty range,
             or ``None`` when injectivity cannot be proven.
     """
-    if clean_ancillas != _ZERO or any(
+    if any(
+        demand != _ZERO for demand in (allocated_qubits, clean_ancillas, dirty_ancillas)
+    ) or any(
         loop_symbol in cast(ResourceExpr, getattr(body_depth, field.name)).free_symbols
         for field in dataclasses.fields(DepthResources)
     ):
@@ -1417,11 +2019,17 @@ def _symbolic_disjoint_loop_depth(
     ):
         return None
     for indices in indices_by_owner.values():
-        representative = indices[0]
+        representative = _normalize_wire_index(indices[0])
         if any(
-            index != representative and _safe_simplify(index - representative) != _ZERO
+            _wire_index_relation(
+                _normalize_wire_index(index),
+                representative,
+            )
+            is not _WireRelation.DEFINITE_OVERLAP
             for index in indices
         ):
+            return None
+        if not isinstance(representative, sp.Expr):
             return None
         slope = _safe_simplify(cast(ResourceExpr, sp.diff(representative, loop_symbol)))
         if loop_symbol in slope.free_symbols or slope.is_zero is not False:
@@ -1459,7 +2067,9 @@ def _dependency_depth(
     wire_footprints: Sequence[_WireFootprint | None],
     *,
     measurement_derived: set[str] | None = None,
-) -> tuple[DepthResources, dict[WireKey, ResourceExpr]]:
+    scalar_values: Mapping[str, sp.Expr] | None = None,
+    used_names: set[str] | None = None,
+) -> tuple[DepthResources, dict[WireKey, ResourceExpr], Boolean, bool]:
     """Schedule operation summaries by wire dependencies and hybrid barriers.
 
     Args:
@@ -1472,11 +2082,19 @@ def _dependency_depth(
             derived from runtime quantum observations. Operations that consume
             them, plus other unschedulable hybrid/control operations, form
             global ordering barriers. Defaults to ``None``.
+        scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
+            values used only to prove completion uniformity. Defaults to
+            ``None``.
+        used_names (set[str] | None): Optional set updated with supplied names
+            used by the uniformity proof. Defaults to ``None``.
 
     Returns:
-        tuple[DepthResources, dict[WireKey, ResourceExpr]]: Critical-path
-        depths and caller-visible completion time of each touched wire for the
-        total-depth field.
+        tuple[DepthResources, dict[WireKey, ResourceExpr], Boolean, bool]:
+            Critical-path depths, caller-visible completion time of each
+            touched wire for the total-depth field, and the condition under
+            which a possible symbolic alias affected scheduling, followed by
+            whether every touched wire is proven to complete at every
+            aggregate depth-field peak.
 
     Raises:
         AssertionError: If a footprint is missing or not aligned with a
@@ -1489,10 +2107,13 @@ def _dependency_depth(
     fields = tuple(field.name for field in dataclasses.fields(DepthResources))
     availability: dict[
         str,
-        dict[tuple[str, int | None], ResourceExpr],
+        dict[str, dict[WireIndex, ResourceExpr]],
     ] = {field: {} for field in fields}
+    indices_by_owner: dict[str, _OwnerWireIndices] = {}
     barrier_availability: dict[str, ResourceExpr] = {field: _ZERO for field in fields}
     peaks: dict[str, ResourceExpr] = {field: _ZERO for field in fields}
+    possible_alias_conditions: set[Boolean] = set()
+    completion_is_uniform = True
     for (operation, estimate), footprint in zip(
         scheduled,
         wire_footprints,
@@ -1518,6 +2139,11 @@ def _dependency_depth(
             reads.add(shared_dirty_pool)
             writes.add(shared_dirty_pool)
         touched = reads | writes
+        if (
+            estimate._dependency_keys is not None
+            and estimate._dependency_completion_uniform is not True
+        ):
+            completion_is_uniform = False
         operation_active = _resource_activity_condition(estimate.depth.depth)
         if operation_active is sp.false:
             continue
@@ -1526,28 +2152,46 @@ def _dependency_depth(
             measurement_derived or set(),
         )
         for field in fields:
-            wire_depth = availability[field]
-            dependencies: list[ResourceExpr] = []
+            owner_depths = availability[field]
+            definite_dependencies: list[ResourceExpr] = []
+            possible_dependencies: list[ResourceExpr] = []
             for owner, index in reads:
-                if index is None:
-                    dependencies.extend(
-                        depth
-                        for (
-                            candidate_owner,
-                            _candidate_index,
-                        ), depth in wire_depth.items()
-                        if candidate_owner == owner
-                    )
-                else:
-                    dependencies.extend(
-                        (
-                            wire_depth.get((owner, None), _ZERO),
-                            wire_depth.get((owner, index), _ZERO),
-                        )
-                    )
+                owner_indices = indices_by_owner.get(owner)
+                if owner_indices is None:
+                    continue
+                wire_depths = owner_depths.get(owner, {})
+                for candidate_index in owner_indices.candidates(index):
+                    depth = wire_depths.get(candidate_index)
+                    if depth is None:
+                        continue
+                    relation = _wire_index_relation(index, candidate_index)
+                    if relation is _WireRelation.DISJOINT:
+                        continue
+                    if relation is _WireRelation.DEFINITE_OVERLAP:
+                        definite_dependencies.append(depth)
+                    else:
+                        possible_dependencies.append(depth)
             if schedulable:
-                dependencies.append(barrier_availability[field])
-                start = _resource_max_many(dependencies)
+                baseline_start = _resource_max_many(
+                    [
+                        *definite_dependencies,
+                        barrier_availability[field],
+                    ]
+                )
+                start = _resource_max_many([baseline_start, *possible_dependencies])
+                for dependency_depth in possible_dependencies:
+                    condition = _and_conditions(
+                        operation_active,
+                        _and_conditions(
+                            _resource_activity_condition(dependency_depth),
+                            sp.Gt(
+                                dependency_depth,
+                                baseline_start,
+                            ),
+                        ),
+                    )
+                    if condition is not sp.false:
+                        possible_alias_conditions.add(condition)
             else:
                 start = _resource_max(
                     peaks[field],
@@ -1567,9 +2211,10 @@ def _dependency_depth(
                         operation_active,
                     )
                 )
-            for key in touched:
-                previous = wire_depth.get(key, _ZERO)
-                wire_depth[key] = (
+            for owner, index in touched:
+                wire_depth = owner_depths.setdefault(owner, {})
+                previous = wire_depth.get(index, _ZERO)
+                wire_depth[index] = (
                     finish
                     if operation_active is sp.true
                     else _conditional_completion(
@@ -1578,7 +2223,51 @@ def _dependency_depth(
                         operation_active,
                     )
                 )
-    return DepthResources(**peaks), dict(availability["depth"])
+        for owner, index in touched:
+            indices_by_owner.setdefault(owner, _OwnerWireIndices()).add(index)
+    completion_keys = {
+        (owner, index)
+        for owner, owner_depths in availability["depth"].items()
+        for index in owner_depths
+    }
+    if completion_is_uniform:
+        for field in fields:
+            peak = _specialize_dependency_expression(
+                peaks[field],
+                scalar_values,
+                used_names,
+            )
+            if any(
+                not _expressions_proven_equal_without_simplify(
+                    _specialize_dependency_expression(
+                        cast(
+                            ResourceExpr,
+                            availability[field].get(owner, {}).get(index, _ZERO),
+                        ),
+                        scalar_values,
+                        used_names,
+                    ),
+                    peak,
+                )
+                for owner, index in completion_keys
+            ):
+                completion_is_uniform = False
+                break
+    return (
+        DepthResources(**peaks),
+        {
+            (owner, index): depth
+            for owner, owner_depths in availability["depth"].items()
+            for index, depth in owner_depths.items()
+        },
+        cast(
+            Boolean,
+            sp.Or(*possible_alias_conditions)
+            if possible_alias_conditions
+            else sp.false,
+        ),
+        completion_is_uniform,
+    )
 
 
 def _block_input_allocations(

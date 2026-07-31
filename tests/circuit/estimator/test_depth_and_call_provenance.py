@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import math
 
 import pytest
 import sympy as sp
@@ -12,13 +13,17 @@ import qamomile.observable as qm_o
 from qamomile.circuit.estimator._resolver import ExprResolver
 from qamomile.circuit.estimator._scheduling import (
     _array_wire_key_at_index,
+    _dependency_depth,
+    _normalize_wire_index,
+    _OwnerWireIndices,
     _quantum_element_index_expression,
     _quantum_element_wire_index,
     _quantum_value_wire_keys,
     _record_disjoint_wire_footprint,
 )
 from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.operation.callable import InvokeOperation
+from qamomile.circuit.ir.operation.callable import CallTransform, InvokeOperation
+from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
@@ -27,7 +32,7 @@ from qamomile.circuit.ir.value import ArrayValue, Value
 
 def test_wire_footprint_index_preserves_owner_wide_aliasing() -> None:
     """The linear overlap index keeps exact and owner-wide alias rules."""
-    seen: dict[str, set[int] | None] = {}
+    seen: dict[str, _OwnerWireIndices] = {}
 
     assert _record_disjoint_wire_footprint(seen, {("left", 0)})
     assert _record_disjoint_wire_footprint(seen, {("left", 1)})
@@ -314,6 +319,361 @@ def test_supplied_array_index_sharpens_depth_dependencies() -> None:
     assert substituted.quality is qm.EstimateQuality.UPPER_BOUND
 
 
+def test_equivalent_symbolic_array_indices_share_one_wire() -> None:
+    """Trivial symbolic identities preserve exact same-wire dependencies."""
+
+    @qm.qkernel
+    def circuit(index: qm.UInt) -> qm.Vector[qm.Qubit]:
+        """Apply three gates through equivalent forms of one array index."""
+        register = qm.qubit_array(8, "register")
+        register[index] = qm.h(register[index])
+        shifted = index + 0
+        register[shifted] = qm.x(register[shifted])
+        scaled = index * 1
+        register[scaled] = qm.z(register[scaled])
+        return register
+
+    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+
+    assert estimate.gates.total == 3
+    assert estimate.depth.depth == 3
+    assert estimate.quality is qm.EstimateQuality.EXACT
+
+
+def test_disjoint_symbolic_array_indices_share_one_layer() -> None:
+    """A constant nonzero index difference proves two wires disjoint."""
+
+    @qm.qkernel
+    def circuit(index: qm.UInt) -> qm.Vector[qm.Qubit]:
+        """Apply independent gates to adjacent symbolic array elements."""
+        register = qm.qubit_array(8, "register")
+        register[index] = qm.h(register[index])
+        register[index + 1] = qm.x(register[index + 1])
+        return register
+
+    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+
+    assert estimate.gates.total == 2
+    assert estimate.depth.depth == 1
+    assert estimate.quality is qm.EstimateQuality.EXACT
+
+
+def test_symbolic_offset_index_skips_disjoint_family_members() -> None:
+    """A large additive family does not require pairwise SymPy comparisons."""
+    index = sp.Symbol("index", integer=True, nonnegative=True)
+    seen = _OwnerWireIndices()
+    for offset in range(1_000):
+        seen.add(_normalize_wire_index(index + offset))
+
+    assert seen.candidates(_normalize_wire_index(index + 1_000)) == ()
+    assert set(seen.candidates(_normalize_wire_index(index + 999))) == {index + 999}
+    assert len(seen.candidates(_normalize_wire_index(2 * index))) == 1_000
+
+
+def test_potentially_aliasing_symbolic_indices_remain_conservative() -> None:
+    """Indices equal for some inputs retain an upper-bound dependency."""
+
+    @qm.qkernel
+    def circuit(index: qm.UInt) -> qm.Vector[qm.Qubit]:
+        """Apply gates to indices that coincide only when index is zero."""
+        register = qm.qubit_array(8, "register")
+        register[index] = qm.h(register[index])
+        register[index * 2] = qm.x(register[index * 2])
+        return register
+
+    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+
+    assert estimate.gates.total == 2
+    assert estimate.depth.depth == 2
+    assert estimate.quality is qm.EstimateQuality.UPPER_BOUND
+
+
+def test_possible_alias_does_not_lower_quality_when_a_shared_wire_serializes() -> None:
+    """A definite shared control keeps target-alias uncertainty off the path."""
+
+    @qm.qkernel
+    def circuit(index: qm.UInt) -> qm.Vector[qm.Qubit]:
+        """Apply two CX gates with one fixed control and uncertain targets."""
+        control = qm.qubit("control")
+        register = qm.qubit_array(8, "register")
+        control, register[index] = qm.cx(control, register[index])
+        control, register[index * 2] = qm.cx(control, register[index * 2])
+        return register
+
+    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+
+    assert estimate.gates.total == 2
+    assert estimate.depth.depth == 2
+    assert estimate.quality is qm.EstimateQuality.EXACT
+
+
+def test_possible_alias_in_specialized_depth_marks_estimate_conservative() -> None:
+    """Alias uncertainty in any depth field prevents an exact classification."""
+    index = sp.Symbol("index", integer=True, nonnegative=True)
+    one = sp.Integer(1)
+    two = sp.Integer(2)
+    operations = [
+        GateOperation(gate_type=GateOperationType.H) for _operation_index in range(3)
+    ]
+    estimates = [
+        qm.ResourceEstimate(
+            depth=qm.DepthResources(
+                depth=one,
+                t_depth=one,
+                gate_depth=one,
+            )
+        ),
+        qm.ResourceEstimate(
+            depth=qm.DepthResources(
+                depth=two,
+                clifford_depth=two,
+                gate_depth=two,
+            )
+        ),
+        qm.ResourceEstimate(
+            depth=qm.DepthResources(
+                depth=one,
+                t_depth=one,
+                gate_depth=one,
+            )
+        ),
+    ]
+    footprints = [
+        (frozenset({("register", index)}),) * 2,
+        (frozenset({("control", None)}),) * 2,
+        (frozenset({("control", None), ("register", 2 * index)}),) * 2,
+    ]
+
+    depth, _completion, possible_alias_active, _uniform = _dependency_depth(
+        list(zip(operations, estimates, strict=True)),
+        footprints,
+    )
+
+    assert depth.depth == 3
+    assert depth.t_depth == 2
+    assert possible_alias_active is not sp.false
+
+
+def test_symbolic_indices_on_distinct_arrays_share_one_layer() -> None:
+    """Allocation identity proves symbolic elements of two arrays disjoint."""
+
+    @qm.qkernel
+    def circuit(
+        index: qm.UInt,
+    ) -> tuple[qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
+        """Apply independent gates at one symbolic index of separate arrays."""
+        left = qm.qubit_array(8, "left")
+        right = qm.qubit_array(8, "right")
+        left[index] = qm.h(left[index])
+        right[index] = qm.x(right[index])
+        return left, right
+
+    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+
+    assert estimate.gates.total == 2
+    assert estimate.depth.depth == 1
+    assert estimate.quality is qm.EstimateQuality.EXACT
+
+
+def test_affine_view_index_matches_equivalent_root_index() -> None:
+    """A view index and its affine root expression identify one wire."""
+
+    @qm.qkernel
+    def circuit(index: qm.UInt) -> qm.Vector[qm.Qubit]:
+        """Address an odd element through both a view and its root array."""
+        register = qm.qubit_array(8, "register")
+        odd = register[1::2]
+        odd[index] = qm.h(odd[index])
+        register[index * 2 + 1] = qm.x(register[index * 2 + 1])
+        return register
+
+    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+
+    assert estimate.gates.total == 2
+    assert estimate.depth.depth == 2
+    assert estimate.quality is qm.EstimateQuality.EXACT
+
+
+def test_even_and_odd_symbolic_views_share_one_layer() -> None:
+    """Affine view mappings prove even and odd root elements disjoint."""
+
+    @qm.qkernel
+    def circuit(index: qm.UInt) -> qm.Vector[qm.Qubit]:
+        """Apply independent gates through even and odd views of one array."""
+        register = qm.qubit_array(8, "register")
+        even = register[0::2]
+        odd = register[1::2]
+        even[index] = qm.h(even[index])
+        odd[index] = qm.x(odd[index])
+        return register
+
+    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+
+    assert estimate.gates.total == 2
+    assert estimate.depth.depth == 1
+    assert estimate.quality is qm.EstimateQuality.EXACT
+
+
+def test_large_concrete_disjoint_views_preserve_parallel_depth() -> None:
+    """Large concrete disjoint views retain exact expansion and scheduling."""
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Vector[qm.Bit], qm.Vector[qm.Bit]]:
+        """Measure large even and odd views as independent vector operations."""
+        register = qm.qubit_array(600, "register")
+        even = register[0::2]
+        odd = register[1::2]
+        return qm.measure(even), qm.measure(odd)
+
+    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+
+    assert estimate.measurements.total == 600
+    assert estimate.depth.depth == 1
+    assert estimate.depth.measurement_depth == 1
+    assert estimate.quality is qm.EstimateQuality.EXACT
+
+
+def test_loop_range_projection_preserves_concrete_wire_dependencies() -> None:
+    """Concrete inputs enumerate loop wires while symbolic bounds stay safe."""
+
+    @qm.qkernel
+    def circuit(iterations: qm.UInt) -> qm.Vector[qm.Qubit]:
+        """Gate a loop prefix and then the final array slot."""
+        register = qm.qubit_array(8, "register")
+        for index in qm.range(iterations):
+            register[index] = qm.h(register[index])
+        register[7] = qm.x(register[7])
+        return register
+
+    symbolic = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    empty = circuit.estimate_resources(
+        inputs={"iterations": 0},
+        basis=qm.GateBasis.LOGICAL,
+    )
+    disjoint = circuit.estimate_resources(
+        inputs={"iterations": 1},
+        basis=qm.GateBasis.LOGICAL,
+    )
+    overlapping = circuit.estimate_resources(
+        inputs={"iterations": 8},
+        basis=qm.GateBasis.LOGICAL,
+    )
+
+    assert symbolic.quality is qm.EstimateQuality.UPPER_BOUND
+    assert empty.depth.depth == 1
+    assert empty.quality is qm.EstimateQuality.EXACT
+    assert disjoint.depth.depth == 1
+    assert disjoint.quality is qm.EstimateQuality.EXACT
+    assert overlapping.depth.depth == 2
+    assert overlapping.quality is qm.EstimateQuality.EXACT
+
+
+def test_nested_loop_range_projection_binds_every_local_index() -> None:
+    """Concrete nested-loop inputs preserve exact outer wire dependencies."""
+
+    @qm.qkernel
+    def circuit(
+        outer: qm.UInt,
+        inner: qm.UInt,
+    ) -> qm.Vector[qm.Qubit]:
+        """Gate a flattened loop prefix and then the final array slot."""
+        register = qm.qubit_array(8, "register")
+        for row in qm.range(outer):
+            for column in qm.range(inner):
+                offset = row * inner + column
+                register[offset] = qm.h(register[offset])
+        register[7] = qm.x(register[7])
+        return register
+
+    symbolic = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    disjoint = circuit.estimate_resources(
+        inputs={"outer": 1, "inner": 1},
+        basis=qm.GateBasis.LOGICAL,
+    )
+    overlapping = circuit.estimate_resources(
+        inputs={"outer": 2, "inner": 4},
+        basis=qm.GateBasis.LOGICAL,
+    )
+
+    assert symbolic.quality is qm.EstimateQuality.UPPER_BOUND
+    assert disjoint.depth.depth == 1
+    assert disjoint.quality is qm.EstimateQuality.EXACT
+    assert {index for _owner, index in disjoint._dependency_keys or ()} == {0, 7}
+    assert overlapping.depth.depth == 2
+    assert overlapping.quality is qm.EstimateQuality.EXACT
+    assert {index for _owner, index in overlapping._dependency_keys or ()} == set(
+        range(8)
+    )
+
+
+def test_nested_call_preserves_symbolic_index_alias_relations() -> None:
+    """Nested-call footprints retain equal and disjoint symbolic indices."""
+
+    @qm.qkernel
+    def touch_index(
+        register: qm.Vector[qm.Qubit],
+        index: qm.UInt,
+    ) -> qm.Vector[qm.Qubit]:
+        """Apply one gate at the supplied symbolic array index."""
+        register[index] = qm.h(register[index])
+        return register
+
+    @qm.qkernel
+    def disjoint(index: qm.UInt) -> qm.Vector[qm.Qubit]:
+        """Gate the element adjacent to the one touched by a nested call."""
+        register = qm.qubit_array(8, "register")
+        register = touch_index(register, index)
+        register[index + 1] = qm.x(register[index + 1])
+        return register
+
+    @qm.qkernel
+    def overlapping(index: qm.UInt) -> qm.Vector[qm.Qubit]:
+        """Gate the same element touched by a nested call."""
+        register = qm.qubit_array(8, "register")
+        register = touch_index(register, index)
+        register[index + 0] = qm.x(register[index + 0])
+        return register
+
+    disjoint_estimate = disjoint.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    overlapping_estimate = overlapping.estimate_resources(basis=qm.GateBasis.LOGICAL)
+
+    assert disjoint_estimate.gates.total == 2
+    assert disjoint_estimate.depth.depth == 1
+    assert disjoint_estimate.quality is qm.EstimateQuality.EXACT
+    assert overlapping_estimate.gates.total == 2
+    assert overlapping_estimate.depth.depth == 2
+    assert overlapping_estimate.quality is qm.EstimateQuality.EXACT
+
+
+def test_symbolic_control_pool_index_is_disjoint_from_adjacent_slot() -> None:
+    """A selected symbolic control and its adjacent pool slot do not alias."""
+
+    @qm.qkernel
+    def circuit(
+        width: qm.UInt,
+        index: qm.UInt,
+    ) -> tuple[qm.Vector[qm.Qubit], qm.Qubit]:
+        """Control one gate through a pool slot and gate its neighbor."""
+        pool = qm.qubit_array(8, "pool")
+        target = qm.qubit("target")
+        pool, target = qm.control(
+            _single_hadamard,
+            num_controls=width,
+        )(pool, target, control_indices=(index,))
+        pool[index + 1] = qm.x(pool[index + 1])
+        return pool, target
+
+    estimate = circuit.estimate_resources(
+        inputs={"width": 1},
+        basis=qm.GateBasis.LOGICAL,
+        control_decomposition=qm.ControlDecomposition.ABSTRACT,
+    )
+
+    assert estimate.gates.total == 2
+    assert estimate.depth.depth == 1
+    assert estimate.quality is qm.EstimateQuality.EXACT
+
+
 def test_symbolic_vector_broadcast_has_layer_depth_not_element_depth() -> None:
     """Injective affine broadcast loops parallelize across vector slots."""
     width = sp.Symbol("width", integer=True, nonnegative=True)
@@ -372,6 +732,69 @@ def test_concrete_loop_parallelizes_disjoint_array_elements() -> None:
     assert estimate.depth.measurement_depth == 1
 
 
+def test_parallel_loop_reports_stale_completion_as_an_upper_bound() -> None:
+    """Parallel loop depth must not make aggregate exit latency look exact."""
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
+        """Gate an early-finishing loop wire immediately after the loop."""
+        left = qm.qubit_array(2, "left")
+        right = qm.qubit_array(2, "right")
+        for index in qm.range(2):
+            left[index] = qm.h(left[index])
+            left[index] = qm.z(left[index])
+            right[index] = qm.x(right[index])
+        right[0] = qm.h(right[0])
+        return left, right
+
+    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+
+    assert estimate.depth.depth == 3
+    assert estimate.quality is qm.EstimateQuality.UPPER_BOUND
+    assert any("aggregate latency" in note.message for note in estimate.assumptions)
+
+
+def test_large_uniform_parallel_loop_keeps_compact_exact_completion() -> None:
+    """A uniform loop need not enumerate every wire to preserve exactness."""
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Vector[qm.Qubit], qm.Vector[qm.Qubit]]:
+        """Apply one independent gate to each slot of two large arrays."""
+        left = qm.qubit_array(300, "left")
+        right = qm.qubit_array(300, "right")
+        for index in qm.range(300):
+            left[index] = qm.h(left[index])
+            right[index] = qm.x(right[index])
+        return left, right
+
+    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+
+    assert estimate.gates.total == 600
+    assert estimate.depth.depth == 1
+    assert estimate.quality is qm.EstimateQuality.EXACT
+    assert estimate._dependency_keys is not None
+    assert len(estimate._dependency_keys) == 2
+
+
+def test_large_nonaffine_disjoint_loop_preserves_exact_parallel_depth() -> None:
+    """Concrete disjointness enumeration retains the prior 4096-loop budget."""
+
+    @qm.qkernel
+    def circuit() -> qm.Vector[qm.Qubit]:
+        """Gate distinct square-numbered slots beyond the metadata budget."""
+        register = qm.qubit_array(90_000, "register")
+        for index in qm.range(300):
+            offset = index * index
+            register[offset] = qm.h(register[offset])
+        return register
+
+    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+
+    assert estimate.gates.total == 300
+    assert estimate.depth.depth == 1
+    assert estimate.quality is qm.EstimateQuality.EXACT
+
+
 def test_parallel_measurement_and_reset_counts_do_not_inflate_depth() -> None:
     """Independent gates, resets, and measurements each form one layer."""
 
@@ -419,6 +842,49 @@ def test_reusable_clean_ancilla_pool_serializes_independent_fallbacks() -> None:
     assert estimate.gates.total == 10
     assert estimate.width.clean_ancilla_qubits == 2
     assert estimate.depth.depth == 10
+
+
+@pytest.mark.parametrize(
+    ("name", "workspace"),
+    [
+        (
+            "allocated",
+            qm.WidthResources(allocated_qubits=1),
+        ),
+        (
+            "dirty",
+            qm.WidthResources(dirty_ancilla_qubits=1),
+        ),
+    ],
+)
+def test_loop_reuses_body_workspace_sequentially(
+    name: str,
+    workspace: qm.WidthResources,
+) -> None:
+    """Disjoint targets cannot parallelize through one reused workspace."""
+    oracle = qm.opaque(
+        f"{name}_workspace_oracle",
+        num_qubits=1,
+        cost=qm.ResourceEstimate(
+            width=workspace,
+            gates=qm.GateResources(total=2),
+            depth=qm.DepthResources(depth=2, gate_depth=2),
+        ),
+    )
+
+    @qm.qkernel
+    def circuit() -> qm.Vector[qm.Qubit]:
+        """Apply one workspace-using opaque operation to each array slot."""
+        register = qm.qubit_array(3, "register")
+        for index in qm.range(3):
+            (register[index],) = oracle(register[index])
+        return register
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.gates.total == 6
+    assert estimate.depth.depth == 6
+    assert estimate.depth.gate_depth == 6
 
 
 def test_ordinary_call_uses_only_body_touched_arguments_for_depth() -> None:
@@ -507,6 +973,229 @@ def test_multi_wire_call_boundary_reports_conservative_depth_quality() -> None:
     assert any("aggregate latency" in note.message for note in estimate.assumptions)
 
 
+def test_multi_wire_call_reports_specialized_depth_completion_uncertainty() -> None:
+    """A uniform total exit can still hide unequal T-depth completions."""
+
+    @qm.qkernel
+    def body(
+        left: qm.Qubit,
+        right: qm.Qubit,
+    ) -> tuple[qm.Qubit, qm.Qubit]:
+        """Finish both wires at total depth two with different gate families."""
+        left = qm.t(left)
+        left = qm.h(left)
+        right = qm.h(right)
+        right = qm.z(right)
+        return left, right
+
+    @qm.qkernel
+    def nested() -> tuple[qm.Qubit, qm.Qubit]:
+        """Apply a T gate after crossing the aggregate call boundary."""
+        left = qm.qubit("left")
+        right = qm.qubit("right")
+        left, right = body(left, right)
+        right = qm.t(right)
+        return left, right
+
+    @qm.qkernel
+    def inline() -> tuple[qm.Qubit, qm.Qubit]:
+        """Express the same gates without a nested aggregate boundary."""
+        left = qm.qubit("left")
+        right = qm.qubit("right")
+        left = qm.t(left)
+        left = qm.h(left)
+        right = qm.h(right)
+        right = qm.z(right)
+        right = qm.t(right)
+        return left, right
+
+    nested_estimate = nested.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    inline_estimate = inline.estimate_resources(basis=qm.GateBasis.LOGICAL)
+
+    assert inline_estimate.depth.t_depth == 1
+    assert inline_estimate.quality is qm.EstimateQuality.EXACT
+    assert nested_estimate.depth.t_depth == 2
+    assert nested_estimate.quality is qm.EstimateQuality.UPPER_BOUND
+    assert any(
+        "aggregate latency" in note.message for note in nested_estimate.assumptions
+    )
+
+
+def test_single_visible_wire_preserves_hidden_specialized_nonuniformity() -> None:
+    """Hidden body-local work prevents an exact specialized-depth boundary."""
+
+    @qm.qkernel
+    def body(target: qm.Qubit) -> qm.Qubit:
+        """Gate the visible target beside a hidden T-gate path."""
+        fresh = qm.qubit("fresh")
+        target = qm.h(target)
+        fresh = qm.t(fresh)
+        return target
+
+    @qm.qkernel
+    def nested() -> qm.Qubit:
+        """Apply a T gate after the aggregate call boundary."""
+        target = qm.qubit("target")
+        target = body(target)
+        return qm.t(target)
+
+    estimate = nested.estimate_resources(basis=qm.GateBasis.LOGICAL)
+
+    assert estimate.depth.depth == 2
+    assert estimate.depth.t_depth == 2
+    assert estimate.quality is qm.EstimateQuality.UPPER_BOUND
+    assert any("aggregate latency" in note.message for note in estimate.assumptions)
+
+
+def test_legacy_inverse_invoke_invalidates_forward_completion() -> None:
+    """Reversing a raw call does not reuse its forward wire exit layers."""
+
+    @qm.qkernel
+    def body(
+        left: qm.Qubit,
+        right: qm.Qubit,
+    ) -> tuple[qm.Qubit, qm.Qubit]:
+        """Finish both forward outputs together but not after inversion."""
+        left = qm.h(left)
+        left, right = qm.cx(left, right)
+        return left, right
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Qubit, qm.Qubit]:
+        """Gate the earlier-finishing output after a legacy inverse call."""
+        left = qm.qubit("left")
+        right = qm.qubit("right")
+        left, right = body(left, right)
+        right = qm.x(right)
+        return left, right
+
+    block = circuit.block
+    invoke = next(
+        operation
+        for operation in block.operations
+        if isinstance(operation, InvokeOperation)
+    )
+    invoke.transform = CallTransform.INVERSE
+
+    estimate = qm.ResourceEstimator(basis=qm.GateBasis.LOGICAL).estimate(block)
+
+    assert estimate.depth.depth == 3
+    assert estimate.quality is qm.EstimateQuality.UPPER_BOUND
+    assert any("aggregate latency" in note.message for note in estimate.assumptions)
+
+
+def test_pauli_evolve_aggregate_boundary_is_not_exact() -> None:
+    """A decomposed Pauli operation does not claim uniform wire completion."""
+
+    @qm.qkernel
+    def circuit(hamiltonian: qm.Observable) -> qm.Vector[qm.Qubit]:
+        """Gate one register slot after a single-term Pauli evolution."""
+        qubits = qm.qubit_array(2, "qubits")
+        qubits = qm.pauli_evolve(qubits, hamiltonian, qm.float_(0.5))
+        qubits[1] = qm.rz(qubits[1], qm.float_(0.25))
+        return qubits
+
+    estimate = circuit.estimate_resources(
+        inputs={"hamiltonian": qm_o.X(0)},
+        basis=qm.GateBasis.LOGICAL,
+    )
+
+    assert estimate.depth.depth == 4
+    assert estimate.depth.rotation_depth == 2
+    assert estimate.quality is qm.EstimateQuality.UPPER_BOUND
+    assert any("aggregate latency" in note.message for note in estimate.assumptions)
+
+
+def test_controlled_z_lowering_is_not_uniform() -> None:
+    """A multi-layer controlled-Z summary has unequal wire exit layers."""
+
+    @qm.qkernel
+    def z_body(target: qm.Qubit) -> qm.Qubit:
+        """Apply one Z gate."""
+        return qm.z(target)
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Qubit, qm.Qubit]:
+        """Gate the control after a lowered controlled-Z."""
+        control = qm.qubit("control")
+        target = qm.qubit("target")
+        control, target = qm.control(z_body)(control, target)
+        control = qm.h(control)
+        return control, target
+
+    estimate = circuit.estimate_resources(
+        basis=qm.GateBasis.CLIFFORD_T,
+        precision=1e-4,
+    )
+
+    assert estimate.depth.depth == 4
+    assert estimate.quality is qm.EstimateQuality.UPPER_BOUND
+
+
+def test_controlled_swap_lowering_is_not_uniform() -> None:
+    """A lowered controlled-SWAP does not finish every operand together."""
+
+    @qm.qkernel
+    def swap_body(
+        left: qm.Qubit,
+        right: qm.Qubit,
+    ) -> tuple[qm.Qubit, qm.Qubit]:
+        """Swap two target qubits."""
+        return qm.swap(left, right)
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
+        """Gate the control after a lowered controlled-SWAP."""
+        control = qm.qubit("control")
+        left = qm.qubit("left")
+        right = qm.qubit("right")
+        control, left, right = qm.control(swap_body)(control, left, right)
+        control = qm.h(control)
+        return control, left, right
+
+    estimate = circuit.estimate_resources(
+        basis=qm.GateBasis.CLIFFORD_T,
+        precision=1e-4,
+    )
+
+    assert estimate.depth.depth == 18
+    assert estimate.quality is qm.EstimateQuality.UPPER_BOUND
+
+
+def test_multi_controlled_global_phase_completion_is_not_uniform() -> None:
+    """A lowered relative phase may finish its controls on different layers."""
+
+    @qm.qkernel
+    def identity(target: qm.Qubit) -> qm.Qubit:
+        """Leave the target unchanged."""
+        return target
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit, qm.Qubit]:
+        """Gate one control after a three-control relative phase."""
+        c0 = qm.qubit("c0")
+        c1 = qm.qubit("c1")
+        c2 = qm.qubit("c2")
+        target = qm.qubit("target")
+        c0, c1, c2, target = qm.control(identity, num_controls=3)(
+            c0,
+            c1,
+            c2,
+            target,
+            global_phase=qm.float_(math.pi),
+        )
+        c0 = qm.h(c0)
+        return c0, c1, c2, target
+
+    estimate = circuit.estimate_resources(
+        basis=qm.GateBasis.CLIFFORD_T,
+        precision=1e-4,
+    )
+
+    assert estimate.depth.depth == 18
+    assert estimate.quality is qm.EstimateQuality.UPPER_BOUND
+
+
 def test_multi_wire_if_boundary_reports_conservative_depth_quality() -> None:
     """A selected multi-path branch discloses aggregate exit latency."""
 
@@ -529,7 +1218,7 @@ def test_multi_wire_if_boundary_reports_conservative_depth_quality() -> None:
 
     assert estimate.depth.depth == 3
     assert estimate.quality is qm.EstimateQuality.UPPER_BOUND
-    assert any("control-flow boundary" in note.message for note in estimate.assumptions)
+    assert any("aggregate latency" in note.message for note in estimate.assumptions)
 
 
 def test_multi_wire_for_boundary_reports_conservative_depth_quality() -> None:
@@ -551,7 +1240,7 @@ def test_multi_wire_for_boundary_reports_conservative_depth_quality() -> None:
 
     assert estimate.depth.depth == 3
     assert estimate.quality is qm.EstimateQuality.UPPER_BOUND
-    assert any("control-flow boundary" in note.message for note in estimate.assumptions)
+    assert any("aggregate latency" in note.message for note in estimate.assumptions)
 
 
 def test_select_does_not_block_an_unused_pass_through_target() -> None:
@@ -1069,7 +1758,13 @@ def test_controlled_recursive_resource_driver_reaches_base_case(k: int) -> None:
     assert estimate.depth == reference.depth
     assert estimate.width == reference.width
     assert estimate.quality is reference.quality
-    assert estimate.assumptions == reference.assumptions
+    assert all(
+        assumption in estimate.assumptions for assumption in reference.assumptions
+    )
+    assert all(
+        assumption in reference.assumptions or "aggregate latency" in assumption.message
+        for assumption in estimate.assumptions
+    )
 
 
 def test_symbolic_controlled_recursive_driver_fails_with_guidance() -> None:

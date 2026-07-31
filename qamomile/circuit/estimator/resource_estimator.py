@@ -99,17 +99,22 @@ from qamomile.circuit.estimator._resolver import (
     input_shape_dimension_aliases,
 )
 from qamomile.circuit.estimator._scheduling import (
+    _MAX_EXACT_LOOP_WIRE_EXPANSION,
+    _UNKNOWN_WIRE_INDEX,
     WireKey,
     _activate_allocation_sites,
+    _aggregate_completion_overlap_condition,
     _anonymous_allocation_width,
     _block_input_allocations,
     _branch_owner_sizes,
     _branch_width_with_static_allocations,
     _captured_quantum_allocations,
+    _concrete_loop_dependency_completion,
     _controlled_u_control_wire_keys,
     _count_qinit,
     _definitely_consumed_captured_allocations,
     _dependency_depth,
+    _dependency_keys_depend_on_symbol,
     _disjoint_concrete_loop_depth,
     _estimate_has_nonzero_depth,
     _invoke_quantum_output_sizes,
@@ -122,17 +127,22 @@ from qamomile.circuit.estimator._scheduling import (
     _merge_allocation_sites,
     _merge_dependency_keys,
     _namespace_allocation_sites,
+    _normalize_wire_index,
+    _operation_has_uniform_intrinsic_completion,
     _operation_has_unresolved_quantum_index,
     _quantum_allocation_owner,
     _quantum_wire_keys,
     _qubit_value_size,
     _root_callable_resource_attrs,
     _root_callable_shape_inputs,
+    _specialize_dependency_expression,
     _symbolic_disjoint_loop_depth,
+    _symbolic_wire_range_index,
+    _uniform_parallel_loop_dependency_completion,
     _width_with_identity_aware_allocations,
     _wire_keys_for_values,
     _WireFootprint,
-    _with_aggregate_boundary_depth_metadata,
+    _WireRangeIndex,
     _with_body_boundary_depth_metadata,
     _with_operation_output_summary,
     _without_input_allocation_sites,
@@ -818,6 +828,10 @@ class ResourceEstimate:
             caller-visible completion depth for each dependency wire.
             ``None`` requests conservative reconstruction from
             ``_dependency_keys`` or the enclosing operation footprint.
+        _dependency_completion_uniform (bool | None): Whether every
+            caller-visible wire is proven to complete at the aggregate peak
+            of every depth field. ``None`` means that field-wise uniformity
+            was not proven.
         _guarded_assumptions (tuple[_GuardedAssumption, ...] | None): Internal
             condition-aware assumption provenance. ``None`` initializes facts
             from the public ``assumptions`` tuple.
@@ -878,6 +892,11 @@ class ResourceEstimate:
         compare=False,
     )
     _dependency_completion: dict[WireKey, ResourceExpr] | None = dataclasses.field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    _dependency_completion_uniform: bool | None = dataclasses.field(
         default=None,
         repr=False,
         compare=False,
@@ -1483,6 +1502,7 @@ class ResourceEstimate:
                 if self._dependency_completion is not None
                 else None
             ),
+            _dependency_completion_uniform=self._dependency_completion_uniform,
             _guarded_assumptions=tuple(
                 fact.when(active_when) for fact in (self._guarded_assumptions or ())
             ),
@@ -1622,6 +1642,7 @@ class ResourceEstimate:
             _has_output_summary=self._has_output_summary,
             _dependency_keys=self._dependency_keys,
             _dependency_completion=self._dependency_completion,
+            _dependency_completion_uniform=self._dependency_completion_uniform,
             _guarded_assumptions=self._guarded_assumptions,
             _guarded_qualities=self._guarded_qualities,
             _guarded_approximations=self._guarded_approximations,
@@ -1677,7 +1698,11 @@ class ResourceEstimate:
             _input_sizes=self._input_sizes,
             _has_output_summary=self._has_output_summary,
             _dependency_keys=self._dependency_keys,
-            _dependency_completion=self._dependency_completion,
+            # Reversing a multi-wire aggregate preserves its touched wires but
+            # can change which wire finishes first. Only a gate-by-gate inverse
+            # can reconstruct exact caller-visible completion layers.
+            _dependency_completion=None,
+            _dependency_completion_uniform=None,
             _guarded_assumptions=self._guarded_assumptions,
             _guarded_qualities=self._guarded_qualities,
             _guarded_approximations=self._guarded_approximations,
@@ -1703,6 +1728,45 @@ class ResourceEstimate:
             ResourceEstimate: Estimate with additive metrics summed over the
             loop and width kept reusable.
         """
+        return self._sum_over(
+            loop_symbol,
+            start,
+            stop,
+            step,
+            dependency_start=start,
+            dependency_stop=stop,
+            dependency_step=step,
+        )
+
+    def _sum_over(
+        self,
+        loop_symbol: sp.Symbol,
+        start: ResourceExpr,
+        stop: ResourceExpr,
+        step: ResourceExpr,
+        *,
+        dependency_start: ResourceExpr,
+        dependency_stop: ResourceExpr,
+        dependency_step: ResourceExpr,
+    ) -> ResourceEstimate:
+        """Sum resources while using specialized bounds for wire projection.
+
+        Args:
+            loop_symbol (sp.Symbol): Symbol used for the loop variable.
+            start (ResourceExpr): Inclusive resource-expression start bound.
+            stop (ResourceExpr): Exclusive resource-expression stop bound.
+            step (ResourceExpr): Resource-expression loop step.
+            dependency_start (ResourceExpr): Start bound specialized only for
+                caller-visible wire projection.
+            dependency_stop (ResourceExpr): Stop bound specialized only for
+                caller-visible wire projection.
+            dependency_step (ResourceExpr): Step specialized only for
+                caller-visible wire projection.
+
+        Returns:
+            ResourceEstimate: Estimate with additive metrics summed over the
+                loop and width kept reusable.
+        """
         step_constraint = _ResourceConstraint(
             expression=sp.Abs(step),
             minimum=1,
@@ -1710,10 +1774,21 @@ class ResourceEstimate:
         )
         step_constraint.validate()
         iterations = symbolic_iterations(start, stop, step)
+        projected_iterations = symbolic_iterations(
+            dependency_start,
+            dependency_stop,
+            dependency_step,
+        )
         if loop_symbol not in _free_symbols(self):
-            return _with_constraints(
-                self.repeat(iterations),
-                step_constraint,
+            return _project_dependency_metadata_over_symbol(
+                _with_constraints(
+                    self.repeat(iterations),
+                    step_constraint,
+                ),
+                loop_symbol,
+                start=dependency_start,
+                step=dependency_step,
+                iterations=projected_iterations,
             )
         width, allocation_sites, width_is_exact = _maximum_width_over_range(
             self.width,
@@ -1735,7 +1810,7 @@ class ResourceEstimate:
                 ),
             )
             quality = _combine_quality(quality, EstimateQuality.UPPER_BOUND)
-        return ResourceEstimate(
+        estimate = ResourceEstimate(
             width=width,
             gates=_sum_gates(self.gates, loop_symbol, start, step, iterations),
             depth=_sum_depth(self.depth, loop_symbol, start, step, iterations),
@@ -1847,6 +1922,13 @@ class ResourceEstimate:
             assumptions=assumptions,
             quality=quality,
             active_when=sp.Gt(iterations, _ZERO),
+        )
+        return _project_dependency_metadata_over_symbol(
+            estimate,
+            loop_symbol,
+            start=dependency_start,
+            step=dependency_step,
+            iterations=projected_iterations,
         )
 
     def substitute(self, **values: object) -> ResourceEstimate:
@@ -2057,8 +2139,9 @@ class ResourceEstimate:
             guard_fn (Any | None): Optional rewrite for guarded assumption,
                 quality, and approximation predicates. Defaults to
                 ``constraint_fn``.
-            dependency_fn (Any | None): Optional rewrite for private
-                per-wire completion depths. Defaults to ``constraint_fn``.
+            dependency_fn (Any | None): Optional rewrite for private wire-key
+                indices and per-wire completion depths. Defaults to
+                ``constraint_fn``.
 
         Returns:
             ResourceEstimate: Rewritten estimate.
@@ -2152,11 +2235,15 @@ class ResourceEstimate:
             },
             _input_sizes={owner: fn(size) for owner, size in self._input_sizes.items()},
             _has_output_summary=self._has_output_summary,
-            _dependency_keys=self._dependency_keys,
+            _dependency_keys=_map_dependency_keys(
+                self._dependency_keys,
+                rewrite_dependency,
+            ),
             _dependency_completion=_map_dependency_completion(
                 self._dependency_completion,
                 rewrite_dependency,
             ),
+            _dependency_completion_uniform=self._dependency_completion_uniform,
             _guarded_assumptions=mapped_assumptions,
             _guarded_qualities=mapped_qualities,
             _guarded_approximations=mapped_approximations,
@@ -3750,8 +3837,8 @@ class ResourceInterpreter:
                     used_names=self.branch_condition_names,
                 ):
                     assumption = ResourceAssumption(
-                        "symbolic quantum index uses an owner-wide dependency "
-                        "footprint",
+                        "unresolved quantum index may alias any scalar of its "
+                        "allocation",
                         source=type(operation).__name__,
                     )
                     operation_estimate = operation_estimate._with_metadata(
@@ -3803,6 +3890,7 @@ class ResourceInterpreter:
                                 operation_estimate,
                                 _dependency_keys=frozenset(),
                                 _dependency_completion={},
+                                _dependency_completion_uniform=True,
                             ),
                         )
                     )
@@ -3812,6 +3900,9 @@ class ResourceInterpreter:
                     wire_footprints.append((footprint_keys, footprint_keys))
                     reads = set(footprint_keys)
                     writes = set(footprint_keys)
+                    completion_uniform = (
+                        operation_estimate._dependency_completion_uniform
+                    )
                 else:
                     reads, writes = _quantum_wire_keys(
                         operation,
@@ -3821,6 +3912,12 @@ class ResourceInterpreter:
                     )
                     footprint_keys = frozenset(reads | writes)
                     wire_footprints.append((frozenset(reads), frozenset(writes)))
+                    completion_uniform = _operation_has_uniform_intrinsic_completion(
+                        operation,
+                        operation_estimate,
+                        footprint_keys,
+                        surrounding_controls=_expr(control_count),
+                    )
                 dependency_keys.update(footprint_keys)
                 operation_completion = _normalized_dependency_completion(
                     operation_estimate
@@ -3829,16 +3926,13 @@ class ResourceInterpreter:
                     operation_completion = {
                         key: operation_estimate.depth.depth for key in footprint_keys
                     }
-                scheduled_with_dependencies.append(
-                    (
-                        operation,
-                        dataclasses.replace(
-                            operation_estimate,
-                            _dependency_keys=footprint_keys,
-                            _dependency_completion=operation_completion,
-                        ),
-                    )
+                operation_estimate = dataclasses.replace(
+                    operation_estimate,
+                    _dependency_keys=footprint_keys,
+                    _dependency_completion=operation_completion,
+                    _dependency_completion_uniform=completion_uniform,
                 )
+                scheduled_with_dependencies.append((operation, operation_estimate))
             scheduled = scheduled_with_dependencies
             estimate = ResourceEstimate.seq_all(
                 operation_estimate for _, operation_estimate in scheduled
@@ -3857,12 +3951,23 @@ class ResourceInterpreter:
                     )
                     for footprint in wire_footprints
                 ]
-            scheduled_depth, scheduled_completion = _dependency_depth(
+            (
+                scheduled_depth,
+                scheduled_completion,
+                possible_alias_active,
+                completion_is_uniform,
+            ) = _dependency_depth(
                 scheduled,
                 depth_footprints,
                 measurement_derived=self._measurement_derived,
+                scalar_values=self.condition_values,
+                used_names=self.branch_condition_names,
             )
-            return dataclasses.replace(
+            aggregate_completion_active = _aggregate_completion_overlap_condition(
+                scheduled,
+                depth_footprints,
+            )
+            result = dataclasses.replace(
                 estimate,
                 depth=scheduled_depth,
                 width=_liveness_width(
@@ -3883,7 +3988,31 @@ class ResourceInterpreter:
                     for key, completion in scheduled_completion.items()
                     if key in dependency_keys
                 },
+                _dependency_completion_uniform=completion_is_uniform,
             )
+            if possible_alias_active is not sp.false:
+                assumption = ResourceAssumption(
+                    "symbolic quantum indices may alias and are scheduled "
+                    "conservatively",
+                    source="dependency scheduler",
+                )
+                result = result._with_metadata(
+                    assumptions=(assumption,),
+                    quality=EstimateQuality.UPPER_BOUND,
+                    active_when=possible_alias_active,
+                )
+            if aggregate_completion_active is not sp.false:
+                assumption = ResourceAssumption(
+                    "aggregate latency may over-serialize a later wire dependency "
+                    "and therefore overestimate depth",
+                    source="dependency scheduler",
+                )
+                result = result._with_metadata(
+                    assumptions=(assumption,),
+                    quality=EstimateQuality.UPPER_BOUND,
+                    active_when=aggregate_completion_active,
+                )
+            return result
         finally:
             self._measurement_derived = previous_taint
 
@@ -4646,6 +4775,14 @@ class ResourceInterpreter:
             resolver,
         )
         iterations = symbolic_iterations(start, stop, step)
+        dependency_start, dependency_stop, dependency_step = (
+            _specialize_dependency_expression(
+                bound,
+                self.condition_values,
+                self.branch_condition_names,
+            )
+            for bound in (start, stop, step)
+        )
         if operation.region_args:
             estimate = self._eval_region_for(
                 operation,
@@ -4667,7 +4804,15 @@ class ResourceInterpreter:
                     self._allocation_owners_by_uuid,
                 ),
             )
-            estimate = inner.sum_over(loop_symbol, start, stop, step)
+            estimate = inner._sum_over(
+                loop_symbol,
+                start,
+                stop,
+                step,
+                dependency_start=dependency_start,
+                dependency_stop=dependency_stop,
+                dependency_step=dependency_step,
+            )
             parallel_depth: DepthResources | None = None
             if _expr(controls) == _ZERO:
                 parallel_depth = _symbolic_disjoint_loop_depth(
@@ -4676,7 +4821,9 @@ class ResourceInterpreter:
                     inner.depth,
                     loop_symbol=loop_symbol,
                     iterations=iterations,
+                    allocated_qubits=inner.width.allocated_qubits,
                     clean_ancillas=inner.width.clean_ancilla_qubits,
+                    dirty_ancillas=inner.width.dirty_ancilla_qubits,
                     scalar_values=self.condition_values,
                     used_names=self.branch_condition_names,
                 )
@@ -4685,22 +4832,78 @@ class ResourceInterpreter:
                         operation,
                         resolver,
                         inner.depth,
+                        body_dependency_keys=inner._dependency_keys,
                         start=start,
                         stop=stop,
                         step=step,
                         loop_symbol=loop_symbol,
+                        allocated_qubits=inner.width.allocated_qubits,
                         clean_ancillas=inner.width.clean_ancilla_qubits,
+                        dirty_ancillas=inner.width.dirty_ancilla_qubits,
                         scalar_values=self.condition_values,
                         used_names=self.branch_condition_names,
                     )
             if parallel_depth is not None:
-                estimate = dataclasses.replace(estimate, depth=parallel_depth)
-            elif _expr(controls) == _ZERO and _loop_body_has_symbolic_quantum_index(
-                operation,
-                child,
-                loop_symbol,
-                scalar_values=self.condition_values,
-                used_names=self.branch_condition_names,
+                parallel_completion = _concrete_loop_dependency_completion(
+                    inner._dependency_completion,
+                    loop_symbol,
+                    start=start,
+                    stop=stop,
+                    step=step,
+                    scalar_values=self.condition_values,
+                    used_names=self.branch_condition_names,
+                )
+                if parallel_completion is None:
+                    parallel_completion = _uniform_parallel_loop_dependency_completion(
+                        inner._dependency_completion,
+                        body_depth=inner.depth.depth,
+                        projected_keys=estimate._dependency_keys,
+                        parallel_depth=parallel_depth.depth,
+                        loop_symbol=loop_symbol,
+                    )
+                estimate = dataclasses.replace(
+                    estimate,
+                    depth=parallel_depth,
+                    _dependency_completion=(
+                        parallel_completion
+                        if parallel_completion is not None
+                        else estimate._dependency_completion
+                    ),
+                    _dependency_completion_uniform=(
+                        inner._dependency_completion_uniform is True
+                        and all(
+                            loop_symbol
+                            not in cast(
+                                ResourceExpr,
+                                getattr(inner.depth, field.name),
+                            ).free_symbols
+                            for field in dataclasses.fields(DepthResources)
+                        )
+                    ),
+                )
+                if parallel_completion is None and estimate._dependency_keys:
+                    assumption = ResourceAssumption(
+                        "parallel loop uses aggregate completion latency because "
+                        "per-wire exit layers could not be projected exactly",
+                        source="for",
+                    )
+                    estimate = estimate._with_metadata(
+                        assumptions=(assumption,),
+                        quality=EstimateQuality.UPPER_BOUND,
+                        active_when=sp.Gt(iterations, _ZERO),
+                    )
+            elif _expr(controls) == _ZERO and (
+                _dependency_keys_depend_on_symbol(
+                    inner._dependency_keys,
+                    loop_symbol,
+                )
+                or _loop_body_has_symbolic_quantum_index(
+                    operation,
+                    child,
+                    loop_symbol,
+                    scalar_values=self.condition_values,
+                    used_names=self.branch_condition_names,
+                )
             ):
                 assumption = ResourceAssumption(
                     "symbolic loop depth is sequential because disjoint "
@@ -4719,12 +4922,7 @@ class ResourceInterpreter:
             active_when=sp.Gt(iterations, _ZERO),
             allocation_owners_by_uuid=self._allocation_owners_by_uuid,
         )
-        return _with_aggregate_boundary_depth_metadata(
-            estimate,
-            estimate,
-            source="for",
-            boundary="control-flow",
-        )
+        return estimate
 
     def _eval_region_for(
         self,
@@ -5034,7 +5232,23 @@ class ResourceInterpreter:
                 "loop-carried recurrence. Supply concrete loop-bound inputs or "
                 "use an affine or fixed-point carry."
             )
-        estimate = inner.sum_over(loop_symbol, start, stop, step)
+        dependency_start, dependency_stop, dependency_step = (
+            _specialize_dependency_expression(
+                bound,
+                self.condition_values,
+                self.branch_condition_names,
+            )
+            for bound in (start, stop, step)
+        )
+        estimate = inner._sum_over(
+            loop_symbol,
+            start,
+            stop,
+            step,
+            dependency_start=dependency_start,
+            dependency_stop=dependency_stop,
+            dependency_step=dependency_step,
+        )
         for arg in operation.region_args:
             resolver.bind(arg.result, final_values[arg.result.uuid])
         if assumptions:
@@ -5158,12 +5372,7 @@ class ResourceInterpreter:
             active_when=sp.Gt(trip_count, _ZERO),
             allocation_owners_by_uuid=self._allocation_owners_by_uuid,
         )
-        return _with_aggregate_boundary_depth_metadata(
-            estimate,
-            estimate,
-            source="while",
-            boundary="control-flow",
-        )
+        return estimate
 
     def eval_if(
         self,
@@ -5252,12 +5461,7 @@ class ResourceInterpreter:
                 _input_sizes=true_inputs if taken else false_inputs,
                 _has_output_summary=True,
             )
-            return _with_aggregate_boundary_depth_metadata(
-                estimate,
-                estimate,
-                source="if",
-                boundary="control-flow",
-            )
+            return estimate
         is_runtime_condition = operation.condition.uuid in self._measurement_derived
         if is_runtime_condition:
             _require_uncontrolled_operation(operation, controls)
@@ -5308,12 +5512,7 @@ class ResourceInterpreter:
                 _input_sizes=input_sizes,
                 _has_output_summary=True,
             )
-            return _with_aggregate_boundary_depth_metadata(
-                combined,
-                combined,
-                source="if",
-                boundary="control-flow",
-            )
+            return combined
         combined = true_estimate.choice(false_estimate)
         if note is None:
             combined = dataclasses.replace(
@@ -5322,12 +5521,7 @@ class ResourceInterpreter:
                 _input_sizes=input_sizes,
                 _has_output_summary=True,
             )
-            return _with_aggregate_boundary_depth_metadata(
-                combined,
-                combined,
-                source="if",
-                boundary="control-flow",
-            )
+            return combined
         trace = combined.trace
         if trace is not None:
             trace = dataclasses.replace(trace, assumptions=(*trace.assumptions, note))
@@ -5339,12 +5533,7 @@ class ResourceInterpreter:
             _has_output_summary=True,
         )
         combined = combined._with_metadata(assumptions=(note,))
-        return _with_aggregate_boundary_depth_metadata(
-            combined,
-            combined,
-            source="if",
-            boundary="control-flow",
-        )
+        return combined
 
     def _publish_if_results(
         self,
@@ -5632,12 +5821,7 @@ class ResourceInterpreter:
             active_when=sp.Gt(cardinality, _ZERO),
             allocation_owners_by_uuid=self._allocation_owners_by_uuid,
         )
-        return _with_aggregate_boundary_depth_metadata(
-            estimate,
-            estimate,
-            source="for_items",
-            boundary="control-flow",
-        )
+        return estimate
 
     def _eval_region_for_items(
         self,
@@ -6381,9 +6565,16 @@ class ResourceInterpreter:
             if control_indices is not None
             else ()
         )
+        selected_control_keys = _controlled_u_control_wire_keys(
+            operation,
+            resolved_indices,
+            resolver,
+            scalar_values=self.condition_values,
+            used_names=self.branch_condition_names,
+        )
         unresolved_control_selection = control_indices is not None and any(
-            not index.is_number or not _is_concrete_integer(index)
-            for index in resolved_indices
+            index is None or index is _UNKNOWN_WIRE_INDEX
+            for _owner, index in selected_control_keys
         )
         callable_name = (
             operation.callable_ref.name
@@ -6518,15 +6709,7 @@ class ResourceInterpreter:
             if dependency_keys is not None:
                 mapped_keys = set(dependency_keys)
                 if _estimate_has_nonzero_depth(estimate):
-                    mapped_keys.update(
-                        _controlled_u_control_wire_keys(
-                            operation,
-                            resolved_indices,
-                            resolver,
-                            scalar_values=self.condition_values,
-                            used_names=self.branch_condition_names,
-                        )
-                    )
+                    mapped_keys.update(selected_control_keys)
                 estimate = dataclasses.replace(
                     estimate,
                     _dependency_keys=frozenset(mapped_keys),
@@ -6542,8 +6725,8 @@ class ResourceInterpreter:
             )
             if unresolved_control_selection:
                 assumption = ResourceAssumption(
-                    "symbolic control selection uses the whole control-pool "
-                    "dependency footprint",
+                    "control selection could not be resolved to scalar "
+                    "control-pool dependency addresses",
                     source=callable_name,
                 )
                 estimate = estimate._with_metadata(
@@ -8034,6 +8217,146 @@ def _normalized_dependency_completion(
     return {key: estimate.depth.depth for key in keys}
 
 
+def _project_dependency_metadata_over_symbol(
+    estimate: ResourceEstimate,
+    symbol: sp.Symbol,
+    *,
+    start: ResourceExpr,
+    step: ResourceExpr,
+    iterations: ResourceExpr,
+) -> ResourceEstimate:
+    """Project loop-local scalar wire keys into the enclosing scope.
+
+    A loop induction symbol is local to one iteration. Once the loop is
+    summarized, an address such as ``register[i]`` represents a set of
+    caller-visible wires rather than one scalar wire. Concrete bounded loops
+    enumerate those addresses exactly. A symbolic or large one-dimensional
+    loop retains a canonical range descriptor, while a nested range that
+    cannot be represented without leaking an outer binder falls back to an
+    unknown-scalar marker. Neither representation pretends that the loop
+    definitely touched the whole allocation.
+
+    Args:
+        estimate (ResourceEstimate): Estimate whose dependency metadata may
+            contain the bound symbol.
+        symbol (sp.Symbol): Bound symbol leaving scope.
+        start (ResourceExpr): First Python-range value.
+        step (ResourceExpr): Python-range step.
+        iterations (ResourceExpr): Number of executed iterations.
+
+    Returns:
+        ResourceEstimate: Estimate with concrete loop addresses enumerated and
+            unresolved ranges represented without leaking local symbols.
+    """
+
+    start_expr = _expr(start)
+    step_expr = _expr(step)
+    iterations_expr = _expr(iterations)
+    concrete_values: tuple[sp.Integer, ...] | None = None
+    if all(
+        bound.is_number and _is_concrete_integer(bound)
+        for bound in (start_expr, step_expr, iterations_expr)
+    ):
+        concrete_start = int(start_expr)
+        concrete_step = int(step_expr)
+        concrete_iterations = int(iterations_expr)
+        if (
+            concrete_step != 0
+            and 0 <= concrete_iterations <= _MAX_EXACT_LOOP_WIRE_EXPANSION
+        ):
+            concrete_values = tuple(
+                sp.Integer(concrete_start + concrete_step * offset)
+                for offset in range(concrete_iterations)
+            )
+
+    def project(key: WireKey) -> tuple[WireKey, ...]:
+        """Project one symbol-dependent scalar address.
+
+        Args:
+            key (WireKey): Allocation-owner and scalar-index address.
+
+        Returns:
+            tuple[WireKey, ...]: Concrete projected addresses, one unknown
+                scalar address, or the unchanged address.
+        """
+        owner, index = key
+        if isinstance(index, _WireRangeIndex):
+            range_symbols = (
+                index.index_at_offset.free_symbols | index.iterations.free_symbols
+            )
+            if symbol not in range_symbols:
+                return (key,)
+            if concrete_values is None:
+                return ((owner, _UNKNOWN_WIRE_INDEX),)
+            return tuple(
+                (
+                    owner,
+                    index.mapped(
+                        lambda expression: expression.subs(
+                            symbol,
+                            value,
+                            simultaneous=True,
+                        )
+                    ),
+                )
+                for value in concrete_values
+            )
+        if not isinstance(index, sp.Expr) or symbol not in index.free_symbols:
+            return (key,)
+        if concrete_values is None:
+            return (
+                (
+                    owner,
+                    _symbolic_wire_range_index(
+                        index,
+                        symbol,
+                        start=start_expr,
+                        step=step_expr,
+                        iterations=iterations_expr,
+                    ),
+                ),
+            )
+        return tuple(
+            (
+                owner,
+                _normalize_wire_index(
+                    cast(
+                        ResourceExpr,
+                        index.subs(symbol, value, simultaneous=True),
+                    )
+                ),
+            )
+            for value in concrete_values
+        )
+
+    keys = estimate._dependency_keys
+    projected_keys = (
+        frozenset(projected for key in keys for projected in project(key))
+        if keys is not None
+        else None
+    )
+    completion = estimate._dependency_completion
+    projected_completion: dict[WireKey, ResourceExpr] | None
+    if completion is None:
+        projected_completion = None
+    else:
+        projected_completion = {}
+        for key, depth in completion.items():
+            for projected in project(key):
+                projected_completion[projected] = cast(
+                    ResourceExpr,
+                    sp.Max(
+                        projected_completion.get(projected, _ZERO),
+                        depth,
+                    ),
+                )
+    return dataclasses.replace(
+        estimate,
+        _dependency_keys=projected_keys,
+        _dependency_completion=projected_completion,
+    )
+
+
 def _seq_dependency_completion(
     left: ResourceEstimate,
     right: ResourceEstimate,
@@ -8124,11 +8447,52 @@ def _conditional_dependency_completion(
     }
 
 
+def _map_dependency_key(
+    key: WireKey,
+    fn: Any,
+) -> WireKey:
+    """Rewrite the symbolic index of one private dependency key.
+
+    Args:
+        key (WireKey): Allocation-owner and optional scalar-index address.
+        fn (Any): Symbolic expression rewrite callable.
+
+    Returns:
+        WireKey: Address with its symbolic scalar index rewritten and
+            normalized.
+    """
+    owner, index = key
+    if isinstance(index, _WireRangeIndex):
+        return owner, index.mapped(fn)
+    if not isinstance(index, sp.Expr):
+        return key
+    return owner, _normalize_wire_index(cast(ResourceExpr, fn(index)))
+
+
+def _map_dependency_keys(
+    keys: frozenset[WireKey] | None,
+    fn: Any,
+) -> frozenset[WireKey] | None:
+    """Rewrite every symbolic private dependency key.
+
+    Args:
+        keys (frozenset[WireKey] | None): Dependency addresses, or ``None``
+            when the footprint is unavailable.
+        fn (Any): Symbolic expression rewrite callable.
+
+    Returns:
+        frozenset[WireKey] | None: Rewritten dependency addresses.
+    """
+    if keys is None:
+        return None
+    return frozenset(_map_dependency_key(key, fn) for key in keys)
+
+
 def _map_dependency_completion(
     completion: Mapping[WireKey, ResourceExpr] | None,
     fn: Any,
 ) -> dict[WireKey, ResourceExpr] | None:
-    """Rewrite per-wire completion depths and discard zero entries.
+    """Rewrite per-wire addresses and completion depths.
 
     Args:
         completion (Mapping[WireKey, ResourceExpr] | None): Completion depths
@@ -8136,7 +8500,8 @@ def _map_dependency_completion(
         fn (Any): Symbolic expression rewrite callable.
 
     Returns:
-        dict[WireKey, ResourceExpr] | None: Rewritten completion depths.
+        dict[WireKey, ResourceExpr] | None: Rewritten nonzero completion
+            depths with colliding addresses merged.
     """
     if completion is None:
         return None
@@ -8144,7 +8509,11 @@ def _map_dependency_completion(
     for key, value in completion.items():
         rewritten = cast(ResourceExpr, fn(value))
         if rewritten != _ZERO:
-            mapped[key] = rewritten
+            mapped_key = _map_dependency_key(key, fn)
+            mapped[mapped_key] = cast(
+                ResourceExpr,
+                sp.Max(mapped.get(mapped_key, _ZERO), rewritten),
+            )
     return mapped
 
 
@@ -11510,6 +11879,7 @@ def _apply_inputs(
     substituted = estimate._map_expr(
         lambda expr: _substitute_resource_expr(expr, subs),
         constraint_fn=lambda expr: _safe_constraint_substitute(expr, subs),
+        dependency_fn=lambda expr: _substitute_resource_expr(expr, subs),
     )
     if ignored:
         note = ResourceAssumption(

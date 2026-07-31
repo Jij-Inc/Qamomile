@@ -216,7 +216,9 @@ def test_concrete_loop_simplifies_constant_depth_fields_once(
         stop=sp.Integer(3),
         step=sp.Integer(1),
         loop_symbol=sp.Dummy("loop", integer=True),
+        allocated_qubits=sp.Integer(0),
         clean_ancillas=sp.Integer(0),
+        dirty_ancillas=sp.Integer(0),
     )
 
     assert depth is not None
@@ -357,5 +359,29 @@ def test_all_z_pauli_evolution_skips_pairwise_commutation_scan(
     pairwise.assert_not_called()
     assert estimate.quality is qmc.EstimateQuality.EXACT
     assert not any(
-        assumption.source == "PauliEvolveOp" for assumption in estimate.assumptions
+        "Lie-Trotter" in assumption.message for assumption in estimate.assumptions
     )
+
+
+def test_completion_uniformity_avoids_general_symbolic_simplification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed structural proof stays conservative without calling simplify."""
+    value = sp.Symbol("value", integer=True, nonnegative=True)
+    expression = sp.Piecewise((1, sp.Eq(value, 0)), (value, True))
+    simplify = Mock(
+        side_effect=AssertionError(
+            "completion uniformity must not run general simplification"
+        )
+    )
+    monkeypatch.setattr(scheduling_module, "_safe_simplify", simplify)
+
+    assert scheduling_module._expressions_proven_equal_without_simplify(
+        expression,
+        expression,
+    )
+    assert not scheduling_module._expressions_proven_equal_without_simplify(
+        expression,
+        sp.Integer(1),
+    )
+    simplify.assert_not_called()
