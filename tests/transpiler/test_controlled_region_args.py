@@ -83,6 +83,26 @@ def _nested_carried_index_body(
 
 
 @qmc.qkernel
+def _conditional_carried_angle_body(
+    targets: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Update a loop-carried angle in a statically selected branch.
+
+    Args:
+        targets (qmc.Vector[qmc.Qubit]): Target register to rotate.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Register after two controlled pi rotations.
+    """
+    angle = qmc.float_(0.0)
+    for iteration in qmc.range(2):
+        if iteration == 0:
+            angle = angle + math.pi
+        targets[0] = qmc.rx(targets[0], angle)
+    return targets
+
+
+@qmc.qkernel
 def _inverse_source_with_carried_index(
     targets: qmc.Vector[qmc.Qubit],
 ) -> qmc.Vector[qmc.Qubit]:
@@ -756,6 +776,34 @@ def _controlled_sample_kernel_with_width(body: Any, target_count: int) -> Any:
     return kernel
 
 
+def _controlled_sample_kernel_with_two_controls(body: Any) -> Any:
+    """Build a two-control sample kernel for a vector-target body.
+
+    Args:
+        body (Any): Qkernel that consumes and returns a target vector.
+
+    Returns:
+        Any: Qkernel applying ``body`` under two enabled controls.
+    """
+    controlled = qmc.control(body, num_controls=2)
+
+    @qmc.qkernel
+    def kernel() -> qmc.Vector[qmc.Bit]:
+        """Enable both controls, apply the body, and measure its targets.
+
+        Returns:
+            qmc.Vector[qmc.Bit]: Measured target bits.
+        """
+        controls = qmc.qubit_array(2, "controls")
+        controls[0] = qmc.x(controls[0])
+        controls[1] = qmc.x(controls[1])
+        targets = qmc.qubit_array(2, "targets")
+        controls, targets = controlled(controls, targets)
+        return qmc.measure(targets)
+
+    return kernel
+
+
 def _sample(backend: str, body: Any) -> tuple[int, ...]:
     """Execute one deterministic controlled body on ``backend``.
 
@@ -768,6 +816,25 @@ def _sample(backend: str, body: Any) -> tuple[int, ...]:
     """
     transpiler = _make_transpiler(backend)
     executable = transpiler.transpile(_controlled_sample_kernel(body))
+    sampled = executable.sample(transpiler.executor(), shots=16).result()
+    assert len(sampled.results) == 1
+    value, count = sampled.results[0]
+    assert count == 16
+    return value
+
+
+def _sample_with_two_controls(backend: str, body: Any) -> tuple[int, ...]:
+    """Execute one deterministic two-control body on ``backend``.
+
+    Args:
+        backend (str): Backend key accepted by ``_make_transpiler``.
+        body (Any): Two-target qkernel to apply under two controls.
+
+    Returns:
+        tuple[int, ...]: Deterministic measured target tuple.
+    """
+    transpiler = _make_transpiler(backend)
+    executable = transpiler.transpile(_controlled_sample_kernel_with_two_controls(body))
     sampled = executable.sample(transpiler.executor(), shots=16).result()
     assert len(sampled.results) == 1
     value, count = sampled.results[0]
@@ -812,6 +879,7 @@ def _sample_inverse(
     [
         (_carried_index_body, (1, 0)),
         (_nested_carried_index_body, (1, 1)),
+        (_conditional_carried_angle_body, (0, 0)),
     ],
 )
 def test_controlled_region_args_execute_across_backends(
@@ -821,6 +889,17 @@ def test_controlled_region_args_execute_across_backends(
 ) -> None:
     """Controlled loop carries advance on every nested static iteration."""
     assert _sample(backend, body) == expected
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_controlled_conditional_carry_profiles_across_backends(
+    backend: str,
+) -> None:
+    """Two-control lowering preserves a carry updated by a static branch."""
+    assert _sample_with_two_controls(backend, _conditional_carried_angle_body) == (
+        0,
+        0,
+    )
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

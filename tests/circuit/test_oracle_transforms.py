@@ -505,6 +505,39 @@ def test_serialized_repeated_oracle_keeps_one_shared_cost_symbol() -> None:
     assert estimate.substitute(n=3).gates.total == 6
 
 
+def test_serialized_oracles_share_cost_symbol_across_local_aliases() -> None:
+    """Payload-wide slots preserve a symbol despite definition-local aliases."""
+    shadow_symbol = sp.Dummy("n", integer=True, nonnegative=True)
+    shared_symbol = sp.Dummy("n", integer=True, nonnegative=True)
+    left_oracle = qmc.opaque(
+        "serialized_alias_collision_left",
+        num_qubits=1,
+        cost=qmc.ResourceEstimate(
+            gates=qmc.GateResources(total=shadow_symbol + shared_symbol),
+        ),
+    )
+    right_oracle = qmc.opaque(
+        "serialized_alias_collision_right",
+        num_qubits=1,
+        cost=qmc.ResourceEstimate(
+            gates=qmc.GateResources(total=shared_symbol),
+        ),
+    )
+
+    @qmc.qkernel
+    def circuit() -> tuple[qmc.Qubit, qmc.Qubit]:
+        """Invoke definitions that assign different local aliases to one symbol."""
+        (left,) = left_oracle(qmc.qubit("left"))
+        (right,) = right_oracle(qmc.qubit("right"))
+        return left, right
+
+    restored = deserialize(serialize(circuit))
+    estimate = qmc.estimate_resources(restored)
+
+    assert set(estimate.parameters) == {"n", "n__2"}
+    assert estimate.substitute(n=2, n__2=5).gates.total == 12
+
+
 def test_serialized_oracle_cost_symbol_stays_distinct_from_kernel_input() -> None:
     """A fixed-cost parameter does not merge with a same-named qkernel input."""
     cost_symbol = sp.Dummy("n", integer=True, nonnegative=True)

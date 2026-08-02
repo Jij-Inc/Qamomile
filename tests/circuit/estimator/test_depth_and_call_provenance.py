@@ -711,6 +711,25 @@ def test_symbolic_vector_broadcast_has_layer_depth_not_element_depth() -> None:
     assert empty.quality is qm.EstimateQuality.EXACT
 
 
+def test_repeated_symbolic_branch_depth_omits_redundant_activity_indicator() -> None:
+    """A branch guard already carried by duration stays concise in depth."""
+
+    @qm.qkernel
+    def circuit(flag: qm.UInt) -> qm.Bit:
+        """Apply 64 conditional layers before an unconditional measurement."""
+        target = qm.qubit("target")
+        for _ in range(64):
+            if flag:
+                target = qm.x(target)
+        return qm.measure(target)
+
+    estimate = circuit.estimate_resources()
+    flag = estimate.parameters["flag"]
+
+    assert estimate.depth.depth == sp.Piecewise((65, flag > 0), (1, True))
+    assert "_ConditionIndicator" not in str(estimate.depth.depth)
+
+
 def test_concrete_loop_parallelizes_disjoint_array_elements() -> None:
     """Concrete iterations on distinct slots share one gate layer."""
 
@@ -887,6 +906,49 @@ def test_loop_reuses_body_workspace_sequentially(
     assert estimate.depth.gate_depth == 6
 
 
+def test_opaque_category_depths_survive_zero_aggregate_depth() -> None:
+    """Each declared depth category is scheduled without requiring total depth."""
+    oracle = qm.opaque(
+        "category_depth_oracle",
+        num_qubits=1,
+        cost=qm.ResourceEstimate(
+            gates=qm.GateResources(total=10, t=10),
+            depth=qm.DepthResources(
+                clifford_depth=1,
+                rotation_depth=2,
+                t_depth=3,
+                toffoli_depth=4,
+                non_clifford_depth=5,
+                measurement_depth=6,
+                gate_depth=7,
+                reset_depth=8,
+            ),
+        ),
+    )
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Apply the category-only opaque depth twice to one target."""
+        target = qm.qubit("target")
+        (target,) = oracle(target)
+        (target,) = oracle(target)
+        return target
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.depth == qm.DepthResources(
+        depth=0,
+        clifford_depth=2,
+        rotation_depth=4,
+        t_depth=6,
+        toffoli_depth=8,
+        non_clifford_depth=10,
+        measurement_depth=12,
+        gate_depth=14,
+        reset_depth=16,
+    )
+
+
 def test_ordinary_call_uses_only_body_touched_arguments_for_depth() -> None:
     """An unused pass-through argument remains parallel with the call body."""
 
@@ -903,6 +965,44 @@ def test_ordinary_call_uses_only_body_touched_arguments_for_depth() -> None:
 
     assert estimate.depth.depth == 1
     assert estimate.quality is qm.EstimateQuality.EXACT
+
+
+def test_nonunitary_calls_disclose_global_barrier_depth() -> None:
+    """Measurement-bearing call boundaries report conservative serialization."""
+
+    @qm.qkernel
+    def measured_body(target: qm.Qubit) -> qm.Bit:
+        """Apply one gate and then measure its target."""
+        target = qm.h(target)
+        return qm.measure(target)
+
+    @qm.qkernel
+    def nested() -> tuple[qm.Bit, qm.Bit]:
+        """Invoke the measured body on two disjoint targets."""
+        left = measured_body(qm.qubit("left"))
+        right = measured_body(qm.qubit("right"))
+        return left, right
+
+    @qm.qkernel
+    def inline() -> tuple[qm.Bit, qm.Bit]:
+        """Write the same disjoint gate and measurement pairs inline."""
+        left = qm.h(qm.qubit("left"))
+        left_result = qm.measure(left)
+        right = qm.h(qm.qubit("right"))
+        right_result = qm.measure(right)
+        return left_result, right_result
+
+    nested_estimate = nested.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    inline_estimate = inline.estimate_resources(basis=qm.GateBasis.LOGICAL)
+
+    assert inline_estimate.depth.depth == 2
+    assert inline_estimate.quality is qm.EstimateQuality.EXACT
+    assert nested_estimate.depth.depth == 4
+    assert nested_estimate.quality is qm.EstimateQuality.UPPER_BOUND
+    assert any(
+        "non-unitary callable boundary" in assumption.message
+        for assumption in nested_estimate.assumptions
+    )
 
 
 def test_inverse_call_uses_only_body_touched_arguments_for_depth() -> None:
@@ -1448,6 +1548,27 @@ def test_measurement_provenance_sets_runtime_choice_and_feed_forward_depth() -> 
     assert estimate.depth.depth == 4
     assert not estimate.gates.total.has(sp.Piecewise)
     assert estimate.parameters == {}
+
+
+def test_feed_forward_barrier_orders_every_specialized_depth_field() -> None:
+    """A runtime branch separates same-category work even with zero duration."""
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
+        """Place disjoint measurements and T gates around one runtime branch."""
+        predicate = qm.measure(qm.qubit("predicate"))
+        before_t = qm.t(qm.qubit("before_t"))
+        branch_target = qm.qubit("branch_target")
+        if predicate:
+            branch_target = qm.h(branch_target)
+        qm.measure(qm.qubit("after_measurement"))
+        after_t = qm.t(qm.qubit("after_t"))
+        return before_t, branch_target, after_t
+
+    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+
+    assert estimate.depth.measurement_depth == 2
+    assert estimate.depth.t_depth == 2
 
 
 def test_measurement_provenance_crosses_uncontrolled_inverse_boundary() -> None:

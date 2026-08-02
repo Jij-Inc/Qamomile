@@ -1391,8 +1391,8 @@ class TestControlledOracle:
         self,
         num_control_qubits: object,
     ) -> None:
-        """Oracle definitions require a plain Python integer control count."""
-        with pytest.raises(TypeError, match="plain Python int"):
+        """Oracle definitions require a non-boolean integral control count."""
+        with pytest.raises(TypeError, match="must be an integer"):
             qmc.opaque(
                 "invalid_control_count",
                 num_qubits=1,

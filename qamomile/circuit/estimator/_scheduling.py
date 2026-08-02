@@ -379,6 +379,32 @@ def _estimate_has_nonzero_depth(estimate: ResourceEstimate) -> bool:
     )
 
 
+def _estimate_depth_activity_condition(estimate: ResourceEstimate) -> Boolean:
+    """Return when at least one declared depth field is active.
+
+    Aggregate opaque costs may provide category depths without also providing
+    ``depth``. Such a declaration still participates in dependency barriers
+    for every category, including categories where its own duration is zero.
+
+    Args:
+        estimate (ResourceEstimate): Estimate whose depth fields define
+            operation activity.
+
+    Returns:
+        Boolean: Symbolic condition under which any depth field is nonzero.
+    """
+    active: Boolean = sp.false
+    for field in dataclasses.fields(DepthResources):
+        field_active = _resource_activity_condition(
+            cast(ResourceExpr, getattr(estimate.depth, field.name))
+        )
+        if field_active is sp.true:
+            return sp.true
+        if field_active is not sp.false:
+            active = cast(Boolean, sp.Or(active, field_active))
+    return active
+
+
 def _merge_dependency_keys(
     left: ResourceEstimate,
     right: ResourceEstimate,
@@ -1096,7 +1122,7 @@ def _with_body_boundary_depth_metadata(
         return estimate
     bracket_condition = _and_conditions(
         sp.Gt(_expr(zero_controls), _ZERO),
-        _resource_activity_condition(estimate.depth.depth),
+        _estimate_depth_activity_condition(estimate),
     )
     if keys and bracket_condition is not sp.false:
         assumption = ResourceAssumption(
@@ -1111,7 +1137,7 @@ def _with_body_boundary_depth_metadata(
         )
     broadcast_condition = _and_conditions(
         sp.Gt(_expr(scalar_broadcast), _ONE),
-        _resource_activity_condition(estimate.depth.depth),
+        _estimate_depth_activity_condition(estimate),
     )
     if broadcast_condition is not sp.false:
         assumption = ResourceAssumption(
@@ -1580,8 +1606,15 @@ def _bounded_concrete_loop_values(
     concrete_start, concrete_stop, concrete_step = (int(value) for value in bounds)
     if concrete_step == 0:
         return None
-    iterations = range(concrete_start, concrete_stop, concrete_step)
-    return iterations if len(iterations) <= limit else None
+    if concrete_step > 0:
+        distance = concrete_stop - concrete_start
+        iteration_count = 0 if distance <= 0 else (distance - 1) // concrete_step + 1
+    else:
+        distance = concrete_start - concrete_stop
+        iteration_count = 0 if distance <= 0 else (distance - 1) // -concrete_step + 1
+    if iteration_count > limit:
+        return None
+    return range(concrete_start, concrete_stop, concrete_step)
 
 
 def _concrete_loop_dependency_completion(
@@ -1836,7 +1869,7 @@ def _aggregate_completion_overlap_condition(
                 "A nonzero-depth scheduled operation requires a wire footprint."
             )
         reads, writes = map(set, footprint)
-        active = _resource_activity_condition(estimate.depth.depth)
+        active = _estimate_depth_activity_condition(estimate)
         for owner, index in reads:
             owner_indices = uncertain_indices.get(owner)
             if owner_indices is None:
@@ -2062,6 +2095,37 @@ def _conditional_completion(
     )
 
 
+def _completion_after_conditional_duration(
+    finish: ResourceExpr,
+    start: ResourceExpr,
+    inactive: ResourceExpr,
+    active_when: Boolean,
+) -> ResourceExpr:
+    """Keep one scheduled completion compact across an inactive duration.
+
+    When ``start`` already equals the inactive completion, ``finish`` differs
+    only by the operation duration. That duration is zero whenever its
+    activity guard is false, so wrapping the same condition in an additional
+    :class:`_ConditionIndicator` is redundant.
+
+    Args:
+        finish (ResourceExpr): Completion after adding the operation duration.
+        start (ResourceExpr): Dependency start selected for the operation.
+        inactive (ResourceExpr): Completion retained when the duration is zero.
+        active_when (Boolean): Guard under which the duration may be nonzero.
+
+    Returns:
+        ResourceExpr: Exact completion with no redundant activity indicator
+            when structural equality proves it unnecessary.
+    """
+    if active_when is sp.true or _expressions_proven_equal_without_simplify(
+        start,
+        inactive,
+    ):
+        return finish
+    return _conditional_completion(finish, inactive, active_when)
+
+
 def _dependency_depth(
     scheduled: Sequence[tuple[Operation, ResourceEstimate]],
     wire_footprints: Sequence[_WireFootprint | None],
@@ -2144,14 +2208,15 @@ def _dependency_depth(
             and estimate._dependency_completion_uniform is not True
         ):
             completion_is_uniform = False
-        operation_active = _resource_activity_condition(estimate.depth.depth)
-        if operation_active is sp.false:
-            continue
         schedulable = _operation_depth_is_dependency_schedulable(
             operation,
             measurement_derived or set(),
         )
+        operation_active = _estimate_depth_activity_condition(estimate)
+        if operation_active is sp.false:
+            continue
         for field in fields:
+            duration = cast(ResourceExpr, getattr(estimate.depth, field))
             owner_depths = availability[field]
             definite_dependencies: list[ResourceExpr] = []
             possible_dependencies: list[ResourceExpr] = []
@@ -2197,31 +2262,24 @@ def _dependency_depth(
                     peaks[field],
                     barrier_availability[field],
                 )
-            duration = cast(ResourceExpr, getattr(estimate.depth, field))
             finish = start + duration
             peaks[field] = _resource_max(peaks[field], finish)
             if not schedulable:
                 previous_barrier = barrier_availability[field]
-                barrier_availability[field] = (
-                    finish
-                    if operation_active is sp.true
-                    else _conditional_completion(
-                        finish,
-                        previous_barrier,
-                        operation_active,
-                    )
+                barrier_availability[field] = _completion_after_conditional_duration(
+                    finish,
+                    start,
+                    previous_barrier,
+                    operation_active,
                 )
             for owner, index in touched:
                 wire_depth = owner_depths.setdefault(owner, {})
                 previous = wire_depth.get(index, _ZERO)
-                wire_depth[index] = (
-                    finish
-                    if operation_active is sp.true
-                    else _conditional_completion(
-                        finish,
-                        previous,
-                        operation_active,
-                    )
+                wire_depth[index] = _completion_after_conditional_duration(
+                    finish,
+                    start,
+                    previous,
+                    operation_active,
                 )
         for owner, index in touched:
             indices_by_owner.setdefault(owner, _OwnerWireIndices()).add(index)
@@ -2386,7 +2444,9 @@ def _captured_quantum_allocations(
     Branch liveness must start with captured wires live so measuring or
     replacing them can release capacity before a branch-local allocation. A
     value is captured when it is read by the nested list but is not produced by
-    any operation in that same list.
+    any operation in that same list. Array elements and slice views carry fresh
+    SSA UUIDs, so a value whose root owner comes from a body-local QInit is also
+    excluded explicitly.
 
     Args:
         operations (Sequence[Operation]): Nested operations to inspect.
@@ -2404,6 +2464,18 @@ def _captured_quantum_allocations(
         for result in operation.results
         if isinstance(result, Value)
     }
+    local_allocation_owners_by_uuid = {
+        result.uuid: _quantum_allocation_owner(result)
+        for operation in operations
+        if isinstance(operation, QInitOperation)
+        for result in operation.results
+        if isinstance(result, Value) and result.type.is_quantum()
+    }
+    local_allocation_owners = frozenset(local_allocation_owners_by_uuid.values())
+    resolved_allocation_owners = {
+        **(allocation_owners_by_uuid or {}),
+        **local_allocation_owners_by_uuid,
+    }
     captured: dict[str, ResourceExpr] = {}
     for operation in operations:
         for value in operation.all_input_values():
@@ -2415,13 +2487,17 @@ def _captured_quantum_allocations(
                 continue
             runtime_sizes = _runtime_carrier_owner_sizes(
                 value,
-                allocation_owners_by_uuid or {},
+                resolved_allocation_owners,
             )
             if runtime_sizes is not None:
                 for owner, size in runtime_sizes.items():
+                    if owner in local_allocation_owners:
+                        continue
                     captured[owner] = captured.get(owner, _ZERO) + size
                 continue
             owner = _quantum_allocation_owner(value)
+            if owner in local_allocation_owners:
+                continue
             captured[owner] = _quantum_owner_capacity(value, resolver)
     return captured
 

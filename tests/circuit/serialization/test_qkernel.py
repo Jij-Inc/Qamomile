@@ -8,6 +8,7 @@ import struct
 import subprocess
 import sys
 from importlib.metadata import version
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -682,6 +683,30 @@ _explicit_signature_oracle = qmc.Oracle(
         outputs=[qmc.Qubit],
     ),
 )
+
+_nested_serialization_oracle = qmc.Oracle(
+    name="nested_serialization_oracle",
+    num_qubits=1,
+    cost=qmc.ResourceEstimate(
+        calls=qmc.CallResources(
+            queries_by_name={"nested_serialization_oracle": 1},
+        ),
+    ),
+)
+
+
+@qmc.qkernel
+def _nested_oracle_helper(target: qmc.Qubit) -> qmc.Qubit:
+    """Invoke an Oracle from a callable-table forward reference."""
+    (target,) = _nested_serialization_oracle(target)
+    return target
+
+
+@qmc.qkernel
+def _calls_nested_oracle_helper() -> qmc.Bit:
+    """Call a nested qkernel whose body contains an Oracle invocation."""
+    target = _nested_oracle_helper(qmc.qubit("target"))
+    return qmc.measure(target)
 
 
 @qmc.qkernel
@@ -1472,6 +1497,13 @@ def test_controlled_oracle_signature_includes_controls() -> None:
     assert kernel_to_dict(restored) == kernel_to_dict(_calls_controlled_oracle)
 
 
+def test_nested_oracle_definition_round_trips_after_forward_linking() -> None:
+    """Nested Oracle calls validate after every definition header is linked."""
+    restored = deserialize(serialize(_calls_nested_oracle_helper))
+
+    assert kernel_to_dict(restored) == kernel_to_dict(_calls_nested_oracle_helper)
+
+
 def test_fixed_opaque_resource_cost_round_trips_with_provenance() -> None:
     """Fixed opaque costs retain metrics, symbols, requirements, and guards."""
     message = _message(_calls_fixed_cost_oracle)
@@ -1503,6 +1535,81 @@ def test_fixed_opaque_resource_cost_round_trips_with_provenance() -> None:
     assert inactive.quality is qmc.EstimateQuality.EXACT
     assert inactive.approximation is qmc.ApproximationStatus.EXACT
     assert inactive.trace == expected_inactive.trace
+
+
+def test_fixed_opaque_resource_cost_has_process_deterministic_bytes() -> None:
+    """Quantified Dummy identities never leak process randomness into bytes."""
+    script = """
+from qamomile.circuit.serialization import serialize
+from tests.circuit.serialization.test_qkernel import _calls_fixed_cost_oracle
+
+print(serialize(_calls_fixed_cost_oracle).hex())
+"""
+    repository = Path(__file__).resolve().parents[3]
+    payloads = [
+        subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        for _ in range(3)
+    ]
+
+    assert payloads[1:] == payloads[:-1]
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "factorial(Integer(1000000000))",
+        "Pow(Integer(2), Integer(4097))",
+        "Float('1e1000000', precision=53)",
+    ],
+)
+def test_deserialize_rejects_unbounded_opaque_cost_arithmetic_promptly(
+    expression: str,
+) -> None:
+    """Untrusted opaque costs cannot trigger unbounded eager arithmetic."""
+    script = f"""
+from qamomile.circuit.serialization import deserialize
+from qamomile.circuit.serialization.encode import to_dict
+from qamomile.circuit.serialization.graph_protobuf import qkernel_from_graph_dict
+from tests.circuit.serialization.test_qkernel import _calls_fixed_cost_oracle
+
+envelope = to_dict(_calls_fixed_cost_oracle)
+definition = next(
+    entry["definition"]
+    for entry in envelope["callable_table"]
+    if entry["definition"]["ref"]["name"]
+    == "serialization_fixed_cost_oracle"
+)
+opaque_cost = dict(definition["opaque_cost"]["$map"])
+gate_total = next(
+    pair for pair in opaque_cost["gates"]["$map"] if pair[0] == "total"
+)
+gate_total[1] = {expression!r}
+message = qkernel_from_graph_dict(envelope)
+try:
+    deserialize(message.SerializeToString(deterministic=True))
+except ValueError:
+    print("rejected")
+else:
+    raise AssertionError("unsafe opaque cost was accepted")
+"""
+    repository = Path(__file__).resolve().parents[3]
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert completed.stdout.strip() == "rejected"
 
 
 def test_opaque_resource_callback_fails_serialization_explicitly() -> None:

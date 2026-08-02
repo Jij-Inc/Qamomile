@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable, Sequence
+from numbers import Integral
 from typing import TYPE_CHECKING, Any, cast
 
 from qamomile.circuit.frontend.callable_signature import CallableSignature
@@ -25,6 +26,27 @@ from qamomile.circuit.ir.value import Value
 
 if TYPE_CHECKING:
     from qamomile.circuit.estimator import OpaqueCostContext, ResourceEstimate
+
+
+def _normalize_control_count(value: object) -> int:
+    """Return one nonnegative integral control count as a Python integer.
+
+    Args:
+        value (object): Candidate Python or NumPy integer scalar.
+
+    Returns:
+        int: Equivalent nonnegative Python integer.
+
+    Raises:
+        TypeError: If ``value`` is boolean or not integral.
+        ValueError: If ``value`` is negative.
+    """
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise TypeError("num_control_qubits must be an integer.")
+    normalized = int(value)
+    if normalized < 0:
+        raise ValueError("num_control_qubits must be nonnegative.")
+    return normalized
 
 
 @dataclasses.dataclass
@@ -85,18 +107,12 @@ class Oracle:
                 controls added by an outer transform. Defaults to ``None``.
 
         Raises:
-            TypeError: If ``num_control_qubits`` is not a plain Python integer.
+            TypeError: If ``num_control_qubits`` is not a non-boolean integer.
             ValueError: If neither ``num_qubits`` nor ``signature`` supplies
                 enough arity information, or if ``num_control_qubits`` is
                 negative.
         """
-        if isinstance(num_control_qubits, bool) or not isinstance(
-            num_control_qubits,
-            int,
-        ):
-            raise TypeError("num_control_qubits must be a plain Python int.")
-        if num_control_qubits < 0:
-            raise ValueError("num_control_qubits must be nonnegative.")
+        normalized_control_qubits = _normalize_control_count(num_control_qubits)
         if signature is not None and num_qubits is None:
             num_qubits = signature.scalar_qubit_input_count()
         if num_qubits is None and not (
@@ -108,7 +124,7 @@ class Oracle:
             )
         self.name = name
         self.num_qubits = num_qubits
-        self.num_control_qubits = num_control_qubits
+        self.num_control_qubits = normalized_control_qubits
         self.signature = signature
         self.cost = cost
 
@@ -755,7 +771,7 @@ def opaque(
         Oracle: Opaque callable backed by ``InvokeOperation`` with no body.
 
     Raises:
-        TypeError: If ``num_control_qubits`` is not a plain Python integer.
+        TypeError: If ``num_control_qubits`` is not a non-boolean integer.
         ValueError: If neither ``num_qubits`` nor ``signature`` supplies
             enough arity information, or if ``num_control_qubits`` is
             negative.

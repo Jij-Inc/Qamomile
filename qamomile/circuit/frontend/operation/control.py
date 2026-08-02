@@ -3076,6 +3076,7 @@ def control(
     from qamomile.circuit.frontend.operation.inverse import (
         InverseGate,
         _InverseComposite,
+        _InverseRotationCallable,
     )
 
     if isinstance(qkernel, InverseGate):
@@ -3094,6 +3095,20 @@ def control(
         )
         return ControlledGate(
             qkernel.kernel,
+            num_controls=num_controls,
+            control_value=control_value,
+            callable_ref=callable_ref,
+            callable_attrs=callable_attrs,
+            target_inverse=True,
+        )
+    if isinstance(qkernel, _InverseRotationCallable):
+        qkernel_impl = _qkernel_for_callable(qkernel.rotation_callable)
+        callable_ref, callable_attrs = _control_callable_metadata(
+            qkernel.rotation_callable,
+            qkernel_impl,
+        )
+        return ControlledGate(
+            qkernel_impl,
             num_controls=num_controls,
             control_value=control_value,
             callable_ref=callable_ref,

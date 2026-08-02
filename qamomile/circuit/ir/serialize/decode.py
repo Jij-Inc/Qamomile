@@ -302,7 +302,20 @@ class _DecodeContext:
         return definition
 
     def populate_definitions(self) -> None:
-        """Populate callable placeholders after every graph node has an ID."""
+        """Populate callable placeholders after every graph node has an ID.
+
+        Callable attributes are populated for every placeholder before any
+        body is decoded. A body may contain a forward reference to a later
+        callable whose attributes participate in invocation validation.
+
+        Raises:
+            ValueError: If callable attributes or definitions are malformed,
+                or if a decoded definition changes its registered reference.
+        """
+        for definition_id, payload in self._definition_entries.items():
+            self._definitions[definition_id].attrs = _decode_callable_definition_attrs(
+                payload
+            )
         for definition_id, payload in self._definition_entries.items():
             decoded = _decode_callable_def(payload, self)
             placeholder = self._definitions[definition_id]
@@ -2273,11 +2286,7 @@ def _decode_callable_def(d: Any, ctx: _DecodeContext) -> CallableDef:
     """
     if not isinstance(d, dict):
         raise ValueError("CallableDef payload must be a dict")
-    attrs = _decode_payload(d.get("attrs"))
-    if attrs is None:
-        attrs = {}
-    if not isinstance(attrs, dict):
-        raise ValueError("CallableDef attrs must decode to a dict")
+    attrs = _decode_callable_definition_attrs(d)
     raw_opaque_cost = d.get("opaque_cost")
     opaque_cost = None
     if raw_opaque_cost is not None:
@@ -2296,6 +2305,28 @@ def _decode_callable_def(d: Any, ctx: _DecodeContext) -> CallableDef:
         default_policy=_enum_by_name(CallPolicy, raw_policy, "CallPolicy"),
         attrs=attrs,
     )
+
+
+def _decode_callable_definition_attrs(d: Any) -> dict[str, Any]:
+    """Decode the attributes carried by one callable definition.
+
+    Args:
+        d (Any): Serialized callable-definition payload.
+
+    Returns:
+        dict[str, Any]: Decoded callable attributes.
+
+    Raises:
+        ValueError: If the definition or its attributes are malformed.
+    """
+    if not isinstance(d, dict):
+        raise ValueError("CallableDef payload must be a dict")
+    attrs = _decode_payload(d.get("attrs"))
+    if attrs is None:
+        return {}
+    if not isinstance(attrs, dict):
+        raise ValueError("CallableDef attrs must decode to a dict")
+    return attrs
 
 
 def _decode_invoke_operation(d: dict[str, Any], ctx: _DecodeContext) -> InvokeOperation:

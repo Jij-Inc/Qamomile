@@ -499,6 +499,95 @@ def test_loop_body_release_precedes_nested_and_later_allocations() -> None:
     assert estimate.width.circuit_qubits == 3
 
 
+def test_control_flow_counts_body_local_array_owners_used_through_elements() -> None:
+    """Element views keep their body-local root allocations in every width."""
+
+    @qm.qkernel
+    def loop_circuit() -> qm.Qubit:
+        """Use one element of a loop-local array while retaining one qubit."""
+        retained = qm.qubit("retained")
+        for _index in qm.range(1):
+            work = qm.qubit_array(2, "work")
+            work[0] = qm.h(work[0])
+        return retained
+
+    @qm.qkernel
+    def sliced_loop_circuit() -> qm.Qubit:
+        """Use a local array element through a nested slice view."""
+        retained = qm.qubit("retained")
+        for _index in qm.range(1):
+            work = qm.qubit_array(2, "work")
+            view = work[0:1]
+            view[0] = qm.h(view[0])
+        return retained
+
+    @qm.qkernel
+    def items_circuit(data: qm.Dict[qm.UInt, qm.Float]) -> qm.Qubit:
+        """Use one element of an items-loop-local array through a slice."""
+        retained = qm.qubit("retained")
+        for _index, _value in qm.items(data):
+            work = qm.qubit_array(2, "work")
+            view = work[0:1]
+            view[0] = qm.h(view[0])
+        return retained
+
+    @qm.qkernel
+    def compile_time_if_circuit(flag: qm.UInt) -> qm.Qubit:
+        """Use one element of a compile-time branch-local array."""
+        retained = qm.qubit("retained")
+        if flag:
+            work = qm.qubit_array(2, "work")
+            work[0] = qm.h(work[0])
+        return retained
+
+    @qm.qkernel
+    def runtime_if_circuit() -> qm.Qubit:
+        """Use one element of a runtime branch-local array."""
+        retained = qm.qubit("retained")
+        predicate = qm.measure(qm.qubit("predicate"))
+        if predicate:
+            work = qm.qubit_array(2, "work")
+            work[0] = qm.h(work[0])
+        return retained
+
+    @qm.qkernel
+    def while_circuit() -> qm.Qubit:
+        """Use one element of a while-local array for one modeled trip."""
+        retained = qm.qubit("retained")
+        predicate = qm.measure(qm.qubit("predicate"))
+        while predicate:
+            work = qm.qubit_array(2, "work")
+            work[0] = qm.h(work[0])
+            predicate = qm.measure(work[0])
+        return retained
+
+    loop = loop_circuit.estimate_resources()
+    sliced_loop = sliced_loop_circuit.estimate_resources()
+    items_loop = items_circuit.estimate_resources(inputs={"data": {0: 0.1}})
+    compile_time_if = compile_time_if_circuit.estimate_resources(inputs={"flag": 1})
+    runtime_if = runtime_if_circuit.estimate_resources()
+    modeled_while = while_circuit.estimate_resources().substitute(**{"|while|": 1})
+
+    assert loop.width.allocated_qubits == 3
+    assert loop.width.peak_qubits == 3
+    assert loop.width.circuit_qubits == 3
+    assert sliced_loop.width.allocated_qubits == 3
+    assert sliced_loop.width.peak_qubits == 3
+    assert sliced_loop.width.circuit_qubits == 3
+    assert items_loop.width.allocated_qubits == 3
+    assert items_loop.width.peak_qubits == 3
+    assert items_loop.width.circuit_qubits == 3
+    assert compile_time_if.width.allocated_qubits == 3
+    assert compile_time_if.width.peak_qubits == 3
+    assert compile_time_if.width.circuit_qubits == 3
+    assert runtime_if.width.allocated_qubits == 4
+    assert runtime_if.width.peak_qubits == 3
+    assert runtime_if.width.circuit_qubits == 4
+    assert modeled_while.width.allocated_qubits == 4
+    assert modeled_while.width.peak_qubits == 3
+    assert modeled_while.width.circuit_qubits == 4
+
+
 def test_invoke_fresh_outputs_extend_caller_liveness() -> None:
     """Fresh outputs from nested qkernels remain live in the caller."""
 
@@ -1111,6 +1200,63 @@ def test_float_region_carry_fallback_remains_real() -> None:
     )
 
 
+def test_large_affine_multiplicative_carry_stays_compact() -> None:
+    """A geometric carry may drive a range beyond Python's ssize limit."""
+
+    @qm.qkernel
+    def circuit(repetitions: qm.UInt) -> tuple[qm.Qubit, qm.UInt]:
+        """Double a carry, then use its final value as a gate-loop bound."""
+        total = qm.uint(1)
+        target = qm.qubit("target")
+        for _index in qm.range(repetitions):
+            total = total * 2
+        for _index in qm.range(total):
+            target = qm.x(target)
+        return target, total
+
+    symbolic = circuit.estimate_resources()
+    repetitions = symbolic.parameters["repetitions"]
+
+    assert sp.simplify(symbolic.gates.total - 2**repetitions) == 0
+    assert symbolic.substitute(repetitions=63).gates.total == 2**63
+    assert circuit.estimate_resources(inputs={"repetitions": 63}).gates.total == 2**63
+
+
+def test_large_coupled_region_carry_stays_symbolically_compact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A large concrete bound cannot bypass the region replay limit."""
+
+    @qm.qkernel
+    def circuit(
+        repetitions: qm.UInt,
+    ) -> tuple[qm.Qubit, qm.UInt, qm.UInt]:
+        """Apply one gate beside two coupled loop-carried counters."""
+        first = qm.uint(0)
+        second = qm.uint(1)
+        target = qm.qubit("target")
+        for _index in qm.range(repetitions):
+            target = qm.x(target)
+            first = first + second
+            second = second + 1
+        return target, first, second
+
+    def reject_concrete_replay(*_args: object, **_kwargs: object) -> None:
+        """Fail if the estimator expands the large loop iteration by iteration."""
+        pytest.fail("large coupled loop used concrete region replay")
+
+    monkeypatch.setattr(
+        resource_estimator_module.ResourceInterpreter,
+        "_eval_concrete_region_for",
+        reject_concrete_replay,
+    )
+
+    estimate = circuit.estimate_resources(inputs={"repetitions": 4096})
+
+    assert estimate.gates.total == 4096
+    assert estimate.parameters == {}
+
+
 def test_float_runtime_if_merge_keeps_reachable_resource_branch() -> None:
     """An undecidable Float merge never collapses a reachable comparison."""
 
@@ -1343,6 +1489,69 @@ def test_for_items_uses_concrete_entries_and_rejects_symbolic_dependency() -> No
     assert concrete.parameters == {}
     with pytest.raises(NotImplementedError, match="current item key or value"):
         circuit.estimate_resources()
+
+
+def test_concrete_for_items_schedules_disjoint_entries_in_parallel() -> None:
+    """Concrete dictionary entries on distinct wires share one depth layer."""
+
+    @qm.qkernel
+    def circuit(
+        data: qm.Dict[qm.UInt, qm.Float],
+    ) -> qm.Vector[qm.Qubit]:
+        """Rotate the register slot selected by each dictionary key."""
+        register = qm.qubit_array(3, "register")
+        for index, _value in qm.items(data):
+            register[index] = qm.rz(register[index], qm.float_(0.25))
+        return register
+
+    estimate = circuit.estimate_resources(inputs={"data": {0: 0.1, 1: 0.2, 2: 0.3}})
+
+    assert estimate.gates.total == 3
+    assert estimate.depth.depth == 1
+    assert estimate.depth.rotation_depth == 1
+    assert estimate.quality is qm.EstimateQuality.EXACT
+
+
+def test_concrete_for_items_serializes_overlapping_entries() -> None:
+    """Concrete dictionary entries on one wire retain sequential depth."""
+
+    @qm.qkernel
+    def circuit(
+        data: qm.Dict[qm.UInt, qm.Float],
+    ) -> qm.Vector[qm.Qubit]:
+        """Rotate one fixed register slot for every dictionary entry."""
+        register = qm.qubit_array(3, "register")
+        for _index, _value in qm.items(data):
+            register[0] = qm.rz(register[0], qm.float_(0.25))
+        return register
+
+    estimate = circuit.estimate_resources(inputs={"data": {0: 0.1, 1: 0.2, 2: 0.3}})
+
+    assert estimate.gates.total == 3
+    assert estimate.depth.depth == 3
+    assert estimate.depth.rotation_depth == 3
+    assert estimate.quality is qm.EstimateQuality.EXACT
+
+
+def test_concrete_for_items_propagates_each_wire_completion() -> None:
+    """A gate after an items loop waits only for its own entry dependency."""
+
+    @qm.qkernel
+    def circuit(
+        data: qm.Dict[qm.UInt, qm.Float],
+    ) -> qm.Vector[qm.Qubit]:
+        """Rotate disjoint entries, then gate one previously used slot."""
+        register = qm.qubit_array(3, "register")
+        for index, _value in qm.items(data):
+            register[index] = qm.rz(register[index], qm.float_(0.25))
+        register[1] = qm.x(register[1])
+        return register
+
+    estimate = circuit.estimate_resources(inputs={"data": {0: 0.1, 1: 0.2, 2: 0.3}})
+
+    assert estimate.gates.total == 4
+    assert estimate.depth.depth == 2
+    assert estimate.quality is qm.EstimateQuality.EXACT
 
 
 def test_for_items_rejects_item_dependent_structural_constraints() -> None:
@@ -1585,6 +1794,77 @@ def test_independent_while_loops_expose_distinct_trip_counts() -> None:
     assert set(estimate.parameters) == {"|while|", "|while[2]|"}
     specialized = estimate.substitute(**{"|while|": 3, "|while[2]|": 4})
     assert specialized.gates.total == 11
+
+
+def test_skipped_for_body_preserves_later_while_name() -> None:
+    """Input specialization cannot renumber a while after an empty loop."""
+
+    @qm.qkernel
+    def circuit(repetitions: qm.UInt) -> qm.Bit:
+        """Place one measured loop inside a range before a second loop."""
+        for _index in qm.range(repetitions):
+            first = qm.measure(qm.qubit("first_trigger"))
+            while first:
+                first = qm.measure(qm.qubit("first_next"))
+
+        second = qm.measure(qm.qubit("second_trigger"))
+        while second:
+            second = qm.measure(qm.qubit("second_next"))
+        return second
+
+    symbolic = circuit.estimate_resources()
+    specialized = symbolic.substitute(repetitions=0)
+    direct = circuit.estimate_resources(inputs={"repetitions": 0})
+
+    assert set(specialized.parameters) == {"|while[2]|"}
+    assert set(direct.parameters) == {"|while[2]|"}
+    assert direct.gates == specialized.gates
+    assert direct.depth == specialized.depth
+    assert direct.width == specialized.width
+
+
+def test_symbolic_region_probe_reuses_while_name() -> None:
+    """A region-loop probe and its final evaluation share one while symbol."""
+
+    @qm.qkernel
+    def circuit(repetitions: qm.UInt) -> tuple[qm.Bit, qm.UInt]:
+        """Carry a counter around one measured loop in a symbolic range."""
+        total = qm.uint(0)
+        output = qm.qubit("output")
+        for _index in qm.range(repetitions):
+            active = qm.measure(qm.qubit("trigger"))
+            while active:
+                output = qm.x(output)
+                active = qm.measure(qm.qubit("next"))
+            total = total + 1
+        return qm.measure(output), total
+
+    estimate = circuit.estimate_resources()
+
+    assert set(estimate.parameters) == {"repetitions", "|while|"}
+
+
+def test_while_names_distinguish_reused_qkernel_call_sites() -> None:
+    """Two calls to one while-bearing definition retain independent counts."""
+
+    @qm.qkernel
+    def measured_loop(target: qm.Qubit) -> qm.Bit:
+        """Measure one target repeatedly while its result remains true."""
+        active = qm.measure(target)
+        while active:
+            active = qm.measure(qm.qubit("next"))
+        return active
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Bit, qm.Bit]:
+        """Invoke the same measured-loop definition at two call sites."""
+        first = measured_loop(qm.qubit("first"))
+        second = measured_loop(qm.qubit("second"))
+        return first, second
+
+    estimate = circuit.estimate_resources()
+
+    assert set(estimate.parameters) == {"|while|", "|while[2]|"}
 
 
 def test_positive_symbolic_while_releases_consumed_capture() -> None:

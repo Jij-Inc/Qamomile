@@ -13,14 +13,28 @@ import sympy as sp
 import qamomile.circuit as qm
 import qamomile.observable as qm_o
 from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.operation.callable import InvokeOperation
+from qamomile.circuit.ir.operation.callable import (
+    CallableDef,
+    CallableImplementation,
+    CallableRef,
+    CallTransform,
+    InvokeOperation,
+)
+from qamomile.circuit.ir.operation.control_flow import (
+    ForItemsOperation,
+    WhileOperation,
+)
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
+    GateOperation,
+    GateOperationType,
     ProjectOperation,
 )
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import (
     Operation,
     OperationKind,
+    QInitOperation,
     Signature,
 )
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
@@ -800,12 +814,101 @@ def test_symbolic_controlled_loop_matches_direct_specialization() -> None:
     assert symbolic.substitute(repetitions=0).gates.total == 0
 
 
+def test_symbolic_controlled_loop_accepts_integer_valued_float_bound() -> None:
+    """Integer-valued float bounds fully specialize the batching expression."""
+
+    @qm.qkernel
+    def loop_body(target: qm.Qubit, repetitions: qm.UInt) -> qm.Qubit:
+        """Apply one X gate in every requested iteration."""
+        for _index in qm.range(repetitions):
+            target = qm.x(target)
+        return target
+
+    @qm.qkernel
+    def circuit(repetitions: qm.UInt) -> qm.Qubit:
+        """Apply the symbolic loop body under three controls."""
+        controls = qm.qubit_array(3, "controls")
+        target = qm.qubit("target")
+        *_, target = qm.control(loop_body, num_controls=3)(
+            controls,
+            target,
+            repetitions,
+        )
+        return target
+
+    symbolic = circuit.estimate_resources()
+    integer = symbolic.substitute(repetitions=3)
+    float_substitution = symbolic.substitute(repetitions=3.0)
+    direct_float = circuit.estimate_resources(inputs={"repetitions": 3.0})
+
+    assert float_substitution.gates == integer.gates == direct_float.gates
+    assert float_substitution.depth == integer.depth == direct_float.depth
+    assert float_substitution.width == integer.width == direct_float.width
+    assert float_substitution.parameters == direct_float.parameters == {}
+    assert float_substitution.gates.total.is_number
+    assert direct_float.gates.total.is_number
+
+
+def test_transform_specific_open_control_body_keeps_x_bracket() -> None:
+    """A controlled implementation still receives its open-control X pair."""
+    formal_control = Value(type=QubitType(), name="formal_control")
+    formal_target = Value(type=QubitType(), name="formal_target")
+    formal_control_result = formal_control.next_version()
+    formal_target_result = formal_target.next_version()
+    body = Block(
+        input_values=[formal_control, formal_target],
+        output_values=[formal_control_result, formal_target_result],
+        operations=[
+            GateOperation.fixed(
+                GateOperationType.CX,
+                [formal_control, formal_target],
+                [formal_control_result, formal_target_result],
+            )
+        ],
+    )
+    ref = CallableRef(namespace="test", name="open_control_implementation")
+    implementation = CallableImplementation(
+        transform=CallTransform.CONTROLLED,
+        body=body,
+    )
+    control = Value(type=QubitType(), name="control")
+    target = Value(type=QubitType(), name="target")
+    operation = InvokeOperation(
+        operands=[control, target],
+        results=[control.next_version(), target.next_version()],
+        target=ref,
+        transform=CallTransform.CONTROLLED,
+        attrs={
+            "num_control_qubits": 1,
+            "num_target_qubits": 1,
+            "control_value": 0,
+        },
+        definition=CallableDef(ref=ref, implementations=[implementation]),
+    )
+    root = Block(
+        operations=[
+            QInitOperation(results=[control]),
+            QInitOperation(results=[target]),
+            operation,
+        ],
+        output_values=list(operation.results),
+    )
+
+    estimate = qm.ResourceEstimator().estimate(root)
+
+    assert estimate.gates.total == 3
+    assert estimate.gates.single_qubit == 2
+    assert estimate.gates.two_qubit == 1
+    assert estimate.depth.depth == 3
+    assert estimate.quality is qm.EstimateQuality.UPPER_BOUND
+
+
 def test_loop_local_power_specializes_without_bound_symbol_leaks() -> None:
     """Loop-local powers choose the same decomposition before and after binding."""
     symbolic = _loop_local_power_circuit.estimate_resources()
 
     assert set(symbolic.parameters) == {"repetitions"}
-    for repetitions in (0, 1, 2, 3, 1000):
+    for repetitions in (0, 1, 2, 3, 3.0, 1000):
         specialized = symbolic.substitute(repetitions=repetitions)
         direct = _loop_local_power_circuit.estimate_resources(
             inputs={"repetitions": repetitions}
@@ -867,7 +970,7 @@ def test_fixed_point_nonlinear_carry_uses_fixed_control_model() -> None:
 
 
 def test_resource_sensitive_nonlinear_carry_requires_concrete_bounds() -> None:
-    """Unsupported nonlinear work fails symbolically but replays concrete inputs."""
+    """Unsupported nonlinear work replays only small concrete bounds."""
     with pytest.raises(
         NotImplementedError,
         match="unsupported nonlinear loop-carried recurrence",
@@ -882,6 +985,11 @@ def test_resource_sensitive_nonlinear_carry_requires_concrete_bounds() -> None:
         assert estimate.gates.total == expected_total
         assert estimate.parameters == {}
         assert estimate.gates.total.is_number
+
+    with pytest.raises(NotImplementedError, match="at most 64 iterations"):
+        _unsupported_nonlinear_resource_circuit.estimate_resources(
+            inputs={"repetitions": 65}
+        )
 
 
 def test_symbolic_control_width_retains_shared_ladder_variants() -> None:
@@ -1107,6 +1215,350 @@ def test_fixed_shared_ladder_is_invariant_across_ir_boundaries() -> None:
         assert estimate.depth.depth == 4
         assert estimate.width.clean_ancilla_qubits == 1
         assert estimate.width.peak_qubits == 4
+
+
+def test_zero_cost_slice_markers_do_not_change_control_recipe() -> None:
+    """Array-view bookkeeping does not count as controlled quantum work."""
+
+    @qm.qkernel
+    def direct_x(register: qm.Vector[qm.Qubit]) -> qm.Vector[qm.Qubit]:
+        """Apply one X gate directly to the register."""
+        register[0] = qm.x(register[0])
+        return register
+
+    @qm.qkernel
+    def sliced_x(register: qm.Vector[qm.Qubit]) -> qm.Vector[qm.Qubit]:
+        """Apply the same X gate through a one-element slice view."""
+        view = register[0:1]
+        view[0] = qm.x(view[0])
+        register[0:1] = view
+        return register
+
+    @qm.qkernel
+    def direct_circuit() -> qm.Vector[qm.Qubit]:
+        """Control the direct body with two qubits."""
+        controls = qm.qubit_array(2, "controls")
+        register = qm.qubit_array(1, "register")
+        *_, register = qm.control(direct_x, num_controls=2)(
+            controls,
+            register,
+        )
+        return register
+
+    @qm.qkernel
+    def sliced_circuit() -> qm.Vector[qm.Qubit]:
+        """Control the slice-backed body with two qubits."""
+        controls = qm.qubit_array(2, "controls")
+        register = qm.qubit_array(1, "register")
+        *_, register = qm.control(sliced_x, num_controls=2)(
+            controls,
+            register,
+        )
+        return register
+
+    direct = direct_circuit.estimate_resources()
+    sliced = sliced_circuit.estimate_resources()
+
+    assert sliced.gates == direct.gates
+    assert sliced.depth == direct.depth
+    assert sliced.width == direct.width
+    assert direct.gates.total == 1
+    assert direct.gates.toffoli == 1
+    assert direct.width.clean_ancilla_qubits == 0
+
+
+def test_explicit_opaque_calls_share_the_outer_control_ladder() -> None:
+    """Fixed and callback costs preserve batching across Invoke boundaries."""
+    base_cost = qm.ResourceEstimate(
+        gates=qm.GateResources(total=1, single_qubit=1),
+    )
+    fixed_oracle = qm.opaque(
+        "fixed_outer_batch_leaf",
+        num_qubits=1,
+        cost=base_cost,
+    )
+    observed: list[qm.OpaqueCostContext] = []
+
+    def callback_cost(ctx: qm.OpaqueCostContext) -> qm.ResourceEstimate:
+        """Return one modeled single-qubit operation.
+
+        Args:
+            ctx (qm.OpaqueCostContext): Definition-level cost context.
+
+        Returns:
+            qm.ResourceEstimate: One single-qubit operation.
+        """
+        observed.append(ctx)
+        return base_cost
+
+    callback_oracle = qm.opaque(
+        "callback_outer_batch_leaf",
+        num_qubits=1,
+        cost=callback_cost,
+    )
+
+    @qm.qkernel
+    def direct_body(target: qm.Qubit) -> qm.Qubit:
+        """Apply two direct Hadamard gates."""
+        target = qm.h(target)
+        return qm.h(target)
+
+    @qm.qkernel
+    def fixed_body(target: qm.Qubit) -> qm.Qubit:
+        """Invoke two fixed-cost opaque leaves."""
+        (target,) = fixed_oracle(target)
+        (target,) = fixed_oracle(target)
+        return target
+
+    @qm.qkernel
+    def callback_body(target: qm.Qubit) -> qm.Qubit:
+        """Invoke two callback-priced opaque leaves."""
+        (target,) = callback_oracle(target)
+        (target,) = callback_oracle(target)
+        return target
+
+    @qm.qkernel
+    def direct_circuit() -> qm.Qubit:
+        """Control the direct body with two qubits."""
+        controls = qm.qubit_array(2, "controls")
+        target = qm.qubit("target")
+        *_, target = qm.control(direct_body, num_controls=2)(controls, target)
+        return target
+
+    @qm.qkernel
+    def fixed_circuit() -> qm.Qubit:
+        """Control the fixed-cost body with two qubits."""
+        controls = qm.qubit_array(2, "controls")
+        target = qm.qubit("target")
+        *_, target = qm.control(fixed_body, num_controls=2)(controls, target)
+        return target
+
+    @qm.qkernel
+    def callback_circuit() -> qm.Qubit:
+        """Control the callback-priced body with two qubits."""
+        controls = qm.qubit_array(2, "controls")
+        target = qm.qubit("target")
+        *_, target = qm.control(callback_body, num_controls=2)(controls, target)
+        return target
+
+    direct = direct_circuit.estimate_resources()
+    fixed = fixed_circuit.estimate_resources()
+    callback = callback_circuit.estimate_resources()
+
+    for estimate in (fixed, callback):
+        assert estimate.gates.total == direct.gates.total
+        assert estimate.gates.single_qubit == direct.gates.single_qubit
+        assert estimate.gates.two_qubit == direct.gates.two_qubit
+        assert estimate.gates.multi_qubit == direct.gates.multi_qubit
+        assert estimate.gates.toffoli == direct.gates.toffoli
+        assert estimate.depth.depth == direct.depth.depth
+        assert estimate.depth.gate_depth == direct.depth.gate_depth
+        assert estimate.width.clean_ancilla_qubits == 1
+        assert estimate.gates.total == 4
+    assert len(observed) == 2
+
+
+def test_query_only_opaque_call_does_not_trigger_control_batching() -> None:
+    """Call/query provenance without gate work stays below the threshold."""
+    query_only = qm.opaque(
+        "query_only_batch_boundary",
+        num_qubits=1,
+        cost=qm.ResourceEstimate(
+            calls=qm.CallResources(
+                queries_by_name={"query_only_batch_boundary": 1},
+            )
+        ),
+    )
+
+    @qm.qkernel
+    def with_query(target: qm.Qubit) -> qm.Qubit:
+        """Record one query before applying one Hadamard gate."""
+        (target,) = query_only(target)
+        return qm.h(target)
+
+    @qm.qkernel
+    def one_h(target: qm.Qubit) -> qm.Qubit:
+        """Apply one Hadamard gate."""
+        return qm.h(target)
+
+    @qm.qkernel
+    def query_circuit() -> qm.Qubit:
+        """Control the query-bearing body with two qubits."""
+        controls = qm.qubit_array(2, "controls")
+        target = qm.qubit("target")
+        *_, target = qm.control(with_query, num_controls=2)(controls, target)
+        return target
+
+    @qm.qkernel
+    def gate_circuit() -> qm.Qubit:
+        """Control the gate-only body with two qubits."""
+        controls = qm.qubit_array(2, "controls")
+        target = qm.qubit("target")
+        *_, target = qm.control(one_h, num_controls=2)(controls, target)
+        return target
+
+    with_query_estimate = query_circuit.estimate_resources()
+    gate_only_estimate = gate_circuit.estimate_resources()
+
+    from qamomile.circuit.estimator._resolver import ExprResolver
+    from qamomile.circuit.estimator.resource_estimator import (
+        ResourceInterpreter,
+        _ResourceEstimatorConfig,
+    )
+
+    body = with_query.block
+    profile = ResourceInterpreter(
+        config=_ResourceEstimatorConfig(),
+        bindings={},
+    )._controlled_body_batch_profile(
+        body.operations,
+        ExprResolver(body),
+    )
+
+    assert profile.work == 1
+    assert with_query_estimate.gates == gate_only_estimate.gates
+    assert with_query_estimate.depth == gate_only_estimate.depth
+    assert with_query_estimate.width == gate_only_estimate.width
+    assert with_query_estimate.gates.total == 3
+    assert with_query_estimate.gates.toffoli == 2
+    assert with_query_estimate.width.clean_ancilla_qubits == 1
+    assert with_query_estimate.calls.queries_by_name == {"query_only_batch_boundary": 1}
+
+
+def test_symbolic_opaque_work_retains_outer_batching_variants() -> None:
+    """Opaque symbolic activity selects the matching recipe after substitution."""
+    work = sp.Symbol("opaque_work", integer=True, nonnegative=True)
+    oracle = qm.opaque(
+        "symbolic_outer_batch_leaf",
+        num_qubits=1,
+        cost=qm.ResourceEstimate(
+            gates=qm.GateResources(
+                total=work,
+                single_qubit=work,
+            )
+        ),
+    )
+
+    @qm.qkernel
+    def body(target: qm.Qubit) -> qm.Qubit:
+        """Apply symbolic opaque work followed by one Hadamard gate."""
+        (target,) = oracle(target)
+        return qm.h(target)
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Control the body with two qubits."""
+        controls = qm.qubit_array(2, "controls")
+        target = qm.qubit("target")
+        *_, target = qm.control(body, num_controls=2)(controls, target)
+        return target
+
+    symbolic = circuit.estimate_resources()
+    inactive = symbolic.substitute(opaque_work=0)
+    active = symbolic.substitute(opaque_work=1)
+
+    assert inactive.gates.total == 3
+    assert active.gates.total == 4
+    assert inactive.width.clean_ancilla_qubits == 1
+    assert active.width.clean_ancilla_qubits == 1
+
+
+def test_inactive_controlled_body_does_not_evaluate_opaque_callback() -> None:
+    """A zero-power controlled call skips opaque cost profiling entirely."""
+    observed: list[qm.OpaqueCostContext] = []
+
+    def callback_cost(ctx: qm.OpaqueCostContext) -> qm.ResourceEstimate:
+        """Record a callback execution.
+
+        Args:
+            ctx (qm.OpaqueCostContext): Definition-level cost context.
+
+        Returns:
+            qm.ResourceEstimate: One single-qubit operation.
+        """
+        observed.append(ctx)
+        return qm.ResourceEstimate(
+            gates=qm.GateResources(total=1, single_qubit=1),
+        )
+
+    oracle = qm.opaque(
+        "inactive_profile_oracle",
+        num_qubits=1,
+        cost=callback_cost,
+    )
+
+    @qm.qkernel
+    def body(target: qm.Qubit) -> qm.Qubit:
+        """Invoke the callback-priced opaque Oracle."""
+        (target,) = oracle(target)
+        return target
+
+    @qm.qkernel
+    def circuit(power: qm.UInt) -> qm.Qubit:
+        """Apply the controlled body zero times."""
+        controls = qm.qubit_array(2, "controls")
+        target = qm.qubit("target")
+        *_, target = qm.control(body, num_controls=2)(
+            controls,
+            target,
+            power=power,
+        )
+        return target
+
+    estimate = circuit.estimate_resources(inputs={"power": 0})
+
+    assert estimate.gates.total == 0
+    assert observed == []
+
+
+def test_zero_iteration_controlled_loop_does_not_evaluate_opaque_callback() -> None:
+    """A concretely empty range skips its controlled opaque body entirely."""
+    observed: list[qm.OpaqueCostContext] = []
+
+    def callback_cost(ctx: qm.OpaqueCostContext) -> qm.ResourceEstimate:
+        """Record a callback execution.
+
+        Args:
+            ctx (qm.OpaqueCostContext): Definition-level cost context.
+
+        Returns:
+            qm.ResourceEstimate: One single-qubit operation.
+        """
+        observed.append(ctx)
+        return qm.ResourceEstimate(
+            gates=qm.GateResources(total=1, single_qubit=1),
+        )
+
+    oracle = qm.opaque(
+        "zero_iteration_profile_oracle",
+        num_qubits=1,
+        cost=callback_cost,
+    )
+
+    @qm.qkernel
+    def body(target: qm.Qubit, repetitions: qm.UInt) -> qm.Qubit:
+        """Invoke the opaque Oracle once per range iteration."""
+        for _index in qm.range(repetitions):
+            (target,) = oracle(target)
+        return target
+
+    @qm.qkernel
+    def circuit(repetitions: qm.UInt) -> qm.Qubit:
+        """Apply the range body under two coherent controls."""
+        controls = qm.qubit_array(2, "controls")
+        target = qm.qubit("target")
+        *_, target = qm.control(body, num_controls=2)(
+            controls,
+            target,
+            repetitions,
+        )
+        return target
+
+    estimate = circuit.estimate_resources(inputs={"repetitions": 0})
+
+    assert estimate.gates.total == 0
+    assert estimate.quality is qm.EstimateQuality.EXACT
+    assert observed == []
 
 
 def test_single_intrinsic_cx_uses_per_primitive_recipe() -> None:
@@ -1994,6 +2446,164 @@ def test_bodyless_controlled_calls_do_not_create_a_shared_ladder() -> None:
     assert estimate.width.clean_ancilla_qubits == 0
     assert estimate.calls.calls_by_name == {"controlled_u": 2}
     assert estimate.calls.queries_by_name == {"controlled_u": 2}
+
+
+@pytest.mark.parametrize(
+    ("operation", "callable_kind"),
+    [
+        pytest.param(
+            ConcreteControlledU(
+                operands=[
+                    Value(type=QubitType(), name="control"),
+                    Value(type=QubitType(), name="target"),
+                ],
+                results=[
+                    Value(type=QubitType(), name="control_result"),
+                    Value(type=QubitType(), name="target_result"),
+                ],
+                num_controls=1,
+                block=None,
+            ),
+            "controlled callable",
+            id="controlled",
+        ),
+        pytest.param(
+            InverseBlockOperation(
+                operands=[Value(type=QubitType(), name="target")],
+                results=[Value(type=QubitType(), name="target_result")],
+                num_target_qubits=1,
+                custom_name="bodyless_inverse",
+            ),
+            "inverse callable",
+            id="inverse",
+        ),
+    ],
+)
+def test_bodyless_transforms_honor_fail_closed_and_warning_policies(
+    operation: Operation,
+    callable_kind: str,
+) -> None:
+    """Bodyless transforms fail by default and honor the warning policy."""
+    from qamomile.circuit.estimator._resolver import ExprResolver
+    from qamomile.circuit.estimator.resource_estimator import (
+        ResourceInterpreter,
+        _ResourceEstimatorConfig,
+    )
+
+    block = Block(operations=[operation])
+    with pytest.raises(ValueError, match=rf"resources for {callable_kind}"):
+        ResourceInterpreter(
+            config=_ResourceEstimatorConfig(),
+            bindings={},
+        ).eval_operations(block.operations, ExprResolver(block))
+
+    warning = ResourceInterpreter(
+        config=_ResourceEstimatorConfig(
+            unknown_policy=qm.UnknownResourcePolicy.ZERO_WITH_WARNING,
+        ),
+        bindings={},
+    ).eval_operations(block.operations, ExprResolver(block))
+
+    assert warning.gates.total == 0
+    assert warning.quality is qm.EstimateQuality.MODELED
+    assert any("no implementation body" in item.message for item in warning.assumptions)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        ForItemsOperation(),
+        WhileOperation(),
+    ],
+)
+def test_unsupported_controlled_loops_fail_closed(
+    operation: Operation,
+) -> None:
+    """Unsupported loop forms fail instead of selecting a control recipe."""
+    from qamomile.circuit.estimator._resolver import ExprResolver
+    from qamomile.circuit.estimator.resource_estimator import (
+        ResourceInterpreter,
+        _ResourceEstimatorConfig,
+    )
+
+    block = Block(operations=[operation])
+    interpreter = ResourceInterpreter(
+        config=_ResourceEstimatorConfig(),
+        bindings={},
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=rf"Cannot estimate controlled {type(operation).__name__}",
+    ):
+        interpreter.eval_operations(
+            block.operations,
+            ExprResolver(block),
+            controls=2,
+        )
+
+
+def test_clifford_t_cz_matches_controlled_z_lowering() -> None:
+    """Equivalent CZ and CCZ constructions use the same canonical counts."""
+
+    @qm.qkernel
+    def z_body(target: qm.Qubit) -> qm.Qubit:
+        """Apply one Pauli-Z gate."""
+        return qm.z(target)
+
+    @qm.qkernel
+    def cz_body(left: qm.Qubit, right: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
+        """Apply one controlled-Z gate."""
+        return qm.cz(left, right)
+
+    @qm.qkernel
+    def direct_cz() -> tuple[qm.Qubit, qm.Qubit]:
+        """Apply CZ as a direct two-qubit primitive."""
+        return qm.cz(qm.qubit("left"), qm.qubit("right"))
+
+    @qm.qkernel
+    def controlled_z() -> tuple[qm.Qubit, qm.Qubit]:
+        """Construct CZ by controlling a one-gate Z body."""
+        control = qm.qubit("control")
+        target = qm.qubit("target")
+        return qm.control(z_body)(control, target)
+
+    @qm.qkernel
+    def controlled_cz() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
+        """Construct CCZ by controlling a CZ body."""
+        control = qm.qubit("control")
+        left = qm.qubit("left")
+        right = qm.qubit("right")
+        return qm.control(cz_body)(control, left, right)
+
+    @qm.qkernel
+    def doubly_controlled_z() -> qm.Qubit:
+        """Construct CCZ by controlling Z with two qubits."""
+        controls = qm.qubit_array(2, "controls")
+        target = qm.qubit("target")
+        *_, target = qm.control(z_body, num_controls=2)(controls, target)
+        return target
+
+    direct = direct_cz.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
+    equivalent = controlled_z.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
+    direct_ccz = controlled_cz.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
+    equivalent_ccz = doubly_controlled_z.estimate_resources(
+        basis=qm.GateBasis.CLIFFORD_T
+    )
+
+    assert (
+        direct.gates
+        == equivalent.gates
+        == qm.GateResources(
+            total=3,
+            single_qubit=2,
+            two_qubit=1,
+            clifford=3,
+        )
+    )
+    assert direct.depth.depth == equivalent.depth.depth == 3
+    assert direct_ccz.gates == equivalent_ccz.gates
+    assert direct_ccz.gates.total == 17
 
 
 def test_clifford_t_supports_multi_controlled_global_phase() -> None:
@@ -3637,6 +4247,184 @@ def test_opaque_cost_width_is_relative_to_the_call_boundary() -> None:
         assert estimate.width.allocated_qubits == 5
         assert estimate.width.peak_qubits == 3
         assert estimate.width.circuit_qubits == 5
+        assert not any(
+            "anonymous allocated workspace" in assumption.message
+            for assumption in estimate.assumptions
+        )
+
+
+def test_opaque_peak_residual_becomes_anonymous_workspace() -> None:
+    """An input-plus-peak declaration survives call-boundary scheduling."""
+    base_cost = qm.ResourceEstimate(
+        width=qm.WidthResources(
+            input_qubits=1,
+            peak_qubits=3,
+        )
+    )
+    fixed_oracle = qm.opaque(
+        "fixed_peak_only_oracle",
+        num_qubits=1,
+        cost=base_cost,
+    )
+    observed: list[qm.OpaqueCostContext] = []
+
+    def callback_cost(ctx: qm.OpaqueCostContext) -> qm.ResourceEstimate:
+        """Return the same partial width declaration.
+
+        Args:
+            ctx (qm.OpaqueCostContext): Definition-level cost context.
+
+        Returns:
+            qm.ResourceEstimate: Input-plus-peak opaque width.
+        """
+        observed.append(ctx)
+        return base_cost
+
+    callback_oracle = qm.opaque(
+        "callback_peak_only_oracle",
+        num_qubits=1,
+        cost=callback_cost,
+    )
+
+    @qm.qkernel
+    def fixed_direct() -> qm.Qubit:
+        """Invoke the fixed-cost Oracle directly."""
+        target = qm.qubit("target")
+        (target,) = fixed_oracle(target)
+        return target
+
+    @qm.qkernel
+    def callback_direct() -> qm.Qubit:
+        """Invoke the callback-priced Oracle directly."""
+        target = qm.qubit("target")
+        (target,) = callback_oracle(target)
+        return target
+
+    @qm.qkernel
+    def fixed_inverse() -> qm.Qubit:
+        """Invoke the inverse fixed-cost Oracle."""
+        target = qm.qubit("target")
+        (target,) = qm.inverse(fixed_oracle)(target)
+        return target
+
+    @qm.qkernel
+    def fixed_controlled() -> qm.Qubit:
+        """Invoke the fixed-cost Oracle under two controls."""
+        controls = qm.qubit_array(2, "controls")
+        target = qm.qubit("target")
+        *_, target = qm.control(fixed_oracle, num_controls=2)(
+            controls[0],
+            controls[1],
+            target,
+        )
+        return target
+
+    direct_estimates = (
+        fixed_direct.estimate_resources(),
+        callback_direct.estimate_resources(),
+        fixed_inverse.estimate_resources(),
+    )
+    for estimate in direct_estimates:
+        assert estimate.width.allocated_qubits == 3
+        assert estimate.width.peak_qubits == 3
+        assert estimate.width.circuit_qubits == 3
+        assert any(
+            "anonymous allocated workspace" in assumption.message
+            for assumption in estimate.assumptions
+        )
+
+    controlled = fixed_controlled.estimate_resources()
+    assert controlled.width.allocated_qubits == 5
+    assert controlled.width.clean_ancilla_qubits == 0
+    assert controlled.width.peak_qubits == 5
+    assert controlled.width.circuit_qubits == 5
+    assert len(observed) == 1
+
+
+def test_opaque_peak_only_workspace_remains_distinct_from_reusable_ancilla() -> None:
+    """Peak-only scratch stays conservative across distinct static call sites."""
+    peak_only = qm.opaque(
+        "peak_only_static_workspace",
+        num_qubits=1,
+        cost=qm.ResourceEstimate(
+            width=qm.WidthResources(
+                input_qubits=1,
+                peak_qubits=3,
+            )
+        ),
+    )
+    reusable_clean = qm.opaque(
+        "declared_reusable_clean_workspace",
+        num_qubits=1,
+        cost=qm.ResourceEstimate(
+            width=qm.WidthResources(
+                input_qubits=1,
+                clean_ancilla_qubits=2,
+                peak_qubits=3,
+            )
+        ),
+    )
+
+    @qm.qkernel
+    def peak_only_circuit() -> qm.Qubit:
+        """Call the peak-only Oracle at two distinct source locations."""
+        target = qm.qubit("target")
+        (target,) = peak_only(target)
+        (target,) = peak_only(target)
+        return target
+
+    @qm.qkernel
+    def reusable_clean_circuit() -> qm.Qubit:
+        """Call the clean-workspace Oracle at two distinct source locations."""
+        target = qm.qubit("target")
+        (target,) = reusable_clean(target)
+        (target,) = reusable_clean(target)
+        return target
+
+    conservative = peak_only_circuit.estimate_resources()
+    reusable = reusable_clean_circuit.estimate_resources()
+
+    assert conservative.width.peak_qubits == reusable.width.peak_qubits == 3
+    assert conservative.width.allocated_qubits == 5
+    assert conservative.width.clean_ancilla_qubits == 0
+    assert conservative.width.circuit_qubits == 5
+    assert reusable.width.allocated_qubits == 1
+    assert reusable.width.clean_ancilla_qubits == 2
+    assert reusable.width.circuit_qubits == 3
+
+
+@pytest.mark.parametrize("uses_callback", [False, True], ids=["fixed", "callback"])
+def test_opaque_ancilla_declaration_implies_peak_workspace(
+    uses_callback: bool,
+) -> None:
+    """Opaque clean ancillas contribute to peak even when peak is omitted."""
+    base_cost = qm.ResourceEstimate(
+        width=qm.WidthResources(clean_ancilla_qubits=2),
+    )
+
+    def callback_cost(ctx: qm.OpaqueCostContext) -> qm.ResourceEstimate:
+        """Return the same partial width declaration for one Oracle call."""
+        assert ctx.target_qubits == 1
+        return base_cost
+
+    oracle = qm.opaque(
+        f"ancilla_without_peak_{uses_callback}",
+        num_qubits=1,
+        cost=callback_cost if uses_callback else base_cost,
+    )
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Invoke an Oracle whose cost declares only clean workspace."""
+        (target,) = oracle(qm.qubit("target"))
+        return target
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.width.allocated_qubits == 1
+    assert estimate.width.clean_ancilla_qubits == 2
+    assert estimate.width.peak_qubits == 3
+    assert estimate.width.circuit_qubits == 3
 
 
 def test_opaque_callback_arity_profile_uses_fixed_cost_projection() -> None:
@@ -3700,6 +4488,53 @@ def test_opaque_callback_arity_profile_uses_fixed_cost_projection() -> None:
     assert callback_estimate.calls.calls_by_name == {
         "base_definition_controls=0": 1,
     }
+
+
+def test_opaque_aggregate_and_enclosing_body_share_recipe_predicate() -> None:
+    """An Invoke boundary cannot change the symbolic shared-ladder choice."""
+    known_work = sp.Symbol(
+        "known_arity_work",
+        integer=True,
+        nonnegative=True,
+    )
+    base_cost = qm.ResourceEstimate(
+        gates=qm.GateResources(
+            total=2,
+            single_qubit=known_work,
+        ),
+    )
+    oracle = qm.opaque(
+        "shared_recipe_predicate_oracle",
+        num_qubits=1,
+        cost=base_cost,
+    )
+
+    @qm.qkernel
+    def body(target: qm.Qubit) -> qm.Qubit:
+        """Invoke the aggregate-cost Oracle once."""
+        (target,) = oracle(target)
+        return target
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Apply two outer controls around the invocation body."""
+        controls = qm.qubit_array(2, "controls")
+        target = qm.qubit("target")
+        *_, target = qm.control(body, num_controls=2)(controls, target)
+        return target
+
+    through_body = circuit.estimate_resources()
+    direct_aggregate = base_cost.controlled(2)
+
+    for concrete_work in (0, 1, 2):
+        body_estimate = through_body.substitute(known_arity_work=concrete_work)
+        aggregate_estimate = direct_aggregate.substitute(known_arity_work=concrete_work)
+        assert body_estimate.gates == aggregate_estimate.gates
+        assert body_estimate.depth == aggregate_estimate.depth
+        assert (
+            body_estimate.width.clean_ancilla_qubits
+            == aggregate_estimate.width.clean_ancilla_qubits
+        )
 
 
 def test_opaque_callback_nested_estimate_restores_manual_parameter_metadata() -> None:
@@ -4372,15 +5207,15 @@ def test_recursive_lcu_expands_through_inverse_control_and_serialization() -> No
     assert direct_estimate.width.peak_qubits == 3
 
     assert controlled_estimate.gates == qm.GateResources(
-        total=17,
-        single_qubit=3,
-        two_qubit=9,
-        multi_qubit=5,
+        total=15,
+        single_qubit=2,
+        two_qubit=10,
+        multi_qubit=3,
         clifford=6,
         rotation=6,
         t=0,
-        toffoli=5,
-        non_clifford=11,
+        toffoli=3,
+        non_clifford=9,
     )
     assert controlled_estimate.width.input_qubits == 4
     assert controlled_estimate.width.clean_ancilla_qubits == 1

@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import enum
+import re
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
@@ -37,6 +38,7 @@ from qamomile.circuit.estimator._metrics import (
     _GuardedApproximation,
     _GuardedAssumption,
     _GuardedQuality,
+    _is_concrete_integer,
     _ResourceConstraint,
 )
 from qamomile.circuit.estimator._serialization import SymbolRegistry
@@ -55,14 +57,179 @@ _MetricT = TypeVar(
 _EnumT = TypeVar("_EnumT", bound=enum.Enum)
 _RESOURCE_ESTIMATE_WIRE_VERSION = 2
 _MAX_EXPRESSION_NODES = 100_000
+_MAX_NUMERIC_BITS = 4096
+# ceil(4096 / log2(10)); keeps decimal Float magnitude and parsing work within
+# the same approximate information budget as exact integer/rational values.
+_MAX_DECIMAL_FLOAT_DIGITS = 1234
+_MAX_EAGER_RANGE_ITERATIONS = 1024
 _MAX_TRACE_NODES = 100_000
+_SAFE_SYMPY_NAMES = frozenset(
+    {
+        "Abs",
+        "Add",
+        "And",
+        "BooleanFalse",
+        "BooleanTrue",
+        "Dummy",
+        "Equality",
+        "ExprCondPair",
+        "Float",
+        "GreaterThan",
+        "Integer",
+        "Lambda",
+        "LessThan",
+        "Max",
+        "Min",
+        "Mod",
+        "Mul",
+        "Not",
+        "Or",
+        "Piecewise",
+        "Pow",
+        "Rational",
+        "StrictGreaterThan",
+        "StrictLessThan",
+        "Symbol",
+        "Tuple",
+        "Unequality",
+        "Xor",
+        "ceiling",
+        "cos",
+        "exp",
+        "floor",
+        "log",
+        "nan",
+        "oo",
+        "pi",
+        "sign",
+        "sin",
+        "tan",
+        "true",
+        "false",
+        "zoo",
+    }
+)
 
 
-def resource_estimate_to_wire(estimate: ResourceEstimate) -> dict[str, Any]:
+class _WireExpressionEncoder:
+    """Canonicalize every expression in one resource wire payload.
+
+    Ordinary symbols retain their public names. Identity-only ``Dummy``
+    symbols instead receive payload-local slots in deterministic encounter
+    order, removing SymPy's process-random ``dummy_index`` while preserving
+    identity across every metric, requirement, and trace expression.
+
+    Args:
+        registry (SymbolRegistry): Symbol registry for one resource estimate.
+        dummy_slots (dict[sp.Dummy, int] | None): Optional payload-wide mapping
+            from source Dummy identities to deterministic slots. Defaults to a
+            mapping local to this resource estimate.
+    """
+
+    def __init__(
+        self,
+        registry: SymbolRegistry,
+        dummy_slots: dict[sp.Dummy, int] | None = None,
+    ) -> None:
+        """Build canonical replacements for every registered symbol.
+
+        Args:
+            registry (SymbolRegistry): Symbol registry for one resource
+                estimate.
+            dummy_slots (dict[sp.Dummy, int] | None): Optional payload-wide
+                Dummy slot mapping. Defaults to ``None``.
+        """
+        replacements: dict[sp.Symbol, sp.Symbol] = {}
+        resolved_dummy_slots = {} if dummy_slots is None else dummy_slots
+        for symbol, public_name in registry.aliases().items():
+            if isinstance(symbol, sp.Dummy):
+                dummy_slot = resolved_dummy_slots.get(symbol)
+                if dummy_slot is None:
+                    dummy_slot = len(resolved_dummy_slots)
+                    resolved_dummy_slots[symbol] = dummy_slot
+                replacement = sp.Dummy(
+                    public_name,
+                    dummy_index=dummy_slot,
+                    **symbol.assumptions0,
+                )
+            else:
+                replacement = sp.Symbol(public_name, **symbol.assumptions0)
+            replacements[symbol] = replacement
+        self._replacements = replacements
+
+    def encode(self, expression: Any) -> str:
+        """Encode one expression with payload-canonical symbol identities.
+
+        Args:
+            expression (Any): SymPy-compatible expression.
+
+        Returns:
+            str: Deterministic SymPy structural representation.
+
+        Raises:
+            ValueError: If the expression cannot be decoded by the matching
+                closed wire-expression language.
+        """
+        normalized = sp.sympify(expression).xreplace(self._replacements)
+        payload = sp.srepr(normalized)
+        _expression_from_wire(payload, "resource expression")
+        return payload
+
+
+class _WireExpressionDecoder:
+    """Decode Dummy identities from one paired encoder stream.
+
+    A decoder may span multiple resource records only when their encoders
+    shared the same ``dummy_slots`` mapping. Independent wire payloads require
+    independent decoder instances because their integer slots are local.
+    """
+
+    def __init__(self) -> None:
+        """Initialize one encoder-stream-local Dummy mapping."""
+        self._dummies: dict[int, sp.Dummy] = {}
+
+    def decode(self, payload: Any, label: str) -> sp.Basic:
+        """Decode one expression and freshen its canonical Dummy symbols.
+
+        Args:
+            payload (Any): Structural SymPy representation string.
+            label (str): Diagnostic label.
+
+        Returns:
+            sp.Basic: Decoded expression sharing fresh Dummies only within this
+                resource payload.
+
+        Raises:
+            ValueError: If the expression is outside the supported language.
+        """
+        expression = _expression_from_wire(payload, label)
+        replacements: dict[sp.Dummy, sp.Dummy] = {}
+        for symbol in expression.atoms(sp.Dummy):
+            slot = cast(int, getattr(symbol, "dummy_index"))
+            replacement = self._dummies.get(slot)
+            if replacement is None:
+                replacement = sp.Dummy(symbol.name, **symbol.assumptions0)
+                self._dummies[slot] = replacement
+            elif replacement.assumptions0 != symbol.assumptions0:
+                raise ValueError(
+                    f"{label} assigns conflicting assumptions to Dummy slot {slot}"
+                )
+            replacements[symbol] = replacement
+        return expression.xreplace(replacements)
+
+
+def resource_estimate_to_wire(
+    estimate: ResourceEstimate,
+    *,
+    dummy_slots: dict[sp.Dummy, int] | None = None,
+) -> dict[str, Any]:
     """Encode one fixed resource estimate as serializer-friendly data.
 
     Args:
         estimate (ResourceEstimate): Fixed resource estimate to encode.
+        dummy_slots (dict[sp.Dummy, int] | None): Optional payload-wide Dummy
+            slot mapping shared by every opaque cost in one serialized
+            qkernel. Defaults to ``None``.
 
     Returns:
         dict[str, Any]: Closed payload containing metrics, requirements,
@@ -70,7 +237,9 @@ def resource_estimate_to_wire(estimate: ResourceEstimate) -> dict[str, Any]:
 
     Raises:
         TypeError: If ``estimate`` is not a ``ResourceEstimate``.
-        ValueError: If its explanation trace exceeds the supported node limit.
+        ValueError: If its expression language or explanation trace exceeds
+            the supported wire contract, or if it carries caller-scoped
+            liveness state that has no meaning for an opaque definition.
     """
     from qamomile.circuit.estimator.resource_estimator import (
         ResourceEstimate,
@@ -82,6 +251,11 @@ def resource_estimate_to_wire(estimate: ResourceEstimate) -> dict[str, Any]:
             "opaque_cost serialization requires a fixed ResourceEstimate; "
             f"got {type(estimate).__name__}"
         )
+    if estimate._output_sizes or estimate._input_sizes or estimate._has_output_summary:
+        raise ValueError(
+            "opaque_cost serialization does not support caller-scoped "
+            "input/output liveness summaries"
+        )
     registry = SymbolRegistry.from_expressions(
         (
             *_serialization_expressions(estimate),
@@ -89,18 +263,19 @@ def resource_estimate_to_wire(estimate: ResourceEstimate) -> dict[str, Any]:
         ),
         estimate._symbol_aliases,
     )
-    expression = _expression_to_wire
+    encoder = _WireExpressionEncoder(registry, dummy_slots)
+    expression = encoder.encode
     guarded_assumptions = estimate._guarded_assumptions or ()
     guarded_qualities = estimate._guarded_qualities or ()
     guarded_approximations = estimate._guarded_approximations or ()
     return {
         "$type": "ResourceEstimate",
         "version": _RESOURCE_ESTIMATE_WIRE_VERSION,
-        "width": _metric_to_wire(estimate.width),
-        "gates": _metric_to_wire(estimate.gates),
-        "depth": _metric_to_wire(estimate.depth),
-        "measurements": _metric_to_wire(estimate.measurements),
-        "resets": _metric_to_wire(estimate.resets),
+        "width": _metric_to_wire(estimate.width, encoder),
+        "gates": _metric_to_wire(estimate.gates, encoder),
+        "depth": _metric_to_wire(estimate.depth, encoder),
+        "measurements": _metric_to_wire(estimate.measurements, encoder),
+        "resets": _metric_to_wire(estimate.resets, encoder),
         "calls": {
             "calls_by_name": {
                 name: expression(value)
@@ -114,7 +289,7 @@ def resource_estimate_to_wire(estimate: ResourceEstimate) -> dict[str, Any]:
         "assumptions": [
             _assumption_to_wire(assumption) for assumption in estimate.assumptions
         ],
-        "trace": _trace_to_wire(estimate.trace),
+        "trace": _trace_to_wire(estimate.trace, encoder),
         "symbol_aliases": {
             alias: expression(symbol) for symbol, alias in registry.aliases().items()
         },
@@ -178,11 +353,18 @@ def resource_estimate_to_wire(estimate: ResourceEstimate) -> dict[str, Any]:
     }
 
 
-def resource_estimate_from_wire(payload: Any) -> ResourceEstimate:
+def resource_estimate_from_wire(
+    payload: Any,
+    *,
+    decoder: _WireExpressionDecoder | None = None,
+) -> ResourceEstimate:
     """Decode one fixed resource estimate from semantic IR data.
 
     Args:
         payload (Any): Payload produced by :func:`resource_estimate_to_wire`.
+        decoder (_WireExpressionDecoder | None): Optional payload-wide
+            expression decoder shared by every opaque cost in one serialized
+            qkernel. Defaults to ``None``.
 
     Returns:
         ResourceEstimate: Reconstructed fixed resource estimate.
@@ -202,6 +384,7 @@ def resource_estimate_from_wire(payload: Any) -> ResourceEstimate:
             f"{record.get('version')!r}"
         )
 
+    decoder = _WireExpressionDecoder() if decoder is None else decoder
     calls = _mapping(record.get("calls"), "opaque ResourceEstimate calls")
     provenance = _mapping(
         record.get("provenance"),
@@ -215,28 +398,28 @@ def resource_estimate_from_wire(payload: Any) -> ResourceEstimate:
         )
     )
     requirements = tuple(
-        _requirement_from_wire(item)
+        _requirement_from_wire(item, decoder)
         for item in _sequence(
             record.get("requirements"),
             "opaque ResourceEstimate requirements",
         )
     )
     guarded_assumptions = tuple(
-        _guarded_assumption_from_wire(item)
+        _guarded_assumption_from_wire(item, decoder)
         for item in _sequence(
             provenance.get("assumptions"),
             "opaque ResourceEstimate assumption provenance",
         )
     )
     guarded_qualities = tuple(
-        _guarded_quality_from_wire(item)
+        _guarded_quality_from_wire(item, decoder)
         for item in _sequence(
             provenance.get("qualities"),
             "opaque ResourceEstimate quality provenance",
         )
     )
     guarded_approximations = tuple(
-        _guarded_approximation_from_wire(item)
+        _guarded_approximation_from_wire(item, decoder)
         for item in _sequence(
             provenance.get("approximations"),
             "opaque ResourceEstimate approximation provenance",
@@ -247,39 +430,46 @@ def resource_estimate_from_wire(payload: Any) -> ResourceEstimate:
             record.get("width"),
             WidthResources,
             "opaque ResourceEstimate width",
+            decoder,
         ),
         gates=_metric_from_wire(
             record.get("gates"),
             GateResources,
             "opaque ResourceEstimate gates",
+            decoder,
         ),
         depth=_metric_from_wire(
             record.get("depth"),
             DepthResources,
             "opaque ResourceEstimate depth",
+            decoder,
         ),
         measurements=_metric_from_wire(
             record.get("measurements"),
             MeasurementResources,
             "opaque ResourceEstimate measurements",
+            decoder,
         ),
         resets=_metric_from_wire(
             record.get("resets"),
             ResetResources,
             "opaque ResourceEstimate resets",
+            decoder,
         ),
         calls=CallResources(
             calls_by_name=_expression_map_from_wire(
                 calls.get("calls_by_name"),
                 "opaque ResourceEstimate calls_by_name",
+                decoder,
             ),
             queries_by_name=_expression_map_from_wire(
                 calls.get("queries_by_name"),
                 "opaque ResourceEstimate queries_by_name",
+                decoder,
             ),
         ),
         assumptions=assumptions,
-        trace=_trace_from_wire(record.get("trace")),
+        trace=_trace_from_wire(record.get("trace"), decoder),
         quality=_enum_from_wire(
             EstimateQuality,
             record.get("quality"),
@@ -313,12 +503,13 @@ def resource_estimate_from_wire(payload: Any) -> ResourceEstimate:
     symbol_aliases = _symbol_aliases_from_wire(
         record.get("symbol_aliases"),
         estimate,
+        decoder,
     )
     expected_parameters: dict[str, sp.Symbol] = {}
     for name, symbol_payload in raw_parameters.items():
         if not isinstance(name, str):
             raise ValueError("opaque ResourceEstimate parameter names must be strings")
-        symbol = _expression_from_wire(
+        symbol = decoder.decode(
             symbol_payload,
             f"opaque ResourceEstimate parameter {name!r}",
         )
@@ -354,6 +545,7 @@ def resource_estimate_from_wire(payload: Any) -> ResourceEstimate:
 def _symbol_aliases_from_wire(
     payload: Any,
     estimate: ResourceEstimate,
+    decoder: _WireExpressionDecoder,
 ) -> dict[sp.Symbol, str]:
     """Decode the complete identity-to-public-name symbol mapping.
 
@@ -361,6 +553,8 @@ def _symbol_aliases_from_wire(
         payload (Any): Serialized alias mapping keyed by public name.
         estimate (ResourceEstimate): Decoded estimate whose expressions define
             the allowed symbol identities.
+        decoder (_WireExpressionDecoder): Shared payload-local expression
+            decoder.
 
     Returns:
         dict[sp.Symbol, str]: Symbol identities mapped to public aliases.
@@ -387,7 +581,7 @@ def _symbol_aliases_from_wire(
     ).items():
         if not isinstance(public_name, str):
             raise ValueError("opaque ResourceEstimate symbol aliases must be strings")
-        symbol = _expression_from_wire(
+        symbol = decoder.decode(
             symbol_payload,
             f"opaque ResourceEstimate symbol alias {public_name!r}",
         )
@@ -415,16 +609,19 @@ def _symbol_aliases_from_wire(
 
 def _metric_to_wire(
     metric: _MetricT,
+    encoder: _WireExpressionEncoder,
 ) -> dict[str, str]:
     """Encode every dataclass field of one resource metric.
 
     Args:
         metric (_MetricT): Metric record to encode.
+        encoder (_WireExpressionEncoder): Shared canonical expression encoder.
+
     Returns:
         dict[str, str]: Field names mapped to safe SymPy representations.
     """
     return {
-        field.name: _expression_to_wire(getattr(metric, field.name))
+        field.name: encoder.encode(getattr(metric, field.name))
         for field in dataclasses.fields(metric)
     }
 
@@ -433,6 +630,7 @@ def _metric_from_wire(
     payload: Any,
     metric_type: type[_MetricT],
     label: str,
+    decoder: _WireExpressionDecoder,
 ) -> _MetricT:
     """Decode every field of one resource metric.
 
@@ -440,6 +638,8 @@ def _metric_from_wire(
         payload (Any): Serialized metric mapping.
         metric_type (type[_MetricT]): Dataclass type to construct.
         label (str): Diagnostic label.
+        decoder (_WireExpressionDecoder): Shared payload-local expression
+            decoder.
 
     Returns:
         _MetricT: Reconstructed metric record.
@@ -455,18 +655,24 @@ def _metric_from_wire(
             f"{label} fields must be {sorted(field_names)!r}, got {sorted(record)!r}"
         )
     values = {
-        name: _resource_expression_from_wire(value, f"{label}.{name}")
+        name: _resource_expression_from_wire(value, f"{label}.{name}", decoder)
         for name, value in record.items()
     }
     return metric_type(**values)
 
 
-def _expression_map_from_wire(payload: Any, label: str) -> dict[str, sp.Expr]:
+def _expression_map_from_wire(
+    payload: Any,
+    label: str,
+    decoder: _WireExpressionDecoder,
+) -> dict[str, sp.Expr]:
     """Decode a name-to-resource-expression mapping.
 
     Args:
         payload (Any): Serialized mapping.
         label (str): Diagnostic label.
+        decoder (_WireExpressionDecoder): Shared payload-local expression
+            decoder.
 
     Returns:
         dict[str, sp.Expr]: Decoded expression map in payload order.
@@ -480,7 +686,11 @@ def _expression_map_from_wire(payload: Any, label: str) -> dict[str, sp.Expr]:
     for name, value in record.items():
         if not isinstance(name, str):
             raise ValueError(f"{label} keys must be strings")
-        decoded[name] = _resource_expression_from_wire(value, f"{label}.{name}")
+        decoded[name] = _resource_expression_from_wire(
+            value,
+            f"{label}.{name}",
+            decoder,
+        )
     return decoded
 
 
@@ -523,14 +733,19 @@ def _assumption_from_wire(payload: Any) -> ResourceAssumption:
 
 def _trace_to_wire(
     trace: ResourceTraceNode | None,
+    encoder: _WireExpressionEncoder,
 ) -> dict[str, Any] | None:
     """Encode one explanation trace as a flat indexed tree.
 
     Args:
         trace (ResourceTraceNode | None): Trace node to encode.
+        encoder (_WireExpressionEncoder): Shared canonical expression encoder.
 
     Returns:
         dict[str, Any] | None: Serialized trace, or ``None``.
+
+    Raises:
+        ValueError: If the trace exceeds the supported node limit.
     """
     if trace is None:
         return None
@@ -553,7 +768,7 @@ def _trace_to_wire(
                     _assumption_to_wire(assumption) for assumption in node.assumptions
                 ],
                 "children": list(range(child_start, child_start + len(node.children))),
-                "active_when": _expression_to_wire(node.active_when),
+                "active_when": encoder.encode(node.active_when),
             }
         )
         index += 1
@@ -570,6 +785,9 @@ def _trace_activation_guards(
 
     Returns:
         Sequence[sp.Basic]: Guards in deterministic pre-order.
+
+    Raises:
+        ValueError: If the trace exceeds the supported node limit.
     """
     if trace is None:
         return ()
@@ -586,11 +804,16 @@ def _trace_activation_guards(
     return guards
 
 
-def _trace_from_wire(payload: Any) -> ResourceTraceNode | None:
+def _trace_from_wire(
+    payload: Any,
+    decoder: _WireExpressionDecoder,
+) -> ResourceTraceNode | None:
     """Decode one flat indexed explanation trace.
 
     Args:
         payload (Any): Serialized trace mapping or ``None``.
+        decoder (_WireExpressionDecoder): Shared payload-local expression
+            decoder.
 
     Returns:
         ResourceTraceNode | None: Reconstructed trace.
@@ -670,16 +893,22 @@ def _trace_from_wire(payload: Any) -> ResourceTraceNode | None:
             active_when=_boolean_expression_from_wire(
                 record.get("active_when"),
                 f"resource trace node {index} active_when",
+                decoder,
             ),
         )
     return cast(ResourceTraceNode, decoded[0])
 
 
-def _requirement_from_wire(payload: Any) -> _ResourceConstraint:
+def _requirement_from_wire(
+    payload: Any,
+    decoder: _WireExpressionDecoder,
+) -> _ResourceConstraint:
     """Decode one structural resource requirement.
 
     Args:
         payload (Any): Serialized requirement mapping.
+        decoder (_WireExpressionDecoder): Shared payload-local expression
+            decoder.
 
     Returns:
         _ResourceConstraint: Reconstructed requirement.
@@ -709,7 +938,7 @@ def _requirement_from_wire(payload: Any) -> _ResourceConstraint:
         "resource requirement ranges",
     ):
         range_record = _mapping(raw_range, "resource requirement range")
-        symbol = _expression_from_wire(
+        symbol = decoder.decode(
             range_record.get("symbol"),
             "resource requirement range symbol",
         )
@@ -721,14 +950,17 @@ def _requirement_from_wire(payload: Any) -> _ResourceConstraint:
                 start=_resource_expression_from_wire(
                     range_record.get("start"),
                     "resource requirement range start",
+                    decoder,
                 ),
                 step=_resource_expression_from_wire(
                     range_record.get("step"),
                     "resource requirement range step",
+                    decoder,
                 ),
                 iterations=_resource_expression_from_wire(
                     range_record.get("iterations"),
                     "resource requirement range iterations",
+                    decoder,
                 ),
             )
         )
@@ -737,6 +969,7 @@ def _requirement_from_wire(payload: Any) -> _ResourceConstraint:
         expression=_resource_expression_from_wire(
             record.get("expression"),
             "resource requirement expression",
+            decoder,
         ),
         minimum=minimum,
         label=label,
@@ -748,6 +981,7 @@ def _requirement_from_wire(payload: Any) -> _ResourceConstraint:
             _resource_expression_from_wire(
                 raw_expected,
                 "resource requirement expected",
+                decoder,
             )
             if raw_expected is not None
             else None
@@ -758,11 +992,16 @@ def _requirement_from_wire(payload: Any) -> _ResourceConstraint:
     return requirement
 
 
-def _guarded_assumption_from_wire(payload: Any) -> _GuardedAssumption:
+def _guarded_assumption_from_wire(
+    payload: Any,
+    decoder: _WireExpressionDecoder,
+) -> _GuardedAssumption:
     """Decode one guarded assumption fact.
 
     Args:
         payload (Any): Serialized provenance mapping.
+        decoder (_WireExpressionDecoder): Shared payload-local expression
+            decoder.
 
     Returns:
         _GuardedAssumption: Reconstructed guarded fact.
@@ -775,16 +1014,22 @@ def _guarded_assumption_from_wire(payload: Any) -> _GuardedAssumption:
         active_when=_boolean_expression_from_wire(
             record.get("active_when"),
             "guarded resource assumption active_when",
+            decoder,
         ),
         assumption=_assumption_from_wire(record.get("assumption")),
     )
 
 
-def _guarded_quality_from_wire(payload: Any) -> _GuardedQuality:
+def _guarded_quality_from_wire(
+    payload: Any,
+    decoder: _WireExpressionDecoder,
+) -> _GuardedQuality:
     """Decode one guarded estimate-quality fact.
 
     Args:
         payload (Any): Serialized provenance mapping.
+        decoder (_WireExpressionDecoder): Shared payload-local expression
+            decoder.
 
     Returns:
         _GuardedQuality: Reconstructed guarded fact.
@@ -797,6 +1042,7 @@ def _guarded_quality_from_wire(payload: Any) -> _GuardedQuality:
         active_when=_boolean_expression_from_wire(
             record.get("active_when"),
             "guarded resource quality active_when",
+            decoder,
         ),
         quality=_enum_from_wire(
             EstimateQuality,
@@ -806,11 +1052,16 @@ def _guarded_quality_from_wire(payload: Any) -> _GuardedQuality:
     )
 
 
-def _guarded_approximation_from_wire(payload: Any) -> _GuardedApproximation:
+def _guarded_approximation_from_wire(
+    payload: Any,
+    decoder: _WireExpressionDecoder,
+) -> _GuardedApproximation:
     """Decode one guarded approximation fact.
 
     Args:
         payload (Any): Serialized provenance mapping.
+        decoder (_WireExpressionDecoder): Shared payload-local expression
+            decoder.
 
     Returns:
         _GuardedApproximation: Reconstructed guarded fact.
@@ -823,6 +1074,7 @@ def _guarded_approximation_from_wire(payload: Any) -> _GuardedApproximation:
         active_when=_boolean_expression_from_wire(
             record.get("active_when"),
             "guarded resource approximation active_when",
+            decoder,
         ),
         approximation=_enum_from_wire(
             ApproximationStatus,
@@ -830,20 +1082,6 @@ def _guarded_approximation_from_wire(payload: Any) -> _GuardedApproximation:
             "guarded resource approximation",
         ),
     )
-
-
-def _expression_to_wire(
-    expression: Any,
-) -> str:
-    """Encode one symbolic expression as identity-safe constructor text.
-
-    Args:
-        expression (Any): SymPy-compatible expression.
-
-    Returns:
-        str: SymPy structural representation preserving symbol identities.
-    """
-    return sp.srepr(sp.sympify(expression))
 
 
 def _expression_from_wire(payload: Any, label: str) -> sp.Basic:
@@ -874,12 +1112,18 @@ def _expression_from_wire(payload: Any, label: str) -> sp.Basic:
     return result
 
 
-def _resource_expression_from_wire(payload: Any, label: str) -> sp.Expr:
+def _resource_expression_from_wire(
+    payload: Any,
+    label: str,
+    decoder: _WireExpressionDecoder,
+) -> sp.Expr:
     """Decode one numeric resource expression.
 
     Args:
         payload (Any): Structural SymPy representation string.
         label (str): Diagnostic label.
+        decoder (_WireExpressionDecoder): Shared payload-local expression
+            decoder.
 
     Returns:
         sp.Expr: Reconstructed numeric expression.
@@ -887,18 +1131,24 @@ def _resource_expression_from_wire(payload: Any, label: str) -> sp.Expr:
     Raises:
         ValueError: If the payload decodes to a Boolean or non-expression.
     """
-    expression = _expression_from_wire(payload, label)
+    expression = decoder.decode(payload, label)
     if not isinstance(expression, sp.Expr):
         raise ValueError(f"{label} must decode to a numeric SymPy expression")
     return expression
 
 
-def _boolean_expression_from_wire(payload: Any, label: str) -> Boolean:
+def _boolean_expression_from_wire(
+    payload: Any,
+    label: str,
+    decoder: _WireExpressionDecoder,
+) -> Boolean:
     """Decode one symbolic Boolean guard.
 
     Args:
         payload (Any): Structural SymPy representation string.
         label (str): Diagnostic label.
+        decoder (_WireExpressionDecoder): Shared payload-local expression
+            decoder.
 
     Returns:
         Boolean: Reconstructed Boolean condition.
@@ -906,7 +1156,7 @@ def _boolean_expression_from_wire(payload: Any, label: str) -> Boolean:
     Raises:
         ValueError: If the payload does not decode to a SymPy Boolean.
     """
-    expression = _expression_from_wire(payload, label)
+    expression = decoder.decode(payload, label)
     if not isinstance(expression, Boolean):
         raise ValueError(f"{label} must decode to a SymPy Boolean")
     return expression
@@ -961,6 +1211,8 @@ def _evaluate_sympy_ast(node: ast.AST) -> Any:
         cast(str, keyword.arg): _evaluate_sympy_ast(keyword.value)
         for keyword in node.keywords
     }
+    constructor_name = node.func.id if isinstance(node.func, ast.Name) else ""
+    _validate_sympy_constructor_call(constructor_name, args, kwargs)
     try:
         result = constructor(*args, **kwargs)
     except (TypeError, ValueError, sp.SympifyError) as exc:
@@ -969,7 +1221,123 @@ def _evaluate_sympy_ast(node: ast.AST) -> Any:
         ) from exc
     if not isinstance(result, (sp.Basic, FunctionClass)):
         raise ValueError("symbolic constructor produced an unsupported result")
+    if isinstance(result, sp.Basic):
+        _validate_sympy_numeric_size(result)
     return result
+
+
+def _validate_sympy_constructor_call(
+    name: str,
+    args: list[Any],
+    kwargs: dict[str, Any],
+) -> None:
+    """Reject constructor inputs that can trigger unbounded eager arithmetic.
+
+    Args:
+        name (str): Validated SymPy constructor name.
+        args (list[Any]): Recursively decoded positional arguments.
+        kwargs (dict[str, Any]): Recursively decoded keyword arguments.
+
+    Raises:
+        ValueError: If a numeric constructor request exceeds the wire budget.
+    """
+    if name == "Float":
+        _validate_float_constructor(args, kwargs)
+    if name == "_CappedRangeSum" and len(args) == 4:
+        iterations = args[3]
+        if (
+            isinstance(iterations, sp.Expr)
+            and iterations.is_number
+            and _is_concrete_integer(iterations)
+            and int(iterations) > _MAX_EAGER_RANGE_ITERATIONS
+        ):
+            raise ValueError("symbolic range evaluation exceeds the wire budget")
+    if name != "Pow" or len(args) < 2:
+        return
+    base, exponent = args[:2]
+    if not isinstance(exponent, sp.Integer):
+        return
+    exponent_value = int(exponent)
+    if not isinstance(base, (sp.Integer, sp.Rational)):
+        return
+    if base in (sp.Integer(-1), sp.Integer(0), sp.Integer(1)):
+        return
+    magnitude = max(
+        abs(int(base.p)).bit_length(),
+        abs(int(base.q)).bit_length(),
+    )
+    if magnitude * max(1, abs(exponent_value)) > _MAX_NUMERIC_BITS:
+        raise ValueError("symbolic numeric power exceeds the wire budget")
+
+
+def _validate_float_constructor(args: list[Any], kwargs: dict[str, Any]) -> None:
+    """Reject Float payloads whose parsing or magnitude exceeds the budget.
+
+    The encoder's structural representation always uses one decimal string
+    plus an optional ``precision`` keyword. Restricting the decoder to that
+    canonical shape prevents positional ``dps`` or enormous decimal exponents
+    from triggering expensive arbitrary-precision construction.
+
+    Args:
+        args (list[Any]): Recursively decoded Float positional arguments.
+        kwargs (dict[str, Any]): Recursively decoded Float keyword arguments.
+
+    Raises:
+        ValueError: If the Float is noncanonical or exceeds the wire budget.
+    """
+    if len(args) != 1 or not isinstance(args[0], str):
+        raise ValueError("symbolic Float requires one decimal string")
+    if set(kwargs) - {"precision"}:
+        raise ValueError("symbolic Float contains unsupported keyword arguments")
+    precision = kwargs.get("precision", 53)
+    if not isinstance(precision, int) or isinstance(precision, bool):
+        raise ValueError("symbolic Float precision must be an integer")
+    if precision < 1 or precision > _MAX_NUMERIC_BITS:
+        raise ValueError("symbolic Float precision exceeds the wire budget")
+
+    literal = args[0]
+    if len(literal) > _MAX_DECIMAL_FLOAT_DIGITS + 16:
+        raise ValueError("symbolic Float literal exceeds the wire budget")
+    match = re.fullmatch(
+        r"[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE]([+-]?\d+))?",
+        literal,
+    )
+    if match is None:
+        raise ValueError("symbolic Float literal is malformed")
+    digits = sum(
+        character.isdigit() for character in literal.split("e")[0].split("E")[0]
+    )
+    exponent_text = match.group(1)
+    if exponent_text is None:
+        exponent = 0
+    else:
+        exponent_digits = exponent_text.lstrip("+-")
+        if len(exponent_digits) > len(str(_MAX_DECIMAL_FLOAT_DIGITS)):
+            raise ValueError("symbolic Float exponent exceeds the wire budget")
+        exponent = int(exponent_text)
+    if digits + abs(exponent) > _MAX_DECIMAL_FLOAT_DIGITS:
+        raise ValueError("symbolic Float magnitude exceeds the wire budget")
+
+
+def _validate_sympy_numeric_size(expression: sp.Basic) -> None:
+    """Reject an exact numeric result that exceeds the wire arithmetic budget.
+
+    Args:
+        expression (sp.Basic): Newly constructed SymPy expression or number.
+
+    Raises:
+        ValueError: If an exact rational result exceeds the bit limit.
+    """
+    if not isinstance(expression, sp.Rational):
+        return
+    if (
+        max(
+            abs(int(expression.p)).bit_length(),
+            abs(int(expression.q)).bit_length(),
+        )
+        > _MAX_NUMERIC_BITS
+    ):
+        raise ValueError("symbolic numeric value exceeds the wire budget")
 
 
 def _sympy_name(name: str) -> Any:
@@ -1006,6 +1374,8 @@ def _sympy_name(name: str) -> Any:
         )
 
         return _CappedRangeSum
+    if name not in _SAFE_SYMPY_NAMES:
+        raise ValueError(f"unsupported symbolic constructor {name!r}")
     candidate = getattr(sp, name, None)
     if isinstance(candidate, sp.Basic) or _is_sympy_constructor(candidate):
         return candidate

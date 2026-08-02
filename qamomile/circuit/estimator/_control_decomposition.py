@@ -5,13 +5,11 @@ from __future__ import annotations
 import dataclasses
 
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.arithmetic_operations import (
-    BinOp,
-    CompOp,
-    CondOp,
-    NotOp,
-)
 from qamomile.circuit.ir.operation.callable import InvokeOperation
+from qamomile.circuit.ir.operation.cast import CastOperation
+from qamomile.circuit.ir.operation.classical_ops import (
+    ReturnQuantumArrayElementOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
 from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
@@ -19,18 +17,13 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
-from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.ir.operation.operation import OperationKind, QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
-from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.operation.select import SelectOperation
 
 CLEAN_ANCILLA_BATCH_MIN_WORK = 2
 
 _CONTEXT_DEPENDENT_OPERATION_TYPES = (
-    BinOp,
-    CompOp,
-    CondOp,
-    NotOp,
     ControlledUOperation,
     ForOperation,
     GlobalPhaseOperation,
@@ -83,7 +76,14 @@ def static_clean_ancilla_batch_profile(
         StaticCleanAncillaBatchProfile | None: Context-free fixed-model profile,
             or ``None`` when estimator-specific resolution is required.
     """
-    if isinstance(operation, (ReturnOperation, QInitOperation)):
+    if operation.operation_kind is OperationKind.CLASSICAL or isinstance(
+        operation,
+        (
+            CastOperation,
+            QInitOperation,
+            ReturnQuantumArrayElementOperation,
+        ),
+    ):
         return StaticCleanAncillaBatchProfile()
     if isinstance(operation, GateOperation):
         return StaticCleanAncillaBatchProfile(work=1)

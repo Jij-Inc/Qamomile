@@ -328,6 +328,60 @@ def test_resource_wire_rejects_executable_expression_syntax() -> None:
         resource_estimate_from_wire(wire)
 
 
+def test_resource_wire_rejects_unsupported_expression_before_encoding() -> None:
+    """A fixed cost is never persisted when its expression cannot decode."""
+    repetitions = sp.Symbol("repetitions", integer=True, nonnegative=True)
+    estimate = qm.ResourceEstimate(
+        gates=qm.GateResources(total=sp.factorial(repetitions))
+    )
+
+    with pytest.raises(ValueError, match="unsupported symbolic constructor"):
+        resource_estimate_to_wire(estimate)
+
+
+@pytest.mark.parametrize(
+    "iterations",
+    [sp.Integer(1025), sp.Float(1025.0)],
+    ids=["integer", "integer-valued-float"],
+)
+def test_resource_wire_applies_range_budget_during_encoding(
+    iterations: sp.Expr,
+) -> None:
+    """Encoder and decoder enforce the same concrete range-work budget."""
+    index = sp.Dummy("index", integer=True, nonnegative=True)
+    work_per_iteration = sp.Symbol(
+        "work_per_iteration",
+        integer=True,
+        nonnegative=True,
+    )
+    work = _CappedRangeSum(
+        sp.Lambda(
+            index,
+            work_per_iteration * _ConditionIndicator(sp.Gt(index, 0)),
+        ),
+        sp.Integer(0),
+        sp.Integer(1),
+        iterations,
+        evaluate=False,
+    )
+    estimate = qm.ResourceEstimate(gates=qm.GateResources(total=work))
+
+    with pytest.raises(ValueError, match="range evaluation exceeds"):
+        resource_estimate_to_wire(estimate)
+
+
+def test_resource_wire_rejects_caller_scoped_liveness_before_encoding() -> None:
+    """Opaque definition costs cannot persist private caller owner mappings."""
+    hidden_size = sp.Symbol("hidden_size", integer=True, nonnegative=True)
+    estimate = qm.ResourceEstimate(
+        _output_sizes={"caller-owner": hidden_size},
+        _has_output_summary=True,
+    )
+
+    with pytest.raises(ValueError, match="caller-scoped input/output liveness"):
+        resource_estimate_to_wire(estimate)
+
+
 def test_resource_wire_preserves_trace_only_symbol_identity() -> None:
     """Trace guards round-trip even when no metric exposes their symbol."""
     trace_flag = sp.Dummy("trace_flag", integer=True, nonnegative=True)
@@ -339,9 +393,56 @@ def test_resource_wire_preserves_trace_only_symbol_identity() -> None:
         )
     )
 
-    restored = resource_estimate_from_wire(resource_estimate_to_wire(estimate))
+    wire = resource_estimate_to_wire(estimate)
+    restored = resource_estimate_from_wire(wire)
 
+    assert "dummy_index=0" in wire["trace"]["nodes"][0]["active_when"]
     assert restored.parameters == {}
+    assert restored.explain() == (
+        "Resource estimate\n  conditional trace [test] when=trace_flag > 0"
+    )
+
+
+def test_resource_wire_shares_dummy_identity_across_one_payload() -> None:
+    """One payload restores the same Dummy identity in every expression."""
+    shared = sp.Dummy("shared", integer=True, nonnegative=True)
+    estimate = qm.ResourceEstimate(
+        gates=qm.GateResources(total=shared),
+        trace=ResourceTraceNode(
+            name="conditional trace",
+            source_kind="test",
+            active_when=sp.Gt(shared, 0),
+        ),
+    )
+
+    restored = resource_estimate_from_wire(resource_estimate_to_wire(estimate))
+    (metric_symbol,) = restored.gates.total.free_symbols
+    (trace_symbol,) = restored.trace.active_when.free_symbols
+
+    assert isinstance(metric_symbol, sp.Dummy)
+    assert metric_symbol is trace_symbol
+
+
+def test_resource_wire_decodes_legacy_nondeterministic_dummy_indices() -> None:
+    """Older payloads with process-assigned Dummy indices remain readable."""
+    trace_flag = sp.Dummy("trace_flag", integer=True, nonnegative=True)
+    estimate = qm.ResourceEstimate(
+        trace=ResourceTraceNode(
+            name="conditional trace",
+            source_kind="test",
+            active_when=sp.Gt(trace_flag, 0),
+        )
+    )
+    wire = resource_estimate_to_wire(estimate)
+    wire["trace"]["nodes"][0]["active_when"] = wire["trace"]["nodes"][0][
+        "active_when"
+    ].replace("dummy_index=0", "dummy_index=987654")
+    wire["symbol_aliases"]["trace_flag"] = wire["symbol_aliases"]["trace_flag"].replace(
+        "dummy_index=0", "dummy_index=987654"
+    )
+
+    restored = resource_estimate_from_wire(wire)
+
     assert restored.explain() == (
         "Resource estimate\n  conditional trace [test] when=trace_flag > 0"
     )
@@ -389,7 +490,7 @@ def test_separately_decoded_costs_keep_independent_symbol_identities() -> None:
 
 def test_separately_decoded_costs_preserve_shared_symbol_identity() -> None:
     """Fixed-cost payloads retain an intentionally shared model parameter."""
-    shared_symbol = sp.Dummy("n", integer=True, nonnegative=True)
+    shared_symbol = sp.Symbol("n", integer=True, nonnegative=True)
     left = qm.ResourceEstimate(
         gates=qm.GateResources(total=shared_symbol),
     )

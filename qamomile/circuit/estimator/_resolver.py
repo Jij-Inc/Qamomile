@@ -104,6 +104,7 @@ class ExprResolver:
         "_loop_var_names",
         "_parent_blocks",
         "_producer_maps",
+        "_structural_scope",
     )
 
     def __init__(
@@ -114,6 +115,7 @@ class ExprResolver:
         parent_blocks: list[Any] | None = None,
         producer_maps: dict[int, tuple[Any, dict[str, Operation]]] | None = None,
         input_shape_alias_maps: (dict[int, tuple[Block, dict[str, str]]] | None) = None,
+        structural_scope: tuple[tuple[int, int], ...] | None = None,
     ):
         """Initialise an ExprResolver.
 
@@ -137,6 +139,10 @@ class ExprResolver:
                 and its input-dimension UUID to public alias map. Child
                 resolvers reuse it so every block interface is scanned at most
                 once. Defaults to ``None``.
+            structural_scope (tuple[tuple[int, int], ...] | None): Stable
+                call-site path used by structural resource symbols. Each item
+                contains the invocation and selected-body identities. Defaults
+                to ``None`` for a root scope.
         """
         self._block = block
         self._context: dict[str, sp.Expr] = dict(context or {})
@@ -146,6 +152,7 @@ class ExprResolver:
         self._input_shape_alias_maps = (
             input_shape_alias_maps if input_shape_alias_maps is not None else {}
         )
+        self._structural_scope = structural_scope or ()
 
     # ------------------------------------------------------------------ #
     #  Public API                                                         #
@@ -185,6 +192,33 @@ class ExprResolver:
             getattr(v, "uuid", "?"),
             f"Expected concrete int, got {expr}",
         )
+
+    @property
+    def structural_scope(self) -> tuple[tuple[int, int], ...]:
+        """Return the nested callable path for structural resource symbols.
+
+        Returns:
+            tuple[tuple[int, int], ...]: Invocation/body identity pairs from
+                the root block to this resolver scope.
+        """
+        return self._structural_scope
+
+    def call_structural_scope(
+        self,
+        call_op: Any,
+        called_block: Block,
+    ) -> tuple[tuple[int, int], ...]:
+        """Return the structural scope of one selected callable body.
+
+        Args:
+            call_op (Any): Invocation-like operation defining the call site.
+            called_block (Block): Selected body entered at that call site.
+
+        Returns:
+            tuple[tuple[int, int], ...]: Parent path extended by this call
+                site and selected body.
+        """
+        return (*self._structural_scope, (id(call_op), id(called_block)))
 
     def child_scope(
         self,
@@ -226,12 +260,14 @@ class ExprResolver:
             parent_blocks=new_parents,
             producer_maps=self._producer_maps,
             input_shape_alias_maps=self._input_shape_alias_maps,
+            structural_scope=self._structural_scope,
         )
 
     def isolated_scope(
         self,
         inner_block: Any,
         extra_context: dict[str, sp.Expr] | None = None,
+        structural_scope: tuple[tuple[int, int], ...] | None = None,
     ) -> ExprResolver:
         """Create a resolver scope isolated from caller block visibility.
 
@@ -243,6 +279,9 @@ class ExprResolver:
             inner_block (Any): Callable block for the isolated scope.
             extra_context (dict[str, sp.Expr] | None): Additional UUID to
                 expression mappings for formal inputs. Defaults to ``None``.
+            structural_scope (tuple[tuple[int, int], ...] | None): Explicit
+                call-site path for the isolated scope. Defaults to the current
+                path.
 
         Returns:
             ExprResolver: Resolver with no parent blocks and shared block
@@ -258,6 +297,9 @@ class ExprResolver:
             parent_blocks=[],
             producer_maps=self._producer_maps,
             input_shape_alias_maps=self._input_shape_alias_maps,
+            structural_scope=(
+                self._structural_scope if structural_scope is None else structural_scope
+            ),
         )
 
     def call_child_scope(
@@ -321,7 +363,11 @@ class ExprResolver:
                     extra[df.uuid] = self.resolve(da)
 
         # Callee gets fresh scope — no parent blocks from caller.
-        return self.isolated_scope(called_block, extra)
+        return self.isolated_scope(
+            called_block,
+            extra,
+            structural_scope=self.call_structural_scope(call_op, called_block),
+        )
 
     def bind(self, value: Value, expression: sp.Expr) -> None:
         """Bind an IR value to an expression in this resolver scope.

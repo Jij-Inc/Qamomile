@@ -16,6 +16,7 @@ from qamomile.circuit.ir.operation.callable import (
     CompositeGateType,
     InvokeOperation,
 )
+from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
     GateOperation,
@@ -230,6 +231,33 @@ def test_bodyless_inverse_counts_as_unresolved_batch_work() -> None:
 
     assert profile.weight == 1
     assert profile.selects_exact_two
+
+
+def test_invalid_for_bounds_remain_visible_to_controlled_emission() -> None:
+    """Unresolved and zero-step loops cannot masquerade as identities."""
+    start = Value(type=UIntType(), name="start")
+    stop = Value(type=UIntType(), name="stop")
+    step = Value(type=UIntType(), name="step")
+    operation = ForOperation(operands=[start, stop, step])
+    emit_pass = _ResolverOnlyEmitPass()
+
+    unresolved = controlled_emission._batch_op_profile(
+        emit_pass,
+        operation,
+        {},
+    )
+    zero_step = controlled_emission._batch_op_profile(
+        emit_pass,
+        operation,
+        {
+            start.uuid: 0,
+            stop.uuid: 3,
+            step.uuid: 0,
+        },
+    )
+
+    assert unresolved.weight == 1
+    assert zero_step.weight == 1
 
 
 def test_controlled_power_analysis_propagates_invalid_values() -> None:
@@ -1610,6 +1638,216 @@ def test_batched_multi_gate_body_shares_one_and_ladder() -> None:
         ("toffoli", 2, 10, 11),
         ("toffoli", 0, 1, 10),
     ]
+
+
+def test_controlled_walker_reuses_supplied_batch_profile(monkeypatch: Any) -> None:
+    """A call-site profile avoids replaying the same controlled body."""
+    pool = MultiControlAncillaPool(first_index=10, count=2)
+    emit_pass = _MultiControlEmitPass(ancilla_pool=pool)
+    target = Value(type=QubitType(), name="target")
+    after_x = target.next_version()
+    after_z = after_x.next_version()
+    operations = [
+        GateOperation.fixed(GateOperationType.X, [target], [after_x]),
+        GateOperation.fixed(GateOperationType.Z, [after_x], [after_z]),
+    ]
+    profile = controlled_emission.ControlBatchProfile(weight=2)
+
+    def fail_reanalysis(*args: Any, **kwargs: Any) -> None:
+        """Fail if the controlled walker recomputes a supplied profile."""
+        del args, kwargs
+        raise AssertionError("batch profile was recomputed")
+
+    monkeypatch.setattr(
+        controlled_emission,
+        "_controlled_body_batch_profile",
+        fail_reanalysis,
+    )
+
+    emit_controlled_operations(
+        emit_pass,
+        object(),
+        operations,
+        [0, 1, 2],
+        {QubitAddress(target.uuid): 3},
+        {},
+        batch_profile=profile,
+    )
+
+    assert emit_pass._emitter.calls
+
+
+def test_batch_profile_stops_after_a_decisive_loop_iteration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A large static loop is not replayed after batching is decided."""
+    loop_var = Value(type=UIntType(), name="iteration")
+    operation = ForOperation(
+        operands=[
+            Value(type=UIntType(), name="start").with_const(0),
+            Value(type=UIntType(), name="stop").with_const(1_000_000),
+            Value(type=UIntType(), name="step").with_const(1),
+        ],
+        loop_var="iteration",
+        loop_var_value=loop_var,
+        operations=[_fixed_gate(GateOperationType.CX, 2)],
+    )
+    calls = 0
+
+    def decisive_profile(*args: Any, **kwargs: Any) -> Any:
+        """Return a terminal profile and record one body inspection."""
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        return controlled_emission.ControlBatchProfile(
+            weight=2,
+            selects_exact_two=True,
+        )
+
+    monkeypatch.setattr(
+        controlled_emission,
+        "_batch_op_profile",
+        decisive_profile,
+    )
+
+    profile = controlled_emission._for_batch_profile(
+        _ResolverOnlyEmitPass(),
+        operation,
+        {},
+    )
+
+    assert profile.weight == 2
+    assert profile.selects_exact_two
+    assert calls == 1
+
+
+@pytest.mark.parametrize(
+    "reuse_gate",
+    [False, True],
+    ids=["zero-power", "reusable-gate"],
+)
+def test_controlled_call_profiles_only_fallback_work(
+    monkeypatch: pytest.MonkeyPatch,
+    reuse_gate: bool,
+) -> None:
+    """Identity powers and reusable gates skip fallback-only profiling."""
+    control = Value(type=QubitType(), name="control")
+    target = Value(type=QubitType(), name="target")
+    formal_target = Value(type=QubitType(), name="formal_target")
+    formal_result = formal_target.next_version()
+    block = Block(
+        input_values=[formal_target],
+        output_values=[formal_result],
+        operations=[
+            GateOperation.fixed(
+                GateOperationType.X,
+                [formal_target],
+                [formal_result],
+            )
+        ],
+    )
+    operation = ConcreteControlledU(
+        operands=[control, target],
+        results=[control.next_version(), target.next_version()],
+        num_controls=1,
+        power=1 if reuse_gate else 0,
+        block=block,
+    )
+    emit_pass = _MultiControlEmitPass()
+    appended: list[list[int]] = []
+    if reuse_gate:
+        monkeypatch.setattr(
+            emit_pass,
+            "_blockvalue_to_gate",
+            lambda *args, **kwargs: object(),
+        )
+        monkeypatch.setattr(
+            emit_pass._emitter,
+            "gate_controlled",
+            lambda gate, num_controls: gate,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            emit_pass._emitter,
+            "append_gate",
+            lambda circuit, gate, indices: appended.append(indices),
+            raising=False,
+        )
+
+    def fail_profile(*args: Any, **kwargs: Any) -> None:
+        """Fail if a non-fallback path performs semantic profiling."""
+        del args, kwargs
+        raise AssertionError("fallback profile was computed eagerly")
+
+    monkeypatch.setattr(
+        controlled_emission,
+        "_controlled_body_batch_profile",
+        fail_profile,
+    )
+
+    controlled_emission.emit_controlled_u(
+        emit_pass,
+        object(),
+        operation,
+        {
+            QubitAddress(control.uuid): 0,
+            QubitAddress(target.uuid): 1,
+        },
+        {},
+    )
+
+    assert appended == ([[0, 1]] if reuse_gate else [])
+
+
+def test_repeated_fallback_profiles_body_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated fallback emission reuses one resolved batching profile."""
+    target = Value(type=QubitType(), name="target")
+    target_after_x = target.next_version()
+    target_after_z = target_after_x.next_version()
+    block = Block(
+        input_values=[target],
+        output_values=[target_after_z],
+        operations=[
+            GateOperation.fixed(GateOperationType.X, [target], [target_after_x]),
+            GateOperation.fixed(
+                GateOperationType.Z,
+                [target_after_x],
+                [target_after_z],
+            ),
+        ],
+    )
+    emit_pass = _MultiControlEmitPass(
+        ancilla_pool=MultiControlAncillaPool(first_index=10, count=2)
+    )
+    original_profile = controlled_emission._controlled_body_batch_profile
+    calls = 0
+
+    def record_profile(*args: Any, **kwargs: Any) -> Any:
+        """Count profile resolutions while delegating to the implementation."""
+        nonlocal calls
+        calls += 1
+        return original_profile(*args, **kwargs)
+
+    monkeypatch.setattr(
+        controlled_emission,
+        "_controlled_body_batch_profile",
+        record_profile,
+    )
+
+    controlled_emission.emit_controlled_fallback(
+        emit_pass,
+        object(),
+        block,
+        num_controls=3,
+        control_indices=[0, 1, 2],
+        target_indices=[3],
+        power=5,
+        bindings={},
+    )
+
+    assert calls == 1
 
 
 @pytest.mark.parametrize("num_controls", [2, 3])

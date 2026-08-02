@@ -224,6 +224,33 @@ def _patterned_inverse_kernel() -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
     return qmc.inverse(_patterned_controlled_composite_layer)(q[0], q[1], q[2])
 
 
+_CONTROLLED_INVERSE_ORACLE = qmc.opaque(
+    "drawer_controlled_inverse",
+    num_qubits=1,
+)
+
+
+@qmc.qkernel
+def _controlled_inverse_oracle_kernel() -> tuple[
+    qmc.Qubit,
+    qmc.Qubit,
+    qmc.Qubit,
+]:
+    """Apply a bodyless controlled-inverse call with a mixed control pattern."""
+    transformed = qmc.inverse(
+        qmc.control(
+            _CONTROLLED_INVERSE_ORACLE,
+            num_controls=2,
+            control_value=2,
+        )
+    )
+    return transformed(
+        qmc.qubit("control_0"),
+        qmc.qubit("control_1"),
+        qmc.qubit("target"),
+    )
+
+
 def _controlled_u_nodes(kernel: Any) -> list[VGate]:
     """Build controlled-U visual nodes from a kernel.
 
@@ -347,6 +374,31 @@ def test_patterned_inverse_visual_ir_retains_control_pattern():
     assert len(controlled) == 1
     assert controlled[0].control_count == 2
     assert controlled[0].control_pattern == (0, 1)
+
+
+def test_controlled_inverse_invoke_draws_controlled_pattern() -> None:
+    """CONTROLLED_INVERSE invokes use controlled wires and dagger labeling."""
+    [operation] = [
+        candidate
+        for candidate in _controlled_inverse_oracle_kernel.block.operations
+        if isinstance(candidate, InvokeOperation)
+    ]
+    nodes = _controlled_u_nodes(_controlled_inverse_oracle_kernel)
+
+    assert operation.transform is CallTransform.CONTROLLED_INVERSE
+    assert len(nodes) == 1
+    assert nodes[0].label == "DRAWER_CONTROLLED_INVERSE†"
+    assert nodes[0].qubit_indices == [0, 1, 2]
+    assert nodes[0].control_count == 2
+    assert nodes[0].control_pattern == (0, 1)
+
+    figure = MatplotlibDrawer.draw_kernel(_controlled_inverse_oracle_kernel)
+    controls = [
+        patch
+        for patch in figure.axes[0].patches
+        if isinstance(patch, mpatches.Circle) and patch.radius == 0.1
+    ]
+    assert len(controls) == 2
 
 
 @pytest.mark.parametrize("operation_kind", ["invoke", "inverse"])

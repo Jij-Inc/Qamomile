@@ -47,7 +47,7 @@ from qamomile.circuit.ir.serialize.encode import (
 from qamomile.circuit.ir.types import ValueType
 from qamomile.circuit.ir.value import ValueBase
 
-from ._opaque_cost import encode_opaque_cost
+from ._opaque_cost import OpaqueCostEncoder
 from .canonical import canonicalize_graph
 from .schema import QAMOMILE_VERSION
 from .validation import validate_qkernel_ir
@@ -115,7 +115,7 @@ def to_dict(kernel: QKernelLike) -> dict[str, Any]:
         raise ValueError("qkernel return annotations do not match Block outputs")
     validate_qkernel_ir(block)
 
-    ctx = _EncodeContext(opaque_cost_encoder=encode_opaque_cost)
+    ctx = _EncodeContext(opaque_cost_encoder=OpaqueCostEncoder())
     parameters: list[dict[str, Any]] = []
     slots = {slot.name: slot for slot in block.param_slots}
     formals = dict(zip(block.label_args, block.input_values, strict=True))

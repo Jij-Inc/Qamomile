@@ -98,6 +98,7 @@ def _scalar_quantum_broadcast_pair(
     if (
         len(formal_quantum) != 1
         or not isinstance(formal_quantum[0], Value)
+        or isinstance(formal_quantum[0], ArrayValue)
         or len(actual_quantum) != 1
         or not isinstance(actual_quantum[0], ArrayValue)
     ):

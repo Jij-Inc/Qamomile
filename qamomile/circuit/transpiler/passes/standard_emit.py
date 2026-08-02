@@ -84,6 +84,9 @@ from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import 
 from qamomile.circuit.transpiler.passes.emit_support.composite_gate_emission import (
     emit_invoke_operation,
 )
+from qamomile.circuit.transpiler.passes.emit_support.control_batching import (
+    ControlBatchProfile,
+)
 from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
     emit_for,
     emit_for_items,
@@ -1315,7 +1318,22 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         target_indices: list[int],
         power: int,
         bindings: dict[str, Any],
+        batch_profile: ControlBatchProfile | None = None,
     ) -> None:
+        """Emit a controlled body through the shared fallback walker.
+
+        Args:
+            circuit (T): Backend circuit being built.
+            block_value (Any): Block whose operations should be controlled.
+            num_controls (int): Number of active control qubits.
+            control_indices (list[int]): Physical control-qubit indices.
+            target_indices (list[int]): Physical target-qubit indices.
+            power (int): Number of controlled body repetitions.
+            bindings (dict[str, Any]): Bindings visible inside the body.
+            batch_profile (ControlBatchProfile | None): Previously resolved
+                profile for this exact body and binding scope. Defaults to
+                ``None``, which lets the fallback resolve it.
+        """
         emit_controlled_fallback(
             self,
             circuit,
@@ -1325,6 +1343,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             target_indices,
             power,
             bindings,
+            batch_profile=batch_profile,
         )
 
     def _reserves_multi_control_ancillas(self) -> bool:

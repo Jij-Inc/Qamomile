@@ -35,7 +35,7 @@ from qamomile.circuit.ir.serialize.decode import (
 from qamomile.circuit.ir.types import DictType, QFixedType, ValueType
 from qamomile.circuit.ir.value import ArrayValue, ValueLike
 
-from ._opaque_cost import decode_opaque_cost
+from ._opaque_cost import OpaqueCostDecoder
 from .kernel import SerializedQKernel
 from .schema import QAMOMILE_VERSION
 from .validation import validate_qkernel_ir
@@ -98,7 +98,7 @@ def from_dict(envelope: dict[str, Any]) -> SerializedQKernel:
     ctx = _DecodeContext(
         value_table,
         callable_table,
-        opaque_cost_decoder=decode_opaque_cost,
+        opaque_cost_decoder=OpaqueCostDecoder(),
     )
     ctx.populate_definitions()
     raw_body = artifact.get("body")

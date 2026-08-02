@@ -157,10 +157,6 @@ from qamomile.circuit.ir.dataflow import (
     walk_operations,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import (
-    BinOp,
-    CompOp,
-    CondOp,
-    NotOp,
     UnaryMathOp,
     UnaryMathOpKind,
 )
@@ -196,7 +192,6 @@ from qamomile.circuit.ir.operation.operation import (
     QInitOperation,
 )
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
-from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.primitives import (
     BitType,
@@ -278,13 +273,9 @@ class _CappedRangeSum(sp.Function):
         expression = cast(sp.Expr, summand.expr)
         if loop_symbol not in expression.free_symbols and expression.is_number:
             return cast(sp.Expr, sp.Min(2, expression * iterations))
-        if not (
-            start.is_integer is True
-            and start.is_number
-            and step.is_integer is True
-            and step.is_number
-            and iterations.is_integer is True
-            and iterations.is_number
+        if not all(
+            value.is_number and _is_concrete_integer(value)
+            for value in (start, step, iterations)
         ):
             return None
         count = int(iterations)
@@ -651,6 +642,59 @@ class _EstimatorControlBatchProfile:
         return cls(work=work)
 
 
+def _clean_ancilla_shared_ladder_condition(
+    controls: ResourceExpr,
+    profile: _EstimatorControlBatchProfile,
+) -> sp.Basic:
+    """Return when the fixed model shares one control-condition ladder.
+
+    Both body-backed calls and aggregate opaque costs must use this exact
+    threshold so an invocation boundary cannot change the selected resource
+    recipe.
+
+    Args:
+        controls (ResourceExpr): Number of surrounding coherent controls.
+        profile (_EstimatorControlBatchProfile): Capped controlled work.
+
+    Returns:
+        sp.Basic: Symbolic shared-ladder selection predicate.
+    """
+    return _boolean_condition(
+        sp.And(
+            sp.Ge(controls, CLEAN_ANCILLA_BATCH_MIN_WORK),
+            profile.has_multiple_work,
+        )
+    )
+
+
+def _clean_ancilla_aggregate_control_profile(
+    estimate: ResourceEstimate,
+) -> _EstimatorControlBatchProfile:
+    """Return controlled work declared by one aggregate opaque cost.
+
+    The profile is shared by the enclosing-body preflight and the aggregate
+    projection itself. This ensures both stages choose the same per-primitive
+    or shared-ladder recipe after symbolic specialization.
+
+    Args:
+        estimate (ResourceEstimate): Definition-level aggregate cost.
+
+    Returns:
+        _EstimatorControlBatchProfile: Total modeled work, capped at the
+            sharing threshold, when known one- or two-qubit work makes the
+            aggregate projection eligible.
+    """
+    if _aggregate_arity_projection_reason(estimate) is not None:
+        return _EstimatorControlBatchProfile()
+    known_arity_work = estimate.gates.single_qubit + estimate.gates.two_qubit
+    return _EstimatorControlBatchProfile(
+        work=sp.Min(
+            CLEAN_ANCILLA_BATCH_MIN_WORK,
+            estimate.gates.total,
+        )
+    ).when(sp.Gt(known_arity_work, _ZERO))
+
+
 class _CanonicalPhaseClass(sp.Function):
     """Classify a phase after numeric substitution without erasing small phases."""
 
@@ -737,6 +781,26 @@ def _normalize_resource_scalar(
     if normalized.is_real is not True or normalized.is_finite is not True:
         raise ValueError(f"{label} must be finite and real, got {value!r}.")
     return cast(sp.Expr, normalized)
+
+
+def _canonicalize_concrete_integer(value: sp.Expr) -> sp.Expr:
+    """Return an exact SymPy integer for an integer-valued concrete number.
+
+    Python and NumPy integer-valued floats are accepted for integer resource
+    parameters. Canonicalizing them at the public boundary prevents SymPy's
+    undecided ``Float.is_integer`` property from retaining internal loop nodes
+    after all user parameters have been substituted.
+
+    Args:
+        value (sp.Expr): Concrete or symbolic resource scalar.
+
+    Returns:
+        sp.Expr: Exact integer for a concrete integral value, otherwise the
+            original expression.
+    """
+    if value.is_number and _is_concrete_integer(value):
+        return sp.Integer(int(value))
+    return value
 
 
 def _typed_value_symbol(
@@ -1969,6 +2033,8 @@ class ResourceEstimate:
                     f"Cannot substitute non-integer value {value!r} for "
                     f"integer resource parameter '{name}'."
                 )
+            if parameter.is_integer is True:
+                replacement = _canonicalize_concrete_integer(replacement)
             if replacement.is_negative is True and parameter.is_nonnegative is True:
                 raise ValueError(
                     f"Cannot substitute negative value {value!r} for "
@@ -2617,30 +2683,47 @@ class OpaqueCostContext:
         )
 
 
-def _opaque_call_relative_width(width: WidthResources) -> WidthResources:
+def _opaque_call_relative_width(
+    width: WidthResources,
+) -> tuple[WidthResources, ResourceExpr]:
     """Remove a standalone estimate's caller-owned width baseline.
 
     Explicit opaque costs may be copied from a root qkernel estimate, whose
     ``peak_qubits`` includes ``input_qubits``. At an Invoke boundary those
     operands are already live in the caller, so only the peak above that
-    baseline belongs to the call body.
+    baseline belongs to the call body. Any residual peak not categorized as
+    allocation or clean/dirty ancilla is retained as anonymous allocation. A
+    partial declaration that omits ``peak_qubits`` is normalized so its peak
+    cannot be smaller than its declared allocation and ancilla workspace.
 
     Args:
         width (WidthResources): Definition-level standalone width.
 
     Returns:
-        WidthResources: Body-relative width for one opaque invocation.
+        tuple[WidthResources, ResourceExpr]: Body-relative width for one opaque
+            invocation and the anonymous workspace added to its allocation
+            count.
     """
-    return dataclasses.replace(
+    categorized_workspace = (
+        width.allocated_qubits + width.clean_ancilla_qubits + width.dirty_ancilla_qubits
+    )
+    relative_peak = _safe_simplify(
+        sp.Max(
+            _ZERO,
+            width.peak_qubits - width.input_qubits,
+            categorized_workspace,
+        )
+    )
+    anonymous_workspace = _safe_simplify(
+        sp.Max(_ZERO, relative_peak - categorized_workspace)
+    )
+    relative_width = dataclasses.replace(
         width,
         input_qubits=_ZERO,
-        peak_qubits=_safe_simplify(
-            sp.Max(
-                _ZERO,
-                width.peak_qubits - width.input_qubits,
-            )
-        ),
+        allocated_qubits=width.allocated_qubits + anonymous_workspace,
+        peak_qubits=relative_peak,
     )
+    return relative_width, anonymous_workspace
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -3077,10 +3160,27 @@ class ResourceInterpreter:
             int,
             list[tuple[sp.Expr, ...]],
         ] = {}
+        # Opaque callbacks describe definition-level costs and may be inspected
+        # once for control batching before normal operation evaluation. Cache
+        # that base result so profiling never executes user code twice for one
+        # call context. The value keeps the operation strongly referenced and
+        # identity-checked, matching the other id-keyed interpreter caches.
+        self._opaque_definition_cost_cache: dict[
+            tuple[Any, ...],
+            tuple[InvokeOperation, ResourceEstimate],
+        ] = {}
         # While loops have no source-level induction variable, so expose a
-        # deterministic traversal-order name for each independent trip count.
-        # Retaining ``|while|`` for the first loop preserves the original API.
-        self._while_count = 0
+        # deterministic lexical-order name for each independent trip count.
+        # Strongly reference every operation used by the id-keyed map so probe
+        # evaluation and skipped branches cannot consume or reassign a name.
+        self._while_trip_count_names: dict[
+            tuple[tuple[tuple[int, int], ...], int],
+            tuple[WhileOperation, str],
+        ] = {}
+        self._while_name_scan_operations: dict[
+            tuple[tuple[tuple[int, int], ...], int],
+            Operation,
+        ] = {}
 
     def estimate(self, block_or_ops: Block | Sequence[Operation]) -> ResourceEstimate:
         """Estimate resources for a block or operation sequence.
@@ -3136,6 +3236,102 @@ class ResourceInterpreter:
         )
         return self.eval_operations(list(block_or_ops), resolver)
 
+    def _reserve_while_trip_count_names(
+        self,
+        operations: Sequence[Operation],
+        resolver: ExprResolver,
+    ) -> None:
+        """Reserve deterministic names for every structurally reachable while.
+
+        The interpreter may evaluate a loop body first as a symbolic probe and
+        again with resolved carry values, or skip that body after input
+        specialization. Preorder reservation makes both paths use the same
+        public trip-count symbol names.
+
+        Args:
+            operations (Sequence[Operation]): Root operations whose nested
+                control-flow and callable bodies should be indexed.
+            resolver (ExprResolver): Resolver carrying the current structural
+                call-site path.
+        """
+
+        def visit(
+            body_operations: Sequence[Operation],
+            structural_scope: tuple[tuple[int, int], ...],
+            active_call_bodies: frozenset[int],
+        ) -> None:
+            """Visit one operation sequence in deterministic lexical order.
+
+            Args:
+                body_operations (Sequence[Operation]): Operations to scan.
+                structural_scope (tuple[tuple[int, int], ...]): Callable path
+                    containing this operation sequence.
+                active_call_bodies (frozenset[int]): Callable block identities
+                    already entered on this lexical path.
+            """
+            for operation in body_operations:
+                operation_id = id(operation)
+                operation_key = (structural_scope, operation_id)
+                cached = self._while_name_scan_operations.get(operation_key)
+                if cached is operation:
+                    continue
+                self._while_name_scan_operations[operation_key] = operation
+                if isinstance(operation, WhileOperation):
+                    ordinal = len(self._while_trip_count_names) + 1
+                    name = "|while|" if ordinal == 1 else f"|while[{ordinal}]|"
+                    self._while_trip_count_names[operation_key] = (operation, name)
+
+                if isinstance(operation, InvokeOperation):
+                    body = operation.effective_body(
+                        strategy=self._strategy_for(operation)
+                    )
+                    if isinstance(body, Block) and id(body) not in active_call_bodies:
+                        visit(
+                            body.operations,
+                            (*structural_scope, (operation_id, id(body))),
+                            active_call_bodies | {id(body)},
+                        )
+                elif isinstance(operation, ControlledUOperation):
+                    if (
+                        isinstance(operation.block, Block)
+                        and id(operation.block) not in active_call_bodies
+                    ):
+                        visit(
+                            operation.block.operations,
+                            (
+                                *structural_scope,
+                                (operation_id, id(operation.block)),
+                            ),
+                            active_call_bodies | {id(operation.block)},
+                        )
+                elif isinstance(operation, SelectOperation):
+                    for case in operation.case_blocks:
+                        if id(case) in active_call_bodies:
+                            continue
+                        visit(
+                            case.operations,
+                            (*structural_scope, (operation_id, id(case))),
+                            active_call_bodies | {id(case)},
+                        )
+                elif isinstance(operation, InverseBlockOperation):
+                    if (
+                        isinstance(operation.implementation_block, Block)
+                        and id(operation.implementation_block) not in active_call_bodies
+                    ):
+                        visit(
+                            operation.implementation_block.operations,
+                            (
+                                *structural_scope,
+                                (operation_id, id(operation.implementation_block)),
+                            ),
+                            active_call_bodies | {id(operation.implementation_block)},
+                        )
+                elif isinstance(operation, HasNestedOps):
+                    for nested in operation.nested_op_lists():
+                        visit(nested, structural_scope, active_call_bodies)
+
+        visit(operations, resolver.structural_scope, frozenset())
+
     def eval_block(self, block: Block, resolver: ExprResolver) -> ResourceEstimate:
         """Evaluate a block body.
 
@@ -3178,8 +3374,6 @@ class ResourceInterpreter:
         static_profile = static_clean_ancilla_batch_profile(operation)
         if static_profile is not None:
             return _EstimatorControlBatchProfile(work=static_profile.work)
-        if isinstance(operation, (BinOp, CompOp, CondOp, NotOp, ReturnOperation)):
-            return _EstimatorControlBatchProfile()
         if isinstance(operation, GlobalPhaseOperation):
             phase = self._apply_condition_values(
                 resolver.resolve(operation.phase),
@@ -3217,6 +3411,8 @@ class ResourceInterpreter:
                 record_usage=False,
             )
             active = sp.And(active, sp.Gt(broadcast, _ZERO))
+            if _boolean_condition(active) is sp.false:
+                return _EstimatorControlBatchProfile()
             child = _controlled_u_child_resolver(operation, resolver)
             body_profile = self._controlled_body_batch_profile(
                 operation.block.operations,
@@ -3237,6 +3433,8 @@ class ResourceInterpreter:
             stop = self._apply_condition_values(stop, record_usage=False)
             step = self._apply_condition_values(step, record_usage=False)
             iterations = symbolic_iterations(start, stop, step)
+            if iterations.is_zero is True:
+                return _EstimatorControlBatchProfile()
             if operation.region_args:
                 return self._controlled_region_for_batch_profile(
                     operation,
@@ -3288,7 +3486,28 @@ class ResourceInterpreter:
             strategy = self._strategy_for(operation)
             body = operation.effective_body(strategy=strategy)
             if not isinstance(body, Block):
-                return _EstimatorControlBatchProfile()
+                opaque_cost = (
+                    operation.definition.opaque_cost
+                    if operation.definition is not None
+                    else None
+                )
+                if opaque_cost is None:
+                    return _EstimatorControlBatchProfile()
+                context, transform = self._opaque_cost_context(
+                    operation,
+                    resolver,
+                    controls=_ZERO,
+                    strategy=strategy,
+                )
+                base_cost = self._resolve_opaque_definition_cost(
+                    operation,
+                    opaque_cost,
+                    context,
+                )
+                profile = _clean_ancilla_aggregate_control_profile(base_cost)
+                if transform.added_controls:
+                    return profile.as_shared_leaf()
+                return profile
             selected_impl = operation.implementation_for(strategy=strategy)
             body_implements_transform = (
                 selected_impl is not None and selected_impl.body is body
@@ -3356,11 +3575,14 @@ class ResourceInterpreter:
                     ),
                     record_usage=False,
                 )
+                case_active = _boolean_condition(sp.Gt(broadcast, _ZERO))
+                if case_active is sp.false:
+                    continue
                 case_profiles.append(
                     self._controlled_body_batch_profile(
                         case_block.operations,
                         child,
-                    ).when(sp.Gt(broadcast, _ZERO))
+                    ).when(case_active)
                 )
             # SELECT contributes at least one index control to every active
             # case, so one active leaf already benefits from composing that
@@ -3465,16 +3687,6 @@ class ResourceInterpreter:
                 init=init,
             )
             if recurrence is None:
-                concrete_profile = self._concrete_region_batch_profile(
-                    operation,
-                    resolver,
-                    start=start,
-                    step=step,
-                    iterations=iterations,
-                    maximum_iterations=None,
-                )
-                if concrete_profile is not None:
-                    return concrete_profile
                 return _EstimatorControlBatchProfile(work=2).when(
                     sp.Gt(iterations, _ZERO)
                 )
@@ -3506,7 +3718,7 @@ class ResourceInterpreter:
         start: ResourceExpr,
         step: ResourceExpr,
         iterations: ResourceExpr,
-        maximum_iterations: int | None,
+        maximum_iterations: int,
     ) -> _EstimatorControlBatchProfile | None:
         """Replay a concrete loop carry for the control-batching decision.
 
@@ -3516,8 +3728,7 @@ class ResourceInterpreter:
             start (ResourceExpr): First Python-range value.
             step (ResourceExpr): Python-range step.
             iterations (ResourceExpr): Number of executed iterations.
-            maximum_iterations (int | None): Largest range to replay, or
-                ``None`` to replay any concrete range.
+            maximum_iterations (int): Largest concrete range to replay.
 
         Returns:
             _EstimatorControlBatchProfile | None: Exact combined profile, or
@@ -3535,7 +3746,7 @@ class ResourceInterpreter:
         )
         if concrete_step == 0 or iteration_count < 0:
             return None
-        if maximum_iterations is not None and iteration_count > maximum_iterations:
+        if iteration_count > maximum_iterations:
             return None
         carried = {
             arg.block_arg.uuid: self._apply_condition_values(
@@ -3633,11 +3844,9 @@ class ResourceInterpreter:
         if control_count.is_zero is True or control_count == _ONE:
             return sp.false
         profile = self._controlled_body_batch_profile(operations, resolver)
-        return _boolean_condition(
-            sp.And(
-                sp.Ge(control_count, CLEAN_ANCILLA_BATCH_MIN_WORK),
-                profile.has_multiple_work,
-            )
+        return _clean_ancilla_shared_ladder_condition(
+            control_count,
+            profile,
         )
 
     def _peek_branch_decision(self, condition: sp.Basic) -> bool | None:
@@ -3760,6 +3969,7 @@ class ResourceInterpreter:
         Returns:
             ResourceEstimate: Sequential composition of operation resources.
         """
+        self._reserve_while_trip_count_names(operations, resolver)
         control_count = self._apply_condition_values(
             _expr(controls),
             record_usage=False,
@@ -4590,6 +4800,10 @@ class ResourceInterpreter:
 
         Returns:
             ResourceEstimate: Measurement depth estimate.
+
+        Raises:
+            TypeError: If ``operation`` is not a supported measurement IR
+                operation.
         """
         if isinstance(operation, MeasureOperation):
             measured_qubits = _ONE
@@ -4794,27 +5008,37 @@ class ResourceInterpreter:
                 controls=controls,
             )
         else:
-            inner = self.eval_operations(
-                operation.operations,
-                child,
-                controls=controls,
-                initial_allocations=_captured_quantum_allocations(
+            specialized_bounds = tuple(
+                self._apply_condition_values(bound, record_usage=False)
+                for bound in (start, stop, step)
+            )
+            specialized_iterations = symbolic_iterations(*specialized_bounds)
+            inner: ResourceEstimate | None = None
+            if specialized_iterations.is_zero is True:
+                estimate = ResourceEstimate.zero("empty_for")
+            else:
+                inner = self.eval_operations(
                     operation.operations,
                     child,
-                    self._allocation_owners_by_uuid,
-                ),
-            )
-            estimate = inner._sum_over(
-                loop_symbol,
-                start,
-                stop,
-                step,
-                dependency_start=dependency_start,
-                dependency_stop=dependency_stop,
-                dependency_step=dependency_step,
-            )
+                    controls=controls,
+                    initial_allocations=_captured_quantum_allocations(
+                        operation.operations,
+                        child,
+                        self._allocation_owners_by_uuid,
+                    ),
+                )
+                estimate = inner._sum_over(
+                    loop_symbol,
+                    start,
+                    stop,
+                    step,
+                    dependency_start=dependency_start,
+                    dependency_stop=dependency_stop,
+                    dependency_step=dependency_step,
+                )
             parallel_depth: DepthResources | None = None
-            if _expr(controls) == _ZERO:
+            if specialized_iterations.is_zero is not True and _expr(controls) == _ZERO:
+                assert inner is not None
                 parallel_depth = _symbolic_disjoint_loop_depth(
                     operation,
                     child,
@@ -4844,6 +5068,7 @@ class ResourceInterpreter:
                         used_names=self.branch_condition_names,
                     )
             if parallel_depth is not None:
+                assert inner is not None
                 parallel_completion = _concrete_loop_dependency_completion(
                     inner._dependency_completion,
                     loop_symbol,
@@ -4892,17 +5117,24 @@ class ResourceInterpreter:
                         quality=EstimateQuality.UPPER_BOUND,
                         active_when=sp.Gt(iterations, _ZERO),
                     )
-            elif _expr(controls) == _ZERO and (
-                _dependency_keys_depend_on_symbol(
-                    inner._dependency_keys,
-                    loop_symbol,
-                )
-                or _loop_body_has_symbolic_quantum_index(
-                    operation,
-                    child,
-                    loop_symbol,
-                    scalar_values=self.condition_values,
-                    used_names=self.branch_condition_names,
+            elif (
+                specialized_iterations.is_zero is not True
+                and _expr(controls) == _ZERO
+                and (
+                    inner is not None
+                    and (
+                        _dependency_keys_depend_on_symbol(
+                            inner._dependency_keys,
+                            loop_symbol,
+                        )
+                        or _loop_body_has_symbolic_quantum_index(
+                            operation,
+                            child,
+                            loop_symbol,
+                            scalar_values=self.condition_values,
+                            used_names=self.branch_condition_names,
+                        )
+                    )
                 )
             ):
                 assumption = ResourceAssumption(
@@ -5083,7 +5315,7 @@ class ResourceInterpreter:
         loop_symbol: sp.Symbol,
         controls: ResourceExpr | int,
     ) -> ResourceEstimate:
-        """Evaluate independent affine region recurrences in closed form.
+        """Summarize symbolic or large region loops without unbounded replay.
 
         Args:
             operation (ForOperation): Loop carrying region arguments.
@@ -5096,6 +5328,12 @@ class ResourceInterpreter:
 
         Returns:
             ResourceEstimate: Symbolic loop estimate and recurrence assumptions.
+
+        Raises:
+            ValueError: If input specialization produces a concrete zero-step
+                range.
+            NotImplementedError: If quantum resource use depends on an
+                unsupported nonlinear loop-carried recurrence.
         """
         carry_symbols = {
             arg.block_arg.uuid: _typed_value_symbol(
@@ -5134,11 +5372,24 @@ class ResourceInterpreter:
             )
             for bound in (start, stop, step)
         )
-        concrete_fallback = (
+        concrete_bounds = (
             cast(tuple[int, int, int], specialized_bounds)
             if all(bound is not None for bound in specialized_bounds)
             else None
         )
+        concrete_replay: range | None = None
+        if concrete_bounds is not None:
+            concrete_start, concrete_stop, concrete_step = concrete_bounds
+            if concrete_step == 0:
+                raise ValueError(
+                    "Resource estimation cannot evaluate a zero-step loop."
+                )
+            candidate = range(concrete_start, concrete_stop, concrete_step)
+            if (
+                len(candidate[: _CONCRETE_REGION_REPLAY_LIMIT + 1])
+                <= _CONCRETE_REGION_REPLAY_LIMIT
+            ):
+                concrete_replay = candidate
         at_iteration: dict[str, sp.Expr] = {}
         final_values: dict[str, sp.Expr] = {}
         unresolved_iteration_values: list[sp.Expr] = []
@@ -5159,20 +5410,11 @@ class ResourceInterpreter:
                 init=init,
             )
             if recurrence is None:
-                if concrete_fallback is not None:
-                    concrete_start, concrete_stop, concrete_step = concrete_fallback
-                    if concrete_step == 0:
-                        raise ValueError(
-                            "Resource estimation cannot evaluate a zero-step loop."
-                        )
+                if concrete_replay is not None:
                     return self._eval_concrete_region_for(
                         operation,
                         resolver,
-                        range(
-                            concrete_start,
-                            concrete_stop,
-                            concrete_step,
-                        ),
+                        concrete_replay,
                         controls=controls,
                     )
                 at_value = sp.Function(f"{arg.var_name}_carry")(loop_symbol)
@@ -5229,8 +5471,9 @@ class ResourceInterpreter:
             raise NotImplementedError(
                 "Resource estimation cannot keep a symbolic loop compact when "
                 "its quantum resource use depends on an unsupported nonlinear "
-                "loop-carried recurrence. Supply concrete loop-bound inputs or "
-                "use an affine or fixed-point carry."
+                "loop-carried recurrence. Use an affine or fixed-point carry, "
+                "or a concrete loop with at most "
+                f"{_CONCRETE_REGION_REPLAY_LIMIT} iterations."
             )
         dependency_start, dependency_stop, dependency_step = (
             _specialize_dependency_expression(
@@ -5293,13 +5536,7 @@ class ResourceInterpreter:
         )
 
     def _concrete_scalar(self, expression: sp.Expr) -> int | None:
-        """Resolve an integer expression already concrete in the traced IR.
-
-        Estimation ``inputs`` deliberately do not participate here. They are
-        applied after symbolic loop summarization, preventing a large concrete
-        problem size from turning a compact parametric loop into thousands of
-        interpreter iterations. Structural inputs still reach this path as
-        constants because they are baked into the built block.
+        """Resolve an integer expression after any requested specialization.
 
         Args:
             expression (sp.Expr): Symbolic scalar expression.
@@ -5307,7 +5544,7 @@ class ResourceInterpreter:
         Returns:
             int | None: Concrete integer, or ``None`` when unresolved.
         """
-        if expression.is_number and expression.is_integer:
+        if expression.is_number and _is_concrete_integer(expression):
             return int(expression)
         return None
 
@@ -5333,6 +5570,8 @@ class ResourceInterpreter:
             ValueError: If the loop is nested under coherent quantum control.
             NotImplementedError: If the loop carries a rebound value whose
                 recurrence the symbolic while-loop model cannot represent.
+            AssertionError: If deterministic trip-count name reservation is
+                unexpectedly missing for the operation.
         """
         _require_uncontrolled_operation(operation, controls)
         if operation.loop_carried_rebinds or operation.region_args:
@@ -5346,10 +5585,12 @@ class ResourceInterpreter:
                 f"WhileOperation ({variables}). A symbolic trip count alone "
                 "cannot determine the carried recurrence."
             )
-        self._while_count += 1
-        trip_count_name = (
-            "|while|" if self._while_count == 1 else f"|while[{self._while_count}]|"
-        )
+        self._reserve_while_trip_count_names((operation,), resolver)
+        operation_key = (resolver.structural_scope, id(operation))
+        cached_name = self._while_trip_count_names.get(operation_key)
+        if cached_name is None or cached_name[0] is not operation:
+            raise AssertionError("WhileOperation trip-count name was not reserved.")
+        trip_count_name = cached_name[1]
         child, trip_count = build_while_scope(
             operation,
             resolver,
@@ -5965,12 +6206,13 @@ class ResourceInterpreter:
             controls (ResourceExpr | int): Surrounding controls.
 
         Returns:
-            ResourceEstimate: Per-entry composition — gates, depth, and
-                calls accumulate sequentially; peak and ancilla width use the
-                per-entry maximum, while allocated width is the union of
-                distinct QInit identities.
+            ResourceEstimate: Per-entry composition. Gates and calls add,
+                depth follows resolved wire dependencies, peak and ancilla
+                width use the per-entry maximum, and allocated width is the
+                union of distinct QInit identities.
         """
         composer = _SequentialEstimateComposer()
+        entry_estimates: list[ResourceEstimate] = []
         iteration_width = WidthResources.zero()
         anonymous_allocated = _ZERO
         for key, value in entries:
@@ -5993,6 +6235,7 @@ class ResourceInterpreter:
                 ),
             )
             composer.append(entry_estimate)
+            entry_estimates.append(entry_estimate)
             iteration_width = _max_width(iteration_width, entry_estimate.width)
             anonymous_allocated = sp.Max(
                 anonymous_allocated,
@@ -6005,13 +6248,18 @@ class ResourceInterpreter:
         # gate/depth/call totals, take reusable width fields per-entry, and
         # replace only allocated_qubits with the distinct static-site union.
         estimate = composer.finish()
-        return dataclasses.replace(
+        estimate = dataclasses.replace(
             estimate,
             width=_width_with_identity_aware_allocations(
                 iteration_width,
                 estimate._allocation_sites,
                 anonymous_allocated=anonymous_allocated,
             ),
+        )
+        return self._schedule_concrete_for_items_depth(
+            operation,
+            entry_estimates,
+            estimate,
         )
 
     def _eval_concrete_region_for_items(
@@ -6031,14 +6279,15 @@ class ResourceInterpreter:
             controls (ResourceExpr | int): Surrounding controls.
 
         Returns:
-            ResourceEstimate: Sequential work with per-entry peak width and
-                identity-deduplicated static allocations.
+            ResourceEstimate: Summed work with dependency-scheduled depth,
+                per-entry peak width, and identity-deduplicated allocations.
         """
         carried = {
             arg.block_arg.uuid: self._apply_condition_values(resolver.resolve(arg.init))
             for arg in operation.region_args
         }
         composer = _SequentialEstimateComposer()
+        entry_estimates: list[ResourceEstimate] = []
         iteration_width = WidthResources.zero()
         anonymous_allocated = _ZERO
         for key, value in entries:
@@ -6061,6 +6310,7 @@ class ResourceInterpreter:
                 ),
             )
             composer.append(iteration_estimate)
+            entry_estimates.append(iteration_estimate)
             iteration_width = _max_width(iteration_width, iteration_estimate.width)
             anonymous_allocated = sp.Max(
                 anonymous_allocated,
@@ -6078,7 +6328,7 @@ class ResourceInterpreter:
         for arg in operation.region_args:
             resolver.bind(arg.result, carried[arg.block_arg.uuid])
         estimate = composer.finish()
-        return dataclasses.replace(
+        estimate = dataclasses.replace(
             estimate,
             width=_width_with_identity_aware_allocations(
                 iteration_width,
@@ -6086,6 +6336,107 @@ class ResourceInterpreter:
                 anonymous_allocated=anonymous_allocated,
             ),
         )
+        return self._schedule_concrete_for_items_depth(
+            operation,
+            entry_estimates,
+            estimate,
+        )
+
+    def _schedule_concrete_for_items_depth(
+        self,
+        operation: ForItemsOperation,
+        entry_estimates: Sequence[ResourceEstimate],
+        combined: ResourceEstimate,
+    ) -> ResourceEstimate:
+        """Schedule concrete items-loop entries by their resolved wire use.
+
+        Gate and call counts remain a sequential sum, but dictionary entries
+        acting on disjoint wires may occupy the same depth layers. A body-local
+        allocation prevents this optimization because every iteration reuses
+        the same allocation site.
+
+        Args:
+            operation (ForItemsOperation): Items loop whose entries were
+                evaluated with concrete key and value bindings.
+            entry_estimates (Sequence[ResourceEstimate]): Per-entry estimates
+                before sequential depth offsets are applied.
+            combined (ResourceEstimate): Sequentially composed estimate whose
+                non-depth resources must be preserved.
+
+        Returns:
+            ResourceEstimate: Combined estimate with dependency-scheduled
+                depth and caller-visible wire completion when available.
+        """
+        if not entry_estimates or any(
+            estimate.width.allocated_qubits != _ZERO for estimate in entry_estimates
+        ):
+            return combined
+
+        scheduled: list[tuple[Operation, ResourceEstimate]] = []
+        footprints: list[_WireFootprint | None] = []
+        for entry_estimate in entry_estimates:
+            scheduled.append((operation, entry_estimate))
+            if not _estimate_has_nonzero_depth(entry_estimate):
+                footprints.append(None)
+                continue
+            keys = entry_estimate._dependency_keys
+            if keys is None:
+                assumption = ResourceAssumption(
+                    "concrete items-loop entry dependencies are unavailable; "
+                    "depth remains sequential",
+                    source="items dependency scheduler",
+                )
+                return combined._with_metadata(
+                    assumptions=(assumption,),
+                    quality=EstimateQuality.UPPER_BOUND,
+                )
+            footprints.append((keys, keys))
+
+        (
+            scheduled_depth,
+            scheduled_completion,
+            possible_alias_active,
+            completion_is_uniform,
+        ) = _dependency_depth(
+            scheduled,
+            footprints,
+            measurement_derived=self._measurement_derived,
+            scalar_values=self.condition_values,
+            used_names=self.branch_condition_names,
+        )
+        result = dataclasses.replace(
+            combined,
+            depth=scheduled_depth,
+            _dependency_completion=scheduled_completion,
+            _dependency_completion_uniform=completion_is_uniform,
+        )
+        if possible_alias_active is not sp.false:
+            assumption = ResourceAssumption(
+                "concrete items-loop quantum indices may alias and are "
+                "scheduled conservatively",
+                source="items dependency scheduler",
+            )
+            result = result._with_metadata(
+                assumptions=(assumption,),
+                quality=EstimateQuality.UPPER_BOUND,
+                active_when=possible_alias_active,
+            )
+        aggregate_completion_active = _aggregate_completion_overlap_condition(
+            scheduled,
+            footprints,
+        )
+        if aggregate_completion_active is not sp.false:
+            assumption = ResourceAssumption(
+                "aggregate items-loop entry latency may over-serialize a "
+                "later wire dependency",
+                source="items dependency scheduler",
+            )
+            result = result._with_metadata(
+                assumptions=(assumption,),
+                quality=EstimateQuality.UPPER_BOUND,
+                active_when=aggregate_completion_active,
+            )
+        return result
 
     def _for_items_entries(
         self,
@@ -7473,6 +7824,100 @@ class ResourceInterpreter:
                 synthesis precision, or if a non-unitary cost is controlled or
                 inverted.
         """
+        estimate = self._resolve_opaque_definition_cost(
+            operation,
+            cost,
+            context,
+        )
+        # Root input width and caller-scoped dependency/liveness maps belong to
+        # the qkernel that produced an aggregate cost, not to this opaque call
+        # site. The caller scheduler derives that boundary information from
+        # this InvokeOperation instead.
+        relative_width, anonymous_workspace = _opaque_call_relative_width(
+            estimate.width
+        )
+        estimate = _namespace_allocation_sites(
+            dataclasses.replace(
+                estimate,
+                width=relative_width,
+                _output_sizes={},
+                _input_sizes={},
+                _has_output_summary=False,
+                _dependency_keys=None,
+            ),
+            operation,
+        )
+        if anonymous_workspace != _ZERO:
+            assumption = ResourceAssumption(
+                "opaque peak width exceeds its categorized workspace; the "
+                "residual is treated as anonymous allocated workspace",
+                source=operation.custom_name,
+            )
+            estimate = estimate._with_metadata(
+                assumptions=(assumption,),
+                active_when=sp.Gt(anonymous_workspace, _ZERO),
+            )
+        if transform.declared_controls:
+            _require_unitary_resource_estimate(
+                estimate,
+                transform="use as a coherently controlled Oracle",
+            )
+        if transform.inverse:
+            estimate = estimate.inverse()
+        if transform.external_controls != _ZERO:
+            estimate = estimate.controlled(transform.external_controls)
+        if transform.local_controls:
+            estimate = self._with_zero_control_bracket(
+                estimate,
+                zero_controls=transform.zero_controls,
+            )
+        estimate = dataclasses.replace(
+            estimate,
+            trace=_wrap_trace(
+                operation.custom_name,
+                estimate.trace,
+                source_kind="opaque_cost",
+                strategy=context.strategy,
+            ),
+        )
+        return estimate._with_metadata(quality=EstimateQuality.MODELED)
+
+    def _resolve_opaque_definition_cost(
+        self,
+        operation: InvokeOperation,
+        cost: Any,
+        context: OpaqueCostContext,
+    ) -> ResourceEstimate:
+        """Resolve and cache one opaque callable's definition-level cost.
+
+        Args:
+            operation (InvokeOperation): Invocation whose definition is priced.
+            cost (Any): Fixed estimate or callback accepting the context.
+            context (OpaqueCostContext): Definition-level callback inputs.
+
+        Returns:
+            ResourceEstimate: Validated and normalized base estimate before
+                inverse or added/inherited controls are applied.
+
+        Raises:
+            TypeError: If cost is neither a ResourceEstimate nor a callback
+                returning one.
+            ValueError: If model provenance is incompatible with the active
+                estimator configuration.
+        """
+        cache_key = (
+            id(operation),
+            context.callable_name,
+            tuple(context.target_shapes.items()),
+            context.definition_control_qubits,
+            context.strategy,
+            context.basis,
+            context.control_decomposition,
+            context.precision,
+        )
+        cached = self._opaque_definition_cost_cache.get(cache_key)
+        if cached is not None and cached[0] is operation:
+            return cached[1]
         if isinstance(cost, ResourceEstimate):
             estimate = cost
         elif callable(cost):
@@ -7501,46 +7946,10 @@ class ResourceInterpreter:
         # Public resource dataclasses accept ordinary Python numeric values.
         # Compose one base application through the resource algebra so every
         # field is normalized before dependency scheduling inspects SymPy
-        # predicates. Root input width and caller-scoped dependency/liveness
-        # maps belong to the qkernel that produced an aggregate cost, not to
-        # this opaque call site. The caller scheduler derives that boundary
-        # information from this InvokeOperation instead.
-        estimate = estimate.repeat(_ONE)
-        estimate = _namespace_allocation_sites(
-            dataclasses.replace(
-                estimate,
-                width=_opaque_call_relative_width(estimate.width),
-                _output_sizes={},
-                _input_sizes={},
-                _has_output_summary=False,
-                _dependency_keys=None,
-            ),
-            operation,
-        )
-        if transform.declared_controls:
-            _require_unitary_resource_estimate(
-                estimate,
-                transform="use as a coherently controlled Oracle",
-            )
-        if transform.inverse:
-            estimate = estimate.inverse()
-        if transform.external_controls != _ZERO:
-            estimate = estimate.controlled(transform.external_controls)
-        if transform.local_controls:
-            estimate = self._with_zero_control_bracket(
-                estimate,
-                zero_controls=transform.zero_controls,
-            )
-        estimate = dataclasses.replace(
-            estimate,
-            trace=_wrap_trace(
-                operation.custom_name,
-                estimate.trace,
-                source_kind="opaque_cost",
-                strategy=context.strategy,
-            ),
-        )
-        return estimate._with_metadata(quality=EstimateQuality.MODELED)
+        # predicates.
+        normalized = estimate.repeat(_ONE)
+        self._opaque_definition_cost_cache[cache_key] = (operation, normalized)
+        return normalized
 
     def _estimate_invoke_body(
         self,
@@ -7551,10 +7960,11 @@ class ResourceInterpreter:
     ) -> ResourceEstimate:
         """Estimate an invocation by traversing its body.
 
-        When the invocation has a controlled transform, its own control qubits
-        are added to the surrounding controls so every primitive gate inside
-        the body is classified as controlled, matching how
-        ``eval_controlled_u`` treats a block body.
+        For an ordinary body selected by a controlled invocation, add the
+        invocation's controls to the surrounding controls before traversing
+        its primitives. A transform-specific implementation already contains
+        those controls, but a non-default activation value still contributes
+        the invocation-level X bracket emitted around that body.
 
         Args:
             operation (InvokeOperation): Invocation operation.
@@ -7576,10 +7986,11 @@ class ResourceInterpreter:
             called_block=body,
             body_implements_transform=body_implements_transform,
         )
-        own_controls = 0
-        if operation.transform.is_controlled and not body_implements_transform:
-            own_controls = int(operation.attrs.get("num_control_qubits", 0) or 0)
-        total_controls = _expr(controls) + own_controls
+        call_controls = (
+            operation.num_control_qubits if operation.transform.is_controlled else 0
+        )
+        body_added_controls = 0 if body_implements_transform else call_controls
+        total_controls = _expr(controls) + body_added_controls
         actual_operands = operation.operands
         if operation.transform.is_controlled and not body_implements_transform:
             actual_operands = actual_operands[operation.num_control_qubits :]
@@ -7593,9 +8004,9 @@ class ResourceInterpreter:
         if operation.transform.is_inverse and not body_implements_transform:
             body_estimate = body_estimate.inverse()
         zero_controls = _ZERO
-        if own_controls:
+        if call_controls:
             zero_controls = _zero_control_count(
-                own_controls,
+                call_controls,
                 operation.control_value,
             )
             body_estimate = self._with_zero_control_bracket(
@@ -7626,7 +8037,7 @@ class ResourceInterpreter:
         )
         if dependency_keys is not None:
             mapped_keys = set(dependency_keys)
-            if own_controls and _estimate_has_nonzero_depth(body_estimate):
+            if call_controls and _estimate_has_nonzero_depth(body_estimate):
                 mapped_keys.update(
                     _wire_keys_for_values(
                         operation.operands[: operation.num_control_qubits],
@@ -7664,12 +8075,36 @@ class ResourceInterpreter:
             ),
             operation,
         )
-        return _with_body_boundary_depth_metadata(
+        estimate = _with_body_boundary_depth_metadata(
             estimate,
             estimate,
             source=operation.custom_name,
             zero_controls=zero_controls,
         )
+        if not operation.effects.is_unitary:
+            assumption = ResourceAssumption(
+                "non-unitary callable boundary is scheduled as a global "
+                "barrier and may overestimate depth on disjoint wires",
+                source=operation.custom_name,
+            )
+            estimate = estimate._with_metadata(
+                assumptions=(assumption,),
+                quality=EstimateQuality.UPPER_BOUND,
+                active_when=_boolean_condition(
+                    sp.Or(
+                        *(
+                            _resource_activity_condition(
+                                cast(
+                                    ResourceExpr,
+                                    getattr(estimate.depth, field.name),
+                                )
+                            )
+                            for field in dataclasses.fields(DepthResources)
+                        )
+                    )
+                ),
+            )
+        return estimate
 
     def _handle_unknown_invoke(
         self,
@@ -9932,13 +10367,10 @@ def _project_clean_ancilla_aggregate_controlled_cost(
         )
         .seq(unresolved)
     )
-    has_batchable_work = sp.Ge(
-        estimate.gates.total,
-        CLEAN_ANCILLA_BATCH_MIN_WORK,
-    )
-    use_shared_ladder = sp.And(
-        sp.Ge(controls, CLEAN_ANCILLA_BATCH_MIN_WORK),
-        has_batchable_work,
+    aggregate_profile = _clean_ancilla_aggregate_control_profile(estimate)
+    use_shared_ladder = _clean_ancilla_shared_ladder_condition(
+        controls,
+        aggregate_profile,
     )
     projected = shared_projection.conditional(
         per_primitive_projection,
@@ -10511,6 +10943,14 @@ def _classify_uncontrolled_clifford_t_gate(
         return GateResources(
             total=sp.Integer(3),
             two_qubit=sp.Integer(3),
+            clifford=sp.Integer(3),
+        )
+    if gate_name == "cz":
+        # Use the same H-CX-H canonical Clifford lowering as controlled Z.
+        return GateResources(
+            total=sp.Integer(3),
+            single_qubit=sp.Integer(2),
+            two_qubit=sp.Integer(1),
             clifford=sp.Integer(3),
         )
     rotation_t = sp.Integer(math.ceil(3 * math.log2(1 / precision)))
@@ -11723,7 +12163,9 @@ def _scalar_values(values: Mapping[str, Any]) -> dict[str, sp.Expr]:
     from a notebook works) and SymPy numbers. Dicts, Hamiltonians, and
     symbolic-expression substitution values are dropped: only concrete numbers
     can decide a branch or select one physical array/control index during the
-    initial scheduling pass.
+    initial scheduling pass. Integer-valued numbers are represented as exact
+    SymPy integers so accepted float bounds follow the same scheduling path as
+    Python integers.
 
     Args:
         values (Mapping[str, Any]): Concrete input values.
@@ -11739,9 +12181,10 @@ def _scalar_values(values: Mapping[str, Any]) -> dict[str, sp.Expr]:
             # Normalize NumPy scalars (np.int64, np.float64, ...) to a Python
             # scalar before sympifying.
             scalar = value.item() if hasattr(value, "item") else value
-            out[name] = cast(sp.Expr, sp.sympify(scalar))
+            normalized = cast(sp.Expr, sp.sympify(scalar))
+            out[name] = _canonicalize_concrete_integer(normalized)
         elif isinstance(value, sp.Basic) and value.is_number:
-            out[name] = cast(sp.Expr, value)
+            out[name] = _canonicalize_concrete_integer(cast(sp.Expr, value))
     return out
 
 
@@ -11864,6 +12307,8 @@ def _apply_inputs(
                 f"Cannot apply non-integer value {value!r} to integer "
                 f"resource parameter '{name}'."
             )
+        if any(symbol.is_integer is True for symbol in symbols_by_name[name]):
+            sympified = _canonicalize_concrete_integer(sympified)
         if sympified.is_negative is True and any(
             symbol.is_nonnegative is True for symbol in symbols_by_name[name]
         ):
@@ -12016,7 +12461,11 @@ def _controlled_u_child_resolver(
             for formal_dim, actual_dim in zip(formal.shape, actual.shape):
                 extra[formal_dim.uuid] = resolver.resolve(actual_dim)
 
-    return resolver.isolated_scope(block, extra)
+    return resolver.isolated_scope(
+        block,
+        extra,
+        structural_scope=resolver.call_structural_scope(operation, block),
+    )
 
 
 def _select_case_child_resolver(
@@ -12043,7 +12492,11 @@ def _select_case_child_resolver(
             for formal_dim, actual_dim in zip(formal.shape, actual.shape):
                 extra[formal_dim.uuid] = resolver.resolve(actual_dim)
 
-    return resolver.isolated_scope(case_block, extra)
+    return resolver.isolated_scope(
+        case_block,
+        extra,
+        structural_scope=resolver.call_structural_scope(operation, case_block),
+    )
 
 
 def _scalar_target_broadcast_factor(
@@ -12101,4 +12554,8 @@ def _inverse_block_child_resolver(
             for formal_dim, actual_dim in zip(formal.shape, actual.shape):
                 extra[formal_dim.uuid] = resolver.resolve(actual_dim)
 
-    return resolver.isolated_scope(impl, extra)
+    return resolver.isolated_scope(
+        impl,
+        extra,
+        structural_scope=resolver.call_structural_scope(operation, impl),
+    )

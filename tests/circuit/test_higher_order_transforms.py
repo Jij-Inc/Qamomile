@@ -8,7 +8,12 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.ir.operation.gate import ControlledUOperation, GateOperation
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
+from qamomile.circuit.ir.operation.gate import (
+    ControlledUOperation,
+    GateOperation,
+    GateOperationType,
+)
 from qamomile.circuit.serialization import deserialize, serialize
 
 
@@ -74,6 +79,56 @@ def test_inverse_of_controlled_qkernel_matches_control_of_inverse() -> None:
             qmc.qubit("target"),
         )
 
+    assert left.estimate_resources().gates == right.estimate_resources().gates
+    assert left.estimate_resources().depth == right.estimate_resources().depth
+
+
+def test_control_of_inverse_rotation_matches_inverse_of_control() -> None:
+    """Native rotations compose with control in either transform order."""
+    angle = 0.375
+    control_of_inverse = qmc.control(qmc.inverse(qmc.rx))
+    inverse_of_control = qmc.inverse(qmc.control(qmc.rx))
+
+    @qmc.qkernel
+    def left() -> tuple[qmc.Qubit, qmc.Qubit]:
+        """Apply a controlled inverse RX directly."""
+        return control_of_inverse(
+            qmc.qubit("control"),
+            qmc.qubit("target"),
+            angle,
+        )
+
+    @qmc.qkernel
+    def right() -> tuple[qmc.Qubit, qmc.Qubit]:
+        """Invert an ordinary controlled RX."""
+        return inverse_of_control(
+            qmc.qubit("control"),
+            qmc.qubit("target"),
+            angle,
+        )
+
+    [operation] = [
+        candidate
+        for candidate in left.block.operations
+        if isinstance(candidate, ControlledUOperation)
+    ]
+    [rotation] = [
+        candidate
+        for candidate in operation.block.operations
+        if isinstance(candidate, GateOperation)
+    ]
+
+    [negation] = [
+        candidate
+        for candidate in operation.block.operations
+        if isinstance(candidate, BinOp)
+    ]
+
+    assert rotation.gate_type is GateOperationType.RX
+    assert rotation.theta is not None
+    assert rotation.theta.uuid == negation.results[0].uuid
+    assert negation.kind is BinOpKind.MUL
+    assert any(operand.get_const() == -1.0 for operand in negation.operands)
     assert left.estimate_resources().gates == right.estimate_resources().gates
     assert left.estimate_resources().depth == right.estimate_resources().depth
 
