@@ -9,6 +9,11 @@ import pytest
 
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.qkernel_build import create_traced_block
+from qamomile.circuit.frontend.qkernel_invocation import (
+    _shape_invocation_results,
+    invoke_qkernel,
+)
+from qamomile.circuit.frontend.tracer import Tracer, trace
 from qamomile.circuit.transpiler.errors import QubitRebindError
 
 
@@ -624,6 +629,7 @@ def test_qkernel_like_object_without_return_type_uses_signature() -> None:
 def test_void_build_remains_supported() -> None:
     """The top-level build path preserves its existing void-kernel contract."""
     assert _valid_void.build().output_values == []
+    assert _valid_void.output_types == []
 
 
 def test_nested_call_wraps_native_scalar_return_aliases() -> None:
@@ -645,6 +651,56 @@ def test_nested_call_preserves_singleton_python_tuple_shape() -> None:
     assert unpacked.output_values[0].type.label() == "BitType"
 
 
+@pytest.mark.parametrize(
+    ("annotation", "results", "expected"),
+    [
+        pytest.param(type(None), [], None, id="none"),
+        pytest.param(tuple[()], [], (), id="empty-tuple"),
+        pytest.param(qmc.Bit, ["bit"], "bit", id="scalar"),
+        pytest.param(tuple[qmc.Bit], ["bit"], ("bit",), id="singleton-tuple"),
+    ],
+)
+def test_invocation_result_shape_follows_complete_annotation(
+    annotation: Any,
+    results: list[Any],
+    expected: Any,
+) -> None:
+    """Invocation distinguishes void, scalar, and Python-tuple contracts."""
+    assert _shape_invocation_results(annotation, results) == expected
+
+
+def test_legacy_qkernel_like_invocation_resolves_deferred_result_shape() -> None:
+    """Invocation resolves postponed void and singleton-tuple annotations."""
+    singleton_kernel = SimpleNamespace(
+        raw_func=_singleton_tuple_result.raw_func,
+        name=_singleton_tuple_result.name,
+        signature=_singleton_tuple_result.signature,
+        input_types={},
+        output_types=[qmc.Bit],
+        block=_singleton_tuple_result.block,
+        _block_building=False,
+    )
+    void_kernel = SimpleNamespace(
+        raw_func=_valid_void.raw_func,
+        name=_valid_void.name,
+        signature=_valid_void.signature,
+        input_types={},
+        output_types=[],
+        block=_empty_tuple_result.block,
+        _block_building=False,
+    )
+
+    with trace(Tracer()):
+        singleton_result = invoke_qkernel(singleton_kernel)
+    with trace(Tracer()):
+        void_result = invoke_qkernel(void_kernel)
+
+    assert isinstance(singleton_result, tuple)
+    assert len(singleton_result) == 1
+    assert isinstance(singleton_result[0], qmc.Bit)
+    assert void_result is None
+
+
 @pytest.mark.parametrize("trace_mode", ["build", "block"])
 def test_empty_python_tuple_return_remains_supported(trace_mode: str) -> None:
     """Both tracing modes preserve the existing empty-tuple return ABI."""
@@ -654,6 +710,7 @@ def test_empty_python_tuple_return_remains_supported(trace_mode: str) -> None:
         block = _empty_tuple_result.block
 
     assert block.output_values == []
+    assert _empty_tuple_result.output_types == []
 
 
 def test_variable_length_python_tuple_return_is_rejected() -> None:

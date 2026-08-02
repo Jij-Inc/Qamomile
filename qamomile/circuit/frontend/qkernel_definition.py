@@ -176,7 +176,8 @@ def flatten_kernel_return_type(return_type: Any) -> list[Any]:
     """Flatten a qkernel return annotation into its output-slot types.
 
     A Python tuple denotes multiple ABI results, while every other annotation,
-    including the structural ``Tuple`` handle, denotes one result.
+    including the structural ``Tuple`` handle, denotes one result. A ``None``
+    annotation denotes no result slots.
 
     Args:
         return_type (Any): Complete qkernel return annotation.
@@ -188,6 +189,8 @@ def flatten_kernel_return_type(return_type: Any) -> list[Any]:
         TypeError: If a variable-length Python tuple is declared because its
             result arity cannot be represented by the qkernel ABI.
     """
+    if return_type is None or return_type is type(None):
+        return []
     if getattr(return_type, "__origin__", None) is tuple:
         result_types = return_type.__args__
         if any(result_type is Ellipsis for result_type in result_types):
@@ -220,6 +223,53 @@ def resolve_kernel_return_type(
         TypeError: If the return type is missing an annotation.
     """
     return try_resolve_kernel_return_type(func, signature)[0]
+
+
+def resolve_qkernel_like_return_type(kernel: Any) -> Any:
+    """Return a qkernel-like object's complete resolved return annotation.
+
+    Decorator-created kernels expose a frozen ``return_type`` property. Legacy
+    qkernel-like objects instead expose only a signature and original function,
+    so postponed string annotations must be resolved before ABI decisions.
+
+    Args:
+        kernel (Any): QKernel-like object exposing a signature and, when its
+            annotation is postponed, the original ``raw_func``.
+
+    Returns:
+        Any: Complete resolved return annotation.
+
+    Raises:
+        TypeError: If the annotation is missing or cannot be resolved without
+            a frozen ``return_type`` contract.
+    """
+    missing_return_type = object()
+    annotation = getattr(kernel, "return_type", missing_return_type)
+    if annotation is not missing_return_type and not isinstance(annotation, str):
+        return annotation
+
+    if annotation is missing_return_type:
+        annotation = kernel.signature.return_annotation
+    if annotation is inspect.Signature.empty:
+        raise TypeError("Return type must have a type annotation")
+    if not isinstance(annotation, str):
+        return annotation
+
+    raw_func = getattr(kernel, "raw_func", None)
+    if not callable(raw_func):
+        raise TypeError(
+            f"Cannot resolve deferred return annotation {annotation!r} "
+            "without the original qkernel function."
+        )
+    resolved, succeeded, error = try_resolve_kernel_return_type(
+        raw_func,
+        kernel.signature,
+    )
+    if not succeeded:
+        raise TypeError(
+            f"Cannot resolve deferred return annotation {annotation!r}."
+        ) from error
+    return resolved
 
 
 def try_resolve_kernel_return_type(

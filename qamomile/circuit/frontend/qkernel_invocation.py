@@ -14,6 +14,9 @@ from qamomile.circuit.frontend.handle.containers import Dict, Tuple
 from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, UInt
 from qamomile.circuit.frontend.param_validation import _validate_bound_handles
 from qamomile.circuit.frontend.qkernel_callable import qkernel_invoke_block
+from qamomile.circuit.frontend.qkernel_definition import (
+    resolve_qkernel_like_return_type,
+)
 from qamomile.circuit.frontend.qkernel_self_call import emit_self_call_forward_ref
 from qamomile.circuit.frontend.qkernel_specialization import (
     select_specialized_block,
@@ -494,6 +497,29 @@ def _wrap_call_results(
     return wrapped_results
 
 
+def _shape_invocation_results(
+    return_annotation: Any,
+    wrapped_results: list[Any],
+) -> Any:
+    """Restore the Python-level result shape declared by a qkernel.
+
+    Args:
+        return_annotation (Any): Complete resolved return annotation.
+        wrapped_results (list[Any]): Frontend handles reconstructed from IR
+            result values.
+
+    Returns:
+        Any: ``None``, one handle, or a Python tuple matching the annotation.
+    """
+    if return_annotation is None or return_annotation is type(None):
+        return None
+    if getattr(return_annotation, "__origin__", None) is tuple:
+        return tuple(wrapped_results)
+    if len(wrapped_results) == 1:
+        return wrapped_results[0]
+    return tuple(wrapped_results)
+
+
 def invoke_qkernel_with_operation(
     kernel: Any,
     invoke_block_factory: Any | None,
@@ -576,16 +602,8 @@ def invoke_qkernel_with_operation(
         if not in_view._consumed:
             in_view.consume(operation_name="qkernel call (view dropped)")
 
-    return_annotation = getattr(
-        kernel,
-        "return_type",
-        kernel.signature.return_annotation,
-    )
-    if getattr(return_annotation, "__origin__", None) is tuple:
-        return tuple(wrapped_results)
-    if len(wrapped_results) == 1:
-        return wrapped_results[0]
-    return tuple(wrapped_results)
+    return_annotation = resolve_qkernel_like_return_type(kernel)
+    return _shape_invocation_results(return_annotation, wrapped_results)
 
 
 def invoke_qkernel(kernel: Any, *args: Any, **kwargs: Any) -> Any:

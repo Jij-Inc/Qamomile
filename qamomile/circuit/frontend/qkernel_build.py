@@ -18,7 +18,7 @@ from qamomile.circuit.frontend.param_validation import (
 )
 from qamomile.circuit.frontend.qkernel_definition import (
     refresh_qkernel_function_namespace,
-    resolve_kernel_return_type,
+    resolve_qkernel_like_return_type,
 )
 from qamomile.circuit.frontend.qkernel_inputs import (
     auto_detect_parameters,
@@ -119,10 +119,7 @@ def create_traced_block(
     ensure_annotations = getattr(kernel, "_ensure_annotation_types_resolved", None)
     if callable(ensure_annotations):
         ensure_annotations()
-    missing_return_type = object()
-    return_type = getattr(kernel, "return_type", missing_return_type)
-    if return_type is missing_return_type:
-        return_type = resolve_kernel_return_type(kernel.raw_func, kernel.signature)
+    return_type = resolve_qkernel_like_return_type(kernel)
 
     with trace(tracer):
         dummy_inputs: dict[str, Any] = {}
