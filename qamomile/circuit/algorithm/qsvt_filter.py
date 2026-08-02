@@ -8,12 +8,16 @@ alternation ``R(phi_0), U, R(phi_1), U^dagger, ...`` with
 same block. This module does not reimplement that sequence; it only wraps it.
 
 Taking :math:`P \approx \mathrm{sign}` turns the transformation into a reflection
-:math:`R` about the eigenspace below the shift. One Hadamard-test qubit turns
-that reflection into the projector :math:`P_{<\mu} = (I - R)/2` of Lin & Tong
-(2020, arXiv:2002.12508). Sampling the probe kernel below and post-selecting on
-all-zero ancillas estimates
-:math:`\lVert P_{<\mu}\lvert\varphi_0\rangle\rVert^2`, the single scalar a
-classical binary search over :math:`\mu` consumes to locate the ground energy.
+:math:`R` about the eigenspace split off by the shift. One Hadamard-test qubit
+turns that reflection into the projector :math:`P_\mu = (I - R)/2` of Lin & Tong
+(2020, arXiv:2002.12508). Which of the two eigenspaces survives is carried
+entirely by the phases: negating the polynomial negates :math:`R` and so swaps
+:math:`P_\mu` for its complement. The same kernels therefore serve both the
+ground-energy and the largest-energy search, and neither fixes a direction of
+its own. Sampling the probe kernel below and post-selecting on all-zero
+ancillas estimates :math:`\lVert P_\mu\lvert\varphi_0\rangle\rVert^2`, the
+single scalar a classical binary search over :math:`\mu` consumes to locate
+that extremal energy.
 
 The builders take an :class:`~qamomile.circuit.LCUBlockEncoding` and close over
 it, because a controlled call (``qmc.control``) cannot forward a descriptor
@@ -35,9 +39,10 @@ def eigenstate_filter_projector(encoding: LCUBlockEncoding) -> QKernel:
     :math:`R` — produced by :func:`~qamomile.circuit.qsvt` from the reflection
     phases — into :math:`(I - R)/2`, held in the block selected by all-zero
     projector *and* signal qubits. With phases approximating
-    :math:`R \approx \mathrm{sign}(A/\alpha)` and ``encoding`` block-encoding
-    :math:`H - \mu I`, that is the projector :math:`P_{<\mu}` onto the
-    eigenspace of :math:`H` below :math:`\mu`.
+    :math:`R \approx \pm\mathrm{sign}(A/\alpha)` and ``encoding``
+    block-encoding :math:`H - \mu I`, that is the projector onto one of the two
+    eigenspaces of :math:`H` that :math:`\mu` separates — the polynomial's sign
+    decides which, and this kernel imposes no preference.
 
     Args:
         encoding (LCUBlockEncoding): Block-encoding descriptor whose sign
@@ -108,13 +113,13 @@ def eigenstate_filter_projector(encoding: LCUBlockEncoding) -> QKernel:
 
 
 def eigenstate_filter_probe(encoding: LCUBlockEncoding) -> QKernel:
-    r"""Build the sampling circuit of the Lin & Tong ground-energy search.
+    r"""Build the sampling circuit of the Lin & Tong extremal-energy search.
 
     Prepares the uniform superposition :math:`\lvert\varphi_0\rangle =
     H^{\otimes n}\lvert 0\rangle` on the system register, applies
     :func:`eigenstate_filter_projector`, and measures every register. The
     fraction of shots whose projector and signal bits are all zero estimates
-    :math:`\lVert P_{<\mu}\lvert\varphi_0\rangle\rVert^2`; the system bits of
+    :math:`\lVert P_\mu\lvert\varphi_0\rangle\rVert^2`; the system bits of
     those shots are samples of the projected state.
 
     Args:

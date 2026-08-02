@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import math
+import re
 from typing import Any
 
 import numpy as np
@@ -10,6 +12,7 @@ import ommx.v1
 import pytest
 
 from qamomile.circuit.transpiler.job import SampleResult
+from qamomile.optimization import qsvt_filter
 from qamomile.optimization.binary_model import BinaryModel
 from qamomile.optimization.qsvt_filter import QSVTFilterConverter
 
@@ -79,16 +82,27 @@ def _exact_success_probability(
     return float(np.sum(np.abs(amplitudes) ** 2))
 
 
-def test_encoding_captures_the_full_cost_hamiltonian() -> None:
-    """The block encoding covers every term, constant included."""
+def test_encoding_holds_out_the_constant_term() -> None:
+    """The constant is tracked as an offset instead of costing subnormalization.
+
+    An identity term shifts every eigenvalue equally, so it cannot change which
+    state is best, but it would consume the subnormalization budget that sets
+    the filter's resolution. It is folded into the threshold instead.
+    """
     model = BinaryModel.from_higher_ising(
         {(0,): 1.0, (1,): -1.0, (0, 1): -1.0}, constant=0.5
     )
     converter = QSVTFilterConverter(model)
 
     assert converter.encoding.num_system_qubits == 2
-    # 1-norm of all coefficients, including the constant term.
-    assert converter.normalization == pytest.approx(3.5)
+    # 1-norm of the non-constant coefficients only.
+    assert converter.normalization == pytest.approx(3.0)
+    assert converter.energy_offset == pytest.approx(0.5)
+    # The pair still bounds the spectrum, which is what picks a threshold.
+    energies = _ising_diagonal({(0,): 1.0, (1,): -1.0, (0, 1): -1.0}, 2) + 0.5
+    low = converter.energy_offset - converter.normalization
+    high = converter.energy_offset + converter.normalization
+    assert low <= energies.min() and energies.max() <= high
 
 
 def test_cost_hamiltonian_is_not_exposed() -> None:
@@ -103,29 +117,61 @@ def test_cost_hamiltonian_is_not_exposed() -> None:
 @pytest.mark.parametrize(
     ("mu", "expected_signal_qubits"),
     [
-        # A non-zero shift keeps both LCU terms, so the composition adds one
+        # A residual shift keeps both LCU terms, so the composition adds one
         # selector qubit on top of the child encoding's single signal qubit.
         (-2.0, 2),
         (1.5, 2),
-        # lcu_block_encoding drops zero-coefficient terms, so mu == 0 collapses
-        # back to the unshifted encoding's width.
-        (0.0, 1),
+        # lcu_block_encoding drops zero-coefficient terms, so a threshold
+        # sitting on the offset collapses back to the unshifted width.
+        (0.75, 1),
     ],
 )
-def test_shifted_encoding_normalization_grows_with_the_shift(
+def test_shifted_encoding_normalization_grows_with_the_residual_shift(
     mu: float, expected_signal_qubits: int
 ) -> None:
-    """Composing with the identity term adds |mu| to the subnormalization."""
-    model = BinaryModel.from_higher_ising({(0,): 1.0, (0, 1): -1.0})
+    """Composing with the identity adds |mu - offset| to the subnormalization.
+
+    The constant is already held out of the encoding, so only the part of the
+    threshold that is not the offset has to be paid for.
+    """
+    model = BinaryModel.from_higher_ising({(0,): 1.0, (0, 1): -1.0}, constant=0.75)
     converter = QSVTFilterConverter(model)
 
     shifted = converter._shifted_encoding(mu)
 
+    assert converter.energy_offset == pytest.approx(0.75)
     assert converter.encoding.num_signal_qubits == 1
     assert shifted.num_system_qubits == converter.encoding.num_system_qubits
-    assert shifted.normalization == pytest.approx(converter.normalization + abs(mu))
+    assert shifted.normalization == pytest.approx(
+        converter.normalization + abs(mu - converter.energy_offset)
+    )
     assert shifted.num_signal_qubits == expected_signal_qubits
     assert converter.num_ancilla_bits(mu) == 1 + expected_signal_qubits
+
+
+def test_holding_out_the_constant_shrinks_the_subnormalization() -> None:
+    """The offset is pure savings: it never widens the shifted normalization.
+
+    Encoding the constant would cost ``|c| + |mu|``; folding it into the
+    threshold costs ``|mu - c|``, which the triangle inequality caps at the
+    same value and which is far smaller when ``mu`` sits near ``c`` — the usual
+    case, since a spectrum is centred on its own constant.
+    """
+    coefficients = {(0,): 1.0, (1,): -1.0, (0, 1): -1.0}
+    constant = 5.0
+    converter = QSVTFilterConverter(
+        BinaryModel.from_higher_ising(coefficients, constant=constant)
+    )
+    bare = QSVTFilterConverter(BinaryModel.from_higher_ising(coefficients))
+
+    for mu in (constant, constant - 1.0, constant + 2.0, 0.0):
+        held_out = converter._shifted_encoding(mu).normalization
+        encoded = bare.normalization + abs(constant) + abs(mu)
+        assert held_out <= encoded + 1e-12
+    # At mu == c the residual shift vanishes entirely.
+    assert converter._shifted_encoding(constant).normalization == pytest.approx(
+        converter.normalization
+    )
 
 
 def test_qsp_phases_are_odd_length_and_cached() -> None:
@@ -142,6 +188,81 @@ def test_qsp_phases_are_odd_length_and_cached() -> None:
     # The cache hands out copies, so callers cannot corrupt it.
     cached[0] = 0.0
     assert converter._qsp_phases(degree=11, delta=5) == phases
+
+
+def test_qsp_phases_replace_pyqsp_output_with_one_summary_line(
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Synthesis prints its own summary and demotes pyqsp's prints to DEBUG."""
+    pytest.importorskip("pyqsp")
+    model = BinaryModel.from_higher_ising({(0,): 1.0})
+    converter = QSVTFilterConverter(model)
+
+    with caplog.at_level(logging.DEBUG, logger="qamomile.optimization.qsvt_filter"):
+        converter._qsp_phases(degree=11, delta=5, scale=-1.1)
+
+    printed = capsys.readouterr().out.splitlines()
+    assert printed == [
+        "[qamomile.qsvt_filter] synthesizing sign filter: "
+        "degree=11, delta=5, scale=-1.1 -> 12 phases"
+    ]
+    # pyqsp's own chatter survives, one level down, rather than being dropped.
+    logged = "\n".join(r.message for r in caplog.records)
+    assert "[pyqsp.poly.PolySign] degree=11, delta=5" in logged
+    assert all(r.levelno == logging.DEBUG for r in caplog.records)
+
+    # A cache hit re-synthesizes nothing, so it prints nothing.
+    converter._qsp_phases(degree=11, delta=5, scale=-1.1)
+    assert capsys.readouterr().out == ""
+
+
+def test_qsp_phases_summary_can_be_switched_off(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clearing the module flag makes synthesis fully silent."""
+    pytest.importorskip("pyqsp")
+    monkeypatch.setattr(qsvt_filter, "SHOW_PHASE_SYNTHESIS_SUMMARY", False)
+    model = BinaryModel.from_higher_ising({(0,): 1.0})
+    converter = QSVTFilterConverter(model)
+
+    converter._qsp_phases(degree=11, delta=5)
+
+    assert capsys.readouterr().out == ""
+
+
+def test_qsp_phases_reject_a_polynomial_outside_the_qsp_bound() -> None:
+    """A joint (degree, delta, scale) violation fails loudly, not silently.
+
+    ``ensure_bounded`` leaves headroom that depends on degree and delta, so
+    ``scale`` alone cannot decide whether |p| <= 1 holds. At (21, 20) the
+    default scale overshoots; the phases extracted from such a polynomial
+    approximate nothing, which previously surfaced as a filter that kept ~80%
+    of the spectrum instead of 3%.
+    """
+    pytest.importorskip("pyqsp")
+    model = BinaryModel.from_higher_ising({(0,): 1.0})
+    converter = QSVTFilterConverter(model)
+
+    with pytest.raises(ValueError, match=r"QSP bound") as excinfo:
+        converter._qsp_phases(degree=21, delta=20, scale=1.10)
+
+    # The message quotes the measured peak so the overshoot is actionable.
+    assert re.search(r"\|p\|=1\.\d+", str(excinfo.value))
+    # Nothing broken is cached for a later call to hand back.
+    assert (21, 20.0, 1.10) not in converter._phase_cache
+
+
+def test_qsp_phases_accept_a_bounded_polynomial() -> None:
+    """The default combination clears the bound and still synthesizes."""
+    pytest.importorskip("pyqsp")
+    model = BinaryModel.from_higher_ising({(0,): 1.0})
+    converter = QSVTFilterConverter(model)
+
+    phases = converter._qsp_phases(degree=61, delta=20, scale=1.10)
+
+    assert len(phases) == 62
 
 
 @pytest.mark.parametrize("degree", [0, -1, 10])
@@ -229,6 +350,58 @@ def test_success_probability_counts_the_states_below_the_threshold(
     energies = _ising_diagonal(coefficients, 2)
     assert float((energies < mu).mean()) == pytest.approx(expected_fraction)
     assert probability == pytest.approx(expected_fraction, abs=0.05)
+
+
+def test_the_predicate_is_unchanged_by_holding_out_the_constant(
+    transpiler: Any,
+) -> None:
+    """Holding the constant out sharpens the filter without moving the answer.
+
+    ``mu`` stays in the problem's own energy units, so the same threshold must
+    select the same fraction of the spectrum whether or not the constant sits
+    inside the encoding. Only the subnormalization -- and hence the resolution
+    -- improves.
+    """
+    pytest.importorskip("pyqsp")
+    coefficients = {(0,): 1.0, (1,): -1.0, (0, 1): -1.0}
+    constant = 5.0
+    converter = QSVTFilterConverter(
+        BinaryModel.from_higher_ising(coefficients, constant=constant)
+    )
+    phases = converter._qsp_phases()
+
+    # Energies are the bare spectrum plus the constant; mu is quoted in those
+    # same units, so the shifted threshold lands between the two lowest levels.
+    energies = _ising_diagonal(coefficients, 2) + constant
+    mu = constant - 0.5
+    probability = _exact_success_probability(converter, transpiler, mu, phases, 2)
+
+    assert float((energies < mu).mean()) == pytest.approx(0.75)
+    assert probability == pytest.approx(0.75, abs=0.05)
+
+
+def test_a_positive_scale_inverts_the_filter(transpiler: Any) -> None:
+    """The sign of ``scale`` is the only thing selecting which side is kept.
+
+    Same circuit, same threshold: the default keeps the three quarters of the
+    spectrum below ``mu``, and negating the polynomial keeps the complementary
+    quarter above it.
+    """
+    pytest.importorskip("pyqsp")
+    coefficients = {(0,): 1.0, (1,): -1.0, (0, 1): -1.0}
+    model = BinaryModel.from_higher_ising(coefficients)
+    converter = QSVTFilterConverter(model)
+
+    below = _exact_success_probability(
+        converter, transpiler, -0.5, converter._qsp_phases(), 2
+    )
+    above = _exact_success_probability(
+        converter, transpiler, -0.5, converter._qsp_phases(scale=1.10), 2
+    )
+
+    assert below == pytest.approx(0.75, abs=0.05)
+    assert above == pytest.approx(0.25, abs=0.05)
+    assert below + above == pytest.approx(1.0, abs=0.05)
 
 
 def test_sampled_filter_recovers_the_ground_states(transpiler: Any) -> None:

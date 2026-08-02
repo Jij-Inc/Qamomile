@@ -8,18 +8,30 @@ The fraction of shots with all ancillas zero estimates
 :math:`\lVert P_{<\mu}\lvert\varphi_0\rangle\rVert^2`, which is the predicate a
 classical binary search over :math:`\mu` needs. The search itself stays outside
 the library — the converter only emits quantum programs.
+
+By default the filter keeps the eigenspace *below* the threshold, so the search
+converges on the ground energy. That is the orientation every OMMX problem
+wants: ``Instance.to_hubo`` negates a maximization into a minimization before
+the converter ever sees it, so the optimum is always the smallest eigenvalue.
+Passing a positive ``scale`` to :meth:`QSVTFilterConverter.transpile` inverts
+the filter into a largest-eigenvalue search; nothing else about the circuit
+changes.
 """
 
 from __future__ import annotations
 
+import contextlib
+import io
+import logging
 import math
+from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
+from numpy.polynomial.chebyshev import chebval
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile._utils import is_close_zero
 from qamomile.circuit.algorithm.qsvt_filter import eigenstate_filter_probe
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.job import SampleResult
@@ -37,17 +49,73 @@ DEFAULT_TRANSITION_WIDTH = 20
 DEFAULT_POLYNOMIAL_SCALE = -1.10
 """Rescaling applied to the sign polynomial before phase extraction.
 
-The sign fixes the filter's orientation: the negative default keeps the
-eigenstates *below* the threshold. The magnitude sharpens the step.
+The sign fixes the filter's orientation, because negating the polynomial
+negates the reflection :math:`R` and so swaps :math:`(I + R)/2` for its
+complement. The negative default keeps the eigenstates *below* the threshold,
+which is what a ground-state search wants; pass a positive ``scale`` to keep
+those above it instead. The magnitude sharpens the step.
 """
 
 MAX_POLYNOMIAL_SCALE = 1.2
-r"""Largest ``scale`` magnitude that keeps the polynomial under the QSP bound.
+r"""Cheap upper bound on ``scale``, checked before any ``pyqsp`` call.
 
-Beyond this, ``pyqsp``'s ``ensure_bounded`` headroom is exhausted, the
-polynomial leaves :math:`\lvert p \rvert \le 1`, and the extracted phases
-stop approximating the sign function.
+This rejects obvious nonsense early but is *not* authoritative: how much
+headroom ``ensure_bounded`` leaves under :math:`\lvert p \rvert \le 1` depends
+on ``degree`` and ``delta`` as well, so no bound on ``scale`` alone can decide
+it. :data:`POLYNOMIAL_BOUND_SAMPLES` describes the check that can.
 """
+
+POLYNOMIAL_BOUND_SAMPLES = 4001
+r"""Grid resolution for the authoritative :math:`\lvert p \rvert \le 1` check.
+
+QSP can only realize polynomials bounded by one on :math:`[-1, 1]`. Whether
+``scale`` times ``pyqsp``'s sign approximation clears that bar is a joint
+property of ``degree``, ``delta`` and ``scale``, so :meth:`_qsp_phases`
+measures it on this many uniform samples rather than inferring it. Sampling
+costs microseconds against a multi-second phase optimization, and running it
+first means a violating combination fails loudly instead of returning phases
+that encode nothing.
+"""
+
+_LOGGER = logging.getLogger(__name__)
+
+SHOW_PHASE_SYNTHESIS_SUMMARY = True
+"""Whether phase synthesis prints its one-line summary to stdout.
+
+Synthesis takes seconds and happens implicitly inside :meth:`transpile`, so the
+summary exists to explain the pause and record which filter shape was built.
+Set to ``False`` to make :meth:`QSVTFilterConverter._qsp_phases` fully silent.
+"""
+
+
+@contextlib.contextmanager
+def _pyqsp_output_to_logger() -> Iterator[None]:
+    """Route ``pyqsp``'s unconditional prints into this module's logger.
+
+    ``pyqsp`` reports progress with bare ``print`` calls that no flag turns
+    off: ``PolyGenerator`` stores a ``verbose`` argument it never consults, and
+    ``sym_qsp`` prints one line per optimization iteration regardless of the
+    ``verbose`` passed to ``QuantumSignalProcessingPhases``. Capturing
+    ``sys.stdout`` is therefore the only way to keep phase synthesis quiet.
+
+    Nothing is dropped: every captured line is logged at ``DEBUG``, including
+    output produced before an exception, so a failed synthesis still leaves its
+    diagnostics behind.
+
+    Redirection replaces ``sys.stdout`` process-wide for the duration of the
+    block, so concurrent threads printing at the same time are captured too.
+
+    Yields:
+        None: With ``sys.stdout`` redirected for the body of the block.
+    """
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buffer):
+            yield
+    finally:
+        for line in buffer.getvalue().splitlines():
+            if line.strip():
+                _LOGGER.debug("%s", line)
 
 
 class QSVTFilterConverter(MathematicalProblemConverter):
@@ -65,11 +133,16 @@ class QSVTFilterConverter(MathematicalProblemConverter):
     the filtered states themselves.
 
     Attributes:
-        encoding (qmc.LCUBlockEncoding): Block encoding of the unshifted cost
-            Hamiltonian, built during construction.
-        normalization (float): Its subnormalization :math:`\alpha`, which
-            bounds the spectrum: every eigenvalue lies in
-            :math:`[-\alpha, \alpha]`, so it sets the binary-search grid.
+        encoding (qmc.LCUBlockEncoding): Block encoding of the cost
+            Hamiltonian's non-constant part, built during construction.
+        normalization (float): Its subnormalization :math:`\alpha`. Together
+            with :attr:`energy_offset` it bounds the spectrum: every eigenvalue
+            lies in :math:`[c - \alpha, c + \alpha]`, so the pair sets the
+            binary-search grid.
+        energy_offset (float): The spin model's constant :math:`c`, held out of
+            the encoding and folded into the threshold instead. Thresholds
+            passed to :meth:`transpile` stay in the problem's own energy units,
+            constant included.
 
     Example:
         >>> from qamomile.optimization.binary_model import BinaryModel
@@ -81,12 +154,19 @@ class QSVTFilterConverter(MathematicalProblemConverter):
     """
 
     def __post_init__(self) -> None:
-        """Block encode the spin model's Hamiltonian once, up front."""
-        coefficients: dict[tuple[int, ...], float] = dict(self.spin_model.coefficients)
-        if not is_close_zero(self.spin_model.constant):
-            coefficients[()] = self.spin_model.constant
+        r"""Block encode the spin model's non-constant part once, up front.
+
+        The constant term is deliberately kept out of the encoding and stored
+        in :attr:`energy_offset` instead. It shifts every eigenvalue equally,
+        so it changes neither the eigenvectors nor their order and says nothing
+        about which state is best, yet as an identity term it would consume
+        subnormalization budget — the very quantity that sets how finely the
+        filter can resolve :math:`\mu`. :meth:`_shifted_encoding` folds it into
+        the threshold instead, where it costs nothing.
+        """
+        self.energy_offset = float(self.spin_model.constant)
         self.encoding = qmc.ising_z_block_encoding(
-            coefficients, self.spin_model.num_bits
+            dict(self.spin_model.coefficients), self.spin_model.num_bits
         )
         self.normalization = self.encoding.normalization
         self._phase_cache: dict[tuple[int, float, float], list[float]] = {}
@@ -117,10 +197,11 @@ class QSVTFilterConverter(MathematicalProblemConverter):
 
         The probe circuit's post-selected block is the projector qubit plus the
         signal register of the shifted encoding. It depends on ``mu``: at
-        :math:`\mu = 0` the identity term drops out of the LCU (a
-        zero-coefficient term is removed before normalization), leaving a
-        narrower signal register than any non-zero threshold. Pass the same
-        ``mu`` that produced the results being interpreted.
+        :math:`\mu =` :attr:`energy_offset` the residual shift vanishes and the
+        identity term drops out of the LCU (a zero-coefficient term is removed
+        before normalization), leaving a narrower signal register than any
+        other threshold. Pass the same ``mu`` that produced the results being
+        interpreted.
 
         Args:
             mu (float): Energy threshold, as passed to :meth:`transpile`.
@@ -135,13 +216,23 @@ class QSVTFilterConverter(MathematicalProblemConverter):
         r"""Compose a block encoding of :math:`H - \mu I`.
 
         Written as an LCU *of block encodings*, so the Hamiltonian is decomposed
-        once and every threshold reuses it:
-        :math:`H - \mu I = 1 \cdot H + (-\mu) \cdot I`, with normalization
-        :math:`\alpha' = \alpha + \lvert\mu\rvert`.
+        once and every threshold reuses it. Because :attr:`encoding` holds
+        :math:`H - cI` rather than :math:`H` (see :meth:`__post_init__`, where
+        :math:`c` is :attr:`energy_offset`), the identity term carries the
+        residual shift:
+
+        .. math:: H - \mu I = 1 \cdot (H - cI) + (c - \mu) \cdot I
+
+        giving :math:`\alpha' = \alpha + \lvert\mu - c\rvert`. Encoding the
+        constant instead would cost :math:`\lvert c\rvert + \lvert\mu\rvert`,
+        which the triangle inequality never makes smaller and which is far
+        larger whenever :math:`\mu` sits near :math:`c` — the usual case, since
+        the spectrum is centred on its own constant.
 
         Args:
             mu (float): Energy threshold to subtract, in the units of the
-                problem's Ising Hamiltonian.
+                problem's Ising Hamiltonian — constant included, so callers
+                never see the offset bookkeeping.
 
         Returns:
             qmc.LCUBlockEncoding: Descriptor of the shifted operator, with its
@@ -151,7 +242,7 @@ class QSVTFilterConverter(MathematicalProblemConverter):
         return qmc.lcu_block_encoding(
             [
                 qmc.LCUBlockEncodingTerm(1.0, self.encoding),
-                qmc.LCUBlockEncodingTerm(-float(mu), identity),
+                qmc.LCUBlockEncodingTerm(self.energy_offset - float(mu), identity),
             ]
         )
 
@@ -173,7 +264,14 @@ class QSVTFilterConverter(MathematicalProblemConverter):
         phase, subtracting :math:`\pi/2` from every interior phase and
         :math:`\pi/4` from the last, and wrapping into :math:`(-\pi, \pi]`.
         Results are cached per ``(degree, delta, scale)``; they do not depend on
-        :math:`\mu`.
+        :math:`\mu`, so a cache hit skips synthesis and prints nothing.
+
+        A cache miss prints one summary line naming the filter shape being
+        built, unless :data:`SHOW_PHASE_SYNTHESIS_SUMMARY` is cleared.
+        ``pyqsp``'s own progress prints are captured and logged at ``DEBUG``
+        instead (see :func:`_pyqsp_output_to_logger`); raise
+        ``logging.getLogger("qamomile.optimization.qsvt_filter")`` to ``DEBUG``
+        to see the polynomial fit and convergence trace.
 
         Args:
             degree (int): Odd degree of the sign approximation. Higher degree
@@ -196,8 +294,10 @@ class QSVTFilterConverter(MathematicalProblemConverter):
         Raises:
             ImportError: If ``pyqsp`` is not installed.
             ValueError: If ``degree`` is not a positive odd integer, ``delta``
-                is not positive, or ``scale`` is zero or exceeds
-                :data:`MAX_POLYNOMIAL_SCALE` in magnitude.
+                is not positive, ``scale`` is zero or exceeds
+                :data:`MAX_POLYNOMIAL_SCALE` in magnitude, or the scaled
+                polynomial breaks the QSP bound :math:`\lvert p \rvert \le 1`
+                (measured on :data:`POLYNOMIAL_BOUND_SAMPLES` points).
         """
         if not isinstance(degree, int) or degree < 1 or degree % 2 == 0:
             raise ValueError(f"degree must be a positive odd int; got {degree!r}.")
@@ -227,17 +327,39 @@ class QSVTFilterConverter(MathematicalProblemConverter):
                 "the `phi` argument of transpile()."
             ) from error
 
-        generated, _ = PolySign().generate(
-            degree=degree,
-            delta=delta,
-            ensure_bounded=True,
-            return_scale=True,
-            chebyshev_basis=True,
-        )
-        coefficients = [scale * float(c) for c in np.asarray(generated).ravel()]
-        wx_phases, _, _ = QuantumSignalProcessingPhases(
-            coefficients, method="sym_qsp", chebyshev_basis=True
-        )
+        if SHOW_PHASE_SYNTHESIS_SUMMARY:
+            print(
+                f"[qamomile.qsvt_filter] synthesizing sign filter: "
+                f"degree={degree}, delta={delta}, scale={scale} "
+                f"-> {degree + 1} phases"
+            )
+
+        with _pyqsp_output_to_logger():
+            generated, _ = PolySign().generate(
+                degree=degree,
+                delta=delta,
+                ensure_bounded=True,
+                return_scale=True,
+                chebyshev_basis=True,
+            )
+            coefficients = [scale * float(c) for c in np.asarray(generated).ravel()]
+            # Reject an out-of-bounds polynomial before paying for sym_qsp:
+            # its phases would be silently meaningless, not merely imprecise.
+            grid = np.linspace(-1.0, 1.0, POLYNOMIAL_BOUND_SAMPLES)
+            peak = float(np.abs(chebval(grid, coefficients)).max())
+            if peak > 1.0 + 1e-9:
+                raise ValueError(
+                    f"scale={scale!r} drives the degree-{degree} delta={delta!r} "
+                    f"sign approximation to |p|={peak:.4f}, outside the QSP "
+                    "bound |p| <= 1, so the extracted phases would not "
+                    "approximate the sign function. Lower |scale|, raise "
+                    "degree, or lower delta. delta sets the width of the "
+                    "transition and degree must be large enough to represent "
+                    "it, so delta far above degree/3 is the usual cause."
+                )
+            wx_phases, _, _ = QuantumSignalProcessingPhases(
+                coefficients, method="sym_qsp", chebyshev_basis=True
+            )
 
         # sym_qsp raw output -> genuine Wx sequence.
         wx = np.array(wx_phases, dtype=float)
@@ -278,8 +400,9 @@ class QSVTFilterConverter(MathematicalProblemConverter):
 
         Args:
             transpiler (Transpiler): Backend transpiler to use.
-            mu (float): Energy threshold. The filter keeps eigenstates of the
-                cost Hamiltonian with energy below ``mu``.
+            mu (float): Energy threshold. With the default ``scale`` the
+                filter keeps eigenstates of the cost Hamiltonian with energy
+                below ``mu``; a positive ``scale`` keeps those above it.
             degree (int): Degree of the sign approximation, passed to
                 :meth:`_qsp_phases`. Ignored when ``phi`` is given.
             delta (float): Transition-width parameter, passed to
@@ -296,8 +419,8 @@ class QSVTFilterConverter(MathematicalProblemConverter):
 
         Raises:
             ValueError: If ``phi`` has odd or fewer than two entries, or if the
-                phase-synthesis arguments are out of range (see
-                :meth:`_qsp_phases`).
+                phase-synthesis arguments are out of range or jointly break the
+                QSP bound (see :meth:`_qsp_phases`).
             ImportError: If ``phi`` is omitted and ``pyqsp`` is not installed.
         """
         phases = (
@@ -355,8 +478,9 @@ class QSVTFilterConverter(MathematicalProblemConverter):
         r"""Estimate :math:`\lVert P_{<\mu}\lvert\varphi_0\rangle\rVert^2`.
 
         This is the quantity the Lin & Tong binary search thresholds: it is
-        bounded away from zero exactly when an eigenstate below :math:`\mu`
-        carries weight in the uniform superposition.
+        bounded away from zero exactly when an eigenstate on the kept side of
+        :math:`\mu` — below it by default — carries weight in the uniform
+        superposition.
 
         Args:
             samples (SampleResult[tuple[list[int], list[int], list[int]]]): Raw
@@ -381,7 +505,7 @@ class QSVTFilterConverter(MathematicalProblemConverter):
         """Decode the post-selected system measurements into problem samples.
 
         Shots whose projector or signal bits are non-zero missed the filtered
-        block and carry no information about the low-energy subspace, so they
+        block and carry no information about the retained subspace, so they
         are dropped before the usual SPIN/BINARY decoding runs. Use
         :meth:`success_probability` on the same result to recover how many were
         discarded.
