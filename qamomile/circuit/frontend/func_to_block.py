@@ -698,6 +698,11 @@ def _validate_return_type(
                 "supported; use qmc.Tuple for a structural nested value."
             )
         expected = getattr(annotation, "__args__", ())
+        if any(item is Ellipsis for item in expected):
+            raise TypeError(
+                "Variable-length Python tuple return annotations are not "
+                "supported; declare a fixed-length tuple instead."
+            )
         if not isinstance(result, tuple):
             raise TypeError(
                 f"{path} annotation declares a tuple, but the kernel returned "

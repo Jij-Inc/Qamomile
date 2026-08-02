@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 import qamomile.circuit as qmc
+from qamomile.circuit.frontend.qkernel_build import create_traced_block
 from qamomile.circuit.transpiler.errors import QubitRebindError
 
 
@@ -604,6 +606,21 @@ def test_matching_return_annotation_is_accepted(kernel: Any, trace_mode: str) ->
     assert len(block.output_values) == 1
 
 
+def test_qkernel_like_object_without_return_type_uses_signature() -> None:
+    """Tracing keeps compatibility with qkernel-like objects without return_type."""
+    legacy_kernel = SimpleNamespace(
+        raw_func=_valid_bit.raw_func,
+        func=_valid_bit.func,
+        name=_valid_bit.name,
+        signature=_valid_bit.signature,
+        input_types={},
+    )
+
+    block = create_traced_block(legacy_kernel, [], {})
+
+    assert block.output_values[0].type.label() == "BitType"
+
+
 def test_void_build_remains_supported() -> None:
     """The top-level build path preserves its existing void-kernel contract."""
     assert _valid_void.build().output_values == []
@@ -637,6 +654,21 @@ def test_empty_python_tuple_return_remains_supported(trace_mode: str) -> None:
         block = _empty_tuple_result.block
 
     assert block.output_values == []
+
+
+def test_variable_length_python_tuple_return_is_rejected() -> None:
+    """Variable-length Python tuple returns fail with a clear ABI error."""
+
+    def invalid() -> tuple[qmc.Bit, ...]:
+        """Return one Bit through an unsupported variable-length tuple.
+
+        Returns:
+            tuple[qmc.Bit, ...]: One classical Bit.
+        """
+        return (qmc.bit(False),)  # type: ignore[return-value]
+
+    with pytest.raises(TypeError, match="Variable-length Python tuple"):
+        qmc.qkernel(invalid)
 
 
 def test_resolved_return_alias_is_frozen_across_entrypoints() -> None:

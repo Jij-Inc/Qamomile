@@ -9,7 +9,6 @@ from qamomile.circuit.frontend.ast_transform import (
     collect_quantum_rebind_violations,
     transform_control_flow,
 )
-from qamomile.circuit.frontend.handle.primitives import Handle
 from qamomile.circuit.frontend.qkernel_rebind import format_rebind_violation
 from qamomile.circuit.frontend.qkernel_utils import quantum_param_names
 from qamomile.circuit.frontend.region_analysis import RegionLocation, RegionSignature
@@ -96,7 +95,7 @@ def refresh_qkernel_function_namespace(kernel: Any) -> None:
 def resolve_kernel_io_types(
     func: Callable[..., Any],
     signature: inspect.Signature,
-) -> tuple[dict[str, type[Handle]], list[type[Handle]]]:
+) -> tuple[dict[str, Any], list[Any]]:
     """Resolve and validate qkernel input/output handle annotations.
 
     Args:
@@ -104,8 +103,8 @@ def resolve_kernel_io_types(
         signature (inspect.Signature): Function signature.
 
     Returns:
-        tuple[dict[str, type[Handle]], list[type[Handle]]]: Input handle types
-        keyed by parameter name and output handle types by position.
+        tuple[dict[str, Any], list[Any]]: Resolved annotations or raw deferred
+        fallbacks keyed by parameter name, and output annotations by position.
 
     Raises:
         TypeError: If any parameter or return type is missing an annotation.
@@ -118,7 +117,7 @@ def resolve_kernel_io_types(
 def resolve_kernel_input_types(
     func: Callable[..., Any],
     signature: inspect.Signature,
-) -> dict[str, type[Handle]]:
+) -> dict[str, Any]:
     """Resolve qkernel input annotations independently by parameter.
 
     Resolving each annotation separately prevents one deferred forward
@@ -129,7 +128,8 @@ def resolve_kernel_input_types(
         signature (inspect.Signature): Function signature.
 
     Returns:
-        dict[str, type[Handle]]: Input handle types keyed by parameter name.
+        dict[str, Any]: Resolved annotations or raw deferred fallbacks keyed by
+        parameter name.
 
     Raises:
         TypeError: If any parameter is missing an annotation.
@@ -140,7 +140,7 @@ def resolve_kernel_input_types(
 def try_resolve_kernel_input_types(
     func: Callable[..., Any],
     signature: inspect.Signature,
-) -> tuple[dict[str, type[Handle]], dict[str, Exception]]:
+) -> tuple[dict[str, Any], dict[str, Exception]]:
     """Resolve each qkernel input annotation independently.
 
     Args:
@@ -148,14 +148,14 @@ def try_resolve_kernel_input_types(
         signature (inspect.Signature): Function signature.
 
     Returns:
-        tuple[dict[str, type[Handle]], dict[str, Exception]]: Resolved types or
-        raw fallbacks by parameter, plus resolution errors for deferred
+        tuple[dict[str, Any], dict[str, Exception]]: Resolved annotations or raw
+        fallbacks by parameter, plus resolution errors for deferred
         annotations.
 
     Raises:
         TypeError: If any parameter is missing an annotation.
     """
-    input_types: dict[str, type[Handle]] = {}
+    input_types: dict[str, Any] = {}
     errors: dict[str, Exception] = {}
     for param in signature.parameters.values():
         if param.annotation is inspect.Parameter.empty:
@@ -183,9 +183,19 @@ def flatten_kernel_return_type(return_type: Any) -> list[Any]:
 
     Returns:
         list[Any]: Frontend annotations ordered by output slot.
+
+    Raises:
+        TypeError: If a variable-length Python tuple is declared because its
+            result arity cannot be represented by the qkernel ABI.
     """
     if getattr(return_type, "__origin__", None) is tuple:
-        return list(return_type.__args__)
+        result_types = return_type.__args__
+        if any(result_type is Ellipsis for result_type in result_types):
+            raise TypeError(
+                "Variable-length Python tuple return annotations are not "
+                "supported; declare a fixed-length tuple instead."
+            )
+        return list(result_types)
     return [return_type]
 
 
@@ -278,14 +288,15 @@ def validate_quantum_rebinds(
     func: Callable[..., Any],
     *,
     kernel_name: str,
-    input_types: dict[str, type[Handle]],
+    input_types: dict[str, Any],
 ) -> None:
     """Reject illegal quantum variable rebindings in a qkernel body.
 
     Args:
         func (Callable[..., Any]): Raw user function.
         kernel_name (str): User-visible qkernel name for diagnostics.
-        input_types (dict[str, type[Handle]]): Resolved input annotations.
+        input_types (dict[str, Any]): Resolved annotations or raw deferred
+            fallbacks keyed by parameter name.
 
     Raises:
         QubitRebindError: If the AST analyzer finds a forbidden quantum
@@ -315,14 +326,15 @@ def get_quantum_rebind_error(
     func: Callable[..., Any],
     *,
     kernel_name: str,
-    input_types: dict[str, type[Handle]],
+    input_types: dict[str, Any],
 ) -> QubitRebindError | None:
     """Capture an illegal quantum rebind for deferred input validation.
 
     Args:
         func (Callable[..., Any]): Raw user function.
         kernel_name (str): User-visible qkernel name for diagnostics.
-        input_types (dict[str, type[Handle]]): Resolved input annotations.
+        input_types (dict[str, Any]): Resolved annotations or raw deferred
+            fallbacks keyed by parameter name.
 
     Returns:
         QubitRebindError | None: Validation error, or ``None`` when the body is
