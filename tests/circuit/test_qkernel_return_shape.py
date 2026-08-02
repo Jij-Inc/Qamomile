@@ -194,7 +194,11 @@ _RETURN_ANNOTATION_RESOLUTION_CALLS = 0
 
 
 def _next_return_annotation() -> Any:
-    """Return a different handle type after the first annotation evaluation."""
+    """Return a different handle type after the first annotation evaluation.
+
+    Returns:
+        Any: Bit for the first evaluation and UInt for later evaluations.
+    """
     global _RETURN_ANNOTATION_RESOLUTION_CALLS
 
     _RETURN_ANNOTATION_RESOLUTION_CALLS += 1

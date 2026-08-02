@@ -23,16 +23,24 @@ _OUTER_ANNOTATION_EVALUATIONS = 0
 _NESTED_ANNOTATION_EVALUATIONS = 0
 
 
-def _next_outer_annotation():
-    """Count and return the outer qkernel annotation."""
+def _next_outer_annotation() -> type[qmc.Bit]:
+    """Count and return the outer qkernel annotation.
+
+    Returns:
+        type[qmc.Bit]: Bit handle class used as the return annotation.
+    """
     global _OUTER_ANNOTATION_EVALUATIONS
 
     _OUTER_ANNOTATION_EVALUATIONS += 1
     return qmc.Bit
 
 
-def _mark_nested_annotation():
-    """Count and return one nested function annotation."""
+def _mark_nested_annotation() -> type[qmc.Bit]:
+    """Count and return one nested function annotation.
+
+    Returns:
+        type[qmc.Bit]: Bit handle class used as the parameter annotation.
+    """
     global _NESTED_ANNOTATION_EVALUATIONS
 
     _NESTED_ANNOTATION_EVALUATIONS += 1

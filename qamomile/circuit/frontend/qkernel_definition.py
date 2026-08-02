@@ -309,3 +309,31 @@ def validate_quantum_rebinds(
         handle_name=v.target_name,
         operation_name="assignment_rebind",
     )
+
+
+def get_quantum_rebind_error(
+    func: Callable[..., Any],
+    *,
+    kernel_name: str,
+    input_types: dict[str, type[Handle]],
+) -> QubitRebindError | None:
+    """Capture an illegal quantum rebind for deferred input validation.
+
+    Args:
+        func (Callable[..., Any]): Raw user function.
+        kernel_name (str): User-visible qkernel name for diagnostics.
+        input_types (dict[str, type[Handle]]): Resolved input annotations.
+
+    Returns:
+        QubitRebindError | None: Validation error, or ``None`` when the body is
+        valid for the resolved input types.
+    """
+    try:
+        validate_quantum_rebinds(
+            func,
+            kernel_name=kernel_name,
+            input_types=input_types,
+        )
+    except QubitRebindError as error:
+        return error
+    return None

@@ -19,6 +19,7 @@ from qamomile.circuit.frontend.qkernel_api import (
 from qamomile.circuit.frontend.qkernel_block import get_or_build_block
 from qamomile.circuit.frontend.qkernel_definition import (
     flatten_kernel_return_type,
+    get_quantum_rebind_error,
     transform_qkernel_function,
     try_resolve_kernel_input_types,
     try_resolve_kernel_return_type,
@@ -27,7 +28,6 @@ from qamomile.circuit.frontend.qkernel_definition import (
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.effect import KernelEffect
 from qamomile.circuit.ir.operation.callable import CallPolicy, CompositeGateType
-from qamomile.circuit.transpiler.errors import QubitRebindError
 
 if TYPE_CHECKING:
     from qamomile.circuit.ir.operation.callable import InvokeOperation
@@ -58,7 +58,7 @@ class QKernel(QKernelBuildMixin, QKernelVisualizationMixin, Generic[P, R]):
         self.name = func.__name__
         self.signature = inspect.signature(func)
         self._annotation_lock = threading.RLock()
-        self._input_type_validation_error: QubitRebindError | None = None
+        self._input_type_validation_error: Exception | None = None
         self._input_types, self._input_type_resolution_errors = (
             try_resolve_kernel_input_types(func, self.signature)
         )
@@ -198,15 +198,14 @@ class QKernel(QKernelBuildMixin, QKernelVisualizationMixin, Generic[P, R]):
                 self._return_type_resolution_error = return_error
 
             if input_updates:
-                try:
-                    validate_quantum_rebinds(
-                        self.raw_func,
-                        kernel_name=self.name,
-                        input_types=self._input_types,
-                    )
-                except QubitRebindError as error:
-                    self._input_type_validation_error = error
-                    raise
+                validation_error = get_quantum_rebind_error(
+                    self.raw_func,
+                    kernel_name=self.name,
+                    input_types=self._input_types,
+                )
+                if validation_error is not None:
+                    self._input_type_validation_error = validation_error
+                    raise validation_error
 
             if not input_errors and not self._input_types_resolved:
                 self._freeze_input_types()
