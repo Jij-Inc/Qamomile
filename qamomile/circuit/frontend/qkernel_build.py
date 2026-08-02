@@ -7,6 +7,7 @@ from typing import Any, cast
 
 from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.func_to_block import (
+    _validate_return_type,
     build_param_slots,
     create_dummy_input,
     is_array_type,
@@ -114,6 +115,10 @@ def create_traced_block(
     tracked_parameters: dict[str, Value] = {}
 
     refresh_qkernel_function_namespace(kernel)
+    ensure_annotations = getattr(kernel, "_ensure_annotation_types_resolved", None)
+    if callable(ensure_annotations):
+        ensure_annotations()
+    return_type = kernel.return_type
 
     with trace(tracer):
         dummy_inputs: dict[str, Any] = {}
@@ -171,6 +176,7 @@ def create_traced_block(
             dummy_inputs[name] = handle
 
         result = kernel.func(**dummy_inputs)
+        _validate_return_type(result, return_type)
         output_values = _extract_output_values(result)
         if emit_return_op:
             tracer.add_operation(
@@ -232,6 +238,10 @@ def build_qkernel(
             both ``parameters`` and ``kwargs`` (the compile-time-bound values),
             which violates the bindings/parameters disjointness rule.
     """
+    ensure_annotations = getattr(kernel, "_ensure_annotation_types_resolved", None)
+    if callable(ensure_annotations):
+        ensure_annotations()
+
     # Enforce the bindings/parameters disjointness rule against the
     # *user-provided* ``parameters`` before auto-detection. Auto-detect only
     # ever picks names absent from ``kwargs``, so it can never introduce an

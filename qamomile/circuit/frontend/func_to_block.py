@@ -8,6 +8,7 @@ from qamomile.circuit.frontend.handle.primitives import (
     Bit,
     Float,
     Handle,
+    QFixed,
     Qubit,
     UInt,
 )
@@ -552,26 +553,151 @@ def _validate_returned_arrays(result: typing.Any) -> None:
     _visit(result)
 
 
-def _validate_return_shape(
+def _format_return_annotation(annotation: typing.Any) -> str:
+    """Format a frontend return annotation for diagnostics.
+
+    Args:
+        annotation (Any): Resolved frontend return annotation.
+
+    Returns:
+        str: Compact annotation name without module qualification.
+    """
+    if annotation is None or annotation is type(None):
+        return "None"
+    if annotation is Ellipsis:
+        return "..."
+
+    origin = getattr(annotation, "__origin__", None)
+    annotation_type = origin or annotation
+    name = getattr(annotation_type, "__name__", repr(annotation_type))
+    arguments = getattr(annotation, "__args__", ())
+    if not arguments:
+        return name
+    return f"{name}[{', '.join(_format_return_annotation(arg) for arg in arguments)}]"
+
+
+def _return_annotations_match(expected: typing.Any, actual: typing.Any) -> bool:
+    """Compare frontend annotations by their runtime IR value types.
+
+    Args:
+        expected (Any): Annotation declared by the return type.
+        actual (Any): Annotation retained by a structural return handle.
+
+    Returns:
+        bool: ``True`` when both annotations describe the same value type and
+        array rank.
+    """
+    expected_is_array = is_array_type(expected)
+    actual_is_array = is_array_type(actual)
+    if expected_is_array != actual_is_array:
+        return False
+    if expected_is_array and _get_ndim(expected) != _get_ndim(actual):
+        return False
+    if expected is QFixed or actual is QFixed:
+        return expected is actual
+    try:
+        return handle_type_map(expected) == handle_type_map(actual)
+    except TypeError:
+        return expected == actual
+
+
+def _return_value_types_match(expected: ValueType, actual: ValueType) -> bool:
+    """Compare declared and traced IR types for a return value.
+
+    An unbound ``DictValue`` carries absent key/value details in its IR type.
+    Those absent details are wildcards, while every detail present in the
+    traced value must match the declared interface exactly.
+
+    Args:
+        expected (ValueType): IR type derived from the return annotation.
+        actual (ValueType): IR type carried by the traced return value.
+
+    Returns:
+        bool: Whether the traced type is compatible with the declaration.
+    """
+    if isinstance(actual, DictType):
+        return (
+            isinstance(expected, DictType)
+            and (
+                actual.key_type is None
+                or (
+                    expected.key_type is not None
+                    and _return_value_types_match(
+                        expected.key_type,
+                        actual.key_type,
+                    )
+                )
+            )
+            and (
+                actual.value_type is None
+                or (
+                    expected.value_type is not None
+                    and _return_value_types_match(
+                        expected.value_type,
+                        actual.value_type,
+                    )
+                )
+            )
+        )
+    if isinstance(actual, TupleType):
+        return (
+            isinstance(expected, TupleType)
+            and len(actual.element_types) == len(expected.element_types)
+            and all(
+                _return_value_types_match(expected_element, actual_element)
+                for expected_element, actual_element in zip(
+                    expected.element_types,
+                    actual.element_types,
+                    strict=True,
+                )
+            )
+        )
+    return actual == expected
+
+
+def _describe_return_value(result: typing.Any) -> str:
+    """Describe one traced return value for diagnostics.
+
+    Args:
+        result (Any): Traced Python return value.
+
+    Returns:
+        str: Runtime handle and IR type description.
+    """
+    if result is None:
+        return "None"
+    value = getattr(result, "value", None)
+    value_type = getattr(value, "type", None)
+    if value_type is None:
+        return type(result).__name__
+    return f"{type(result).__name__} carrying {value_type.label()}"
+
+
+def _validate_return_type(
     result: typing.Any,
     annotation: typing.Any,
     path: str = "return",
 ) -> None:
-    """Validate scalar, array, and tuple structure against an annotation.
+    """Validate a traced return value against its frontend annotation.
 
     Args:
         result (Any): Traced Python return value.
         annotation (Any): Resolved frontend return annotation.
-        path (str): Diagnostic path for nested tuple elements.
+        path (str): Diagnostic path for nested structural elements.
 
     Raises:
-        TypeError: If an array is returned for a scalar annotation, a scalar
-            is returned for an array annotation, or tuple structure differs.
+        TypeError: If the return structure, array rank, or IR value type does
+            not match the annotation.
     """
     from qamomile.circuit.frontend.handle.array import ArrayBase
 
     if getattr(annotation, "__origin__", None) is tuple:
-        expected = annotation.__args__
+        if path != "return":
+            raise TypeError(
+                f"{path} declares a nested Python tuple return, which is not "
+                "supported; use qmc.Tuple for a structural nested value."
+            )
+        expected = getattr(annotation, "__args__", ())
         if not isinstance(result, tuple):
             raise TypeError(
                 f"{path} annotation declares a tuple, but the kernel returned "
@@ -582,8 +708,109 @@ def _validate_return_shape(
                 f"{path} annotation declares {len(expected)} tuple elements, "
                 f"but the kernel returned {len(result)}."
             )
-        for index, (item, item_annotation) in enumerate(zip(result, expected)):
-            _validate_return_shape(item, item_annotation, f"{path}[{index}]")
+        for index, (item, item_annotation) in enumerate(
+            zip(result, expected, strict=True)
+        ):
+            _validate_return_type(item, item_annotation, f"{path}[{index}]")
+        return
+
+    if annotation is None or annotation is type(None):
+        if path != "return":
+            raise TypeError(
+                f"{path} annotation declares None, but None is only supported "
+                "as the complete top-level return annotation."
+            )
+        if result is not None:
+            raise TypeError(
+                f"{path} annotation declares None, but the kernel returned "
+                f"{_describe_return_value(result)}."
+            )
+        return
+
+    if is_tuple_type(annotation):
+        if not isinstance(result, Tuple) or not isinstance(result.value, TupleValue):
+            raise TypeError(
+                f"{path} annotation declares {_format_return_annotation(annotation)}, "
+                f"but the kernel returned {_describe_return_value(result)}."
+            )
+        expected = getattr(annotation, "__args__", ())
+        if not expected:
+            raise TypeError(f"{path} Tuple annotation must declare element types.")
+        if len(result._elements) != len(expected):
+            raise TypeError(
+                f"{path} annotation declares {len(expected)} Tuple elements, "
+                f"but the kernel returned {len(result._elements)}."
+            )
+        if len(result.value.elements) != len(expected):
+            raise TypeError(
+                f"{path} annotation declares {len(expected)} Tuple elements, "
+                f"but the returned IR value carries {len(result.value.elements)}."
+            )
+        for index, (item, item_annotation) in enumerate(
+            zip(result._elements, expected, strict=True)
+        ):
+            _validate_return_type(item, item_annotation, f"{path}[{index}]")
+        expected_value_type = handle_type_map(annotation)
+        if not _return_value_types_match(expected_value_type, result.value.type):
+            raise TypeError(
+                f"{path} annotation declares {_format_return_annotation(annotation)} "
+                f"backed by {expected_value_type.label()}, but the kernel returned "
+                f"{_describe_return_value(result)}."
+            )
+        return
+
+    if is_dict_type(annotation):
+        if not isinstance(result, Dict) or not isinstance(result.value, DictValue):
+            raise TypeError(
+                f"{path} annotation declares {_format_return_annotation(annotation)}, "
+                f"but the kernel returned {_describe_return_value(result)}."
+            )
+        expected = getattr(annotation, "__args__", ())
+        if len(expected) != 2:
+            raise TypeError(f"{path} Dict annotation must declare key and value types.")
+        expected_value_type = handle_type_map(annotation)
+        if not _return_value_types_match(expected_value_type, result.value.type):
+            raise TypeError(
+                f"{path} annotation declares {_format_return_annotation(annotation)} "
+                f"backed by {expected_value_type.label()}, but the kernel returned "
+                f"{_describe_return_value(result)}."
+            )
+
+        actual_annotations = (result._key_type, result._value_type)
+        for label, expected_type, actual_type in zip(
+            ("key", "value"),
+            expected,
+            actual_annotations,
+            strict=True,
+        ):
+            if actual_type is not None and not _return_annotations_match(
+                expected_type, actual_type
+            ):
+                raise TypeError(
+                    f"{path}.{label} annotation declares "
+                    f"{_format_return_annotation(expected_type)}, but the "
+                    f"returned Dict carries "
+                    f"{_format_return_annotation(actual_type)}."
+                )
+        if result._entries:
+            for index, (key, value) in enumerate(result._entries):
+                _validate_return_type(key, expected[0], f"{path}.key[{index}]")
+                _validate_return_type(value, expected[1], f"{path}.value[{index}]")
+            return
+        if all(actual is not None for actual in actual_annotations):
+            return
+        raise TypeError(
+            f"{path} returned an empty Dict without key/value type metadata."
+        )
+
+    if annotation is QFixed:
+        if not isinstance(result, QFixed) or not isinstance(
+            result.value.type, ir_types.QFixedType
+        ):
+            raise TypeError(
+                f"{path} annotation declares QFixed, but the kernel returned "
+                f"{_describe_return_value(result)}."
+            )
         return
 
     expects_array = is_array_type(annotation)
@@ -597,6 +824,45 @@ def _validate_return_shape(
         raise TypeError(
             f"{path} annotation declares a scalar, but the kernel returned "
             f"{type(result).__name__}."
+        )
+
+    if not isinstance(result, Handle):
+        raise TypeError(
+            f"{path} annotation declares {_format_return_annotation(annotation)}, "
+            f"but the kernel returned {_describe_return_value(result)}."
+        )
+
+    if expects_array:
+        if not isinstance(result.value, ArrayValue):
+            raise TypeError(
+                f"{path} annotation declares an array, but the kernel returned "
+                f"{_describe_return_value(result)} without an array IR value."
+            )
+        declared_origin = getattr(annotation, "__origin__", annotation)
+        if isinstance(declared_origin, type) and not isinstance(
+            result, declared_origin
+        ):
+            raise TypeError(
+                f"{path} annotation declares "
+                f"{_format_return_annotation(annotation)}, but the kernel "
+                f"returned {_describe_return_value(result)} with a different "
+                "array rank."
+            )
+        expected_rank = _get_ndim(annotation)
+        actual_rank = len(result.value.shape)
+        if actual_rank != expected_rank:
+            raise TypeError(
+                f"{path} annotation declares a rank-{expected_rank} array, "
+                f"but the kernel returned a rank-{actual_rank} array."
+            )
+
+    expected_value_type = handle_type_map(annotation)
+    actual_value_type = result.value.type
+    if not _return_value_types_match(expected_value_type, actual_value_type):
+        raise TypeError(
+            f"{path} annotation declares {_format_return_annotation(annotation)} "
+            f"backed by {expected_value_type.label()}, but the kernel returned "
+            f"{_describe_return_value(result)}."
         )
 
 
@@ -640,6 +906,10 @@ def func_to_block(func: typing.Callable) -> Block:
         if signature.return_annotation is not inspect.Signature.empty:
             type_hints["return"] = signature.return_annotation
 
+    resolved_input_types = getattr(func, "__qamomile_resolved_input_types__", {})
+    effective_type_hints = dict(type_hints)
+    effective_type_hints.update(resolved_input_types)
+
     # Check type annotations ================
 
     # ========= Check Input Types =========
@@ -649,7 +919,7 @@ def func_to_block(func: typing.Callable) -> Block:
             raise TypeError(f"Parameter '{param.name}' must have a type annotation")
 
         # Use resolved type hint instead of raw annotation
-        param_type = type_hints.get(param.name, param.annotation)
+        param_type = effective_type_hints.get(param.name, param.annotation)
         if is_static_binding_annotation(param_type):
             if param.default is not inspect.Parameter.empty:
                 raise TypeError(
@@ -664,24 +934,24 @@ def func_to_block(func: typing.Callable) -> Block:
     if signature.return_annotation is inspect.Signature.empty:
         raise TypeError("Return type must have a type annotation")
 
-    # ======== Check Output Types ========
-    # Use resolved return type hint instead of raw annotation
-    return_type = type_hints.get("return", signature.return_annotation)
-    _output_type: ValueType | list[ValueType] | None = None
-    if getattr(return_type, "__origin__", None) is tuple:
-        _output_type = []
-        for ret_type in return_type.__args__:
-            _output_type.append(handle_type_map(ret_type))
-    else:
-        _output_type = handle_type_map(return_type)
-    # ======================= Check Input Types
+    # Use the resolved return type hint for post-trace validation.
+    return_type = getattr(
+        func,
+        "__qamomile_resolved_return_type__",
+        type_hints.get("return", signature.return_annotation),
+    )
+    effective_type_hints["return"] = return_type
+    if return_type is None or return_type is type(None):
+        raise TypeError(
+            "QKernel return annotation None is not supported by hierarchical blocks."
+        )
 
     # Create dummy inputs from resolved type hints (preserving Array types)
     # Use emit_init=False to avoid emitting QInitOperation for nested Block inputs
     dummy_inputs: dict[str, typing.Any] = {}
     static_proxies: list[StaticBindingProxy] = []
     for name, param in signature.parameters.items():
-        param_type = type_hints.get(name, param.annotation)
+        param_type = effective_type_hints.get(name, param.annotation)
         if is_static_binding_annotation(param_type):
             proxy = create_static_binding_proxy(param_type, name)
             dummy_inputs[name] = proxy
@@ -698,7 +968,7 @@ def func_to_block(func: typing.Callable) -> Block:
     with trace(tracer):
         result = func(**dummy_inputs)  # type: ignore
 
-    _validate_return_shape(result, return_type)
+    _validate_return_type(result, return_type)
 
     # Validate that returned / live quantum arrays have no unreturned
     # borrows.  The existing ``validate_all_returned`` is consume-driven
@@ -715,7 +985,9 @@ def func_to_block(func: typing.Callable) -> Block:
     ordinary_input_names = [
         name
         for name, param in signature.parameters.items()
-        if not is_static_binding_annotation(type_hints.get(name, param.annotation))
+        if not is_static_binding_annotation(
+            effective_type_hints.get(name, param.annotation)
+        )
     ]
     label_args = ordinary_input_names
     input_values: list[ValueLike] = [
@@ -748,10 +1020,11 @@ def func_to_block(func: typing.Callable) -> Block:
     # ``input_types`` above already maps each name to a converted
     # ``ValueType``; ``build_param_slots`` needs the raw handle-side type
     # annotations (e.g., ``Vector[Float]``) so it can introspect array
-    # element types and dimensionality. Pass ``type_hints`` directly.
+    # element types and dimensionality. Pass the effective annotations
+    # directly so frozen qkernel contracts cannot diverge from live globals.
     param_slots = build_param_slots(
         signature=signature,
-        input_types=type_hints,
+        input_types=effective_type_hints,
         bind_defaults=False,
     )
 

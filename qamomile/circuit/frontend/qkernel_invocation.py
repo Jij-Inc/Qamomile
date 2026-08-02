@@ -11,7 +11,7 @@ from qamomile.circuit.frontend.func_to_block import (
 )
 from qamomile.circuit.frontend.handle.array import ArrayBase, VectorView
 from qamomile.circuit.frontend.handle.containers import Dict, Tuple
-from qamomile.circuit.frontend.handle.primitives import Handle, UInt
+from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, UInt
 from qamomile.circuit.frontend.param_validation import _validate_bound_handles
 from qamomile.circuit.frontend.qkernel_callable import qkernel_invoke_block
 from qamomile.circuit.frontend.qkernel_self_call import emit_self_call_forward_ref
@@ -36,6 +36,12 @@ from qamomile.circuit.ir.value import (
 )
 
 InputViewKey = tuple[str, str | None, str | None, str | None]
+
+_NATIVE_SCALAR_RESULT_HANDLES: dict[type, type[Handle]] = {
+    bool: Bit,
+    int: UInt,
+    float: Float,
+}
 
 
 def _collect_input_view_metas(arguments: dict[str, Any]) -> dict[InputViewKey, Any]:
@@ -422,12 +428,13 @@ def _wrap_call_value(
             f"Expected scalar Value for return type {handle_type!r}, "
             f"got {type(value).__name__}."
         )
+    result_handle_type = _NATIVE_SCALAR_RESULT_HANDLES.get(handle_type, handle_type)
     if value.logical_id in provenance_map:
         parent, indices, intermediate = provenance_map.pop(value.logical_id)
-        output = handle_type(value=value, parent=parent, indices=indices)
+        output = result_handle_type(value=value, parent=parent, indices=indices)
         intermediate._handoff_direct_borrow_to(output)
         return output
-    return handle_type(value=value)
+    return result_handle_type(value=value)
 
 
 def _wrap_call_results(
@@ -569,6 +576,13 @@ def invoke_qkernel_with_operation(
         if not in_view._consumed:
             in_view.consume(operation_name="qkernel call (view dropped)")
 
+    return_annotation = getattr(
+        kernel,
+        "return_type",
+        kernel.signature.return_annotation,
+    )
+    if getattr(return_annotation, "__origin__", None) is tuple:
+        return tuple(wrapped_results)
     if len(wrapped_results) == 1:
         return wrapped_results[0]
     return tuple(wrapped_results)
