@@ -24,7 +24,7 @@ from qamomile.circuit.transpiler.compiled_segments import (
     CompiledExpvalSegment,
     CompiledQuantumSegment,
 )
-from qamomile.circuit.transpiler.errors import ExecutionError
+from qamomile.circuit.transpiler.errors import EmitError, ExecutionError
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.execution_context import ExecutionContext
 from qamomile.circuit.transpiler.job import SampleJob
@@ -51,6 +51,40 @@ def _uint_const(value: int, name: str = "const") -> Value:
 
 def _float_const(value: float, name: str = "const") -> Value:
     return Value(type=FloatType(), name=name).with_const(value)
+
+
+class _MapResolver:
+    """Minimal emit-time resolver mapping bound operands to concrete ints.
+
+    Stands in for the real ``ValueResolver`` so ``resolve_loop_bounds`` can be
+    exercised without building a full emit pass. Operands are matched by object
+    identity; unknown operands resolve to ``None`` (symbolic).
+    """
+
+    def __init__(self, mapping: dict[int, int]) -> None:
+        """Record the identity-keyed operand-to-int resolution table.
+
+        Args:
+            mapping (dict[int, int]): ``id(operand) -> concrete int`` for each
+                operand this resolver should resolve; others stay symbolic.
+        """
+        self._mapping = mapping
+
+    def resolve_int_value(
+        self, value: object, bindings: dict[str, object]
+    ) -> int | None:
+        """Resolve one operand to its recorded int, or ``None`` if unknown.
+
+        Args:
+            value (object): The bound operand to resolve.
+            bindings (dict[str, object]): Ignored; present for signature parity
+                with the real resolver.
+
+        Returns:
+            int | None: The recorded concrete value, or ``None`` when the
+                operand is not in the table (treated as symbolic).
+        """
+        return self._mapping.get(id(value))
 
 
 class _FakeExecutor(QuantumExecutor[str]):
@@ -247,6 +281,78 @@ class TestClassicalExecutorControlFlow:
         )
 
         assert results[out.uuid] == 11
+
+    def test_for_bounds_defaults_agree_between_emit_and_runtime(self) -> None:
+        """A missing ``stop`` yields an empty loop on both emit and runtime.
+
+        ``resolve_loop_bounds`` (emit) once defaulted a missing ``stop`` to
+        ``1`` while the runtime executor defaulted it to ``0``, so an
+        under-specified loop unrolled to one iteration yet ran zero times.
+        Both paths now delegate to the shared ``resolve_for_bounds`` helper
+        and agree on the empty-loop default.
+        """
+        from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (  # noqa: E501
+            resolve_loop_bounds,
+        )
+        from qamomile.circuit.transpiler.passes.eval_utils import resolve_for_bounds
+
+        start = _uint_const(4)
+        loop_out = Value(type=UIntType(), name="loop_out")
+        # Only ``start`` is present; ``stop`` and ``step`` are absent so the
+        # shared defaults decide the semantics.
+        start_only = ForOperation(
+            loop_var="i",
+            loop_var_value=Value(type=UIntType(), name="i"),
+            operands=[start],
+            operations=[
+                BinOp(
+                    kind=BinOpKind.ADD,
+                    operands=[Value(type=UIntType(), name="i"), _uint_const(1)],
+                    results=[loop_out],
+                )
+            ],
+        )
+
+        # Shared helper locks the empty-loop default (stop=0, step=1).
+        assert resolve_for_bounds(start_only, lambda _operand: 4) == (4, 0, 1)
+
+        # Emit side delegates to the same helper.
+        emit_bounds = resolve_loop_bounds(_MapResolver({id(start): 4}), start_only, {})
+        assert emit_bounds == (4, 0, 1)
+
+        # Runtime side agrees: the body never runs, so its result is unset.
+        results = ClassicalExecutor().execute(
+            ClassicalSegment(operations=[start_only]),
+            ExecutionContext(),
+        )
+        assert loop_out.uuid not in results
+
+    def test_for_bounds_zero_step_rejected_on_both_paths(self) -> None:
+        """A concrete zero ``step`` is rejected identically on emit and runtime."""
+        from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (  # noqa: E501
+            resolve_loop_bounds,
+        )
+
+        start, stop, step = _uint_const(0), _uint_const(5), _uint_const(0)
+        zero_step = ForOperation(
+            loop_var="i",
+            loop_var_value=Value(type=UIntType(), name="i"),
+            operands=[start, stop, step],
+            operations=[],
+        )
+
+        with pytest.raises(EmitError, match="step must not be zero"):
+            resolve_loop_bounds(
+                _MapResolver({id(start): 0, id(stop): 5, id(step): 0}),
+                zero_step,
+                {},
+            )
+
+        with pytest.raises(ExecutionError, match="step must not be zero"):
+            ClassicalExecutor().execute(
+                ClassicalSegment(operations=[zero_step]),
+                ExecutionContext(),
+            )
 
 
 class TestExecutableProgramRuntime:

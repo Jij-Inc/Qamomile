@@ -640,24 +640,29 @@ class ClassicalExecutor:
         scoped_locals: dict[str, Any],
     ) -> None:
         """Execute a classical for loop."""
-        start = (
-            int(self._get_value(op.operands[0], context, results, scoped_locals))
-            if len(op.operands) > 0
-            else 0
-        )
-        stop = (
-            int(self._get_value(op.operands[1], context, results, scoped_locals))
-            if len(op.operands) > 1
-            else 0
-        )
-        step = (
-            int(self._get_value(op.operands[2], context, results, scoped_locals))
-            if len(op.operands) > 2
-            else 1
-        )
+        from qamomile.circuit.transpiler.passes.eval_utils import resolve_for_bounds
 
-        if step == 0:
-            raise ExecutionError("ForOperation step must not be zero")
+        def _resolve_bound(operand: Any) -> int:
+            """Resolve one loop-bound operand to a concrete int at runtime.
+
+            Args:
+                operand (Any): A ``start`` / ``stop`` / ``step`` bound operand.
+
+            Returns:
+                int: The operand's concrete runtime value.
+            """
+            return int(self._get_value(operand, context, results, scoped_locals))
+
+        try:
+            start, stop, step = resolve_for_bounds(op, _resolve_bound)
+        except ValueError as error:
+            raise ExecutionError(str(error)) from error
+
+        if start is None or stop is None or step is None:
+            raise ExecutionError(
+                "ForOperation bounds could not be resolved to concrete "
+                "integers at runtime."
+            )
 
         self._materialize_loop_store_defaults(
             op.operations, context, results, scoped_locals

@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import enum
 import math
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
@@ -45,6 +45,64 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     UnaryMathOp,
     UnaryMathOpKind,
 )
+
+if TYPE_CHECKING:
+    from qamomile.circuit.ir.operation.control_flow import ForOperation
+
+
+# Shared ``ForOperation`` bound defaults for an operand that is absent from
+# the IR, as ``(start, stop, step)``. A missing ``stop`` resolves to ``0`` so
+# an under-specified loop is empty rather than single-trip; this is the safer
+# default and — crucially — the value both the emit and runtime paths now
+# agree on (see ``resolve_for_bounds``).
+_FOR_BOUND_DEFAULTS: tuple[int, int, int] = (0, 0, 1)
+
+
+def resolve_for_bounds(
+    op: "ForOperation",
+    resolve: Callable[[Any], int | None],
+) -> tuple[int | None, int | None, int | None]:
+    """Resolve a ``ForOperation``'s ``(start, stop, step)`` from its operands.
+
+    This is the shared definition of for-loop boundary semantics for the two
+    execution-facing paths — emit-time lowering (``resolve_loop_bounds``) and
+    runtime execution (``classical_executor._execute_for``). Both used to
+    resolve the
+    operands independently and disagreed on the default for a missing ``stop``
+    (emit used ``1``, runtime used ``0``), so an under-specified loop unrolled
+    to one iteration at emit time yet ran zero iterations at runtime. Routing
+    both callers through this helper removes that divergence.
+
+    Missing operands fall back to :data:`_FOR_BOUND_DEFAULTS`
+    (``start=0``, ``stop=0``, ``step=1``), so an under-specified loop is empty
+    rather than single-trip. A ``step`` that concretely resolves to ``0`` is
+    rejected; a ``step`` that stays unresolved (``None``, i.e. symbolic at
+    emit time) is passed through so the caller can fall back to its unrolled
+    path.
+
+    Args:
+        op (ForOperation): Loop whose bounds are resolved. Only
+            ``op.operands`` is read.
+        resolve (Callable[[Any], int | None]): Resolver mapping one bound
+            operand to a concrete ``int``, or ``None`` when it cannot be
+            resolved at the caller's stage (symbolic emit-time operands).
+
+    Returns:
+        tuple[int | None, int | None, int | None]: The resolved
+            ``(start, stop, step)``. Any element is ``None`` when its operand
+            could not be resolved by ``resolve``.
+
+    Raises:
+        ValueError: If ``step`` concretely resolves to ``0``.
+    """
+    operands = op.operands
+    start_default, stop_default, step_default = _FOR_BOUND_DEFAULTS
+    start = resolve(operands[0]) if len(operands) > 0 else start_default
+    stop = resolve(operands[1]) if len(operands) > 1 else stop_default
+    step = resolve(operands[2]) if len(operands) > 2 else step_default
+    if step == 0:
+        raise ValueError("ForOperation step must not be zero.")
+    return start, stop, step
 
 
 class FoldPolicy(enum.Enum):

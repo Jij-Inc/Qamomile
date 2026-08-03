@@ -103,25 +103,43 @@ def resolve_loop_bounds(
 ) -> tuple[int | None, int | None, int | None]:
     """Resolve for-loop bounds (start, stop, step) from operands.
 
-    Missing operands use defaults: start=0, stop=1, step=1.
-    Returns None for bounds that cannot be resolved to concrete ints.
+    Delegates to :func:`resolve_for_bounds`, the single source of truth for
+    for-loop boundary semantics shared with runtime execution. Missing
+    operands use the shared defaults (start=0, stop=0, step=1). Returns None
+    for bounds that cannot be resolved to concrete ints (symbolic operands),
+    so the caller can fall back to its unrolled path.
+
+    Args:
+        resolver (Any): Value resolver used to fold each bound operand to a
+            concrete ``int`` under ``bindings``.
+        op (ForOperation): Loop whose bounds are resolved.
+        bindings (dict[str, Any]): Active emit-time bindings.
+
+    Returns:
+        tuple[int | None, int | None, int | None]: The resolved
+            ``(start, stop, step)``, each ``None`` when its operand is symbolic.
+
+    Raises:
+        EmitError: If ``step`` concretely resolves to ``0``.
     """
-    start = (
-        resolver.resolve_int_value(op.operands[0], bindings)
-        if len(op.operands) > 0
-        else 0
-    )
-    stop = (
-        resolver.resolve_int_value(op.operands[1], bindings)
-        if len(op.operands) > 1
-        else 1
-    )
-    step = (
-        resolver.resolve_int_value(op.operands[2], bindings)
-        if len(op.operands) > 2
-        else 1
-    )
-    return start, stop, step
+    from qamomile.circuit.transpiler.passes.eval_utils import resolve_for_bounds
+
+    def _resolve_bound(operand: Any) -> int | None:
+        """Resolve one loop-bound operand to a concrete int at emit time.
+
+        Args:
+            operand (Any): A ``start`` / ``stop`` / ``step`` bound operand.
+
+        Returns:
+            int | None: The operand's concrete value, or ``None`` when it is
+                symbolic under the active bindings.
+        """
+        return resolver.resolve_int_value(operand, bindings)
+
+    try:
+        return resolve_for_bounds(op, _resolve_bound)
+    except ValueError as error:
+        raise EmitError(str(error), operation="ForOperation") from error
 
 
 def runtime_condition_source_key(
