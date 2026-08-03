@@ -314,7 +314,7 @@ class Handle(abc.ABC):
             QubitConsumedError: If this quantum handle was already consumed.
         """
         if self._consumed and self._should_enforce_linear():
-            display_name = self.name or f"qubit_{self.id[:8]}"
+            display_name = self.name or self.value.name or f"qubit_{self.id[:8]}"
             first_use, reuse, consumed_at = _describe_consume_sites(
                 self, operation_name
             )
