@@ -135,13 +135,13 @@ instance = problem.eval(instance_data)
 # ## Using the `QSVTFilterConverter()`
 #
 # To use the `QSVTFilterConverter()`, it is as simple as calling it on the problem instance.
-# However, a lot of internal parameter a decisive on the solution quality. We explain each of 
-# them in the tutorial, as well as how to chose them cleverly to improve the solution quality.
+# However, a lot of internal parameters are decisive for the solution quality. We explain each of 
+# them in the tutorial, as well as how to choose them cleverly to improve the solution quality.
 #
 # The constant term of the Ising Hamiltonian is held out of the block encoding,
 # indeed the methods performances are tied to the normalization parameter ($\alpha$)
 # and the constant term makes it grow. On the other hand, a constant offset shifts 
-# every eigenvalue equally without perturbating the solutions. 
+# every eigenvalue equally without perturbing the solutions. 
 # `normalization` ($\alpha$) and `energy_offset` ($c$) together bound the spectrum, and that
 # interval is what a threshold gets chosen against.
 
@@ -178,7 +178,7 @@ assert low <= energies.min() and energies.max() <= high
 # what a search for the minimum eigenvalue (ground energy) wants.
 #
 # `degree` and `delta` are paired: `delta` sets the width of the polynomial's
-# transition and `degree`, is the degree of the Tchebychev expansion, 
+# transition and `degree`, is the degree of the Chebyshev expansion, 
 # and must be large enough to represent it. 
 #
 # ::: if not chosen, `degree` and `delta` are set to a default value by the converter.
@@ -192,7 +192,7 @@ assert low <= energies.min() and energies.max() <= high
 # practice we need to "guess" or estimate a bound to ensure beating the resolution.
 # The `degree` roughly scales as $O(1/\Delta)$.
 #
-# Below we demonstrates the algorithm for $\mu=4$. The resolution to beat is then $\Delta = \frac{|4-3|}{3 + |4 - 6|} = 1/5$, a choice of `delta=8` matches the transition to the gap and `degree=21` represents it. A bad 
+# Below we demonstrate the algorithm for $\mu=4$. The resolution to beat is then $\Delta = \frac{|4-3|}{3 + |4 - 6|} = 1/5$, a choice of `delta=8` matches the transition to the gap and `degree=21` represents it. A bad 
 # pairing is not a silent loss of accuracy, it will be rejected outright by the $|p| \le 1$ check.
 
 # %%
@@ -219,8 +219,8 @@ print(f"p(mu=4.0) = {probe(4.0):.4f}   (exact: {(energies < 4.0).mean():.4f})")
 # An external library `pyqsp` is used for computing the phase factors 
 # corresponding to the polynomial approximation defined by our parameters.
 #
-# The converter build the quantum circuit of the projector. The circuit is
-# ran and we compute the success probability based on the samples count 
+# The converter builds the quantum circuit of the projector. The circuit is
+# run and we compute the success probability based on the samples count 
 # and using the `success_probability` method.
 # (exact computation is used as a reference to check the precision) 
 
@@ -334,17 +334,17 @@ eigenstate_filter_projector(shifted).draw(
 # %% [markdown]
 # ## Binary search
 #
-# We want to use the above algorithm to find a tight bound the problem solution, i.e. the ground state of the Hamiltonian. To do so, we find the correct value of the threshold parameter $\mu$ using the same Binary Search Algorithm as in Li & Tong's paper.
+# We want to use the above algorithm to find a tight bound on the problem solution, i.e. the ground state of the Hamiltonian. To do so, we find the correct value of the threshold parameter $\mu$ using the same Binary Search Algorithm as in Li & Tong's paper.
 #
-# We previously compute the range in which the eigenvalues live $[c-\alpha,c+\alpha)$. For a given threshold $\mu$, we can compare it to the ground energy $\lambda_0$. If $\mu$ lies in $[c-\alpha, \lambda_0)$, all the eigenvalues are filtered out and $P(\mu)=0$. On the intervalle $[\lambda_0,\lambda_1)$, only the ground energy survives. Because our Hamiltonian is diagonal, this probability is given by $\gamma^2 = d/2^n$ where $n$ is the space size and $d$ the degeneracy of the ground state. On the intervalle $[\lambda_1,c+\alpha)$, the probability $P(\mu)$ is always greater than $\gamma^2$.
+# We previously compute the range in which the eigenvalues live $[c-\alpha,c+\alpha)$. For a given threshold $\mu$, we can compare it to the ground energy $\lambda_0$. If $\mu$ lies in $[c-\alpha, \lambda_0)$, all the eigenvalues are filtered out and $P(\mu)=0$. On the interval $[\lambda_0,\lambda_1)$, only the ground energy survives. Because our Hamiltonian is diagonal, this probability is given by $\gamma^2 = d/2^n$ where $n$ is the space size and $d$ the degeneracy of the ground state. On the interval $[\lambda_1,c+\alpha)$, the probability $P(\mu)$ is always greater than $\gamma^2$.
 #
-# The parameter $\gamma$ is the key for the search to suceed, yet, $\gamma$ is unknown to us and need to be approximated. 
+# The parameter $\gamma$ is the key for the search to succeed, yet $\gamma$ is unknown to us and needs to be approximated. 
 #
 # Once $\gamma$ is settled, we divide the search space $[c-\alpha,c+\alpha)$ into an equally spaced grid. Let $G$ be the range of the space and $h$ is the discretization parameter, input of the algorithm, then the grid contains $\lfloor G/h \rfloor$ possibilities for $\mu$. We explore those possibilities through a classical binary search. The criteria to search above or below the current threshold is whether $P(\mu)$, estimate by our quantum algorithm, is greater or lower than $\tau = \gamma^2/2$.
 #
 # $h$ also needs to be carefully chosen as it should be smaller than the (unknown) spectral gap.
 #
-# Finally notice that the approximation error can make the function non strictly decreasing. To overcome this issue, we evaluate a bracket of two consecutive threshold in the grid and return a single bit for each $(B_k,B_{k+1})$ flagging if $P(\mu) > \tau$, and we move according to these bracket.
+# Finally notice that the approximation error can make the estimated function non-monotonic. To overcome this issue, we evaluate a bracket of two consecutive threshold in the grid and return a single bit for each $(B_k,B_{k+1})$ flagging if $P(\mu) > \tau$, and we move according to these bracket.
 
 # %%
 def binary_search_ground_energy(success_prob, low, high, gamma, h=1.0):
@@ -417,7 +417,7 @@ print(f"\nlambda_0 in [{x_lower:+.2f}, {x_upper:+.2f}]   true lambda_0 = {ground
 #
 # Finally, we can call the quantum algorithm with the final threshold parameter found by the binary search to prepare the ground state with high accuracy. From the ground states measurement sample, we extract the optimal solution. 
 #
-# ::: Note : Deciding whether $P(\mu)>\tau$ in the binary search tolerates a blury filter and that's why `degree=21` was enough for every probe. To keep *only* the ground eigenspace, at $\mu = 3.5$ the optimal resolution is $\Delta = 0.09$ rather than the $0.20$ used by the search, so the final decode exploits a sharper polynomial. Raising `degree` alone does not help: `degree=61` with a mismatched `delta=20` scores *worse* (85%) than `degree=41` with `delta=11` (91%).
+# ::: Note : Deciding whether $P(\mu)>\tau$ in the binary search tolerates a blurry filter and that's why `degree=21` was enough for every probe. To keep *only* the ground eigenspace, at $\mu = 3.5$ the optimal resolution is $\Delta = 0.09$ rather than the $0.20$ used by the search, so the final decode exploits a sharper polynomial. Raising `degree` alone does not help: `degree=61` with a mismatched `delta=20` scores *worse* (85%) than `degree=41` with `delta=11` (91%).
 
 # %%
 # The predicate needed degree 21; extracting the state itself needs a sharper
@@ -450,7 +450,7 @@ assert optimal / kept > 0.85
 assert cut == 3 and len(side) == num_nodes // 2
 
 # %% [markdown]
-# From the final sample distribution `sampleset`, we recover the most sampled partition that we use as the solution to the partition problem. The partition is $[0,3,4]$ and the coresponding objective (minimal cut) is $3$. 
+# From the final sample distribution `sampleset`, we recover the most sampled partition and use it as the solution to the partition problem. The two triangles $\{0,3,4\}$ and $\{1,2,5\}$ describe the same split, so either side may come out on top from one run to the next; the corresponding objective (minimal cut) is $3$.
 
 # %% [markdown]
 # ## Summary
