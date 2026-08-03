@@ -10,6 +10,10 @@ during tracing are outside the format.
 
 After :func:`deserialize`, pass the returned :class:`SerializedQKernel` to an
 ordinary Qamomile transpiler with fresh ``bindings`` and ``parameters``.
+
+Registered compile-time object arguments are stored only as typed binding
+slots. Their concrete values are deliberately absent from the payload and must
+be supplied through ``bindings`` after deserialization.
 """
 
 from qamomile.circuit.serialization.kernel import SerializedQKernel

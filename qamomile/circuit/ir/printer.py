@@ -38,12 +38,14 @@ from qamomile.circuit.ir.operation import (
     ProjectOperation,
     ResetOperation,
     ReturnOperation,
+    SelectOperation,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     CompOp,
     CondOp,
     NotOp,
+    UnaryMathOp,
 )
 from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
 from qamomile.circuit.ir.operation.control_flow import (
@@ -128,6 +130,14 @@ class _BlockPrinter:
             self.lines.append(
                 f"{pad}{_INDENT}parameters: [{', '.join(block.parameters)}]"
             )
+        for slot in block.static_bindings:
+            fields = ", ".join(
+                f"{field.name}={_format_value(field.value)}" for field in slot.fields
+            )
+            suffix = f" ({fields})" if fields else ""
+            self.lines.append(
+                f"{pad}{_INDENT}static binding {slot.name}: {slot.type_key}{suffix}"
+            )
         body_indent = indent + 1
         self._emit_ops(block.operations, indent=body_indent)
         self.lines.append(f"{pad}}}")
@@ -160,6 +170,8 @@ class _BlockPrinter:
             self._emit_while(op, indent=indent, pad=pad)
         elif isinstance(op, InvokeOperation):
             self._emit_invoke(op, indent=indent, pad=pad)
+        elif isinstance(op, SelectOperation):
+            self._emit_select(op, indent=indent, pad=pad)
         else:
             self.lines.append(pad + _format_flat_op(op))
 
@@ -253,6 +265,44 @@ class _BlockPrinter:
         else:
             self.lines.append(f"{pad}invoke {name}({args}){arrow}{metadata}")
 
+    def _emit_select(self, op: SelectOperation, *, indent: int, pad: str) -> None:
+        """Emit a SELECT with structural metadata and optional case bodies.
+
+        Args:
+            op (SelectOperation): SELECT operation to print.
+            indent (int): Current indentation depth for expanded case bodies.
+            pad (str): Precomputed indentation prefix for the SELECT line.
+
+        Returns:
+            None: Appends the formatted SELECT to ``self.lines``.
+        """
+        width = op.num_index_qubits
+        width_text = _format_value(width) if isinstance(width, Value) else str(width)
+        cases = ", ".join(
+            f"{index}:{block.name or '<anonymous>'}"
+            for index, block in enumerate(op.case_blocks)
+        )
+        args = ", ".join(_format_value(value) for value in op.operands)
+        header = (
+            f"{_format_results(op.results)} = select({args}) "
+            f"[index_width={width_text}, index_args={op.num_index_args}, "
+            f"cases=[{cases}]]"
+        )
+        if self.depth <= 0:
+            self.lines.append(pad + header)
+            return
+
+        self.lines.append(pad + header + " {")
+        case_pad = _INDENT * (indent + 1)
+        for index, block in enumerate(op.case_blocks):
+            name = block.name or "<anonymous>"
+            self.lines.append(f"{case_pad}case {index} {name} {{")
+            child = _BlockPrinter(depth=self.depth - 1)
+            child._emit_ops(block.operations, indent=indent + 2)
+            self.lines.extend(child.lines)
+            self.lines.append(f"{case_pad}}}")
+        self.lines.append(f"{pad}}}")
+
 
 # ---------------------------------------------------------------------------
 # Single-operation formatting (no indentation, no recursion)
@@ -298,6 +348,12 @@ def _format_flat_op(op: Operation) -> str:
         return _format_simple(op, "expval")
     if isinstance(op, BinOp):
         return _format_binary(op, _BINOP_SYMBOLS)
+    if isinstance(op, UnaryMathOp):
+        assert op.kind is not None
+        return (
+            f"{_format_results(op.results)} = "
+            f"{op.kind.name.lower()}({_format_value(op.input)})"
+        )
     if isinstance(op, CompOp):
         return _format_binary(op, _COMPOP_SYMBOLS)
     if isinstance(op, CondOp):

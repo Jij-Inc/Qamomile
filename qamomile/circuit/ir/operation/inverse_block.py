@@ -34,15 +34,15 @@ class InverseBlockOperation(Operation):
     backend-native inverse/adjoint primitive, then fall back to
     ``implementation_block`` when native inversion is unavailable.
 
-    Operands are ordered as control qubits, target quantum operands, then
-    classical/object parameters. Results mirror the quantum operand layout:
-    control results first, then one target result per target operand. Vector
-    target operands therefore count as one operand/result while contributing
-    their scalar width to ``num_target_qubits``.
+    Operands are ordered as scalar control qubits, target quantum operands,
+    then classical/object parameters. Results mirror the quantum operand
+    layout: control results first, then one target result per target operand.
+    Vector target operands therefore count as one operand/result while
+    contributing their scalar width to ``num_target_qubits``.
 
     Attributes:
-        num_control_qubits (int): Number of leading control operands and
-            pass-through control results.
+        num_control_qubits (int): Number of leading scalar control operands
+            and pass-through control results.
         num_target_qubits (int): Scalar qubit width occupied by target
             operands at emit time. Vector operands count by static scalar
             width here but still produce one vector result operand.
@@ -73,8 +73,8 @@ class InverseBlockOperation(Operation):
         Raises:
             TypeError: If ``control_value`` is not a Python ``int`` or
                 ``None``.
-            ValueError: If control operands are not quantum values, if a
-                quantum target operand appears after a non-quantum
+            ValueError: If control operands are not scalar quantum values, if
+                a quantum target operand appears after a non-quantum
                 parameter, or if the results do not mirror the quantum
                 operand layout (one quantum result per control operand
                 followed by one per target operand), or if ``control_value``
@@ -98,6 +98,10 @@ class InverseBlockOperation(Operation):
             )
 
         for operand in self.operands[: self.num_control_qubits]:
+            if isinstance(operand, ArrayValue):
+                raise ValueError(
+                    "inverse block control operands must be scalar qubits."
+                )
             if not operand.type.is_quantum():
                 raise ValueError("inverse block control operands must be quantum.")
 

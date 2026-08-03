@@ -26,6 +26,7 @@ message KernelParameter {
   bool has_default = 4;
   Payload default = 5;
   bool differentiable = 6;
+  optional string static_binding_type = 7;
 }
 
 enum ParameterKind {
@@ -75,7 +76,19 @@ message Block {
   repeated string output_value_refs = 5;
   repeated string output_names = 6;
   repeated NamedReference parameters = 7;
+  repeated StaticBindingSlot static_bindings = 8;
   repeated Operation operations = 9;
+}
+
+message StaticBindingSlot {
+  string name = 1;
+  string type_key = 2;
+  repeated StaticBindingField fields = 3;
+}
+
+message StaticBindingField {
+  string name = 1;
+  string value_ref = 2;
 }
 
 message NamedReference {
@@ -226,6 +239,7 @@ enum OperationType {
   GLOBAL_PHASE_OPERATION = 31;
   SELECT_OPERATION = 32;
   RETURN_QUANTUM_ARRAY_ELEMENT_OPERATION = 33;
+  UNARY_MATH_OPERATION = 34;
 }
 
 message Operation {
@@ -260,6 +274,9 @@ message Operation {
   repeated string true_yield_refs = 44;
   repeated string false_yield_refs = 45;
   repeated BranchRebind branch_rebinds = 46;
+  repeated string capture_refs = 47;
+  repeated string true_capture_refs = 48;
+  repeated string false_capture_refs = 49;
 
   optional sint64 num_controls = 60;
   optional string num_controls_ref = 61;

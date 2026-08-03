@@ -10,6 +10,7 @@ from qamomile.circuit.frontend.param_validation import (
     validate_bindings_parameters_disjoint,
 )
 from qamomile.circuit.frontend.qkernel_like import QKernelLike
+from qamomile.circuit.frontend.static_binding import without_static_bindings
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.transpiler.compiler import QamomileCompiler
 from qamomile.circuit.transpiler.config import TranspilerConfig
@@ -20,6 +21,9 @@ from qamomile.circuit.transpiler.errors import (
 from qamomile.circuit.transpiler.executable import ExecutableProgram, QuantumExecutor
 from qamomile.circuit.transpiler.passes.affine_validate import AffineValidationPass
 from qamomile.circuit.transpiler.passes.analyze import AnalyzePass
+from qamomile.circuit.transpiler.passes.array_bounds_validation import (
+    ArrayBoundsValidationPass,
+)
 from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
     CompileTimeIfLoweringPass,
 )
@@ -354,6 +358,26 @@ class Transpiler(ABC, Generic[T]):
 
         return StripSliceArrayOpsPass().run(block)
 
+    def array_bounds_check(self, block: Block) -> Block:
+        """Pass 1.85: Reject reachable accesses outside resolved array bounds.
+
+        Runs after :meth:`partial_eval` so binding-dependent view extents and
+        indices are concrete where possible, and before declarative slice
+        operations are stripped. Statically zero-trip loop bodies are skipped
+        because their element accesses are unreachable.
+
+        Args:
+            block (Block): Post-fold affine or hierarchical block to validate.
+
+        Returns:
+            Block: The input block unchanged after successful validation.
+
+        Raises:
+            ValidationError: If a reachable constant element index is outside
+                a resolved root-array or view-local extent.
+        """
+        return ArrayBoundsValidationPass().run(block)
+
     def slice_borrow_check(self, block: Block) -> Block:
         """Pass 1.9: Post-fold slice-view linearity checker.
 
@@ -548,6 +572,7 @@ class Transpiler(ABC, Generic[T]):
         affine = self.unroll_recursion(affine, bindings)
         validated = self.affine_validate(affine)
         partially_evaluated = self.partial_eval(validated, bindings)
+        partially_evaluated = self.array_bounds_check(partially_evaluated)
         partially_evaluated = self.slice_borrow_check(partially_evaluated)
         partially_evaluated = self.strip_slice_ops(partially_evaluated)
         analyzed = self.analyze(partially_evaluated)
@@ -624,8 +649,10 @@ class Transpiler(ABC, Generic[T]):
         validate_bindings_parameters_disjoint(bindings, parameters)
 
         prepared = self.prepare(kernel, bindings, parameters)
-        separated = self.plan_circuit(prepared, bindings)
-        return self.emit(separated, bindings, parameters)
+        input_types = getattr(kernel, "input_types", {})
+        ordinary_bindings = without_static_bindings(input_types, bindings)
+        separated = self.plan_circuit(prepared, ordinary_bindings)
+        return self.emit(separated, ordinary_bindings, parameters)
 
     def to_circuit(
         self,

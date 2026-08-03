@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.canonical import content_hash
 from qamomile.circuit.ir.operation import GateOperation, GateOperationType
 from qamomile.circuit.ir.operation.callable import InvokeOperation
-from qamomile.circuit.ir.operation.control_flow import IfOperation
+from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
 from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.primitives import FloatType, QubitType
@@ -15,6 +17,7 @@ from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
     CompileTimeIfLoweringPass,
 )
+from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
 from qamomile.circuit.transpiler.passes.inline import (
     InlinePass,
     count_inline_invokes,
@@ -85,6 +88,21 @@ def _select_with_shadowed_selector(
         index,
         target,
         selector=0,
+    )
+
+
+@qmc.qkernel
+def _select_with_computed_selector(
+    selector: qmc.UInt,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Pass an outer arithmetic result to a case-local selector."""
+    index = qmc.qubit("index")
+    target = qmc.qubit("target")
+    computed_selector = selector - 1
+    return qmc.select([_conditional_x_case, _parameterized_identity_case])(
+        index,
+        target,
+        selector=computed_selector,
     )
 
 
@@ -241,6 +259,58 @@ def test_partial_eval_scopes_select_case_bindings() -> None:
         and operation.gate_type is GateOperationType.X
         for operation in first_case.operations
     )
+
+
+def test_parent_folded_select_actual_triggers_second_case_descent() -> None:
+    """Parent folding exposes a case binding only to the second descent."""
+    inlined = InlinePass().run(_select_with_computed_selector.block)
+    partial_eval = PartialEvaluationPass({"selector": 1})
+
+    case_evaluated = dataclasses.replace(
+        inlined,
+        operations=partial_eval._evaluate_select_case_blocks(inlined.operations),
+    )
+    assert any(
+        isinstance(operation, IfOperation)
+        for operation in _only_select(case_evaluated).case_blocks[0].operations
+    )
+
+    parent_folded = ConstantFoldingPass(
+        {"selector": 1},
+        strip_slice_ops=False,
+    ).run(case_evaluated)
+    parent_select = _only_select(parent_folded)
+    assert parent_select.param_operands[0].get_const() == 0
+    assert any(
+        isinstance(operation, IfOperation)
+        for operation in parent_select.case_blocks[0].operations
+    )
+
+    lowered = CompileTimeIfLoweringPass({"selector": 1}).run(parent_folded)
+    first_case = _only_select(lowered).case_blocks[0]
+    assert not any(
+        isinstance(operation, IfOperation) for operation in first_case.operations
+    )
+    assert any(
+        isinstance(operation, GateOperation)
+        and operation.gate_type is GateOperationType.X
+        for operation in first_case.operations
+    )
+
+
+def test_select_discovery_preserves_unrelated_nested_tree_identity() -> None:
+    """SELECT discovery does not rebuild a nested tree containing no SELECT."""
+    leaf_operations: list[GateOperation] = []
+    inner = ForOperation(operations=leaf_operations)
+    outer = ForOperation(operations=[inner])
+    operations = [outer]
+
+    evaluated = PartialEvaluationPass()._evaluate_select_case_blocks(operations)
+
+    assert evaluated is operations
+    assert evaluated[0] is outer
+    assert outer.operations[0] is inner
+    assert inner.operations is leaf_operations
 
 
 def test_substitution_descends_into_select_case_blocks() -> None:

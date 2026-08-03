@@ -116,4 +116,8 @@ def finalize_pending_self_calls(kernel: Any) -> None:
         op.definition = definition
         op.body = kernel._block
 
+    from qamomile.circuit.ir.effect import refresh_block_effects
+
+    refresh_block_effects(kernel._block)
+
     kernel._pending_self_calls = []

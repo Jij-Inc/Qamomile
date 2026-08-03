@@ -268,6 +268,8 @@ def emit_callable_implementation_emitter(
     Raises:
         EmitError: If the selected emitter object does not provide a callable
             ``emit`` method.
+        RuntimeError: If a declining emitter removed or replaced circuit state
+            that existed before its append-only emission attempt.
     """
     backend_name = getattr(emit_pass, "backend_name", None)
     impl = op.implementation_for(backend=backend_name)
@@ -287,13 +289,24 @@ def emit_callable_implementation_emitter(
         normalized_attrs = dict(op.attrs)
         normalized_attrs.pop("control_value", None)
         normalized_op = dataclasses.replace(op, attrs=normalized_attrs)
+    snapshot_state = getattr(circuit, "snapshot_state", None)
+    restore_state = getattr(circuit, "restore_state", None)
+    circuit_snapshot = (
+        snapshot_state()
+        if callable(snapshot_state) and callable(restore_state)
+        else None
+    )
     with bracket_control_value(
         emit_pass,
         circuit,
         own_controls,
         op.control_value,
     ):
-        return bool(emit(circuit, normalized_op, qubit_indices, bindings))
+        handled = bool(emit(circuit, normalized_op, qubit_indices, bindings))
+    if not handled and circuit_snapshot is not None:
+        assert callable(restore_state)
+        restore_state(circuit_snapshot)
+    return handled
 
 
 def emit_qft_with_strategy(

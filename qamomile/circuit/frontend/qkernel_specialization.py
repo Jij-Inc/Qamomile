@@ -16,6 +16,10 @@ from qamomile.circuit.frontend.handle.utils import get_size
 from qamomile.circuit.frontend.qkernel_build import build_specialized_block
 from qamomile.circuit.frontend.qkernel_inputs import is_parameterizable_type
 from qamomile.circuit.frontend.qkernel_utils import get_array_element_type
+from qamomile.circuit.frontend.static_binding import (
+    is_static_binding_annotation,
+    validate_static_binding_argument,
+)
 from qamomile.circuit.ir.block import Block
 
 
@@ -29,7 +33,8 @@ def extract_calltime_specialization(
         kernel (Any): ``QKernel``-like object with ``signature`` and
             ``input_types`` attributes.
         arguments (dict[str, Any]): Bound call arguments after literal
-            promotion and frontend-handle validation.
+            promotion and frontend validation. Registered static bindings
+            remain concrete Python objects.
 
     Returns:
         tuple[list[str], dict[str, Any], dict[str, int]] | None: Runtime
@@ -43,7 +48,15 @@ def extract_calltime_specialization(
 
     for name, param in kernel.signature.parameters.items():
         param_type = kernel.input_types.get(name, param.annotation)
-        handle = arguments.get(name)
+        argument = arguments.get(name)
+        if is_static_binding_annotation(param_type):
+            bindings[name] = validate_static_binding_argument(
+                param_type,
+                name,
+                argument,
+            )
+            continue
+        handle = argument
         assert isinstance(handle, Handle), (
             f"Internal invariant violated: argument {name!r} should already "
             f"be a Handle by the time extract_calltime_specialization runs."
@@ -123,7 +136,8 @@ def select_specialized_block(
     Args:
         kernel (Any): ``QKernel``-like object whose block should be selected.
         arguments (dict[str, Any]): Bound call arguments after literal
-            promotion and frontend-handle validation.
+            promotion and frontend validation. Registered static bindings may
+            remain concrete Python objects when ``require_handles`` is false.
         require_handles (bool): If ``True``, specialization is skipped unless
             every argument is a frontend ``Handle``. Defaults to ``True``.
 

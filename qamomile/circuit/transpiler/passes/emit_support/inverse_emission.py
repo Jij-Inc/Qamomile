@@ -209,8 +209,9 @@ def emit_inverse_block_at_indices(
     # compile silently and crash the simulator (CUDA-Q).
     reject_duplicate_physical_indices("inverse block", control_indices + target_indices)
 
-    # Nested emission prepends enclosing controls. The activation value belongs
-    # only to this operation's own trailing control segment.
+    # Nested emission prepends enclosing controls. InverseBlockOperation
+    # validates one scalar qubit per control operand, so num_control_qubits is
+    # also the physical width of this operation's trailing control segment.
     activation_controls = (
         control_indices[-op.num_control_qubits :] if op.num_control_qubits else []
     )

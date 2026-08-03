@@ -7,10 +7,6 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.arithmetic import (
-    modular_decrement,
-    modular_increment,
-)
 from qamomile.circuit.algorithm.basic import (
     cx_entangling_layer,
     cz_entangling_layer,
@@ -57,6 +53,10 @@ from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.types.primitives import QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
+from qamomile.circuit.stdlib import (
+    modular_decrement,
+    modular_increment,
+)
 from qamomile.circuit.stdlib.state_preparation import (
     computational_basis_state,
     mottonen_amplitude_encoding,
@@ -1134,6 +1134,51 @@ def test_inverse_pauli_evolve_matches_manual_negative_time(qiskit_transpiler) ->
 # ---------------------------------------------------------------------------
 # Inverse of inverse
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("with_body", [True, False], ids=["body", "opaque"])
+def test_block_inverter_cancels_inverse_invoke_transform(with_body: bool) -> None:
+    """An inverse invocation returns to its direct callable definition."""
+    callee_input = Value(type=QubitType(), name="callee_input")
+    callee_output = callee_input.next_version()
+    callee_body = Block(
+        name="callee",
+        input_values=[callee_input],
+        output_values=[callee_output],
+        operations=[
+            GateOperation.fixed(
+                GateOperationType.X,
+                [callee_input],
+                [callee_output],
+            )
+        ],
+    )
+    ref = CallableRef(namespace="test", name="inverse_call")
+    definition = CallableDef(ref=ref, body=callee_body if with_body else None)
+    source = Value(type=QubitType(), name="source")
+    transformed = source.next_version()
+    inverse_call = InvokeOperation(
+        operands=[source],
+        results=[transformed],
+        target=ref,
+        transform=CallTransform.INVERSE,
+        definition=definition,
+    )
+    block = Block(
+        name="inverse_invoke",
+        input_values=[source],
+        output_values=[transformed],
+        operations=[inverse_call],
+        kind=BlockKind.HIERARCHICAL,
+    )
+
+    inverted = _BlockInverter().invert_block(block)
+    [direct_call] = inverted.operations
+
+    assert isinstance(direct_call, InvokeOperation)
+    assert direct_call.transform is CallTransform.DIRECT
+    assert direct_call.definition is definition
+    assert direct_call.body is (callee_body if with_body else None)
 
 
 def test_inverse_of_inverse_restores_source_operations() -> None:
@@ -2892,7 +2937,7 @@ def _rx_layer_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
 
 
 def _modular_increment_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
-    """Build algorithm modular_increment inverse roundtrip kernels.
+    """Build standard-library modular_increment inverse roundtrip kernels.
 
     The register stays at two qubits so the QURI Parts modular-arithmetic
     support documented in LIMITATIONS.md is not exceeded by the forward op.
@@ -3157,7 +3202,7 @@ def _x_mixer_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
 
 
 def _modular_decrement_roundtrip_kernels() -> tuple[qmc.QKernel, qmc.QKernel]:
-    """Build algorithm modular_decrement inverse roundtrip kernels.
+    """Build standard-library modular_decrement inverse roundtrip kernels.
 
     The register stays at two qubits so the QURI Parts modular-arithmetic
     support documented in LIMITATIONS.md is not exceeded by the forward op.
@@ -3545,13 +3590,13 @@ STDLIB_ALGO_ROUNDTRIP_CASES = [
         _modular_increment_roundtrip_kernels,
         2,
         {},
-        id="algorithm-modular-increment",
+        id="stdlib-modular-increment",
     ),
     pytest.param(
         _modular_decrement_roundtrip_kernels,
         2,
         {},
-        id="algorithm-modular-decrement",
+        id="stdlib-modular-decrement",
     ),
     pytest.param(
         _computational_basis_state_roundtrip_kernels,
@@ -3692,6 +3737,22 @@ def test_inverse_block_operation_rejects_interleaved_parameters() -> None:
             results=[q0.next_version(), q1.next_version()],
             num_control_qubits=0,
             num_target_qubits=2,
+        )
+
+
+def test_inverse_block_operation_rejects_vector_control_operand() -> None:
+    """The constructor rejects controls whose operand width exceeds one qubit."""
+    dimension = Value(type=UIntType(), name="dimension").with_const(3)
+    control = ArrayValue(type=QubitType(), name="control", shape=(dimension,))
+    target = Value(type=QubitType(), name="target")
+
+    with pytest.raises(ValueError, match="control operands must be scalar qubits"):
+        InverseBlockOperation(
+            operands=[control, target],
+            results=[control.next_version(), target.next_version()],
+            num_control_qubits=1,
+            num_target_qubits=1,
+            control_value=0,
         )
 
 

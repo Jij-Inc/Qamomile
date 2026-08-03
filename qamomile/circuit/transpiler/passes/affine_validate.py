@@ -95,9 +95,9 @@ class AffineValidationPass(Pass[Block, Block]):
             # bodies here and never counts a merge source as a consume.
             if isinstance(op, HasNestedOps):
                 scoped_sets: list[dict[str, str]] = []
-                for op_list in op.nested_op_lists():
+                for region in op.nested_regions():
                     scoped = consumed.copy()
-                    self._validate_operations(op_list, scoped)
+                    self._validate_operations(list(region.operations), scoped)
                     scoped_sets.append(scoped)
                 # For IfOperation, merge all scoped consumed back:
                 # anything consumed in either branch is considered consumed.

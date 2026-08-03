@@ -40,6 +40,7 @@ project:
     - title: リリースノート
       file: release_notes/index.md
       children:
+        - file: release_notes/v0_14_0.md
         - file: release_notes/v0_13_0.md
         - file: release_notes/v0_12_7.md
         - file: release_notes/v0_12_6.md
@@ -66,6 +67,7 @@ project:
             - file: api/circuit/multi_controlled_x
             - file: api/circuit/qft
             - file: api/circuit/qpe
+            - file: api/circuit/qsvt
             - file: api/circuit/serialization
             - file: api/circuit/stdlib
             - file: api/circuit/transpiler
@@ -77,7 +79,13 @@ project:
             - file: api/cudaq/observable
             - file: api/cudaq/transpiler
         - file: api/hugr
-        - file: api/linalg
+        - file: api/linalg/index
+          children:
+            - file: api/linalg/hermitian
+            - file: api/linalg/mottonen
+            - file: api/linalg/pauli_lcu
+            - file: api/linalg/periodic_shift_lcu
+            - file: api/linalg/subspace
         - file: api/observable
         - file: api/optimization/index
           children:
@@ -109,6 +117,7 @@ site:
   template: book-theme
   title: Qamomile ドキュメント
   options:
+    favicon: ../assets/qamomile_logo.png
     logo: ../assets/qamomile_logo.png
     style: ../assets/custom-theme.css
     folders: true

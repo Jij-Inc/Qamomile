@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
@@ -34,6 +35,28 @@ def _make_qubit(name: str) -> Qubit:
         Qubit: Fresh unconsumed qubit handle.
     """
     return Qubit(value=Value(type=QubitType(), name=name))
+
+
+class _CountingOperationList(list[Any]):
+    """Count recursive validation visits to a shared operation list."""
+
+    def __init__(self, *operations: Any) -> None:
+        """Initialize the list and its visit counter.
+
+        Args:
+            *operations (Any): Operations stored in the shared block body.
+        """
+        super().__init__(operations)
+        self.visits = 0
+
+    def __iter__(self) -> Iterator[Any]:
+        """Iterate over operations and record one recursive visit.
+
+        Returns:
+            Iterator[Any]: Iterator over the stored operations.
+        """
+        self.visits += 1
+        return super().__iter__()
 
 
 @qkernel
@@ -724,6 +747,31 @@ class TestSelectValidation:
 
         with pytest.raises(ValueError, match="same parameter signature"):
             qmc.select([first, second])
+
+    def test_shared_nested_block_is_validated_once(self) -> None:
+        """Cases sharing one callable body traverse that body only once."""
+        from qamomile.circuit.frontend.operation.select import (
+            _validate_case_target_footprint,
+        )
+        from qamomile.circuit.ir.block import Block
+
+        shared_operations = _CountingOperationList()
+        shared = Block(name="shared", operations=shared_operations)
+        cases = []
+        for position in range(8):
+            target = Value(type=QubitType(), name=f"target_{position}")
+            cases.append(
+                Block(
+                    input_values=[target],
+                    output_values=[target],
+                    operations=[shared.call()],
+                )
+            )
+        shared_operations.visits = 0
+
+        _validate_case_target_footprint(cases)
+
+        assert shared_operations.visits == 1
 
     @pytest.mark.parametrize(("case_count", "width"), [(2, 1), (3, 2), (8, 3)])
     def test_num_index_qubits(self, case_count: int, width: int) -> None:

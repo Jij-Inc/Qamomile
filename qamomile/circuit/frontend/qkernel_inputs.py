@@ -19,6 +19,10 @@ from qamomile.circuit.frontend.handle.array import Vector
 from qamomile.circuit.frontend.handle.containers import Dict
 from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, Qubit, UInt
 from qamomile.circuit.frontend.qkernel_utils import get_array_element_type
+from qamomile.circuit.frontend.static_binding import (
+    is_static_binding_annotation,
+    validate_static_binding,
+)
 from qamomile.circuit.ir.types import BitType, FloatType, ObservableType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
 
@@ -95,6 +99,12 @@ def validate_parameters(
             raise ValueError(f"Unknown parameter: '{name}'")
 
         param_type = input_types[name]
+        if is_static_binding_annotation(param_type):
+            raise TypeError(
+                f"Parameter '{name}' has static binding type {param_type}; "
+                "static bindings must be supplied at compile time and cannot "
+                "be runtime parameters"
+            )
         if is_dict_type(param_type):
             args = getattr(param_type, "__args__", None)
             if not args or len(args) < 2:
@@ -139,6 +149,8 @@ def validate_kwargs(
     Raises:
         ValueError: If an unknown argument is supplied, or if a required
             non-parameter classical argument is missing.
+        TypeError: If a static binding has a default value or a supplied
+            object does not match its registered annotation.
     """
     known_names = set(signature.parameters.keys())
     unknown = set(kwargs.keys()) - known_names
@@ -150,10 +162,30 @@ def validate_kwargs(
         )
 
     for name, param in signature.parameters.items():
+        param_type = input_types.get(name, param.annotation)
+        if is_static_binding_annotation(param_type):
+            if param.default is not inspect.Parameter.empty:
+                raise TypeError(
+                    f"Static binding parameter {name!r} cannot have a "
+                    "default value; provide it through bindings when building "
+                    "or transpiling the qkernel."
+                )
+            if name in parameters:
+                raise TypeError(
+                    f"Static binding argument {name!r} must be supplied at "
+                    "compile time and cannot be a runtime parameter."
+                )
+            if name not in kwargs:
+                raise ValueError(
+                    f"Static binding argument {name!r} must be provided "
+                    "through bindings."
+                )
+            validate_static_binding(param_type, name, kwargs[name])
+            continue
+
         if name in parameters:
             continue
 
-        param_type = input_types.get(name, param.annotation)
         if param_type is Qubit:
             continue
         if is_array_type(param_type):
@@ -243,6 +275,14 @@ def _array_binding_payload(
         TypeError: If the array element type or rank is unsupported.
     """
     element_type = get_array_element_type(param_type)
+    if element_type in (Bit, bool):
+        arr = np.asarray(value, dtype=object)
+        normalized_bits = [
+            _coerce_bit_binding(name, item, index=index)
+            for index, item in enumerate(arr.flat)
+        ]
+        payload = np.asarray(normalized_bits, dtype=object).reshape(arr.shape).tolist()
+        return BitType(), arr.shape, payload
     if element_type in (Float, float):
         arr = np.asarray(value)
         return FloatType(), arr.shape, arr.tolist()
@@ -274,6 +314,38 @@ def _array_binding_payload(
                 )
         return ObservableType(), (len(items),), items
     raise TypeError(f"Unsupported element type for array binding: {element_type}")
+
+
+def _coerce_bit_binding(name: str, value: Any, *, index: int | None = None) -> bool:
+    """Validate and normalize one compile-time Bit binding.
+
+    Args:
+        name (str): QKernel parameter name used in diagnostics.
+        value (Any): Candidate scalar binding.
+        index (int | None): Optional flattened array index. Defaults to
+            ``None`` for a scalar binding.
+
+    Returns:
+        bool: Normalized boolean value.
+
+    Raises:
+        TypeError: If ``value`` is neither boolean nor integral.
+        ValueError: If an integral value is not zero or one.
+    """
+    location = f" at flattened index {index}" if index is not None else ""
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if not isinstance(value, numbers.Integral):
+        raise TypeError(
+            f"Bit binding '{name}'{location} must be bool, 0, or 1, got "
+            f"{type(value).__name__} ({value!r})."
+        )
+    normalized = int(value)
+    if normalized not in (0, 1):
+        raise ValueError(
+            f"Bit binding '{name}'{location} must be 0 or 1, got {normalized}."
+        )
+    return bool(normalized)
 
 
 def create_bound_input(param_type: Any, name: str, value: Any) -> Handle:
