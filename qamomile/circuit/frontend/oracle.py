@@ -28,12 +28,12 @@ if TYPE_CHECKING:
     from qamomile.circuit.estimator import OpaqueCostContext, ResourceEstimate
 
 
-def _normalize_control_count(
+def _normalize_nonnegative_integer(
     value: object,
     *,
     label: str = "num_control_qubits",
 ) -> int:
-    """Return one nonnegative integral control count as a Python integer.
+    """Return one nonnegative integral value as a Python integer.
 
     Args:
         value (object): Candidate Python or NumPy integer scalar.
@@ -63,18 +63,27 @@ class Oracle:
         name (str): Human-readable oracle name.
         num_qubits (int | None): Number of target qubits consumed and returned
             by the oracle. ``None`` means the arity is provided by
-            ``signature`` and may be vector-shaped.
+            ``signature`` and may be vector-shaped. Python and NumPy integer
+            scalars are accepted; booleans and negative values are rejected.
         num_control_qubits (int): Number of explicit control qubits required
             by scalar calls. Defaults to ``0``.
-        signature (CallableSignature | None): Optional frontend signature.
-            When omitted, a fixed-width scalar/vector-compatible oracle is
-            created from ``num_qubits``.
+        signature (CallableSignature | None): Optional frontend signature for
+            target operands only. It must not repeat the leading controls
+            declared by ``num_control_qubits``; those controls are prefixed by
+            the Oracle automatically. When omitted, a fixed-width
+            scalar/vector-compatible oracle is created from ``num_qubits``.
         cost (ResourceEstimate | Callable[[OpaqueCostContext], ResourceEstimate] | None):
             Optional explicit cost for this bodyless callable. Both forms
             describe one ordinary application of the Oracle as declared,
             including ``num_control_qubits``. Controls added later with
             ``qmc.control`` are projected by resource estimation. Defaults to
             ``None``.
+
+    Raises:
+        TypeError: If a supplied ``num_qubits`` or ``num_control_qubits`` is
+            boolean or not an integral scalar.
+        ValueError: If either width is negative, or neither ``num_qubits`` nor
+            ``signature`` supplies enough target-arity information.
     """
 
     name: str
@@ -101,11 +110,15 @@ class Oracle:
         Args:
             name (str): Human-readable oracle name.
             num_qubits (int | None): Fixed scalar/vector width. Defaults to
-                ``None`` when ``signature`` describes the callable.
+                ``None`` when ``signature`` describes the callable. Python
+                and NumPy integer scalars are accepted; booleans and negative
+                values are rejected.
             num_control_qubits (int): Number of explicit scalar controls.
                 Defaults to ``0``.
-            signature (CallableSignature | None): Optional frontend signature.
-                Defaults to ``None``.
+            signature (CallableSignature | None): Optional frontend signature
+                for target operands only. Do not include controls declared by
+                ``num_control_qubits``; the Oracle prefixes those controls to
+                its internal callable signature. Defaults to ``None``.
             cost (ResourceEstimate | Callable[[OpaqueCostContext], ResourceEstimate] | None):
                 Optional fixed or context-dependent opaque cost. The returned
                 estimate describes one ordinary application of this Oracle
@@ -113,14 +126,20 @@ class Oracle:
                 controls added by an outer transform. Defaults to ``None``.
 
         Raises:
-            TypeError: If ``num_control_qubits`` is not a non-boolean integer.
+            TypeError: If a supplied ``num_qubits`` or
+                ``num_control_qubits`` is not a non-boolean integral scalar.
             ValueError: If neither ``num_qubits`` nor ``signature`` supplies
-                enough arity information, or if ``num_control_qubits`` is
+                enough target-arity information, or if either width is
                 negative.
         """
-        normalized_control_qubits = _normalize_control_count(num_control_qubits)
+        normalized_control_qubits = _normalize_nonnegative_integer(num_control_qubits)
         if signature is not None and num_qubits is None:
             num_qubits = signature.scalar_qubit_input_count()
+        if num_qubits is not None:
+            num_qubits = _normalize_nonnegative_integer(
+                num_qubits,
+                label="num_qubits",
+            )
         if num_qubits is None and not (
             signature is not None and signature.accepts_single_qubit_vector()
         ):
@@ -133,6 +152,17 @@ class Oracle:
         self.num_control_qubits = normalized_control_qubits
         self.signature = signature
         self.cost = cost
+
+    def _uses_vector_target_signature(self) -> bool:
+        """Return whether this Oracle exposes one vector target operand.
+
+        Returns:
+            bool: Whether coherent controls cannot currently be prepended to
+            this Oracle's target ABI.
+        """
+        return self.num_qubits is None or (
+            self.signature is not None and self.signature.accepts_single_qubit_vector()
+        )
 
     def __call__(
         self,
@@ -527,6 +557,12 @@ class TransformedOracle:
             added controls, or ``None`` for all ones. Defaults to ``None``.
         inverse (bool): Whether to apply the inverse Oracle. Defaults to
             ``False``.
+
+    Raises:
+        TypeError: If ``added_num_control_qubits`` is boolean or not integral,
+            or a positive count is attached to a vector-signature Oracle.
+        ValueError: If the added-control count is negative or its activation
+            value is invalid for that width.
     """
 
     oracle: Oracle
@@ -539,14 +575,19 @@ class TransformedOracle:
 
         Raises:
             TypeError: If ``added_num_control_qubits`` is not a non-boolean
-                integer.
+                integer, or controls are added to a vector-signature Oracle.
             ValueError: If the added-control count is negative or its
                 activation value is invalid for that width.
         """
-        count = _normalize_control_count(
+        count = _normalize_nonnegative_integer(
             self.added_num_control_qubits,
             label="added_num_control_qubits",
         )
+        if count and self.oracle._uses_vector_target_signature():
+            raise TypeError(
+                "control(Oracle) supports fixed-width scalar oracles only; "
+                "vector-signature oracles must be called directly."
+            )
         object.__setattr__(self, "added_num_control_qubits", count)
         if count == 0:
             if self.added_control_value is not None:
@@ -588,11 +629,20 @@ class TransformedOracle:
 
         Raises:
             TypeError: If ``num_controls`` is not a non-boolean integer or
-                ``control_value`` is not a Python integer or ``None``.
+                ``control_value`` is not a Python integer or ``None``, or the
+                source Oracle uses a vector target signature.
             ValueError: If ``num_controls`` is not positive or
                 ``control_value`` does not fit its width.
         """
-        num_controls = _normalize_control_count(num_controls, label="num_controls")
+        if self.oracle._uses_vector_target_signature():
+            raise TypeError(
+                "control(Oracle) supports fixed-width scalar oracles only; "
+                "vector-signature oracles must be called directly."
+            )
+        num_controls = _normalize_nonnegative_integer(
+            num_controls,
+            label="num_controls",
+        )
         if num_controls == 0:
             raise ValueError("num_controls must be >= 1, got 0.")
         outer_value = normalize_control_value(control_value, num_controls)
@@ -766,11 +816,14 @@ def opaque(
         name (str): Human-readable callable name.
         num_qubits (int | None): Number of target qubits consumed and returned
             by the callable. Defaults to ``None`` when ``signature`` carries
-            the shape contract.
+            the target shape contract. Python and NumPy integer scalars are
+            accepted; booleans and negative values are rejected.
         num_control_qubits (int): Number of explicit scalar control qubits
             required by scalar calls. Defaults to ``0``.
-        signature (CallableSignature | None): Optional frontend signature.
-            Defaults to ``None``.
+        signature (CallableSignature | None): Optional frontend signature for
+            target operands only. It must exclude controls declared by
+            ``num_control_qubits`` because the Oracle prefixes those controls
+            automatically. Defaults to ``None``.
         cost (ResourceEstimate | Callable[[OpaqueCostContext], ResourceEstimate] | None):
             Optional fixed or context-dependent opaque cost. Both forms
             describe one ordinary application of this Oracle definition,
@@ -780,10 +833,10 @@ def opaque(
         Oracle: Opaque callable backed by ``InvokeOperation`` with no body.
 
     Raises:
-        TypeError: If ``num_control_qubits`` is not a non-boolean integer.
+        TypeError: If a supplied ``num_qubits`` or ``num_control_qubits`` is
+            not a non-boolean integral scalar.
         ValueError: If neither ``num_qubits`` nor ``signature`` supplies
-            enough arity information, or if ``num_control_qubits`` is
-            negative.
+            enough target-arity information, or if either width is negative.
     """
     return Oracle(
         name=name,

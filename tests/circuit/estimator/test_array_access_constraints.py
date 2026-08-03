@@ -184,20 +184,26 @@ def test_direct_array_index_constraints_validate_inputs_and_substitution() -> No
     valid = _direct_array_access.estimate_resources(inputs={"length": 3, "index": 2})
     assert valid.gates.total == 1
 
-    with pytest.raises(ValueError, match="element index 0 upper bound"):
+    with pytest.raises(
+        ValueError,
+        match=r"element axis 0 in-bounds margin \(dimension - index\)",
+    ):
         _direct_array_access.estimate_resources(inputs={"length": 3, "index": 3})
 
     symbolic = _direct_array_access.estimate_resources()
-    with pytest.raises(ValueError, match="element index 0 upper bound"):
+    with pytest.raises(
+        ValueError,
+        match=r"element axis 0 in-bounds margin \(dimension - index\)",
+    ):
         symbolic.substitute(length=3, index=3)
 
 
 def test_computed_index_constraint_rejects_negative_result() -> None:
     """A nonnegative UInt input can still produce an invalid negative index."""
-    with pytest.raises(ValueError, match="element index 0 lower bound"):
+    with pytest.raises(ValueError, match="element axis 0 index lower bound"):
         _computed_negative_access.estimate_resources(inputs={"index": 0})
 
-    with pytest.raises(ValueError, match="element index 0 lower bound"):
+    with pytest.raises(ValueError, match="element axis 0 index lower bound"):
         _computed_negative_access.estimate_resources().substitute(index=0)
 
 
@@ -206,7 +212,7 @@ def test_loop_index_constraints_are_quantified_over_executed_iterations() -> Non
     empty = _loop_array_access.estimate_resources(inputs={"length": 0})
     assert empty.gates.total == 0
 
-    with pytest.raises(ValueError, match="element index 0 upper bound"):
+    with pytest.raises(ValueError, match="element axis 0 in-bounds margin"):
         _loop_array_access.estimate_resources(inputs={"length": 3})
 
     valid = _valid_loop_array_access.estimate_resources(inputs={"length": 3})
@@ -220,7 +226,7 @@ def test_loop_index_constraints_are_quantified_over_executed_iterations() -> Non
 )
 def test_body_backed_transforms_preserve_array_constraints(kernel: object) -> None:
     """Direct, controlled, and inverse body traversal retain index bounds."""
-    with pytest.raises(ValueError, match="element index 0 upper bound"):
+    with pytest.raises(ValueError, match="element axis 0 in-bounds margin"):
         kernel.estimate_resources(inputs={"length": 3, "index": 3})  # type: ignore[attr-defined]
 
 
@@ -231,7 +237,7 @@ def test_compile_time_branch_validates_only_the_selected_access() -> None:
     )
     assert untaken.gates.total == 1
 
-    with pytest.raises(ValueError, match="element index 0 upper bound"):
+    with pytest.raises(ValueError, match="element axis 0 in-bounds margin"):
         _compile_time_branch_access.estimate_resources(
             inputs={"length": 3, "index": 3, "flag": 1}
         )
@@ -239,7 +245,7 @@ def test_compile_time_branch_validates_only_the_selected_access() -> None:
 
 def test_runtime_branch_validates_every_possible_access() -> None:
     """A measurement-selected branch keeps both branches' structural bounds."""
-    with pytest.raises(ValueError, match="element index 0 upper bound"):
+    with pytest.raises(ValueError, match="element axis 0 in-bounds margin"):
         _runtime_branch_access.estimate_resources(inputs={"length": 3, "index": 3})
 
 
@@ -261,11 +267,11 @@ def test_multidimensional_array_constraints_validate_each_axis() -> None:
     )
     assert valid.gates.total == 1
 
-    with pytest.raises(ValueError, match="element index 0 upper bound"):
+    with pytest.raises(ValueError, match="element axis 0 in-bounds margin"):
         _matrix_access.estimate_resources(
             inputs={"values": values, "row": 2, "column": 0}
         )
-    with pytest.raises(ValueError, match="element index 1 upper bound"):
+    with pytest.raises(ValueError, match="element axis 1 in-bounds margin"):
         _matrix_access.estimate_resources(
             inputs={"values": values, "row": 0, "column": 3}
         )
@@ -276,7 +282,7 @@ def test_classical_store_uses_its_separate_index_operands() -> None:
     valid = _classical_store.estimate_resources(inputs={"index": 0})
     assert valid.width.circuit_qubits == 1
 
-    with pytest.raises(ValueError, match="store index 0 upper bound"):
+    with pytest.raises(ValueError, match="store axis 0 in-bounds margin"):
         _classical_store.estimate_resources(inputs={"index": 1})
 
 
@@ -305,7 +311,10 @@ def test_deferred_quantum_return_validates_both_index_layouts(
         results=[],
     )
 
-    with pytest.raises(ValueError, match=rf"return {role} index 0 upper bound"):
+    with pytest.raises(
+        ValueError,
+        match=rf"return {role} axis 0 in-bounds margin",
+    ):
         qm.estimate_resources([operation])
 
 
@@ -319,5 +328,5 @@ def test_array_content_index_remains_an_explicit_symbolic_requirement() -> None:
         for requirement in estimate.to_dict()["requirements"]
     )
     assert estimate.substitute(**{"indices[1]": 1}).gates.total == 1
-    with pytest.raises(ValueError, match="element index 0 upper bound"):
+    with pytest.raises(ValueError, match="element axis 0 in-bounds margin"):
         estimate.substitute(**{"indices[1]": 2})

@@ -103,6 +103,35 @@ _synthesized_kernel_cache: "weakref.WeakKeyDictionary[Callable[..., Any], Any]" 
 _synthesized_kernel_cache_strong: dict[Callable[..., Any], Any] = {}
 
 
+def _normalize_control_count(num_controls: object) -> int | UInt:
+    """Normalize one concrete or symbolic coherent-control width.
+
+    Args:
+        num_controls (object): Positive Python or NumPy integer, or a symbolic
+            ``UInt`` handle whose value is resolved later.
+
+    Returns:
+        int | UInt: A Python ``int`` for concrete values, or the original
+            symbolic ``UInt`` handle.
+
+    Raises:
+        TypeError: If ``num_controls`` is boolean or neither integral nor a
+            ``UInt`` handle.
+        ValueError: If a concrete control count is less than one.
+    """
+    if isinstance(num_controls, UInt):
+        return num_controls
+    if isinstance(num_controls, bool) or not isinstance(num_controls, Integral):
+        raise TypeError(
+            "num_controls must be a positive integer or UInt, "
+            f"got {type(num_controls).__name__}."
+        )
+    normalized = int(num_controls)
+    if normalized < 1:
+        raise ValueError(f"num_controls must be >= 1, got {normalized}.")
+    return normalized
+
+
 def _wrapper_namespace(target_ref: Any) -> dict[str, Any]:
     """Build the exec namespace used when compiling a synthesized wrapper.
 
@@ -302,10 +331,10 @@ class ControlledGate:
                 dict ``input_types`` attribute and an ``inspect.Signature``
                 ``signature`` attribute.
             num_controls (int | UInt): Number of control qubits. A concrete
-                ``int`` must be >= 1; a symbolic ``UInt`` defers validation
-                to emit time. Defaults to 1. A ``bool`` is rejected: it is
-                not a valid control count even though ``bool`` subclasses
-                ``int``.
+                Python or NumPy integer must be >= 1 and is normalized to a
+                Python ``int``; a symbolic ``UInt`` defers validation to emit
+                time. Defaults to 1. A ``bool`` is rejected: it is not a valid
+                control count even though ``bool`` subclasses ``int``.
             control_value (int | None): Computational-basis value that
                 activates the control. Bit zero describes the first flattened
                 control qubit, following Qamomile's LSB-first convention.
@@ -320,26 +349,15 @@ class ControlledGate:
                 inverse of ``qkernel``. Defaults to ``False``.
 
         Raises:
-            TypeError: If ``num_controls`` is a ``bool``, ``control_value`` is
-                not a Python ``int`` or ``None``, or ``qkernel`` does not
-                expose a dict ``input_types`` / an ``inspect.Signature``
-                ``signature``.
+            TypeError: If ``num_controls`` is boolean or neither integral nor
+                a ``UInt``, ``control_value`` is not a Python ``int`` or
+                ``None``, or ``qkernel`` does not expose a dict
+                ``input_types`` / an ``inspect.Signature`` ``signature``.
             ValueError: If a concrete ``num_controls`` is less than one,
                 ``control_value`` does not fit its width, or a non-default
                 value is combined with symbolic ``num_controls``.
         """
-        # Reject bool explicitly (not via is_plain_int): the only numeric guard
-        # here is ``isinstance(int) and < 1`` with no else branch, so swapping in
-        # is_plain_int would keep True stored as the control count and silently
-        # regress False (== 0) past the ``< 1`` check. Mirrors the bool guard in
-        # _normalize_power below.
-        if isinstance(num_controls, bool):
-            raise TypeError(
-                f"num_controls must be a positive integer or UInt, got bool "
-                f"({num_controls})."
-            )
-        if isinstance(num_controls, int) and num_controls < 1:
-            raise ValueError(f"num_controls must be >= 1, got {num_controls}.")
+        num_controls = _normalize_control_count(num_controls)
         # For UInt (symbolic), validation is deferred to emit time
         if isinstance(num_controls, UInt):
             if control_value is not None:
@@ -431,7 +449,8 @@ class ControlledGate:
 
         Args:
             num_controls (int | UInt): Width of the newly prepended control
-                group.
+                group. Python and NumPy integer scalars are accepted for a
+                concrete width; a ``UInt`` preserves a symbolic width.
             control_value (int | None): LSB-first activation value for the new
                 group. ``None`` uses all ones. Defaults to ``None``.
 
@@ -440,17 +459,14 @@ class ControlledGate:
                 prefix.
 
         Raises:
-            TypeError: If ``num_controls`` is ``bool`` or ``control_value`` is
-                not a Python integer or ``None``.
+            TypeError: If ``num_controls`` is boolean or neither integral nor
+                a ``UInt``, or ``control_value`` is not a Python integer or
+                ``None``.
             ValueError: If a concrete width is not positive, an activation
                 value does not fit its group, or a non-default activation
                 pattern is combined with a symbolic width.
         """
-        if isinstance(num_controls, bool):
-            raise TypeError(
-                f"num_controls must be a positive integer or UInt, got bool "
-                f"({num_controls})."
-            )
+        num_controls = _normalize_control_count(num_controls)
         if isinstance(num_controls, UInt):
             if control_value is not None:
                 raise ValueError(
@@ -2885,20 +2901,9 @@ def _validate_concrete_control_count(num_controls: object) -> int:
             integral scalar.
         ValueError: If ``num_controls`` is less than one.
     """
-    if isinstance(num_controls, bool):
-        raise TypeError(
-            f"num_controls must be a positive integer, got bool ({num_controls})."
-        )
-    if isinstance(num_controls, UInt):
+    normalized = _normalize_control_count(num_controls)
+    if isinstance(normalized, UInt):
         raise TypeError("control(Oracle) does not support symbolic num_controls yet.")
-    if not isinstance(num_controls, Integral):
-        raise TypeError(
-            "num_controls must be a positive integer, "
-            f"got {type(num_controls).__name__}."
-        )
-    normalized = int(num_controls)
-    if normalized < 1:
-        raise ValueError(f"num_controls must be >= 1, got {normalized}.")
     return normalized
 
 
@@ -2980,7 +2985,9 @@ def control(
             (possibly inside a ``Union`` such as
             ``Union[Qubit, Vector[Qubit]]``).
         num_controls (int | UInt): Number of control qubits (default: 1).
-            Can be ``int`` (concrete) or ``UInt`` (symbolic).
+            Can be a Python or NumPy integer (concrete) or ``UInt``
+            (symbolic). Concrete integral scalars are normalized to a Python
+            ``int``.
         control_value (int | None): Computational-basis value that activates
             the controlled unitary. Controls are flattened in call order, with
             ``Vector`` / ``VectorView`` elements taken from index zero upward;
@@ -3009,8 +3016,10 @@ def control(
     Raises:
         TypeError: If ``qkernel`` is a callable that cannot be auto-wrapped
             (missing annotations, unsupported types, or no qubit parameters),
-            ``control_value`` is not a Python ``int`` or ``None``, or an
-            ``Oracle`` control count is symbolic.
+            ``num_controls`` is boolean or neither integral nor a ``UInt``,
+            ``control_value`` is not a Python ``int`` or ``None``, an
+            ``Oracle`` control count is symbolic, or an Oracle uses a vector
+            target signature.
         ValueError: If ``num_controls`` is a concrete ``int`` less than one,
             ``control_value`` is out of range, or a non-default value is used
             with symbolic ``num_controls``.

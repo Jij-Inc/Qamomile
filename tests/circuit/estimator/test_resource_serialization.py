@@ -31,6 +31,16 @@ from qamomile.circuit.estimator._wire import (
 from qamomile.circuit.estimator.resource_estimator import _CappedRangeSum
 
 
+@qm.qkernel
+def _triangular_gate_count(k: qm.UInt) -> qm.Bit:
+    """Build a nested loop whose symbolic count retains an internal Sum."""
+    target = qm.qubit("target")
+    for outer in qm.range(k):
+        for _ in qm.range(qm.ceil(qm.log2(outer + 1))):
+            target = qm.x(target)
+    return qm.measure(target)
+
+
 def test_call_map_merge_order_is_hash_seed_independent() -> None:
     """Merged call maps and same-name aliases are deterministic across runs."""
     script = """
@@ -169,6 +179,26 @@ def test_same_name_dummy_normalization_preserves_distinct_identities() -> None:
     assert all(symbol.is_nonnegative is True for symbol in public_symbols)
     assert normalized != 1
     assert "Ne(total_after_loop, total_after_loop__2)" in serialized
+
+
+def test_bound_sum_index_does_not_claim_free_parameter_name() -> None:
+    """A bound Sum index cannot rename a same-name public parameter."""
+    estimate = _triangular_gate_count.estimate_resources()
+    (parameter,) = estimate.gates.total.free_symbols
+    (index,) = estimate.gates.total.atoms(sp.Dummy)
+    estimate.trace = ResourceTraceNode(
+        name="loop",
+        source_kind="for",
+        active_when=sp.Gt(index, 0),
+    )
+
+    assert estimate.parameters == {"k": parameter}
+    assert estimate.to_dict()["parameters"] == {"k": "k"}
+    assert estimate.to_dict()["gates"]["total"] == (
+        "Sum(ceiling(log(k__2 + 1)/log(2)), (k__2, 0, k - 1))"
+    )
+    assert "when=k__2 > 0" in estimate.explain()
+    assert estimate.substitute(k=5).gates.total == 8
 
 
 def test_symbol_registry_skips_reserved_suffix_names_deterministically() -> None:

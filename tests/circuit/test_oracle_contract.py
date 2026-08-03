@@ -58,3 +58,60 @@ def test_transformed_oracle_normalizes_numpy_control_count() -> None:
 
     assert transformed.added_num_control_qubits == 2
     assert isinstance(transformed.added_num_control_qubits, int)
+
+
+@pytest.mark.parametrize("num_qubits", [np.int64(0), np.int32(2)])
+def test_oracle_normalizes_numpy_target_count(num_qubits: np.integer) -> None:
+    """Oracle target widths accept nonnegative NumPy integer scalars."""
+    oracle = qmc.opaque("numpy_target_count", num_qubits=num_qubits)
+
+    assert oracle.num_qubits == int(num_qubits)
+    assert isinstance(oracle.num_qubits, int)
+
+
+@pytest.mark.parametrize("num_qubits", [True, False, 1.0])
+def test_oracle_rejects_non_integral_target_count(num_qubits: object) -> None:
+    """Oracle target widths reject booleans and coercive floats."""
+    with pytest.raises(TypeError, match="num_qubits must be an integer"):
+        qmc.opaque(
+            "invalid_target_count",
+            num_qubits=num_qubits,  # type: ignore[arg-type]
+        )
+
+
+def test_oracle_rejects_negative_target_count() -> None:
+    """Oracle target widths preserve their nonnegative arity contract."""
+    with pytest.raises(ValueError, match="num_qubits must be nonnegative"):
+        qmc.opaque("negative_target_count", num_qubits=-1)
+
+
+@pytest.mark.parametrize("inverse", [False, True])
+def test_vector_signature_oracle_rejects_control_at_compose_time(
+    inverse: bool,
+) -> None:
+    """A vector-target Oracle fails when control is composed, not when called."""
+    oracle = qmc.opaque(
+        "vector_target",
+        signature=qmc.CallableSignature(
+            inputs=[qmc.Vector[qmc.Qubit]],
+            outputs=[qmc.Vector[qmc.Qubit]],
+        ),
+    )
+    candidate = qmc.inverse(oracle) if inverse else oracle
+
+    with pytest.raises(TypeError, match="vector-signature oracles"):
+        qmc.control(candidate)
+
+
+def test_vector_signature_oracle_rejects_direct_controlled_wrapper() -> None:
+    """Direct transformed-Oracle construction enforces the same scalar ABI."""
+    oracle = qmc.opaque(
+        "direct_vector_target",
+        signature=qmc.CallableSignature(
+            inputs=[qmc.Vector[qmc.Qubit]],
+            outputs=[qmc.Vector[qmc.Qubit]],
+        ),
+    )
+
+    with pytest.raises(TypeError, match="vector-signature oracles"):
+        qmc.TransformedOracle(oracle, added_num_control_qubits=1)

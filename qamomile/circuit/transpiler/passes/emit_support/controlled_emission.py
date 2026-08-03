@@ -471,7 +471,9 @@ def _batch_op_profile(
 
     The profile preserves whether a nested callable selects the shared path at
     exactly two outer controls. This makes the decision invariant under call,
-    inverse, loop, and branch boundaries.
+    inverse, loop, and branch boundaries. Because the profile reuses the emit
+    pass's ordinary value resolver, binding a nested body can also register its
+    symbolic parameters with the active emit pass.
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass used to resolve
@@ -484,7 +486,9 @@ def _batch_op_profile(
         ControlBatchProfile: Resolved work and exact-two-control choice.
 
     Raises:
-        EmitError: If a resolved nested control count is invalid.
+        EmitError: If resolving loop bounds or carried values, a phase angle,
+            Pauli-evolution time, controlled-call power, nested operands, or
+            control metadata finds an invalid compile-time value.
     """
     if isinstance(op, BinOp):
         evaluate_binop(emit_pass, op, bindings)

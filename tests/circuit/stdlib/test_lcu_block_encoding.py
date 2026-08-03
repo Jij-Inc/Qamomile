@@ -362,6 +362,26 @@ def test_descriptor_normalizes_reordered_operand_width_contract() -> None:
     assert encoding.unitary.estimate_resources().width.input_qubits == 3
 
 
+def test_descriptor_owned_width_contract_is_replaceable() -> None:
+    """Descriptor reconstruction replaces only its own generated widths."""
+    encoding = qmc.LCUBlockEncoding(_identity_case, 1.0, 1, 2)
+
+    replaced = dataclasses.replace(
+        encoding,
+        num_signal_qubits=2,
+        num_system_qubits=3,
+    )
+    reconstructed = qmc.LCUBlockEncoding(encoding.unitary, 1.0, 2, 3)
+
+    for derived in (replaced, reconstructed):
+        attrs = qkernel_callable_attrs(derived.unitary)
+        assert attrs["resource_contract"]["quantum_operand_widths"] == [
+            {"index": 0, "name": "signal", "width": 2},
+            {"index": 1, "name": "system", "width": 3},
+        ]
+        assert derived.unitary.estimate_resources().width.input_qubits == 5
+
+
 def test_descriptor_rejects_reordered_operand_width_conflict() -> None:
     """Reordering does not hide a conflicting pre-existing register width."""
     attrs = qkernel_callable_attrs(_identity_case)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import math
 import numbers
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import cast
 
@@ -29,6 +29,7 @@ from qamomile.circuit.frontend.static_binding import (
 from qamomile.circuit.ir._resource_contract import (
     QuantumOperandWidth,
     merge_quantum_operand_widths,
+    quantum_operand_widths,
 )
 from qamomile.circuit.ir.operation.callable import CallPolicy
 from qamomile.circuit.stdlib.state_preparation.mottonen_amplitude_encoding import (
@@ -40,6 +41,8 @@ _BlockEncodingUnitary = QKernel[
     tuple[Vector[Qubit], Vector[Qubit]],
 ]
 _LCUCase = QKernel[..., Vector[Qubit]]
+
+_DESCRIPTOR_OWNED_WIDTHS_KEY = "_lcu_block_encoding_owned_widths"
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -188,12 +191,53 @@ def _with_block_encoding_resource_contract(
         ValueError: If the callable already carries incompatible resource
             metadata or a malformed resource-contract mapping.
     """
+    attrs = qkernel_callable_attrs(unitary)
+    existing_contract = attrs.get("resource_contract")
+    owned_indices: set[int] = set()
+    if isinstance(existing_contract, Mapping):
+        raw_owned_indices = existing_contract.get(_DESCRIPTOR_OWNED_WIDTHS_KEY, ())
+        if not isinstance(raw_owned_indices, (list, tuple)) or any(
+            type(index) is not int or index < 0 for index in raw_owned_indices
+        ):
+            raise ValueError(
+                "unitary descriptor-owned width provenance must be a list of "
+                "nonnegative integers."
+            )
+        owned_indices = set(raw_owned_indices)
+        if len(owned_indices) != len(raw_owned_indices):
+            raise ValueError(
+                "unitary descriptor-owned width provenance repeats an operand index."
+            )
+        existing_widths = quantum_operand_widths(attrs, source="unitary")
+        existing_indices = {entry.index for entry in existing_widths}
+        if not owned_indices <= existing_indices:
+            raise ValueError(
+                "unitary descriptor-owned width provenance references a missing "
+                "operand width."
+            )
+        if owned_indices:
+            contract = dict(existing_contract)
+            contract["quantum_operand_widths"] = [
+                {
+                    "index": entry.index,
+                    "name": entry.name,
+                    "width": entry.width,
+                }
+                for entry in existing_widths
+                if entry.index not in owned_indices
+            ]
+            attrs["resource_contract"] = contract
+
+    requested_widths = (
+        QuantumOperandWidth(index=0, name="signal", width=signal_width),
+        QuantumOperandWidth(index=1, name="system", width=system_width),
+    )
+    user_width_indices = {
+        entry.index for entry in quantum_operand_widths(attrs, source="unitary")
+    }
     attrs = merge_quantum_operand_widths(
-        qkernel_callable_attrs(unitary),
-        (
-            QuantumOperandWidth(index=0, name="signal", width=signal_width),
-            QuantumOperandWidth(index=1, name="system", width=system_width),
-        ),
+        attrs,
+        requested_widths,
         source="unitary",
         operand_count=2,
         conflict_labels={
@@ -201,6 +245,13 @@ def _with_block_encoding_resource_contract(
             1: "num_system_qubits",
         },
     )
+    resource_contract = dict(attrs["resource_contract"])
+    resource_contract[_DESCRIPTOR_OWNED_WIDTHS_KEY] = [
+        entry.index
+        for entry in requested_widths
+        if entry.index not in user_width_indices
+    ]
+    attrs["resource_contract"] = resource_contract
     return unitary._clone_with_callable_attrs(attrs)
 
 

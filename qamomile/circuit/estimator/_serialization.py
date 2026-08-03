@@ -171,15 +171,28 @@ def _symbol_base_name(symbol: sp.Symbol) -> str:
 def _symbols_in_expressions(
     expressions: Iterable[sp.Basic | int | float],
 ) -> Iterable[sp.Symbol]:
-    """Yield symbols in deterministic expression-traversal order.
+    """Yield free symbols before bound symbols in deterministic order.
+
+    Public resource parameters are free symbols. Giving them priority keeps a
+    bound ``Sum`` index from claiming the natural spelling of a qkernel input
+    that appears later in the summation bounds.
 
     Args:
         expressions (Iterable[sp.Basic | int | float]): Expressions to walk.
 
     Returns:
-        Iterable[sp.Symbol]: Lazily generated symbols, including bound symbols.
+        Iterable[sp.Symbol]: Lazily generated symbols with free identities
+            first, followed by every bound identity.
     """
-    for expression in expressions:
+    normalized = tuple(sp.sympify(expression) for expression in expressions)
+    free_symbols = set().union(
+        *(expression.free_symbols for expression in normalized),
+    )
+    for expression in normalized:
+        for node in sp.preorder_traversal(expression):
+            if isinstance(node, sp.Symbol) and node in free_symbols:
+                yield node
+    for expression in normalized:
         for node in sp.preorder_traversal(sp.sympify(expression)):
             if isinstance(node, sp.Symbol):
                 yield node

@@ -12,6 +12,7 @@ the corresponding ``_emit_pauli_evolve`` method; calling
 from __future__ import annotations
 
 import math
+from numbers import Real
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -57,8 +58,9 @@ def _resolve_gamma(
 def is_zero_evolution_time(gamma: Any) -> bool:
     """Return whether a resolved evolution time is the numeric identity.
 
-    Backend parameter objects deliberately remain nonzero here: their runtime
-    value is unknown even if they support comparison with Python numbers.
+    Python and NumPy real scalars share the same rule. Backend parameter
+    objects deliberately remain nonzero here: their runtime value is unknown
+    even if they support comparison with Python numbers.
 
     Args:
         gamma (Any): Concrete float or backend-native parameter expression.
@@ -66,10 +68,13 @@ def is_zero_evolution_time(gamma: Any) -> bool:
     Returns:
         bool: ``True`` only for a concrete numeric zero.
     """
-    return (
-        isinstance(gamma, (int, float))
-        and not isinstance(gamma, bool)
-        and math.isclose(float(gamma), 0.0, rel_tol=0.0, abs_tol=0.0)
+    if isinstance(gamma, bool):
+        return False
+    return isinstance(gamma, Real) and math.isclose(
+        float(gamma),
+        0.0,
+        rel_tol=0.0,
+        abs_tol=0.0,
     )
 
 

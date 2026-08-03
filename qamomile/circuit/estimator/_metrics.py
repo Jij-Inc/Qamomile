@@ -19,7 +19,10 @@ from sympy.calculus.util import minimum as calculus_minimum
 from sympy.core.relational import Relational
 from sympy.logic.boolalg import Boolean
 
-from qamomile.circuit.estimator._serialization import stringify_expression
+from qamomile.circuit.estimator._serialization import (
+    SymbolRegistry,
+    stringify_expression,
+)
 
 ResourceExpr = sp.Expr
 _ZERO = sp.Integer(0)
@@ -802,11 +805,17 @@ class ResourceTraceNode:
             active_when=active_when,
         )
 
-    def render(self, indent: int = 0) -> str:
+    def render(
+        self,
+        indent: int = 0,
+        registry: SymbolRegistry | None = None,
+    ) -> str:
         """Render this trace node as plain text.
 
         Args:
             indent (int): Number of leading spaces. Defaults to ``0``.
+            registry (SymbolRegistry | None): Shared estimate symbol registry.
+                Defaults to a registry local to each activation condition.
 
         Returns:
             str: Multi-line explanation text.
@@ -817,14 +826,14 @@ class ResourceTraceNode:
         guard = (
             ""
             if self.active_when is sp.true
-            else f" when={stringify_expression(self.active_when)}"
+            else f" when={stringify_expression(self.active_when, registry)}"
         )
         lines = [f"{prefix}{self.name} [{self.source_kind}{strategy}]{summary}{guard}"]
         for assumption in self.assumptions:
             source = f" ({assumption.source})" if assumption.source else ""
             lines.append(f"{prefix}  assumption: {assumption.message}{source}")
         for child in self.children:
-            lines.append(child.render(indent + 2))
+            lines.append(child.render(indent + 2, registry))
         return "\n".join(lines)
 
 

@@ -2093,13 +2093,21 @@ class ResourceEstimate:
             heading = f"{heading} for {metric}"
         if self.trace is None:
             return heading
-        return f"{heading}\n{self.trace.render(2)}"
+        registry = _serialization_registry(self)
+        return f"{heading}\n{self.trace.render(2, registry)}"
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert this estimate to a JSON-friendly dictionary.
+        """Convert this estimate to a JSON-friendly report snapshot.
+
+        Symbolic fields are display strings, not a round-trip expression
+        format. They can contain Qamomile-specific symbolic nodes and must not
+        be evaluated with :func:`sympy.sympify`. To produce a concrete report,
+        specialize the original estimate with :meth:`substitute` before
+        calling this method.
 
         Returns:
-            dict[str, Any]: Stringified resource expressions.
+            dict[str, Any]: Report fields with stringified resource
+                expressions.
         """
         registry = _serialization_registry(self)
         serialize = registry.stringify
@@ -8425,7 +8433,7 @@ def _array_index_constraints(
     for axis, (index, dimension) in enumerate(zip(indices, array.shape, strict=True)):
         index_expression = resolver.resolve(index)
         dimension_expression = resolver.resolve(dimension)
-        label = f"Array '{display_name}' {access_kind} index {axis}"
+        label = f"Array '{display_name}' {access_kind} axis {axis} index"
         constraints.extend(
             (
                 _ResourceConstraint(
@@ -8436,7 +8444,10 @@ def _array_index_constraints(
                 _ResourceConstraint(
                     expression=dimension_expression - index_expression,
                     minimum=1,
-                    label=f"{label} upper bound",
+                    label=(
+                        f"Array '{display_name}' {access_kind} axis {axis} "
+                        "in-bounds margin (dimension - index)"
+                    ),
                     unit="element",
                 ),
             )
@@ -10670,6 +10681,7 @@ def _estimate_named_gate_in_basis(
                 normalized_name,
                 controls,
                 gates,
+                precision,
             ),
             trace=ResourceTraceNode(
                 normalized_name,
@@ -10743,13 +10755,13 @@ def _clifford_t_clean_ancillas_for_name(
     inherent_controls = {"x": 0, "cx": 1, "toffoli": 2}
     if name in inherent_controls:
         controls = surrounding_controls + inherent_controls[name]
-        return sp.Max(_ZERO, controls - 2)
+        return _clifford_t_mcx_clean_ancillas(controls)
     if name in {"z", "y"}:
-        return sp.Max(_ZERO, surrounding_controls - 2)
+        return _clifford_t_mcx_clean_ancillas(surrounding_controls)
     if name == "cz":
-        return sp.Max(_ZERO, surrounding_controls - _ONE)
+        return _clifford_t_mcx_clean_ancillas(surrounding_controls + _ONE)
     if name == "swap":
-        return sp.Max(_ZERO, surrounding_controls - _ONE)
+        return _clifford_t_mcx_clean_ancillas(surrounding_controls + _ONE)
     if name == "p":
         return sp.Max(_ZERO, surrounding_controls - _ONE)
     if name == "cp":
@@ -10758,15 +10770,54 @@ def _clifford_t_clean_ancillas_for_name(
             surrounding_controls,
             sp.Eq(surrounding_controls, _ZERO),
         )
-    if name in {"s", "sdg", "t", "tdg"}:
+    if name in {"s", "sdg"}:
+        return sp.Max(_ZERO, surrounding_controls - _ONE)
+    if name in {"t", "tdg"}:
         return surrounding_controls
     return sp.Max(_ZERO, surrounding_controls - _ONE)
+
+
+def _clifford_t_mcx_clean_ancillas(controls: ResourceExpr) -> ResourceExpr:
+    """Return workspace for the clean-ancilla MCX recipe.
+
+    Args:
+        controls (ResourceExpr): Number of controls on the X target.
+
+    Returns:
+        ResourceExpr: Clean ancillas required by the logical control recipe
+            after lowering its Toffoli gates to Clifford+T.
+    """
+    return _resource_expr(
+        sp.Piecewise(
+            (_ZERO, controls <= 2),
+            (controls - _ONE, True),
+        )
+    )
+
+
+def _clifford_t_mcx_toffoli_count(controls: ResourceExpr) -> ResourceExpr:
+    """Return the Toffoli count for the clean-ancilla MCX recipe.
+
+    Args:
+        controls (ResourceExpr): Number of controls on the X target.
+
+    Returns:
+        ResourceExpr: Toffoli gates in the selected logical control recipe.
+    """
+    return _resource_expr(
+        sp.Piecewise(
+            (_ZERO, controls <= 1),
+            (_ONE, sp.Eq(controls, 2)),
+            (2 * (controls - _ONE), True),
+        )
+    )
 
 
 def _named_clifford_t_depth(
     name: str,
     surrounding_controls: ResourceExpr,
     gates: GateResources,
+    precision: float,
 ) -> DepthResources:
     """Return canonical depth for an estimator-introduced Clifford+T gate.
 
@@ -10774,6 +10825,8 @@ def _named_clifford_t_depth(
         name (str): Lowercase gate name.
         surrounding_controls (ResourceExpr): Additional coherent controls.
         gates (GateResources): Already-classified aggregate gate counts.
+        precision (float): Rotation-synthesis precision used to classify
+            ``gates``.
 
     Returns:
         DepthResources: Canonical critical-path depth where available,
@@ -10798,7 +10851,120 @@ def _named_clifford_t_depth(
             clifford_depth=middle.clifford_depth + 2,
             gate_depth=middle.gate_depth + 2,
         )
+    if name in {"z", "y"}:
+        if surrounding_controls == _ZERO:
+            return _serial_depth_from_gate_resources(gates)
+        middle = _clifford_t_gate_depth_for_mcx(surrounding_controls)
+        controlled = dataclasses.replace(
+            middle,
+            depth=middle.depth + 2,
+            clifford_depth=middle.clifford_depth + 2,
+            gate_depth=middle.gate_depth + 2,
+        )
+        if surrounding_controls.is_number:
+            return controlled
+        return _conditional_depth(
+            DepthResources(
+                depth=_ONE,
+                clifford_depth=_ONE,
+                gate_depth=_ONE,
+            ),
+            controlled,
+            sp.Eq(surrounding_controls, _ZERO),
+        )
+    if name == "cz":
+        middle = _clifford_t_gate_depth_for_mcx(surrounding_controls + _ONE)
+        return dataclasses.replace(
+            middle,
+            depth=middle.depth + 2,
+            clifford_depth=middle.clifford_depth + 2,
+            gate_depth=middle.gate_depth + 2,
+        )
+    if name in {"p", "cp"}:
+        effective_controls = surrounding_controls + (_ONE if name == "cp" else _ZERO)
+        ladder_steps = 2 * sp.Max(_ZERO, effective_controls - _ONE)
+        rotation_t = _classify_uncontrolled_clifford_t_gate("p", precision).t
+        controlled = _clifford_t_cp_depth(
+            ladder_steps,
+            rotation_t,
+        )
+        if name == "cp":
+            return controlled
+        uncontrolled = _serial_depth_from_gate_resources(
+            _classify_uncontrolled_clifford_t_gate("p", precision)
+        )
+        if surrounding_controls == _ZERO:
+            return uncontrolled
+        if surrounding_controls.is_number:
+            return controlled
+        return _conditional_depth(
+            uncontrolled,
+            controlled,
+            sp.Eq(surrounding_controls, _ZERO),
+        )
+    if name in {"s", "sdg"}:
+        if surrounding_controls == _ZERO:
+            return _serial_depth_from_gate_resources(gates)
+        ladder_steps = 2 * sp.Max(_ZERO, surrounding_controls - _ONE)
+        controlled = DepthResources(
+            depth=15 * ladder_steps + 4,
+            clifford_depth=8 * ladder_steps + 2,
+            t_depth=3 * ladder_steps + 2,
+            non_clifford_depth=3 * ladder_steps + 2,
+            gate_depth=15 * ladder_steps + 4,
+        )
+        if surrounding_controls.is_number:
+            return controlled
+        return _conditional_depth(
+            DepthResources(
+                depth=_ONE,
+                clifford_depth=_ONE,
+                gate_depth=_ONE,
+            ),
+            controlled,
+            sp.Eq(surrounding_controls, _ZERO),
+        )
+    if name in {"t", "tdg"}:
+        ladder_steps = 2 * surrounding_controls
+        return DepthResources(
+            depth=15 * ladder_steps + 1,
+            clifford_depth=8 * ladder_steps,
+            t_depth=3 * ladder_steps + 1,
+            non_clifford_depth=3 * ladder_steps + 1,
+            gate_depth=15 * ladder_steps + 1,
+        )
     return _serial_depth_from_gate_resources(gates)
+
+
+def _clifford_t_cp_depth(
+    ladder_steps: ResourceExpr,
+    rotation_t: ResourceExpr,
+) -> DepthResources:
+    """Return depth for a Toffoli ladder around one synthesized CP gate.
+
+    A CP decomposition uses three axial rotations and two CX gates. The two
+    same-sign rotations can occupy one parallel layer, so the central CP has
+    T-depth ``2 * rotation_t`` rather than ``3 * rotation_t``.
+
+    Args:
+        ladder_steps (ResourceExpr): Number of serial Toffoli gates used to
+            compute and uncompute the surrounding control conjunction.
+        rotation_t (ResourceExpr): T count and T-depth of one synthesized
+            axial rotation.
+
+    Returns:
+        DepthResources: Aggregate and category depth of the complete
+            controlled-phase recipe.
+    """
+    central_depth = 2 * rotation_t + 2
+    central_t_depth = 2 * rotation_t
+    return DepthResources(
+        depth=15 * ladder_steps + central_depth,
+        clifford_depth=8 * ladder_steps + 2,
+        t_depth=3 * ladder_steps + central_t_depth,
+        non_clifford_depth=3 * ladder_steps + central_t_depth,
+        gate_depth=15 * ladder_steps + central_depth,
+    )
 
 
 def _classify_gate(
@@ -10863,16 +11029,17 @@ def _clifford_t_upper_bound_condition(
     """
     if gate_name in _ROTATION_GATES:
         return sp.true
+    inherent_controls = {"x": 0, "cx": 1, "toffoli": 2}
+    if gate_name in inherent_controls:
+        return _boolean_condition(sp.Gt(num_controls + inherent_controls[gate_name], 2))
+    mcx_wrapper_controls = {"z": 0, "y": 0, "cz": 1, "swap": 1}
+    if gate_name in mcx_wrapper_controls:
+        return _boolean_condition(
+            sp.Gt(num_controls + mcx_wrapper_controls[gate_name], 2)
+        )
+    if gate_name in {"s", "sdg"}:
+        return _boolean_condition(sp.Gt(num_controls, _ONE))
     exact_controlled = {
-        "x",
-        "cx",
-        "toffoli",
-        "swap",
-        "y",
-        "z",
-        "cz",
-        "s",
-        "sdg",
         "t",
         "tdg",
     }
@@ -11045,7 +11212,25 @@ def _classify_controlled_clifford_t_gate(
         )
         central = _classify_uncontrolled_clifford_t_gate("cp", precision)
         return _add_gates(ladder, central)
-    if gate_name in {"s", "sdg", "t", "tdg"}:
+    if gate_name in {"s", "sdg"}:
+        # CS = (T x T) - CX - Tdg(target) - CX. The first two T gates
+        # share a layer, so this exact phase-polynomial circuit uses three
+        # T gates at T-depth two and needs no clean carrier.
+        effective_ladder_steps = 2 * sp.Max(_ZERO, num_controls - _ONE)
+        ladder = _scale_gates(
+            _multi_controlled_x_clifford_t(sp.Integer(2)),
+            effective_ladder_steps,
+        )
+        central = GateResources(
+            total=sp.Integer(5),
+            single_qubit=sp.Integer(3),
+            two_qubit=sp.Integer(2),
+            clifford=sp.Integer(2),
+            t=sp.Integer(3),
+            non_clifford=sp.Integer(3),
+        )
+        return _add_gates(ladder, central)
+    if gate_name in {"t", "tdg"}:
         # Compute the conjunction of every control and the target, phase one
         # clean carrier exactly, then uncompute it. This avoids assuming a
         # controlled-T primitive is itself a Clifford+T gate.
@@ -11070,21 +11255,23 @@ def _multi_controlled_x_clifford_t(
         num_controls (ResourceExpr): Number of controls on the X target.
 
     Returns:
-        GateResources: Exact aggregate Clifford+T counts for the selected
-            ladder decomposition.
+        GateResources: Aggregate Clifford+T counts for the selected logical
+            clean-ancilla recipe.
     """
-    toffolis = sp.Max(_ZERO, 2 * num_controls - 3)
+    toffolis = _clifford_t_mcx_toffoli_count(num_controls)
     return GateResources(
         total=_resource_expr(
             sp.Piecewise(
                 (_ONE, num_controls <= 1),
-                (15 * toffolis, True),
+                (sp.Integer(15), sp.Eq(num_controls, 2)),
+                (15 * toffolis + _ONE, True),
             )
         ),
         single_qubit=_resource_expr(
             sp.Piecewise(
                 (_ONE, sp.Eq(num_controls, 0)),
                 (_ZERO, sp.Eq(num_controls, 1)),
+                (9 * toffolis, sp.Eq(num_controls, 2)),
                 (9 * toffolis, True),
             )
         ),
@@ -11092,13 +11279,15 @@ def _multi_controlled_x_clifford_t(
             sp.Piecewise(
                 (_ZERO, sp.Eq(num_controls, 0)),
                 (_ONE, sp.Eq(num_controls, 1)),
-                (6 * toffolis, True),
+                (6 * toffolis, sp.Eq(num_controls, 2)),
+                (6 * toffolis + _ONE, True),
             )
         ),
         clifford=_resource_expr(
             sp.Piecewise(
                 (_ONE, num_controls <= 1),
-                (8 * toffolis, True),
+                (8 * toffolis, sp.Eq(num_controls, 2)),
+                (8 * toffolis + _ONE, True),
             )
         ),
         t=_resource_expr(
@@ -11158,6 +11347,7 @@ def _clifford_t_gate_depth(
         name,
         surrounding_controls,
         gates,
+        precision,
     )
 
 
@@ -11172,15 +11362,20 @@ def _clifford_t_gate_depth_for_mcx(
     Returns:
         DepthResources: Canonical ladder depth.
     """
-    toffolis = sp.Max(_ZERO, 2 * controls - 3)
+    toffolis = _clifford_t_mcx_toffoli_count(controls)
     return DepthResources(
         depth=_resource_expr(
-            sp.Piecewise((_ONE, controls <= 1), (15 * toffolis, True))
+            sp.Piecewise(
+                (_ONE, controls <= 1),
+                (sp.Integer(15), sp.Eq(controls, 2)),
+                (15 * toffolis + _ONE, True),
+            )
         ),
         clifford_depth=_resource_expr(
             sp.Piecewise(
                 (_ONE, controls <= 1),
-                (8 * toffolis, True),
+                (sp.Integer(8), sp.Eq(controls, 2)),
+                (8 * toffolis + _ONE, True),
             )
         ),
         t_depth=_resource_expr(
@@ -11196,7 +11391,11 @@ def _clifford_t_gate_depth_for_mcx(
             )
         ),
         gate_depth=_resource_expr(
-            sp.Piecewise((_ONE, controls <= 1), (15 * toffolis, True))
+            sp.Piecewise(
+                (_ONE, controls <= 1),
+                (sp.Integer(15), sp.Eq(controls, 2)),
+                (15 * toffolis + _ONE, True),
+            )
         ),
     )
 
@@ -11531,9 +11730,9 @@ def _serialization_expressions(
     """Return expressions sharing the estimate's public symbol namespace.
 
     Metric expressions, structural requirements, quantified range variables,
-    and guarded metadata must use one identity registry. Otherwise two symbols
-    that collide only across separate fields could receive the same public
-    name and make the combined payload ambiguous.
+    guarded metadata, and explanation guards must use one identity registry.
+    Otherwise two symbols that collide only across separate fields could
+    receive the same public name and make the combined payload ambiguous.
 
     Args:
         estimate (ResourceEstimate): Estimate to serialize.
@@ -11564,6 +11763,11 @@ def _serialization_expressions(
             *(estimate._guarded_approximations or ()),
         )
     )
+    pending_trace_nodes = [estimate.trace] if estimate.trace is not None else []
+    while pending_trace_nodes:
+        trace_node = pending_trace_nodes.pop()
+        expressions.append(trace_node.active_when)
+        pending_trace_nodes.extend(reversed(trace_node.children))
     return expressions
 
 

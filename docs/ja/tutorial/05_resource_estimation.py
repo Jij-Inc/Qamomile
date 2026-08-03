@@ -419,7 +419,7 @@ assert "conditional_oracle" in opaque_branch.explain()
 # %% [markdown]
 # ### JSON向け出力
 #
-# `to_dict()`はJSONへ変換しやすいsnapshotを生成します。symbolic式と構造上の要件は文字列で格納し、basis、precision、quality、approximation status、仮定も含めます。compactなpayloadにopt-inのtraceは埋め込まず、`explain()`で別に表示します。
+# `to_dict()`はJSONへ変換しやすいレポート用snapshotを生成します。symbolic式と構造上の要件は文字列で格納し、basis、precision、quality、approximation status、仮定も含めます。compactなpayloadにopt-inのtraceは埋め込まず、`explain()`で別に表示します。このsnapshotは`ResourceEstimate`を復元するserialization形式ではありません。文字列にはQamomile固有のsymbolic nodeが含まれることがあるため、`sympy.sympify()`で評価しないでください。具体値のレポートを出力する場合は、元のestimateを先に`.substitute(...)`で具体化します。未bindの量子カーネルと対応する固定opaque costを保存する場合は、代わりに`qamomile.circuit.serialization.serialize()`を使います。
 
 
 # %%
@@ -595,7 +595,7 @@ assert short_dlp.output_types == [qmc.Vector[qmc.Bit]]
 # - `inputs`にはclassicalな値と配列shapeに加え、1次元の量子Vectorの幅を整数で指定できます。維持された要件により、不正な幅やindexは拒否されます。
 # - 結果を解釈する前に、`basis`、`quality`、`approximation`、`assumptions`、opt-inのtraceを確認します。`quality`はリソースcountの確からしさを分類し、`approximation`は理想operationに対する数学的な近似を独立に示します。分岐を選ぶと実行されない側のprovenanceは消えます。
 # - `calls_by_name`が表すのは、opaque callや`expval`のようなmodeled semantic operationを含む、展開せずに残した名前付きboundaryです。本体を持つcallは再帰的に展開します。固定costとcallbackによるopaque costは、どちらも1回のbase Oracle適用を記述します。推定器は後から追加または継承したcontrolを適用し、既知の1量子ビット部分と2量子ビット部分を選択したcontrol decompositionで投影し、残りのgateは目に見えるmodeledなplaceholderとして維持します。
-# - `to_dict()`はsymbolicなmetricと要件をJSON向けの形式で出力します。
+# - `to_dict()`は表示・レポート用snapshotを出力します。具体値を保存する場合は、元のestimateを先に`.substitute(...)`で具体化します。
 # - `.substitute(n=...)`で既存の推定を特定サイズに評価して実行可能性を確認し、具体的な構造によりdependency schedulingを精密化したい場合は最初から`inputs`を使います。
 # - FTQC版のShorとEkerå–Håstadは、同じ`O(n^2)`のwindowed modular multiplication bodyと、1つの再利用可能な位相量子ビットを共有します。
 # - 固定window幅では、回路本体は`3*n + w + 7`量子ビットを確保します。既定のclean-ancilla Toffoli分解は最大2個の再利用可能なclean ancillaを加え、Shorの既定精度でgate数は`O(n^3)`です。

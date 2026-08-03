@@ -1997,7 +1997,7 @@ def _decode_select(d: dict[str, Any], ctx: _DecodeContext) -> SelectOperation:
 
     Raises:
         ValueError: If the concrete/reference width union, index-argument
-            count, or case list is malformed.
+            count, case list, or SELECT-specific callable attrs are malformed.
     """
     operands, results = _operands_results(d, ctx)
     has_concrete_width = "num_index_qubits" in d
@@ -2035,6 +2035,12 @@ def _decode_select(d: dict[str, Any], ctx: _DecodeContext) -> SelectOperation:
     if not isinstance(raw_case_blocks, list):
         raise ValueError("SelectOperation.case_blocks must be a list.")
     encoded_case_attrs = _decode_callable_attrs(d.get("callable_attrs"))
+    unsupported_attrs = [key for key in encoded_case_attrs if key != "cases"]
+    if unsupported_attrs:
+        raise ValueError(
+            "SelectOperation callable_attrs supports only the 'cases' key; "
+            f"got unsupported key(s): {unsupported_attrs!r}."
+        )
     raw_case_attrs = encoded_case_attrs.get("cases", [])
     if not isinstance(raw_case_attrs, list) or not all(
         isinstance(attrs, dict) for attrs in raw_case_attrs

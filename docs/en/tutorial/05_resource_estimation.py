@@ -419,7 +419,7 @@ assert "conditional_oracle" in opaque_branch.explain()
 # %% [markdown]
 # ### JSON-friendly output
 #
-# `to_dict()` produces a JSON-friendly snapshot. Symbolic expressions and structural requirements are stored as strings, alongside basis, precision, quality, approximation status, and assumptions. The opt-in trace is intentionally rendered separately with `explain()` rather than embedded in this compact payload.
+# `to_dict()` produces a JSON-friendly report snapshot. Symbolic expressions and structural requirements are stored as strings, alongside basis, precision, quality, approximation status, and assumptions. The opt-in trace is intentionally rendered separately with `explain()` rather than embedded in this compact payload. This snapshot is not a round-trip `ResourceEstimate` serialization format: its strings can contain Qamomile-specific symbolic nodes and should not be evaluated with `sympy.sympify()`. To export a concrete report, specialize the original estimate with `.substitute(...)` first. Persist an unbound qkernel, including supported fixed opaque costs, with `qamomile.circuit.serialization.serialize()` instead.
 
 
 # %%
@@ -595,7 +595,7 @@ assert short_dlp.output_types == [qmc.Vector[qmc.Bit]]
 # - `inputs` can supply classical values, array shapes, and an integer width for a one-dimensional quantum Vector; retained requirements reject invalid widths and indices.
 # - Check `basis`, `quality`, `approximation`, `assumptions`, and opt-in traces before interpreting a result. `quality` classifies resource-count confidence, while `approximation` independently identifies a mathematical approximation of an ideal operation. Condition selection removes inactive provenance.
 # - `calls_by_name` describes unexpanded named boundaries, including opaque calls and modeled semantic operations such as `expval`. Body-backed calls are recursively expanded. Fixed and callback opaque costs both describe one base Oracle application; the estimator applies later-added and inherited controls, projects the known one-/two-qubit portion through the selected control decomposition, and keeps any remaining gates as visible modeled placeholders.
-# - `to_dict()` exports symbolic metrics and requirements in a JSON-friendly form.
+# - `to_dict()` exports a display/report snapshot; use `.substitute(...)` on the original estimate before exporting concrete values.
 # - Use `.substitute(n=...)` to evaluate an existing estimate at specific sizes and check feasibility; use initial `inputs` when concrete structure should sharpen dependency scheduling.
 # - The FTQC Shor and Ekerå–Håstad factories share the same `O(n^2)` windowed modular-multiplication body and one reused phase qubit.
 # - At fixed window width, the circuit body allocates `3*n + w + 7` qubits; the default clean-ancilla Toffoli decomposition adds up to two reusable clean ancillas, and Shor's default-precision gate count is `O(n^3)`.

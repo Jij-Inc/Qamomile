@@ -1321,6 +1321,20 @@ def test_select_parameter_before_target_round_trips_through_dict() -> None:
     assert kernel_to_dict(restored) == payload
 
 
+def test_select_rejects_unrecognized_callable_attrs_during_dict_decode() -> None:
+    """SELECT decoding fails closed on callable metadata outside ``cases``."""
+    payload = kernel_to_dict(_parameter_before_target_select_program)
+    operation = next(
+        operation
+        for operation in payload["artifact"]["body"]["operations"]
+        if operation["$type"] == "SelectOperation"
+    )
+    operation["callable_attrs"]["$map"].append(["unexpected", "payload"])
+
+    with pytest.raises(ValueError, match="supports only the 'cases' key"):
+        kernel_from_dict(payload)
+
+
 def test_concrete_select_width_greater_than_64_round_trips() -> None:
     """The original concrete-width field preserves a large overwide SELECT."""
     message = _message(_wide_select_program)

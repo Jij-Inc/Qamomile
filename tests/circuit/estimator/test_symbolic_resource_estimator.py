@@ -326,15 +326,298 @@ def test_clifford_t_basis_lowers_controlled_toffoli_with_clean_ancilla() -> None
 
     estimate = circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
 
-    assert estimate.gates.t == 21
-    assert estimate.gates.total == 45
-    assert estimate.depth.depth == 45
-    assert estimate.depth.clifford_depth == 24
-    assert estimate.depth.t_depth == 9
-    assert estimate.depth.non_clifford_depth == 9
-    assert estimate.depth.gate_depth == 45
-    assert estimate.width.clean_ancilla_qubits == 1
-    assert estimate.qubits == 5
+    assert estimate.gates.t == 28
+    assert estimate.gates.total == 61
+    assert estimate.depth.depth == 61
+    assert estimate.depth.clifford_depth == 33
+    assert estimate.depth.t_depth == 12
+    assert estimate.depth.non_clifford_depth == 12
+    assert estimate.depth.gate_depth == 61
+    assert estimate.width.clean_ancilla_qubits == 2
+    assert estimate.qubits == 6
+    assert estimate.quality is qm.EstimateQuality.UPPER_BOUND
+
+
+@pytest.mark.parametrize(
+    ("name", "controls", "expected"),
+    [
+        pytest.param(
+            "z",
+            2,
+            (17, 7, 17, 10, 3, 0, qm.EstimateQuality.EXACT),
+            id="ccz-exact-boundary",
+        ),
+        pytest.param(
+            "z",
+            3,
+            (63, 28, 63, 35, 12, 2, qm.EstimateQuality.UPPER_BOUND),
+            id="controlled-z-upper-bound",
+        ),
+        pytest.param(
+            "y",
+            2,
+            (17, 7, 17, 10, 3, 0, qm.EstimateQuality.EXACT),
+            id="ccy-exact-boundary",
+        ),
+        pytest.param(
+            "y",
+            3,
+            (63, 28, 63, 35, 12, 2, qm.EstimateQuality.UPPER_BOUND),
+            id="controlled-y-upper-bound",
+        ),
+        pytest.param(
+            "cz",
+            1,
+            (17, 7, 17, 10, 3, 0, qm.EstimateQuality.EXACT),
+            id="ccz-from-cz-exact-boundary",
+        ),
+        pytest.param(
+            "cz",
+            2,
+            (63, 28, 63, 35, 12, 2, qm.EstimateQuality.UPPER_BOUND),
+            id="controlled-cz-upper-bound",
+        ),
+        pytest.param(
+            "swap",
+            1,
+            (17, 7, 17, 10, 3, 0, qm.EstimateQuality.EXACT),
+            id="fredkin-exact-boundary",
+        ),
+        pytest.param(
+            "swap",
+            2,
+            (63, 28, 63, 35, 12, 2, qm.EstimateQuality.UPPER_BOUND),
+            id="controlled-swap-upper-bound",
+        ),
+        pytest.param(
+            "p",
+            0,
+            (9, 9, 9, 0, 9, 0, qm.EstimateQuality.UPPER_BOUND),
+            id="phase-rotation",
+        ),
+        pytest.param(
+            "p",
+            1,
+            (29, 27, 20, 2, 18, 0, qm.EstimateQuality.UPPER_BOUND),
+            id="controlled-phase-parallel-rotations",
+        ),
+        pytest.param(
+            "p",
+            2,
+            (59, 41, 50, 18, 24, 1, qm.EstimateQuality.UPPER_BOUND),
+            id="multi-controlled-phase",
+        ),
+        pytest.param(
+            "cp",
+            0,
+            (29, 27, 20, 2, 18, 0, qm.EstimateQuality.UPPER_BOUND),
+            id="cp-parallel-rotations",
+        ),
+        pytest.param(
+            "cp",
+            1,
+            (59, 41, 50, 18, 24, 1, qm.EstimateQuality.UPPER_BOUND),
+            id="controlled-cp",
+        ),
+        pytest.param(
+            "s",
+            1,
+            (5, 3, 4, 2, 2, 0, qm.EstimateQuality.EXACT),
+            id="controlled-s",
+        ),
+        pytest.param(
+            "s",
+            2,
+            (35, 17, 34, 18, 8, 1, qm.EstimateQuality.UPPER_BOUND),
+            id="multi-controlled-s",
+        ),
+        pytest.param(
+            "sdg",
+            1,
+            (5, 3, 4, 2, 2, 0, qm.EstimateQuality.EXACT),
+            id="controlled-sdg",
+        ),
+        pytest.param(
+            "sdg",
+            2,
+            (35, 17, 34, 18, 8, 1, qm.EstimateQuality.UPPER_BOUND),
+            id="multi-controlled-sdg",
+        ),
+        pytest.param(
+            "t",
+            1,
+            (31, 15, 31, 16, 7, 1, qm.EstimateQuality.EXACT),
+            id="controlled-t",
+        ),
+        pytest.param(
+            "t",
+            2,
+            (61, 29, 61, 32, 13, 2, qm.EstimateQuality.EXACT),
+            id="multi-controlled-t",
+        ),
+        pytest.param(
+            "tdg",
+            1,
+            (31, 15, 31, 16, 7, 1, qm.EstimateQuality.EXACT),
+            id="controlled-tdg",
+        ),
+        pytest.param(
+            "tdg",
+            2,
+            (61, 29, 61, 32, 13, 2, qm.EstimateQuality.EXACT),
+            id="multi-controlled-tdg",
+        ),
+    ],
+)
+def test_controlled_clifford_t_depth_tracks_canonical_schedule(
+    name: str,
+    controls: int,
+    expected: tuple[int, int, int, int, int, int, qm.EstimateQuality],
+) -> None:
+    """Named Clifford+T recipes expose their canonical schedule and quality."""
+    estimate = resource_estimator_module._estimate_named_gate_in_basis(
+        name,
+        sp.Integer(controls),
+        basis=qm.GateBasis.CLIFFORD_T,
+        control_decomposition=qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+        precision=1 / 8,
+    )
+    total, t_count, depth, clifford_depth, t_depth, ancillas, quality = expected
+
+    assert estimate.gates.total == total
+    assert estimate.gates.t == t_count
+    assert estimate.depth.depth == depth
+    assert estimate.depth.clifford_depth == clifford_depth
+    assert estimate.depth.t_depth == t_depth
+    assert estimate.depth.non_clifford_depth == t_depth
+    assert estimate.depth.gate_depth == depth
+    assert estimate.width.clean_ancilla_qubits == ancillas
+    assert estimate.quality is quality
+    expected_approximation = (
+        qm.ApproximationStatus.APPROXIMATE
+        if name in {"p", "cp"}
+        else qm.ApproximationStatus.EXACT
+    )
+    assert estimate.approximation is expected_approximation
+
+
+@pytest.mark.parametrize("name", ["z", "p", "s"])
+def test_symbolic_clifford_t_named_depth_matches_direct_specialization(
+    name: str,
+) -> None:
+    """Symbolic control guards retain every numeric recipe and quality branch."""
+    controls = sp.Symbol("controls", integer=True, nonnegative=True)
+    symbolic = resource_estimator_module._estimate_named_gate_in_basis(
+        name,
+        controls,
+        basis=qm.GateBasis.CLIFFORD_T,
+        control_decomposition=qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+        precision=1 / 8,
+    )
+
+    for value in range(4):
+        specialized = symbolic.substitute(controls=value)
+        direct = resource_estimator_module._estimate_named_gate_in_basis(
+            name,
+            sp.Integer(value),
+            basis=qm.GateBasis.CLIFFORD_T,
+            control_decomposition=qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+            precision=1 / 8,
+        )
+
+        assert specialized.gates == direct.gates
+        assert specialized.depth == direct.depth
+        assert specialized.width == direct.width
+        assert specialized.quality is direct.quality
+        assert specialized.approximation is direct.approximation
+        assert specialized.parameters == {}
+
+
+@pytest.mark.parametrize("name", ["y", "z", "s", "sdg"])
+def test_uncontrolled_fixed_gate_keeps_single_layer_depth(name: str) -> None:
+    """Controlled-depth special cases preserve their uncontrolled branch."""
+    gates = resource_estimator_module._classify_clifford_t_gate(
+        name,
+        sp.Integer(0),
+        1 / 8,
+    )
+
+    depth = resource_estimator_module._named_clifford_t_depth(
+        name,
+        sp.Integer(0),
+        gates,
+        1 / 8,
+    )
+
+    assert depth.depth == 1
+    assert depth.gate_depth == 1
+
+
+def test_clifford_t_controlled_s_uses_exact_three_t_phase_polynomial() -> None:
+    """Controlled S and Sdg use their ancilla-free exact 3T circuits."""
+
+    @qm.composite_gate
+    def one_s(target: qm.Qubit) -> qm.Qubit:
+        """Apply one S gate."""
+        return qm.s(target)
+
+    @qm.composite_gate
+    def one_sdg(target: qm.Qubit) -> qm.Qubit:
+        """Apply one Sdg gate."""
+        return qm.sdg(target)
+
+    @qm.qkernel
+    def s_circuit() -> tuple[qm.Qubit, qm.Qubit]:
+        """Control one S gate with one qubit."""
+        control = qm.qubit("control")
+        target = qm.qubit("target")
+        return qm.control(one_s)(control, target)
+
+    @qm.qkernel
+    def sdg_circuit() -> tuple[qm.Qubit, qm.Qubit]:
+        """Control one Sdg gate with one qubit."""
+        control = qm.qubit("control")
+        target = qm.qubit("target")
+        return qm.control(one_sdg)(control, target)
+
+    for circuit in (s_circuit, sdg_circuit):
+        estimate = circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
+
+        assert estimate.gates.t == 3
+        assert estimate.gates.total == 5
+        assert estimate.depth.t_depth == 2
+        assert estimate.width.clean_ancilla_qubits == 0
+        assert estimate.quality is qm.EstimateQuality.EXACT
+
+
+def test_clean_ancilla_mcx_recipe_is_consistent_across_gate_bases() -> None:
+    """Logical and Clifford+T MCX use the same four-control ladder."""
+
+    @qm.composite_gate
+    def one_x(target: qm.Qubit) -> qm.Qubit:
+        """Apply one Pauli-X gate."""
+        return qm.x(target)
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Apply one X gate under four coherent controls."""
+        controls = qm.qubit_array(4, "controls")
+        target = qm.qubit("target")
+        *_, target = qm.control(one_x, num_controls=4)(controls, target)
+        return target
+
+    logical = circuit.estimate_resources()
+    clifford_t = circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
+
+    assert logical.gates.total == 7
+    assert logical.gates.toffoli == 6
+    assert logical.width.clean_ancilla_qubits == 3
+    assert logical.quality is qm.EstimateQuality.UPPER_BOUND
+    assert clifford_t.gates.total == 91
+    assert clifford_t.gates.t == 42
+    assert clifford_t.depth.t_depth == 18
+    assert clifford_t.width.clean_ancilla_qubits == 3
+    assert clifford_t.quality is qm.EstimateQuality.UPPER_BOUND
 
 
 @pytest.mark.parametrize(
@@ -1594,7 +1877,7 @@ def test_for_items_rejects_item_dependent_structural_constraints() -> None:
     assert concrete.gates.total == 2
     assert concrete.parameters == {}
 
-    with pytest.raises(ValueError, match="upper bound"):
+    with pytest.raises(ValueError, match="element axis 0 in-bounds margin"):
         circuit.estimate_resources(inputs={"data": {2: 0.1}})
 
 
