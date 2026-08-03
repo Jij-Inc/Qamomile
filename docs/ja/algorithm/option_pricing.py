@@ -24,7 +24,7 @@
 # その中でも、金融工学のオプションプライシングは、その代表的な応用例の一つです。
 # これまでオプションプライシングには古典モンテカルロ法が用いられてきましたが、これは目標精度 $\epsilon$ を達成するための必要なオラクルの呼び出し回数が $\mathcal{O} (\epsilon^{-2})$ でした。
 # これに対し、量子振幅推定は $\mathcal{O} (\epsilon^{-1})$ で済み、2次の高速化をもたらすアルゴリズムであることが知られています。
-# そこで本記事では、[Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/)で提案された、量子振幅推定によるオプションおよびオプションポートフォリオプライシング手法の理解と実装についてまとめました。オプションプライシングの例を通して、Qamomileの使い方を学びましょう。
+# そこで本記事では、量子振幅推定によるオプションおよびオプションポートフォリオプライシング手法{cite:p}`10.22331/q-2020-07-06-291`の理解と実装についてまとめました。オプションプライシングの例を通して、Qamomileの使い方を学びましょう。
 
 # %%
 # Install the latest Qamomile through pip! 
@@ -34,6 +34,7 @@
 import numpy as np
 from scipy.optimize import minimize_scalar
 import matplotlib.pyplot as plt
+from qiskit_aer import AerSimulator
 
 import qamomile.circuit as qmc
 from qamomile.circuit.stdlib import amplitude_encoding
@@ -59,16 +60,16 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # ### 先行研究
 #
-# モンテカルロプライシングの量子アルゴリズムの理論的枠組みを示した先行研究として、[Rebentrost et al. (2018)](https://journals.aps.org/pra/abstract/10.1103/PhysRevA.98.022321)があります。
+# モンテカルロプライシングの量子アルゴリズムの理論的枠組みを示した先行研究として、{cite:p}`10.1103/PhysRevA.98.022321`があります。
 # この論文は、プライシング計算において、古典に対し2次高速化が得られることを理論的に示しました。
 # そして、特にヨーロピアンオプションとアジアンオプションに対して数値シミュレーションを行い、その有効性を示しました。
 # しかし、その成果は理論的な枠組みの提示と数値シミュレーションに留まり、実機での実行は示されていません。  
-# もう一つの重要な先行研究として、[Woerner & Egger (2019)](https://www.nature.com/articles/s41534-019-0130-6)があります。
+# もう一つの重要な先行研究として、{cite:p}`10.1038/s41534-019-0130-6`があります。
 # これはプライシングに対してではなく、VaR や Conditional Value at Risk (CVaR) に QAE を適用した研究です。
-# 先ほどの[Rebentrost et al. (2018)](https://journals.aps.org/pra/abstract/10.1103/PhysRevA.98.022321)のペイオフ計算を改良し、必要量子ビット数・ゲート数の大幅な削減に成功しました。  
-# そこで[Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/)では、[Rebentrost et al. (2018)](https://journals.aps.org/pra/abstract/10.1103/PhysRevA.98.022321)のペイオフ計算手法をオプションプライシングに拡張した実装を示しました。
+# モンテカルロプライシングのペイオフ計算を改良し、必要量子ビット数・ゲート数の大幅な削減に成功しました{cite:p}`10.1103/PhysRevA.98.022321`。
+# このペイオフ計算手法をオプションプライシングに拡張した実装も示されています{cite:p}`10.22331/q-2020-07-06-291`。
 #
-# ## アルゴリズム: NISQでのオプションプライシング計算
+# ## アルゴリズム: QAEによるオプションプライシング計算
 #
 # ### ペイオフの計算
 #
@@ -84,8 +85,8 @@ from qamomile.qiskit import QiskitTranspiler
 # $$
 #
 # のような状態を作れるとすると、ペイオフ量子ビットが $\vert 1 \rangle$ の状態で観測される確率は $a = \mathbb{E}[f(S)]$ となり、QAE によりペイオフの期待値を計算できることがわかります。
-# [Rebentrost et al. (2018)](https://journals.aps.org/pra/abstract/10.1103/PhysRevA.98.022321) は補助レジスタにペイオフをバイナリ表現で格納する手法を提案しましたが、量子ビット数と回路の深さが増大する問題がありました。
-# そこで [Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/) では、[Woerner & Egger (2019)](https://www.nature.com/articles/s41534-019-0130-6) の軽量な $R_y$ 手法を採用しました。
+# 補助レジスタにペイオフをバイナリ表現で格納する手法では、量子ビット数と回路の深さが増大します{cite:p}`10.1103/PhysRevA.98.022321`。
+# 軽量な$R_y$手法では、このオーバーヘッドを避けられます{cite:p}`10.22331/q-2020-07-06-291,10.1038/s41534-019-0130-6`。
 #
 # ### 平均値への適用と $c$ パラメータ
 #
@@ -128,7 +129,7 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # ### 分布の準備
 #
-# それでは、[Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/)で示された実装を見ていきましょう。
+# それでは、オプションプライシングの実装{cite:p}`10.22331/q-2020-07-06-291`を見ていきましょう。
 # ここではまず、幾何ブラウン運動下にある満期 $S_T$ の対数正規分布を離散化したものを準備し、これを株価のデータとします。
 
 # %%
@@ -243,7 +244,7 @@ apply_payoff_ucr_inv = _make_ucry_func(ucry_inv_gates)  # F† (ペイオフ随�
 # ### 分布の読み込みの実装
 #
 # そして先ほど準備した株価データを読み込む演算と、そのエルミート演算を実装しましょう。
-# Qamomile には、振幅符号化の関数が標準で備わっています。
+# Qamomileには、振幅符号化の関数`amplitude_encoding`が標準で備わっています。
 
 # %%
 # ── P_X と P_X†(分布ロードとその随伴) ──
@@ -284,8 +285,10 @@ def payoff_call() -> qmc.Bit:
 
 num_shots      = 4096
 transpiler_qmc = QiskitTranspiler()
+simulator      = AerSimulator(seed_simulator=42)
+executor_qmc   = transpiler_qmc.executor(simulator)
 exe_k0 = transpiler_qmc.transpile(payoff_call)   # バインディング不要
-res_k0 = exe_k0.sample(transpiler_qmc.executor(), shots=num_shots).result()
+res_k0 = exe_k0.sample(executor_qmc, shots=num_shots).result()
 
 ones_k0 = 0
 for q, num in res_k0.results:
@@ -353,6 +356,7 @@ k_list      = [0, 1, 2, 4, 8, 16]
 shots_per_k = 2048
 
 transpiler_q = QiskitTranspiler()
+executor_q   = transpiler_q.executor(simulator)
 h_list, N_list = [], []
 
 # P1 の理論値には線形近似値ではなく厳密値を使用
@@ -361,7 +365,7 @@ print()
 for k in k_list:
     kernel = build_Ak_kernel(k)
     exe    = transpiler_q.transpile(kernel)   # バインディング不要
-    result = exe.sample(transpiler_q.executor(), shots=shots_per_k).result()
+    result = exe.sample(executor_q, shots=shots_per_k).result()
 
     ones = 0
     for q, num in result.results:
@@ -424,20 +428,25 @@ print(f"絶対誤差:          {abs(fair_hat - exact_fair):.6f}")
 # のように近似したことによるものです。
 # ここで $F_\mathrm{max} = S_\mathrm{max} - K$ です。
 # 実際に、推定された $\mathbb{E}[\hat{f}]$ と参照値との差において、近似誤差がどのくらい寄与しているかをみてみましょう。
-
 # %%
 total_error = E_f_hat - exact_E_f
-err_c = F_max / 2 * (P1_exact - P1_approx) / c
-print(f"近似誤差の割合: {err_c / total_error:.6f}")
+approximation_error = F_max / 2 * (P1_exact - P1_approx) / c
+statistical_error = total_error - approximation_error
+error_magnitude_sum = abs(approximation_error) + abs(statistical_error)
+approximation_share = abs(approximation_error) / error_magnitude_sum
+
+print(f"近似誤差: {approximation_error:.6f}")
+print(f"統計誤差: {statistical_error:.6f}")
+print(f"誤差の絶対値に占める近似誤差の割合: {approximation_share:.1%}")
 
 # %% [markdown]
-# 誤差の大半が近似によるものであることがわかります。
-# 残りの部分は、統計的な誤差によるものです。
+# この例では、誤差の大半が近似によるものであることがわかります。
+# 残りの部分は統計誤差です。
 # これは量子振幅推定部分の測定回数を増やすことで、減少させることができます。
 # しかし測定回数を増やすと計算実行時間が増大するため、注意が必要です。  
 # 最後に、対数尤度関数 $\log \mathcal{L} (\sin^2 \theta)$と、$P_1^{(k)}$ をプロットしてみましょう。
 # 左図は対数尤度関数と、最尤推定値および厳密計算による理論値も示しています。
-# さらに右図は、$\theta_\alpha$ から得られる理論曲線 $P_1^{(k)} = \sin^2 ((2k+1) \theta_\alpha)$ も重ねて描画しています。
+# 右図は、推定した$\hat{\theta}$を代入した正弦二乗曲線 $P_1^{(k)} = \sin^2 ((2k+1) \hat{\theta})$ と測定値を重ねて描画しています。
 
 # %%
 # ============================================================
@@ -461,15 +470,15 @@ axes[0].set_ylabel('log-likelihood')
 axes[0].set_title('MLAE likelihood')
 axes[0].legend()
 
-k_dense      = np.arange(max(k_list) + 1)
-P1_fit_dense = np.sin((2 * k_dense + 1) * theta_hat)**2
-axes[1].plot(k_dense, P1_fit_dense, '-', color='steelblue',
-             label=f'fit (θ={theta_hat:.3f})')
+k_smooth = np.linspace(0, max(k_list), 500)
+P1_sine_curve = np.sin((2 * k_smooth + 1) * theta_hat)**2
+axes[1].plot(k_smooth, P1_sine_curve, '-', color='steelblue',
+             label=rf'$\sin^2((2k+1)\hat{{\theta}})$ ($\hat{{\theta}}={theta_hat:.3f}$)')
 axes[1].plot(k_list, [h / N for h, N in zip(h_list, N_list)],
              'o', color='red', zorder=5, label='measured value')
 axes[1].set_xlabel('k  (Grover iterations)')
 axes[1].set_ylabel('P₁ estimation')
-axes[1].set_title('P₁^(k) = sin²((2k+1)θ)')
+axes[1].set_title('P₁^(k) = sin²((2k+1)θ̂)')
 axes[1].legend()
 
 plt.tight_layout()
@@ -481,7 +490,7 @@ plt.show()
 # %% [markdown]
 # ## まとめ
 #
-# ここでは、[Stamatopoulos et al. (2020)](https://quantum-journal.org/papers/q-2020-07-06-291/) で提案されたオプションプライシングアルゴリズムを Qamomile で実装する方法をご紹介しました。
+# ここでは、オプションプライシングアルゴリズム{cite:p}`10.22331/q-2020-07-06-291`をQamomileで実装する方法をご紹介しました。
 # 以下にこのページで紹介した重要な情報をまとめます。
 #
 # * 対数正規分布を Möttönen の符号化手法により量子状態に符号化、一様な制御回転を用いてコールオプションのペイオフをペイオフ量子ビット振幅に符号化しました。状態の読み込みには、Qamomile の `amplitude_encoding` を用いることができます。

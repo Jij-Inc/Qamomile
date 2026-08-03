@@ -27,6 +27,12 @@ Prepare an arbitrary real or complex amplitude vector via Gray-code Ry/Rz multip
 :::
 
 :::{card}
+:header: **Option Pricing with Quantum Amplitude Estimation**
+:link: option_pricing
+An example of option pricing with quantum amplitude estimation (QAE) in Qamomile. It encodes stock-price data into amplitudes, implements amplitude estimation with the Grover operator, and runs a numerical option-pricing simulation.
+:::
+
+:::{card}
 :header: **Multidimensional Quantum Fourier Transform**
 :link: multidimensional_qft
 Implement multidimensional QFT and classical preprocessing for inputs whose grid sizes are not powers of two.
