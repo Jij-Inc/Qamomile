@@ -67,11 +67,11 @@ def resolve_for_bounds(
     This is the shared definition of for-loop boundary semantics for the two
     execution-facing paths — emit-time lowering (``resolve_loop_bounds``) and
     runtime execution (``classical_executor._execute_for``). Both used to
-    resolve the
-    operands independently and disagreed on the default for a missing ``stop``
-    (emit used ``1``, runtime used ``0``), so an under-specified loop unrolled
-    to one iteration at emit time yet ran zero iterations at runtime. Routing
-    both callers through this helper removes that divergence.
+    resolve the operands independently and disagreed on the default for a
+    missing ``stop`` (emit used ``1``, runtime used ``0``), so an
+    under-specified loop unrolled to one iteration at emit time yet ran zero
+    iterations at runtime. Routing both callers through this helper removes
+    that divergence.
 
     Missing operands fall back to :data:`_FOR_BOUND_DEFAULTS`
     (``start=0``, ``stop=0``, ``step=1``), so an under-specified loop is empty
