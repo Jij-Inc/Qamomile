@@ -106,10 +106,9 @@ class TestEntrypointValidation:
     def test_accepts_vector_bit_output(self, qiskit_transpiler) -> None:
         @qmc.qkernel
         def kernel() -> qmc.Vector[qmc.Bit]:
-            q = qmc.qubit(name="q")
+            q = qmc.qubit_array(1, name="q")
             q = qmc.h(q)
-            b = qmc.measure(q)
-            return (b,)
+            return qmc.measure(q)
 
         executable = qiskit_transpiler.transpile(kernel)
         assert executable is not None

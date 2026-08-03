@@ -1,3 +1,5 @@
+import __future__
+
 import ast
 import copy
 import enum
@@ -2337,10 +2339,27 @@ def transform_control_flow(
     )
     tree = transformer.visit(tree)
 
-    # Strip decorators (to prevent recursion)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == func.__name__:
-            node.decorator_list = []
+    # Strip the target function's decorators (to prevent recursion) and its
+    # annotations (to prevent evaluating annotation expressions twice). The
+    # original annotation dictionary is restored after exec, while annotations
+    # on nested functions and classes retain the source module's semantics.
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef) or node.name != func.__name__:
+            continue
+        node.decorator_list = []
+        node.returns = None
+        arguments = [
+            *node.args.posonlyargs,
+            *node.args.args,
+            *node.args.kwonlyargs,
+        ]
+        if node.args.vararg is not None:
+            arguments.append(node.args.vararg)
+        if node.args.kwarg is not None:
+            arguments.append(node.args.kwarg)
+        for argument in arguments:
+            argument.annotation = None
+        break
 
     ast.fix_missing_locations(tree)
 
@@ -2379,10 +2398,18 @@ def transform_control_flow(
                     f"This typically happens with forward references in nested functions."
                 ) from None
 
-    code_obj = compile(tree, filename=source_filename, mode="exec")
+    future_flags = func.__code__.co_flags & __future__.annotations.compiler_flag
+    code_obj = compile(
+        tree,
+        filename=source_filename,
+        mode="exec",
+        flags=future_flags,
+        dont_inherit=True,
+    )
     exec(code_obj, name_space)
 
     transformed = name_space[func.__name__]
+    transformed.__annotations__ = dict(func.__annotations__)
     transformed.__qamomile_generated_globals__ = generated_globals
     return transformed
 

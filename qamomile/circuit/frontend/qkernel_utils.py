@@ -544,12 +544,12 @@ def match_output_to_input(
     return None
 
 
-def quantum_param_names(input_types: dict[str, type]) -> set[str]:
+def quantum_param_names(input_types: dict[str, Any]) -> set[str]:
     """Return parameter names whose frontend type is quantum.
 
     Args:
-        input_types (dict[str, type]): QKernel input annotations keyed by
-            parameter name.
+        input_types (dict[str, Any]): Resolved annotations or raw deferred
+            fallbacks keyed by parameter name.
 
     Returns:
         set[str]: Names annotated as ``Qubit`` or an array of ``Qubit``.
