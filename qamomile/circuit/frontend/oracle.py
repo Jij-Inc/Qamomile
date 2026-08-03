@@ -94,8 +94,8 @@ class Oracle:
         qubits: VectorView[Qubit],
         /,
         *,
-        controls: Sequence[Qubit] = (),
-        control_value: int | None = None,
+        controls: tuple[()] = (),
+        control_value: None = None,
     ) -> VectorView[Qubit]: ...
 
     @overload
@@ -104,8 +104,8 @@ class Oracle:
         qubits: Vector[Qubit],
         /,
         *,
-        controls: Sequence[Qubit] = (),
-        control_value: int | None = None,
+        controls: tuple[()] = (),
+        control_value: None = None,
     ) -> Vector[Qubit]: ...
 
     @overload
