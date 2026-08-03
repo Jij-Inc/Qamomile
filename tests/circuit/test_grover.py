@@ -137,6 +137,14 @@ def test_grover_iteration_count_preserves_sympy_integers() -> None:
         grover_iteration_count(sp.Integer(0), 1)
     with pytest.raises(ValueError, match="must be positive"):
         grover_iteration_count(4, sp.Integer(0))
+    for num_qubits, num_marked in (
+        (sp.Integer(4), -1),
+        (-1, sp.Integer(1)),
+        (sp.Integer(4), np.int64(0)),
+        (np.int64(0), sp.Integer(1)),
+    ):
+        with pytest.raises(ValueError, match="must be positive"):
+            grover_iteration_count(num_qubits, num_marked)
 
 
 def test_grover_iteration_count_uses_arbitrary_precision() -> None:

@@ -37,13 +37,6 @@ from qamomile.circuit.frontend.qkernel_like import QKernelLike
 
 @overload
 def grover_iteration_count(
-    num_qubits: int | np.integer[Any],
-    num_marked: int | np.integer[Any] = 1,
-) -> int: ...
-
-
-@overload
-def grover_iteration_count(
     num_qubits: sp.Expr,
     num_marked: int | np.integer[Any] | sp.Expr = 1,
 ) -> sp.Expr: ...
@@ -54,6 +47,13 @@ def grover_iteration_count(
     num_qubits: int | np.integer[Any],
     num_marked: sp.Expr,
 ) -> sp.Expr: ...
+
+
+@overload
+def grover_iteration_count(
+    num_qubits: int | np.integer[Any],
+    num_marked: int | np.integer[Any] = 1,
+) -> int: ...
 
 
 def grover_iteration_count(
@@ -88,9 +88,13 @@ def grover_iteration_count(
     # agrees with the symbolic overload while preserving positivity validation.
     n_in: Any = num_qubits
     m_in: Any = num_marked
-    n_sympy_nonpositive = isinstance(n_in, sp.Integer) and int(n_in) <= 0
-    m_sympy_nonpositive = isinstance(m_in, sp.Integer) and int(m_in) <= 0
-    if n_sympy_nonpositive or m_sympy_nonpositive:
+    n_nonpositive_integer = (
+        isinstance(n_in, (int, np.integer, sp.Integer)) and int(n_in) <= 0
+    )
+    m_nonpositive_integer = (
+        isinstance(m_in, (int, np.integer, sp.Integer)) and int(m_in) <= 0
+    )
+    if n_nonpositive_integer or m_nonpositive_integer:
         raise ValueError("num_qubits and num_marked must be positive.")
     n_val = int(n_in) if isinstance(n_in, (int, np.integer)) else n_in
     m_val = int(m_in) if isinstance(m_in, (int, np.integer)) else m_in

@@ -46,6 +46,7 @@ def _check_grover_types(
     oracle: qmc.Oracle,
     register: qmc.Vector[qmc.Qubit],
     numpy_integer: np.integer[Any],
+    sympy_integer: sp.Integer,
     symbolic: sp.Expr,
 ) -> None:
     """Verify concrete, symbolic, and opaque-oracle Grover contracts."""
@@ -53,6 +54,8 @@ def _check_grover_types(
     assert_type(qmc.grover_iteration_count(numpy_integer), int)
     assert_type(qmc.grover_iteration_count(symbolic), sp.Expr)
     assert_type(qmc.grover_iteration_count(3, symbolic), sp.Expr)
+    assert_type(qmc.grover_iteration_count(sympy_integer), sp.Expr)
+    assert_type(qmc.grover_iteration_count(3, sympy_integer), sp.Expr)
     assert_type(
         qmc.grover_search(
             register,
