@@ -144,11 +144,11 @@ class QKernel(QKernelBuildMixin, QKernelVisualizationMixin, Generic[P, R]):
 
     def _resolve_pending_annotation_types(
         self,
-    ) -> tuple[dict[str, Exception], Exception | None]:
+    ) -> tuple[dict[str, NameError], NameError | None]:
         """Resolve and freeze every currently available interface annotation.
 
         Returns:
-            tuple[dict[str, Exception], Exception | None]: Remaining input
+            tuple[dict[str, NameError], NameError | None]: Remaining input
             resolution errors and the remaining return resolution error.
 
         Raises:
@@ -162,7 +162,7 @@ class QKernel(QKernelBuildMixin, QKernelVisualizationMixin, Generic[P, R]):
                 return {}, None
 
             input_updates: dict[str, Any] = {}
-            input_errors: dict[str, Exception] = {}
+            input_errors: dict[str, NameError] = {}
             if not self._input_types_resolved:
                 unresolved_input_names = self._input_type_resolution_errors
             else:

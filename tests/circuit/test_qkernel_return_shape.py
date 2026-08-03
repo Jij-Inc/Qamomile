@@ -767,6 +767,33 @@ def test_return_annotation_is_evaluated_once_during_decoration() -> None:
     assert _RETURN_ANNOTATION_RESOLUTION_CALLS == 1
 
 
+def test_invalid_input_annotation_evaluation_fails_during_decoration() -> None:
+    """A definitive input annotation error is not treated as a forward ref."""
+
+    def invalid(
+        pending: "MissingInput",  # noqa: F821 - intentionally unresolved
+        malformed: qmc.Dict[qmc.UInt],  # type: ignore[type-arg]
+    ) -> qmc.UInt:
+        """Return an input whose annotation expression is invalid."""
+        return qmc.uint(0)
+
+    with pytest.raises(TypeError, match="Too few arguments"):
+        qmc.qkernel(invalid)
+
+
+def test_invalid_return_annotation_evaluation_fails_during_decoration() -> None:
+    """A definitive return annotation error is not deferred until build."""
+
+    def invalid(
+        pending: "MissingInput",  # noqa: F821 - intentionally unresolved
+    ) -> qmc.Vector[qmc.Bit, qmc.UInt]:  # type: ignore[type-arg]
+        """Return a Bit behind an invalid annotation expression."""
+        return qmc.bit(False)  # type: ignore[return-value]
+
+    with pytest.raises(TypeError, match="Too many arguments"):
+        qmc.qkernel(invalid)
+
+
 def test_nested_qkernel_resolves_postponed_annotations_from_closure() -> None:
     """Nested qkernels resolve postponed annotations from closure values."""
     import qamomile.circuit as local_qmc

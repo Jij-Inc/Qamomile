@@ -94,55 +94,10 @@ def refresh_qkernel_function_namespace(kernel: Any) -> None:
     namespace[kernel.name] = kernel
 
 
-def resolve_kernel_io_types(
-    func: Callable[..., Any],
-    signature: inspect.Signature,
-) -> tuple[dict[str, Any], list[Any]]:
-    """Resolve and validate qkernel input/output handle annotations.
-
-    Args:
-        func (Callable[..., Any]): Raw user function.
-        signature (inspect.Signature): Function signature.
-
-    Returns:
-        tuple[dict[str, Any], list[Any]]: Resolved annotations or raw deferred
-        fallbacks keyed by parameter name, and output annotations by position.
-
-    Raises:
-        TypeError: If any parameter or return type is missing an annotation.
-    """
-    input_types = resolve_kernel_input_types(func, signature)
-    return_type = resolve_kernel_return_type(func, signature)
-    return input_types, flatten_kernel_return_type(return_type)
-
-
-def resolve_kernel_input_types(
-    func: Callable[..., Any],
-    signature: inspect.Signature,
-) -> dict[str, Any]:
-    """Resolve qkernel input annotations independently by parameter.
-
-    Resolving each annotation separately prevents one deferred forward
-    reference from reverting otherwise valid sibling annotations to strings.
-
-    Args:
-        func (Callable[..., Any]): Raw user function.
-        signature (inspect.Signature): Function signature.
-
-    Returns:
-        dict[str, Any]: Resolved annotations or raw deferred fallbacks keyed by
-        parameter name.
-
-    Raises:
-        TypeError: If any parameter is missing an annotation.
-    """
-    return try_resolve_kernel_input_types(func, signature)[0]
-
-
 def try_resolve_kernel_input_types(
     func: Callable[..., Any],
     signature: inspect.Signature,
-) -> tuple[dict[str, Any], dict[str, Exception]]:
+) -> tuple[dict[str, Any], dict[str, NameError]]:
     """Resolve each qkernel input annotation independently.
 
     Args:
@@ -150,15 +105,16 @@ def try_resolve_kernel_input_types(
         signature (inspect.Signature): Function signature.
 
     Returns:
-        tuple[dict[str, Any], dict[str, Exception]]: Resolved annotations or raw
+        tuple[dict[str, Any], dict[str, NameError]]: Resolved annotations or raw
         fallbacks by parameter, plus resolution errors for deferred
         annotations.
 
     Raises:
-        TypeError: If any parameter is missing an annotation.
+        TypeError: If any parameter is missing an annotation or an annotation
+            expression is definitively invalid.
     """
     input_types: dict[str, Any] = {}
-    errors: dict[str, Exception] = {}
+    errors: dict[str, NameError] = {}
     for param in signature.parameters.values():
         if param.annotation is inspect.Parameter.empty:
             raise TypeError(f"Parameter '{param.name}' must have a type annotation")
@@ -202,29 +158,6 @@ def flatten_kernel_return_type(return_type: Any) -> list[Any]:
             )
         return list(result_types)
     return [return_type]
-
-
-def resolve_kernel_return_type(
-    func: Callable[..., Any],
-    signature: inspect.Signature,
-) -> Any:
-    """Resolve a qkernel's complete return annotation.
-
-    Unlike the flattened ``output_types`` list, the complete annotation
-    preserves the distinction between a Python tuple of results and one
-    structural ``Tuple`` handle.
-
-    Args:
-        func (Callable[..., Any]): Raw user function.
-        signature (inspect.Signature): Function signature.
-
-    Returns:
-        Any: Complete resolved return annotation.
-
-    Raises:
-        TypeError: If the return type is missing an annotation.
-    """
-    return try_resolve_kernel_return_type(func, signature)[0]
 
 
 def resolve_qkernel_like_return_type(kernel: Any) -> Any:
@@ -277,7 +210,7 @@ def resolve_qkernel_like_return_type(kernel: Any) -> Any:
 def try_resolve_kernel_return_type(
     func: Callable[..., Any],
     signature: inspect.Signature,
-) -> tuple[Any, bool, Exception | None]:
+) -> tuple[Any, bool, NameError | None]:
     """Resolve one return annotation independently from parameter hints.
 
     An unresolved forward reference is retained so a live ``QKernel`` can
@@ -289,12 +222,13 @@ def try_resolve_kernel_return_type(
         signature (inspect.Signature): Function signature.
 
     Returns:
-        tuple[Any, bool, Exception | None]: Annotation or raw fallback,
+        tuple[Any, bool, NameError | None]: Annotation or raw fallback,
         whether resolution succeeded, and the resolution error when it did
         not.
 
     Raises:
-        TypeError: If the return type is missing an annotation.
+        TypeError: If the return type is missing an annotation or the
+            annotation expression is definitively invalid.
     """
     annotation = signature.return_annotation
     if annotation is inspect.Signature.empty:
@@ -307,7 +241,7 @@ def _try_resolve_annotation(
     func: Callable[..., Any],
     name: str,
     annotation: Any,
-) -> tuple[Any, bool, Exception | None]:
+) -> tuple[Any, bool, NameError | None]:
     """Resolve one annotation without depending on any sibling hint.
 
     Args:
@@ -316,9 +250,12 @@ def _try_resolve_annotation(
         annotation (Any): Raw annotation to resolve.
 
     Returns:
-        tuple[Any, bool, Exception | None]: Annotation or raw fallback,
+        tuple[Any, bool, NameError | None]: Annotation or raw fallback,
         whether resolution succeeded, and the resolution error when it did
         not.
+
+    Raises:
+        TypeError: If the annotation expression is definitively invalid.
     """
     carrier = type(
         "_QKernelAnnotation",
@@ -331,7 +268,7 @@ def _try_resolve_annotation(
             globalns=getattr(func, "__globals__", {}),
             localns=_closure_local_namespace(func),
         )[name]
-    except (NameError, TypeError) as error:
+    except NameError as error:
         return annotation, False, error
     return resolved, True, None
 
