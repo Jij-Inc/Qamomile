@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, overload
 
 from qamomile.circuit.frontend.callable_signature import CallableSignature
 from qamomile.circuit.frontend.handle.array import Vector, VectorView
@@ -88,6 +88,34 @@ class Oracle:
         self.signature = signature
         self.cost = cost
 
+    @overload
+    def __call__(
+        self,
+        qubits: VectorView[Qubit],
+        /,
+        *,
+        controls: Sequence[Qubit] = (),
+        control_value: int | None = None,
+    ) -> VectorView[Qubit]: ...
+
+    @overload
+    def __call__(
+        self,
+        qubits: Vector[Qubit],
+        /,
+        *,
+        controls: Sequence[Qubit] = (),
+        control_value: int | None = None,
+    ) -> Vector[Qubit]: ...
+
+    @overload
+    def __call__(
+        self,
+        *qubits: Qubit,
+        controls: Sequence[Qubit] = (),
+        control_value: int | None = None,
+    ) -> tuple[Qubit, ...]: ...
+
     def __call__(
         self,
         *qubits: Qubit | Vector[Qubit],
@@ -107,7 +135,7 @@ class Oracle:
 
         Returns:
             tuple[Qubit, ...] | Vector[Qubit]: Oracle outputs with the same
-            shape as the input form.
+                shape as the input form. Vector views remain vector views.
 
         Raises:
             ValueError: If the provided arity does not match ``num_qubits``

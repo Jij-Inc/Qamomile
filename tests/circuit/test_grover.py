@@ -125,6 +125,20 @@ def test_grover_iteration_count_accepts_numpy_integers() -> None:
         grover_iteration_count(np.int64(0), 1)
 
 
+def test_grover_iteration_count_preserves_sympy_integers() -> None:
+    """SymPy integer inputs retain a symbolic result and positivity checks."""
+    count_from_qubits = grover_iteration_count(sp.Integer(4), 1)
+    count_from_marked = grover_iteration_count(4, sp.Integer(1))
+
+    assert isinstance(count_from_qubits, sp.Integer)
+    assert isinstance(count_from_marked, sp.Integer)
+    assert count_from_qubits == count_from_marked == 3
+    with pytest.raises(ValueError, match="must be positive"):
+        grover_iteration_count(sp.Integer(0), 1)
+    with pytest.raises(ValueError, match="must be positive"):
+        grover_iteration_count(4, sp.Integer(0))
+
+
 def test_grover_iteration_count_uses_arbitrary_precision() -> None:
     """Large search spaces return exact Python integers without overflow."""
     count = grover_iteration_count(1024, 1)

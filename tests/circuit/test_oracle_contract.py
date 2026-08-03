@@ -9,6 +9,20 @@ _CONTROLLED_ORACLE = qmc.Oracle(
     num_qubits=2,
     num_control_qubits=1,
 )
+_VECTOR_ORACLE = qmc.Oracle(
+    "vector_contract",
+    signature=qmc.CallableSignature(
+        inputs=[qmc.Vector[qmc.Qubit]],
+        outputs=[qmc.Vector[qmc.Qubit]],
+    ),
+)
+
+
+@qmc.qkernel
+def _valid_vector_call() -> qmc.Vector[qmc.Qubit]:
+    """Return a vector passed through a vector-signature oracle."""
+    qubits = qmc.qubit_array(2, "qubits")
+    return _VECTOR_ORACLE(qubits)
 
 
 @qmc.qkernel
@@ -22,3 +36,11 @@ def test_vector_oracle_cannot_bypass_declared_controls() -> None:
     """Vector syntax rejects an oracle that requires explicit controls."""
     with pytest.raises(ValueError, match="requires 1 explicit control"):
         _invalid_vector_call.build()
+
+
+def test_vector_oracle_preserves_vector_result_shape() -> None:
+    """Vector oracle calls retain one vector output at runtime."""
+    block = _valid_vector_call.build()
+
+    assert len(block.output_values) == 1
+    assert block.output_values[0].type.label() == "QubitType"
