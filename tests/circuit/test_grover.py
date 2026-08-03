@@ -51,6 +51,9 @@ class _QueryCost:
                 calls_by_name={"query_oracle": sp.Integer(1)},
                 queries_by_name={"query_oracle": sp.Integer(1)},
             ),
+            basis=ctx.basis,
+            control_decomposition=ctx.control_decomposition,
+            precision=ctx.precision,
         )
 
 
@@ -81,6 +84,14 @@ def _grover_estimate_kernel(n: qmc.UInt, iterations: qmc.UInt) -> qmc.Vector[qmc
     reg = qmc.qubit_array(n, name="reg")
     reg = grover_search(reg, _query_oracle, iterations)
     return qmc.measure(reg)
+
+
+@pytest.fixture(scope="module")
+def abstract_symbolic_grover_estimate() -> qmc.ResourceEstimate:
+    """Reuse the control-independent symbolic Grover estimate."""
+    return _grover_estimate_kernel.estimate_resources(
+        control_decomposition=qmc.ControlDecomposition.ABSTRACT,
+    )
 
 
 def _numpy_grover_zexp(n: int, iterations: int) -> float:
@@ -124,6 +135,40 @@ def test_grover_iteration_count_accepts_numpy_integers() -> None:
         grover_iteration_count(np.int64(0), 1)
 
 
+def test_grover_iteration_count_rejects_booleans() -> None:
+    """Boolean scalars are not accepted as integer search parameters."""
+    for num_qubits, num_marked in (
+        (True, 1),
+        (4, False),
+        (np.bool_(True), 1),
+        (4, np.bool_(False)),
+    ):
+        with pytest.raises(TypeError, match="must not be booleans"):
+            grover_iteration_count(num_qubits, num_marked)
+
+
+def test_grover_iteration_count_preserves_sympy_integers() -> None:
+    """SymPy integer inputs retain a symbolic result and positivity checks."""
+    count_from_qubits = grover_iteration_count(sp.Integer(4), 1)
+    count_from_marked = grover_iteration_count(4, sp.Integer(1))
+
+    assert isinstance(count_from_qubits, sp.Integer)
+    assert isinstance(count_from_marked, sp.Integer)
+    assert count_from_qubits == count_from_marked == 3
+    with pytest.raises(ValueError, match="must be positive"):
+        grover_iteration_count(sp.Integer(0), 1)
+    with pytest.raises(ValueError, match="must be positive"):
+        grover_iteration_count(4, sp.Integer(0))
+    for num_qubits, num_marked in (
+        (sp.Integer(4), -1),
+        (-1, sp.Integer(1)),
+        (sp.Integer(4), np.int64(0)),
+        (np.int64(0), sp.Integer(1)),
+    ):
+        with pytest.raises(ValueError, match="must be positive"):
+            grover_iteration_count(num_qubits, num_marked)
+
+
 def test_grover_iteration_count_uses_arbitrary_precision() -> None:
     """Large search spaces return exact Python integers without overflow."""
     count = grover_iteration_count(1024, 1)
@@ -132,9 +177,11 @@ def test_grover_iteration_count_uses_arbitrary_precision() -> None:
     assert count.bit_length() > 500
 
 
-def test_grover_symbolic_query_complexity() -> None:
+def test_grover_symbolic_query_complexity(
+    abstract_symbolic_grover_estimate: qmc.ResourceEstimate,
+) -> None:
     """Query count equals the (symbolic) iteration count: O(sqrt(N/m))."""
-    est = _grover_estimate_kernel.estimate_resources()
+    est = abstract_symbolic_grover_estimate
     iterations = est.parameters["iterations"]
     assert est.calls.queries_by_name["query_oracle"] == iterations
 
@@ -149,7 +196,8 @@ def test_grover_optimal_query_complexity_via_inputs() -> None:
     n = sp.Symbol("n", positive=True)
     m = sp.Symbol("m", positive=True)
     est = _grover_estimate_kernel.estimate_resources(
-        inputs={"iterations": grover_iteration_count(n, m)}
+        inputs={"iterations": grover_iteration_count(n, m)},
+        control_decomposition=qmc.ControlDecomposition.ABSTRACT,
     )
     queries = est.calls.queries_by_name["query_oracle"]
     # It is a floor of the optimal continuous count; compare the floor argument
@@ -162,9 +210,11 @@ def test_grover_optimal_query_complexity_via_inputs() -> None:
         assert int(queries.subs({n: nn, m: mm})) == grover_iteration_count(nn, mm)
 
 
-def test_grover_qubit_count_includes_clean_control_ancillas() -> None:
+def test_grover_qubit_count_includes_clean_control_ancillas(
+    abstract_symbolic_grover_estimate: qmc.ResourceEstimate,
+) -> None:
     """Grover reports source width and clean control ancillas separately."""
-    est = _grover_estimate_kernel.estimate_resources()
+    est = abstract_symbolic_grover_estimate
     n = est.parameters["n"]
     assert est.width.allocated_qubits == n
 

@@ -23,35 +23,60 @@ straight from one estimate call::
 
 from __future__ import annotations
 
-import numbers
-from typing import Any, Callable, cast
+from typing import Any, Callable, cast, overload
 
+import numpy as np
 import sympy as sp
 
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.handle import Qubit, Vector
 from qamomile.circuit.frontend.operation.control_flow import for_loop
+from qamomile.circuit.frontend.oracle import Oracle
 from qamomile.circuit.frontend.qkernel_like import QKernelLike
 
 
+@overload
 def grover_iteration_count(
-    num_qubits: int | sp.Expr,
-    num_marked: int | sp.Expr = 1,
+    num_qubits: sp.Expr,
+    num_marked: int | np.integer[Any] | sp.Expr = 1,
+) -> sp.Expr: ...
+
+
+@overload
+def grover_iteration_count(
+    num_qubits: int | np.integer[Any],
+    num_marked: sp.Expr,
+) -> sp.Expr: ...
+
+
+@overload
+def grover_iteration_count(
+    num_qubits: int | np.integer[Any],
+    num_marked: int | np.integer[Any] = 1,
+) -> int: ...
+
+
+def grover_iteration_count(
+    num_qubits: int | np.integer[Any] | sp.Expr,
+    num_marked: int | np.integer[Any] | sp.Expr = 1,
 ) -> int | sp.Expr:
     """Return the optimal Grover iteration count ``floor((pi/4) sqrt(N/m))``.
 
     Args:
-        num_qubits (int | sp.Expr): Number of search qubits ``n`` (search space
-            ``N = 2**n``). May be symbolic.
-        num_marked (int | sp.Expr): Number of marked solutions ``m``. Defaults
-            to ``1``.
+        num_qubits (int | np.integer[Any] | sp.Expr): Number of search qubits
+            ``n`` (search space ``N = 2**n``). May be a Python or NumPy integer,
+            or a symbolic expression.
+        num_marked (int | np.integer[Any] | sp.Expr): Number of marked
+            solutions ``m``. Defaults to ``1``.
 
     Returns:
         int | sp.Expr: Concrete iteration count when both arguments are concrete
-        integers (Python or NumPy), otherwise the symbolic expression
-        ``floor((pi/4) sqrt(2**n / m))``.
+            Python or NumPy integers, otherwise the symbolic expression
+            ``floor((pi/4) sqrt(2**n / m))``. SymPy integers remain SymPy
+            expressions.
 
     Raises:
+        TypeError: If ``num_qubits`` or ``num_marked`` is a boolean.
         ValueError: If concrete ``num_qubits`` or ``num_marked`` is not
             positive.
 
@@ -60,13 +85,22 @@ def grover_iteration_count(
         3
     """
     # Normalize NumPy integer scalars (np.int64, ...) to Python ints so they
-    # take the concrete, positivity-validated path rather than falling through
-    # to the symbolic branch. Route through ``Any`` so the numeric-tower check
-    # is not narrowed away by the declared ``int | sp.Expr`` annotation.
+    # take the concrete path. Keep SymPy integers symbolic so the runtime result
+    # agrees with the symbolic overload while preserving positivity validation.
     n_in: Any = num_qubits
     m_in: Any = num_marked
-    n_val = int(n_in) if isinstance(n_in, numbers.Integral) else n_in
-    m_val = int(m_in) if isinstance(m_in, numbers.Integral) else m_in
+    if isinstance(n_in, (bool, np.bool_)) or isinstance(m_in, (bool, np.bool_)):
+        raise TypeError("num_qubits and num_marked must not be booleans.")
+    n_nonpositive_integer = (
+        isinstance(n_in, (int, np.integer, sp.Integer)) and int(n_in) <= 0
+    )
+    m_nonpositive_integer = (
+        isinstance(m_in, (int, np.integer, sp.Integer)) and int(m_in) <= 0
+    )
+    if n_nonpositive_integer or m_nonpositive_integer:
+        raise ValueError("num_qubits and num_marked must be positive.")
+    n_val = int(n_in) if isinstance(n_in, (int, np.integer)) else n_in
+    m_val = int(m_in) if isinstance(m_in, (int, np.integer)) else m_in
     if isinstance(n_val, int) and isinstance(m_val, int):
         if n_val <= 0 or m_val <= 0:
             raise ValueError("num_qubits and num_marked must be positive.")
@@ -114,7 +148,7 @@ def _diffusion(reg: Vector[Qubit]) -> Vector[Qubit]:
 
 def grover_search(
     reg: Vector[Qubit],
-    oracle: QKernelLike,
+    oracle: Oracle | QKernelLike,
     iterations: int | qmc.UInt,
 ) -> Vector[Qubit]:
     """Run the Grover amplitude-amplification loop on ``reg``.
@@ -128,9 +162,9 @@ def grover_search(
 
     Args:
         reg (Vector[Qubit]): Search register in the all-zero state on entry.
-        oracle (QKernelLike): Phase oracle marking the solution(s). Supply a
-            costed opaque box (e.g. ``qmc.opaque(..., cost=...)``)
-            so the estimator can cost each query.
+        oracle (Oracle | QKernelLike): Phase oracle marking the solution(s).
+            Supply a costed opaque box (e.g. ``qmc.opaque(..., cost=...)``) so
+            the estimator can cost each query.
         iterations (int | qmc.UInt): Number of Grover iterations. Use
             :func:`grover_iteration_count` to obtain the optimal value; leave it
             as an unbound ``UInt`` parameter for symbolic estimation.
@@ -162,12 +196,12 @@ def grover_search(
     return reg
 
 
-def _grover_step(reg: Vector[Qubit], oracle: QKernelLike) -> Vector[Qubit]:
+def _grover_step(reg: Vector[Qubit], oracle: Oracle | QKernelLike) -> Vector[Qubit]:
     """Apply one Grover iteration: an oracle query then the diffusion operator.
 
     Args:
         reg (Vector[Qubit]): Search register.
-        oracle (QKernelLike): Phase oracle marking the solution(s).
+        oracle (Oracle | QKernelLike): Phase oracle marking the solution(s).
 
     Returns:
         Vector[Qubit]: Register after one amplitude-amplification step.

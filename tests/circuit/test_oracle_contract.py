@@ -4,12 +4,28 @@ import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
+from qamomile.circuit.ir.types import QubitType
+from qamomile.circuit.ir.value import ArrayValue, array_static_length
 
 _CONTROLLED_ORACLE = qmc.Oracle(
     "controlled_vector_contract",
     num_qubits=2,
     num_control_qubits=1,
 )
+_VECTOR_ORACLE = qmc.Oracle(
+    "vector_contract",
+    signature=qmc.CallableSignature(
+        inputs=[qmc.Vector[qmc.Qubit]],
+        outputs=[qmc.Vector[qmc.Qubit]],
+    ),
+)
+
+
+@qmc.qkernel
+def _valid_vector_call() -> qmc.Vector[qmc.Qubit]:
+    """Return a vector passed through a vector-signature oracle."""
+    qubits = qmc.qubit_array(2, "qubits")
+    return _VECTOR_ORACLE(qubits)
 
 
 @qmc.qkernel
@@ -115,3 +131,14 @@ def test_vector_signature_oracle_rejects_direct_controlled_wrapper() -> None:
 
     with pytest.raises(TypeError, match="vector-signature oracles"):
         qmc.TransformedOracle(oracle, added_num_control_qubits=1)
+
+
+def test_vector_oracle_preserves_vector_result_shape() -> None:
+    """Vector oracle calls retain one vector output at runtime."""
+    block = _valid_vector_call.build()
+
+    assert len(block.output_values) == 1
+    output = block.output_values[0]
+    assert isinstance(output, ArrayValue)
+    assert array_static_length(output) == 2
+    assert output.type == QubitType()
