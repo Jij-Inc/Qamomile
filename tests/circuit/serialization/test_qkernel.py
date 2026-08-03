@@ -393,6 +393,56 @@ def _containers(
 
 
 @qmc.qkernel
+def _nested_container_return(
+    value: qmc.Tuple[
+        qmc.Dict[qmc.UInt, qmc.Bit],
+        qmc.Tuple[qmc.UInt, qmc.Float],
+    ],
+) -> qmc.Tuple[
+    qmc.Dict[qmc.UInt, qmc.Bit],
+    qmc.Tuple[qmc.UInt, qmc.Float],
+]:
+    """Return nested structural values with an unbound Dict.
+
+    Args:
+        value (qmc.Tuple[qmc.Dict[qmc.UInt, qmc.Bit], qmc.Tuple[qmc.UInt, qmc.Float]]):
+            Nested structural input.
+
+    Returns:
+        qmc.Tuple[qmc.Dict[qmc.UInt, qmc.Bit], qmc.Tuple[qmc.UInt, qmc.Float]]:
+            Unchanged structural value.
+    """
+    return value
+
+
+_MUTABLE_RETURN_ALIAS = qmc.Bit
+
+
+@qmc.qkernel
+def _cached_return_alias() -> _MUTABLE_RETURN_ALIAS:
+    """Return a Bit through a mutable deferred global alias.
+
+    Returns:
+        _MUTABLE_RETURN_ALIAS: Bit resolved when the kernel is decorated.
+    """
+    return qmc.bit(False)
+
+
+@qmc.qkernel
+def _late_serialized_return_alias() -> _LATE_SERIALIZED_RETURN_ALIAS:
+    """Return a Bit through an alias defined after decoration.
+
+    Returns:
+        _LATE_SERIALIZED_RETURN_ALIAS: Return contract resolved by the first
+        serialization trace.
+    """
+    return qmc.bit(False)
+
+
+_LATE_SERIALIZED_RETURN_ALIAS = qmc.Bit
+
+
+@qmc.qkernel
 def _native_annotations(n: int, theta: float, flag: bool) -> bool:
     """Expose Python-native scalar annotations in the static interface."""
     q = qmc.qubit("q")
@@ -408,6 +458,12 @@ def _native_tuple_return(theta: float) -> tuple[bool, float]:
     """Expose a Python tuple return annotation in the static interface."""
     q = qmc.rx(qmc.qubit("q"), theta)
     return qmc.measure(q), theta
+
+
+@qmc.qkernel
+def _singleton_tuple_return() -> tuple[qmc.Bit]:
+    """Expose a one-element Python tuple return annotation."""
+    return (qmc.bit(False),)
 
 
 @qmc.qkernel
@@ -1577,6 +1633,48 @@ def test_container_annotations_round_trip() -> None:
     assert restored.output_types == _containers.output_types
 
 
+def test_nested_container_return_round_trips() -> None:
+    """Nested Dict wildcards remain compatible through deserialization."""
+    restored = deserialize(serialize(_nested_container_return))
+
+    assert restored.output_types == _nested_container_return.output_types
+    assert restored.signature.return_annotation == _nested_container_return.return_type
+
+
+def test_cached_return_annotation_is_stable_after_global_rebinding() -> None:
+    """Serialization uses the return annotation resolved at decoration time."""
+    global _MUTABLE_RETURN_ALIAS
+
+    _ = _cached_return_alias.block
+    original_alias = _MUTABLE_RETURN_ALIAS
+    _MUTABLE_RETURN_ALIAS = qmc.UInt
+    try:
+        restored = deserialize(serialize(_cached_return_alias))
+    finally:
+        _MUTABLE_RETURN_ALIAS = original_alias
+
+    assert restored.signature.return_annotation is qmc.Bit
+    assert restored.output_types == [qmc.Bit]
+
+
+def test_late_return_annotation_is_frozen_during_serialization() -> None:
+    """Serialization resolves a late alias once and retains that contract."""
+    global _LATE_SERIALIZED_RETURN_ALIAS
+
+    first = deserialize(serialize(_late_serialized_return_alias))
+    original_alias = _LATE_SERIALIZED_RETURN_ALIAS
+    _LATE_SERIALIZED_RETURN_ALIAS = qmc.UInt
+    try:
+        second = deserialize(serialize(_late_serialized_return_alias))
+    finally:
+        _LATE_SERIALIZED_RETURN_ALIAS = original_alias
+
+    assert first.signature.return_annotation is qmc.Bit
+    assert first.output_types == [qmc.Bit]
+    assert second.signature.return_annotation is qmc.Bit
+    assert second.output_types == [qmc.Bit]
+
+
 def test_python_native_annotations_round_trip_without_normalization() -> None:
     """Python scalar annotations remain distinct from Qamomile handle types."""
     restored = deserialize(serialize(_native_annotations))
@@ -1595,6 +1693,26 @@ def test_python_tuple_return_annotation_round_trips_exactly() -> None:
 
     assert restored.output_types == [bool, float]
     assert restored.signature.return_annotation == tuple[bool, float]
+
+
+def test_singleton_python_tuple_round_trips_and_invokes_exactly() -> None:
+    """A restored singleton Python tuple remains a tuple during invocation."""
+    restored = deserialize(serialize(_singleton_tuple_return))
+
+    @qmc.qkernel
+    def caller() -> tuple[qmc.Bit]:
+        """Invoke the restored singleton-tuple qkernel.
+
+        Returns:
+            tuple[qmc.Bit]: Restored qkernel's one-element result tuple.
+        """
+        return restored()
+
+    block = caller.build()
+
+    assert restored.output_types == [qmc.Bit]
+    assert restored.signature.return_annotation == tuple[qmc.Bit]
+    assert block.output_values[0].type.label() == "BitType"
 
 
 def test_wire_payload_contains_no_invocation_values() -> None:

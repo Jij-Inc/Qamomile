@@ -244,7 +244,11 @@ def _encode_kernel_type(annotation: Any, value: ValueBase) -> dict[str, Any]:
 
 
 def _resolve_return_annotation(kernel: QKernelLike) -> Any:
-    """Resolve one qkernel return annotation without losing its type family.
+    """Return one qkernel's stable resolved return annotation.
+
+    Live kernels cache the complete annotation when decorated so later global
+    rebinding cannot alter their serialized interface. Deserialized or legacy
+    qkernel-like objects fall back to their stored signature.
 
     Args:
         kernel (QKernelLike): QKernel-like object whose resolved return
@@ -257,6 +261,12 @@ def _resolve_return_annotation(kernel: QKernelLike) -> Any:
         TypeError: If a deferred annotation cannot be resolved exactly.
         ValueError: If the qkernel signature has no return annotation.
     """
+    cached_annotation = getattr(kernel, "return_type", inspect.Signature.empty)
+    if cached_annotation is not inspect.Signature.empty and not isinstance(
+        cached_annotation, str
+    ):
+        return cached_annotation
+
     annotation = kernel.signature.return_annotation
     if annotation is inspect.Signature.empty:
         raise ValueError("qkernel signature has no return annotation")
