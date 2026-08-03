@@ -64,12 +64,8 @@ jobs:
         shell: bash
         run: |
           set -eux
-          uv run zuban check qamomile/
+          uv run zuban check qamomile/ tests/typecheck/
           # docs/ is type-clean in this PR (see the docs-side fixes
           # already landed), but the CI gate is intentionally limited
-          # to qamomile/ for now so future docs edits don't accidentally
-          # break the type-check job. Re-enable by switching the line
-          # above to ``uv run zuban check qamomile/ docs/`` once the
-          # docs-side discipline is established; when doing so, drop the
-          # docs_only skip on this job so docs-only pull requests still
-          # get type-checked.
+          # to the library and focused public-typing fixtures so unrelated
+          # test helpers do not enter the production type-check gate.

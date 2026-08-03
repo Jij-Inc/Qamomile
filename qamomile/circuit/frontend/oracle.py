@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, overload
 
 from qamomile.circuit.frontend.callable_signature import CallableSignature
 from qamomile.circuit.frontend.handle.array import Vector, VectorView
@@ -88,26 +88,57 @@ class Oracle:
         self.signature = signature
         self.cost = cost
 
+    @overload
     def __call__(
         self,
-        *qubits: Qubit | Vector[Qubit],
+        qubits: VectorView[Qubit],
+        /,
+        *,
+        controls: tuple[()] = (),
+        control_value: None = None,
+    ) -> VectorView[Qubit]: ...
+
+    @overload
+    def __call__(
+        self,
+        qubits: Vector[Qubit],
+        /,
+        *,
+        controls: tuple[()] = (),
+        control_value: None = None,
+    ) -> Vector[Qubit]: ...
+
+    @overload
+    def __call__(
+        self,
+        *qubits: Qubit,
         controls: Sequence[Qubit] = (),
         control_value: int | None = None,
-    ) -> tuple[Qubit, ...] | Vector[Qubit]:
+    ) -> tuple[Qubit, ...]: ...
+
+    def __call__(
+        self,
+        *qubits: Qubit | Vector[Qubit] | VectorView[Qubit],
+        controls: Sequence[Qubit] = (),
+        control_value: int | None = None,
+    ) -> tuple[Qubit, ...] | Vector[Qubit] | VectorView[Qubit]:
         """Apply the oracle to scalar qubits or a vector register.
 
         Args:
-            *qubits (Qubit | Vector[Qubit]): Either a single vector register
-                or ``num_qubits`` scalar qubits.
-            controls (Sequence[Qubit]): Explicit control qubits. Defaults to
-                an empty sequence.
-            control_value (int | None): LSB-first activation value for
-                ``controls``. ``None`` uses the ordinary all-ones state.
-                Defaults to ``None``.
+            *qubits (Qubit | Vector[Qubit] | VectorView[Qubit]): Either a single
+                vector register or view, or ``num_qubits`` scalar qubits.
+            controls (Sequence[Qubit]): Explicit control qubits for scalar
+                calls. Vector and vector-view calls currently require the
+                default empty sequence.
+            control_value (int | None): LSB-first activation value for scalar
+                ``controls``. ``None`` uses the ordinary all-ones state. Vector
+                and vector-view calls currently require ``None``. Defaults to
+                ``None``.
 
         Returns:
-            tuple[Qubit, ...] | Vector[Qubit]: Oracle outputs with the same
-            shape as the input form.
+            tuple[Qubit, ...] | Vector[Qubit] | VectorView[Qubit]: Oracle
+                outputs with the same shape as the input form. Vector views
+                remain vector views.
 
         Raises:
             ValueError: If the provided arity does not match ``num_qubits``
