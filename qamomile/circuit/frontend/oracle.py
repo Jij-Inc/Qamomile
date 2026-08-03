@@ -118,10 +118,10 @@ class Oracle:
 
     def __call__(
         self,
-        *qubits: Qubit | Vector[Qubit],
+        *qubits: Qubit | Vector[Qubit] | VectorView[Qubit],
         controls: Sequence[Qubit] = (),
         control_value: int | None = None,
-    ) -> tuple[Qubit, ...] | Vector[Qubit]:
+    ) -> tuple[Qubit, ...] | Vector[Qubit] | VectorView[Qubit]:
         """Apply the oracle to scalar qubits or a vector register.
 
         Args:
