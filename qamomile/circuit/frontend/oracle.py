@@ -127,11 +127,13 @@ class Oracle:
         Args:
             *qubits (Qubit | Vector[Qubit]): Either a single vector register
                 or ``num_qubits`` scalar qubits.
-            controls (Sequence[Qubit]): Explicit control qubits. Defaults to
-                an empty sequence.
-            control_value (int | None): LSB-first activation value for
-                ``controls``. ``None`` uses the ordinary all-ones state.
-                Defaults to ``None``.
+            controls (Sequence[Qubit]): Explicit control qubits for scalar
+                calls. Vector and vector-view calls currently require the
+                default empty sequence.
+            control_value (int | None): LSB-first activation value for scalar
+                ``controls``. ``None`` uses the ordinary all-ones state. Vector
+                and vector-view calls currently require ``None``. Defaults to
+                ``None``.
 
         Returns:
             tuple[Qubit, ...] | Vector[Qubit]: Oracle outputs with the same

@@ -3,6 +3,7 @@
 import pytest
 
 import qamomile.circuit as qmc
+from qamomile.circuit.ir.value import ArrayValue, array_static_length
 
 _CONTROLLED_ORACLE = qmc.Oracle(
     "controlled_vector_contract",
@@ -43,4 +44,7 @@ def test_vector_oracle_preserves_vector_result_shape() -> None:
     block = _valid_vector_call.build()
 
     assert len(block.output_values) == 1
-    assert block.output_values[0].type.label() == "QubitType"
+    output = block.output_values[0]
+    assert isinstance(output, ArrayValue)
+    assert array_static_length(output) == 2
+    assert output.type.label() == "QubitType"
