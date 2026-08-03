@@ -3,6 +3,7 @@
 import pytest
 
 import qamomile.circuit as qmc
+from qamomile.circuit.ir.types import QubitType
 from qamomile.circuit.ir.value import ArrayValue, array_static_length
 
 _CONTROLLED_ORACLE = qmc.Oracle(
@@ -47,4 +48,4 @@ def test_vector_oracle_preserves_vector_result_shape() -> None:
     output = block.output_values[0]
     assert isinstance(output, ArrayValue)
     assert array_static_length(output) == 2
-    assert output.type.label() == "QubitType"
+    assert output.type == QubitType()

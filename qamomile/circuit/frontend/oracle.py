@@ -125,8 +125,8 @@ class Oracle:
         """Apply the oracle to scalar qubits or a vector register.
 
         Args:
-            *qubits (Qubit | Vector[Qubit]): Either a single vector register
-                or ``num_qubits`` scalar qubits.
+            *qubits (Qubit | Vector[Qubit] | VectorView[Qubit]): Either a single
+                vector register or view, or ``num_qubits`` scalar qubits.
             controls (Sequence[Qubit]): Explicit control qubits for scalar
                 calls. Vector and vector-view calls currently require the
                 default empty sequence.
