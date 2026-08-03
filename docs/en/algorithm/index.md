@@ -58,7 +58,7 @@ Implement Quantum-enhanced MCMC using Trotter-decomposed time evolution.
 
 :::{card}
 :header: **QSVT Eigenstate Filtering**
-:link: qsvt_filter
+:link: qsvt_filter_graph_partitioning
 Filter a block-encoded cost Hamiltonian with a QSVT sign approximation, and drive a Lin & Tong binary search with the post-selection rate.
 :::
 
