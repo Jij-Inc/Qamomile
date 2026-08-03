@@ -76,6 +76,7 @@ def grover_iteration_count(
             expressions.
 
     Raises:
+        TypeError: If ``num_qubits`` or ``num_marked`` is a boolean.
         ValueError: If concrete ``num_qubits`` or ``num_marked`` is not
             positive.
 
@@ -88,6 +89,8 @@ def grover_iteration_count(
     # agrees with the symbolic overload while preserving positivity validation.
     n_in: Any = num_qubits
     m_in: Any = num_marked
+    if isinstance(n_in, (bool, np.bool_)) or isinstance(m_in, (bool, np.bool_)):
+        raise TypeError("num_qubits and num_marked must not be booleans.")
     n_nonpositive_integer = (
         isinstance(n_in, (int, np.integer, sp.Integer)) and int(n_in) <= 0
     )

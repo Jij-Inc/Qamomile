@@ -125,6 +125,18 @@ def test_grover_iteration_count_accepts_numpy_integers() -> None:
         grover_iteration_count(np.int64(0), 1)
 
 
+def test_grover_iteration_count_rejects_booleans() -> None:
+    """Boolean scalars are not accepted as integer search parameters."""
+    for num_qubits, num_marked in (
+        (True, 1),
+        (4, False),
+        (np.bool_(True), 1),
+        (4, np.bool_(False)),
+    ):
+        with pytest.raises(TypeError, match="must not be booleans"):
+            grover_iteration_count(num_qubits, num_marked)
+
+
 def test_grover_iteration_count_preserves_sympy_integers() -> None:
     """SymPy integer inputs retain a symbolic result and positivity checks."""
     count_from_qubits = grover_iteration_count(sp.Integer(4), 1)

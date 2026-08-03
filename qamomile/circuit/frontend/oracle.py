@@ -136,8 +136,9 @@ class Oracle:
                 ``None``.
 
         Returns:
-            tuple[Qubit, ...] | Vector[Qubit]: Oracle outputs with the same
-                shape as the input form. Vector views remain vector views.
+            tuple[Qubit, ...] | Vector[Qubit] | VectorView[Qubit]: Oracle
+                outputs with the same shape as the input form. Vector views
+                remain vector views.
 
         Raises:
             ValueError: If the provided arity does not match ``num_qubits``
