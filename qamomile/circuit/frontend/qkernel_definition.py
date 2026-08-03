@@ -17,6 +17,8 @@ from qamomile.circuit.transpiler.errors import (
     QubitRebindError,
 )
 
+_ANNOTATION_LOCALNS_ATTR = "__qamomile_annotation_localns__"
+
 
 def transform_qkernel_function(
     func: Callable[..., Any],
@@ -327,11 +329,37 @@ def _try_resolve_annotation(
         resolved = get_type_hints(
             carrier,
             globalns=getattr(func, "__globals__", {}),
-            localns=None,
+            localns=_closure_local_namespace(func),
         )[name]
     except (NameError, TypeError) as error:
         return annotation, False, error
     return resolved, True, None
+
+
+def _closure_local_namespace(func: Callable[..., Any]) -> dict[str, Any]:
+    """Collect defining-scope values for annotation resolution.
+
+    Args:
+        func (Callable[..., Any]): Raw user function whose temporary decorator
+            namespace and closure provide names from its defining Python scope.
+
+    Returns:
+        dict[str, Any]: Bound defining-scope values keyed by name.
+    """
+    namespace = dict(getattr(func, _ANNOTATION_LOCALNS_ATTR, {}))
+    closure = getattr(func, "__closure__", None)
+    code = getattr(func, "__code__", None)
+    if closure is None or code is None:
+        return namespace
+
+    for name, cell in zip(code.co_freevars, closure):
+        try:
+            namespace[name] = cell.cell_contents
+        except ValueError:
+            # Keep empty forward-reference cells unresolved so a live QKernel
+            # can retry them at a later compilation entry point.
+            continue
+    return namespace
 
 
 def validate_quantum_rebinds(

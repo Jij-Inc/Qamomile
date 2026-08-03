@@ -767,6 +767,128 @@ def test_return_annotation_is_evaluated_once_during_decoration() -> None:
     assert _RETURN_ANNOTATION_RESOLUTION_CALLS == 1
 
 
+def test_nested_qkernel_resolves_postponed_annotations_from_closure() -> None:
+    """Nested qkernels resolve postponed annotations from closure values."""
+    import qamomile.circuit as local_qmc
+
+    @local_qmc.qkernel
+    def nested(value: local_qmc.UInt) -> local_qmc.Bit:
+        """Return a Bit using an import captured from the enclosing scope.
+
+        Args:
+            value (local_qmc.UInt): Unused value that exercises input
+                annotation resolution.
+
+        Returns:
+            local_qmc.Bit: Constant classical bit.
+        """
+        return local_qmc.bit(False)
+
+    traced = nested.build(value=1)
+    hierarchical = nested.block
+
+    assert nested.input_types == {"value": qmc.UInt}
+    assert nested.return_type is qmc.Bit
+    assert traced.output_values[0].type.label() == "BitType"
+    assert hierarchical.output_values[0].type.label() == "BitType"
+
+
+def test_nested_qkernel_resolves_annotation_only_local_alias() -> None:
+    """Nested qkernels resolve a local alias used only by an annotation."""
+    import qamomile.circuit as local_qmc
+
+    @local_qmc.qkernel
+    def nested() -> local_qmc.Bit:
+        """Return a Bit without capturing the annotation's local alias.
+
+        Returns:
+            local_qmc.Bit: Constant classical bit.
+        """
+        return qmc.bit(False)
+
+    assert "local_qmc" not in nested.raw_func.__code__.co_freevars
+
+    traced = nested.build()
+    hierarchical = nested.block
+
+    assert nested.return_type is qmc.Bit
+    assert traced.output_values[0].type.label() == "BitType"
+    assert hierarchical.output_values[0].type.label() == "BitType"
+    assert "__qamomile_annotation_localns__" not in nested.raw_func.__dict__
+
+
+def test_local_annotation_namespace_survives_late_global_resolution() -> None:
+    """Deferred annotations retain local names until resolution succeeds."""
+    global _LATE_LOCAL_NAMESPACE_ELEMENT
+
+    import qamomile.circuit as local_qmc
+
+    globals().pop("_LATE_LOCAL_NAMESPACE_ELEMENT", None)
+
+    @local_qmc.qkernel
+    def nested() -> local_qmc.Vector[_LATE_LOCAL_NAMESPACE_ELEMENT]:
+        """Return a Bit vector through local and late global aliases.
+
+        Returns:
+            local_qmc.Vector[_LATE_LOCAL_NAMESPACE_ELEMENT]: Classical bit
+                vector whose element alias is defined after decoration.
+        """
+        return qmc.bit_array(2, "bits")
+
+    _LATE_LOCAL_NAMESPACE_ELEMENT = qmc.Bit
+    try:
+        traced = nested.build()
+        hierarchical = nested.block
+    finally:
+        del _LATE_LOCAL_NAMESPACE_ELEMENT
+
+    assert nested.return_type == qmc.Vector[qmc.Bit]
+    assert traced.output_values[0].type.label() == "BitType"
+    assert hierarchical.output_values[0].type.label() == "BitType"
+    assert "__qamomile_annotation_localns__" not in nested.raw_func.__dict__
+
+
+def test_annotation_namespace_cleanup_preserves_definition_error() -> None:
+    """Namespace cleanup does not replace a qkernel definition error."""
+    import qamomile.circuit as local_qmc
+
+    with pytest.raises(QubitRebindError):
+
+        @local_qmc.qkernel
+        def invalid(value: local_qmc.Qubit) -> local_qmc.Bit:
+            """Illegally replace a Qubit to exercise decorator cleanup.
+
+            Args:
+                value (local_qmc.Qubit): Quantum input that is overwritten.
+
+            Returns:
+                local_qmc.Bit: Classical replacement value.
+            """
+            value = local_qmc.bit(False)  # type: ignore[assignment]
+            return value  # type: ignore[return-value]
+
+
+def test_resolved_closure_annotation_is_frozen_after_decoration() -> None:
+    """A resolved closure annotation remains frozen after local rebinding."""
+    local_qmc = qmc
+
+    @local_qmc.qkernel
+    def nested() -> local_qmc.Bit:
+        """Return a Bit through a closure namespace that is later rebound.
+
+        Returns:
+            local_qmc.Bit: Constant classical bit.
+        """
+        return local_qmc.bit(False)
+
+    local_qmc = SimpleNamespace(Bit=qmc.UInt, bit=qmc.bit)
+
+    traced = nested.build()
+
+    assert nested.return_type is qmc.Bit
+    assert traced.output_values[0].type.label() == "BitType"
+
+
 def test_resolved_inputs_can_be_read_while_return_alias_is_missing() -> None:
     """Input introspection does not require an unrelated late return alias."""
     late_alias = globals().pop("_LATE_BUILD_RETURN_ALIAS")

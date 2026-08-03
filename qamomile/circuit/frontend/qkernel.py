@@ -18,6 +18,7 @@ from qamomile.circuit.frontend.qkernel_api import (
 )
 from qamomile.circuit.frontend.qkernel_block import get_or_build_block
 from qamomile.circuit.frontend.qkernel_definition import (
+    _ANNOTATION_LOCALNS_ATTR,
     flatten_kernel_return_type,
     get_quantum_rebind_error,
     transform_qkernel_function,
@@ -73,6 +74,7 @@ class QKernel(QKernelBuildMixin, QKernelVisualizationMixin, Generic[P, R]):
         self._output_types = flatten_kernel_return_type(self._return_type)
         if self._return_type_resolved:
             self._freeze_return_type()
+        self._release_annotation_localns_if_resolved()
 
         # Lazy initialization for hierarchical Block
         self._block: Block | None = None
@@ -134,6 +136,11 @@ class QKernel(QKernelBuildMixin, QKernelVisualizationMixin, Generic[P, R]):
             "__qamomile_resolved_return_type__",
             self._return_type,
         )
+
+    def _release_annotation_localns_if_resolved(self) -> None:
+        """Release captured defining locals after the interface is frozen."""
+        if self._input_types_resolved and self._return_type_resolved:
+            self.raw_func.__dict__.pop(_ANNOTATION_LOCALNS_ATTR, None)
 
     def _resolve_pending_annotation_types(
         self,
@@ -211,6 +218,7 @@ class QKernel(QKernelBuildMixin, QKernelVisualizationMixin, Generic[P, R]):
                 self._freeze_input_types()
                 self._input_types_resolved = True
 
+            self._release_annotation_localns_if_resolved()
             return input_errors, return_error if not return_resolved else None
 
     def _ensure_annotation_types_resolved(self) -> None:
@@ -367,13 +375,65 @@ class QKernel(QKernelBuildMixin, QKernelVisualizationMixin, Generic[P, R]):
         return cast(R, invoke_qkernel(self, *args, **kwargs))
 
 
+def _defining_local_namespace(func: Callable[..., Any]) -> dict[str, Any]:
+    """Copy the live local namespace that lexically defines a function.
+
+    Args:
+        func (Callable[..., Any]): Function whose defining frame may still be
+            active while a decorator wrapper constructs its QKernel.
+
+    Returns:
+        dict[str, Any]: Snapshot of the defining frame's locals, or an empty
+            dictionary when the frame is module-global or no longer active.
+    """
+    code = getattr(func, "__code__", None)
+    if code is None or "." not in code.co_qualname:
+        return {}
+
+    defining_qualname = code.co_qualname.rsplit(".", 1)[0]
+    if defining_qualname.endswith(".<locals>"):
+        defining_qualname = defining_qualname.removesuffix(".<locals>")
+
+    frame = inspect.currentframe()
+    try:
+        frame = frame.f_back if frame is not None else None
+        while frame is not None:
+            if frame.f_code.co_qualname == defining_qualname:
+                if frame.f_locals is func.__globals__:
+                    return {}
+                return dict(frame.f_locals)
+            frame = frame.f_back
+    finally:
+        del frame
+    return {}
+
+
 def qkernel(func: Callable[P, R]) -> QKernel[P, R]:
     """Decorator to define a Qamomile quantum kernel.
 
     Args:
-        func: The function to decorate.
+        func (Callable[P, R]): Function to decorate.
 
     Returns:
-        An instance of QKernel wrapping the function.
+        QKernel[P, R]: QKernel wrapping the function.
     """
-    return QKernel(func)
+    annotation_localns = _defining_local_namespace(func)
+    if not annotation_localns:
+        return QKernel(func)
+
+    had_previous_localns = hasattr(func, _ANNOTATION_LOCALNS_ATTR)
+    previous_localns = getattr(func, _ANNOTATION_LOCALNS_ATTR, {})
+    if isinstance(previous_localns, dict):
+        annotation_localns = {**previous_localns, **annotation_localns}
+    setattr(func, _ANNOTATION_LOCALNS_ATTR, annotation_localns)
+    constructed = False
+    try:
+        kernel = QKernel(func)
+        constructed = True
+    finally:
+        if not constructed:
+            if had_previous_localns:
+                setattr(func, _ANNOTATION_LOCALNS_ATTR, previous_localns)
+            else:
+                func.__dict__.pop(_ANNOTATION_LOCALNS_ATTR, None)
+    return kernel
