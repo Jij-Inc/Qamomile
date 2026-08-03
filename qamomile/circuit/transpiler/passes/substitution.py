@@ -12,25 +12,32 @@ Example:
             SubstitutionRule(source_name="qft", strategy="approximate_k2"),
         ]
     )
-    pass = SubstitutionPass(config)
-    new_block = pass.run(block)
+    substitution_pass = SubstitutionPass(config)
+    new_block = substitution_pass.run(block)
 """
 
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.effect import format_kernel_effects
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.callable import (
     CallableDef,
     CallableRef,
+    CallTransform,
     InvokeOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
+from qamomile.circuit.ir.operation.gate import ControlledUOperation
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
+from qamomile.circuit.ir.operation.operation import Signature
 from qamomile.circuit.ir.operation.select import SelectOperation
+from qamomile.circuit.ir.value import ArrayValue, ValueLike
 from qamomile.circuit.transpiler.errors import ValidationError
 from qamomile.circuit.transpiler.passes import Pass
 
@@ -39,9 +46,117 @@ if TYPE_CHECKING:
 
 
 class SignatureCompatibilityError(Exception):
-    """Error raised when signatures are incompatible during substitution."""
+    """Report an incompatible callable substitution signature.
 
-    pass
+    Example:
+        Correct usage leaves compatible blocks unchanged::
+
+            source = Block()
+            target = Block()
+            compatible, _ = check_signature_compatibility(source, target)
+            assert compatible
+
+        An incompatible replacement raises this error::
+
+            raise SignatureCompatibilityError(
+                "Cannot substitute 'oracle': input count mismatch"
+            )
+    """
+
+
+def _signature_callsite_error(
+    signature: Signature,
+    operands: Sequence[ValueLike],
+    results: Sequence[ValueLike],
+) -> str | None:
+    """Return a declared-signature mismatch at one invocation.
+
+    Args:
+        signature (Signature): Callable definition signature to validate.
+        operands (Sequence[ValueLike]): Actual invocation operands.
+        results (Sequence[ValueLike]): Actual invocation results.
+
+    Returns:
+        str | None: Diagnostic text, or ``None`` when the call site matches.
+    """
+    for role, hints, values in (
+        ("Input", signature.operands, operands),
+        ("Return", signature.results, results),
+    ):
+        if len(hints) != len(values):
+            return (
+                f"{role} count mismatch: signature has {len(hints)}, "
+                f"call site has {len(values)}"
+            )
+        for position, (hint, value) in enumerate(zip(hints, values, strict=True)):
+            if hint is not None and hint.type != value.type:
+                return (
+                    f"{role} type mismatch at position {position}: "
+                    f"signature has {hint.type}, call site has {value.type}"
+                )
+    return None
+
+
+def _shape_compatibility_error(
+    source: ValueLike,
+    target: ValueLike,
+    *,
+    position: int,
+    role: str,
+) -> str | None:
+    """Return an array-shape incompatibility diagnostic when one exists.
+
+    A symbolic target extent can specialize a fixed source extent. A fixed
+    target cannot implement a symbolic source extent because it would only be
+    valid for one of the source callable's accepted shapes.
+
+    Args:
+        source (ValueLike): Value in the source callable contract.
+        target (ValueLike): Value in the replacement callable contract.
+        position (int): Positional index within inputs or results.
+        role (str): Human-readable contract role.
+
+    Returns:
+        str | None: Diagnostic text, or ``None`` when shapes are compatible.
+    """
+    source_is_array = isinstance(source, ArrayValue)
+    target_is_array = isinstance(target, ArrayValue)
+    if source_is_array != target_is_array:
+        return (
+            f"{role} shape mismatch at position {position}: "
+            f"source is {'an array' if source_is_array else 'a scalar'}, "
+            f"target is {'an array' if target_is_array else 'a scalar'}"
+        )
+    if not source_is_array:
+        return None
+
+    assert isinstance(source, ArrayValue)
+    assert isinstance(target, ArrayValue)
+    if len(source.shape) != len(target.shape):
+        return (
+            f"{role} rank mismatch at position {position}: source has rank "
+            f"{len(source.shape)}, target has rank {len(target.shape)}"
+        )
+    for dimension, (source_extent, target_extent) in enumerate(
+        zip(source.shape, target.shape, strict=True)
+    ):
+        source_is_fixed = source_extent.is_constant()
+        target_is_fixed = target_extent.is_constant()
+        if not source_is_fixed and target_is_fixed:
+            return (
+                f"{role} shape mismatch at position {position}, dimension "
+                f"{dimension}: source extent is symbolic but target extent is fixed"
+            )
+        if source_is_fixed and target_is_fixed:
+            source_value = source_extent.get_const()
+            target_value = target_extent.get_const()
+            if source_value != target_value:
+                return (
+                    f"{role} extent mismatch at position {position}, dimension "
+                    f"{dimension}: source has {source_value}, target has "
+                    f"{target_value}"
+                )
+    return None
 
 
 def check_signature_compatibility(
@@ -52,14 +167,23 @@ def check_signature_compatibility(
     """Check signature compatibility between two Blocks.
 
     Args:
-        source: The source Block being replaced
-        target: The target Block to replace with
-        strict: If True, require exact type matches
+        source (Block): Source callable contract.
+        target (Block): Replacement callable contract.
+        strict (bool): Whether types must match exactly. The current IR only
+            supports exact type compatibility. Defaults to ``True``.
 
     Returns:
-        Tuple of (is_compatible, error_message).
-        If compatible, error_message is None.
+        tuple[bool, str | None]: Compatibility flag and optional diagnostic.
+
+    Raises:
+        ValueError: If ``strict`` is not ``True`` because non-strict
+            compatibility is unsupported.
     """
+    if strict is not True:
+        raise ValueError(
+            "check_signature_compatibility() only supports strict=True; "
+            "non-strict compatibility is undefined"
+        )
     # Check input count
     if len(source.input_values) != len(target.input_values):
         return False, (
@@ -101,12 +225,14 @@ def check_signature_compatibility(
 class SubstitutionRule:
     """A single substitution rule.
 
-    Attributes:
-        source_name: Name of the target to replace (block name or gate name)
-        target: Replacement Block or QKernel (for inline callables)
-        strategy: Strategy name (for callable/composite operations)
-        validate_signature: If True, validate signature compatibility when
-            replacing blocks. Default is True.
+    Args:
+        source_name (str): Target block or callable name.
+        target (Block | QKernel | None): Replacement body. Defaults to
+            ``None``.
+        strategy (str | None): Callable lowering strategy. Defaults to
+            ``None``.
+        validate_signature (bool): Whether to validate replacement signatures.
+            Defaults to ``True``.
     """
 
     source_name: str
@@ -115,7 +241,11 @@ class SubstitutionRule:
     validate_signature: bool = True
 
     def __post_init__(self) -> None:
-        """Validate rule configuration."""
+        """Validate the rule configuration.
+
+        Raises:
+            ValueError: If neither a target nor a strategy is supplied.
+        """
         if self.target is None and self.strategy is None:
             raise ValueError(
                 f"SubstitutionRule for '{self.source_name}' must specify "
@@ -127,8 +257,9 @@ class SubstitutionRule:
 class SubstitutionConfig:
     """Configuration for the substitution pass.
 
-    Attributes:
-        rules: List of substitution rules to apply
+    Args:
+        rules (list[SubstitutionRule]): Rules to apply. Defaults to an empty
+            list.
     """
 
     rules: list[SubstitutionRule] = field(default_factory=list)
@@ -137,10 +268,10 @@ class SubstitutionConfig:
         """Find a rule matching the given name.
 
         Args:
-            name: Name to look up
+            name (str): Name to look up.
 
         Returns:
-            Matching SubstitutionRule or None
+            SubstitutionRule | None: Matching rule, or ``None``.
         """
         for rule in self.rules:
             if rule.source_name == name:
@@ -149,124 +280,302 @@ class SubstitutionConfig:
 
 
 class SubstitutionPass(Pass[Block, Block]):
-    """Pass that substitutes call operations and callable strategies.
+    """Apply Configure rules and exact per-call opaque replacements.
 
-    This pass traverses the block and applies substitution rules:
-    - For inline InvokeOperation: replaces the callable body with the target
-    - For boxed InvokeOperation: sets the strategy field
+    Configure keeps its display-name-first behavior. ``oracle_bindings`` is a
+    stricter, internal extension of the same pass: it matches the callable
+    definition name, accepts only resource-only opaque definitions, preserves
+    their identity, and takes precedence over a Configure body replacement.
 
-    The pass preserves the block structure and only modifies matching operations.
-
-    Input: Block (any kind)
-    Output: Block with substitutions applied (same kind as input)
+    Args:
+        config (SubstitutionConfig): Persistent Configure rules.
+        oracle_bindings (Mapping[str, Block] | None): Validated per-call
+            opaque replacements. Defaults to ``None``.
     """
 
-    def __init__(self, config: SubstitutionConfig) -> None:
-        """Initialize the pass with configuration.
+    def __init__(
+        self,
+        config: SubstitutionConfig,
+        *,
+        oracle_bindings: Mapping[str, Block] | None = None,
+    ) -> None:
+        """Initialize the pass.
 
         Args:
-            config: Substitution configuration with rules
+            config (SubstitutionConfig): Persistent Configure rules.
+            oracle_bindings (Mapping[str, Block] | None): Validated opaque
+                definition-name replacements. Defaults to ``None``.
         """
         self._config = config
-        self._rules_by_name: dict[str, SubstitutionRule] = {
-            rule.source_name: rule for rule in config.rules
-        }
+        self._rules_by_name = {rule.source_name: rule for rule in config.rules}
+        self._oracle_bindings = dict(oracle_bindings or {})
+        self._reset_state()
+
+    def _reset_state(self) -> None:
+        """Reset graph traversal state before one pass invocation."""
+        self._matched_bindings: set[str] = set()
+        self._block_cache: dict[tuple[int, bool, bool], Block] = {}
+        self._definition_cache: dict[tuple[int, bool], CallableDef] = {}
+        self._active_bindings: list[str] = []
+        self._active_replacement_blocks: dict[int, str] = {}
+        self._active_block_keys: list[tuple[int, bool, bool]] = []
 
     @property
     def name(self) -> str:
-        """Return pass name."""
+        """Return the pass name.
+
+        Returns:
+            str: Stable pass name.
+        """
         return "substitution"
 
     def run(self, input: Block) -> Block:
-        """Apply substitutions to the block.
+        """Apply configured substitutions and opaque bindings.
 
         Args:
-            input: Block to transform
+            input (Block): Traced or hierarchical source block.
 
         Returns:
-            Block with substitutions applied
-        """
-        if input.kind not in (BlockKind.HIERARCHICAL,):
-            raise ValidationError(
-                f"SubstitutionPass expects HIERARCHICAL block, got {input.kind}",
-            )
+            Block: Non-destructively transformed block graph.
 
-        if not self._config.rules:
-            # No rules, return input unchanged
+        Raises:
+            ValidationError: If the block is at an unsupported pipeline stage.
+            ValueError: If an opaque binding is unused, targets an unsupported
+                callable, or forms a cyclic implementation dependency.
+            SignatureCompatibilityError: If a configured replacement body is
+                incompatible with its source callable.
+        """
+        allowed_kinds = {BlockKind.HIERARCHICAL}
+        if self._oracle_bindings:
+            allowed_kinds.add(BlockKind.TRACED)
+        if input.kind not in allowed_kinds:
+            expected = "HIERARCHICAL"
+            if self._oracle_bindings:
+                expected += " or TRACED"
+            raise ValidationError(
+                f"SubstitutionPass expects a {expected} block, got {input.kind}",
+            )
+        if not self._config.rules and not self._oracle_bindings:
             return input
 
-        # Transform operations
-        transformed_ops = self._transform_operations(input.operations)
+        self._reset_state()
+        transformed = self._transform_block(input, apply_rules=True)
+        unused = self._oracle_bindings.keys() - self._matched_bindings
+        if unused:
+            names = ", ".join(repr(name) for name in sorted(unused))
+            raise ValueError(
+                "oracle_bindings keys must match direct or controlled "
+                "resource-only opaque definition names; no match found for "
+                f"{names}"
+            )
+        return transformed
 
-        return Block(
-            name=input.name,
-            label_args=input.label_args,
-            input_values=input.input_values,
-            output_values=input.output_values,
-            operations=transformed_ops,
-            kind=input.kind,
-            parameters=input.parameters,
-            param_slots=input.param_slots,
-        )
+    def _transform_block(
+        self,
+        block: Block,
+        *,
+        apply_rules: bool,
+        inside_inverse: bool = False,
+    ) -> Block:
+        """Clone and transform one source block.
+
+        Args:
+            block (Block): Source block.
+            apply_rules (bool): Whether Configure rules apply in this region.
+            inside_inverse (bool): Whether the block belongs to an
+                ``InverseBlockOperation``. Defaults to ``False``.
+
+        Returns:
+            Block: Cached transformed block.
+        """
+        key = (id(block), apply_rules, inside_inverse)
+        cached = self._block_cache.get(key)
+        if cached is not None:
+            return cached
+        transformed = dataclasses.replace(block, operations=[])
+        self._block_cache[key] = transformed
+        self._active_block_keys.append(key)
+        try:
+            transformed.operations = self._transform_operations(
+                block.operations,
+                apply_rules=apply_rules,
+                inside_inverse=inside_inverse,
+            )
+        finally:
+            self._active_block_keys.pop()
+        return transformed
 
     def _transform_operations(
         self,
         operations: list[Operation],
+        *,
+        apply_rules: bool,
+        inside_inverse: bool = False,
     ) -> list[Operation]:
-        """Transform a list of operations, applying substitutions.
+        """Transform one operation sequence.
 
         Args:
-            operations: Operations to transform
+            operations (list[Operation]): Operations to transform.
+            apply_rules (bool): Whether Configure rules apply in this region.
+            inside_inverse (bool): Whether the sequence belongs to an
+                ``InverseBlockOperation``. Defaults to ``False``.
 
         Returns:
-            Transformed operations
+            list[Operation]: Transformed operations.
         """
-        result: list[Operation] = []
+        return [
+            self._transform_operation(
+                operation,
+                apply_rules=apply_rules,
+                inside_inverse=inside_inverse,
+            )
+            for operation in operations
+        ]
 
-        for op in operations:
-            transformed = self._transform_operation(op)
-            result.append(transformed)
-
-        return result
-
-    def _transform_operation(self, op: Operation) -> Operation:
-        """Transform a single operation.
+    def _transform_operation(
+        self,
+        op: Operation,
+        *,
+        apply_rules: bool,
+        inside_inverse: bool = False,
+    ) -> Operation:
+        """Transform one operation and its source-owned regions.
 
         Args:
-            op: Operation to transform
+            op (Operation): Operation to transform.
+            apply_rules (bool): Whether Configure rules apply in this region.
+            inside_inverse (bool): Whether the operation belongs to an
+                ``InverseBlockOperation``. Defaults to ``False``.
 
         Returns:
-            Transformed operation (may be the same object if no changes)
+            Operation: Transformed operation.
         """
         if isinstance(op, InvokeOperation):
-            return self._transform_invoke(op)
-
+            return self._transform_invoke(
+                op,
+                apply_rules=apply_rules,
+                inside_inverse=inside_inverse,
+            )
+        if self._oracle_bindings and isinstance(op, InverseBlockOperation):
+            return dataclasses.replace(
+                op,
+                source_block=(
+                    self._transform_block(
+                        op.source_block,
+                        apply_rules=False,
+                        inside_inverse=True,
+                    )
+                    if op.source_block is not None
+                    else None
+                ),
+                implementation_block=(
+                    self._transform_block(
+                        op.implementation_block,
+                        apply_rules=False,
+                        inside_inverse=True,
+                    )
+                    if op.implementation_block is not None
+                    else None
+                ),
+            )
+        if self._oracle_bindings and isinstance(op, ControlledUOperation):
+            return dataclasses.replace(
+                op,
+                block=(
+                    self._transform_block(
+                        op.block,
+                        apply_rules=False,
+                        inside_inverse=inside_inverse,
+                    )
+                    if op.block is not None
+                    else None
+                ),
+            )
         if isinstance(op, SelectOperation):
             return dataclasses.replace(
                 op,
                 case_blocks=[
-                    dataclasses.replace(
+                    self._transform_block(
                         case_block,
-                        operations=self._transform_operations(case_block.operations),
+                        apply_rules=apply_rules,
+                        inside_inverse=inside_inverse,
                     )
                     for case_block in op.case_blocks
                 ],
             )
-
         if isinstance(op, HasNestedOps):
             new_regions = tuple(
                 dataclasses.replace(
                     region,
                     operations=tuple(
-                        self._transform_operations(list(region.operations))
+                        self._transform_operations(
+                            list(region.operations),
+                            apply_rules=apply_rules,
+                            inside_inverse=inside_inverse,
+                        )
                     ),
                 )
                 for region in op.nested_regions()
             )
             return op.rebuild_regions(new_regions)
 
-        # Other operations pass through unchanged
         return op
+
+    def _transform_definition(
+        self,
+        definition: CallableDef,
+        *,
+        inside_inverse: bool,
+    ) -> CallableDef:
+        """Clone a source callable definition and bind its reachable bodies.
+
+        Configure rules do not enter existing definition bodies, preserving
+        the behavior of the pass before per-call bindings were introduced.
+
+        Args:
+            definition (CallableDef): Definition to transform.
+            inside_inverse (bool): Whether the definition is reached through
+                an ``InverseBlockOperation``.
+
+        Returns:
+            CallableDef: Cached transformed definition.
+        """
+        key = (id(definition), inside_inverse)
+        cached = self._definition_cache.get(key)
+        if cached is not None:
+            return cached
+        transformed = dataclasses.replace(
+            definition,
+            body=None,
+            implementations=[],
+            attrs=dict(definition.attrs),
+        )
+        self._definition_cache[key] = transformed
+        transformed.body = (
+            self._transform_block(
+                definition.body,
+                apply_rules=False,
+                inside_inverse=inside_inverse,
+            )
+            if definition.body is not None
+            else None
+        )
+        transformed.implementations = [
+            dataclasses.replace(
+                implementation,
+                body=(
+                    self._transform_block(
+                        implementation.body,
+                        apply_rules=False,
+                        inside_inverse=inside_inverse,
+                    )
+                    if implementation.body is not None
+                    else None
+                ),
+            )
+            for implementation in definition.implementations
+        ]
+        return transformed
 
     @staticmethod
     def _replacement_block(rule: SubstitutionRule) -> Block | None:
@@ -276,8 +585,7 @@ class SubstitutionPass(Pass[Block, Block]):
             rule (SubstitutionRule): Rule to resolve.
 
         Returns:
-            Block | None: Replacement block, or ``None`` when the rule has no
-            block target.
+            Block | None: Replacement block, or ``None`` when absent.
         """
         from qamomile.circuit.frontend.qkernel import QKernel
 
@@ -290,43 +598,63 @@ class SubstitutionPass(Pass[Block, Block]):
     def _transform_invoke(
         self,
         op: InvokeOperation,
+        *,
+        apply_rules: bool,
+        inside_inverse: bool = False,
     ) -> InvokeOperation:
-        """Transform an InvokeOperation.
+        """Transform one invocation.
 
         Args:
-            op (InvokeOperation): Operation to transform.
+            op (InvokeOperation): Invocation to transform.
+            apply_rules (bool): Whether Configure rules apply here.
+            inside_inverse (bool): Whether the invocation belongs to an
+                ``InverseBlockOperation``. Defaults to ``False``.
 
         Returns:
-            InvokeOperation: Transformed operation.
-        """
-        gate_names = [
-            str(op.attrs.get("custom_name", "")),
-            op.target.name,
-        ]
-        rule = next(
-            (
-                self._rules_by_name[name]
-                for name in gate_names
-                if name in self._rules_by_name
-            ),
-            None,
-        )
-        if rule is None:
-            return op
+            InvokeOperation: Transformed invocation.
 
-        replacement = self._replacement_block(rule)
-        if replacement is not None:
+        Raises:
+            ValueError: If an exact binding targets an unsupported callable or
+                forms a cyclic implementation dependency.
+            SignatureCompatibilityError: If a replacement signature differs.
+        """
+        has_oracle_binding = (
+            op.target.name in self._oracle_bindings and self._is_oracle_invocation(op)
+        )
+        rule = self._rule_for(op) if apply_rules or has_oracle_binding else None
+        if has_oracle_binding:
+            if inside_inverse:
+                raise ValueError(
+                    f"oracle_bindings[{op.target.name!r}] cannot bind an opaque "
+                    "Oracle reached through qmc.inverse(): late-bound bodies "
+                    "cannot update both the InverseBlockOperation source and "
+                    "its pre-generated fallback implementation consistently. "
+                    "Use a qkernel implementation that is available before "
+                    "qmc.inverse() instead."
+                )
+            replacement = self._oracle_bindings[op.target.name]
+            return self._bind_opaque(op, replacement, rule)
+
+        configured_replacement = self._replacement_block(rule) if rule else None
+        if configured_replacement is not None:
+            assert rule is not None
+            replacement = configured_replacement
+            if self._oracle_bindings:
+                replacement = self._transform_block(
+                    replacement,
+                    apply_rules=False,
+                    inside_inverse=inside_inverse,
+                )
             current_body = op.effective_body()
             if isinstance(current_body, Block) and rule.validate_signature:
-                is_compatible, error_msg = check_signature_compatibility(
+                compatible, error = check_signature_compatibility(
                     current_body,
                     replacement,
                 )
-                if not is_compatible:
+                if not compatible:
                     raise SignatureCompatibilityError(
-                        f"Cannot substitute '{op.target.name}': {error_msg}"
+                        f"Cannot substitute '{op.target.name}': {error}"
                     )
-
             new_ref = op.target
             if replacement.name:
                 new_ref = CallableRef(
@@ -335,32 +663,245 @@ class SubstitutionPass(Pass[Block, Block]):
                     version=op.target.version,
                 )
             definition = op.definition or CallableDef(ref=new_ref)
-            new_definition = dataclasses.replace(
-                definition,
-                ref=new_ref,
-                body=replacement,
-            )
             return dataclasses.replace(
                 op,
                 target=new_ref,
-                definition=new_definition,
+                definition=dataclasses.replace(
+                    definition,
+                    ref=new_ref,
+                    body=replacement,
+                    opaque_cost=None,
+                ),
             )
 
-        if rule.strategy is None:
+        if not self._oracle_bindings and (rule is None or rule.strategy is None):
             return op
 
-        attrs = dict(op.attrs)
-        attrs["strategy_name"] = rule.strategy
         definition = op.definition or CallableDef(ref=op.target)
-        new_definition = dataclasses.replace(
+        transformed_definition = (
+            self._transform_definition(
+                definition,
+                inside_inverse=inside_inverse,
+            )
+            if self._oracle_bindings
+            else definition
+        )
+        transformed = dataclasses.replace(op, definition=transformed_definition)
+        if rule is None or rule.strategy is None:
+            return transformed
+
+        attrs = {**transformed.attrs, "strategy_name": rule.strategy}
+        return dataclasses.replace(
+            transformed,
+            attrs=attrs,
+            definition=dataclasses.replace(
+                transformed_definition,
+                attrs={**transformed_definition.attrs, **attrs},
+            ),
+        )
+
+    @staticmethod
+    def _is_oracle_invocation(op: InvokeOperation) -> bool:
+        """Return whether an invocation carries the Oracle callable contract.
+
+        Definition names are not globally unique across callable namespaces.
+        A qkernel or composite may therefore share its short name with an
+        Oracle. Per-call Oracle bindings ignore those unrelated invocations
+        and select only calls whose serialized callable metadata identifies
+        them as Oracles.
+
+        Args:
+            op (InvokeOperation): Invocation being considered for binding.
+
+        Returns:
+            bool: ``True`` when the invocation uses the canonical Oracle
+                namespace and declares ``kind="oracle"``.
+        """
+        definition_kind = (
+            op.definition.attrs.get("kind") if op.definition is not None else None
+        )
+        return (
+            op.target.namespace == "user.oracle"
+            and op.attrs.get("kind", definition_kind) == "oracle"
+        )
+
+    def _bind_opaque(
+        self,
+        op: InvokeOperation,
+        replacement: Block,
+        rule: SubstitutionRule | None,
+    ) -> InvokeOperation:
+        """Attach a direct body to one resource-only opaque invocation.
+
+        Args:
+            op (InvokeOperation): Matching opaque invocation.
+            replacement (Block): Direct implementation body.
+            rule (SubstitutionRule | None): Selected Configure rule, if any.
+
+        Returns:
+            InvokeOperation: Invocation with the supplied body.
+
+        Raises:
+            ValueError: If the invocation is not a direct or controlled
+                resource-only opaque callable.
+            ValidationError: If the body signature is incompatible or the
+                implementation has non-unitary effects.
+        """
+        definition = op.definition
+        definition_kind = definition.attrs.get("kind") if definition else None
+        kind = op.attrs.get("kind", definition_kind)
+        resource_only = (
+            definition is not None
+            and kind == "oracle"
+            and definition.body is None
+            and definition.body_ref is None
+            and not definition.implementations
+        )
+        if not resource_only or op.transform not in {
+            CallTransform.DIRECT,
+            CallTransform.CONTROLLED,
+        }:
+            raise ValueError(
+                f"oracle_bindings[{op.target.name!r}] can only replace a "
+                "direct or controlled resource-only opaque definition"
+            )
+
+        assert definition is not None
+        self._validate_oracle_signature(op, replacement)
+        replacement = self._transform_binding_body(op.target.name, replacement)
+        if not replacement.effects.is_unitary:
+            raise ValidationError(
+                f"Cannot bind opaque oracle {op.target.name!r}: implementation "
+                "has non-unitary kernel effects "
+                f"[{format_kernel_effects(replacement.effects)}]; opaque oracle "
+                "implementations must be unitary"
+            )
+        self._matched_bindings.add(op.target.name)
+        attrs = dict(op.attrs)
+        if rule is not None and rule.strategy is not None:
+            attrs["strategy_name"] = rule.strategy
+        bound_definition = dataclasses.replace(
             definition,
+            body=replacement,
+            body_ref=None,
+            opaque_cost=None,
             attrs={**definition.attrs, **attrs},
         )
-        return dataclasses.replace(
-            op,
-            attrs=attrs,
-            definition=new_definition,
+        return dataclasses.replace(op, attrs=attrs, definition=bound_definition)
+
+    def _transform_binding_body(self, name: str, replacement: Block) -> Block:
+        """Bind opaque calls inside one supplied implementation body.
+
+        Args:
+            name (str): Binding key whose implementation is being expanded.
+            replacement (Block): Supplied implementation body.
+
+        Returns:
+            Block: Non-destructively transformed implementation body.
+
+        Raises:
+            ValueError: If implementation bindings form a direct or indirect
+                dependency cycle.
+        """
+        if name in self._active_bindings:
+            start = self._active_bindings.index(name)
+            cycle = [*self._active_bindings[start:], name]
+            raise ValueError("Cyclic oracle bindings detected: " + " -> ".join(cycle))
+
+        active_owner = self._active_replacement_blocks.get(id(replacement))
+        if active_owner is not None:
+            start = self._active_bindings.index(active_owner)
+            cycle = [*self._active_bindings[start:], name, active_owner]
+            raise ValueError("Cyclic oracle bindings detected: " + " -> ".join(cycle))
+        if (id(replacement), False, False) in self._active_block_keys:
+            raise ValueError(
+                f"Cyclic oracle binding detected for {name!r}: its implementation "
+                "re-enters an active source or configured replacement block"
+            )
+
+        self._active_bindings.append(name)
+        self._active_replacement_blocks[id(replacement)] = name
+        try:
+            return self._transform_block(replacement, apply_rules=False)
+        finally:
+            self._active_replacement_blocks.pop(id(replacement))
+            self._active_bindings.pop()
+
+    def _rule_for(self, op: InvokeOperation) -> SubstitutionRule | None:
+        """Return the Configure rule selected for an invocation.
+
+        Args:
+            op (InvokeOperation): Invocation to match.
+
+        Returns:
+            SubstitutionRule | None: Display-name-first matching rule.
+        """
+        names = (str(op.attrs.get("custom_name", "")), op.target.name)
+        return next(
+            (
+                self._rules_by_name[name]
+                for name in names
+                if name in self._rules_by_name
+            ),
+            None,
         )
+
+    @staticmethod
+    def _validate_oracle_signature(op: InvokeOperation, replacement: Block) -> None:
+        """Validate an oracle declaration and its direct implementation.
+
+        Explicit controls are excluded because the existing controlled-call
+        path synthesizes them around the supplied direct implementation.
+
+        Args:
+            op (InvokeOperation): Opaque invocation being bound.
+            replacement (Block): Direct implementation body.
+
+        Raises:
+            ValidationError: If arity, types, or array shapes are incompatible.
+        """
+        definition = op.definition
+        if definition is not None and definition.signature is not None:
+            declaration_error = _signature_callsite_error(
+                definition.signature,
+                op.operands,
+                op.results,
+            )
+            if declaration_error is not None:
+                raise ValidationError(
+                    f"Cannot bind opaque oracle {op.target.name!r}: declared "
+                    f"callable signature disagrees with the call site: "
+                    f"{declaration_error}"
+                )
+
+        control_count = op.num_control_qubits
+        source = Block(
+            name=op.target.name,
+            input_values=list(op.operands[control_count:]),
+            output_values=list(op.results[control_count:]),
+        )
+        compatible, error = check_signature_compatibility(source, replacement)
+        if not compatible:
+            raise ValidationError(
+                f"Cannot bind opaque oracle {op.target.name!r}: {error}"
+            )
+        for role, source_values, target_values in (
+            ("Input", source.input_values, replacement.input_values),
+            ("Return", source.output_values, replacement.output_values),
+        ):
+            for position, (source_value, target_value) in enumerate(
+                zip(source_values, target_values, strict=True)
+            ):
+                error = _shape_compatibility_error(
+                    source_value,
+                    target_value,
+                    position=position,
+                    role=role,
+                )
+                if error is not None:
+                    raise ValidationError(
+                        f"Cannot bind opaque oracle {op.target.name!r}: {error}"
+                    )
 
 
 def create_substitution_pass(
@@ -369,19 +910,21 @@ def create_substitution_pass(
     strategy_overrides: dict[str, str] | None = None,
     validate_signatures: bool = True,
 ) -> SubstitutionPass:
-    """Convenience factory for creating a SubstitutionPass.
+    """Create a substitution pass from replacement mappings.
 
     Args:
-        block_replacements: Map of block name to replacement
-        strategy_overrides: Map of gate name to strategy name
-        validate_signatures: If True, validate signature compatibility
+        block_replacements (dict[str, Block | QKernel] | None): Block names
+            mapped to replacement bodies. Defaults to ``None``.
+        strategy_overrides (dict[str, str] | None): Callable names mapped to
+            strategy names. Defaults to ``None``.
+        validate_signatures (bool): Whether to validate signature compatibility
             when replacing blocks. Default is True.
 
     Returns:
-        Configured SubstitutionPass
+        SubstitutionPass: Configured substitution pass.
 
     Example:
-        pass = create_substitution_pass(
+        substitution_pass = create_substitution_pass(
             block_replacements={"my_oracle": optimized_oracle},
             strategy_overrides={"qft": "approximate_k2", "iqft": "approximate_k2"},
         )

@@ -270,6 +270,60 @@ print("total gates:", est.gates.total)
 assert est.gates.total == 3
 
 # %% [markdown]
+# ### トランスパイル時に実装を指定する
+#
+# 実装の開発中は、同じ不透明なアルゴリズム骨格を維持できます。ユニタリな実装が利用可能になったら`oracle_bindings`で指定します。各keyには`qmc.Oracle(name=...)`で宣言した定義名を完全一致で指定し、その実装はそのトランスパイルまたはリソース推定にだけ適用されます。
+
+
+# %%
+@qmc.qkernel
+def oracle_implementation(
+    q0: qmc.Qubit,
+    q1: qmc.Qubit,
+    q2: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
+    q0 = qmc.x(q0)
+    q1 = qmc.x(q1)
+    q2 = qmc.x(q2)
+    return q0, q1, q2
+
+
+@qmc.qkernel
+def executable_oracle_sample() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(3, name="q")
+    q[0], q[1], q[2] = oracle_box(q[0], q[1], q[2])
+    return qmc.measure(q)
+
+
+# %%
+implemented_est = algorithm_skeleton.estimate_resources(
+    oracle_bindings={"oracle": oracle_implementation},
+).simplify()
+print("total gates with implementation:", implemented_est.gates.total)
+assert implemented_est.gates.total == 6
+assert implemented_est.calls.oracle_calls == {}
+
+# %%
+implemented_executable = transpiler.transpile(
+    executable_oracle_sample,
+    oracle_bindings={"oracle": oracle_implementation},
+)
+implemented_circuit = implemented_executable.get_first_circuit()
+assert implemented_circuit is not None
+print(implemented_circuit.draw())
+assert implemented_circuit.num_qubits == 3
+implemented_result = implemented_executable.sample(
+    transpiler.executor(),
+    shots=16,
+).result()
+assert implemented_result.shots == 16
+assert sum(count for _, count in implemented_result.results) == 16
+assert all(outcome == (1, 1, 1) for outcome, _ in implemented_result.results)
+
+# %% [markdown]
+# 元の不透明オラクルとtranspiler設定は変更されません。bindingする実装はユニタリである必要があり、同じ直接実装が通常の制御呼び出しにも使われます。生成された逆演算は自動ではbindingされません。
+
+# %% [markdown]
 # 次に、通常ゲートと複数の不透明オラクルを混在させたqkernelで確認します。
 
 
@@ -353,7 +407,7 @@ assert oracle_est_4.calls.oracle_queries == {"oracle": 5, "mixing": 4}
 # - ヘルパー`@qkernel`：ある量子カーネルから別の量子カーネルを呼び出してコードを再利用できます。トランスパイラがインライン展開し、結果はフラットな回路になります。
 # - `qmc.struct`：関連する量子ハンドルをトレース時のrecordにまとめ、更新後のstructを明示的に返すことで長いタプルを避けられます。
 # - `@composite_gate`：量子カーネルに名前付きの識別子を与え、図で一つのゲートとして可視化します。`@qkernel`の上に`@composite_gate`デコレータを重ねて書きます。
-# - **不透明オラクル**：`qmc.Oracle`により、実装なしでトップダウン設計ができます。
+# - **不透明オラクル**：`qmc.Oracle`により、実装なしでトップダウン設計ができます。後から呼び出しごとの`oracle_bindings`で具体的な実装を指定できます。
 # - `est.calls.oracle_calls`：`UnknownResourcePolicy.OPAQUE_CALL`を使うと、名前別の呼び出し回数を確認できます。
 #
 # 制御ゲート（`qmc.control`）については[チュートリアル04 — 制御ゲート](04_controlled_gates.ipynb)を参照してください。

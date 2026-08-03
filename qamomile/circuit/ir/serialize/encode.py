@@ -124,13 +124,47 @@ class _EncodeContext:
     more than one semantic body in a surrounding module.
     """
 
-    def __init__(self) -> None:
-        """Initialize an empty encode context."""
+    def __init__(
+        self,
+        opaque_cost_encoder: Callable[[Any, str], Any] | None = None,
+    ) -> None:
+        """Initialize an empty encode context.
+
+        Args:
+            opaque_cost_encoder (Callable[[Any, str], Any] | None): Optional
+                serialization-boundary codec for opaque resource costs. The
+                callback receives the cost object and callable name. Defaults
+                to ``None``, which rejects non-``None`` opaque costs.
+        """
         self.value_table_dicts: list[dict[str, Any]] = []
         self._seen_uuids: set[str] = set()
         self._values_by_uuid: dict[str, ValueBase] = {}
         self._definition_ids: dict[int, str] = {}
         self._definitions: list[CallableDef] = []
+        self._opaque_cost_encoder = opaque_cost_encoder
+
+    def encode_opaque_cost(self, cost: Any, callable_name: str) -> Any:
+        """Encode an opaque cost through the configured boundary codec.
+
+        Args:
+            cost (Any): Opaque cost object attached to a callable definition.
+            callable_name (str): Callable name used by codec diagnostics.
+
+        Returns:
+            Any: Closed payload representation, or ``None`` when no cost is
+                attached.
+
+        Raises:
+            TypeError: If a cost is present without a boundary codec.
+        """
+        if cost is None:
+            return None
+        if self._opaque_cost_encoder is None:
+            raise TypeError(
+                "Opaque callable costs require the qkernel serialization "
+                "boundary codec."
+            )
+        return _encode_payload(self._opaque_cost_encoder(cost, callable_name))
 
     def register_value(self, v: ValueBase) -> str:
         """Record ``v`` in the value table if not already present.
@@ -1768,6 +1802,10 @@ def _encode_callable_def(
             _encode_callable_implementation(impl, ctx)
             for impl in definition.implementations
         ],
+        "opaque_cost": ctx.encode_opaque_cost(
+            definition.opaque_cost,
+            definition.ref.name,
+        ),
         "default_policy": definition.default_policy.name,
         "attrs": _encode_payload(definition.attrs),
     }

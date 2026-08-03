@@ -25,6 +25,7 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.value import Value
+from qamomile.circuit.serialization import deserialize, serialize
 from qamomile.circuit.transpiler.passes.separate import lower_operations
 
 
@@ -122,6 +123,95 @@ def builtin_qpe(n: int, phase: float) -> qmc.Float:
     target = qmc.x(target)
     phase_q: qmc.QFixed = qmc.qpe(target, q_phase, _p_gate, theta=phase)
     return qmc.measure(phase_q)
+
+
+_QPE_PHASE_ORACLE = qmc.opaque(
+    "qpe_phase_oracle",
+    num_qubits=1,
+    cost=qmc.ResourceEstimate(
+        gates=qmc.GateResources(total=1),
+        calls=qmc.CallResources(queries_by_name={"qpe_phase_oracle": 1}),
+    ),
+)
+_QPE_VECTOR_ORACLE = qmc.opaque(
+    "qpe_vector_oracle",
+    signature=qmc.CallableSignature(
+        inputs=[qmc.Vector[qmc.Qubit]],
+        outputs=[qmc.Vector[qmc.Qubit]],
+    ),
+)
+
+
+@qmc.qkernel
+def _qpe_z_implementation(q: qmc.Qubit) -> qmc.Qubit:
+    """Implement the QPE test oracle with eigenphase one half."""
+    return qmc.z(q)
+
+
+@qmc.qkernel
+def _qpe_identity_implementation(q: qmc.Qubit) -> qmc.Qubit:
+    """Implement the QPE test oracle with eigenphase zero."""
+    return q
+
+
+@qmc.qkernel
+def _qpe_vector_implementation(
+    qubits: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Implement a joint vector Oracle with eigenphase one half."""
+    qubits[0] = qmc.z(qubits[0])
+    return qubits
+
+
+@qmc.qkernel
+def oracle_qpe(n: qmc.UInt) -> qmc.Float:
+    """Run QPE by passing an opaque oracle directly.
+
+    Args:
+        n (qmc.UInt): Number of counting qubits.
+
+    Returns:
+        qmc.Float: Measured fixed-point phase estimate.
+    """
+    counting = qmc.qubit_array(n, name="phase_reg")
+    target = qmc.x(qmc.qubit(name="target"))
+    phase = qmc.qpe(target, counting, _QPE_PHASE_ORACLE)
+    return qmc.measure(phase)
+
+
+@qmc.qkernel
+def oracle_vector_qpe() -> qmc.Float:
+    """Run QPE with a vector-signature opaque Oracle.
+
+    Returns:
+        qmc.Float: Two-bit phase estimate.
+    """
+    counting = qmc.qubit_array(2, name="phase_reg")
+    target = qmc.qubit_array(2, name="target")
+    target[0] = qmc.x(target[0])
+    phase = qmc.qpe(target, counting, _QPE_VECTOR_ORACLE)
+    return qmc.measure(phase)
+
+
+@qmc.qkernel
+def oracle_qpe_expval(n: qmc.UInt, observable: qmc.Observable) -> qmc.Float:
+    """Execute Oracle-backed QPE before an estimator operation.
+
+    The independent probe makes the analytic expectation exact while the same
+    quantum segment still contains the full Oracle-backed QPE workload.
+
+    Args:
+        n (qmc.UInt): Number of counting qubits.
+        observable (qmc.Observable): One-qubit probe observable.
+
+    Returns:
+        qmc.Float: Probe expectation value after QPE executes.
+    """
+    counting = qmc.qubit_array(n, name="phase_reg")
+    target = qmc.x(qmc.qubit(name="target"))
+    qmc.qpe(target, counting, _QPE_PHASE_ORACLE)
+    probe = qmc.x(qmc.qubit(name="probe"))
+    return qmc.expval(probe, observable)
 
 
 @qmc.qkernel
@@ -477,6 +567,125 @@ class TestQPEBuiltin:
         phases = {value for value, _ in result.results}
         assert phases <= {0.0, 0.5}
         assert phases == {0.0, 0.5}
+
+    def test_qpe_accepts_oracle_and_preserves_its_identity(self):
+        """Direct Oracle input emits powered controlled-U with Oracle metadata."""
+        block = oracle_qpe.build(n=3)
+        controlled_ops = _collect_controlled_u_ops(block.operations)
+
+        assert controlled_ops
+        assert {
+            (op.callable_ref.namespace, op.callable_ref.name)
+            for op in controlled_ops
+            if op.callable_ref is not None
+        } == {("user.oracle", "qpe_phase_oracle")}
+        assert {op.callable_attrs["kind"] for op in controlled_ops} == {"oracle"}
+
+    def test_oracle_qpe_serialization_keeps_late_binding(self, qiskit_transpiler):
+        """A serialized symbolic-width Oracle QPE remains bindable."""
+        payload = serialize(oracle_qpe)
+        restored = deserialize(payload)
+        executable = qiskit_transpiler.transpile(
+            restored,
+            bindings={"n": 3},
+            oracle_bindings={"qpe_phase_oracle": _qpe_z_implementation},
+        )
+        result = executable.sample(qiskit_transpiler.executor(), shots=32).result()
+
+        assert serialize(restored) == payload
+        assert result.shots == 32
+        assert sum(count for _, count in result.results) == 32
+        assert all(
+            np.isclose(value, 0.5, rtol=0.0, atol=1e-8) for value, _ in result.results
+        )
+
+    def test_qpe_accepts_vector_signature_oracle(self, qiskit_transpiler):
+        """The internal vector adapter remains late-bindable and executable."""
+        executable = qiskit_transpiler.transpile(
+            oracle_vector_qpe,
+            oracle_bindings={"qpe_vector_oracle": _qpe_vector_implementation},
+        )
+        result = executable.sample(qiskit_transpiler.executor(), shots=32).result()
+
+        assert result.shots == 32
+        assert sum(count for _, count in result.results) == 32
+        assert all(
+            np.isclose(value, 0.5, rtol=0.0, atol=1e-8) for value, _ in result.results
+        )
+
+    def test_qpe_rejects_oracle_with_explicit_controls(self):
+        """QPE reports its unsupported pre-controlled Oracle contract."""
+        oracle = qmc.opaque(
+            "precontrolled_qpe_oracle",
+            num_qubits=1,
+            num_control_qubits=1,
+        )
+
+        @qmc.qkernel
+        def circuit() -> qmc.Float:
+            counting = qmc.qubit_array(2, "counting")
+            target = qmc.qubit("target")
+            phase = qmc.qpe(target, counting, oracle)
+            return qmc.measure(phase)
+
+        with pytest.raises(ValueError, match="requires an uncontrolled Oracle"):
+            _ = circuit.block
+
+
+@pytest.mark.parametrize("n", [1, 2, 3, 5])
+@pytest.mark.parametrize(
+    ("implementation", "expected_phase"),
+    [
+        pytest.param(_qpe_identity_implementation, 0.0, id="identity"),
+        pytest.param(_qpe_z_implementation, 0.5, id="z"),
+    ],
+)
+def test_oracle_qpe_cross_backend_sampling_and_expval(
+    sdk_transpiler: Any,
+    n: int,
+    implementation: Any,
+    expected_phase: float,
+) -> None:
+    """Oracle-backed QPE executes sampler and estimator paths on every backend.
+
+    Args:
+        sdk_transpiler (Any): Supported SDK transpiler fixture.
+        n (int): Counting-register size, including the one-bit boundary.
+        implementation (Any): Bound identity or Z Oracle implementation.
+        expected_phase (float): Analytic eigenphase for the implementation.
+    """
+    import qamomile.observable as qm_o
+
+    transpiler = sdk_transpiler.transpiler
+    oracle_bindings = {"qpe_phase_oracle": implementation}
+    sample_executable = transpiler.transpile(
+        oracle_qpe,
+        bindings={"n": n},
+        oracle_bindings=oracle_bindings,
+    )
+    sample_result = sample_executable.sample(
+        transpiler.executor(),
+        shots=32,
+    ).result()
+    tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    assert all(
+        np.isclose(
+            value,
+            expected_phase,
+            rtol=0.0,
+            atol=tolerance,
+        )
+        for value, _ in sample_result.results
+    )
+    assert sum(count for _, count in sample_result.results) == 32
+
+    expval_executable = transpiler.transpile(
+        oracle_qpe_expval,
+        bindings={"n": n, "observable": qm_o.Z(0)},
+        oracle_bindings=oracle_bindings,
+    )
+    expval_result = expval_executable.run(transpiler.executor()).result()
+    assert np.isclose(expval_result, -1.0, rtol=0.0, atol=tolerance)
 
 
 class TestQPEFallbackVectorViewPhase:

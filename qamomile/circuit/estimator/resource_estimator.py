@@ -52,6 +52,11 @@ from qamomile.circuit.ir.value import (
     resolve_root_array_index,
 )
 from qamomile.circuit.transpiler.block_parameter_binding import pair_block_operands
+from qamomile.circuit.transpiler.oracle_bindings import (
+    OracleBindings,
+    _apply_oracle_bindings,
+    _normalize_oracle_bindings,
+)
 from qamomile.circuit.transpiler.passes.analyze import (
     build_dependency_graph,
     find_measurement_derived_values,
@@ -1080,6 +1085,7 @@ class ResourceEstimator:
         *,
         inputs: dict[str, Any] | None = None,
         strategies: dict[str, str] | None = None,
+        oracle_bindings: OracleBindings | None = None,
     ) -> ResourceEstimate:
         """Estimate logical resources for a qkernel, block, or operation list.
 
@@ -1091,13 +1097,26 @@ class ResourceEstimator:
                 problem-sized circuit. Defaults to ``None``.
             strategies (dict[str, str] | None): Per-call override merged over
                 estimator-level strategies. Defaults to ``None``.
+            oracle_bindings (OracleBindings | None): Per-call opaque oracle
+                implementations. Keys match callable definition names exactly,
+                not display ``custom_name`` values. Each value is the unitary
+                direct body for a resource-only opaque definition. Direct and
+                controlled calls are supported; generated inverse callables
+                are not bound automatically. Defaults to ``None``.
 
         Returns:
             ResourceEstimate: Logical resource estimate.
 
         Raises:
-            ValueError: If an input name is neither a free symbol nor a declared
-                kernel argument.
+            ValueError: If an input or binding name is invalid, a binding
+                targets an unsupported callable, or oracle implementations
+                form a cycle.
+            TypeError: If an oracle binding key or implementation is invalid,
+                or ``oracle_bindings`` is supplied with a raw operation
+                sequence instead of a hierarchical QKernel or Block.
+            QamomileCompileError: If an implementation signature is
+                incompatible with its oracle or its body has non-unitary
+                effects.
         """
         build_inputs, estimation_inputs = _partition_estimation_inputs(kernel, inputs)
         block_or_ops = self._coerce_input(
@@ -1105,6 +1124,20 @@ class ResourceEstimator:
             build_inputs,
             estimation_inputs,
         )
+        if oracle_bindings is not None:
+            if isinstance(block_or_ops, Block):
+                block_or_ops = _apply_oracle_bindings(
+                    block_or_ops,
+                    oracle_bindings,
+                )
+            elif _normalize_oracle_bindings(oracle_bindings):
+                raise TypeError(
+                    "oracle_bindings requires a QKernel or hierarchical Block; "
+                    "raw operation sequences do not carry callable definitions."
+                )
+            else:
+                # Empty bindings require no callable-definition traversal.
+                pass
         config = dataclasses.replace(
             self.config,
             strategies={**self.config.strategies, **dict(strategies or {})},
@@ -3182,6 +3215,7 @@ def estimate_resources(
     *,
     inputs: dict[str, Any] | None = None,
     strategies: dict[str, str] | None = None,
+    oracle_bindings: OracleBindings | None = None,
     trace: bool = False,
     unknown_policy: UnknownResourcePolicy = UnknownResourcePolicy.ERROR,
     basis: str | GateBasis = GateBasis.LOGICAL,
@@ -3197,6 +3231,12 @@ def estimate_resources(
             Defaults to ``None``.
         strategies (dict[str, str] | None): Strategy overrides by callable
             name. Defaults to ``None``.
+        oracle_bindings (OracleBindings | None): Per-call opaque oracle
+            implementations. Keys match callable definition names exactly,
+            not display ``custom_name`` values. Each value is the unitary
+            direct body for a resource-only opaque definition. Direct and controlled
+            calls are supported; generated inverse callables are not bound
+            automatically. Defaults to ``None``.
         trace (bool): Whether to retain the explanation tree. Defaults to
             ``False``.
         unknown_policy (UnknownResourcePolicy): Unknown callable handling.
@@ -3207,6 +3247,14 @@ def estimate_resources(
 
     Returns:
         ResourceEstimate: Logical resource estimate.
+
+    Raises:
+        TypeError: If an oracle binding is invalid or cannot be applied to the
+            supplied input form.
+        ValueError: If estimator configuration, inputs, or binding names are
+            invalid or target an unsupported callable.
+        QamomileCompileError: If an implementation signature is incompatible
+            with its oracle or its body has non-unitary effects.
 
     Example:
         >>> import qamomile.circuit as qmc
@@ -3221,6 +3269,14 @@ def estimate_resources(
         'n'
         >>> estimate_resources(repeated_h, inputs={"n": 8}).gates.total
         8
+
+        A bodyless oracle can be estimated from its concrete implementation
+        without changing the original qkernel::
+
+            estimate_resources(
+                algorithm,
+                oracle_bindings={"cost_oracle": cost_oracle_impl},
+            )
     """
     estimator = ResourceEstimator(
         strategies=strategies,
@@ -3232,6 +3288,7 @@ def estimate_resources(
     return estimator.estimate(
         kernel,
         inputs=inputs,
+        oracle_bindings=oracle_bindings,
     )
 
 
@@ -3274,7 +3331,7 @@ def _substitute_resource_expr(
     """
     resolved = cast(
         sp.Expr,
-        expression.subs(substitutions, simultaneous=True).doit(),
+        expression.subs(tuple(substitutions.items()), simultaneous=True).doit(),
     )
     if resolved.is_number and resolved.is_negative is True:
         return _ZERO

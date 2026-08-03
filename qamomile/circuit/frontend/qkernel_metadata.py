@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
     from qamomile.circuit.frontend.qkernel import QKernel
+    from qamomile.circuit.frontend.qkernel_like import OracleBindings
 
 
 def extract_return_names(kernel: "QKernel[Any, Any]") -> list[str] | None:
@@ -69,6 +70,7 @@ def estimate_qkernel_resources(
     *,
     inputs: dict[str, Any] | None = None,
     strategies: dict[str, str] | None = None,
+    oracle_bindings: OracleBindings | None = None,
     trace: bool = False,
     unknown_policy: Any = None,
     basis: Any = None,
@@ -82,6 +84,12 @@ def estimate_qkernel_resources(
             the symbolic estimate. Defaults to ``None``.
         strategies (dict[str, str] | None): Callable strategy overrides.
             Defaults to ``None``.
+        oracle_bindings (OracleBindings | None): Per-call opaque oracle
+            implementations. Keys match callable definition names exactly,
+            not display ``custom_name`` values. Each value is the unitary
+            direct body for a resource-only opaque definition. Direct and controlled
+            calls are supported; generated inverse callables are not bound
+            automatically. Defaults to ``None``.
         trace (bool): Whether to retain the explanation tree. Defaults to
             ``False``.
         unknown_policy (Any): Optional ``UnknownResourcePolicy`` override.
@@ -91,6 +99,13 @@ def estimate_qkernel_resources(
 
     Returns:
         ResourceEstimate: Estimated qubit, gate, and parameter resources.
+
+    Raises:
+        TypeError: If an oracle binding key or implementation is invalid.
+        ValueError: If estimator configuration, inputs, or binding names are
+            invalid or target an unsupported callable.
+        QamomileCompileError: If an implementation signature is incompatible
+            with its oracle or its body has non-unitary effects.
     """
     from qamomile.circuit.estimator.resource_estimator import (
         GateBasis,
@@ -102,6 +117,7 @@ def estimate_qkernel_resources(
         kernel,
         inputs=inputs,
         strategies=strategies,
+        oracle_bindings=oracle_bindings,
         trace=trace,
         unknown_policy=unknown_policy or UnknownResourcePolicy.ERROR,
         basis=basis or GateBasis.LOGICAL,

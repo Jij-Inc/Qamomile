@@ -212,6 +212,60 @@ print("total gates:", est.gates.total)
 assert est.gates.total == 3
 
 # %% [markdown]
+# ### Attach an Implementation at Transpile Time
+#
+# Keep the same opaque algorithm skeleton while its implementation is under development. When a unitary implementation becomes available, pass it through `oracle_bindings`. Each key is the exact definition name declared by `qmc.Oracle(name=...)`, and the binding applies only to that transpilation or resource estimate.
+
+
+# %%
+@qmc.qkernel
+def oracle_implementation(
+    q0: qmc.Qubit,
+    q1: qmc.Qubit,
+    q2: qmc.Qubit,
+) -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
+    q0 = qmc.x(q0)
+    q1 = qmc.x(q1)
+    q2 = qmc.x(q2)
+    return q0, q1, q2
+
+
+@qmc.qkernel
+def executable_oracle_sample() -> qmc.Vector[qmc.Bit]:
+    q = qmc.qubit_array(3, name="q")
+    q[0], q[1], q[2] = oracle_box(q[0], q[1], q[2])
+    return qmc.measure(q)
+
+
+# %%
+implemented_est = algorithm_skeleton.estimate_resources(
+    oracle_bindings={"oracle": oracle_implementation},
+).simplify()
+print("total gates with implementation:", implemented_est.gates.total)
+assert implemented_est.gates.total == 6
+assert implemented_est.calls.oracle_calls == {}
+
+# %%
+implemented_executable = transpiler.transpile(
+    executable_oracle_sample,
+    oracle_bindings={"oracle": oracle_implementation},
+)
+implemented_circuit = implemented_executable.get_first_circuit()
+assert implemented_circuit is not None
+print(implemented_circuit.draw())
+assert implemented_circuit.num_qubits == 3
+implemented_result = implemented_executable.sample(
+    transpiler.executor(),
+    shots=16,
+).result()
+assert implemented_result.shots == 16
+assert sum(count for _, count in implemented_result.results) == 16
+assert all(outcome == (1, 1, 1) for outcome, _ in implemented_result.results)
+
+# %% [markdown]
+# The original opaque oracle and transpiler configuration remain unchanged. Bindings must be unitary, and one direct binding also supplies ordinary controlled calls. Generated inverse callables are not bound automatically.
+
+# %% [markdown]
 # Next, we build a qkernel that mixes ordinary gates with multiple opaque oracles.
 
 
@@ -295,7 +349,7 @@ assert oracle_est_4.calls.oracle_queries == {"phase_oracle": 5, "mixing_oracle":
 #   The transpiler inlines the call into a flat circuit.
 # - **`@composite_gate`**: gives a qkernel a named identity visible in
 #   diagrams. Stack `@composite_gate` on top of `@qkernel`.
-# - **Opaque oracle**: `qmc.Oracle` supports top-down design without a full implementation.
+# - **Opaque oracle**: `qmc.Oracle` supports top-down design without a full implementation; attach a concrete body later with per-call `oracle_bindings`.
 # - **`est.calls.oracle_calls`**: with `UnknownResourcePolicy.OPAQUE_CALL`, this reports per-oracle call counts, including symbolic counts.
 #
 # For controlled gates (`qmc.control`), see [Tutorial 04 — Controlled Gates](04_controlled_gates.ipynb).

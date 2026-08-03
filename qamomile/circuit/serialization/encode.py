@@ -48,6 +48,7 @@ from qamomile.circuit.ir.types import ValueType
 from qamomile.circuit.ir.value import ValueBase
 
 from .canonical import canonicalize_graph
+from .resource_estimate import encode_fixed_resource_estimate
 from .schema import QAMOMILE_VERSION
 from .validation import validate_qkernel_ir
 
@@ -114,7 +115,7 @@ def to_dict(kernel: QKernelLike) -> dict[str, Any]:
         raise ValueError("qkernel return annotations do not match Block outputs")
     validate_qkernel_ir(block)
 
-    ctx = _EncodeContext()
+    ctx = _EncodeContext(opaque_cost_encoder=encode_fixed_resource_estimate)
     parameters: list[dict[str, Any]] = []
     slots = {slot.name: slot for slot in block.param_slots}
     formals = dict(zip(block.label_args, block.input_values, strict=True))

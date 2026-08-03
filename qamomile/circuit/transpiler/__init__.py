@@ -107,6 +107,7 @@ from qamomile.circuit.transpiler.artifact import (
 )
 from qamomile.circuit.transpiler.compiler import QamomileCompiler
 from qamomile.circuit.transpiler.config import CompilerConfig, TranspilerConfig
+from qamomile.circuit.transpiler.oracle_bindings import OracleBindings
 from qamomile.circuit.transpiler.prepared import PreparedModule, prepare_module
 from qamomile.circuit.transpiler.target import CompilationTarget
 
@@ -117,6 +118,7 @@ __all__ = [
     "CompiledProgram",
     "CompilerConfig",
     "DiagnosticSeverity",
+    "OracleBindings",
     "PreparedModule",
     "QamomileCompiler",
     "TranspilerConfig",

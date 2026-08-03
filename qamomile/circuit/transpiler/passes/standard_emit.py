@@ -27,6 +27,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CondOp,
     NotOp,
     RuntimeClassicalExpr,
+    UnaryMathOp,
 )
 from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.cast import CastOperation
@@ -79,6 +80,7 @@ from qamomile.circuit.transpiler.passes.emit_support import (
 from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import (
     evaluate_binop,
     evaluate_classical_predicate,
+    evaluate_unary_math,
     handle_cast,
 )
 from qamomile.circuit.transpiler.passes.emit_support.composite_gate_emission import (
@@ -848,6 +850,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 handle_cast(self, op, qubit_map)
             elif isinstance(op, BinOp):
                 evaluate_binop(self, op, bindings)
+            elif isinstance(op, UnaryMathOp):
+                evaluate_unary_math(self, op, bindings)
             elif isinstance(op, DictGetItemOperation):
                 evaluate_dict_getitem(self, op, bindings)
             elif isinstance(op, RuntimeClassicalExpr):

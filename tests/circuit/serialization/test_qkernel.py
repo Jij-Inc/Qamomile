@@ -104,6 +104,21 @@ def _parent(theta: qmc.Float) -> qmc.Bit:
 
 
 @qmc.qkernel
+def _qpe_phase_unitary(q: qmc.Qubit, theta: qmc.Float) -> qmc.Qubit:
+    """Apply the phase unitary used by the serialized QPE program."""
+    return qmc.p(q, theta)
+
+
+@qmc.qkernel
+def _measured_qpe(theta: qmc.Float) -> qmc.Float:
+    """Run and measure an ordinary three-bit phase-estimation program."""
+    counting = qmc.qubit_array(3, "counting")
+    target = qmc.x(qmc.qubit("target"))
+    phase = qmc.qpe(target, counting, _qpe_phase_unitary, theta=theta)
+    return qmc.measure(phase)
+
+
+@qmc.qkernel
 def _phase_identity(q: qmc.Qubit) -> qmc.Qubit:
     """Return one qubit unchanged for global-phase serialization tests."""
     return q
@@ -1025,6 +1040,149 @@ def test_nested_callable_graph_transpiles_after_load() -> None:
     round_tripped = _circuit(restored, parameters=["theta"])
 
     assert original.count_ops() == round_tripped.count_ops()
+
+
+def test_measured_qpe_round_trip_transpiles_after_load() -> None:
+    """A measured QPE preserves its parameterized QFixed operand layout."""
+    payload = serialize(_measured_qpe)
+    restored = deserialize(payload)
+
+    original = _circuit(_measured_qpe, parameters=["theta"])
+    round_tripped = _circuit(restored, parameters=["theta"])
+
+    assert serialize(restored) == payload
+    assert original.num_qubits == round_tripped.num_qubits == 4
+    assert original.count_ops() == round_tripped.count_ops()
+    assert round_tripped.count_ops()["measure"] == 3
+
+
+def test_measured_qpe_rejects_inconsistent_qfixed_operand_layout() -> None:
+    """A measured QPE operand must match the operation's fixed-point layout."""
+    message = _message(_measured_qpe)
+    measure = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.MEASURE_QFIXED_OPERATION
+    )
+    operand = next(
+        value for value in message.value_table if value.uuid == measure.operand_refs[0]
+    )
+    operand.value_type.fractional_bits.concrete = 2
+
+    with pytest.raises(ValueError, match=r"QFixed\[0\.2\].*QFixed\[0\.3\]"):
+        _restore(message)
+
+
+def test_measured_qpe_rejects_zero_width_with_concrete_operand() -> None:
+    """The deferred-width sentinel requires a symbolic QFixed operand."""
+    message = _message(_measured_qpe)
+    measure = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.MEASURE_QFIXED_OPERATION
+    )
+    measure.num_bits = 0
+
+    with pytest.raises(ValueError, match="purely fractional symbolic UInt width"):
+        _restore(message)
+
+
+def test_measured_qpe_rejects_missing_qfixed_carrier_uuid() -> None:
+    """A concrete QFixed measurement requires every carrier UUID."""
+    message = _message(_measured_qpe)
+    measure = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.MEASURE_QFIXED_OPERATION
+    )
+    operand = next(
+        value for value in message.value_table if value.uuid == measure.operand_refs[0]
+    )
+    del operand.metadata.qfixed.qubit_uuids[-1]
+
+    with pytest.raises(
+        ValueError,
+        match="QFixed metadata must contain 3 carrier UUIDs",
+    ):
+        _restore(message)
+
+
+def test_measured_qpe_rejects_missing_cast_carrier_logical_id() -> None:
+    """A cast carrier UUID requires its parallel logical identity."""
+    message = _message(_measured_qpe)
+    measure = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.MEASURE_QFIXED_OPERATION
+    )
+    operand = next(
+        value for value in message.value_table if value.uuid == measure.operand_refs[0]
+    )
+    del operand.metadata.cast.qubit_logical_ids[-1]
+
+    with pytest.raises(
+        ValueError,
+        match="Cast metadata must contain one logical ID per carrier UUID",
+    ):
+        _restore(message)
+
+
+def test_measured_qpe_rejects_cast_operation_mapping_mismatch() -> None:
+    """The producing cast operation must name the measured carriers exactly."""
+    message = _message(_measured_qpe)
+    measure = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.MEASURE_QFIXED_OPERATION
+    )
+    cast_operation = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.CAST_OPERATION
+        and operation.result_refs[0] == measure.operand_refs[0]
+    )
+    del cast_operation.qubit_mapping[-1]
+
+    with pytest.raises(
+        ValueError,
+        match="preceding CastOperation qubit_mapping disagrees",
+    ):
+        _restore(message)
+
+
+def test_measured_qpe_rejects_coordinated_carrier_truncation() -> None:
+    """Carrier metadata cannot collectively truncate a fixed source array."""
+    message = _message(_measured_qpe)
+    measure = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.MEASURE_QFIXED_OPERATION
+    )
+    operand = next(
+        value for value in message.value_table if value.uuid == measure.operand_refs[0]
+    )
+    cast_operation = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.CAST_OPERATION
+        and operation.result_refs[0] == measure.operand_refs[0]
+    )
+
+    measure.num_bits = 2
+    operand.value_type.fractional_bits.concrete = 2
+    operand.metadata.qfixed.num_bits = 2
+    del operand.metadata.qfixed.qubit_uuids[-1]
+    del operand.metadata.cast.qubit_uuids[-1]
+    del operand.metadata.cast.qubit_logical_ids[-1]
+    cast_operation.target_type.fractional_bits.concrete = 2
+    del cast_operation.qubit_mapping[-1]
+
+    with pytest.raises(
+        ValueError,
+        match="QFixed carrier width 2 disagrees with fixed "
+        "CastOperation source extent 3",
+    ):
+        _restore(message)
 
 
 def test_controlled_callable_transform_round_trips_at_high_level() -> None:

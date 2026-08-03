@@ -45,11 +45,12 @@ class TestConstantFoldControlledUFields:
         return None
 
     def test_fold_num_controls_from_binop_promotes_to_concrete(self):
-        """``num_controls=n-1`` folds to an ``int`` and promotes to ``ConcreteControlledU``.
+        """Promotion preserves callable metadata after a serialization round trip.
 
         With ``control_indices`` left at its default (``None``) the
         constant-folding pass is free to expand the control vector into
-        per-qubit operands and switch the op subclass.
+        per-qubit operands and switch the op subclass. Stable callable
+        identity and attributes must survive that subclass change.
         """
 
         @qm.qkernel
@@ -59,10 +60,15 @@ class TestConstantFoldControlledUFields:
             qs[0 : n - 1], qs[n - 1] = cg(qs[0 : n - 1], qs[n - 1])
             return qm.measure(qs)
 
+        from qamomile.circuit.frontend.qkernel_callable import (
+            qkernel_callable_attrs,
+        )
+        from qamomile.circuit.serialization import deserialize, serialize
         from qamomile.qiskit import QiskitTranspiler
 
+        restored = deserialize(serialize(kernel))
         transpiler = QiskitTranspiler()
-        block = transpiler.to_block(kernel, bindings={"n": 4})
+        block = transpiler.to_block(restored, bindings={"n": 4})
         inlined = transpiler.inline(transpiler.substitute(block))
         validated = transpiler.affine_validate(inlined)
         folded = transpiler.constant_fold(validated, bindings={"n": 4})
@@ -73,6 +79,9 @@ class TestConstantFoldControlledUFields:
             f"Expected promotion to ConcreteControlledU, got {type(cu).__name__}"
         )
         assert cu.num_controls == 3
+        assert cu.callable_ref is not None
+        assert cu.callable_ref.name == "_zgate"
+        assert cu.callable_attrs == qkernel_callable_attrs(_zgate)
 
     def test_concrete_num_controls_unchanged(self):
         """A natively concrete ``num_controls`` stays unchanged through folding."""

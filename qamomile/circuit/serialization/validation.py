@@ -228,10 +228,17 @@ def _validate_block(block: Block, state: _ValidationState, location: str) -> Non
         for slot in block.static_bindings
         for field in slot.fields
     }
+    producer_operations: dict[str, Operation] = {}
 
     for index, operation in enumerate(block.operations):
         op_location = f"{location} operation {index} ({type(operation).__name__})"
-        _validate_operation(operation, state, producers, op_location)
+        _validate_operation(
+            operation,
+            state,
+            producers,
+            producer_operations,
+            op_location,
+        )
     if state.static_bindings:
         _validate_value_producer_completeness(block, state, location)
 
@@ -839,6 +846,7 @@ def _validate_operation(
     operation: Operation,
     state: _ValidationState,
     producers: dict[str, str],
+    producer_operations: dict[str, Operation],
     location: str,
 ) -> None:
     """Validate one operation before following its nested graph edges.
@@ -847,6 +855,8 @@ def _validate_operation(
         operation (Operation): Operation to validate.
         state (_ValidationState): Shared graph-validation state.
         producers (dict[str, str]): SSA producers in the owning block scope.
+        producer_operations (dict[str, Operation]): Operations producing SSA
+            values in the owning block scope.
         location (str): Human-readable operation location.
 
     Raises:
@@ -872,8 +882,15 @@ def _validate_operation(
                 f"{previous}"
             )
         producers[result.uuid] = location
+        producer_operations[result.uuid] = operation
 
     _validate_operation_contract(operation, location)
+    if isinstance(operation, MeasureQFixedOperation):
+        _validate_qfixed_carrier_metadata(
+            operation,
+            producer_operations.get(operation.operands[0].uuid),
+            location,
+        )
     _validate_quantum_operand_uniqueness(operation, location)
     if isinstance(operation, InvokeOperation):
         _validate_static_binding_invoke(operation, state, location)
@@ -885,6 +902,7 @@ def _validate_operation(
                     child,
                     state,
                     producers,
+                    producer_operations,
                     f"{location} region {region_index} operation {child_index} "
                     f"({type(child).__name__})",
                 )
@@ -924,8 +942,21 @@ def _validate_definition(
         location (str): Location of the invocation that references it.
 
     Raises:
-        ValueError: If a callable body or implementation is malformed.
+        ValueError: If a callable body or implementation is malformed, or a
+            body-backed definition also declares an opaque cost.
     """
+    has_body = (
+        definition.body is not None
+        or definition.body_ref is not None
+        or any(
+            implementation.body is not None or implementation.body_ref is not None
+            for implementation in definition.implementations
+        )
+    )
+    if has_body and definition.opaque_cost is not None:
+        raise ValueError(
+            f"{location} body-backed callable definition cannot set opaque_cost"
+        )
     if id(definition) in state.seen_definitions:
         return
     state.seen_definitions.add(id(definition))
@@ -974,14 +1005,7 @@ def _validate_operation_contract(operation: Operation, location: str) -> None:
         _require_array_type(operation.operands[0], QubitType(), location)
         _require_array_type(operation.results[0], BitType(), location)
     elif isinstance(operation, MeasureQFixedOperation):
-        _require_arity(operation, 1, 1, location)
-        _validate_fixed_point_layout(
-            operation.num_bits,
-            operation.int_bits,
-            location,
-        )
-        _require_types(operation.operands, [QFixedType()], location, "operand")
-        _require_types(operation.results, [FloatType()], location, "result")
+        _validate_measure_qfixed(operation, location)
     elif isinstance(operation, DecodeQFixedOperation):
         _require_arity(operation, 1, 1, location)
         _validate_fixed_point_layout(
@@ -1195,6 +1219,168 @@ def _validate_fixed_point_layout(
         raise ValueError(f"{location} num_bits must be positive")
     if int_bits < 0 or int_bits > num_bits:
         raise ValueError(f"{location} int_bits must be between 0 and num_bits")
+
+
+def _validate_measure_qfixed(
+    operation: MeasureQFixedOperation,
+    location: str,
+) -> None:
+    """Validate concrete and deferred-width QFixed measurement layouts.
+
+    A zero ``MeasureQFixedOperation.num_bits`` is the frontend's sentinel for
+    a register whose width remains in the operand's symbolic
+    ``QFixedType.fractional_bits`` value. Concrete layouts continue to carry
+    their complete width directly on the operation.
+
+    Args:
+        operation (MeasureQFixedOperation): Measurement operation to validate.
+        location (str): Human-readable operation location.
+
+    Raises:
+        ValueError: If the arity, result type, or fixed-point layout is invalid.
+    """
+    _require_arity(operation, 1, 1, location)
+    operand_type = operation.operands[0].type
+    if operation.num_bits:
+        _validate_fixed_point_layout(
+            operation.num_bits,
+            operation.int_bits,
+            location,
+        )
+        expected_type = QFixedType(
+            integer_bits=operation.int_bits,
+            fractional_bits=operation.num_bits - operation.int_bits,
+        )
+        if operand_type != expected_type:
+            raise ValueError(
+                f"{location} operand 0 has type {operand_type.label()}, "
+                f"expected {expected_type.label()}"
+            )
+    else:
+        if not isinstance(operand_type, QFixedType):
+            raise ValueError(
+                f"{location} operand 0 has type {operand_type.label()}, "
+                "expected a deferred-width QFixed"
+            )
+        fractional_bits = operand_type.fractional_bits
+        if (
+            operation.int_bits != 0
+            or operand_type.integer_bits != 0
+            or type(fractional_bits) is not Value
+            or fractional_bits.type != UIntType()
+        ):
+            raise ValueError(
+                f"{location} num_bits must be positive unless the operand "
+                "has a purely fractional symbolic UInt width"
+            )
+        if fractional_bits.is_constant():
+            width = fractional_bits.get_const()
+            if not is_plain_int(width) or cast(int, width) < 1:
+                raise ValueError(f"{location} num_bits must be positive")
+    _require_types(operation.results, [FloatType()], location, "result")
+
+
+def _validate_qfixed_carrier_metadata(
+    operation: MeasureQFixedOperation,
+    producer: Operation | None,
+    location: str,
+) -> None:
+    """Validate the physical carriers used by a QFixed measurement.
+
+    Args:
+        operation (MeasureQFixedOperation): Measurement operation to validate.
+        producer (Operation | None): Operation producing the measured QFixed
+            value in the owning block, when one exists.
+        location (str): Human-readable operation location.
+
+    Raises:
+        ValueError: If the QFixed and cast carrier descriptions disagree or
+            omit required physical identities.
+    """
+    operand = operation.operands[0]
+    qfixed_metadata = operand.metadata.qfixed
+    if qfixed_metadata is None:
+        raise ValueError(f"{location} operand 0 requires QFixed carrier metadata")
+    if (
+        not is_plain_int(qfixed_metadata.num_bits)
+        or not is_plain_int(qfixed_metadata.int_bits)
+        or qfixed_metadata.num_bits != operation.num_bits
+        or qfixed_metadata.int_bits != operation.int_bits
+    ):
+        raise ValueError(
+            f"{location} QFixed metadata layout must match num_bits="
+            f"{operation.num_bits} and int_bits={operation.int_bits}"
+        )
+
+    carrier_uuids = qfixed_metadata.qubit_uuids
+    if len(carrier_uuids) != operation.num_bits:
+        raise ValueError(
+            f"{location} QFixed metadata must contain {operation.num_bits} "
+            "carrier UUIDs"
+        )
+    if any(not carrier_uuid for carrier_uuid in carrier_uuids):
+        raise ValueError(f"{location} QFixed metadata carrier UUIDs cannot be empty")
+    if len(set(carrier_uuids)) != len(carrier_uuids):
+        raise ValueError(f"{location} QFixed metadata carrier UUIDs must be unique")
+
+    cast_metadata = operand.metadata.cast
+    if cast_metadata is None:
+        if isinstance(producer, CastOperation):
+            raise ValueError(
+                f"{location} QFixed produced by CastOperation requires Cast metadata"
+            )
+        return
+    if not cast_metadata.source_uuid:
+        raise ValueError(f"{location} Cast metadata source UUID cannot be empty")
+    if cast_metadata.source_logical_id is None or not cast_metadata.source_logical_id:
+        raise ValueError(f"{location} Cast metadata source logical ID is required")
+    if cast_metadata.qubit_uuids != carrier_uuids:
+        raise ValueError(
+            f"{location} Cast metadata carrier UUIDs disagree with QFixed metadata"
+        )
+    if len(cast_metadata.qubit_logical_ids) != len(carrier_uuids):
+        raise ValueError(
+            f"{location} Cast metadata must contain one logical ID per carrier UUID"
+        )
+    if any(not logical_id for logical_id in cast_metadata.qubit_logical_ids):
+        raise ValueError(
+            f"{location} Cast metadata carrier logical IDs cannot be empty"
+        )
+    if len(set(cast_metadata.qubit_logical_ids)) != len(
+        cast_metadata.qubit_logical_ids
+    ):
+        raise ValueError(f"{location} Cast metadata carrier logical IDs must be unique")
+    if isinstance(producer, CastOperation):
+        if producer.operands[0].uuid != cast_metadata.source_uuid:
+            raise ValueError(
+                f"{location} Cast metadata source UUID disagrees with the "
+                "preceding CastOperation"
+            )
+        if producer.operands[0].logical_id != cast_metadata.source_logical_id:
+            raise ValueError(
+                f"{location} Cast metadata source logical ID disagrees with the "
+                "preceding CastOperation"
+            )
+        if tuple(producer.qubit_mapping) != carrier_uuids:
+            raise ValueError(
+                f"{location} preceding CastOperation qubit_mapping disagrees "
+                "with QFixed carrier UUIDs"
+            )
+        source = producer.operands[0]
+        if isinstance(source, ArrayValue) and source.shape:
+            source_extent = 1
+            for dimension in source.shape:
+                dimension_value = dimension.get_const()
+                if not is_plain_int(dimension_value):
+                    break
+                source_extent *= cast(int, dimension_value)
+            else:
+                if source_extent != operation.num_bits:
+                    raise ValueError(
+                        f"{location} QFixed carrier width {operation.num_bits} "
+                        f"disagrees with fixed CastOperation source extent "
+                        f"{source_extent}"
+                    )
 
 
 def _validate_binop(operation: BinOp, location: str) -> None:
