@@ -9,6 +9,7 @@ import linecache
 import threading
 import types as _types
 import weakref
+from numbers import Integral
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -2870,17 +2871,18 @@ def _control_callable_metadata(
     return qkernel_callable_ref(qkernel_impl), qkernel_callable_attrs(qkernel_impl)
 
 
-def _validate_concrete_control_count(num_controls: int | UInt) -> int:
+def _validate_concrete_control_count(num_controls: object) -> int:
     """Return a concrete control count for wrappers that cannot be symbolic.
 
     Args:
-        num_controls (int | UInt): Requested control count.
+        num_controls (object): Requested control-count candidate.
 
     Returns:
         int: Positive concrete control count.
 
     Raises:
-        TypeError: If ``num_controls`` is ``bool`` or ``UInt``.
+        TypeError: If ``num_controls`` is ``bool``, ``UInt``, or not an
+            integral scalar.
         ValueError: If ``num_controls`` is less than one.
     """
     if isinstance(num_controls, bool):
@@ -2889,9 +2891,15 @@ def _validate_concrete_control_count(num_controls: int | UInt) -> int:
         )
     if isinstance(num_controls, UInt):
         raise TypeError("control(Oracle) does not support symbolic num_controls yet.")
-    if num_controls < 1:
-        raise ValueError(f"num_controls must be >= 1, got {num_controls}.")
-    return num_controls
+    if not isinstance(num_controls, Integral):
+        raise TypeError(
+            "num_controls must be a positive integer, "
+            f"got {type(num_controls).__name__}."
+        )
+    normalized = int(num_controls)
+    if normalized < 1:
+        raise ValueError(f"num_controls must be >= 1, got {normalized}.")
+    return normalized
 
 
 @overload

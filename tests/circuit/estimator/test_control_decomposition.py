@@ -113,13 +113,13 @@ def _unsupported_nonlinear_resource_body(
 ) -> tuple[qm.Qubit, qm.Qubit]:
     """Make controlled-call work depend on a non-fixed nonlinear carry."""
     count = qm.uint(2)
-    for _index in qm.range(repetitions):
+    for index in qm.range(repetitions):
         local_control, target = qm.control(_scalar_h_body)(
             local_control,
             target,
             power=count,
         )
-        count = count * count
+        count = count * index + 1
     return local_control, target
 
 
@@ -970,14 +970,14 @@ def test_fixed_point_nonlinear_carry_uses_fixed_control_model() -> None:
 
 
 def test_resource_sensitive_nonlinear_carry_requires_concrete_bounds() -> None:
-    """Unsupported nonlinear work replays only small concrete bounds."""
+    """Unsupported nonlinear work replays any concrete loop exactly."""
     with pytest.raises(
         NotImplementedError,
         match="unsupported nonlinear loop-carried recurrence",
     ):
         _unsupported_nonlinear_resource_circuit.estimate_resources()
 
-    for repetitions, expected_total in ((0, 0), (1, 8), (2, 20)):
+    for repetitions, expected_total in ((0, 0), (1, 8), (2, 11)):
         estimate = _unsupported_nonlinear_resource_circuit.estimate_resources(
             inputs={"repetitions": repetitions}
         )
@@ -986,10 +986,17 @@ def test_resource_sensitive_nonlinear_carry_requires_concrete_bounds() -> None:
         assert estimate.parameters == {}
         assert estimate.gates.total.is_number
 
-    with pytest.raises(NotImplementedError, match="at most 64 iterations"):
-        _unsupported_nonlinear_resource_circuit.estimate_resources(
-            inputs={"repetitions": 65}
-        )
+    estimate = _unsupported_nonlinear_resource_circuit.estimate_resources(
+        inputs={"repetitions": 65}
+    )
+    count = 2
+    expected_total = 2
+    for index in range(65):
+        expected_total += 3 * count
+        count = count * index + 1
+
+    assert estimate.gates.total == expected_total
+    assert estimate.parameters == {}
 
 
 def test_symbolic_control_width_retains_shared_ladder_variants() -> None:

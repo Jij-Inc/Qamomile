@@ -94,6 +94,16 @@ class ControlBatchProfile:
         if not isinstance(self.selects_exact_two, bool):
             raise TypeError("selects_exact_two must be a bool.")
 
+    @property
+    def decision_complete(self) -> bool:
+        """Return whether later work cannot change the batching decision.
+
+        Returns:
+            bool: True when work is saturated and exact-two batching has
+                already been selected.
+        """
+        return self.weight == CONTROL_BATCH_MIN_WEIGHT and self.selects_exact_two
+
 
 def static_controlled_batch_profile(
     operation: Operation,
@@ -147,12 +157,13 @@ def combine_control_batch_profiles(
     for profile in profiles:
         weight = min(CONTROL_BATCH_MIN_WEIGHT, weight + profile.weight)
         selects_exact_two = selects_exact_two or profile.selects_exact_two
-        if weight == CONTROL_BATCH_MIN_WEIGHT and selects_exact_two:
+        combined = ControlBatchProfile(
+            weight=weight,
+            selects_exact_two=selects_exact_two,
+        )
+        if combined.decision_complete:
             break
-    return ControlBatchProfile(
-        weight=weight,
-        selects_exact_two=selects_exact_two,
-    )
+    return ControlBatchProfile(weight=weight, selects_exact_two=selects_exact_two)
 
 
 def should_batch_controlled_body(

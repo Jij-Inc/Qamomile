@@ -116,6 +116,7 @@ from qamomile.circuit.estimator._scheduling import (
     _dependency_depth,
     _dependency_keys_depend_on_symbol,
     _disjoint_concrete_loop_depth,
+    _estimate_depth_activity_condition,
     _estimate_has_nonzero_depth,
     _invoke_quantum_output_sizes,
     _liveness_width,
@@ -135,6 +136,7 @@ from qamomile.circuit.estimator._scheduling import (
     _qubit_value_size,
     _root_callable_resource_attrs,
     _root_callable_shape_inputs,
+    _scheduled_depth_activity_conditions,
     _specialize_dependency_expression,
     _symbolic_disjoint_loop_depth,
     _symbolic_wire_range_index,
@@ -4161,6 +4163,7 @@ class ResourceInterpreter:
                     )
                     for footprint in wire_footprints
                 ]
+            depth_activity_conditions = _scheduled_depth_activity_conditions(scheduled)
             (
                 scheduled_depth,
                 scheduled_completion,
@@ -4169,6 +4172,7 @@ class ResourceInterpreter:
             ) = _dependency_depth(
                 scheduled,
                 depth_footprints,
+                activity_conditions=depth_activity_conditions,
                 measurement_derived=self._measurement_derived,
                 scalar_values=self.condition_values,
                 used_names=self.branch_condition_names,
@@ -4176,6 +4180,7 @@ class ResourceInterpreter:
             aggregate_completion_active = _aggregate_completion_overlap_condition(
                 scheduled,
                 depth_footprints,
+                activity_conditions=depth_activity_conditions,
             )
             result = dataclasses.replace(
                 estimate,
@@ -5172,8 +5177,9 @@ class ResourceInterpreter:
         Concrete bounds are interpreted iteration by iteration with the same
         ``init -> block_arg -> yielded -> result`` rule as execution. Symbolic
         bounds use a closed form for independent affine recurrences; unsupported
-        coupled or nonlinear recurrences remain explicit symbols with a visible
-        modeling assumption instead of silently resolving to a stale body value.
+        coupled or nonlinear recurrences remain explicit for symbolic bounds.
+        Concrete unsupported recurrences fall back to exact replay before their
+        final values are exposed to later operations.
 
         Args:
             operation (ForOperation): Loop carrying region arguments.
@@ -5315,7 +5321,11 @@ class ResourceInterpreter:
         loop_symbol: sp.Symbol,
         controls: ResourceExpr | int,
     ) -> ResourceEstimate:
-        """Summarize symbolic or large region loops without unbounded replay.
+        """Summarize a symbolic or large region loop.
+
+        Independent affine carries stay compact. A concrete loop whose carry
+        cannot be solved that way is replayed exactly so its final values are
+        safe for operations following the loop.
 
         Args:
             operation (ForOperation): Loop carrying region arguments.
@@ -5385,11 +5395,9 @@ class ResourceInterpreter:
                     "Resource estimation cannot evaluate a zero-step loop."
                 )
             candidate = range(concrete_start, concrete_stop, concrete_step)
-            if (
-                len(candidate[: _CONCRETE_REGION_REPLAY_LIMIT + 1])
-                <= _CONCRETE_REGION_REPLAY_LIMIT
-            ):
-                concrete_replay = candidate
+            # Keep the concrete range as a correctness fallback after the
+            # compact affine solver has had an opportunity to handle the loop.
+            concrete_replay = candidate
         at_iteration: dict[str, sp.Expr] = {}
         final_values: dict[str, sp.Expr] = {}
         unresolved_iteration_values: list[sp.Expr] = []
@@ -5472,8 +5480,7 @@ class ResourceInterpreter:
                 "Resource estimation cannot keep a symbolic loop compact when "
                 "its quantum resource use depends on an unsupported nonlinear "
                 "loop-carried recurrence. Use an affine or fixed-point carry, "
-                "or a concrete loop with at most "
-                f"{_CONCRETE_REGION_REPLAY_LIMIT} iterations."
+                "or supply concrete loop bounds so the loop can be replayed."
             )
         dependency_start, dependency_stop, dependency_step = (
             _specialize_dependency_expression(
@@ -6392,6 +6399,7 @@ class ResourceInterpreter:
                 )
             footprints.append((keys, keys))
 
+        depth_activity_conditions = _scheduled_depth_activity_conditions(scheduled)
         (
             scheduled_depth,
             scheduled_completion,
@@ -6400,6 +6408,7 @@ class ResourceInterpreter:
         ) = _dependency_depth(
             scheduled,
             footprints,
+            activity_conditions=depth_activity_conditions,
             measurement_derived=self._measurement_derived,
             scalar_values=self.condition_values,
             used_names=self.branch_condition_names,
@@ -6424,6 +6433,7 @@ class ResourceInterpreter:
         aggregate_completion_active = _aggregate_completion_overlap_condition(
             scheduled,
             footprints,
+            activity_conditions=depth_activity_conditions,
         )
         if aggregate_completion_active is not sp.false:
             assumption = ResourceAssumption(
@@ -8090,19 +8100,7 @@ class ResourceInterpreter:
             estimate = estimate._with_metadata(
                 assumptions=(assumption,),
                 quality=EstimateQuality.UPPER_BOUND,
-                active_when=_boolean_condition(
-                    sp.Or(
-                        *(
-                            _resource_activity_condition(
-                                cast(
-                                    ResourceExpr,
-                                    getattr(estimate.depth, field.name),
-                                )
-                            )
-                            for field in dataclasses.fields(DepthResources)
-                        )
-                    )
-                ),
+                active_when=_estimate_depth_activity_condition(estimate),
             )
         return estimate
 

@@ -24,6 +24,7 @@ from qamomile.circuit.estimator._serialization import (
     stringify_expression,
 )
 from qamomile.circuit.estimator._wire import (
+    _WireExpressionDecoder,
     resource_estimate_from_wire,
     resource_estimate_to_wire,
 )
@@ -339,16 +340,10 @@ def test_resource_wire_rejects_unsupported_expression_before_encoding() -> None:
         resource_estimate_to_wire(estimate)
 
 
-@pytest.mark.parametrize(
-    "iterations",
-    [sp.Integer(1025), sp.Float(1025.0)],
-    ids=["integer", "integer-valued-float"],
-)
-def test_resource_wire_applies_range_budget_during_encoding(
-    iterations: sp.Expr,
-) -> None:
-    """Encoder and decoder enforce the same concrete range-work budget."""
+def test_resource_wire_round_trips_large_substituted_capped_range_sum() -> None:
+    """A specialized large loop remains serializable without eager replay."""
     index = sp.Dummy("index", integer=True, nonnegative=True)
+    iterations = sp.Symbol("iterations", integer=True, nonnegative=True)
     work_per_iteration = sp.Symbol(
         "work_per_iteration",
         integer=True,
@@ -365,9 +360,40 @@ def test_resource_wire_applies_range_budget_during_encoding(
         evaluate=False,
     )
     estimate = qm.ResourceEstimate(gates=qm.GateResources(total=work))
+    specialized = estimate.substitute(iterations=2000)
 
-    with pytest.raises(ValueError, match="range evaluation exceeds"):
-        resource_estimate_to_wire(estimate)
+    restored = resource_estimate_from_wire(resource_estimate_to_wire(specialized))
+
+    assert restored.gates.total.has(_CappedRangeSum)
+    assert set(restored.parameters) == {"work_per_iteration"}
+    assert restored.substitute(work_per_iteration=0).gates.total == 0
+    assert restored.substitute(work_per_iteration=1).gates.total == 2
+
+
+def test_resource_wire_round_trips_supported_symbolic_constructors() -> None:
+    """Sum, E, and loop-carry functions survive the closed wire format."""
+    index = sp.Dummy("index", integer=True, nonnegative=True)
+    iterations = sp.Symbol("iterations", integer=True, nonnegative=True)
+    loop_carry = sp.Function("loop_carry")
+    expression = sp.Sum(loop_carry(index), (index, 0, iterations)) + sp.E
+    estimate = qm.ResourceEstimate(gates=qm.GateResources(total=expression))
+
+    restored = resource_estimate_from_wire(resource_estimate_to_wire(estimate))
+
+    assert restored.gates.total.has(sp.Sum)
+    assert restored.gates.total.has(sp.E)
+    assert "loop_carry" in str(restored.gates.total)
+    assert set(restored.parameters) == {"iterations"}
+
+
+def test_resource_wire_round_trips_extreme_finite_float() -> None:
+    """A compact decimal exponent is not charged as mantissa digits."""
+    tiny_cost = sp.Float("1e-1300")
+    estimate = qm.ResourceEstimate(gates=qm.GateResources(total=tiny_cost))
+
+    restored = resource_estimate_from_wire(resource_estimate_to_wire(estimate))
+
+    assert restored.gates.total == tiny_cost
 
 
 def test_resource_wire_rejects_caller_scoped_liveness_before_encoding() -> None:
@@ -489,7 +515,7 @@ def test_separately_decoded_costs_keep_independent_symbol_identities() -> None:
 
 
 def test_separately_decoded_costs_preserve_shared_symbol_identity() -> None:
-    """Fixed-cost payloads retain an intentionally shared model parameter."""
+    """Ordinary Symbols retain one name across independent cost payloads."""
     shared_symbol = sp.Symbol("n", integer=True, nonnegative=True)
     left = qm.ResourceEstimate(
         gates=qm.GateResources(total=shared_symbol),
@@ -502,5 +528,31 @@ def test_separately_decoded_costs_preserve_shared_symbol_identity() -> None:
     restored_right = resource_estimate_from_wire(resource_estimate_to_wire(right))
     combined = restored_left.seq(restored_right)
 
+    assert set(combined.parameters) == {"n"}
+    assert combined.substitute(n=3).gates.total == 6
+
+
+def test_shared_wire_stream_preserves_shared_dummy_identity() -> None:
+    """One encoder/decoder stream retains a shared identity-only parameter."""
+    shared_symbol = sp.Dummy("n", integer=True, nonnegative=True)
+    left = qm.ResourceEstimate(gates=qm.GateResources(total=shared_symbol))
+    right = qm.ResourceEstimate(gates=qm.GateResources(total=shared_symbol))
+    dummy_slots: dict[sp.Dummy, int] = {}
+    decoder = _WireExpressionDecoder()
+
+    restored_left = resource_estimate_from_wire(
+        resource_estimate_to_wire(left, dummy_slots=dummy_slots),
+        decoder=decoder,
+    )
+    restored_right = resource_estimate_from_wire(
+        resource_estimate_to_wire(right, dummy_slots=dummy_slots),
+        decoder=decoder,
+    )
+    (left_symbol,) = restored_left.gates.total.free_symbols
+    (right_symbol,) = restored_right.gates.total.free_symbols
+    combined = restored_left.seq(restored_right)
+
+    assert isinstance(left_symbol, sp.Dummy)
+    assert left_symbol is right_symbol
     assert set(combined.parameters) == {"n"}
     assert combined.substitute(n=3).gates.total == 6

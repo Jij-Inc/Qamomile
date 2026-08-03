@@ -92,12 +92,12 @@ def _conditional_carried_angle_body(
         targets (qmc.Vector[qmc.Qubit]): Target register to rotate.
 
     Returns:
-        qmc.Vector[qmc.Qubit]: Register after two controlled pi rotations.
+        qmc.Vector[qmc.Qubit]: Register after two controlled half-pi rotations.
     """
     angle = qmc.float_(0.0)
     for iteration in qmc.range(2):
         if iteration == 0:
-            angle = angle + math.pi
+            angle = angle + math.pi / 2
         targets[0] = qmc.rx(targets[0], angle)
     return targets
 
@@ -879,7 +879,7 @@ def _sample_inverse(
     [
         (_carried_index_body, (1, 0)),
         (_nested_carried_index_body, (1, 1)),
-        (_conditional_carried_angle_body, (0, 0)),
+        (_conditional_carried_angle_body, (1, 0)),
     ],
 )
 def test_controlled_region_args_execute_across_backends(
@@ -897,7 +897,7 @@ def test_controlled_conditional_carry_profiles_across_backends(
 ) -> None:
     """Two-control lowering preserves a carry updated by a static branch."""
     assert _sample_with_two_controls(backend, _conditional_carried_angle_body) == (
-        0,
+        1,
         0,
     )
 

@@ -11,7 +11,8 @@ from __future__ import annotations
 import dataclasses
 import enum
 import functools
-from collections.abc import Mapping, Sequence
+from collections import ChainMap
+from collections.abc import Mapping, MutableMapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 import sympy as sp
@@ -403,6 +404,24 @@ def _estimate_depth_activity_condition(estimate: ResourceEstimate) -> Boolean:
         if field_active is not sp.false:
             active = cast(Boolean, sp.Or(active, field_active))
     return active
+
+
+def _scheduled_depth_activity_conditions(
+    scheduled: Sequence[tuple[Operation, ResourceEstimate]],
+) -> tuple[Boolean, ...]:
+    """Compute depth-activity guards once for a scheduled operation list.
+
+    Args:
+        scheduled (Sequence[tuple[Operation, ResourceEstimate]]): Operations
+            paired with their resource summaries in program order.
+
+    Returns:
+        tuple[Boolean, ...]: Activity guards aligned with ``scheduled``.
+    """
+    return tuple(
+        _estimate_depth_activity_condition(estimate)
+        for _operation, estimate in scheduled
+    )
 
 
 def _merge_dependency_keys(
@@ -1120,9 +1139,10 @@ def _with_body_boundary_depth_metadata(
     keys = body_estimate._dependency_keys
     if keys is None or not _estimate_has_nonzero_depth(body_estimate):
         return estimate
+    activity_condition = _estimate_depth_activity_condition(estimate)
     bracket_condition = _and_conditions(
         sp.Gt(_expr(zero_controls), _ZERO),
-        _estimate_depth_activity_condition(estimate),
+        activity_condition,
     )
     if keys and bracket_condition is not sp.false:
         assumption = ResourceAssumption(
@@ -1137,7 +1157,7 @@ def _with_body_boundary_depth_metadata(
         )
     broadcast_condition = _and_conditions(
         sp.Gt(_expr(scalar_broadcast), _ONE),
-        _estimate_depth_activity_condition(estimate),
+        activity_condition,
     )
     if broadcast_condition is not sp.false:
         assumption = ResourceAssumption(
@@ -1606,15 +1626,10 @@ def _bounded_concrete_loop_values(
     concrete_start, concrete_stop, concrete_step = (int(value) for value in bounds)
     if concrete_step == 0:
         return None
-    if concrete_step > 0:
-        distance = concrete_stop - concrete_start
-        iteration_count = 0 if distance <= 0 else (distance - 1) // concrete_step + 1
-    else:
-        distance = concrete_start - concrete_stop
-        iteration_count = 0 if distance <= 0 else (distance - 1) // -concrete_step + 1
-    if iteration_count > limit:
+    iterations = range(concrete_start, concrete_stop, concrete_step)
+    if len(iterations[: limit + 1]) > limit:
         return None
-    return range(concrete_start, concrete_stop, concrete_step)
+    return iterations
 
 
 def _concrete_loop_dependency_completion(
@@ -1828,6 +1843,8 @@ def _record_disjoint_wire_footprint(
 def _aggregate_completion_overlap_condition(
     scheduled: Sequence[tuple[Operation, ResourceEstimate]],
     wire_footprints: Sequence[_WireFootprint | None],
+    *,
+    activity_conditions: Sequence[Boolean] | None = None,
 ) -> Boolean:
     """Return when an aggregate completion can delay a later operation.
 
@@ -1841,25 +1858,32 @@ def _aggregate_completion_overlap_condition(
             paired with their resource summaries in program order.
         wire_footprints (Sequence[_WireFootprint | None]): Read/write
             footprints aligned with ``scheduled``.
+        activity_conditions (Sequence[Boolean] | None): Optional precomputed
+            depth-activity guards aligned with ``scheduled``. Defaults to
+            computing them once for this call.
 
     Returns:
         Boolean: Guard under which a nonuniform aggregate may over-serialize
             a later wire dependency.
 
     Raises:
-        AssertionError: If the operation and footprint sequences differ in
-            length.
+        AssertionError: If the operation, footprint, and activity sequences
+            differ in length.
     """
-    if len(scheduled) != len(wire_footprints):
+    if activity_conditions is None:
+        activity_conditions = _scheduled_depth_activity_conditions(scheduled)
+    if not (len(scheduled) == len(wire_footprints) == len(activity_conditions)):
         raise AssertionError(
-            "Scheduled operations and wire footprints must have equal lengths."
+            "Scheduled operations, wire footprints, and activity conditions "
+            "must have equal lengths."
         )
     uncertain_indices: dict[str, _OwnerWireIndices] = {}
     uncertain_activity: dict[WireKey, Boolean] = {}
     overlap_conditions: set[Boolean] = set()
-    for (_operation, estimate), footprint in zip(
+    for (_operation, estimate), footprint, active in zip(
         scheduled,
         wire_footprints,
+        activity_conditions,
         strict=True,
     ):
         if not _estimate_has_nonzero_depth(estimate):
@@ -1869,7 +1893,6 @@ def _aggregate_completion_overlap_condition(
                 "A nonzero-depth scheduled operation requires a wire footprint."
             )
         reads, writes = map(set, footprint)
-        active = _estimate_depth_activity_condition(estimate)
         for owner, index in reads:
             owner_indices = uncertain_indices.get(owner)
             if owner_indices is None:
@@ -2130,6 +2153,7 @@ def _dependency_depth(
     scheduled: Sequence[tuple[Operation, ResourceEstimate]],
     wire_footprints: Sequence[_WireFootprint | None],
     *,
+    activity_conditions: Sequence[Boolean] | None = None,
     measurement_derived: set[str] | None = None,
     scalar_values: Mapping[str, sp.Expr] | None = None,
     used_names: set[str] | None = None,
@@ -2142,6 +2166,9 @@ def _dependency_depth(
         wire_footprints (Sequence[_WireFootprint | None]): Precomputed read and
             write keys aligned with ``scheduled``. Zero-depth operations use
             ``None``.
+        activity_conditions (Sequence[Boolean] | None): Optional precomputed
+            depth-activity guards aligned with ``scheduled``. Defaults to
+            computing them once for this call.
         measurement_derived (set[str] | None): Classical values transitively
             derived from runtime quantum observations. Operations that consume
             them, plus other unschedulable hybrid/control operations, form
@@ -2161,12 +2188,15 @@ def _dependency_depth(
             aggregate depth-field peak.
 
     Raises:
-        AssertionError: If a footprint is missing or not aligned with a
-            nonzero-depth scheduled operation.
+        AssertionError: If a footprint is missing, or the operation,
+            footprint, and activity sequences are not aligned.
     """
-    if len(scheduled) != len(wire_footprints):
+    if activity_conditions is None:
+        activity_conditions = _scheduled_depth_activity_conditions(scheduled)
+    if not (len(scheduled) == len(wire_footprints) == len(activity_conditions)):
         raise AssertionError(
-            "Scheduled operations and wire footprints must have equal lengths."
+            "Scheduled operations, wire footprints, and activity conditions "
+            "must have equal lengths."
         )
     fields = tuple(field.name for field in dataclasses.fields(DepthResources))
     availability: dict[
@@ -2178,9 +2208,11 @@ def _dependency_depth(
     peaks: dict[str, ResourceExpr] = {field: _ZERO for field in fields}
     possible_alias_conditions: set[Boolean] = set()
     completion_is_uniform = True
-    for (operation, estimate), footprint in zip(
+    for (operation, estimate), footprint, operation_active in zip(
         scheduled,
         wire_footprints,
+        activity_conditions,
+        strict=True,
     ):
         if not _estimate_has_nonzero_depth(estimate):
             continue
@@ -2212,7 +2244,6 @@ def _dependency_depth(
             operation,
             measurement_derived or set(),
         )
-        operation_active = _estimate_depth_activity_condition(estimate)
         if operation_active is sp.false:
             continue
         for field in fields:
@@ -2472,10 +2503,10 @@ def _captured_quantum_allocations(
         if isinstance(result, Value) and result.type.is_quantum()
     }
     local_allocation_owners = frozenset(local_allocation_owners_by_uuid.values())
-    resolved_allocation_owners = {
-        **(allocation_owners_by_uuid or {}),
-        **local_allocation_owners_by_uuid,
-    }
+    resolved_allocation_owners: Mapping[str, str] = ChainMap(
+        local_allocation_owners_by_uuid,
+        cast(MutableMapping[str, str], allocation_owners_by_uuid or {}),
+    )
     captured: dict[str, ResourceExpr] = {}
     for operation in operations:
         for value in operation.all_input_values():

@@ -72,6 +72,19 @@ def test_combined_batch_profile_stops_once_shared_ladder_is_decided() -> None:
     )
 
 
+def test_batch_profile_completion_requires_both_saturated_fields() -> None:
+    """Decision completion uses one shared predicate at every caller."""
+    assert not ControlBatchProfile(weight=1, selects_exact_two=True).decision_complete
+    assert not ControlBatchProfile(
+        weight=CONTROL_BATCH_MIN_WEIGHT,
+        selects_exact_two=False,
+    ).decision_complete
+    assert ControlBatchProfile(
+        weight=CONTROL_BATCH_MIN_WEIGHT,
+        selects_exact_two=True,
+    ).decision_complete
+
+
 def test_two_control_profitability_uses_emission_gate_type_policy() -> None:
     """Engine batching skips direct leaves but accepts other work."""
     direct_body = [_gate(GateOperationType.X), _gate(GateOperationType.Z)]

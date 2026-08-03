@@ -1222,10 +1222,8 @@ def test_large_affine_multiplicative_carry_stays_compact() -> None:
     assert circuit.estimate_resources(inputs={"repetitions": 63}).gates.total == 2**63
 
 
-def test_large_coupled_region_carry_stays_symbolically_compact(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A large concrete bound cannot bypass the region replay limit."""
+def test_large_coupled_region_carry_replays_exactly() -> None:
+    """A concrete unsupported carry retains exact values beyond the old limit."""
 
     @qm.qkernel
     def circuit(
@@ -1241,19 +1239,41 @@ def test_large_coupled_region_carry_stays_symbolically_compact(
             second = second + 1
         return target, first, second
 
-    def reject_concrete_replay(*_args: object, **_kwargs: object) -> None:
-        """Fail if the estimator expands the large loop iteration by iteration."""
-        pytest.fail("large coupled loop used concrete region replay")
+    estimate = circuit.estimate_resources(inputs={"repetitions": 65})
 
-    monkeypatch.setattr(
-        resource_estimator_module.ResourceInterpreter,
-        "_eval_concrete_region_for",
-        reject_concrete_replay,
-    )
+    assert estimate.gates.total == 65
+    assert estimate.parameters == {}
 
-    estimate = circuit.estimate_resources(inputs={"repetitions": 4096})
 
-    assert estimate.gates.total == 4096
+def test_large_nonlinear_carry_used_after_loop_replays_exactly() -> None:
+    """A later controlled power sees the exact final concrete carry."""
+
+    @qm.qkernel
+    def one_h(target: qm.Qubit) -> qm.Qubit:
+        """Apply one Hadamard gate."""
+        return qm.h(target)
+
+    @qm.qkernel
+    def circuit(repetitions: qm.UInt) -> qm.Bit:
+        """Use a nonlinear loop carry as a controlled-call power."""
+        count = qm.uint(2)
+        for index in qm.range(repetitions):
+            count = count * index + 1
+        control = qm.qubit("control")
+        target = qm.qubit("target")
+        control, target = qm.control(one_h)(
+            control,
+            target,
+            power=count,
+        )
+        return qm.measure(target)
+
+    estimate = circuit.estimate_resources(inputs={"repetitions": 65})
+    expected_power = 2
+    for index in range(65):
+        expected_power = expected_power * index + 1
+
+    assert estimate.gates.total == expected_power
     assert estimate.parameters == {}
 
 

@@ -28,11 +28,17 @@ if TYPE_CHECKING:
     from qamomile.circuit.estimator import OpaqueCostContext, ResourceEstimate
 
 
-def _normalize_control_count(value: object) -> int:
+def _normalize_control_count(
+    value: object,
+    *,
+    label: str = "num_control_qubits",
+) -> int:
     """Return one nonnegative integral control count as a Python integer.
 
     Args:
         value (object): Candidate Python or NumPy integer scalar.
+        label (str): Parameter name used in validation errors. Defaults to
+            ``"num_control_qubits"``.
 
     Returns:
         int: Equivalent nonnegative Python integer.
@@ -42,10 +48,10 @@ def _normalize_control_count(value: object) -> int:
         ValueError: If ``value`` is negative.
     """
     if isinstance(value, bool) or not isinstance(value, Integral):
-        raise TypeError("num_control_qubits must be an integer.")
+        raise TypeError(f"{label} must be an integer.")
     normalized = int(value)
     if normalized < 0:
-        raise ValueError("num_control_qubits must be nonnegative.")
+        raise ValueError(f"{label} must be nonnegative.")
     return normalized
 
 
@@ -532,16 +538,16 @@ class TransformedOracle:
         """Validate and normalize the stored added-control condition.
 
         Raises:
-            TypeError: If ``added_num_control_qubits`` is not a plain Python
+            TypeError: If ``added_num_control_qubits`` is not a non-boolean
                 integer.
             ValueError: If the added-control count is negative or its
                 activation value is invalid for that width.
         """
-        count = self.added_num_control_qubits
-        if isinstance(count, bool) or not isinstance(count, int):
-            raise TypeError("added_num_control_qubits must be a plain Python int.")
-        if count < 0:
-            raise ValueError("added_num_control_qubits must be nonnegative.")
+        count = _normalize_control_count(
+            self.added_num_control_qubits,
+            label="added_num_control_qubits",
+        )
+        object.__setattr__(self, "added_num_control_qubits", count)
         if count == 0:
             if self.added_control_value is not None:
                 raise ValueError(
@@ -581,11 +587,14 @@ class TransformedOracle:
                 condition.
 
         Raises:
-            TypeError: If ``control_value`` is not a Python integer or
-                ``None``.
+            TypeError: If ``num_controls`` is not a non-boolean integer or
+                ``control_value`` is not a Python integer or ``None``.
             ValueError: If ``num_controls`` is not positive or
                 ``control_value`` does not fit its width.
         """
+        num_controls = _normalize_control_count(num_controls, label="num_controls")
+        if num_controls == 0:
+            raise ValueError("num_controls must be >= 1, got 0.")
         outer_value = normalize_control_value(control_value, num_controls)
         outer_pattern = (1 << num_controls) - 1 if outer_value is None else outer_value
         existing_count = self.added_num_control_qubits

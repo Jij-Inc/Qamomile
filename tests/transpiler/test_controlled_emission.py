@@ -1943,6 +1943,110 @@ def test_open_controlled_identity_phase_skips_x_brackets(angle: float) -> None:
     assert emit_pass._emitter.calls == []
 
 
+def test_open_controlled_zero_weight_body_uses_reusable_gate() -> None:
+    """Zero batch weight alone never proves a reusable body is identity."""
+
+    class ReusableGateEmitter(_RecordingEmitter):
+        """Record open-control brackets and reusable-gate emission."""
+
+        def gate_controlled(
+            self,
+            gate: _GateWithQubitCount,
+            num_controls: int,
+        ) -> _GateWithQubitCount:
+            """Return a controlled fake gate and record its control width.
+
+            Args:
+                gate (_GateWithQubitCount): Fake reusable body gate.
+                num_controls (int): Number of controls to add.
+
+            Returns:
+                _GateWithQubitCount: Fake gate with the controlled width.
+            """
+            self.calls.append(("gate_controlled", num_controls))
+            assert gate.num_qubits is not None
+            return _GateWithQubitCount(gate.num_qubits + num_controls)
+
+        def append_gate(
+            self,
+            circuit: Any,
+            gate: _GateWithQubitCount,
+            qubit_indices: list[int],
+        ) -> None:
+            """Record one reusable controlled-gate append.
+
+            Args:
+                circuit (Any): Ignored fake circuit.
+                gate (_GateWithQubitCount): Fake controlled gate.
+                qubit_indices (list[int]): Physical append order.
+            """
+            del circuit, gate
+            self.calls.append(("append_gate", tuple(qubit_indices)))
+
+    class ReusableGateEmitPass(_MultiControlEmitPass):
+        """Expose a reusable gate for a structurally zero-weight body."""
+
+        def __init__(self) -> None:
+            """Initialize the pass with a reusable-gate emitter."""
+            super().__init__()
+            self._emitter = ReusableGateEmitter()
+
+        def _blockvalue_to_gate(
+            self,
+            block: Block,
+            num_qubits: int,
+            bindings: dict[str, Any],
+        ) -> _GateWithQubitCount:
+            """Materialize the test body through the native gate hook.
+
+            Args:
+                block (Block): Structurally zero-weight body.
+                num_qubits (int): External body width.
+                bindings (dict[str, Any]): Active bindings.
+
+            Returns:
+                _GateWithQubitCount: Fake reusable gate for the body.
+            """
+            del block, bindings
+            return _GateWithQubitCount(num_qubits)
+
+    control = Value(type=QubitType(), name="control")
+    target = Value(type=QubitType(), name="target")
+    formal_target = Value(type=QubitType(), name="formal_target")
+    workspace = Value(type=QubitType(), name="workspace")
+    body = Block(
+        input_values=[formal_target],
+        output_values=[formal_target],
+        operations=[QInitOperation(results=[workspace])],
+    )
+    operation = ConcreteControlledU(
+        operands=[control, target],
+        results=[control.next_version(), target.next_version()],
+        num_controls=1,
+        control_value=0,
+        block=body,
+    )
+    emit_pass = ReusableGateEmitPass()
+
+    controlled_emission.emit_controlled_u(
+        emit_pass,
+        object(),
+        operation,
+        {
+            QubitAddress(control.uuid): 0,
+            QubitAddress(target.uuid): 1,
+        },
+        {},
+    )
+
+    assert emit_pass._emitter.calls == [
+        ("x", 0),
+        ("gate_controlled", 1),
+        ("append_gate", (0, 1)),
+        ("x", 0),
+    ]
+
+
 @pytest.mark.parametrize("operation_kind", ["invoke", "inverse"])
 def test_known_identity_callable_skips_boundary_x_brackets(
     operation_kind: str,

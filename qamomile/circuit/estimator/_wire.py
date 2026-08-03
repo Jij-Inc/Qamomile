@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import sympy as sp
-from sympy.core.function import FunctionClass
+from sympy.core.function import AppliedUndef, FunctionClass
 from sympy.functions.elementary.piecewise import ExprCondPair
 from sympy.logic.boolalg import Boolean
 
@@ -38,7 +38,6 @@ from qamomile.circuit.estimator._metrics import (
     _GuardedApproximation,
     _GuardedAssumption,
     _GuardedQuality,
-    _is_concrete_integer,
     _ResourceConstraint,
 )
 from qamomile.circuit.estimator._serialization import SymbolRegistry
@@ -58,10 +57,10 @@ _EnumT = TypeVar("_EnumT", bound=enum.Enum)
 _RESOURCE_ESTIMATE_WIRE_VERSION = 2
 _MAX_EXPRESSION_NODES = 100_000
 _MAX_NUMERIC_BITS = 4096
-# ceil(4096 / log2(10)); keeps decimal Float magnitude and parsing work within
-# the same approximate information budget as exact integer/rational values.
+# ceil(4096 / log2(10)); bounds decimal mantissa parsing independently from a
+# Float's compact decimal exponent.
 _MAX_DECIMAL_FLOAT_DIGITS = 1234
-_MAX_EAGER_RANGE_ITERATIONS = 1024
+_MAX_DECIMAL_FLOAT_EXPONENT_DIGITS = 4
 _MAX_TRACE_NODES = 100_000
 _SAFE_SYMPY_NAMES = frozenset(
     {
@@ -71,9 +70,11 @@ _SAFE_SYMPY_NAMES = frozenset(
         "BooleanFalse",
         "BooleanTrue",
         "Dummy",
+        "E",
         "Equality",
         "ExprCondPair",
         "Float",
+        "Function",
         "GreaterThan",
         "Integer",
         "Lambda",
@@ -89,6 +90,7 @@ _SAFE_SYMPY_NAMES = frozenset(
         "Rational",
         "StrictGreaterThan",
         "StrictLessThan",
+        "Sum",
         "Symbol",
         "Tuple",
         "Unequality",
@@ -171,8 +173,8 @@ class _WireExpressionEncoder:
                 closed wire-expression language.
         """
         normalized = sp.sympify(expression).xreplace(self._replacements)
+        _validate_sympy_expression_for_wire(normalized)
         payload = sp.srepr(normalized)
-        _expression_from_wire(payload, "resource expression")
         return payload
 
 
@@ -1102,7 +1104,7 @@ def _expression_from_wire(payload: Any, label: str) -> sp.Basic:
         raise ValueError(f"{label} must be a symbolic-expression string")
     try:
         tree = ast.parse(payload, mode="eval")
-    except SyntaxError as exc:
+    except (SyntaxError, ValueError) as exc:
         raise ValueError(f"{label} has invalid symbolic-expression syntax") from exc
     if sum(1 for _ in ast.walk(tree)) > _MAX_EXPRESSION_NODES:
         raise ValueError(f"{label} exceeds the symbolic-expression node limit")
@@ -1110,6 +1112,72 @@ def _expression_from_wire(payload: Any, label: str) -> sp.Basic:
     if not isinstance(result, sp.Basic):
         raise ValueError(f"{label} did not decode to a SymPy expression")
     return result
+
+
+def _validate_sympy_expression_for_wire(expression: sp.Basic) -> None:
+    """Validate an existing SymPy tree before persisting its representation.
+
+    Args:
+        expression (sp.Basic): Trusted, already-constructed SymPy expression.
+
+    Raises:
+        ValueError: If the expression contains an unsupported constructor or
+            exceeds a numeric or structural wire budget.
+    """
+    for count, node in enumerate(sp.preorder_traversal(expression), start=1):
+        if count > _MAX_EXPRESSION_NODES:
+            raise ValueError(
+                "resource expression exceeds the symbolic-expression node limit"
+            )
+        constructor_name = _wire_constructor_name(node)
+        if constructor_name not in _SAFE_SYMPY_NAMES and constructor_name not in {
+            "_CanonicalPhaseClass",
+            "_ConditionIndicator",
+            "_RangeAny",
+            "_CappedRangeSum",
+        }:
+            raise ValueError(f"unsupported symbolic constructor {constructor_name!r}")
+        if isinstance(node, AppliedUndef):
+            _validate_undefined_function_constructor([node.func.__name__], {})
+        if isinstance(node, sp.Float):
+            _validate_float_constructor(
+                [str(node)],
+                {"precision": node._prec},
+            )
+        if isinstance(node, sp.Pow):
+            _validate_sympy_constructor_call("Pow", list(node.args), {})
+        _validate_sympy_numeric_size(node)
+
+
+def _wire_constructor_name(expression: sp.Basic) -> str:
+    """Return the closed-wire constructor name for one SymPy node.
+
+    Args:
+        expression (sp.Basic): One node from an expression tree.
+
+    Returns:
+        str: Constructor or singleton name emitted by ``sympy.srepr``.
+    """
+    if isinstance(expression, AppliedUndef):
+        return "Function"
+    if isinstance(expression, sp.Integer):
+        return "Integer"
+    if isinstance(expression, sp.Rational):
+        return "Rational"
+    if isinstance(expression, sp.Float):
+        return "Float"
+    special_names = (
+        (sp.E, "E"),
+        (sp.pi, "pi"),
+        (sp.nan, "nan"),
+        (sp.oo, "oo"),
+        (-sp.oo, "oo"),
+        (sp.zoo, "zoo"),
+    )
+    for singleton, name in special_names:
+        if expression is singleton:
+            return name
+    return type(expression).__name__
 
 
 def _resource_expression_from_wire(
@@ -1211,8 +1279,12 @@ def _evaluate_sympy_ast(node: ast.AST) -> Any:
         cast(str, keyword.arg): _evaluate_sympy_ast(keyword.value)
         for keyword in node.keywords
     }
-    constructor_name = node.func.id if isinstance(node.func, ast.Name) else ""
+    constructor_name = (
+        node.func.id if isinstance(node.func, ast.Name) else "_AppliedUndefinedFunction"
+    )
     _validate_sympy_constructor_call(constructor_name, args, kwargs)
+    if constructor_name == "_CappedRangeSum":
+        kwargs = {**kwargs, "evaluate": False}
     try:
         result = constructor(*args, **kwargs)
     except (TypeError, ValueError, sp.SympifyError) as exc:
@@ -1243,15 +1315,15 @@ def _validate_sympy_constructor_call(
     """
     if name == "Float":
         _validate_float_constructor(args, kwargs)
-    if name == "_CappedRangeSum" and len(args) == 4:
-        iterations = args[3]
-        if (
-            isinstance(iterations, sp.Expr)
-            and iterations.is_number
-            and _is_concrete_integer(iterations)
-            and int(iterations) > _MAX_EAGER_RANGE_ITERATIONS
-        ):
-            raise ValueError("symbolic range evaluation exceeds the wire budget")
+    if name == "Function":
+        _validate_undefined_function_constructor(args, kwargs)
+    if name == "_AppliedUndefinedFunction":
+        if kwargs or not all(isinstance(arg, sp.Basic) for arg in args):
+            raise ValueError(
+                "symbolic applied functions require SymPy positional arguments"
+            )
+    if name == "_CappedRangeSum" and (len(args) != 4 or kwargs):
+        raise ValueError("symbolic _CappedRangeSum requires four positional arguments")
     if name != "Pow" or len(args) < 2:
         return
     base, exponent = args[:2]
@@ -1270,20 +1342,43 @@ def _validate_sympy_constructor_call(
         raise ValueError("symbolic numeric power exceeds the wire budget")
 
 
+def _validate_undefined_function_constructor(
+    args: list[Any],
+    kwargs: dict[str, Any],
+) -> None:
+    """Restrict undefined functions to canonical bounded identifiers.
+
+    Args:
+        args (list[Any]): Function-factory positional arguments.
+        kwargs (dict[str, Any]): Function-factory keyword arguments.
+
+    Raises:
+        ValueError: If the factory request is not ``Function(identifier)``.
+    """
+    if len(args) != 1 or kwargs or not isinstance(args[0], str):
+        raise ValueError("symbolic Function requires one identifier string")
+    if re.fullmatch(r"[A-Za-z_]\w{0,255}", args[0], flags=re.ASCII) is None:
+        raise ValueError("symbolic Function name must be a bounded identifier")
+
+
 def _validate_float_constructor(args: list[Any], kwargs: dict[str, Any]) -> None:
-    """Reject Float payloads whose parsing or magnitude exceeds the budget.
+    """Reject Float payloads whose parsing work exceeds the wire budget.
 
     The encoder's structural representation always uses one decimal string
     plus an optional ``precision`` keyword. Restricting the decoder to that
-    canonical shape prevents positional ``dps`` or enormous decimal exponents
-    from triggering expensive arbitrary-precision construction.
+    canonical shape prevents positional ``dps`` or enormous exponent text from
+    triggering expensive arbitrary-precision construction. A compact exponent
+    may describe an arbitrarily small or large finite value without requiring
+    a proportionally large mantissa, so its magnitude is not charged as
+    decimal digits.
 
     Args:
         args (list[Any]): Recursively decoded Float positional arguments.
         kwargs (dict[str, Any]): Recursively decoded Float keyword arguments.
 
     Raises:
-        ValueError: If the Float is noncanonical or exceeds the wire budget.
+        ValueError: If the Float is noncanonical or its representation exceeds
+            the wire budget.
     """
     if len(args) != 1 or not isinstance(args[0], str):
         raise ValueError("symbolic Float requires one decimal string")
@@ -1308,15 +1403,12 @@ def _validate_float_constructor(args: list[Any], kwargs: dict[str, Any]) -> None
         character.isdigit() for character in literal.split("e")[0].split("E")[0]
     )
     exponent_text = match.group(1)
-    if exponent_text is None:
-        exponent = 0
-    else:
+    if exponent_text is not None:
         exponent_digits = exponent_text.lstrip("+-")
-        if len(exponent_digits) > len(str(_MAX_DECIMAL_FLOAT_DIGITS)):
+        if len(exponent_digits) > _MAX_DECIMAL_FLOAT_EXPONENT_DIGITS:
             raise ValueError("symbolic Float exponent exceeds the wire budget")
-        exponent = int(exponent_text)
-    if digits + abs(exponent) > _MAX_DECIMAL_FLOAT_DIGITS:
-        raise ValueError("symbolic Float magnitude exceeds the wire budget")
+    if digits > _MAX_DECIMAL_FLOAT_DIGITS:
+        raise ValueError("symbolic Float mantissa exceeds the wire budget")
 
 
 def _validate_sympy_numeric_size(expression: sp.Basic) -> None:

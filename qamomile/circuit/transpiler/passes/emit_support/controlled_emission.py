@@ -570,7 +570,7 @@ def _batch_op_profile(
             bindings,
             isolate_bindings=False,
         )
-        if _is_complete_batch_profile(profile):
+        if profile.decision_complete:
             # No later operation can change the batching decision, so merge
             # values are deliberately not resolved on this short-circuit path.
             return profile
@@ -795,7 +795,7 @@ def _for_batch_profile(
             for body_op in op.operations
         )
         profile = combine_control_batch_profiles((profile, iteration_profile))
-        if _is_complete_batch_profile(profile):
+        if profile.decision_complete:
             # The caller will stop at this result too. Avoid replaying the
             # remaining loop solely to compute classical carries that can no
             # longer influence the batching choice.
@@ -806,19 +806,6 @@ def _for_batch_profile(
     if last_index is not None:
         _bind_loop_var(bindings, op, last_index)
     return profile
-
-
-def _is_complete_batch_profile(profile: ControlBatchProfile) -> bool:
-    """Return whether no later operation can change a batch profile.
-
-    Args:
-        profile (ControlBatchProfile): Accumulated controlled-work profile.
-
-    Returns:
-        bool: True when work is saturated and exact-two batching is already
-            selected.
-    """
-    return profile.weight == CONTROL_BATCH_MIN_WEIGHT and profile.selects_exact_two
 
 
 def _controlled_body_batch_profile(
@@ -856,6 +843,8 @@ def _is_resolved_identity_phase_block(
     emit_pass: "StandardEmitPass",
     block: Block,
     bindings: dict[str, Any],
+    *,
+    batch_profile: ControlBatchProfile | None = None,
 ) -> bool:
     """Return whether a block is explicitly phase-only and resolves to identity.
 
@@ -867,6 +856,8 @@ def _is_resolved_identity_phase_block(
         emit_pass (StandardEmitPass): Active emit pass used to resolve phases.
         block (Block): Candidate callable implementation body.
         bindings (dict[str, Any]): Bindings visible inside the body.
+        batch_profile (ControlBatchProfile | None): Previously resolved body
+            profile, when available. Defaults to ``None``.
 
     Returns:
         bool: Whether the body contains a direct global-phase operation and its
@@ -878,15 +869,18 @@ def _is_resolved_identity_phase_block(
     has_explicit_phase = any(
         isinstance(operation, GlobalPhaseOperation) for operation in block.operations
     )
-    return (
-        has_explicit_phase
-        and _controlled_body_batch_profile(
+    if not has_explicit_phase:
+        return False
+    profile = (
+        batch_profile
+        if batch_profile is not None
+        else _controlled_body_batch_profile(
             emit_pass,
             block.operations,
             bindings,
-        ).weight
-        == 0
+        )
     )
+    return profile.weight == 0
 
 
 def _has_zero_control(control_value: int | None, num_controls: int) -> bool:
@@ -1769,13 +1763,11 @@ def _emit_nested_controlled_u(
         else None
     )
 
-    if (body_profile is not None and body_profile.weight == 0) or (
-        body_profile is None
-        and _is_resolved_identity_phase_block(
-            emit_pass,
-            block,
-            resolved.local_bindings,
-        )
+    if _is_resolved_identity_phase_block(
+        emit_pass,
+        block,
+        resolved.local_bindings,
+        batch_profile=body_profile,
     ):
         map_nested_controlled_u_results(op, resolved, qubit_map)
         return
@@ -2716,13 +2708,11 @@ def emit_controlled_u(
         if _has_zero_control(op.control_value, nc)
         else None
     )
-    if (body_profile is not None and body_profile.weight == 0) or (
-        body_profile is None
-        and _is_resolved_identity_phase_block(
-            emit_pass,
-            block_value,
-            local_bindings,
-        )
+    if _is_resolved_identity_phase_block(
+        emit_pass,
+        block_value,
+        local_bindings,
+        batch_profile=body_profile,
     ):
         _map_controlled_u_results(
             op,
