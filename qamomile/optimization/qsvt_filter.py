@@ -79,14 +79,6 @@ that encode nothing.
 
 _LOGGER = logging.getLogger(__name__)
 
-SHOW_PHASE_SYNTHESIS_SUMMARY = True
-"""Whether phase synthesis prints its one-line summary to stdout.
-
-Synthesis takes seconds and happens implicitly inside :meth:`transpile`, so the
-summary exists to explain the pause and record which filter shape was built.
-Set to ``False`` to make :meth:`QSVTFilterConverter._qsp_phases` fully silent.
-"""
-
 
 @contextlib.contextmanager
 def _pyqsp_output_to_logger() -> Iterator[None]:
@@ -266,12 +258,12 @@ class QSVTFilterConverter(MathematicalProblemConverter):
         Results are cached per ``(degree, delta, scale)``; they do not depend on
         :math:`\mu`, so a cache hit skips synthesis and prints nothing.
 
-        A cache miss prints one summary line naming the filter shape being
-        built, unless :data:`SHOW_PHASE_SYNTHESIS_SUMMARY` is cleared.
-        ``pyqsp``'s own progress prints are captured and logged at ``DEBUG``
-        instead (see :func:`_pyqsp_output_to_logger`); raise
-        ``logging.getLogger("qamomile.optimization.qsvt_filter")`` to ``DEBUG``
-        to see the polynomial fit and convergence trace.
+        A cache miss logs one summary line naming the filter shape being
+        built at ``INFO``. ``pyqsp``'s own progress prints are captured and
+        logged at ``DEBUG`` instead (see :func:`_pyqsp_output_to_logger`); raise
+        ``logging.getLogger("qamomile.optimization.qsvt_filter")`` to ``INFO``
+        for the summary or ``DEBUG`` for the polynomial fit and convergence
+        trace.
 
         Args:
             degree (int): Odd degree of the sign approximation. Higher degree
@@ -327,12 +319,17 @@ class QSVTFilterConverter(MathematicalProblemConverter):
                 "the `phi` argument of transpile()."
             ) from error
 
-        if SHOW_PHASE_SYNTHESIS_SUMMARY:
-            print(
-                f"[qamomile.qsvt_filter] synthesizing sign filter: "
-                f"degree={degree}, delta={delta}, scale={scale} "
-                f"-> {degree + 1} phases"
-            )
+        # Synthesis blocks for seconds inside transpile, so record which filter
+        # is being built. INFO rather than stdout: a library has no business
+        # writing to a downstream application's console, and the log level is
+        # already the toggle.
+        _LOGGER.info(
+            "synthesizing sign filter: degree=%s, delta=%s, scale=%s -> %s phases",
+            degree,
+            delta,
+            scale,
+            degree + 1,
+        )
 
         with _pyqsp_output_to_logger():
             generated, _ = PolySign().generate(

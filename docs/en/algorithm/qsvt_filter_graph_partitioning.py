@@ -8,6 +8,10 @@
 #       format_name: percent
 #       format_version: '1.3'
 #       jupytext_version: 1.11.2
+#   kernelspec:
+#     display_name: Python 3
+#     language: python
+#     name: python3
 # ---
 
 # %% [markdown]
@@ -197,6 +201,7 @@ assert low <= energies.min() and energies.max() <= high
 
 # %%
 DEGREE, DELTA = 21, 8
+print(f"probe filter: degree={DEGREE}, delta={DELTA} -> {DEGREE + 1} phases")
 
 
 def probe(mu, shots=2000):
@@ -423,6 +428,9 @@ print(f"\nlambda_0 in [{x_lower:+.2f}, {x_upper:+.2f}]   true lambda_0 = {ground
 # The predicate needed degree 21; extracting the state itself needs a sharper
 # filter at the same threshold.
 DECODE_DEGREE, DECODE_DELTA = 41, 11
+print(
+    f"decode filter: degree={DECODE_DEGREE}, delta={DECODE_DELTA} -> {DECODE_DEGREE + 1} phases"
+)
 
 executable = converter.transpile(
     transpiler,

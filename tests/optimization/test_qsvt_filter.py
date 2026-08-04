@@ -12,7 +12,6 @@ import ommx.v1
 import pytest
 
 from qamomile.circuit.transpiler.job import SampleResult
-from qamomile.optimization import qsvt_filter
 from qamomile.optimization.binary_model import BinaryModel
 from qamomile.optimization.qsvt_filter import QSVTFilterConverter
 
@@ -190,11 +189,16 @@ def test_qsp_phases_are_odd_length_and_cached() -> None:
     assert converter._qsp_phases(degree=11, delta=5) == phases
 
 
-def test_qsp_phases_replace_pyqsp_output_with_one_summary_line(
+def test_qsp_phases_log_the_summary_and_demote_pyqsp_output(
     capsys: pytest.CaptureFixture[str],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Synthesis prints its own summary and demotes pyqsp's prints to DEBUG."""
+    """Synthesis writes nothing to stdout; both summary and trace are logged.
+
+    ``pyqsp`` prints unconditionally, so its output is captured and demoted to
+    ``DEBUG``. The converter's own one-line summary goes to ``INFO``, leaving a
+    downstream application's console untouched.
+    """
     pytest.importorskip("pyqsp")
     model = BinaryModel.from_higher_ising({(0,): 1.0})
     converter = QSVTFilterConverter(model)
@@ -202,34 +206,17 @@ def test_qsp_phases_replace_pyqsp_output_with_one_summary_line(
     with caplog.at_level(logging.DEBUG, logger="qamomile.optimization.qsvt_filter"):
         converter._qsp_phases(degree=11, delta=5, scale=-1.1)
 
-    printed = capsys.readouterr().out.splitlines()
-    assert printed == [
-        "[qamomile.qsvt_filter] synthesizing sign filter: "
-        "degree=11, delta=5, scale=-1.1 -> 12 phases"
+    assert capsys.readouterr().out == ""
+
+    summaries = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert summaries == [
+        "synthesizing sign filter: degree=11, delta=5, scale=-1.1 -> 12 phases"
     ]
     # pyqsp's own chatter survives, one level down, rather than being dropped.
-    logged = "\n".join(r.message for r in caplog.records)
-    assert "[pyqsp.poly.PolySign] degree=11, delta=5" in logged
-    assert all(r.levelno == logging.DEBUG for r in caplog.records)
-
-    # A cache hit re-synthesizes nothing, so it prints nothing.
-    converter._qsp_phases(degree=11, delta=5, scale=-1.1)
-    assert capsys.readouterr().out == ""
-
-
-def test_qsp_phases_summary_can_be_switched_off(
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Clearing the module flag makes synthesis fully silent."""
-    pytest.importorskip("pyqsp")
-    monkeypatch.setattr(qsvt_filter, "SHOW_PHASE_SYNTHESIS_SUMMARY", False)
-    model = BinaryModel.from_higher_ising({(0,): 1.0})
-    converter = QSVTFilterConverter(model)
-
-    converter._qsp_phases(degree=11, delta=5)
-
-    assert capsys.readouterr().out == ""
+    debug = "\n".join(
+        r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG
+    )
+    assert "[pyqsp.poly.PolySign] degree=11, delta=5" in debug
 
 
 def test_qsp_phases_reject_a_polynomial_outside_the_qsp_bound() -> None:
@@ -237,9 +224,9 @@ def test_qsp_phases_reject_a_polynomial_outside_the_qsp_bound() -> None:
 
     ``ensure_bounded`` leaves headroom that depends on degree and delta, so
     ``scale`` alone cannot decide whether |p| <= 1 holds. At (21, 20) the
-    default scale overshoots; the phases extracted from such a polynomial
-    approximate nothing, which previously surfaced as a filter that kept ~80%
-    of the spectrum instead of 3%.
+    default magnitude overshoots; the phases extracted from such a polynomial
+    approximate nothing, which surfaces as a filter that keeps ~80% of the
+    spectrum instead of 3%.
     """
     pytest.importorskip("pyqsp")
     model = BinaryModel.from_higher_ising({(0,): 1.0})

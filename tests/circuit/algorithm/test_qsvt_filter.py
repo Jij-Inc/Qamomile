@@ -61,8 +61,14 @@ def _zero_probability(results: list[tuple[Any, int]], num_bits: int) -> float:
 
     Returns:
         float: Fraction of shots whose first ``num_bits`` bits are zero.
+
+    Raises:
+        AssertionError: If ``results`` accounts for no shots. A backend or error
+            path can hand back an empty list even when a job object exists;
+            dividing would raise ``ZeroDivisionError`` and bury that cause.
     """
     total = sum(count for _, count in results)
+    assert total > 0, "sampling returned no shots"
     zero = sum(
         count
         for outcome, count in results
