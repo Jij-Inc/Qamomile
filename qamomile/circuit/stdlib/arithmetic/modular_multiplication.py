@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from typing import overload
 
 import qamomile.circuit as qmc
 from qamomile.circuit.frontend.handle import Qubit, UInt, Vector
@@ -11,6 +12,30 @@ from qamomile.circuit.frontend.handle.utils import get_size
 from .bitwise import _xor_bit
 from .carry_venting import _dirty_const_add_extended
 from .ripple_carry import _apply_ripple_carry_add
+
+
+@overload
+def modmul_const(
+    reg: Vector[Qubit],
+    *,
+    multiplier: int | UInt,
+    modulus: int | UInt,
+    window_size: int = 2,
+    inverse_multiplier: int | UInt | None = None,
+    control: None = None,
+) -> Vector[Qubit]: ...
+
+
+@overload
+def modmul_const(
+    reg: Vector[Qubit],
+    *,
+    multiplier: int | UInt,
+    modulus: int | UInt,
+    window_size: int = 2,
+    inverse_multiplier: int | UInt | None = None,
+    control: Qubit,
+) -> tuple[Qubit, Vector[Qubit]]: ...
 
 
 def modmul_const(

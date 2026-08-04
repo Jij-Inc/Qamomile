@@ -1111,7 +1111,7 @@ class TestSupportedLoopCarriedScalars:
             n = 1
             for _i in qmc.range(2):
                 n = n
-            return n
+            return qmc.uint(n)
 
         @qmc.qkernel
         def divergent() -> qmc.UInt:
@@ -1691,7 +1691,7 @@ class TestRejectedRebinds:
         """A residual endpoint keeps the identity RegionArg that defines it."""
 
         @qmc.qkernel
-        def kernel() -> qmc.Bit:
+        def kernel() -> qmc.UInt:
             selector = qmc.measure(qmc.qubit("selector"))
             base = 1
             flag = qmc.bit(False)

@@ -533,7 +533,7 @@ def deutsch() -> qmc.Bit:
 
 
 @qmc.qkernel
-def deutsch_jozsa(n: qmc.UInt) -> qmc.Bit:
+def deutsch_jozsa(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     qs = qmc.qubit_array(n + 1, name="qs")
     targets = qs[0:n]
     ancilla = qs[n]

@@ -27,6 +27,12 @@ Learn how to use Möttönen amplitude encoding in Qamomile to prepare arbitrary 
 :::
 
 :::{card}
+:header: **Option Pricing with Quantum Amplitude Estimation**
+:link: option_pricing
+An example of option pricing with quantum amplitude estimation (QAE) in Qamomile. It encodes stock-price data into amplitudes, implements amplitude estimation with the Grover operator, and runs a numerical option-pricing simulation.
+:::
+
+:::{card}
 :header: **Multidimensional QFT for Estimating Nanosheet Material Properties**
 :link: multidimensional_qft
 This example implements a multidimensional quantum Fourier transform with Qamomile. For nanosheet material characterization, it uses a multidimensional QFT with data preprocessing to run a nanosheet simulation.
