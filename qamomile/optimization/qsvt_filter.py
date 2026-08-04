@@ -254,7 +254,7 @@ class QSVTFilterConverter(MathematicalProblemConverter):
         first turned into a genuine Wx sequence by adding :math:`\pi/4` to the
         two end phases, then mapped by adding :math:`(2d - 1)\pi/4` to the first
         phase, subtracting :math:`\pi/2` from every interior phase and
-        :math:`\pi/4` from the last, and wrapping into :math:`(-\pi, \pi]`.
+        :math:`\pi/4` from the last, and wrapping into :math:`[-\pi, \pi)`.
         Results are cached per ``(degree, delta, scale)``; they do not depend on
         :math:`\mu`, so a cache hit skips synthesis and prints nothing.
 
