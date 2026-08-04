@@ -479,7 +479,7 @@ def test_inputs_trace_structural_values_and_specialize_scalars() -> None:
     assert estimate.parameters == {}
     assert estimate.calls.calls_by_name == {"expval": 1}
     assert estimate.calls.queries_by_name == {"expval": 1}
-    assert estimate.quality is qmc.EstimateQuality.MODELED
+    assert estimate.derivation is qmc.EstimateDerivation.MODELED
     assert len(estimate.assumptions) == 1
 
 

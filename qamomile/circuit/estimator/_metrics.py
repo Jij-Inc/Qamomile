@@ -67,23 +67,41 @@ def _is_concrete_integer(value: sp.Expr) -> bool:
     return False
 
 
-def _combine_quality(
-    left: EstimateQuality,
-    right: EstimateQuality,
-) -> EstimateQuality:
-    """Return the least exact of two estimate-quality values.
+def _combine_derivation(
+    left: EstimateDerivation,
+    right: EstimateDerivation,
+) -> EstimateDerivation:
+    """Return whether either estimate depends on a resource model.
 
     Args:
-        left (EstimateQuality): Left quality.
-        right (EstimateQuality): Right quality.
+        left (EstimateDerivation): Left derivation classification.
+        right (EstimateDerivation): Right derivation classification.
 
     Returns:
-        EstimateQuality: Combined quality classification.
+        EstimateDerivation: ``MODELED`` if either input is modeled.
+    """
+    if EstimateDerivation.MODELED in {left, right}:
+        return EstimateDerivation.MODELED
+    return EstimateDerivation.STRUCTURAL
+
+
+def _combine_guarantee(
+    left: EstimateGuarantee,
+    right: EstimateGuarantee,
+) -> EstimateGuarantee:
+    """Return the weakest resource-count guarantee of two estimates.
+
+    Args:
+        left (EstimateGuarantee): Left count guarantee.
+        right (EstimateGuarantee): Right count guarantee.
+
+    Returns:
+        EstimateGuarantee: Combined count guarantee.
     """
     rank = {
-        EstimateQuality.EXACT: 0,
-        EstimateQuality.UPPER_BOUND: 1,
-        EstimateQuality.MODELED: 2,
+        EstimateGuarantee.EXACT: 0,
+        EstimateGuarantee.UPPER_BOUND: 1,
+        EstimateGuarantee.UNKNOWN: 2,
     }
     return left if rank[left] >= rank[right] else right
 
@@ -160,17 +178,36 @@ class ControlDecomposition(enum.StrEnum):
     CLEAN_ANCILLA_TOFFOLI = "clean_ancilla_toffoli"
 
 
-class EstimateQuality(enum.StrEnum):
-    """Describe how directly resource counts follow the selected circuit model.
+class EstimateDerivation(enum.StrEnum):
+    """Describe how the estimator obtained the reported resource counts.
 
-    This axis concerns the resource counts themselves. Mathematical
-    approximations in the selected circuit are tracked independently by
-    :class:`ApproximationStatus`.
+    Values:
+        STRUCTURAL: Derive counts recursively from visible IR and the selected
+            estimator decomposition rules.
+        MODELED: Use a declared, callback-provided, or fallback resource model
+            for at least one part of the estimate.
+    """
+
+    STRUCTURAL = "structural"
+    MODELED = "modeled"
+
+
+class EstimateGuarantee(enum.StrEnum):
+    """Describe how reported counts relate to the selected circuit cost.
+
+    This axis is independent of both count derivation and mathematical
+    approximation. A modeled estimate can therefore be exact, an upper bound,
+    or unknown with respect to the selected resource model.
+
+    Values:
+        EXACT: Reported counts exactly follow the selected circuit model.
+        UPPER_BOUND: Reported counts are conservative upper bounds.
+        UNKNOWN: No exact or upper-bound guarantee is available.
     """
 
     EXACT = "exact"
     UPPER_BOUND = "upper_bound"
-    MODELED = "modeled"
+    UNKNOWN = "unknown"
 
 
 class ApproximationStatus(enum.StrEnum):
@@ -244,41 +281,85 @@ class _GuardedAssumption:
 
 
 @dataclasses.dataclass(frozen=True)
-class _GuardedQuality:
-    """Associate one non-exact quality classification with a guard.
+class _GuardedDerivation:
+    """Associate one modeled-derivation fact with a guard.
 
     Args:
-        active_when (sp.Basic): Boolean condition under which the quality fact
-            contributes.
-        quality (EstimateQuality): Non-exact classification being guarded.
+        active_when (sp.Basic): Boolean condition under which the derivation
+            fact contributes.
+        derivation (EstimateDerivation): Non-structural derivation being
+            guarded.
     """
 
     active_when: sp.Basic
-    quality: EstimateQuality
+    derivation: EstimateDerivation
 
-    def when(self, condition: sp.Basic) -> _GuardedQuality:
+    def when(self, condition: sp.Basic) -> _GuardedDerivation:
         """Conjoin another activation condition.
 
         Args:
             condition (sp.Basic): Additional branch or repetition guard.
 
         Returns:
-            _GuardedQuality: Quality fact guarded by both conditions.
+            _GuardedDerivation: Derivation fact guarded by both conditions.
         """
         return dataclasses.replace(
             self,
             active_when=_and_conditions(self.active_when, condition),
         )
 
-    def mapped(self, fn: Any) -> _GuardedQuality | None:
-        """Rewrite the activation guard and prune a false quality fact.
+    def mapped(self, fn: Any) -> _GuardedDerivation | None:
+        """Rewrite the activation guard and prune a false derivation fact.
 
         Args:
             fn (Any): Symbolic-expression rewrite function.
 
         Returns:
-            _GuardedQuality | None: Rewritten fact, or ``None`` when its guard
-                resolves false.
+            _GuardedDerivation | None: Rewritten fact, or ``None`` when its
+                guard resolves false.
+        """
+        active_when = _rewrite_condition(self.active_when, fn)
+        if active_when is sp.false:
+            return None
+        return dataclasses.replace(self, active_when=active_when)
+
+
+@dataclasses.dataclass(frozen=True)
+class _GuardedGuarantee:
+    """Associate one non-exact count guarantee with a guard.
+
+    Args:
+        active_when (sp.Basic): Boolean condition under which the guarantee
+            fact contributes.
+        guarantee (EstimateGuarantee): Non-exact guarantee being guarded.
+    """
+
+    active_when: sp.Basic
+    guarantee: EstimateGuarantee
+
+    def when(self, condition: sp.Basic) -> _GuardedGuarantee:
+        """Conjoin another activation condition.
+
+        Args:
+            condition (sp.Basic): Additional branch or repetition guard.
+
+        Returns:
+            _GuardedGuarantee: Guarantee fact guarded by both conditions.
+        """
+        return dataclasses.replace(
+            self,
+            active_when=_and_conditions(self.active_when, condition),
+        )
+
+    def mapped(self, fn: Any) -> _GuardedGuarantee | None:
+        """Rewrite the activation guard and prune a false guarantee fact.
+
+        Args:
+            fn (Any): Symbolic-expression rewrite function.
+
+        Returns:
+            _GuardedGuarantee | None: Rewritten fact, or ``None`` when its
+                guard resolves false.
         """
         active_when = _rewrite_condition(self.active_when, fn)
         if active_when is sp.false:
@@ -348,20 +429,40 @@ def _active_assumptions(
     return tuple(active)
 
 
-def _active_quality(facts: Sequence[_GuardedQuality]) -> EstimateQuality:
-    """Return the worst quality whose guard has not resolved false.
+def _active_derivation(
+    facts: Sequence[_GuardedDerivation],
+) -> EstimateDerivation:
+    """Return whether any active fact uses modeled derivation.
 
     Args:
-        facts (Sequence[_GuardedQuality]): Guarded quality provenance.
+        facts (Sequence[_GuardedDerivation]): Guarded derivation facts.
 
     Returns:
-        EstimateQuality: Active or potentially active worst classification.
+        EstimateDerivation: Active or potentially active derivation.
     """
-    quality = EstimateQuality.EXACT
+    derivation = EstimateDerivation.STRUCTURAL
     for fact in facts:
         if fact.active_when is not sp.false:
-            quality = _combine_quality(quality, fact.quality)
-    return quality
+            derivation = _combine_derivation(derivation, fact.derivation)
+    return derivation
+
+
+def _active_guarantee(
+    facts: Sequence[_GuardedGuarantee],
+) -> EstimateGuarantee:
+    """Return the weakest active or potentially active count guarantee.
+
+    Args:
+        facts (Sequence[_GuardedGuarantee]): Guarded guarantee facts.
+
+    Returns:
+        EstimateGuarantee: Active or potentially active guarantee.
+    """
+    guarantee = EstimateGuarantee.EXACT
+    for fact in facts:
+        if fact.active_when is not sp.false:
+            guarantee = _combine_guarantee(guarantee, fact.guarantee)
+    return guarantee
 
 
 def _active_approximation(
@@ -2285,13 +2386,17 @@ def _scale_resets(
     return ResetResources(total=resets.total * factor)
 
 
+@lru_cache(maxsize=4096)
 def _is_structurally_nonnegative(expression: ResourceExpr) -> bool:
     """Prove nonnegativity from resource-expression constructors alone.
 
     This deliberately avoids general symbolic simplification. Resource width
-    expressions frequently contain nested ``Max`` and ``Piecewise`` nodes;
-    recognizing their explicit nonnegative branches is both cheaper and more
-    reliable than asking SymPy to derive the same invariant globally.
+    expressions frequently contain nested ``Min``, ``Max``, and ``Piecewise``
+    nodes; recognizing their explicit nonnegative branches is both cheaper and
+    more reliable than asking SymPy to derive the same invariant globally. An
+    additive expression with exactly one such node also distributes its affine
+    remainder into that node's values, which proves common-offset bounds
+    without expanding combinations of independent extrema.
 
     Args:
         expression (ResourceExpr): Expression whose sign should be inspected.
@@ -2299,10 +2404,21 @@ def _is_structurally_nonnegative(expression: ResourceExpr) -> bool:
     Returns:
         bool: Whether the expression structure proves a nonnegative value.
     """
-    if expression.is_nonnegative is True or expression == _ZERO:
+    if expression == _ZERO:
+        return True
+    if isinstance(expression, sp.Number):
+        return expression.is_nonnegative is True
+    if isinstance(expression, sp.Symbol):
+        return expression.is_nonnegative is True
+    if getattr(type(expression), "is_nonnegative", None) is True:
         return True
     if isinstance(expression, sp.Max):
         return any(
+            _is_structurally_nonnegative(cast(ResourceExpr, argument))
+            for argument in expression.args
+        )
+    if isinstance(expression, sp.Min):
+        return all(
             _is_structurally_nonnegative(cast(ResourceExpr, argument))
             for argument in expression.args
         )
@@ -2312,13 +2428,53 @@ def _is_structurally_nonnegative(expression: ResourceExpr) -> bool:
             for pair in expression.args
         )
     if isinstance(expression, sp.Add):
+        if all(
+            _is_structurally_nonnegative(cast(ResourceExpr, argument))
+            for argument in expression.args
+        ):
+            return True
+        extrema = tuple(
+            argument
+            for argument in expression.args
+            if isinstance(argument, (sp.Max, sp.Min, sp.Piecewise))
+        )
+        if len(extrema) != 1:
+            return False
+        extremum = extrema[0]
+        remainder = cast(
+            ResourceExpr,
+            sp.Add(
+                *(argument for argument in expression.args if argument is not extremum)
+            ),
+        )
+        if isinstance(extremum, sp.Max):
+            return any(
+                _is_structurally_nonnegative(cast(ResourceExpr, argument + remainder))
+                for argument in extremum.args
+            )
+        values = (
+            tuple(pair.args[0] for pair in extremum.args)
+            if isinstance(extremum, sp.Piecewise)
+            else extremum.args
+        )
+        return all(
+            _is_structurally_nonnegative(cast(ResourceExpr, value + remainder))
+            for value in values
+        )
+    if isinstance(expression, sp.Mul):
         return all(
             _is_structurally_nonnegative(cast(ResourceExpr, argument))
             for argument in expression.args
         )
+    if isinstance(expression, sp.Pow):
+        base, exponent = expression.args
+        return _is_structurally_nonnegative(cast(ResourceExpr, base)) or (
+            exponent.is_integer is True and exponent.is_even is True
+        )
     return False
 
 
+@lru_cache(maxsize=4096)
 def _is_structurally_less_equal(
     left: ResourceExpr,
     right: ResourceExpr,
@@ -2332,8 +2488,27 @@ def _is_structurally_less_equal(
     Returns:
         bool: Whether every structural branch proves ``left <= right``.
     """
-    if left == right or _is_structurally_nonnegative(right - left):
+    if left == right:
         return True
+    if isinstance(left, _ConditionIndicator):
+        return _is_structurally_less_equal(_ONE, right)
+    if isinstance(left, sp.Mul) and any(
+        isinstance(argument, _ConditionIndicator) for argument in left.args
+    ):
+        unguarded = cast(
+            ResourceExpr,
+            sp.Mul(
+                *(
+                    argument
+                    for argument in left.args
+                    if not isinstance(argument, _ConditionIndicator)
+                )
+            ),
+        )
+        if _is_structurally_nonnegative(unguarded) and _is_structurally_less_equal(
+            unguarded, right
+        ):
+            return True
     if isinstance(left, sp.Piecewise):
         return all(
             _is_structurally_less_equal(
@@ -2370,7 +2545,55 @@ def _is_structurally_less_equal(
             _is_structurally_less_equal(left, cast(ResourceExpr, argument))
             for argument in right.args
         )
-    return False
+    return _is_structurally_nonnegative(right - left)
+
+
+def _guarded_resource_extension(
+    base: ResourceExpr,
+    candidate: ResourceExpr,
+) -> ResourceExpr | None:
+    """Recover an exact maximum from one activity-gated extension.
+
+    Scheduling can represent an optional completion as
+    ``(base + extension) * indicator(extension > 0)``. Its maximum with the
+    nonnegative ``base`` is exactly ``base + extension``: while inactive the
+    extension is zero, and while active the guarded candidate dominates.
+
+    Args:
+        base (ResourceExpr): Completion retained when the extension is absent.
+        candidate (ResourceExpr): Potential activity-gated completion.
+
+    Returns:
+        ResourceExpr | None: Unguarded dominating completion when the pattern
+            is proven structurally, otherwise ``None``.
+    """
+    if not isinstance(candidate, sp.Mul) or not _is_structurally_nonnegative(base):
+        return None
+    indicators = tuple(
+        argument
+        for argument in candidate.args
+        if isinstance(argument, _ConditionIndicator)
+    )
+    if len(indicators) != 1:
+        return None
+    unguarded = cast(
+        ResourceExpr,
+        sp.Mul(
+            *(
+                argument
+                for argument in candidate.args
+                if not isinstance(argument, _ConditionIndicator)
+            )
+        ),
+    )
+    if not _is_structurally_less_equal(base, unguarded):
+        return None
+    extension = cast(ResourceExpr, unguarded - base)
+    if not _is_structurally_nonnegative(extension):
+        return None
+    if indicators[0].args[0] != _resource_activity_condition(extension):
+        return None
+    return unguarded
 
 
 def _resource_max(left: ResourceExpr, right: ResourceExpr) -> ResourceExpr:
@@ -2383,11 +2606,22 @@ def _resource_max(left: ResourceExpr, right: ResourceExpr) -> ResourceExpr:
     Returns:
         ResourceExpr: Dominating expression when proven, otherwise ``Max``.
     """
+    if (extension := _guarded_resource_extension(left, right)) is not None:
+        return extension
+    if (extension := _guarded_resource_extension(right, left)) is not None:
+        return extension
     if _is_structurally_less_equal(left, right):
         return right
     if _is_structurally_less_equal(right, left):
         return left
-    return sp.Max(left, right)
+    candidates = (
+        *(left.args if isinstance(left, sp.Max) else (left,)),
+        *(right.args if isinstance(right, sp.Max) else (right,)),
+    )
+    unique_candidates = tuple(dict.fromkeys(candidates))
+    if len(unique_candidates) == 1:
+        return cast(ResourceExpr, unique_candidates[0])
+    return cast(ResourceExpr, sp.Max(*unique_candidates, evaluate=False))
 
 
 def _resource_max_many(expressions: Sequence[ResourceExpr]) -> ResourceExpr:
@@ -2395,9 +2629,9 @@ def _resource_max_many(expressions: Sequence[ResourceExpr]) -> ResourceExpr:
 
     The dependency scheduler repeatedly compares expressions already known to
     be nonnegative and monotone. Folding through :func:`_resource_max` proves
-    those common dominance relations structurally before falling back to
-    SymPy's general ``Max`` constructor, avoiding exponential symbolic work in
-    nested qkernel summaries.
+    those common dominance relations structurally before building an
+    unevaluated ``Max``. This avoids SymPy's general pairwise relation proofs,
+    whose cost is quadratic in the number and size of candidates.
 
     Args:
         expressions (Sequence[ResourceExpr]): Candidate resource expressions.

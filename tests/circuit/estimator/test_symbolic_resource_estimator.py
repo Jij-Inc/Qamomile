@@ -58,7 +58,7 @@ def _repeated_helper_callsite() -> tuple[qm.Bit, qm.UInt]:
     return qm.measure(q), total
 
 
-def test_clifford_t_basis_lowers_body_gates_and_reports_quality() -> None:
+def test_clifford_t_basis_lowers_body_gates_and_reports_metadata() -> None:
     """Basis lowering reports aggregate Clifford+T counts and approximation."""
     logical = _basis_probe.estimate_resources()
     lowered = _basis_probe.estimate_resources(
@@ -67,13 +67,13 @@ def test_clifford_t_basis_lowers_body_gates_and_reports_quality() -> None:
     )
 
     assert logical.gates.total == 2
-    assert logical.quality is qm.EstimateQuality.EXACT
+    assert logical.guarantee is qm.EstimateGuarantee.EXACT
     assert lowered.gates.total == 26
     assert lowered.gates.single_qubit == 20
     assert lowered.gates.two_qubit == 6
     assert lowered.gates.t == 16
     assert lowered.gates.rotation == 0
-    assert lowered.quality is qm.EstimateQuality.UPPER_BOUND
+    assert lowered.guarantee is qm.EstimateGuarantee.UPPER_BOUND
     assert lowered.approximation is qm.ApproximationStatus.APPROXIMATE
 
 
@@ -335,7 +335,7 @@ def test_clifford_t_basis_lowers_controlled_toffoli_with_clean_ancilla() -> None
     assert estimate.depth.gate_depth == 61
     assert estimate.width.clean_ancilla_qubits == 2
     assert estimate.qubits == 6
-    assert estimate.quality is qm.EstimateQuality.UPPER_BOUND
+    assert estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
 
 
 @pytest.mark.parametrize(
@@ -344,127 +344,127 @@ def test_clifford_t_basis_lowers_controlled_toffoli_with_clean_ancilla() -> None
         pytest.param(
             "z",
             2,
-            (17, 7, 17, 10, 3, 0, qm.EstimateQuality.EXACT),
+            (17, 7, 17, 10, 3, 0, qm.EstimateGuarantee.EXACT),
             id="ccz-exact-boundary",
         ),
         pytest.param(
             "z",
             3,
-            (63, 28, 63, 35, 12, 2, qm.EstimateQuality.UPPER_BOUND),
+            (63, 28, 63, 35, 12, 2, qm.EstimateGuarantee.UPPER_BOUND),
             id="controlled-z-upper-bound",
         ),
         pytest.param(
             "y",
             2,
-            (17, 7, 17, 10, 3, 0, qm.EstimateQuality.EXACT),
+            (17, 7, 17, 10, 3, 0, qm.EstimateGuarantee.EXACT),
             id="ccy-exact-boundary",
         ),
         pytest.param(
             "y",
             3,
-            (63, 28, 63, 35, 12, 2, qm.EstimateQuality.UPPER_BOUND),
+            (63, 28, 63, 35, 12, 2, qm.EstimateGuarantee.UPPER_BOUND),
             id="controlled-y-upper-bound",
         ),
         pytest.param(
             "cz",
             1,
-            (17, 7, 17, 10, 3, 0, qm.EstimateQuality.EXACT),
+            (17, 7, 17, 10, 3, 0, qm.EstimateGuarantee.EXACT),
             id="ccz-from-cz-exact-boundary",
         ),
         pytest.param(
             "cz",
             2,
-            (63, 28, 63, 35, 12, 2, qm.EstimateQuality.UPPER_BOUND),
+            (63, 28, 63, 35, 12, 2, qm.EstimateGuarantee.UPPER_BOUND),
             id="controlled-cz-upper-bound",
         ),
         pytest.param(
             "swap",
             1,
-            (17, 7, 17, 10, 3, 0, qm.EstimateQuality.EXACT),
+            (17, 7, 17, 10, 3, 0, qm.EstimateGuarantee.EXACT),
             id="fredkin-exact-boundary",
         ),
         pytest.param(
             "swap",
             2,
-            (63, 28, 63, 35, 12, 2, qm.EstimateQuality.UPPER_BOUND),
+            (63, 28, 63, 35, 12, 2, qm.EstimateGuarantee.UPPER_BOUND),
             id="controlled-swap-upper-bound",
         ),
         pytest.param(
             "p",
             0,
-            (9, 9, 9, 0, 9, 0, qm.EstimateQuality.UPPER_BOUND),
+            (9, 9, 9, 0, 9, 0, qm.EstimateGuarantee.UPPER_BOUND),
             id="phase-rotation",
         ),
         pytest.param(
             "p",
             1,
-            (29, 27, 20, 2, 18, 0, qm.EstimateQuality.UPPER_BOUND),
+            (29, 27, 20, 2, 18, 0, qm.EstimateGuarantee.UPPER_BOUND),
             id="controlled-phase-parallel-rotations",
         ),
         pytest.param(
             "p",
             2,
-            (59, 41, 50, 18, 24, 1, qm.EstimateQuality.UPPER_BOUND),
+            (59, 41, 50, 18, 24, 1, qm.EstimateGuarantee.UPPER_BOUND),
             id="multi-controlled-phase",
         ),
         pytest.param(
             "cp",
             0,
-            (29, 27, 20, 2, 18, 0, qm.EstimateQuality.UPPER_BOUND),
+            (29, 27, 20, 2, 18, 0, qm.EstimateGuarantee.UPPER_BOUND),
             id="cp-parallel-rotations",
         ),
         pytest.param(
             "cp",
             1,
-            (59, 41, 50, 18, 24, 1, qm.EstimateQuality.UPPER_BOUND),
+            (59, 41, 50, 18, 24, 1, qm.EstimateGuarantee.UPPER_BOUND),
             id="controlled-cp",
         ),
         pytest.param(
             "s",
             1,
-            (5, 3, 4, 2, 2, 0, qm.EstimateQuality.EXACT),
+            (5, 3, 4, 2, 2, 0, qm.EstimateGuarantee.EXACT),
             id="controlled-s",
         ),
         pytest.param(
             "s",
             2,
-            (35, 17, 34, 18, 8, 1, qm.EstimateQuality.UPPER_BOUND),
+            (35, 17, 34, 18, 8, 1, qm.EstimateGuarantee.UPPER_BOUND),
             id="multi-controlled-s",
         ),
         pytest.param(
             "sdg",
             1,
-            (5, 3, 4, 2, 2, 0, qm.EstimateQuality.EXACT),
+            (5, 3, 4, 2, 2, 0, qm.EstimateGuarantee.EXACT),
             id="controlled-sdg",
         ),
         pytest.param(
             "sdg",
             2,
-            (35, 17, 34, 18, 8, 1, qm.EstimateQuality.UPPER_BOUND),
+            (35, 17, 34, 18, 8, 1, qm.EstimateGuarantee.UPPER_BOUND),
             id="multi-controlled-sdg",
         ),
         pytest.param(
             "t",
             1,
-            (31, 15, 31, 16, 7, 1, qm.EstimateQuality.EXACT),
+            (31, 15, 31, 16, 7, 1, qm.EstimateGuarantee.EXACT),
             id="controlled-t",
         ),
         pytest.param(
             "t",
             2,
-            (61, 29, 61, 32, 13, 2, qm.EstimateQuality.EXACT),
+            (61, 29, 61, 32, 13, 2, qm.EstimateGuarantee.EXACT),
             id="multi-controlled-t",
         ),
         pytest.param(
             "tdg",
             1,
-            (31, 15, 31, 16, 7, 1, qm.EstimateQuality.EXACT),
+            (31, 15, 31, 16, 7, 1, qm.EstimateGuarantee.EXACT),
             id="controlled-tdg",
         ),
         pytest.param(
             "tdg",
             2,
-            (61, 29, 61, 32, 13, 2, qm.EstimateQuality.EXACT),
+            (61, 29, 61, 32, 13, 2, qm.EstimateGuarantee.EXACT),
             id="multi-controlled-tdg",
         ),
     ],
@@ -472,9 +472,9 @@ def test_clifford_t_basis_lowers_controlled_toffoli_with_clean_ancilla() -> None
 def test_controlled_clifford_t_depth_tracks_canonical_schedule(
     name: str,
     controls: int,
-    expected: tuple[int, int, int, int, int, int, qm.EstimateQuality],
+    expected: tuple[int, int, int, int, int, int, qm.EstimateGuarantee],
 ) -> None:
-    """Named Clifford+T recipes expose their canonical schedule and quality."""
+    """Named Clifford+T recipes expose their schedule and guarantee."""
     estimate = resource_estimator_module._estimate_named_gate_in_basis(
         name,
         sp.Integer(controls),
@@ -482,7 +482,7 @@ def test_controlled_clifford_t_depth_tracks_canonical_schedule(
         control_decomposition=qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
         precision=1 / 8,
     )
-    total, t_count, depth, clifford_depth, t_depth, ancillas, quality = expected
+    total, t_count, depth, clifford_depth, t_depth, ancillas, guarantee = expected
 
     assert estimate.gates.total == total
     assert estimate.gates.t == t_count
@@ -492,7 +492,7 @@ def test_controlled_clifford_t_depth_tracks_canonical_schedule(
     assert estimate.depth.non_clifford_depth == t_depth
     assert estimate.depth.gate_depth == depth
     assert estimate.width.clean_ancilla_qubits == ancillas
-    assert estimate.quality is quality
+    assert estimate.guarantee is guarantee
     expected_approximation = (
         qm.ApproximationStatus.APPROXIMATE
         if name in {"p", "cp"}
@@ -505,7 +505,7 @@ def test_controlled_clifford_t_depth_tracks_canonical_schedule(
 def test_symbolic_clifford_t_named_depth_matches_direct_specialization(
     name: str,
 ) -> None:
-    """Symbolic control guards retain every numeric recipe and quality branch."""
+    """Symbolic control guards retain every recipe and guarantee branch."""
     controls = sp.Symbol("controls", integer=True, nonnegative=True)
     symbolic = resource_estimator_module._estimate_named_gate_in_basis(
         name,
@@ -528,7 +528,8 @@ def test_symbolic_clifford_t_named_depth_matches_direct_specialization(
         assert specialized.gates == direct.gates
         assert specialized.depth == direct.depth
         assert specialized.width == direct.width
-        assert specialized.quality is direct.quality
+        assert specialized.derivation is direct.derivation
+        assert specialized.guarantee is direct.guarantee
         assert specialized.approximation is direct.approximation
         assert specialized.parameters == {}
 
@@ -587,7 +588,7 @@ def test_clifford_t_controlled_s_uses_exact_three_t_phase_polynomial() -> None:
         assert estimate.gates.total == 5
         assert estimate.depth.t_depth == 2
         assert estimate.width.clean_ancilla_qubits == 0
-        assert estimate.quality is qm.EstimateQuality.EXACT
+        assert estimate.guarantee is qm.EstimateGuarantee.EXACT
 
 
 def test_clean_ancilla_mcx_recipe_is_consistent_across_gate_bases() -> None:
@@ -612,12 +613,12 @@ def test_clean_ancilla_mcx_recipe_is_consistent_across_gate_bases() -> None:
     assert logical.gates.total == 7
     assert logical.gates.toffoli == 6
     assert logical.width.clean_ancilla_qubits == 3
-    assert logical.quality is qm.EstimateQuality.UPPER_BOUND
+    assert logical.guarantee is qm.EstimateGuarantee.UPPER_BOUND
     assert clifford_t.gates.total == 91
     assert clifford_t.gates.t == 42
     assert clifford_t.depth.t_depth == 18
     assert clifford_t.width.clean_ancilla_qubits == 3
-    assert clifford_t.quality is qm.EstimateQuality.UPPER_BOUND
+    assert clifford_t.guarantee is qm.EstimateGuarantee.UPPER_BOUND
 
 
 @pytest.mark.parametrize(
@@ -682,7 +683,7 @@ def test_gate_basis_and_control_decomposition_cross_product(
     assert estimate.gates.two_qubit == 1
     assert estimate.gates.clifford == 1
     assert estimate.width.clean_ancilla_qubits == 0
-    assert estimate.quality is qm.EstimateQuality.EXACT
+    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
 
 
 def test_clifford_t_basis_rejects_missing_controlled_gate_lowering() -> None:
@@ -1166,7 +1167,7 @@ def test_symbolic_loop_width_finds_piecewise_condition_boundaries() -> None:
     assert index not in symbolic.width.peak_qubits.free_symbols
     assert concrete.width.clean_ancilla_qubits == 12
     assert concrete.width.peak_qubits == 12
-    assert concrete.quality is qm.EstimateQuality.EXACT
+    assert concrete.guarantee is qm.EstimateGuarantee.EXACT
 
 
 def test_sum_over_reduces_loop_guarded_metadata_by_reachable_iterations() -> None:
@@ -1176,7 +1177,7 @@ def test_sum_over_reduces_loop_guarded_metadata_by_reachable_iterations() -> Non
     active_body = qm.ResourceEstimate(
         gates=qm.GateResources(total=1, single_qubit=1),
         assumptions=(assumption,),
-        quality=qm.EstimateQuality.MODELED,
+        derivation=qm.EstimateDerivation.MODELED,
         approximation=qm.ApproximationStatus.APPROXIMATE,
     )
     empty = qm.ResourceEstimate.zero()
@@ -1200,21 +1201,21 @@ def test_sum_over_reduces_loop_guarded_metadata_by_reachable_iterations() -> Non
 
     assert never.gates.total == 0
     assert never.assumptions == ()
-    assert never.quality is qm.EstimateQuality.EXACT
+    assert never.guarantee is qm.EstimateGuarantee.EXACT
     assert never.approximation is qm.ApproximationStatus.EXACT
 
     assert sometimes.gates.total == 1
     assert sometimes.assumptions == (assumption,)
-    assert sometimes.quality is qm.EstimateQuality.MODELED
+    assert sometimes.derivation is qm.EstimateDerivation.MODELED
     assert sometimes.approximation is qm.ApproximationStatus.APPROXIMATE
 
     before_guard = symbolic.substitute(iterations=1)
     after_guard = symbolic.substitute(iterations=2)
     assert before_guard.assumptions == ()
-    assert before_guard.quality is qm.EstimateQuality.EXACT
+    assert before_guard.guarantee is qm.EstimateGuarantee.EXACT
     assert before_guard.approximation is qm.ApproximationStatus.EXACT
     assert after_guard.assumptions == (assumption,)
-    assert after_guard.quality is qm.EstimateQuality.MODELED
+    assert after_guard.derivation is qm.EstimateDerivation.MODELED
     assert after_guard.approximation is qm.ApproximationStatus.APPROXIMATE
 
 
@@ -1812,7 +1813,7 @@ def test_concrete_for_items_schedules_disjoint_entries_in_parallel() -> None:
     assert estimate.gates.total == 3
     assert estimate.depth.depth == 1
     assert estimate.depth.rotation_depth == 1
-    assert estimate.quality is qm.EstimateQuality.EXACT
+    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
 
 
 def test_concrete_for_items_serializes_overlapping_entries() -> None:
@@ -1833,7 +1834,7 @@ def test_concrete_for_items_serializes_overlapping_entries() -> None:
     assert estimate.gates.total == 3
     assert estimate.depth.depth == 3
     assert estimate.depth.rotation_depth == 3
-    assert estimate.quality is qm.EstimateQuality.EXACT
+    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
 
 
 def test_concrete_for_items_propagates_each_wire_completion() -> None:
@@ -1854,7 +1855,7 @@ def test_concrete_for_items_propagates_each_wire_completion() -> None:
 
     assert estimate.gates.total == 4
     assert estimate.depth.depth == 2
-    assert estimate.quality is qm.EstimateQuality.EXACT
+    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
 
 
 def test_for_items_rejects_item_dependent_structural_constraints() -> None:
@@ -2799,7 +2800,7 @@ def test_constant_conditional_ignores_unreachable_provenance() -> None:
     clifford_t = qm.ResourceEstimate(
         gates=qm.GateResources(total=100),
         assumptions=(qm.ResourceAssumption("unreachable"),),
-        quality=qm.EstimateQuality.MODELED,
+        derivation=qm.EstimateDerivation.MODELED,
         basis=qm.GateBasis.CLIFFORD_T,
         precision=1e-3,
     )
@@ -2846,13 +2847,13 @@ def test_zero_trip_repeat_disables_internal_allocation_sites() -> None:
     assert repeated._allocation_sites == {"body": sp.Integer(0)}
 
 
-def test_zero_trip_repeat_prunes_quality_and_assumptions() -> None:
+def test_zero_trip_repeat_prunes_metadata_and_assumptions() -> None:
     """Literal and specialized zero repeats contribute no modeled metadata."""
     assumption = qm.ResourceAssumption("modeled body")
     body = qm.ResourceEstimate(
         gates=qm.GateResources(total=1),
         assumptions=(assumption,),
-        quality=qm.EstimateQuality.MODELED,
+        derivation=qm.EstimateDerivation.MODELED,
         approximation=qm.ApproximationStatus.APPROXIMATE,
     )
     repetitions = sp.Symbol("repetitions", integer=True, nonnegative=True)
@@ -2863,11 +2864,11 @@ def test_zero_trip_repeat_prunes_quality_and_assumptions() -> None:
     for estimate in (literal_zero, symbolic_zero):
         assert estimate.gates.total == 0
         assert estimate.assumptions == ()
-        assert estimate.quality is qm.EstimateQuality.EXACT
+        assert estimate.guarantee is qm.EstimateGuarantee.EXACT
         assert estimate.approximation is qm.ApproximationStatus.EXACT
 
     active = body.repeat(repetitions).substitute(repetitions=2)
     assert active.gates.total == 2
     assert active.assumptions == (assumption,)
-    assert active.quality is qm.EstimateQuality.MODELED
+    assert active.derivation is qm.EstimateDerivation.MODELED
     assert active.approximation is qm.ApproximationStatus.APPROXIMATE

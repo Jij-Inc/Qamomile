@@ -109,7 +109,8 @@ assert decomposed_controls.gates.total == 5
 assert decomposed_controls.gates.toffoli == 4
 assert decomposed_controls.width.clean_ancilla_qubits == 2
 assert decomposed_controls.qubits == 6
-assert decomposed_controls.quality is qmc.EstimateQuality.UPPER_BOUND
+assert decomposed_controls.derivation is qmc.EstimateDerivation.STRUCTURAL
+assert decomposed_controls.guarantee is qmc.EstimateGuarantee.UPPER_BOUND
 
 abstract_controls = controlled_h.estimate_resources(
     control_decomposition=qmc.ControlDecomposition.ABSTRACT,
@@ -121,7 +122,7 @@ assert abstract_controls.width.clean_ancilla_qubits == 0
 assert abstract_controls.qubits == 4
 
 # %% [markdown]
-# `CLEAN_ANCILLA_TOFFOLI`は、resource estimatorがcoherent controlを数えるための固定algorithmic modelです。通常のgateは種類によらず1単位のmodel workとして数えます。2個以上のcontrolが2単位以上のactiveなworkを囲む場合、このmodelはcontrolの論理積を1回だけ計算してbody全体で共有します。operationが1個だけ、またはcontrolが1個だけの場合は、primitiveごとの保守的な分解を維持します。workの数は具体化済みのqkernel call、inverse block、branch、loopの内側まで再帰的に追うため、同じbodyを別qkernelへ切り出しただけでは結果が変わりません。nested control boundary、activeなSELECT case、Pauli evolutionは、構造上1つのleafでも共有に十分な内部controlled workを表す場合があります。このresource modelはengineのemission policyから意図的に独立しています。engine側が直接経路やnativeな多制御gateを使っても、推定式は自動的には変わりません。制御数にかかわらずソース上の各controlled primitiveを1個の抽象operationとして扱いたい場合は、`ABSTRACT`を選択します。これとは独立に、対応しているoperationをClifford+Tの合計リソースへ変換する場合は`CLIFFORD_T`を選び、任意回転の合成精度を`precision`で指定します。抽象的なcontrolled primitive自体はClifford+Tの内訳として報告できません。対応するClifford+T loweringがない場合も、架空のコストを算出せずエラーになります。これらの設定はrouting、ハードウェアのnative gateに合わせた最適化、誤り訂正のコスト算出を行いません。
+# `CLEAN_ANCILLA_TOFFOLI`は、resource estimatorがcoherent controlを数えるための固定algorithmic modelです。通常のgateは種類によらず1単位のactive workとして数えます。2個以上のcontrolが2単位以上のactiveなworkを囲む場合、このmodelはcontrolの論理積を1回だけ計算してbody全体で共有します。operationが1個だけ、またはcontrolが1個だけの場合は、primitiveごとの保守的な分解を維持します。workの数は具体化済みのqkernel call、inverse block、branch、loopの内側まで再帰的に追うため、同じbodyを別qkernelへ切り出しただけでは結果が変わりません。nested control boundary、activeなSELECT case、Pauli evolutionは、構造上1つのleafでも共有に十分な内部controlled workを表す場合があります。このresource modelはengineのemission policyから意図的に独立しています。engine側が直接経路やnativeな多制御gateを使っても、推定式は自動的には変わりません。制御数にかかわらずソース上の各controlled primitiveを1個の抽象operationとして扱いたい場合は、`ABSTRACT`を選択します。これとは独立に、対応しているoperationをClifford+Tの合計リソースへ変換する場合は`CLIFFORD_T`を選び、任意回転の合成精度を`precision`で指定します。抽象的なcontrolled primitive自体はClifford+Tの内訳として報告できません。対応するClifford+T loweringがない場合も、架空のコストを算出せずエラーになります。これらの設定はrouting、ハードウェアのnative gateに合わせた最適化、誤り訂正のコスト算出を行いません。
 
 
 # %%
@@ -152,7 +153,9 @@ phase_est = controlled_phase.estimate_resources(
 )
 assert phase_est.substitute(theta=0).gates.total == 0
 assert phase_est.substitute(theta=math.pi / 4).gates.t == 1
-assert phase_est.substitute(theta=0.3).quality is qmc.EstimateQuality.UPPER_BOUND
+arbitrary_phase = phase_est.substitute(theta=0.3)
+assert arbitrary_phase.guarantee is qmc.EstimateGuarantee.UPPER_BOUND
+assert arbitrary_phase.approximation is qmc.ApproximationStatus.APPROXIMATE
 
 # %% [markdown]
 # 単独のglobal phaseは観測できないため、このtarget非依存モデルではコストを0とします。上の例のように量子制御下ではrelative phaseになります。代入後の角度が0、Z、S、Tなどのcanonicalな値なら厳密に分類し、任意の角度には指定した合成モデルを使います。
@@ -166,13 +169,13 @@ assert phase_est.substitute(theta=0.3).quality is qmc.EstimateQuality.UPPER_BOUN
 # | `qmc.select(...)` | indexの各量子ビットによる制御、open controlの前後のX、Vectorへのbroadcast、外側の制御を含め、出力されるすべての制御付きcase本体を合計します。宣言したindex幅はoperandと一致し、全caseを指定できる必要があります。 |
 # | `qmc.pauli_evolve(...)` | Hermitian Hamiltonianを与えると、Pauli basis変換、parity ladder、軸回転、定数項による制御付きphaseを数えます。非可換なPauli sumはHamiltonianの項の順序による1-stepのfirst-order Lie–Trotterとして扱い、`approximate`と記録します。targetレジスタはHamiltonianのsupportを収容できる幅が必要です。 |
 # | `if`、`for`、`for_items`、`while` | 可能な場合はコンパイル時のconditionとloop boundをsymbolicに保ちます。パラメータ分岐のgate数と幅は`Piecewise`で表し、測定結果に基づく分岐は保守的な最大値を使います。symbolicなaliasや複数wireの境界により厳密なscheduleを構成できない場合、dependency depthは`upper_bound`のままになります。loopのworkは累積し、再利用できる幅はlivenessに従います。扱えないcarry recurrenceは明示的にエラーにするか、仮定として表示します。 |
-# | `qmc.expval(...)` | 抽象的なexpectation query 1回とmeasurement layer 1段を記録します。observable grouping、basis rotation、shot数、executorのsampling policyはengine/executorに依存するため、架空のgate数を出さず、仮定を明示した`modeled`推定にします。 |
+# | `qmc.expval(...)` | 抽象的なexpectation query 1回とmeasurement layer 1段を記録します。observable grouping、basis rotation、shot数、executorのsampling policyはengine/executorに依存するため、架空のgate数を出さず、仮定を明示して`derivation=MODELED`、`guarantee=UNKNOWN`とします。 |
 # | LCU block encoding | 直接、制御、inverse、descriptor経由、serialization後のいずれでも、signalレジスタとsystemレジスタの厳密な幅要件を維持します。 |
 
 # %% [markdown]
-# ### リソースcountのqualityと数学的なapproximation
+# ### リソースcountの算出方法、保証、数学的なapproximation
 #
-# `EstimateQuality`は、報告するリソースcountが選択した回路モデルからどの程度直接得られたかを表します。これとは独立して、`estimate.approximation`は、その選択された回路が理想的な数学上のoperationを近似するかどうかを表します。例えば、任意回転を有限精度でClifford+T合成する場合と、非可換なPauli項へ1-stepのproduct formulaを使う場合は、どちらも`ApproximationStatus.APPROXIMATE`になります。
+# 三つの独立したfieldが別々の問いに答えます。`estimate.derivation`は、見えているIRと選択した推定器の分解規則から数えたか（`STRUCTURAL`）、宣言済みまたはfallbackのmodelを使ったか（`MODELED`）を表します。`estimate.guarantee`は、そのcountが`EXACT`、安全側の`UPPER_BOUND`、どちらも保証できない`UNKNOWN`のいずれかを表します。`estimate.approximation`は、選択した回路について推定器が認識した数学的近似を記録します。ここで`EXACT`は「既知の近似を記録していない」という意味で、opaque boundaryの内側や外部helperがすでに低水準化した処理の数学的意味まで厳密だと証明するものではありません。そのため、`UPPER_BOUND`だから`APPROXIMATE`になるわけではなく、modelを使った推定が同時に上界保証を持つ場合もあります。
 
 
 # %%
@@ -199,7 +202,8 @@ commuting_est = pauli_sum_evolution.estimate_resources(
     inputs={"hamiltonian": qmo.Z(0) + qmo.Z(1), "time": 0.25},
 )
 
-assert noncommuting_est.quality is qmc.EstimateQuality.EXACT
+assert noncommuting_est.derivation is qmc.EstimateDerivation.STRUCTURAL
+assert noncommuting_est.guarantee is qmc.EstimateGuarantee.EXACT
 assert noncommuting_est.approximation is qmc.ApproximationStatus.APPROXIMATE
 assert zero_time_est.approximation is qmc.ApproximationStatus.EXACT
 assert commuting_est.approximation is qmc.ApproximationStatus.EXACT
@@ -246,7 +250,7 @@ print("parameters:", est.parameters)
 assert set(est.parameters.keys()) == {"n"}
 
 # %% [markdown]
-# 出力には、量子ビット数を表す`n`や総ゲート数を表す`2*n + Max(0, n - 1)`のようなSymPy式が含まれます。これらの式は、選択した推定モデルの中では厳密です。保守的な上界や明示的なモデルを使った推定かどうかは`est.quality`で確認できます。
+# 出力には、量子ビット数を表す`n`や総ゲート数を表す`2*n + Max(0, n - 1)`のようなSymPy式が含まれます。明示的またはfallbackのmodelを使ったかは`est.derivation`、countが厳密か、上界か、どちらも保証できないかは`est.guarantee`で確認できます。
 #
 # `Max(0, ...)`は`qmc.range(n - 1)`のループ回数に由来します。`n`が未束縛のため`n >= 1`を仮定できず、`n = 0`のときに回数が`-1`になってしまわないよう0で下限を取っています。具体的な`n >= 1`を代入すればこのガードは外れるので、後述の合計値はそのまま整数になります。
 
@@ -303,25 +307,26 @@ assert vector_est.parameters == {}
 # | `est.basis` | 選択したgate basis（`logical`または`clifford_t`） |
 # | `est.control_decomposition` | 選択したcoherent controlモデル（`abstract`または`clean_ancilla_toffoli`） |
 # | `est.precision` | `clifford_t`のrotation synthesis精度 |
-# | `est.quality` | `exact`、`upper_bound`、`modeled`のいずれか |
-# | `est.approximation` | `exact`または`approximate`：選択した回路が理想的なoperationを近似するか |
+# | `est.derivation` | `structural`または`modeled`：countをどのように求めたか |
+# | `est.guarantee` | `exact`、`upper_bound`、`unknown`のいずれか：選択した回路costに対するcountの保証 |
+# | `est.approximation` | `exact`または`approximate`：推定器が数学的近似を認識したか |
 # | `est.assumptions` | 推定時に有効なモデル上の仮定 |
 # | `est.trace` / `est.explain()` | 任意で保持する説明treeとそのテキスト表示 |
 #
-# 数値リソースのフィールドはSymPy式です。固定量子カーネルの場合は通常の整数に評価されます。`quality`はリソースcountに関する分類であり、`approximation`は選択した回路が理想的なoperationを数学的にどの程度忠実に表すかに関する独立した分類です。測定とresetはゲートとして数えません。`N`量子ビットのvectorを測定すると`measurements.total`は`N`増えますが、並列に読み出せる場合の`measurement_depth`は1 layerです。countは量子カーネルをlogicalに1回実行した場合の値で、shots倍しません。`qmc.expval`はobservable grouping、basis rotation、shotsがExecutorに依存するため、`measurements.total`を0のままにします。ここでの0は「測定不要」ではなく「この推定には含めていない」という意味で、その不確実性は`modeled` quality、assumption、abstract query、measurement layerで明示します。`resets.total`が数えるのは明示的な`qmc.reset`だけで、`|0>`状態の新規確保やengineがtargetに合わせて挿入するresetは含みません。各種類のdepthは独立してscheduleされるため、加減算から`depth.depth`を復元することはできません。
+# 数値リソースのfieldはSymPy式です。固定量子カーネルの場合は通常の整数に評価されます。`derivation`はresource countの求め方、`guarantee`は選択した回路costに対するcountの関係、`approximation`は推定器が認識した数学的近似を、それぞれ独立に示します。`approximation=EXACT`は「既知の近似を記録していない」という意味で、opaqueな意味まで厳密だと証明するものではありません。測定とresetはgateとして数えません。`N`量子ビットのvectorを測定すると`measurements.total`は`N`増えますが、並列に読み出せる場合の`measurement_depth`は1 layerです。countは量子カーネルをlogicalに1回実行した場合の値で、shots倍しません。`qmc.expval`はobservable grouping、basis rotation、shotsがexecutorに依存するため、`measurements.total`を0のままにします。ここでの0は「測定不要」ではなく「この推定には含めていない」という意味で、その不確実性は`MODELED`という算出方法、`UNKNOWN`という保証、assumption、abstract query、measurement layerで明示します。`resets.total`が数えるのは明示的な`qmc.reset`だけで、`|0>`状態の新規確保やengineがtargetに合わせて挿入するresetは含みません。各種類のdepthは独立してscheduleされるため、加減算から`depth.depth`を復元することはできません。
 #
 # `calls_by_name`は通常の本体を持つ量子カーネルのcallを意図的に数えません。その本体はすでに展開され、gate、幅、depth、測定、resetに反映されているためです。ここに記録するのは、選択したmodelで展開せずに残した名前付きboundaryです。明示的またはunknownなopaque callに加え、具体的なsampling実装をexecutorが決める`qmc.expval`のようなmodeled semantic boundaryも含みます。そのため、1回の`expval`はmodeledなmeasurement layerに加えて、`calls_by_name={"expval": 1}`と`queries_by_name={"expval": 1}`を記録します。
 
 # %% [markdown]
-# ## Opaque boundary、condition-aware provenance、trace
+# ## Opaque boundary、算出条件、trace
 #
-# 本体を持たないcallableは、コストを指定しない限り正確なgate数が分かりません。そのため既定の`UnknownResourcePolicy.ERROR`ではエラーになります。コストが分かっている場合は、`qmc.opaque(...)`に明示的な`ResourceEstimate`を指定してください。探索的な用途では、`OPAQUE_CALL`は名前付きのcallとqueryを記録してqualityを`modeled`とし、`ZERO_WITH_WARNING`はコスト0という仮定を記録します。どちらも未知の本体を分解したかのようには扱いません。
+# 本体を持たないcallableは、コストを指定しない限り正確なgate数が分かりません。そのため既定の`UnknownResourcePolicy.ERROR`ではエラーになります。コストが分かっている場合は、`qmc.opaque(...)`に明示的な`ResourceEstimate`を指定してください。探索的な用途では、`OPAQUE_CALL`は名前付きのcallとqueryを記録し、`derivation=MODELED`、`guarantee=UNKNOWN`とします。`ZERO_WITH_WARNING`も同じmetadataでコスト0という仮定を記録します。どちらも未知の本体を分解したかのようには扱いません。
 #
 # 固定`ResourceEstimate`とcontext-dependentな`cost(ctx)` callbackは、どちらもOracle定義を1回適用するbase costを記述します。このbase costには`qmc.opaque(..., num_control_qubits=...)`で宣言したcontrol（D）がすでに含まれますが、後から`qmc.control(oracle, ...)`で追加したcontrol（A）と、外側のcontrolled qkernelから継承したcontrol（K）は含まれません。推定器はどちらのbase costを受け取った後も、inverseとこれらの外部controlを適用します。
 #
 # callbackが受け取るのは完全なcall siteではなく、`OpaqueCostContext`です。`target_qubits`、targetごとの`target_shapes`、`definition_control_qubits`、`basis`、`control_decomposition`、`precision`、任意のbase `strategy`を参照できます。追加control、継承control、inverse、open-control値は意図的に含めていません。callbackは定義levelのbase costだけを記述し、これらのcall-site transformは推定器だけが反映します。ただし、ほかの利用者指定costと同様に、callbackの作成者にはこの契約に沿ったbase costを返す責任があります。
 #
-# gate modelに依存するfieldを含む固定costは、そのfieldのprovenanceも固定します。異なる`basis`、`control_decomposition`、またはClifford+Tの`precision`でそのOracleを推定すると、同じgate数へ別の意味を黙って付け直すのではなくエラーになります。callsとqueriesだけを含むcostのようにgate modelへ依存しないcostは、解釈し直すgate内訳がないため複数のmodelで利用できます。複数のgate modelへ対応するcallbackは、返り値を`basis=ctx.basis`、`control_decomposition=ctx.control_decomposition`、`precision=ctx.precision`で構築します。
+# gate modelに依存するfieldを含む固定costは、その数値を求めたときのmodel設定も固定します。異なる`basis`、`control_decomposition`、またはClifford+Tの`precision`でそのOracleを推定すると、同じgate数へ別の意味を黙って付け直すのではなくエラーになります。callsとqueriesだけを含むcostのようにgate modelへ依存しないcostは、解釈し直すgate内訳がないため複数のmodelで利用できます。複数のgate modelへ対応するcallbackは、返り値を`basis=ctx.basis`、`control_decomposition=ctx.control_decomposition`、`precision=ctx.precision`で構築します。
 #
 # | controlの由来 | callbackから見えるか | costを含める側 |
 # |---|---|---|
@@ -333,7 +338,7 @@ assert vector_est.parameters == {}
 #
 # `ABSTRACT`では、外部controlを追加しても`total`を変えず、arityが分かっているbucketだけを移します。1量子ビットgateは1制御で2量子ビットgateになり、2制御以上ではmulti-qubitになります。arity不明のgateは不明のままです。`CLEAN_ANCILLA_TOFFOLI`では、`single_qubit`または`two_qubit`が分かるlogical profileを分解して推定できます。2個以上のモデル化されたoperationへ2個以上の外部controlを付ける場合、この推定modelはcontrolのANDを1回だけ計算し、既知の各primitiveをその1個の実効controlの下へ投影して、本体の後で共有ladderを逆計算します。operationが1個だけ、または外部controlが1個だけの場合は、primitiveごとの分解を使います。`CLEAN_ANCILLA_TOFFOLI`は固定されたresource-estimation modelの名前です。その式は、engine側のemission policyを変更しても自動的には変化しません。
 #
-# aggregate profileにはgate名や元のscheduleがありません。そのためarity fieldとgate-family fieldはfieldごとに独立したboundであり、その和が`total`と一致しない場合があります。arity不明のgateを`multi_qubit`へ誤分類することはありません。結果は`modeled`のままとし、この制限を`assumptions`へ記録します。aggregateなClifford+T gate profileへ外部controlを付ける場合は、arity countだけではClifford+T loweringを特定できないため拒否します。calls/queryだけのcostには変換対象のgate profileがないので、それらのcounterは見える仮定とともに変更せず保持します。gate固有の変換後costが必要なら本体を持つcallableを使うか、宣言controlとbase costにその実装を含めた別Oracleを定義します。
+# aggregate profileにはgate名や元のscheduleがありません。そのためarity fieldとgate-family fieldはfieldごとに独立したboundであり、その和が`total`と一致しない場合があります。arity不明のgateを`multi_qubit`へ誤分類することはありません。結果は`derivation=MODELED`です。与えたprofileが安全側へ投影するのに十分なら`guarantee=UPPER_BOUND`、不足する場合は`guarantee=UNKNOWN`とし、その制限を`assumptions`へ記録します。aggregateなClifford+T gate profileへ外部controlを付ける場合は、arity countだけではClifford+T loweringを特定できないため拒否します。calls/queryだけのcostには変換対象のgate profileがないので、それらのcounterは見える仮定とともに変更せず保持します。gate固有の変換後costが必要なら本体を持つcallableを使うか、宣言controlとbase costにその実装を含めた別Oracleを定義します。
 
 
 # %%
@@ -372,7 +377,8 @@ assert costed_est.gates.total == 9
 assert costed_est.depth.depth == 9
 assert costed_est.width.clean_ancilla_qubits == 2
 assert costed_est.calls.queries_by_name == {"costed_oracle": 1}
-assert costed_est.quality is qmc.EstimateQuality.MODELED
+assert costed_est.derivation is qmc.EstimateDerivation.MODELED
+assert costed_est.guarantee is qmc.EstimateGuarantee.UNKNOWN
 assert any(
     "2 gate(s) with unclassified arity" in assumption.message
     for assumption in costed_est.assumptions
@@ -406,20 +412,22 @@ exact_branch = conditional_est.substitute(flag=1)
 opaque_branch = conditional_est.substitute(flag=0)
 
 assert exact_branch.calls.calls_by_name == {}
-assert exact_branch.quality is qmc.EstimateQuality.EXACT
+assert exact_branch.derivation is qmc.EstimateDerivation.STRUCTURAL
+assert exact_branch.guarantee is qmc.EstimateGuarantee.EXACT
 assert "conditional_oracle" not in exact_branch.explain()
 assert opaque_branch.calls.calls_by_name == {"conditional_oracle": 1}
 assert opaque_branch.calls.queries_by_name == {"conditional_oracle": 1}
-assert opaque_branch.quality is qmc.EstimateQuality.MODELED
+assert opaque_branch.derivation is qmc.EstimateDerivation.MODELED
+assert opaque_branch.guarantee is qmc.EstimateGuarantee.UNKNOWN
 assert "conditional_oracle" in opaque_branch.explain()
 
 # %% [markdown]
-# 仮定、quality、callの集計、trace nodeには、数値リソースと同じsymbolicな分岐guardが付きます。上の例のように`inputs`または`.substitute()`で分岐を選ぶと、実行されない側の警告やopaque callは消えます。説明treeが必要な場合だけ`trace=True`を指定します。既定では保持しないため、推定結果は小さいままです。`est.explain()`を使うと、再帰的な本体、primitive、opaque provenanceを表示できます。
+# 仮定、derivation/guaranteeの情報、callの集計、trace nodeには、数値リソースと同じsymbolicな分岐guardが付きます。上の例のように`inputs`または`.substitute()`で分岐を選ぶと、実行されない側の警告やopaque callは消えます。説明treeが必要な場合だけ`trace=True`を指定します。既定では保持しないため、推定結果は小さいままです。`est.explain()`を使うと、再帰的な本体、primitive、opaqueの説明を表示できます。
 
 # %% [markdown]
 # ### JSON向け出力
 #
-# `to_dict()`はJSONへ変換しやすいレポート用snapshotを生成します。symbolic式と構造上の要件は文字列で格納し、basis、precision、quality、approximation status、仮定も含めます。compactなpayloadにopt-inのtraceは埋め込まず、`explain()`で別に表示します。このsnapshotは`ResourceEstimate`を復元するserialization形式ではありません。文字列にはQamomile固有のsymbolic nodeが含まれることがあるため、`sympy.sympify()`で評価しないでください。具体値のレポートを出力する場合は、元のestimateを先に`.substitute(...)`で具体化します。未bindの量子カーネルと対応する固定opaque costを保存する場合は、代わりに`qamomile.circuit.serialization.serialize()`を使います。
+# `to_dict()`はJSONへ変換しやすいレポート用snapshotを生成します。symbolic式と構造上の要件は文字列で格納し、basis、precision、derivation、guarantee、approximation status、仮定も含めます。compactなpayloadにopt-inのtraceは埋め込まず、`explain()`で別に表示します。このsnapshotは`ResourceEstimate`を復元するserialization形式ではありません。文字列にはQamomile固有のsymbolic nodeが含まれることがあるため、`sympy.sympify()`で評価しないでください。具体値のレポートを出力する場合は、元のestimateを先に`.substitute(...)`で具体化します。未bindの量子カーネルと対応する固定opaque costを保存する場合は、代わりに`qamomile.circuit.serialization.serialize()`を使います。
 
 
 # %%
@@ -428,7 +436,8 @@ import json
 payload = json.loads(json.dumps(conditional_est.to_dict()))
 assert payload["basis"] == "logical"
 assert payload["control_decomposition"] == "clean_ancilla_toffoli"
-assert payload["quality"] == "modeled"
+assert payload["derivation"] == "modeled"
+assert payload["guarantee"] == "unknown"
 assert payload["approximation"] == "exact"
 assert "requirements" in payload
 
@@ -460,7 +469,8 @@ print("default peak qubits:", shor_est.qubits)
 print("default total gates:", shor_est.gates.total)
 print("measurements:", shor_est.measurements.total)
 print("resets:", shor_est.resets.total)
-print("estimate quality:", shor_est.quality)
+print("estimate derivation:", shor_est.derivation)
+print("estimate guarantee:", shor_est.guarantee)
 
 assert shor_est.parameters == {}
 assert shor_est.width.allocated_qubits == 21
@@ -469,7 +479,8 @@ assert shor_est.qubits == 23
 assert shor_est.gates.total == 4585
 assert shor_est.measurements.total == 80
 assert shor_est.resets.total == 80
-assert str(shor_est.quality) == "upper_bound"
+assert shor_est.derivation is qmc.EstimateDerivation.STRUCTURAL
+assert shor_est.guarantee is qmc.EstimateGuarantee.UPPER_BOUND
 
 # %% [markdown]
 # この実装は`2*n`量子ビットのcountingレジスタを同時に保持しません。1つの位相量子ビットを測定・resetして再利用し、それまでに得たビットで半古典的inverse QFTの位相補正を行います。上の80回の測定・resetのうち、8回はこの位相読み出しと再利用、72回は算術内部のmeasurement-assisted carry ventingによるものです。明示的なresetは`gates.total`ではなく`resets.total`に反映されます。
@@ -516,7 +527,7 @@ assert shor_est.gates.total == (
 )
 
 # %% [markdown]
-# `quality`が`upper_bound`なのは、途中測定に基づくclassical feed-forwardの分岐を安全側に数え、`CLEAN_ANCILLA_TOFFOLI`が保守的な多制御モデルであるためです。ここで得られるのはalgorithmic circuitのリソースであり、特定デバイスのnative gateへの分解、routing、誤り訂正、magic state生成などは含みません。
+# `guarantee`が`upper_bound`なのは、途中測定に基づくclassical feed-forwardの分岐を安全側に数え、`CLEAN_ANCILLA_TOFFOLI`が保守的な多制御モデルであるためです。算出方法は`structural`のままであり、この上界自体が回路を数学的な近似にするわけではありません。ここで得られるのはalgorithmic circuitのリソースであり、特定deviceのnative gateへの分解、routing、誤り訂正、magic state生成などは含みません。
 
 # %% [markdown]
 # ### なぜgate数は`O(n^3)`なのか
@@ -593,7 +604,7 @@ assert short_dlp.output_types == [qmc.Vector[qmc.Bit]]
 # - `expval`は抽象的なqueryとmeasurement layerとして`modeled`推定にし、grouping、basis変換、shotのコストは選択したexecutorに委ねます。
 # - パラメータ付き量子カーネルでは、選択したモデルにおけるスケーリングがSymPy式になります。
 # - `inputs`にはclassicalな値と配列shapeに加え、1次元の量子Vectorの幅を整数で指定できます。維持された要件により、不正な幅やindexは拒否されます。
-# - 結果を解釈する前に、`basis`、`quality`、`approximation`、`assumptions`、opt-inのtraceを確認します。`quality`はリソースcountの確からしさを分類し、`approximation`は理想operationに対する数学的な近似を独立に示します。分岐を選ぶと実行されない側のprovenanceは消えます。
+# - 結果を解釈する前に、`basis`、`derivation`、`guarantee`、`approximation`、`assumptions`、opt-inのtraceを確認します。`derivation`は構造から数えたかmodelを使ったか、`guarantee`は選択した回路costに対する関係、`approximation`は推定器が認識した数学的な近似を独立に示します。分岐を選ぶと実行されない側のmetadataは消えます。
 # - `calls_by_name`が表すのは、opaque callや`expval`のようなmodeled semantic operationを含む、展開せずに残した名前付きboundaryです。本体を持つcallは再帰的に展開します。固定costとcallbackによるopaque costは、どちらも1回のbase Oracle適用を記述します。推定器は後から追加または継承したcontrolを適用し、既知の1量子ビット部分と2量子ビット部分を選択したcontrol decompositionで投影し、残りのgateは目に見えるmodeledなplaceholderとして維持します。
 # - `to_dict()`は表示・レポート用snapshotを出力します。具体値を保存する場合は、元のestimateを先に`.substitute(...)`で具体化します。
 # - `.substitute(n=...)`で既存の推定を特定サイズに評価して実行可能性を確認し、具体的な構造によりdependency schedulingを精密化したい場合は最初から`inputs`を使います。

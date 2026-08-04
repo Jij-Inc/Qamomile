@@ -27,7 +27,8 @@ from qamomile.circuit.estimator._metrics import (
     CallResources,
     ControlDecomposition,
     DepthResources,
-    EstimateQuality,
+    EstimateDerivation,
+    EstimateGuarantee,
     GateBasis,
     GateResources,
     MeasurementResources,
@@ -39,7 +40,8 @@ from qamomile.circuit.estimator._metrics import (
     _activation_over_range,
     _active_approximation,
     _active_assumptions,
-    _active_quality,
+    _active_derivation,
+    _active_guarantee,
     _add_calls,
     _add_depth,
     _add_gates,
@@ -47,7 +49,8 @@ from qamomile.circuit.estimator._metrics import (
     _add_resets,
     _boolean_condition,
     _combine_approximation,
-    _combine_quality,
+    _combine_derivation,
+    _combine_guarantee,
     _conditional_calls,
     _conditional_depth,
     _conditional_gates,
@@ -60,7 +63,8 @@ from qamomile.circuit.estimator._metrics import (
     _expr,
     _GuardedApproximation,
     _GuardedAssumption,
-    _GuardedQuality,
+    _GuardedDerivation,
+    _GuardedGuarantee,
     _is_concrete_integer,
     _max_calls,
     _max_depth,
@@ -73,6 +77,7 @@ from qamomile.circuit.estimator._metrics import (
     _piecewise,
     _resource_activity_condition,
     _resource_expr,
+    _resource_max,
     _ResourceConstraint,
     _safe_constraint_substitute,
     _safe_simplify,
@@ -132,6 +137,7 @@ from qamomile.circuit.estimator._scheduling import (
     _operation_has_uniform_intrinsic_completion,
     _operation_has_unresolved_quantum_index,
     _quantum_allocation_owner,
+    _quantum_owner_capacities,
     _quantum_wire_keys,
     _qubit_value_size,
     _root_callable_resource_attrs,
@@ -162,7 +168,10 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     UnaryMathOp,
     UnaryMathOpKind,
 )
-from qamomile.circuit.ir.operation.callable import InvokeOperation
+from qamomile.circuit.ir.operation.callable import (
+    CallableBodySelection,
+    InvokeOperation,
+)
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     ReturnQuantumArrayElementOperation,
@@ -232,6 +241,9 @@ _PHASE_CLASS_CODES = {
     "p": -1,
 }
 _CONCRETE_REGION_REPLAY_LIMIT = 64
+# Global SymPy simplification becomes superlinear on nested branch extrema;
+# resource composition has already normalized larger expressions structurally.
+_PUBLIC_RESOURCE_SIMPLIFY_NODE_LIMIT = 32
 
 
 class _CappedRangeSum(sp.Function):
@@ -318,26 +330,41 @@ class _CappedRangeSum(sp.Function):
 def _simplify_public_resource_expression(
     expression: ResourceExpr,
 ) -> ResourceExpr:
-    """Simplify a public metric unless it contains a bound batching summary.
+    """Simplify a public metric unless it contains branching structure.
 
     ``_CappedRangeSum`` deliberately keeps a loop induction variable inside a
     ``Lambda``, while ``_ConditionIndicator`` keeps a Boolean predicate opaque
-    to ``Piecewise`` rewriting. SymPy's global simplifier spends substantial
-    time exploring those nodes, usually returning an expression of the same
-    shape and occasionally attempting to release a bound variable. Concrete
-    substitution evaluates them directly, so retaining the symbolic form is
-    both faster and safer.
+    to ``Piecewise`` rewriting. Resource expressions also contain nested
+    ``Min``, ``Max``, and ``Piecewise`` nodes that are already structurally
+    normalized while they are composed. SymPy's global simplifier spends
+    substantial time exploring those nodes, usually returning an expression
+    of the same shape and occasionally attempting to release a bound variable.
+    Concrete substitution evaluates them directly, so retaining the symbolic
+    form is both faster and safer.
 
     Args:
         expression (ResourceExpr): Public resource expression to normalize.
 
     Returns:
         ResourceExpr: Safely simplified expression, or the original
-            binder-preserving expression.
+            structurally normalized expression when global simplification is
+            unsafe or disproportionately expensive.
     """
     normalized = _expr(expression)
-    if normalized.has(_CappedRangeSum, _ConditionIndicator):
-        return normalized
+    has_branching_structure = False
+    for node_count, node in enumerate(
+        sp.preorder_traversal(normalized),
+        start=1,
+    ):
+        if isinstance(node, (_CappedRangeSum, _ConditionIndicator)):
+            return normalized
+        if isinstance(node, (sp.Max, sp.Min, sp.Piecewise)):
+            has_branching_structure = True
+        if (
+            has_branching_structure
+            and node_count > _PUBLIC_RESOURCE_SIMPLIFY_NODE_LIMIT
+        ):
+            return normalized
     return _safe_simplify(normalized)
 
 
@@ -862,8 +889,11 @@ class ResourceEstimate:
             ``None``.
         parameters (dict[str, sp.Symbol]): Symbols present in the estimate,
             keyed by unique public aliases. Defaults to an empty dict.
-        quality (EstimateQuality): Confidence classification. Defaults to
-            ``EXACT`` for body-derived logical estimates.
+        derivation (EstimateDerivation): Whether counts are derived from
+            visible structure or use a resource model. Defaults to
+            ``STRUCTURAL``.
+        guarantee (EstimateGuarantee): Relationship between reported counts
+            and the selected circuit cost. Defaults to ``EXACT``.
         approximation (ApproximationStatus): Whether the selected circuit
             approximates an ideal mathematical operation. Defaults to
             ``EXACT``.
@@ -901,9 +931,12 @@ class ResourceEstimate:
         _guarded_assumptions (tuple[_GuardedAssumption, ...] | None): Internal
             condition-aware assumption provenance. ``None`` initializes facts
             from the public ``assumptions`` tuple.
-        _guarded_qualities (tuple[_GuardedQuality, ...] | None): Internal
-            condition-aware non-exact quality provenance. ``None`` initializes
-            a fact from the public ``quality`` value.
+        _guarded_derivations (tuple[_GuardedDerivation, ...] | None): Internal
+            condition-aware modeled-derivation provenance. ``None`` initializes
+            a fact from the public ``derivation`` value.
+        _guarded_guarantees (tuple[_GuardedGuarantee, ...] | None): Internal
+            condition-aware non-exact count guarantees. ``None`` initializes a
+            fact from the public ``guarantee`` value.
         _guarded_approximations (tuple[_GuardedApproximation, ...] | None):
             Internal condition-aware mathematical approximation provenance.
             ``None`` initializes a fact from the public ``approximation``
@@ -919,7 +952,8 @@ class ResourceEstimate:
     assumptions: tuple[ResourceAssumption, ...] = ()
     trace: ResourceTraceNode | None = None
     parameters: dict[str, sp.Symbol] = dataclasses.field(default_factory=dict)
-    quality: EstimateQuality = EstimateQuality.EXACT
+    derivation: EstimateDerivation = EstimateDerivation.STRUCTURAL
+    guarantee: EstimateGuarantee = EstimateGuarantee.EXACT
     approximation: ApproximationStatus = ApproximationStatus.EXACT
     basis: GateBasis = _DEFAULT_GATE_BASIS
     control_decomposition: ControlDecomposition = _DEFAULT_CONTROL_DECOMPOSITION
@@ -972,7 +1006,12 @@ class ResourceEstimate:
         repr=False,
         compare=False,
     )
-    _guarded_qualities: tuple[_GuardedQuality, ...] | None = dataclasses.field(
+    _guarded_derivations: tuple[_GuardedDerivation, ...] | None = dataclasses.field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    _guarded_guarantees: tuple[_GuardedGuarantee, ...] | None = dataclasses.field(
         default=None,
         repr=False,
         compare=False,
@@ -1007,24 +1046,41 @@ class ResourceEstimate:
                     if assumption not in active_assumptions
                 ),
             )
-        if self._guarded_qualities is None:
-            self._guarded_qualities = (
-                (_GuardedQuality(sp.true, self.quality),)
-                if self.quality is not EstimateQuality.EXACT
+        if self._guarded_derivations is None:
+            self._guarded_derivations = (
+                (_GuardedDerivation(sp.true, self.derivation),)
+                if self.derivation is not EstimateDerivation.STRUCTURAL
                 else ()
             )
-        elif _combine_quality(
-            _active_quality(self._guarded_qualities),
-            self.quality,
-        ) is self.quality and self.quality is not _active_quality(
-            self._guarded_qualities
+        elif _combine_derivation(
+            _active_derivation(self._guarded_derivations),
+            self.derivation,
+        ) is self.derivation and self.derivation is not _active_derivation(
+            self._guarded_derivations
         ):
-            self._guarded_qualities = (
-                *self._guarded_qualities,
-                _GuardedQuality(sp.true, self.quality),
+            self._guarded_derivations = (
+                *self._guarded_derivations,
+                _GuardedDerivation(sp.true, self.derivation),
             )
         self.assumptions = _active_assumptions(self._guarded_assumptions)
-        self.quality = _active_quality(self._guarded_qualities)
+        self.derivation = _active_derivation(self._guarded_derivations)
+        if self._guarded_guarantees is None:
+            self._guarded_guarantees = (
+                (_GuardedGuarantee(sp.true, self.guarantee),)
+                if self.guarantee is not EstimateGuarantee.EXACT
+                else ()
+            )
+        elif _combine_guarantee(
+            _active_guarantee(self._guarded_guarantees),
+            self.guarantee,
+        ) is self.guarantee and self.guarantee is not _active_guarantee(
+            self._guarded_guarantees
+        ):
+            self._guarded_guarantees = (
+                *self._guarded_guarantees,
+                _GuardedGuarantee(sp.true, self.guarantee),
+            )
+        self.guarantee = _active_guarantee(self._guarded_guarantees)
         if self._guarded_approximations is None:
             self._guarded_approximations = (
                 (_GuardedApproximation(sp.true, self.approximation),)
@@ -1068,17 +1124,20 @@ class ResourceEstimate:
         self,
         *,
         assumptions: Sequence[ResourceAssumption] = (),
-        quality: EstimateQuality = EstimateQuality.EXACT,
+        derivation: EstimateDerivation = EstimateDerivation.STRUCTURAL,
+        guarantee: EstimateGuarantee = EstimateGuarantee.EXACT,
         approximation: ApproximationStatus = ApproximationStatus.EXACT,
         active_when: sp.Basic = sp.true,
     ) -> ResourceEstimate:
-        """Append guarded assumption, quality, and approximation provenance.
+        """Append guarded assumption, derivation, guarantee, and approximation.
 
         Args:
             assumptions (Sequence[ResourceAssumption]): Assumptions to append.
                 Defaults to none.
-            quality (EstimateQuality): Quality fact to append. ``EXACT`` adds
-                no fact. Defaults to ``EXACT``.
+            derivation (EstimateDerivation): Derivation fact to append.
+                ``STRUCTURAL`` adds no fact. Defaults to ``STRUCTURAL``.
+            guarantee (EstimateGuarantee): Count guarantee to append. ``EXACT``
+                adds no fact. Defaults to ``EXACT``.
             approximation (ApproximationStatus): Mathematical approximation
                 fact to append. ``EXACT`` adds no fact. Defaults to ``EXACT``.
             active_when (sp.Basic): Activation condition shared by the new
@@ -1089,7 +1148,8 @@ class ResourceEstimate:
         """
         condition = _boolean_condition(active_when)
         guarded_assumptions = self._guarded_assumptions or ()
-        guarded_qualities = self._guarded_qualities or ()
+        guarded_derivations = self._guarded_derivations or ()
+        guarded_guarantees = self._guarded_guarantees or ()
         guarded_approximations = self._guarded_approximations or ()
         return dataclasses.replace(
             self,
@@ -1100,11 +1160,19 @@ class ResourceEstimate:
                     for assumption in assumptions
                 ),
             ),
-            _guarded_qualities=(
-                *guarded_qualities,
+            _guarded_derivations=(
+                *guarded_derivations,
                 *(
-                    (_GuardedQuality(condition, quality),)
-                    if quality is not EstimateQuality.EXACT
+                    (_GuardedDerivation(condition, derivation),)
+                    if derivation is not EstimateDerivation.STRUCTURAL
+                    else ()
+                ),
+            ),
+            _guarded_guarantees=(
+                *guarded_guarantees,
+                *(
+                    (_GuardedGuarantee(condition, guarantee),)
+                    if guarantee is not EstimateGuarantee.EXACT
                     else ()
                 ),
             ),
@@ -1210,7 +1278,8 @@ class ResourceEstimate:
             resets=_add_resets(self.resets, other.resets),
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_merge_trace("seq", self.trace, other.trace),
-            quality=_combine_quality(self.quality, other.quality),
+            derivation=_combine_derivation(self.derivation, other.derivation),
+            guarantee=_combine_guarantee(self.guarantee, other.guarantee),
             approximation=_combine_approximation(
                 self.approximation,
                 other.approximation,
@@ -1229,9 +1298,13 @@ class ResourceEstimate:
                 *(self._guarded_assumptions or ()),
                 *(other._guarded_assumptions or ()),
             ),
-            _guarded_qualities=(
-                *(self._guarded_qualities or ()),
-                *(other._guarded_qualities or ()),
+            _guarded_derivations=(
+                *(self._guarded_derivations or ()),
+                *(other._guarded_derivations or ()),
+            ),
+            _guarded_guarantees=(
+                *(self._guarded_guarantees or ()),
+                *(other._guarded_guarantees or ()),
             ),
             _guarded_approximations=(
                 *(self._guarded_approximations or ()),
@@ -1288,7 +1361,8 @@ class ResourceEstimate:
             resets=_add_resets(self.resets, other.resets),
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_merge_trace("parallel", self.trace, other.trace),
-            quality=_combine_quality(self.quality, other.quality),
+            derivation=_combine_derivation(self.derivation, other.derivation),
+            guarantee=_combine_guarantee(self.guarantee, other.guarantee),
             approximation=_combine_approximation(
                 self.approximation,
                 other.approximation,
@@ -1307,9 +1381,13 @@ class ResourceEstimate:
                 *(self._guarded_assumptions or ()),
                 *(other._guarded_assumptions or ()),
             ),
-            _guarded_qualities=(
-                *(self._guarded_qualities or ()),
-                *(other._guarded_qualities or ()),
+            _guarded_derivations=(
+                *(self._guarded_derivations or ()),
+                *(other._guarded_derivations or ()),
+            ),
+            _guarded_guarantees=(
+                *(self._guarded_guarantees or ()),
+                *(other._guarded_guarantees or ()),
             ),
             _guarded_approximations=(
                 *(self._guarded_approximations or ()),
@@ -1351,9 +1429,10 @@ class ResourceEstimate:
             resets=_max_resets(self.resets, other.resets),
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_merge_trace("choice", self.trace, other.trace),
-            quality=_combine_quality(
-                EstimateQuality.UPPER_BOUND,
-                _combine_quality(self.quality, other.quality),
+            derivation=_combine_derivation(self.derivation, other.derivation),
+            guarantee=_combine_guarantee(
+                EstimateGuarantee.UPPER_BOUND,
+                _combine_guarantee(self.guarantee, other.guarantee),
             ),
             approximation=_combine_approximation(
                 self.approximation,
@@ -1370,10 +1449,14 @@ class ResourceEstimate:
                 *(self._guarded_assumptions or ()),
                 *(other._guarded_assumptions or ()),
             ),
-            _guarded_qualities=(
-                *(self._guarded_qualities or ()),
-                *(other._guarded_qualities or ()),
-                _GuardedQuality(sp.true, EstimateQuality.UPPER_BOUND),
+            _guarded_derivations=(
+                *(self._guarded_derivations or ()),
+                *(other._guarded_derivations or ()),
+            ),
+            _guarded_guarantees=(
+                *(self._guarded_guarantees or ()),
+                *(other._guarded_guarantees or ()),
+                _GuardedGuarantee(sp.true, EstimateGuarantee.UPPER_BOUND),
             ),
             _guarded_approximations=(
                 *(self._guarded_approximations or ()),
@@ -1437,7 +1520,8 @@ class ResourceEstimate:
             resets=_conditional_resets(self.resets, other.resets, condition),
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_conditional_trace(condition, self.trace, other.trace),
-            quality=_combine_quality(self.quality, other.quality),
+            derivation=_combine_derivation(self.derivation, other.derivation),
+            guarantee=_combine_guarantee(self.guarantee, other.guarantee),
             approximation=_combine_approximation(
                 self.approximation,
                 other.approximation,
@@ -1466,11 +1550,18 @@ class ResourceEstimate:
                     for fact in (other._guarded_assumptions or ())
                 ),
             ),
-            _guarded_qualities=(
-                *(fact.when(condition) for fact in (self._guarded_qualities or ())),
+            _guarded_derivations=(
+                *(fact.when(condition) for fact in (self._guarded_derivations or ())),
                 *(
                     fact.when(sp.Not(condition))
-                    for fact in (other._guarded_qualities or ())
+                    for fact in (other._guarded_derivations or ())
+                ),
+            ),
+            _guarded_guarantees=(
+                *(fact.when(condition) for fact in (self._guarded_guarantees or ())),
+                *(
+                    fact.when(sp.Not(condition))
+                    for fact in (other._guarded_guarantees or ())
                 ),
             ),
             _guarded_approximations=(
@@ -1494,7 +1585,7 @@ class ResourceEstimate:
             )
             estimate = estimate._with_metadata(
                 assumptions=(assumption,),
-                quality=EstimateQuality.UPPER_BOUND,
+                guarantee=EstimateGuarantee.UPPER_BOUND,
                 active_when=_unresolved_condition_guard(condition),
             )
         return estimate
@@ -1540,7 +1631,8 @@ class ResourceEstimate:
                 f"repeat({f})",
                 self.trace.when(active_when) if self.trace is not None else None,
             ),
-            quality=EstimateQuality.EXACT,
+            derivation=EstimateDerivation.STRUCTURAL,
+            guarantee=EstimateGuarantee.EXACT,
             approximation=ApproximationStatus.EXACT,
             basis=self.basis,
             control_decomposition=self.control_decomposition,
@@ -1572,8 +1664,11 @@ class ResourceEstimate:
             _guarded_assumptions=tuple(
                 fact.when(active_when) for fact in (self._guarded_assumptions or ())
             ),
-            _guarded_qualities=tuple(
-                fact.when(active_when) for fact in (self._guarded_qualities or ())
+            _guarded_derivations=tuple(
+                fact.when(active_when) for fact in (self._guarded_derivations or ())
+            ),
+            _guarded_guarantees=tuple(
+                fact.when(active_when) for fact in (self._guarded_guarantees or ())
             ),
             _guarded_approximations=tuple(
                 fact.when(active_when) for fact in (self._guarded_approximations or ())
@@ -1593,7 +1688,7 @@ class ResourceEstimate:
             )
             estimate = estimate._with_metadata(
                 assumptions=(assumption,),
-                quality=EstimateQuality.UPPER_BOUND,
+                guarantee=EstimateGuarantee.UPPER_BOUND,
                 active_when=active_when,
             )
         return estimate
@@ -1695,7 +1790,8 @@ class ResourceEstimate:
             resets=self.resets,
             assumptions=self.assumptions,
             trace=_wrap_trace(f"controlled({controls})", self.trace),
-            quality=self.quality,
+            derivation=self.derivation,
+            guarantee=self.guarantee,
             approximation=self.approximation,
             basis=self.basis,
             control_decomposition=self.control_decomposition,
@@ -1710,7 +1806,8 @@ class ResourceEstimate:
             _dependency_completion=self._dependency_completion,
             _dependency_completion_uniform=self._dependency_completion_uniform,
             _guarded_assumptions=self._guarded_assumptions,
-            _guarded_qualities=self._guarded_qualities,
+            _guarded_derivations=self._guarded_derivations,
+            _guarded_guarantees=self._guarded_guarantees,
             _guarded_approximations=self._guarded_approximations,
             _symbol_aliases=self._symbol_aliases,
         )
@@ -1722,7 +1819,8 @@ class ResourceEstimate:
         )
         return controlled_estimate._with_metadata(
             assumptions=(assumption,),
-            quality=EstimateQuality.MODELED,
+            derivation=EstimateDerivation.MODELED,
+            guarantee=EstimateGuarantee.UNKNOWN,
             active_when=sp.And(
                 sp.Gt(controls, _ZERO),
                 activity_guard,
@@ -1753,7 +1851,8 @@ class ResourceEstimate:
             assumptions=self.assumptions,
             trace=_wrap_trace("inverse", self.trace),
             parameters=self.parameters,
-            quality=self.quality,
+            derivation=self.derivation,
+            guarantee=self.guarantee,
             approximation=self.approximation,
             basis=self.basis,
             control_decomposition=self.control_decomposition,
@@ -1770,7 +1869,8 @@ class ResourceEstimate:
             _dependency_completion=None,
             _dependency_completion_uniform=None,
             _guarded_assumptions=self._guarded_assumptions,
-            _guarded_qualities=self._guarded_qualities,
+            _guarded_derivations=self._guarded_derivations,
+            _guarded_guarantees=self._guarded_guarantees,
             _guarded_approximations=self._guarded_approximations,
             _symbol_aliases=self._symbol_aliases,
         )
@@ -1865,7 +1965,7 @@ class ResourceEstimate:
             iterations,
         )
         assumptions: tuple[ResourceAssumption, ...] = ()
-        quality = EstimateQuality.EXACT
+        guarantee = EstimateGuarantee.EXACT
         if not width_is_exact:
             assumptions = (
                 *assumptions,
@@ -1875,7 +1975,10 @@ class ResourceEstimate:
                     source=str(loop_symbol),
                 ),
             )
-            quality = _combine_quality(quality, EstimateQuality.UPPER_BOUND)
+            guarantee = _combine_guarantee(
+                guarantee,
+                EstimateGuarantee.UPPER_BOUND,
+            )
         estimate = ResourceEstimate(
             width=width,
             gates=_sum_gates(self.gates, loop_symbol, start, step, iterations),
@@ -1957,7 +2060,7 @@ class ResourceEstimate:
                 )
                 for fact in (self._guarded_assumptions or ())
             ),
-            _guarded_qualities=tuple(
+            _guarded_derivations=tuple(
                 dataclasses.replace(
                     fact,
                     active_when=_activation_over_range(
@@ -1968,7 +2071,20 @@ class ResourceEstimate:
                         iterations,
                     ),
                 )
-                for fact in (self._guarded_qualities or ())
+                for fact in (self._guarded_derivations or ())
+            ),
+            _guarded_guarantees=tuple(
+                dataclasses.replace(
+                    fact,
+                    active_when=_activation_over_range(
+                        fact.active_when,
+                        loop_symbol,
+                        start,
+                        step,
+                        iterations,
+                    ),
+                )
+                for fact in (self._guarded_guarantees or ())
             ),
             _guarded_approximations=tuple(
                 dataclasses.replace(
@@ -1986,7 +2102,7 @@ class ResourceEstimate:
             _symbol_aliases=self._symbol_aliases,
         )._with_metadata(
             assumptions=assumptions,
-            quality=quality,
+            guarantee=guarantee,
             active_when=sp.Gt(iterations, _ZERO),
         )
         return _project_dependency_metadata_over_symbol(
@@ -2047,12 +2163,18 @@ class ResourceEstimate:
             _substitute_resource_expr,
             substitutions=subs,
         )
-        return self._map_expr(
+        mapped = self._map_expr(
             substitute_expression,
             constraint_fn=lambda expr: _safe_constraint_substitute(expr, subs),
             guard_fn=substitute_expression,
             dependency_fn=substitute_expression,
         )
+        # Substitution often collapses a previously large branch expression to
+        # a small Piecewise/Min/Max form. Re-run the bounded public simplifier
+        # so post-hoc specialization has the same canonical shape as direct
+        # input specialization, while still skipping expressions above the
+        # global-simplification node budget.
+        return mapped.simplify()
 
     def simplify(self) -> ResourceEstimate:
         """Simplify all symbolic expressions.
@@ -2165,7 +2287,8 @@ class ResourceEstimate:
             "parameters": {
                 name: registry.name(symbol) for name, symbol in self.parameters.items()
             },
-            "quality": self.quality.value,
+            "derivation": self.derivation.value,
+            "guarantee": self.guarantee.value,
             "approximation": self.approximation.value,
             "basis": self.basis.value,
             "control_decomposition": self.control_decomposition.value,
@@ -2213,8 +2336,8 @@ class ResourceEstimate:
             constraint_fn (Any | None): Optional non-clamping rewrite for
                 structural constraints. Defaults to ``fn``.
             guard_fn (Any | None): Optional rewrite for guarded assumption,
-                quality, and approximation predicates. Defaults to
-                ``constraint_fn``.
+                derivation, guarantee, and approximation predicates. Defaults
+                to ``constraint_fn``.
             dependency_fn (Any | None): Optional rewrite for private wire-key
                 indices and per-wire completion depths. Defaults to
                 ``constraint_fn``.
@@ -2235,9 +2358,14 @@ class ResourceEstimate:
             for fact in (self._guarded_assumptions or ())
             if (mapped := fact.mapped(rewrite_guard)) is not None
         )
-        mapped_qualities = tuple(
+        mapped_derivations = tuple(
             mapped
-            for fact in (self._guarded_qualities or ())
+            for fact in (self._guarded_derivations or ())
+            if (mapped := fact.mapped(rewrite_guard)) is not None
+        )
+        mapped_guarantees = tuple(
+            mapped
+            for fact in (self._guarded_guarantees or ())
             if (mapped := fact.mapped(rewrite_guard)) is not None
         )
         mapped_approximations = tuple(
@@ -2321,7 +2449,8 @@ class ResourceEstimate:
             ),
             _dependency_completion_uniform=self._dependency_completion_uniform,
             _guarded_assumptions=mapped_assumptions,
-            _guarded_qualities=mapped_qualities,
+            _guarded_derivations=mapped_derivations,
+            _guarded_guarantees=mapped_guarantees,
             _guarded_approximations=mapped_approximations,
             _symbol_aliases=self._symbol_aliases,
         )
@@ -2985,6 +3114,17 @@ class ResourceEstimator:
             condition_values=_scalar_values({**build_inputs, **estimation_inputs}),
         )
         estimate = interpreter.estimate(block_or_ops)
+        # Boundary liveness is interpreter-local metadata. A root estimate can
+        # later be reused as an opaque definition cost, where caller owner
+        # identities would be meaningless and unserializable. Drop it before
+        # public symbol discovery so private size expressions cannot introduce
+        # public parameters either.
+        estimate = dataclasses.replace(
+            estimate,
+            _output_sizes={},
+            _input_sizes={},
+            _has_output_summary=False,
+        )
         root_source = getattr(kernel, "name", None) or (
             block_or_ops.name if isinstance(block_or_ops, Block) else "qkernel"
         )
@@ -3107,7 +3247,71 @@ def _find_runtime_observation_results(
     for operation in walk_operations(operations):
         if isinstance(operation, ExpvalOp):
             results.update(result.uuid for result in operation.results)
+        elif isinstance(operation, InvokeOperation):
+            results.update(
+                operation.results[index].uuid
+                for index in operation.measurement_result_indices
+                if index < len(operation.results)
+            )
     return results
+
+
+def _if_merge_captured_allocations(
+    operations: Sequence[Operation],
+    merge_values: Sequence[ValueBase],
+    resolver: ExprResolver,
+    allocation_owners_by_uuid: Mapping[str, str],
+) -> dict[str, ResourceExpr]:
+    """Return outer allocations referenced only by branch merge records.
+
+    A branch can be structurally empty while its merge record selects an
+    element of an outer array. Such a value is not visible to ordinary capture
+    analysis, but its complete root owner must remain live. Values produced by
+    the branch are deliberately excluded: local QInit sites are counted by the
+    branch estimate and must never be reclassified as caller-owned inputs.
+
+    Args:
+        operations (Sequence[Operation]): Operations in one conditional branch.
+        merge_values (Sequence[ValueBase]): Quantum merge sources selected from
+            that branch.
+        resolver (ExprResolver): Resolver for symbolic root dimensions.
+        allocation_owners_by_uuid (Mapping[str, str]): Known QInit result UUIDs
+            mapped to root allocation owners.
+
+    Returns:
+        dict[str, ResourceExpr]: Captured outer owner capacities omitted from
+        the branch operation list.
+    """
+    produced = {
+        result.uuid
+        for operation in operations
+        for result in operation.results
+        if isinstance(result, Value)
+    }
+    local_owners = {
+        _quantum_allocation_owner(result)
+        for operation in operations
+        if isinstance(operation, QInitOperation)
+        for result in operation.results
+        if isinstance(result, Value) and result.type.is_quantum()
+    }
+    candidates = [
+        value
+        for value in merge_values
+        if isinstance(value, Value)
+        and value.type.is_quantum()
+        and value.uuid not in produced
+        and allocation_owners_by_uuid.get(
+            value.uuid,
+            _quantum_allocation_owner(value),
+        )
+        not in local_owners
+    ]
+    return _quantum_owner_capacities(
+        candidates,
+        resolver,
+        allocation_owners_by_uuid,
+    )
 
 
 class ResourceInterpreter:
@@ -3145,14 +3349,32 @@ class ResourceInterpreter:
         # constraint. Repeated body invocations commonly rediscover the same
         # element bounds, so retain whether each one was already proven.
         self._array_constraint_proven: dict[_ResourceConstraint, bool] = {}
-        # Dependency analysis depends only on operation-list identity, not the
-        # resolver used for a particular concrete loop iteration. Keep the
-        # sequence strongly referenced so an ``id`` cannot be reused for an
-        # unrelated transient list during this interpretation.
+        # The graph and locally introduced measurement roots depend only on
+        # operation-list identity, not the resolver used for a particular
+        # concrete loop iteration. Inherited taint remains context-dependent
+        # and is propagated from these cached ingredients on every visit.
+        # Keep the sequence strongly referenced so an ``id`` cannot be reused
+        # for an unrelated transient list during this interpretation.
         self._operation_taint_cache: dict[
             int,
-            tuple[list[Operation], frozenset[str]],
+            tuple[
+                list[Operation],
+                dict[str, set[str]],
+                frozenset[str],
+                frozenset[int],
+            ],
         ] = {}
+        # Selected callable bodies can expose runtime observations that are
+        # not represented by KernelEffect, notably expectation values. Cache
+        # their output indices and whether the body contains any observation,
+        # retaining the Block to guard against id reuse.
+        self._runtime_observation_cache: dict[
+            int,
+            tuple[Block, frozenset[int], bool],
+        ] = {}
+        # Operation identities whose selected nested body forms a global
+        # scheduling barrier in the current operation-list scope.
+        self._global_barrier_operation_ids: set[int] = set()
         # Synthetic tuple carriers retain physical parent UUIDs rather than
         # Value ancestry. Keep the corresponding allocation-owner identity
         # across nested control-flow and callable evaluation scopes.
@@ -3292,7 +3514,7 @@ class ResourceInterpreter:
                     self._while_trip_count_names[operation_key] = (operation, name)
 
                 if isinstance(operation, InvokeOperation):
-                    body = operation.effective_body(
+                    body, _realized_transform = operation.body_for_transform(
                         strategy=self._strategy_for(operation)
                     )
                     if isinstance(body, Block) and id(body) not in active_call_bodies:
@@ -3494,7 +3716,8 @@ class ResourceInterpreter:
             )
         if isinstance(operation, InvokeOperation):
             strategy = self._strategy_for(operation)
-            body = operation.effective_body(strategy=strategy)
+            selection = operation.select_body(strategy=strategy)
+            body = selection.body
             if not isinstance(body, Block):
                 opaque_cost = (
                     operation.definition.opaque_cost
@@ -3518,14 +3741,12 @@ class ResourceInterpreter:
                 if transform.added_controls:
                     return profile.as_shared_leaf()
                 return profile
-            selected_impl = operation.implementation_for(strategy=strategy)
-            body_implements_transform = (
-                selected_impl is not None and selected_impl.body is body
-            )
+            body_implements_controls = selection.implements_controls
             child = resolver.call_child_scope(
                 operation,
                 called_block=body,
-                body_implements_transform=body_implements_transform,
+                body_implements_transform=body_implements_controls,
+                actual_operands=selection.operands,
             )
             body_identity = id(body)
             call_state = tuple(
@@ -3561,11 +3782,7 @@ class ResourceInterpreter:
                 active_states.pop()
                 if not active_states:
                     self._active_batch_profile_states.pop(body_identity, None)
-            own_controls = (
-                operation.num_control_qubits
-                if operation.transform.is_controlled and not body_implements_transform
-                else 0
-            )
+            own_controls = len(operation.operands) - len(selection.operands)
             if own_controls:
                 return body_profile.as_shared_leaf()
             return body_profile
@@ -3952,7 +4169,104 @@ class ResourceInterpreter:
                 if body._dependency_completion is not None
                 else None
             ),
-        )._with_metadata(quality=EstimateQuality.UPPER_BOUND)
+        )._with_metadata(guarantee=EstimateGuarantee.UPPER_BOUND)
+
+    def _block_runtime_observation_summary(
+        self,
+        block: Block,
+        *,
+        active_blocks: frozenset[int] = frozenset(),
+    ) -> tuple[frozenset[int], bool]:
+        """Summarize runtime-observation outputs and barriers for one body.
+
+        Measurement provenance is cached in the IR, while expectation values
+        intentionally are not a ``KernelEffect``. Resource scheduling needs
+        both, so this estimator-local summary recursively follows the same
+        selected Invoke bodies used for resource evaluation.
+
+        Args:
+            block (Block): Selected callable body to inspect.
+            active_blocks (frozenset[int]): Body identities already active on
+                the recursive path. Defaults to an empty set.
+
+        Returns:
+            tuple[frozenset[int], bool]: Body output indices derived from a
+            runtime observation and whether any observation occurs in the body.
+        """
+        cached = self._runtime_observation_cache.get(id(block))
+        if cached is not None and cached[0] is block:
+            return cached[1], cached[2]
+        if id(block) in active_blocks:
+            return block.measurement_result_indices, not block.effects.is_unitary
+
+        roots = _find_runtime_observation_results(block.operations)
+        has_observation = bool(roots)
+        nested_active = active_blocks | {id(block)}
+        for operation in walk_operations(block.operations):
+            if not isinstance(operation, InvokeOperation):
+                continue
+            indices, nested_has_observation = self._invoke_runtime_observation_summary(
+                operation,
+                active_blocks=nested_active,
+            )
+            roots.update(
+                operation.results[index].uuid
+                for index in indices
+                if index < len(operation.results)
+            )
+            has_observation = has_observation or nested_has_observation
+
+        graph = build_dependency_graph(block.operations)
+        derived = find_measurement_derived_values(graph, roots)
+        derived.update(roots)
+        output_indices = frozenset(
+            index
+            for index, output in enumerate(block.output_values)
+            if output.uuid in derived
+        )
+        self._runtime_observation_cache[id(block)] = (
+            block,
+            output_indices,
+            has_observation,
+        )
+        return output_indices, has_observation
+
+    def _invoke_runtime_observation_summary(
+        self,
+        operation: InvokeOperation,
+        *,
+        active_blocks: frozenset[int] = frozenset(),
+    ) -> tuple[frozenset[int], bool]:
+        """Map a selected body's runtime observations to Invoke results.
+
+        Args:
+            operation (InvokeOperation): Callable invocation to inspect.
+            active_blocks (frozenset[int]): Body identities already active on
+                the recursive path. Defaults to an empty set.
+
+        Returns:
+            tuple[frozenset[int], bool]: Caller result indices derived from an
+            observation and whether the selected body contains an observation.
+        """
+        selection = operation.select_body(strategy=self._strategy_for(operation))
+        body = selection.body
+        if not isinstance(body, Block):
+            return operation.measurement_result_indices, bool(
+                operation.measurement_result_indices
+            )
+        body_indices, has_observation = self._block_runtime_observation_summary(
+            body,
+            active_blocks=active_blocks,
+        )
+        offset = len(operation.results) - len(selection.results)
+        return (
+            frozenset(
+                index + offset
+                for index in body_indices
+                if index + offset < len(operation.results)
+            ),
+            has_observation,
+        )
 
     def eval_operations(
         self,
@@ -4026,19 +4340,45 @@ class ResourceInterpreter:
             return shared.conditional(direct, batch_condition)
 
         previous_taint = self._measurement_derived
+        previous_global_barriers = self._global_barrier_operation_ids
         cache_entry = self._operation_taint_cache.get(id(operations))
         if cache_entry is not None and cache_entry[0] is operations:
-            local_taint = cache_entry[1]
+            graph = cache_entry[1]
+            local_measurement_roots = cache_entry[2]
+            local_global_barriers = cache_entry[3]
         else:
             graph = build_dependency_graph(operations)
-            local_taint = frozenset(
-                find_measurement_derived_values(
-                    graph,
-                    _find_runtime_observation_results(operations),
+            measurement_roots = _find_runtime_observation_results(operations)
+            global_barriers: set[int] = set()
+            for nested_operation in walk_operations(operations):
+                if not isinstance(nested_operation, InvokeOperation):
+                    continue
+                indices, has_observation = self._invoke_runtime_observation_summary(
+                    nested_operation
                 )
+                measurement_roots.update(
+                    nested_operation.results[index].uuid
+                    for index in indices
+                    if index < len(nested_operation.results)
+                )
+                if has_observation:
+                    global_barriers.add(id(nested_operation))
+            local_measurement_roots = frozenset(measurement_roots)
+            local_global_barriers = frozenset(global_barriers)
+            self._operation_taint_cache[id(operations)] = (
+                operations,
+                graph,
+                local_measurement_roots,
+                local_global_barriers,
             )
-            self._operation_taint_cache[id(operations)] = (operations, local_taint)
-        self._measurement_derived = previous_taint | local_taint
+        propagated_taint = find_measurement_derived_values(
+            graph,
+            set(previous_taint) | set(local_measurement_roots),
+        )
+        self._measurement_derived = previous_taint | propagated_taint
+        self._global_barrier_operation_ids = previous_global_barriers | set(
+            local_global_barriers
+        )
         try:
             scheduled: list[tuple[Operation, ResourceEstimate]] = []
             seen_array_constraints: set[_ResourceConstraint] = set()
@@ -4063,7 +4403,7 @@ class ResourceInterpreter:
                     )
                     operation_estimate = operation_estimate._with_metadata(
                         assumptions=(assumption,),
-                        quality=EstimateQuality.UPPER_BOUND,
+                        guarantee=EstimateGuarantee.UPPER_BOUND,
                     )
                 if not self.config.trace:
                     # Every operation estimate is freshly produced for this
@@ -4182,6 +4522,7 @@ class ResourceInterpreter:
                 depth_footprints,
                 activity_conditions=depth_activity_conditions,
                 measurement_derived=self._measurement_derived,
+                global_barrier_operation_ids=self._global_barrier_operation_ids,
                 scalar_values=self.condition_values,
                 used_names=self.branch_condition_names,
             )
@@ -4190,16 +4531,16 @@ class ResourceInterpreter:
                 depth_footprints,
                 activity_conditions=depth_activity_conditions,
             )
+            liveness = _liveness_width(
+                scheduled,
+                initial_allocations or {},
+                resolver,
+                allocation_owners_by_uuid=self._allocation_owners_by_uuid,
+            )
             result = dataclasses.replace(
                 estimate,
                 depth=scheduled_depth,
-                width=_liveness_width(
-                    scheduled,
-                    initial_allocations or {},
-                    resolver,
-                    allocation_owners_by_uuid=self._allocation_owners_by_uuid,
-                ),
-                quality=estimate.quality,
+                width=liveness.width,
                 _allocation_sites=_without_input_allocation_sites(
                     estimate._allocation_sites,
                     operations,
@@ -4212,6 +4553,9 @@ class ResourceInterpreter:
                     if key in dependency_keys
                 },
                 _dependency_completion_uniform=completion_is_uniform,
+                _output_sizes=liveness.final_live_by_owner,
+                _input_sizes=dict(initial_allocations or {}),
+                _has_output_summary=True,
             )
             if possible_alias_active is not sp.false:
                 assumption = ResourceAssumption(
@@ -4221,7 +4565,7 @@ class ResourceInterpreter:
                 )
                 result = result._with_metadata(
                     assumptions=(assumption,),
-                    quality=EstimateQuality.UPPER_BOUND,
+                    guarantee=EstimateGuarantee.UPPER_BOUND,
                     active_when=possible_alias_active,
                 )
             if aggregate_completion_active is not sp.false:
@@ -4232,12 +4576,13 @@ class ResourceInterpreter:
                 )
                 result = result._with_metadata(
                     assumptions=(assumption,),
-                    quality=EstimateQuality.UPPER_BOUND,
+                    guarantee=EstimateGuarantee.UPPER_BOUND,
                     active_when=aggregate_completion_active,
                 )
             return result
         finally:
             self._measurement_derived = previous_taint
+            self._global_barrier_operation_ids = previous_global_barriers
 
     def eval_operation(
         self,
@@ -4574,7 +4919,7 @@ class ResourceInterpreter:
             )
             if upper_bound_when is not sp.false:
                 estimate = estimate._with_metadata(
-                    quality=EstimateQuality.UPPER_BOUND,
+                    guarantee=EstimateGuarantee.UPPER_BOUND,
                     active_when=upper_bound_when,
                 )
             if _gate_has_rotation(operation):
@@ -4892,7 +5237,8 @@ class ResourceInterpreter:
                 queries_by_name={"expval": _ONE},
             ),
             assumptions=(assumption,),
-            quality=EstimateQuality.MODELED,
+            derivation=EstimateDerivation.MODELED,
+            guarantee=EstimateGuarantee.UNKNOWN,
             trace=ResourceTraceNode(
                 "expval",
                 "opaque",
@@ -5061,6 +5407,8 @@ class ResourceInterpreter:
                     allocated_qubits=inner.width.allocated_qubits,
                     clean_ancillas=inner.width.clean_ancilla_qubits,
                     dirty_ancillas=inner.width.dirty_ancilla_qubits,
+                    measurement_derived=self._measurement_derived,
+                    global_barrier_operation_ids=(self._global_barrier_operation_ids),
                     scalar_values=self.condition_values,
                     used_names=self.branch_condition_names,
                 )
@@ -5077,6 +5425,10 @@ class ResourceInterpreter:
                         allocated_qubits=inner.width.allocated_qubits,
                         clean_ancillas=inner.width.clean_ancilla_qubits,
                         dirty_ancillas=inner.width.dirty_ancilla_qubits,
+                        measurement_derived=self._measurement_derived,
+                        global_barrier_operation_ids=(
+                            self._global_barrier_operation_ids
+                        ),
                         scalar_values=self.condition_values,
                         used_names=self.branch_condition_names,
                     )
@@ -5127,7 +5479,7 @@ class ResourceInterpreter:
                     )
                     estimate = estimate._with_metadata(
                         assumptions=(assumption,),
-                        quality=EstimateQuality.UPPER_BOUND,
+                        guarantee=EstimateGuarantee.UPPER_BOUND,
                         active_when=sp.Gt(iterations, _ZERO),
                     )
             elif (
@@ -5157,7 +5509,7 @@ class ResourceInterpreter:
                 )
                 estimate = estimate._with_metadata(
                     assumptions=(assumption,),
-                    quality=EstimateQuality.UPPER_BOUND,
+                    guarantee=EstimateGuarantee.UPPER_BOUND,
                     active_when=sp.Gt(iterations, _ONE),
                 )
         estimate = _with_operation_output_summary(
@@ -5268,6 +5620,7 @@ class ResourceInterpreter:
             for arg in operation.region_args
         }
         composer = _SequentialEstimateComposer()
+        iteration_estimates: list[ResourceEstimate] = []
         iteration_width = WidthResources.zero()
         anonymous_allocated = _ZERO
         body = _LocalBlock(operation.operations)
@@ -5292,6 +5645,7 @@ class ResourceInterpreter:
                 ),
             )
             composer.append(iteration_estimate)
+            iteration_estimates.append(iteration_estimate)
             iteration_width = _max_width(iteration_width, iteration_estimate.width)
             anonymous_allocated = sp.Max(
                 anonymous_allocated,
@@ -5309,13 +5663,18 @@ class ResourceInterpreter:
         for arg in operation.region_args:
             resolver.bind(arg.result, carried[arg.block_arg.uuid])
         estimate = composer.finish()
-        return dataclasses.replace(
+        estimate = dataclasses.replace(
             estimate,
             width=_width_with_identity_aware_allocations(
                 iteration_width,
                 estimate._allocation_sites,
                 anonymous_allocated=anonymous_allocated,
             ),
+        )
+        return self._schedule_concrete_loop_depth(
+            operation,
+            iteration_estimates,
+            estimate,
         )
 
     def _eval_symbolic_region_for(
@@ -5667,6 +6026,30 @@ class ResourceInterpreter:
             false_child,
             self._allocation_owners_by_uuid,
         )
+        true_inputs.update(
+            _if_merge_captured_allocations(
+                operation.true_operations,
+                [
+                    merge.true_value
+                    for merge in operation.iter_merges()
+                    if merge.result.type.is_quantum()
+                ],
+                true_child,
+                self._allocation_owners_by_uuid,
+            )
+        )
+        false_inputs.update(
+            _if_merge_captured_allocations(
+                operation.false_operations,
+                [
+                    merge.false_value
+                    for merge in operation.iter_merges()
+                    if merge.result.type.is_quantum()
+                ],
+                false_child,
+                self._allocation_owners_by_uuid,
+            )
+        )
         true_consumed = _definitely_consumed_captured_allocations(
             operation.true_operations,
             true_inputs,
@@ -5702,6 +6085,10 @@ class ResourceInterpreter:
                 resolver,
                 true_child,
                 false_child,
+                true_estimate=estimate if taken else None,
+                false_estimate=estimate if not taken else None,
+                true_inputs=true_inputs,
+                false_inputs=false_inputs,
                 taken=taken,
                 runtime_condition=False,
                 true_consumed=true_consumed,
@@ -5746,6 +6133,10 @@ class ResourceInterpreter:
             resolver,
             true_child,
             false_child,
+            true_estimate=true_estimate,
+            false_estimate=false_estimate,
+            true_inputs=true_inputs,
+            false_inputs=false_inputs,
             taken=None,
             runtime_condition=is_runtime_condition,
             true_consumed=true_consumed,
@@ -5846,6 +6237,28 @@ class ResourceInterpreter:
                     fresh=True,
                 )
             resolver.bind(merge.result, cast(sp.Expr, merged))
+            if merge.result.type.is_quantum():
+                selected_values = (
+                    (merge.true_value,)
+                    if taken is True
+                    else (
+                        (merge.false_value,)
+                        if taken is False
+                        else (merge.true_value, merge.false_value)
+                    )
+                )
+                owners = {
+                    self._allocation_owners_by_uuid.get(
+                        value.uuid,
+                        _quantum_allocation_owner(value),
+                    )
+                    for value in selected_values
+                    if isinstance(value, Value) and value.type.is_quantum()
+                }
+                if len(owners) == 1:
+                    self._allocation_owners_by_uuid[merge.result.uuid] = next(
+                        iter(owners)
+                    )
             if not all(
                 isinstance(value, ArrayValue)
                 for value in (
@@ -5887,6 +6300,10 @@ class ResourceInterpreter:
         true_resolver: ExprResolver,
         false_resolver: ExprResolver,
         *,
+        true_estimate: ResourceEstimate | None,
+        false_estimate: ResourceEstimate | None,
+        true_inputs: Mapping[str, ResourceExpr],
+        false_inputs: Mapping[str, ResourceExpr],
         taken: bool | None,
         runtime_condition: bool,
         true_consumed: Mapping[str, ResourceExpr],
@@ -5904,6 +6321,14 @@ class ResourceInterpreter:
             resolver (ExprResolver): Resolver for the branch condition.
             true_resolver (ExprResolver): True-branch resolver.
             false_resolver (ExprResolver): False-branch resolver.
+            true_estimate (ResourceEstimate | None): Evaluated true-branch
+                summary when that branch was visited.
+            false_estimate (ResourceEstimate | None): Evaluated false-branch
+                summary when that branch was visited.
+            true_inputs (Mapping[str, ResourceExpr]): Outer allocations live at
+                true-branch entry.
+            false_inputs (Mapping[str, ResourceExpr]): Outer allocations live
+                at false-branch entry.
             taken (bool | None): Statically selected branch, if any.
             runtime_condition (bool): Whether a measurement selects the branch
                 at runtime.
@@ -5916,30 +6341,38 @@ class ResourceInterpreter:
             dict[str, ResourceExpr]: Live merged output width by root owner.
         """
         condition = _boolean_condition(resolver.resolve(operation.condition))
-        true_sizes: dict[str, ResourceExpr] = {}
-        false_sizes: dict[str, ResourceExpr] = {}
-        for merge in operation.iter_merges():
-            if not merge.result.type.is_quantum():
-                continue
-            owner = _quantum_allocation_owner(merge.result)
-            true_sizes[owner] = true_sizes.get(owner, _ZERO) + _qubit_value_size(
-                merge.true_value,
-                true_resolver,
+        true_authoritative = bool(
+            true_estimate is not None and true_estimate._has_output_summary
+        )
+        false_authoritative = bool(
+            false_estimate is not None and false_estimate._has_output_summary
+        )
+        true_sizes = {
+            owner: (
+                true_estimate._output_sizes.get(owner, _ZERO)
+                if true_authoritative and true_estimate is not None
+                else sp.Max(
+                    _ZERO,
+                    size - true_consumed.get(owner, _ZERO),
+                )
             )
-            false_sizes[owner] = false_sizes.get(owner, _ZERO) + _qubit_value_size(
-                merge.false_value,
-                false_resolver,
+            for owner, size in true_inputs.items()
+        }
+        false_sizes = {
+            owner: (
+                false_estimate._output_sizes.get(owner, _ZERO)
+                if false_authoritative and false_estimate is not None
+                else sp.Max(
+                    _ZERO,
+                    size - false_consumed.get(owner, _ZERO),
+                )
             )
+            for owner, size in false_inputs.items()
+        }
         output_sizes: dict[str, ResourceExpr] = {}
         for owner in true_sizes.keys() | false_sizes.keys():
-            true_size = sp.Max(
-                _ZERO,
-                true_sizes.get(owner, _ZERO) - true_consumed.get(owner, _ZERO),
-            )
-            false_size = sp.Max(
-                _ZERO,
-                false_sizes.get(owner, _ZERO) - false_consumed.get(owner, _ZERO),
-            )
+            true_size = true_sizes.get(owner, _ZERO)
+            false_size = false_sizes.get(owner, _ZERO)
             if taken is True:
                 size = true_size
             elif taken is False:
@@ -5950,6 +6383,49 @@ class ResourceInterpreter:
                 size = _piecewise(true_size, false_size, condition)
             if size != _ZERO:
                 output_sizes[owner] = size
+        owner_map = self._allocation_owners_by_uuid
+        for merge in operation.iter_merges():
+            if not merge.result.type.is_quantum():
+                continue
+            true_owner = owner_map.get(
+                merge.true_value.uuid,
+                _quantum_allocation_owner(merge.true_value),
+            )
+            false_owner = owner_map.get(
+                merge.false_value.uuid,
+                _quantum_allocation_owner(merge.false_value),
+            )
+            true_returned = (
+                _ZERO
+                if true_owner in true_inputs
+                else _qubit_value_size(merge.true_value, true_resolver)
+            )
+            false_returned = (
+                _ZERO
+                if false_owner in false_inputs
+                else _qubit_value_size(merge.false_value, false_resolver)
+            )
+            if taken is True:
+                returned = true_returned
+            elif taken is False:
+                returned = false_returned
+            elif runtime_condition:
+                returned = _resource_max(true_returned, false_returned)
+            else:
+                returned = _piecewise(
+                    true_returned,
+                    false_returned,
+                    condition,
+                )
+            if returned == _ZERO:
+                continue
+            result_owner = owner_map.get(
+                merge.result.uuid,
+                _quantum_allocation_owner(merge.result),
+            )
+            output_sizes[result_owner] = (
+                output_sizes.get(result_owner, _ZERO) + returned
+            )
         return output_sizes
 
     def _decide_branch(
@@ -6271,7 +6747,7 @@ class ResourceInterpreter:
                 anonymous_allocated=anonymous_allocated,
             ),
         )
-        return self._schedule_concrete_for_items_depth(
+        return self._schedule_concrete_loop_depth(
             operation,
             entry_estimates,
             estimate,
@@ -6351,28 +6827,28 @@ class ResourceInterpreter:
                 anonymous_allocated=anonymous_allocated,
             ),
         )
-        return self._schedule_concrete_for_items_depth(
+        return self._schedule_concrete_loop_depth(
             operation,
             entry_estimates,
             estimate,
         )
 
-    def _schedule_concrete_for_items_depth(
+    def _schedule_concrete_loop_depth(
         self,
-        operation: ForItemsOperation,
+        operation: ForOperation | ForItemsOperation,
         entry_estimates: Sequence[ResourceEstimate],
         combined: ResourceEstimate,
     ) -> ResourceEstimate:
-        """Schedule concrete items-loop entries by their resolved wire use.
+        """Schedule concrete loop iterations by their resolved wire use.
 
         Gate and call counts remain a sequential sum, but dictionary entries
-        acting on disjoint wires may occupy the same depth layers. A body-local
-        allocation prevents this optimization because every iteration reuses
-        the same allocation site.
+        or range iterations acting on disjoint wires may occupy the same depth
+        layers. A body-local allocation prevents this optimization because
+        every iteration reuses the same allocation site.
 
         Args:
-            operation (ForItemsOperation): Items loop whose entries were
-                evaluated with concrete key and value bindings.
+            operation (ForOperation | ForItemsOperation): Loop whose iterations
+                were evaluated with concrete index/key/value bindings.
             entry_estimates (Sequence[ResourceEstimate]): Per-entry estimates
                 before sequential depth offsets are applied.
             combined (ResourceEstimate): Sequentially composed estimate whose
@@ -6397,13 +6873,13 @@ class ResourceInterpreter:
             keys = entry_estimate._dependency_keys
             if keys is None:
                 assumption = ResourceAssumption(
-                    "concrete items-loop entry dependencies are unavailable; "
+                    "concrete loop iteration dependencies are unavailable; "
                     "depth remains sequential",
-                    source="items dependency scheduler",
+                    source="loop dependency scheduler",
                 )
                 return combined._with_metadata(
                     assumptions=(assumption,),
-                    quality=EstimateQuality.UPPER_BOUND,
+                    guarantee=EstimateGuarantee.UPPER_BOUND,
                 )
             footprints.append((keys, keys))
 
@@ -6418,6 +6894,7 @@ class ResourceInterpreter:
             footprints,
             activity_conditions=depth_activity_conditions,
             measurement_derived=self._measurement_derived,
+            global_barrier_operation_ids=self._global_barrier_operation_ids,
             scalar_values=self.condition_values,
             used_names=self.branch_condition_names,
         )
@@ -6429,13 +6906,13 @@ class ResourceInterpreter:
         )
         if possible_alias_active is not sp.false:
             assumption = ResourceAssumption(
-                "concrete items-loop quantum indices may alias and are "
+                "concrete loop quantum indices may alias and are "
                 "scheduled conservatively",
-                source="items dependency scheduler",
+                source="loop dependency scheduler",
             )
             result = result._with_metadata(
                 assumptions=(assumption,),
-                quality=EstimateQuality.UPPER_BOUND,
+                guarantee=EstimateGuarantee.UPPER_BOUND,
                 active_when=possible_alias_active,
             )
         aggregate_completion_active = _aggregate_completion_overlap_condition(
@@ -6445,13 +6922,13 @@ class ResourceInterpreter:
         )
         if aggregate_completion_active is not sp.false:
             assumption = ResourceAssumption(
-                "aggregate items-loop entry latency may over-serialize a "
+                "aggregate loop-iteration latency may over-serialize a "
                 "later wire dependency",
-                source="items dependency scheduler",
+                source="loop dependency scheduler",
             )
             result = result._with_metadata(
                 assumptions=(assumption,),
-                quality=EstimateQuality.UPPER_BOUND,
+                guarantee=EstimateGuarantee.UPPER_BOUND,
                 active_when=aggregate_completion_active,
             )
         return result
@@ -6853,10 +7330,15 @@ class ResourceInterpreter:
             source=operation.custom_name,
         )
         strategy = self._strategy_for(operation)
-        body = operation.effective_body(strategy=strategy)
-        if isinstance(body, Block):
+        selection = operation.select_body(strategy=strategy)
+        if isinstance(selection.body, Block):
             return _with_constraints(
-                self._estimate_invoke_body(operation, body, resolver, controls),
+                self._estimate_invoke_body(
+                    operation,
+                    selection,
+                    resolver,
+                    controls,
+                ),
                 *width_constraints,
             )
         cost_context, invocation_transform = self._opaque_cost_context(
@@ -7100,7 +7582,7 @@ class ResourceInterpreter:
                 )
                 estimate = estimate._with_metadata(
                     assumptions=(assumption,),
-                    quality=EstimateQuality.UPPER_BOUND,
+                    guarantee=EstimateGuarantee.UPPER_BOUND,
                 )
             return _with_body_boundary_depth_metadata(
                 estimate,
@@ -7123,7 +7605,8 @@ class ResourceInterpreter:
         if self.config.unknown_policy is UnknownResourcePolicy.ZERO_WITH_WARNING:
             estimate = ResourceEstimate(
                 assumptions=(assumption,),
-                quality=EstimateQuality.MODELED,
+                derivation=EstimateDerivation.MODELED,
+                guarantee=EstimateGuarantee.UNKNOWN,
                 trace=ResourceTraceNode(
                     name,
                     "opaque",
@@ -7151,7 +7634,8 @@ class ResourceInterpreter:
             gates=gates,
             calls=calls,
             assumptions=(assumption,),
-            quality=EstimateQuality.MODELED,
+            derivation=EstimateDerivation.MODELED,
+            guarantee=EstimateGuarantee.UNKNOWN,
             trace=ResourceTraceNode(
                 name,
                 "opaque",
@@ -7412,7 +7896,8 @@ class ResourceInterpreter:
                         queries_by_name={name: _ONE},
                     ),
                     assumptions=(assumption,),
-                    quality=EstimateQuality.MODELED,
+                    derivation=EstimateDerivation.MODELED,
+                    guarantee=EstimateGuarantee.UNKNOWN,
                     trace=ResourceTraceNode(
                         name,
                         "opaque",
@@ -7422,7 +7907,8 @@ class ResourceInterpreter:
             else:
                 estimate = ResourceEstimate(
                     assumptions=(assumption,),
-                    quality=EstimateQuality.MODELED,
+                    derivation=EstimateDerivation.MODELED,
+                    guarantee=EstimateGuarantee.UNKNOWN,
                     trace=ResourceTraceNode(
                         name,
                         "opaque",
@@ -7571,7 +8057,8 @@ class ResourceInterpreter:
             return ResourceEstimate(
                 calls=calls,
                 assumptions=(assumption,),
-                quality=EstimateQuality.MODELED,
+                derivation=EstimateDerivation.MODELED,
+                guarantee=EstimateGuarantee.UNKNOWN,
                 trace=ResourceTraceNode(
                     "pauli_evolve",
                     "modeled",
@@ -7898,7 +8385,7 @@ class ResourceInterpreter:
                 strategy=context.strategy,
             ),
         )
-        return estimate._with_metadata(quality=EstimateQuality.MODELED)
+        return estimate._with_metadata(derivation=EstimateDerivation.MODELED)
 
     def _resolve_opaque_definition_cost(
         self,
@@ -7972,7 +8459,7 @@ class ResourceInterpreter:
     def _estimate_invoke_body(
         self,
         operation: InvokeOperation,
-        body: Block,
+        selection: CallableBodySelection,
         resolver: ExprResolver,
         controls: ResourceExpr | int,
     ) -> ResourceEstimate:
@@ -7986,32 +8473,35 @@ class ResourceInterpreter:
 
         Args:
             operation (InvokeOperation): Invocation operation.
-            body (Block): Selected callable body.
+            selection (CallableBodySelection): Validated callable body and
+                call-site values aligned to its ABI.
             resolver (ExprResolver): Call-site resolver.
             controls (ResourceExpr | int): Surrounding control count.
 
         Returns:
             ResourceEstimate: Body-derived estimate.
+
+        Raises:
+            TypeError: If ``selection`` does not contain an IR body.
         """
-        selected_impl = operation.implementation_for(
-            strategy=self._strategy_for(operation)
-        )
-        body_implements_transform = (
-            selected_impl is not None and selected_impl.body is body
-        )
+        body = selection.body
+        if not isinstance(body, Block):
+            raise TypeError("_estimate_invoke_body requires a selected IR body.")
+        realized_transform = selection.realized_transform
+        body_implements_controls = selection.implements_controls
+        body_implements_inverse = realized_transform.is_inverse
         child = resolver.call_child_scope(
             operation,
             called_block=body,
-            body_implements_transform=body_implements_transform,
+            body_implements_transform=body_implements_controls,
+            actual_operands=selection.operands,
         )
-        call_controls = (
+        local_controls = (
             operation.num_control_qubits if operation.transform.is_controlled else 0
         )
-        body_added_controls = 0 if body_implements_transform else call_controls
+        body_added_controls = len(operation.operands) - len(selection.operands)
         total_controls = _expr(controls) + body_added_controls
-        actual_operands = operation.operands
-        if operation.transform.is_controlled and not body_implements_transform:
-            actual_operands = actual_operands[operation.num_control_qubits :]
+        actual_operands = selection.operands
         body_estimate = self._eval_call_body(
             body,
             child,
@@ -8019,12 +8509,12 @@ class ResourceInterpreter:
             controls=total_controls,
         )
         body_dependency_estimate = body_estimate
-        if operation.transform.is_inverse and not body_implements_transform:
+        if operation.transform.is_inverse and not body_implements_inverse:
             body_estimate = body_estimate.inverse()
         zero_controls = _ZERO
-        if call_controls:
+        if local_controls:
             zero_controls = _zero_control_count(
-                call_controls,
+                local_controls,
                 operation.control_value,
             )
             body_estimate = self._with_zero_control_bracket(
@@ -8032,9 +8522,7 @@ class ResourceInterpreter:
                 zero_controls=zero_controls,
                 active_when=_estimate_activity(body_estimate),
             )
-        caller_results: Sequence[ValueBase] = operation.results
-        if operation.transform.is_controlled and not body_implements_transform:
-            caller_results = operation.results[operation.num_control_qubits :]
+        caller_results: Sequence[ValueBase] = selection.results
         dependency_keys = _map_body_dependency_keys(
             body,
             body_dependency_estimate,
@@ -8055,7 +8543,7 @@ class ResourceInterpreter:
         )
         if dependency_keys is not None:
             mapped_keys = set(dependency_keys)
-            if call_controls and _estimate_has_nonzero_depth(body_estimate):
+            if local_controls and _estimate_has_nonzero_depth(body_estimate):
                 mapped_keys.update(
                     _wire_keys_for_values(
                         operation.operands[: operation.num_control_qubits],
@@ -8073,12 +8561,17 @@ class ResourceInterpreter:
                     fallback_depth=body_estimate.depth.depth,
                 ),
             )
-        output_sizes, has_output_summary = _invoke_quantum_output_sizes(
+        input_sizes, output_sizes, has_output_summary = _invoke_quantum_output_sizes(
             operation,
             body,
             child,
             resolver,
-            body_implements_transform=body_implements_transform,
+            body_external_control_qubits=(
+                len(operation.results) - len(selection.results)
+            ),
+            body_final_live=body_dependency_estimate._output_sizes,
+            actual_operands=actual_operands,
+            allocation_owners_by_uuid=self._allocation_owners_by_uuid,
         )
         estimate = _namespace_allocation_sites(
             dataclasses.replace(
@@ -8089,6 +8582,7 @@ class ResourceInterpreter:
                     source_kind="body",
                 ),
                 _output_sizes=output_sizes,
+                _input_sizes=input_sizes,
                 _has_output_summary=has_output_summary,
             ),
             operation,
@@ -8099,15 +8593,19 @@ class ResourceInterpreter:
             source=operation.custom_name,
             zero_controls=zero_controls,
         )
-        if not operation.effects.is_unitary:
+        _observation_outputs, has_runtime_observation = (
+            self._block_runtime_observation_summary(body)
+        )
+        if not body.effects.is_unitary or has_runtime_observation:
             assumption = ResourceAssumption(
-                "non-unitary callable boundary is scheduled as a global "
-                "barrier and may overestimate depth on disjoint wires",
+                "runtime-observation or non-unitary callable boundary is "
+                "scheduled as a global barrier and may overestimate depth "
+                "on disjoint wires",
                 source=operation.custom_name,
             )
             estimate = estimate._with_metadata(
                 assumptions=(assumption,),
-                quality=EstimateQuality.UPPER_BOUND,
+                guarantee=EstimateGuarantee.UPPER_BOUND,
                 active_when=_estimate_depth_activity_condition(estimate),
             )
         return estimate
@@ -8138,7 +8636,8 @@ class ResourceInterpreter:
                     queries_by_name={name: _ONE},
                 ),
                 trace=ResourceTraceNode(name, "opaque"),
-                quality=EstimateQuality.MODELED,
+                derivation=EstimateDerivation.MODELED,
+                guarantee=EstimateGuarantee.UNKNOWN,
             )
         elif self.config.unknown_policy is UnknownResourcePolicy.ZERO_WITH_WARNING:
             assumption = ResourceAssumption(
@@ -8148,7 +8647,8 @@ class ResourceInterpreter:
             estimate = ResourceEstimate(
                 assumptions=(assumption,),
                 trace=ResourceTraceNode(name, "opaque", assumptions=(assumption,)),
-                quality=EstimateQuality.MODELED,
+                derivation=EstimateDerivation.MODELED,
+                guarantee=EstimateGuarantee.UNKNOWN,
             )
         else:
             raise ValueError(
@@ -8954,9 +9454,9 @@ def _map_dependency_completion(
         rewritten = cast(ResourceExpr, fn(value))
         if rewritten != _ZERO:
             mapped_key = _map_dependency_key(key, fn)
-            mapped[mapped_key] = cast(
-                ResourceExpr,
-                sp.Max(mapped.get(mapped_key, _ZERO), rewritten),
+            mapped[mapped_key] = _resource_max(
+                mapped.get(mapped_key, _ZERO),
+                rewritten,
             )
     return mapped
 
@@ -9477,7 +9977,7 @@ def _clean_ancilla_sequence_estimate(
     gates: GateResources,
     *,
     clean_ancillas: ResourceExpr = _ZERO,
-    quality: EstimateQuality = EstimateQuality.EXACT,
+    guarantee: EstimateGuarantee = EstimateGuarantee.EXACT,
 ) -> ResourceEstimate:
     """Build one clean-ancilla Toffoli decomposition estimate.
 
@@ -9486,8 +9986,7 @@ def _clean_ancilla_sequence_estimate(
         gates (GateResources): Aggregate logical gate resources.
         clean_ancillas (ResourceExpr): Reusable clean-ancilla demand.
             Defaults to zero.
-        quality (EstimateQuality): Confidence classification. Defaults to
-            ``EXACT``.
+        guarantee (EstimateGuarantee): Count guarantee. Defaults to ``EXACT``.
 
     Returns:
         ResourceEstimate: Serial gate/depth and reusable-width estimate.
@@ -9500,7 +9999,7 @@ def _clean_ancilla_sequence_estimate(
         width=width,
         gates=gates,
         depth=_serial_depth_from_gate_resources(gates),
-        quality=quality,
+        guarantee=guarantee,
         trace=ResourceTraceNode(
             name=name,
             source_kind="clean_ancilla_toffoli",
@@ -9569,7 +10068,7 @@ def _clean_ancilla_generic_multi_control_estimate(
         f"mc-{name}",
         _add_gates(ladder, central),
         clean_ancillas=controls - _ONE,
-        quality=EstimateQuality.UPPER_BOUND,
+        guarantee=EstimateGuarantee.UPPER_BOUND,
     )
 
 
@@ -9671,13 +10170,35 @@ def _clean_ancilla_z_estimate(controls: ResourceExpr) -> ResourceEstimate:
         .seq(_clean_ancilla_primitive_estimate("toffoli"))
         .seq(_clean_ancilla_primitive_estimate("h"))
     )
-    two = two._with_metadata(quality=EstimateQuality.UPPER_BOUND)
     return _select_control_count_estimate(
         controls,
         zero=_clean_ancilla_primitive_estimate("z"),
         one=_clean_ancilla_single_control_estimate("z"),
         two=two,
         many=_clean_ancilla_generic_multi_control_estimate("z", controls),
+    )
+
+
+def _clean_ancilla_y_estimate(controls: ResourceExpr) -> ResourceEstimate:
+    """Estimate a Y gate with the exact two-control conjugation.
+
+    Args:
+        controls (ResourceExpr): Number of controls on the Y target.
+
+    Returns:
+        ResourceEstimate: Clean-ancilla Y-family estimate.
+    """
+    two = (
+        _clean_ancilla_primitive_estimate("sdg")
+        .seq(_clean_ancilla_primitive_estimate("toffoli"))
+        .seq(_clean_ancilla_primitive_estimate("s"))
+    )
+    return _select_control_count_estimate(
+        controls,
+        zero=_clean_ancilla_primitive_estimate("y"),
+        one=_clean_ancilla_single_control_estimate("y"),
+        two=two,
+        many=_clean_ancilla_generic_multi_control_estimate("y", controls),
     )
 
 
@@ -9720,6 +10241,8 @@ def _estimate_clean_ancilla_named_gate(
         return _clean_ancilla_x_estimate(controls)
     if name == "z":
         return _clean_ancilla_z_estimate(controls)
+    if name == "y":
+        return _clean_ancilla_y_estimate(controls)
     if name == "cx":
         return _clean_ancilla_controlled_branch(
             controls,
@@ -9751,9 +10274,6 @@ def _estimate_clean_ancilla_named_gate(
             .seq(middle)
             .seq(_clean_ancilla_primitive_estimate("cx"))
         )
-        controlled = controlled._with_metadata(
-            quality=EstimateQuality.UPPER_BOUND,
-        )
         return _clean_ancilla_controlled_branch(
             controls,
             _clean_ancilla_primitive_estimate("swap"),
@@ -9764,9 +10284,6 @@ def _estimate_clean_ancilla_named_gate(
             _clean_ancilla_primitive_estimate("cx")
             .seq(_clean_ancilla_single_target_estimate("rz", controls))
             .seq(_clean_ancilla_primitive_estimate("cx"))
-        )
-        controlled = controlled._with_metadata(
-            quality=EstimateQuality.UPPER_BOUND,
         )
         return _clean_ancilla_controlled_branch(
             controls,
@@ -10173,7 +10690,8 @@ def _project_abstract_aggregate_controlled_cost(
                 summary=f"gates={gates.total}, controls={controls}",
             ),
         ),
-        quality=estimate.quality,
+        derivation=estimate.derivation,
+        guarantee=estimate.guarantee,
         approximation=estimate.approximation,
         basis=estimate.basis,
         control_decomposition=estimate.control_decomposition,
@@ -10185,7 +10703,8 @@ def _project_abstract_aggregate_controlled_cost(
         _has_output_summary=estimate._has_output_summary,
         _dependency_keys=estimate._dependency_keys,
         _guarded_assumptions=estimate._guarded_assumptions,
-        _guarded_qualities=estimate._guarded_qualities,
+        _guarded_derivations=estimate._guarded_derivations,
+        _guarded_guarantees=estimate._guarded_guarantees,
         _guarded_approximations=estimate._guarded_approximations,
         _symbol_aliases=estimate._symbol_aliases,
     )
@@ -10218,26 +10737,30 @@ def _project_abstract_aggregate_controlled_cost(
     if unclassified_count == _ZERO:
         controlled = controlled._with_metadata(
             assumptions=(complete_assumption,),
-            quality=EstimateQuality.MODELED,
+            derivation=EstimateDerivation.MODELED,
+            guarantee=EstimateGuarantee.UPPER_BOUND,
             active_when=active_controls,
         )
     elif unclassified_count.is_positive is True:
         controlled = controlled._with_metadata(
             assumptions=(partial_assumption,),
-            quality=EstimateQuality.MODELED,
+            derivation=EstimateDerivation.MODELED,
+            guarantee=EstimateGuarantee.UNKNOWN,
             active_when=active_controls,
         )
     else:
         controlled = controlled._with_metadata(
             assumptions=(complete_assumption,),
-            quality=EstimateQuality.MODELED,
+            derivation=EstimateDerivation.MODELED,
+            guarantee=EstimateGuarantee.UPPER_BOUND,
             active_when=sp.And(
                 active_controls,
                 sp.Eq(unclassified_count, _ZERO),
             ),
         )._with_metadata(
             assumptions=(partial_assumption,),
-            quality=EstimateQuality.MODELED,
+            derivation=EstimateDerivation.MODELED,
+            guarantee=EstimateGuarantee.UNKNOWN,
             active_when=sp.And(
                 active_controls,
                 sp.Gt(unclassified_count, _ZERO),
@@ -10298,7 +10821,7 @@ def _clean_ancilla_shared_aggregate_control_ladder(
         _has_output_summary=body._has_output_summary,
         _dependency_keys=body._dependency_keys,
         _symbol_aliases=body._symbol_aliases,
-    )._with_metadata(quality=EstimateQuality.UPPER_BOUND)
+    )._with_metadata(guarantee=EstimateGuarantee.UPPER_BOUND)
 
 
 def _project_clean_ancilla_aggregate_controlled_cost(
@@ -10356,7 +10879,7 @@ def _project_clean_ancilla_aggregate_controlled_cost(
             source_kind="opaque_arity_remainder",
             summary=f"gates={unresolved_count}",
         ),
-        quality=EstimateQuality.MODELED,
+        derivation=EstimateDerivation.MODELED,
         basis=estimate.basis,
         control_decomposition=estimate.control_decomposition,
         precision=estimate.precision,
@@ -10495,7 +11018,8 @@ def _project_clean_ancilla_aggregate_controlled_cost(
             estimate.trace,
             projected.trace,
         ),
-        quality=estimate.quality,
+        derivation=estimate.derivation,
+        guarantee=estimate.guarantee,
         approximation=estimate.approximation,
         basis=estimate.basis,
         control_decomposition=estimate.control_decomposition,
@@ -10511,7 +11035,8 @@ def _project_clean_ancilla_aggregate_controlled_cost(
         _has_output_summary=estimate._has_output_summary,
         _dependency_keys=estimate._dependency_keys,
         _guarded_assumptions=estimate._guarded_assumptions,
-        _guarded_qualities=estimate._guarded_qualities,
+        _guarded_derivations=estimate._guarded_derivations,
+        _guarded_guarantees=estimate._guarded_guarantees,
         _guarded_approximations=estimate._guarded_approximations,
         _symbol_aliases=estimate._symbol_aliases,
     )
@@ -10522,26 +11047,30 @@ def _project_clean_ancilla_aggregate_controlled_cost(
     if unresolved_count == _ZERO:
         controlled = controlled._with_metadata(
             assumptions=(complete_assumption,),
-            quality=EstimateQuality.MODELED,
+            derivation=EstimateDerivation.MODELED,
+            guarantee=EstimateGuarantee.UPPER_BOUND,
             active_when=active_controls,
         )
     elif unresolved_count.is_positive is True:
         controlled = controlled._with_metadata(
             assumptions=(partial_assumption,),
-            quality=EstimateQuality.MODELED,
+            derivation=EstimateDerivation.MODELED,
+            guarantee=EstimateGuarantee.UNKNOWN,
             active_when=active_controls,
         )
     else:
         controlled = controlled._with_metadata(
             assumptions=(complete_assumption,),
-            quality=EstimateQuality.MODELED,
+            derivation=EstimateDerivation.MODELED,
+            guarantee=EstimateGuarantee.UPPER_BOUND,
             active_when=sp.And(
                 active_controls,
                 sp.Eq(unresolved_count, _ZERO),
             ),
         )._with_metadata(
             assumptions=(partial_assumption,),
-            quality=EstimateQuality.MODELED,
+            derivation=EstimateDerivation.MODELED,
+            guarantee=EstimateGuarantee.UNKNOWN,
             active_when=sp.And(
                 active_controls,
                 sp.Gt(unresolved_count, _ZERO),
@@ -10564,7 +11093,8 @@ def _project_clean_ancilla_aggregate_controlled_cost(
                     controls,
                 ),
             ),
-            quality=EstimateQuality.MODELED,
+            derivation=EstimateDerivation.MODELED,
+            guarantee=EstimateGuarantee.UNKNOWN,
             active_when=active_controls,
         )
         controlled = retained.conditional(
@@ -10701,7 +11231,7 @@ def _estimate_named_gate_in_basis(
         )
         if upper_bound_when is not sp.false:
             estimate = estimate._with_metadata(
-                quality=EstimateQuality.UPPER_BOUND,
+                guarantee=EstimateGuarantee.UPPER_BOUND,
                 active_when=upper_bound_when,
             )
         if normalized_name in _ROTATION_GATES:
@@ -11717,7 +12247,8 @@ def _free_symbols(estimate: ResourceEstimate) -> set[sp.Symbol]:
         symbols.update(cast(set[sp.Symbol], constraint_symbols - bound_symbols))
     for fact in (
         *(estimate._guarded_assumptions or ()),
-        *(estimate._guarded_qualities or ()),
+        *(estimate._guarded_derivations or ()),
+        *(estimate._guarded_guarantees or ()),
         *(estimate._guarded_approximations or ()),
     ):
         symbols.update(cast(set[sp.Symbol], sp.sympify(fact.active_when).free_symbols))
@@ -11759,7 +12290,8 @@ def _serialization_expressions(
         fact.active_when
         for fact in (
             *(estimate._guarded_assumptions or ()),
-            *(estimate._guarded_qualities or ()),
+            *(estimate._guarded_derivations or ()),
+            *(estimate._guarded_guarantees or ()),
             *(estimate._guarded_approximations or ()),
         )
     )

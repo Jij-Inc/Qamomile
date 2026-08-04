@@ -22,7 +22,7 @@ from qamomile.circuit.estimator._metrics import (
     _ONE,
     _ZERO,
     DepthResources,
-    EstimateQuality,
+    EstimateGuarantee,
     ResourceAssumption,
     ResourceExpr,
     WidthResources,
@@ -1152,7 +1152,7 @@ def _with_body_boundary_depth_metadata(
         )
         estimate = estimate._with_metadata(
             assumptions=(assumption,),
-            quality=EstimateQuality.UPPER_BOUND,
+            guarantee=EstimateGuarantee.UPPER_BOUND,
             active_when=bracket_condition,
         )
     broadcast_condition = _and_conditions(
@@ -1167,7 +1167,7 @@ def _with_body_boundary_depth_metadata(
         )
         estimate = estimate._with_metadata(
             assumptions=(assumption,),
-            quality=EstimateQuality.UPPER_BOUND,
+            guarantee=EstimateGuarantee.UPPER_BOUND,
             active_when=broadcast_condition,
         )
     return estimate
@@ -1315,6 +1315,7 @@ def _uses_measurement_derived_classical_input(
 def _operation_depth_is_dependency_schedulable(
     operation: Operation,
     measurement_derived: set[str],
+    global_barrier_operation_ids: set[int] | frozenset[int] = frozenset(),
 ) -> bool:
     """Return whether wire dependencies fully describe an operation's depth.
 
@@ -1326,11 +1327,16 @@ def _operation_depth_is_dependency_schedulable(
     Args:
         operation (Operation): Operation to classify.
         measurement_derived (set[str]): UUIDs tainted by measurement results.
+        global_barrier_operation_ids (set[int] | frozenset[int]): Operation
+            identities whose nested bodies contain runtime observations not
+            captured by quantum wire dependencies. Defaults to an empty set.
 
     Returns:
         bool: Whether dependency scheduling is exact for this operation.
     """
     if _uses_measurement_derived_classical_input(operation, measurement_derived):
+        return False
+    if id(operation) in global_barrier_operation_ids:
         return False
     if isinstance(
         operation,
@@ -1359,13 +1365,21 @@ def _operation_depth_is_dependency_schedulable(
         if operation.condition.uuid in measurement_derived:
             return False
         return all(
-            _operation_depth_is_dependency_schedulable(child, measurement_derived)
+            _operation_depth_is_dependency_schedulable(
+                child,
+                measurement_derived,
+                global_barrier_operation_ids,
+            )
             for body in operation.nested_op_lists()
             for child in body
         )
     if isinstance(operation, (ForOperation, ForItemsOperation)):
         return all(
-            _operation_depth_is_dependency_schedulable(child, measurement_derived)
+            _operation_depth_is_dependency_schedulable(
+                child,
+                measurement_derived,
+                global_barrier_operation_ids,
+            )
             for body in operation.nested_op_lists()
             for child in body
         )
@@ -1378,6 +1392,32 @@ def _operation_depth_is_dependency_schedulable(
         # an otherwise schedulable nested quantum body into a global barrier.
         return True
     return False
+
+
+def _operation_has_runtime_control_boundary(
+    operation: Operation,
+    measurement_derived: set[str],
+) -> bool:
+    """Return whether control resolution is active even for a zero-depth body.
+
+    A measurement-backed ``if`` and a ``while`` must resolve their runtime
+    predicate before operations after the control-flow boundary can proceed.
+    That ordering remains observable when the selected branch is empty or a
+    while loop executes zero iterations, so it cannot be inferred from the
+    body's depth-activity guard.
+
+    Args:
+        operation (Operation): Operation whose control boundary is inspected.
+        measurement_derived (set[str]): UUIDs tainted by measurement results.
+
+    Returns:
+        bool: Whether the runtime control boundary is unconditionally active.
+    """
+    if isinstance(operation, WhileOperation):
+        return True
+    return isinstance(operation, IfOperation) and (
+        operation.condition.uuid in measurement_derived
+    )
 
 
 def _operation_has_uniform_intrinsic_completion(
@@ -1481,6 +1521,8 @@ def _disjoint_concrete_loop_depth(
     allocated_qubits: ResourceExpr,
     clean_ancillas: ResourceExpr,
     dirty_ancillas: ResourceExpr,
+    measurement_derived: set[str],
+    global_barrier_operation_ids: set[int] | frozenset[int] = frozenset(),
     scalar_values: Mapping[str, sp.Expr] | None = None,
     used_names: set[str] | None = None,
 ) -> DepthResources | None:
@@ -1506,6 +1548,11 @@ def _disjoint_concrete_loop_depth(
             between sequential iterations.
         clean_ancillas (ResourceExpr): Shared fallback ancilla demand.
         dirty_ancillas (ResourceExpr): Shared dirty-ancilla demand.
+        measurement_derived (set[str]): Classical UUIDs carrying runtime
+            measurement provenance in the loop scope.
+        global_barrier_operation_ids (set[int] | frozenset[int]): Nested
+            operation identities that require global ordering. Defaults to an
+            empty set.
         scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
             dependency values. Defaults to ``None``.
         used_names (set[str] | None): Optional set updated with used input
@@ -1515,6 +1562,15 @@ def _disjoint_concrete_loop_depth(
         DepthResources | None: Parallel critical-path depth when disjointness
             is proven, otherwise ``None``.
     """
+    if any(
+        not _operation_depth_is_dependency_schedulable(
+            body_operation,
+            measurement_derived,
+            global_barrier_operation_ids,
+        )
+        for body_operation in operation.operations
+    ):
+        return None
     iterations = _bounded_concrete_loop_values(
         start,
         stop,
@@ -1997,6 +2053,8 @@ def _symbolic_disjoint_loop_depth(
     allocated_qubits: ResourceExpr,
     clean_ancillas: ResourceExpr,
     dirty_ancillas: ResourceExpr,
+    measurement_derived: set[str],
+    global_barrier_operation_ids: set[int] | frozenset[int] = frozenset(),
     scalar_values: Mapping[str, sp.Expr] | None = None,
     used_names: set[str] | None = None,
 ) -> DepthResources | None:
@@ -2018,6 +2076,11 @@ def _symbolic_disjoint_loop_depth(
             between sequential iterations.
         clean_ancillas (ResourceExpr): Shared decomposition ancilla demand.
         dirty_ancillas (ResourceExpr): Shared dirty-ancilla demand.
+        measurement_derived (set[str]): Classical UUIDs carrying runtime
+            measurement provenance in the loop scope.
+        global_barrier_operation_ids (set[int] | frozenset[int]): Nested
+            operation identities that require global ordering. Defaults to an
+            empty set.
         scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
             dependency values. Defaults to ``None``.
         used_names (set[str] | None): Optional set updated with used input
@@ -2027,11 +2090,24 @@ def _symbolic_disjoint_loop_depth(
         DepthResources | None: One-iteration depth guarded by a nonempty range,
             or ``None`` when injectivity cannot be proven.
     """
-    if any(
-        demand != _ZERO for demand in (allocated_qubits, clean_ancillas, dirty_ancillas)
-    ) or any(
-        loop_symbol in cast(ResourceExpr, getattr(body_depth, field.name)).free_symbols
-        for field in dataclasses.fields(DepthResources)
+    if (
+        any(
+            not _operation_depth_is_dependency_schedulable(
+                body_operation,
+                measurement_derived,
+                global_barrier_operation_ids,
+            )
+            for body_operation in operation.operations
+        )
+        or any(
+            demand != _ZERO
+            for demand in (allocated_qubits, clean_ancillas, dirty_ancillas)
+        )
+        or any(
+            loop_symbol
+            in cast(ResourceExpr, getattr(body_depth, field.name)).free_symbols
+            for field in dataclasses.fields(DepthResources)
+        )
     ):
         return None
     ignored_operations = (
@@ -2155,6 +2231,7 @@ def _dependency_depth(
     *,
     activity_conditions: Sequence[Boolean] | None = None,
     measurement_derived: set[str] | None = None,
+    global_barrier_operation_ids: set[int] | frozenset[int] = frozenset(),
     scalar_values: Mapping[str, sp.Expr] | None = None,
     used_names: set[str] | None = None,
 ) -> tuple[DepthResources, dict[WireKey, ResourceExpr], Boolean, bool]:
@@ -2173,6 +2250,9 @@ def _dependency_depth(
             derived from runtime quantum observations. Operations that consume
             them, plus other unschedulable hybrid/control operations, form
             global ordering barriers. Defaults to ``None``.
+        global_barrier_operation_ids (set[int] | frozenset[int]): Operation
+            identities whose selected nested body requires global ordering.
+            Defaults to an empty set.
         scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
             values used only to prove completion uniformity. Defaults to
             ``None``.
@@ -2214,14 +2294,23 @@ def _dependency_depth(
         activity_conditions,
         strict=True,
     ):
-        if not _estimate_has_nonzero_depth(estimate):
+        schedulable = _operation_depth_is_dependency_schedulable(
+            operation,
+            measurement_derived or set(),
+            global_barrier_operation_ids,
+        )
+        runtime_control_boundary = _operation_has_runtime_control_boundary(
+            operation,
+            measurement_derived or set(),
+        )
+        if not _estimate_has_nonzero_depth(estimate) and not runtime_control_boundary:
             continue
-        if footprint is None:
+        if footprint is None and _estimate_has_nonzero_depth(estimate):
             raise AssertionError(
                 "A nonzero-depth scheduled operation requires a wire footprint."
             )
-        reads = set(footprint[0])
-        writes = set(footprint[1])
+        reads = set(footprint[0]) if footprint is not None else set()
+        writes = set(footprint[1]) if footprint is not None else set()
         if estimate.width.clean_ancilla_qubits != _ZERO:
             # Width reports one reusable clean-ancilla pool (a maximum across
             # sequential operations). Treat that pool as a shared dependency
@@ -2240,11 +2329,8 @@ def _dependency_depth(
             and estimate._dependency_completion_uniform is not True
         ):
             completion_is_uniform = False
-        schedulable = _operation_depth_is_dependency_schedulable(
-            operation,
-            measurement_derived or set(),
-        )
-        if operation_active is sp.false:
+        scheduling_active = sp.true if runtime_control_boundary else operation_active
+        if scheduling_active is sp.false:
             continue
         for field in fields:
             duration = cast(ResourceExpr, getattr(estimate.depth, field))
@@ -2277,7 +2363,7 @@ def _dependency_depth(
                 start = _resource_max_many([baseline_start, *possible_dependencies])
                 for dependency_depth in possible_dependencies:
                     condition = _and_conditions(
-                        operation_active,
+                        scheduling_active,
                         _and_conditions(
                             _resource_activity_condition(dependency_depth),
                             sp.Gt(
@@ -2301,7 +2387,7 @@ def _dependency_depth(
                     finish,
                     start,
                     previous_barrier,
-                    operation_active,
+                    scheduling_active,
                 )
             for owner, index in touched:
                 wire_depth = owner_depths.setdefault(owner, {})
@@ -2310,7 +2396,7 @@ def _dependency_depth(
                     finish,
                     start,
                     previous,
-                    operation_active,
+                    scheduling_active,
                 )
         for owner, index in touched:
             indices_by_owner.setdefault(owner, _OwnerWireIndices()).add(index)
@@ -2844,13 +2930,50 @@ def _quantum_result_owner_sizes(
                 returned[owner] = returned.get(owner, _ZERO) + size
                 capacities[owner] = returned[owner]
             continue
-        owner = _quantum_allocation_owner(result)
+        owner = (allocation_owners_by_uuid or {}).get(
+            result.uuid,
+            _quantum_allocation_owner(result),
+        )
         returned[owner] = returned.get(owner, _ZERO) + _qubit_value_size(
             result,
             resolver,
         )
         capacities[owner] = _quantum_owner_capacity(result, resolver)
     return {owner: sp.Min(size, capacities[owner]) for owner, size in returned.items()}
+
+
+def _quantum_owner_capacities(
+    values: Sequence[ValueBase],
+    resolver: ExprResolver,
+    allocation_owners_by_uuid: Mapping[str, str] | None = None,
+) -> dict[str, ResourceExpr]:
+    """Resolve complete root-allocation widths touched by quantum values.
+
+    A scalar array element keeps its complete root allocation live even though
+    the element itself has width one. Conditional merge inputs use this helper
+    because branch bodies can be structurally empty while their merge values
+    still retain an enclosing allocation.
+
+    Args:
+        values (Sequence[ValueBase]): Candidate quantum values.
+        resolver (ExprResolver): Resolver for symbolic root dimensions.
+        allocation_owners_by_uuid (Mapping[str, str] | None): Optional QInit
+            result UUID to logical-owner map. Defaults to ``None``.
+
+    Returns:
+        dict[str, ResourceExpr]: Complete capacity by root allocation owner.
+    """
+    capacities: dict[str, ResourceExpr] = {}
+    owner_map = allocation_owners_by_uuid or {}
+    for value in values:
+        if not isinstance(value, Value) or not value.type.is_quantum():
+            continue
+        owner = owner_map.get(value.uuid, _quantum_allocation_owner(value))
+        capacities[owner] = _resource_max(
+            capacities.get(owner, _ZERO),
+            _quantum_owner_capacity(value, resolver),
+        )
+    return capacities
 
 
 def _destructive_input_owner_sizes(
@@ -2913,40 +3036,61 @@ def _invoke_quantum_output_sizes(
     child_resolver: ExprResolver,
     caller_resolver: ExprResolver,
     *,
-    body_implements_transform: bool,
-) -> tuple[dict[str, ResourceExpr], bool]:
-    """Map body-derived quantum output widths onto caller result owners.
+    body_external_control_qubits: int,
+    body_final_live: Mapping[str, ResourceExpr],
+    actual_operands: Sequence[ValueBase],
+    allocation_owners_by_uuid: Mapping[str, str] | None = None,
+) -> tuple[dict[str, ResourceExpr], dict[str, ResourceExpr], bool]:
+    """Map body liveness onto caller input and output allocation owners.
 
     A callee branch may return arrays whose branches have different symbolic
     widths even though the caller-side IR result retains one representative
     static shape. The callee resolver contains the merged shape binding, so
-    invocation liveness must carry that size across the call boundary.
+    invocation liveness must carry that size across the call boundary. The
+    body summary also identifies allocations that remain live without being
+    returned. Such residual workspace is retained under a call-local owner;
+    allocations consumed inside the body are absent from the summary and are
+    therefore not resurrected.
 
     Args:
         operation (InvokeOperation): Caller-side invocation.
         body (Block): Selected implementation body.
         child_resolver (ExprResolver): Resolver after evaluating the body.
         caller_resolver (ExprResolver): Resolver for caller-side controls.
-        body_implements_transform (bool): Whether the selected body explicitly
-            includes transform-specific control inputs and outputs.
+        body_external_control_qubits (int): Number of leading caller controls
+            implemented outside the selected body's input/output contract.
+        body_final_live (Mapping[str, ResourceExpr]): Authoritative live widths
+            by callee allocation owner after body evaluation.
+        actual_operands (Sequence[ValueBase]): Caller operands aligned to the
+            selected body after wrapper-only controls are removed.
+        allocation_owners_by_uuid (Mapping[str, str] | None): Optional known
+            QInit UUID to logical-owner map. Defaults to ``None``.
 
     Returns:
-        tuple[dict[str, ResourceExpr], bool]: Output width by caller allocation
-        owner and whether the positional mapping was complete.
+        tuple[dict[str, ResourceExpr], dict[str, ResourceExpr], bool]: Input
+        widths, output widths, and whether positional output mapping was
+        complete.
     """
-    sources: list[tuple[ValueBase, ExprResolver]] = []
-    if operation.transform.is_controlled and not body_implements_transform:
-        control_count = operation.num_control_qubits
+    owner_map = allocation_owners_by_uuid or {}
+    input_sizes = _quantum_result_owner_sizes(
+        [value for value in operation.operands if value.type.is_quantum()],
+        caller_resolver,
+        owner_map,
+    )
+    sources: list[tuple[ValueBase, ExprResolver, bool]] = []
+    if body_external_control_qubits:
         sources.extend(
-            (operand, caller_resolver) for operand in operation.operands[:control_count]
+            (operand, caller_resolver, False)
+            for operand in operation.operands[:body_external_control_qubits]
         )
-    sources.extend((output, child_resolver) for output in body.output_values)
+    sources.extend((output, child_resolver, True) for output in body.output_values)
     if len(sources) != len(operation.results):
-        return {}, False
+        return input_sizes, {}, False
 
     output_sizes: dict[str, ResourceExpr] = {}
     capacities: dict[str, ResourceExpr] = {}
-    for result, (source, source_resolver) in zip(
+    returned_by_body_owner: dict[str, ResourceExpr] = {}
+    for result, (source, source_resolver, comes_from_body) in zip(
         operation.results,
         sources,
         strict=True,
@@ -2957,15 +3101,72 @@ def _invoke_quantum_output_sizes(
             or not result.type.is_quantum()
         ):
             continue
-        owner = _quantum_allocation_owner(result)
+        owner = owner_map.get(result.uuid, _quantum_allocation_owner(result))
+        source_size = _qubit_value_size(source, source_resolver)
         output_sizes[owner] = output_sizes.get(owner, _ZERO) + _qubit_value_size(
             source,
             source_resolver,
         )
         capacities[owner] = _quantum_owner_capacity(result, caller_resolver)
-    return {
+        if comes_from_body:
+            source_owner = owner_map.get(
+                source.uuid,
+                _quantum_allocation_owner(source),
+            )
+            returned_by_body_owner[source_owner] = (
+                returned_by_body_owner.get(source_owner, _ZERO) + source_size
+            )
+    output_sizes = {
         owner: sp.Min(size, capacities[owner]) for owner, size in output_sizes.items()
-    }, True
+    }
+
+    formal_to_actual_owner: dict[str, str] = {}
+    for formal, actual in pair_block_operands(body, actual_operands):
+        if (
+            not isinstance(formal, Value)
+            or not isinstance(actual, Value)
+            or not formal.type.is_quantum()
+            or not actual.type.is_quantum()
+        ):
+            continue
+        formal_owner = owner_map.get(
+            formal.uuid,
+            _quantum_allocation_owner(formal),
+        )
+        actual_owner = owner_map.get(
+            actual.uuid,
+            _quantum_allocation_owner(actual),
+        )
+        formal_to_actual_owner[formal_owner] = actual_owner
+
+    namespace = f"{type(operation).__name__}:{id(operation)}/live"
+    for body_owner, live_size in body_final_live.items():
+        residual = sp.Max(
+            _ZERO,
+            live_size - returned_by_body_owner.get(body_owner, _ZERO),
+        )
+        if residual == _ZERO:
+            continue
+        caller_owner = formal_to_actual_owner.get(
+            body_owner,
+            f"{namespace}/{body_owner}",
+        )
+        output_sizes[caller_owner] = output_sizes.get(caller_owner, _ZERO) + residual
+    return input_sizes, output_sizes, True
+
+
+@dataclasses.dataclass(frozen=True)
+class _LivenessSummary:
+    """Carry liveness width and the owners still live after a body.
+
+    Args:
+        width (WidthResources): Liveness-aware width of the evaluated body.
+        final_live_by_owner (dict[str, ResourceExpr]): Remaining live qubits
+            keyed by root allocation owner at the body boundary.
+    """
+
+    width: WidthResources
+    final_live_by_owner: dict[str, ResourceExpr]
 
 
 def _liveness_width(
@@ -2974,7 +3175,7 @@ def _liveness_width(
     resolver: ExprResolver,
     *,
     allocation_owners_by_uuid: Mapping[str, str] | None = None,
-) -> WidthResources:
+) -> _LivenessSummary:
     """Compute peak width from affine allocation and consumption lifetimes.
 
     Args:
@@ -2988,7 +3189,7 @@ def _liveness_width(
             Defaults to ``None``.
 
     Returns:
-        WidthResources: Total body allocations and liveness-aware peak width.
+        _LivenessSummary: Width and authoritative final live-owner state.
     """
     live = dict(initial_allocations)
     baseline = sum(live.values(), _ZERO)
@@ -3049,7 +3250,14 @@ def _liveness_width(
                 if isinstance(result, Value) and result.type.is_quantum()
             ]
             input_sizes = _quantum_result_owner_sizes(input_values, resolver)
-            if estimate._input_sizes:
+            if estimate._has_output_summary:
+                # Boundary summaries describe both sides of the liveness
+                # transfer. An empty input map is authoritative and means the
+                # operation creates returned owners from no caller-owned
+                # quantum input; falling back to syntactic merge/call inputs
+                # would consume those freshly returned owners immediately.
+                input_sizes = estimate._input_sizes
+            elif estimate._input_sizes:
                 input_sizes = estimate._input_sizes
             result_sizes = (
                 estimate._output_sizes
@@ -3123,11 +3331,14 @@ def _liveness_width(
         relative_peak = static_width
     else:
         relative_peak = sp.Min(relative_peak, static_width)
-    return WidthResources(
-        allocated_qubits=allocated,
-        clean_ancilla_qubits=clean,
-        dirty_ancilla_qubits=dirty,
-        peak_qubits=relative_peak,
+    return _LivenessSummary(
+        width=WidthResources(
+            allocated_qubits=allocated,
+            clean_ancilla_qubits=clean,
+            dirty_ancilla_qubits=dirty,
+            peak_qubits=relative_peak,
+        ),
+        final_live_by_owner=dict(live),
     )
 
 

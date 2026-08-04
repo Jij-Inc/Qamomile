@@ -10,6 +10,7 @@ Two-mode API:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import sympy as sp
@@ -308,6 +309,7 @@ class ExprResolver:
         *,
         called_block: Block | None = None,
         body_implements_transform: bool = False,
+        actual_operands: Sequence[Any] | None = None,
     ) -> ExprResolver:
         """Create a child resolver for an inline callable invocation.
 
@@ -330,6 +332,10 @@ class ExprResolver:
                 transform-specific implementation whose formal inputs include
                 control operands. Defaults to ``False`` for a direct body that
                 the compiler transforms structurally.
+            actual_operands (Sequence[Any] | None): Call-site operands already
+                aligned to ``called_block``. When omitted, the resolver derives
+                the alignment from the invocation metadata. Defaults to
+                ``None``.
 
         Returns:
             ExprResolver: A new resolver scoped to the callee block with
@@ -347,12 +353,18 @@ class ExprResolver:
             # Not a nested Block input — use child_scope as fallback
             return self.child_scope(called_block)
 
-        actual_operands = call_op.operands
-        if (
-            getattr(call_op, "transform", CallTransform.DIRECT).is_controlled
-            and not body_implements_transform
-        ):
-            actual_operands = actual_operands[call_op.num_control_qubits :]
+        if actual_operands is None:
+            actual_operands = call_op.operands
+            if (
+                getattr(call_op, "transform", CallTransform.DIRECT).is_controlled
+                and not body_implements_transform
+            ):
+                control_count = getattr(
+                    call_op,
+                    "num_body_external_control_qubits",
+                    call_op.num_control_qubits,
+                )
+                actual_operands = actual_operands[control_count:]
 
         extra: dict[str, sp.Expr] = {}
         for formal, actual in pair_block_operands(called_block, actual_operands):

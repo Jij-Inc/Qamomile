@@ -241,8 +241,8 @@ def test_modmul_const_control_is_derived_from_the_controlled_body() -> None:
 
     assert plain.assumptions == ctrl.assumptions
     assert plain.assumptions
-    assert plain.quality is qmc.EstimateQuality.UPPER_BOUND
-    assert ctrl.quality is qmc.EstimateQuality.UPPER_BOUND
+    assert plain.guarantee is qmc.EstimateGuarantee.UPPER_BOUND
+    assert ctrl.guarantee is qmc.EstimateGuarantee.UPPER_BOUND
     assert all("depth" in assumption.message for assumption in plain.assumptions)
     assert plain.gates.two_qubit > 0
     assert ctrl.gates.multi_qubit > 0

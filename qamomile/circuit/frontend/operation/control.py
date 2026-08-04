@@ -46,6 +46,7 @@ from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.effect import require_unitary_effects
 from qamomile.circuit.ir.operation.callable import (
+    CallableImplementation,
     CallableRef,
     CallTransform,
     InvokeOperation,
@@ -832,6 +833,28 @@ class ControlledGate:
             power,
             has_call_global_phase=has_call_global_phase,
         ):
+            definition = qkernel_callable_def(self._qkernel, definition_block)
+            if (
+                self._target_inverse
+                and definition.implementation_for(transform=CallTransform.INVERSE)
+                is None
+            ):
+                from qamomile.circuit.frontend.operation.inverse import _BlockInverter
+
+                try:
+                    inverse_body = _BlockInverter().invert_block(definition_block)
+                except NotImplementedError:
+                    # A transform-specific implementation may still realize
+                    # the semantic call for its engine. Emission reports a
+                    # missing fallback if another engine later selects none.
+                    inverse_body = None
+                if inverse_body is not None:
+                    definition.implementations.append(
+                        CallableImplementation(
+                            transform=CallTransform.INVERSE,
+                            body=inverse_body,
+                        )
+                    )
             attrs = self._callable_attrs()
             attrs["num_control_qubits"] = num_controls
             if self._control_value is not None:
@@ -848,7 +871,7 @@ class ControlledGate:
                     else CallTransform.CONTROLLED
                 ),
                 attrs=attrs,
-                definition=qkernel_callable_def(self._qkernel, definition_block),
+                definition=definition,
             )
         elif isinstance(num_controls, Value):
             op = SymbolicControlledU(
@@ -892,20 +915,52 @@ class ControlledGate:
             bool: True when ``InvokeOperation`` can represent the complete
                 controlled transform without structural materialization.
         """
-        has_controlled_inverse_implementation = any(
-            implementation.transform is CallTransform.CONTROLLED_INVERSE
-            for implementation in getattr(
-                self._qkernel,
-                "_callable_implementations",
-                (),
-            )
+        has_inverse_implementation = self._has_composite_implementation(
+            CallTransform.INVERSE,
+            require_body=True,
+        )
+        has_controlled_inverse_implementation = self._has_composite_implementation(
+            CallTransform.CONTROLLED_INVERSE
         )
         return (
             getattr(self._qkernel, "_callable_kind", None) == "composite"
             and isinstance(num_controls, int)
             and power == 1
             and not has_call_global_phase
-            and (not self._target_inverse or has_controlled_inverse_implementation)
+            and (
+                not self._target_inverse
+                or has_inverse_implementation
+                or has_controlled_inverse_implementation
+            )
+        )
+
+    def _has_composite_implementation(
+        self,
+        transform: CallTransform,
+        *,
+        require_body: bool = False,
+    ) -> bool:
+        """Return whether the wrapped callable declares one implementation.
+
+        Args:
+            transform (CallTransform): Transform whose registered
+                implementation should be detected.
+            require_body (bool): Whether the implementation must provide a
+                composable IR body. Defaults to False, allowing native emitter
+                implementations too.
+
+        Returns:
+            bool: True when any callable implementation realizes
+                ``transform``.
+        """
+        return any(
+            implementation.transform is transform
+            and (not require_body or implementation.body is not None)
+            for implementation in getattr(
+                self._qkernel,
+                "_callable_implementations",
+                (),
+            )
         )
 
     def _callable_ref(self) -> Any:
@@ -988,12 +1043,25 @@ class ControlledGate:
                 an explicit controlled body is itself non-unitary.
         """
         definition = qkernel_callable_def(self._qkernel, block)
+        transform = (
+            CallTransform.CONTROLLED_INVERSE
+            if self._target_inverse
+            else CallTransform.CONTROLLED
+        )
+        if (
+            transform is CallTransform.CONTROLLED_INVERSE
+            and not self._has_composite_implementation(transform)
+            and self._has_composite_implementation(
+                CallTransform.INVERSE,
+                require_body=True,
+            )
+        ):
+            # An inverse implementation already realizes the inverse part of
+            # the requested transform. Generic lowering adds only the coherent
+            # controls, so validate the body that will actually be controlled.
+            transform = CallTransform.INVERSE
         require_unitary_effects(
-            definition.effects_for(
-                CallTransform.CONTROLLED_INVERSE
-                if self._target_inverse
-                else CallTransform.CONTROLLED
-            ),
+            definition.effects_for(transform),
             operation="qmc.control()",
             target=self._qkernel.name,
             alternative=(

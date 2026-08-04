@@ -174,6 +174,193 @@ class CallableImplementation:
     attrs: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
+@dataclasses.dataclass(frozen=True)
+class CallableBodySelection:
+    """Describe one validated IR body selected for an invocation.
+
+    Args:
+        body (Block | None): Selected IR body, or ``None`` when no composable
+            body is available.
+        realized_transform (CallTransform): Transform already implemented by
+            ``body``.
+        operands (tuple[ValueBase, ...]): Call-site operands corresponding to
+            the selected body's formal inputs.
+        results (tuple[ValueBase, ...]): Call-site results corresponding to
+            the selected body's formal outputs.
+    """
+
+    body: Block | None
+    realized_transform: CallTransform
+    operands: tuple[ValueBase, ...]
+    results: tuple[ValueBase, ...]
+
+    @property
+    def implements_controls(self) -> bool:
+        """Return whether the selected body includes invocation controls.
+
+        Returns:
+            bool: True when ``realized_transform`` includes coherent control.
+        """
+        return self.realized_transform.is_controlled
+
+
+def _validate_selected_body_contract(
+    body: Block,
+    operands: Sequence[ValueBase],
+    results: Sequence[ValueBase],
+    *,
+    callable_name: str,
+    realized_transform: CallTransform,
+) -> None:
+    """Validate a selected implementation body against one call site.
+
+    Args:
+        body (Block): Selected implementation body.
+        operands (Sequence[ValueBase]): Actual inputs aligned to ``body``.
+        results (Sequence[ValueBase]): Actual outputs aligned to ``body``.
+        callable_name (str): Callable name used in diagnostics.
+        realized_transform (CallTransform): Transform implemented by ``body``.
+
+    Raises:
+        ValueError: If input/output arity, scalar-versus-array layout, static
+            array rank/shape, or IR value types disagree.
+    """
+    _validate_selected_body_values(
+        body.input_values,
+        operands,
+        callable_name=callable_name,
+        realized_transform=realized_transform,
+        role="input",
+    )
+    _validate_selected_body_values(
+        body.output_values,
+        results,
+        callable_name=callable_name,
+        realized_transform=realized_transform,
+        role="output",
+    )
+
+
+def _validate_selected_body_values(
+    formals: Sequence[ValueBase],
+    actuals: Sequence[ValueBase],
+    *,
+    callable_name: str,
+    realized_transform: CallTransform,
+    role: str,
+) -> None:
+    """Validate one side of a selected implementation-body ABI.
+
+    Args:
+        formals (Sequence[ValueBase]): Body-side formal values.
+        actuals (Sequence[ValueBase]): Invocation-side actual values.
+        callable_name (str): Callable name used in diagnostics.
+        realized_transform (CallTransform): Transform implemented by the body.
+        role (str): Diagnostic role, either ``"input"`` or ``"output"``.
+
+    Raises:
+        ValueError: If arity, scalar-versus-array layout, static array shape,
+            or value types disagree.
+    """
+    prefix = (
+        f"Callable '{callable_name}' {realized_transform.value} implementation "
+        f"{role} contract"
+    )
+    if len(formals) != len(actuals):
+        raise ValueError(
+            f"{prefix} expects {len(formals)} value(s), but the invocation "
+            f"provides {len(actuals)}."
+        )
+    for index, (formal, actual) in enumerate(zip(formals, actuals, strict=True)):
+        formal_is_array = isinstance(formal, ArrayValue)
+        actual_is_array = isinstance(actual, ArrayValue)
+        if formal.type != actual.type or formal_is_array != actual_is_array:
+            raise ValueError(
+                f"{prefix} value {index} expects "
+                f"{_value_contract_description(formal)}, but the invocation "
+                f"provides {_value_contract_description(actual)}."
+            )
+        if not formal_is_array:
+            continue
+        assert isinstance(formal, ArrayValue)
+        assert isinstance(actual, ArrayValue)
+        if len(formal.shape) != len(actual.shape):
+            raise ValueError(
+                f"{prefix} value {index} expects array rank "
+                f"{len(formal.shape)}, but the invocation provides rank "
+                f"{len(actual.shape)}."
+            )
+        for dimension, (formal_size, actual_size) in enumerate(
+            zip(formal.shape, actual.shape, strict=True)
+        ):
+            formal_const = formal_size.get_const()
+            actual_const = actual_size.get_const()
+            if (
+                type(formal_const) is int
+                and type(actual_const) is int
+                and formal_const != actual_const
+            ):
+                raise ValueError(
+                    f"{prefix} value {index} dimension {dimension} expects "
+                    f"size {formal_const}, but the invocation provides "
+                    f"size {actual_const}."
+                )
+
+
+def _value_contract_description(value: ValueBase) -> str:
+    """Return a compact diagnostic description of one IR value contract.
+
+    Args:
+        value (ValueBase): IR value to describe.
+
+    Returns:
+        str: Scalar type or array rank plus element type.
+    """
+    if isinstance(value, ArrayValue):
+        return f"rank-{len(value.shape)} array of {value.type!r}"
+    return repr(value.type)
+
+
+def _align_grouped_call_values_to_body(
+    formals: Sequence[ValueBase],
+    actuals: Sequence[ValueBase],
+) -> tuple[ValueBase, ...]:
+    """Restore body declaration order from a grouped transformed-call ABI.
+
+    Controlled and inverse frontend wrappers store quantum operands before
+    classical/object operands, while a source callable body retains its Python
+    declaration order.  When generic lowering reuses that source body, align
+    the two stable per-kind subsequences before validating the body contract.
+    A category-count mismatch is left unchanged so the normal contract
+    validator reports the offending value instead of hiding malformed IR.
+
+    Args:
+        formals (Sequence[ValueBase]): Selected body inputs or outputs in
+            declaration order.
+        actuals (Sequence[ValueBase]): Call-site values after external control
+            operands have been removed.
+
+    Returns:
+        tuple[ValueBase, ...]: Actual values ordered to match ``formals`` when
+            quantum/non-quantum category counts agree; otherwise the original
+            order for fail-closed validation.
+    """
+    if len(formals) != len(actuals):
+        return tuple(actuals)
+    quantum_actuals = [actual for actual in actuals if actual.type.is_quantum()]
+    nonquantum_actuals = [actual for actual in actuals if not actual.type.is_quantum()]
+    formal_quantum_count = sum(formal.type.is_quantum() for formal in formals)
+    if formal_quantum_count != len(quantum_actuals):
+        return tuple(actuals)
+
+    quantum = iter(quantum_actuals)
+    nonquantum = iter(nonquantum_actuals)
+    return tuple(
+        next(quantum) if formal.type.is_quantum() else next(nonquantum)
+        for formal in formals
+    )
+
+
 @dataclasses.dataclass
 class CallableDef:
     """Describe a compiler-facing callable definition.
@@ -209,6 +396,7 @@ class CallableDef:
         transform: CallTransform = CallTransform.DIRECT,
         backend: str | None = None,
         strategy: str | None = None,
+        require_body: bool = False,
     ) -> CallableImplementation | None:
         """Return the best matching implementation candidate.
 
@@ -216,6 +404,8 @@ class CallableDef:
             transform (CallTransform): Requested call transform.
             backend (str | None): Requested backend name.
             strategy (str | None): Requested strategy name.
+            require_body (bool): Whether candidates without an IR body should
+                be excluded before ranking. Defaults to False.
 
         Returns:
             CallableImplementation | None: Matching implementation, if any.
@@ -224,6 +414,7 @@ class CallableDef:
             impl
             for impl in self.implementations
             if impl.transform == transform
+            and (not require_body or impl.body is not None)
             and (
                 (backend is None and impl.backend is None)
                 or (backend is not None and impl.backend in (None, backend))
@@ -1088,7 +1279,7 @@ class InvokeOperation(Operation):
 
     @property
     def effects(self) -> "KernelEffect":
-        """Return cached effects of the selected callable implementation.
+        """Return cached effects of relevant callable implementations.
 
         Returns:
             KernelEffect: Effects reachable through this invocation.
@@ -1101,6 +1292,10 @@ class InvokeOperation(Operation):
     def measurement_result_indices(self) -> frozenset[int]:
         """Return invocation result positions derived from measurement.
 
+        Transform-specific bodies use the full invocation result ABI. When a
+        controlled call instead lowers a direct or inverse body, the body's
+        result positions are shifted past the structurally added controls.
+
         Returns:
             frozenset[int]: Caller-local result indices with measurement
                 provenance.
@@ -1109,7 +1304,25 @@ class InvokeOperation(Operation):
             callable_measurement_result_indices,
         )
 
-        return callable_measurement_result_indices(self.definition, self.transform)
+        indices = callable_measurement_result_indices(
+            self.definition,
+            self.transform,
+        )
+        offset = (
+            self.num_body_external_control_qubits
+            if self.transform.is_controlled
+            and not any(
+                implementation.transform is self.transform
+                and implementation.body is not None
+                for implementation in (
+                    self.definition.implementations
+                    if self.definition is not None
+                    else ()
+                )
+            )
+            else 0
+        )
+        return frozenset(offset + index for index in indices)
 
     @body.setter
     def body(self, value: Block | None) -> None:
@@ -1184,6 +1397,23 @@ class InvokeOperation(Operation):
             int: Added control arity, or zero for direct calls.
         """
         return int(self.attrs.get("num_added_control_qubits", 0))
+
+    @property
+    def num_body_external_control_qubits(self) -> int:
+        """Return control operands generic lowering adds outside a base body.
+
+        An Oracle's declared controls are part of its definition-level ABI,
+        while controls added by a later transform sit outside that body.
+        Ordinary composite definitions declare no controls, so their complete
+        invocation control prefix is external.
+
+        Returns:
+            int: Number of leading invocation operands not passed to a direct
+            or inverse implementation body.
+        """
+        if self.attrs.get("kind") == "oracle":
+            return self.num_added_control_qubits
+        return self.num_control_qubits if self.transform.is_controlled else 0
 
     @property
     def control_value(self) -> int | None:
@@ -1299,6 +1529,7 @@ class InvokeOperation(Operation):
         *,
         backend: str | None = None,
         strategy: str | None = None,
+        require_body: bool = False,
     ) -> CallableImplementation | None:
         """Return the selected implementation for this invocation.
 
@@ -1308,6 +1539,8 @@ class InvokeOperation(Operation):
             strategy (str | None): Strategy name to match. Defaults to
                 ``None``, meaning the invocation's ``strategy_name`` attribute
                 is used.
+            require_body (bool): Whether candidates without an IR body should
+                be excluded before ranking. Defaults to False.
 
         Returns:
             CallableImplementation | None: Matching implementation candidate,
@@ -1320,6 +1553,7 @@ class InvokeOperation(Operation):
             transform=self.transform,
             backend=backend,
             strategy=requested_strategy,
+            require_body=require_body,
         )
 
     def effective_body(
@@ -1341,10 +1575,130 @@ class InvokeOperation(Operation):
             A compiler may synthesize inverse or controlled behavior from this
             fallback body.
         """
-        impl = self.implementation_for(backend=backend, strategy=strategy)
+        impl = self.implementation_for(
+            backend=backend,
+            strategy=strategy,
+            require_body=True,
+        )
         if impl is not None and impl.body is not None:
             return impl.body
         return self.body
+
+    def body_for_transform(
+        self,
+        *,
+        backend: str | None = None,
+        strategy: str | None = None,
+    ) -> tuple[Block | None, CallTransform]:
+        """Select a body and report the transform it already realizes.
+
+        A controlled-inverse invocation may reuse an explicitly registered
+        inverse body when no implementation realizes both transforms. Keeping
+        that fallback in the IR operation gives emitters and static analyses
+        one selection rule while still letting each consumer apply the
+        remaining coherent controls in its own representation.
+
+        Args:
+            backend (str | None): Backend name to match. Defaults to ``None``.
+            strategy (str | None): Strategy name to match. Defaults to the
+                invocation's ``strategy_name`` attribute.
+
+        Returns:
+            tuple[Block | None, CallTransform]: Selected body and the transform
+            already implemented by that body. The callable's direct body is
+            returned with ``DIRECT`` when no transform-specific body matches.
+
+        Raises:
+            ValueError: If the selected body disagrees with the invocation's
+                input or output contract.
+        """
+        selection = self.select_body(backend=backend, strategy=strategy)
+        return selection.body, selection.realized_transform
+
+    def select_body(
+        self,
+        *,
+        backend: str | None = None,
+        strategy: str | None = None,
+    ) -> CallableBodySelection:
+        """Select and validate the composable body for this invocation.
+
+        The result carries the transform already realized by the body and the
+        exact call-site values that bind to it. Consumers therefore cannot
+        independently disagree about whether an invocation's control prefix
+        belongs to the selected implementation ABI.
+
+        Args:
+            backend (str | None): Backend name to match. Defaults to ``None``.
+            strategy (str | None): Strategy name to match. Defaults to the
+                invocation's ``strategy_name`` attribute.
+
+        Returns:
+            CallableBodySelection: Validated body, realized transform, and
+            aligned call-site operands and results.
+
+        Raises:
+            ValueError: If the selected body disagrees with the invocation's
+                input or output contract.
+        """
+        implementation = self.implementation_for(
+            backend=backend,
+            strategy=strategy,
+            require_body=True,
+        )
+        if implementation is not None and implementation.body is not None:
+            body = implementation.body
+            realized_transform = self.transform
+        elif (
+            self.transform is CallTransform.CONTROLLED_INVERSE
+            and self.definition is not None
+        ):
+            requested_strategy = self.strategy_name if strategy is None else strategy
+            inverse_implementation = self.definition.implementation_for(
+                transform=CallTransform.INVERSE,
+                backend=backend,
+                strategy=requested_strategy,
+                require_body=True,
+            )
+            if inverse_implementation is not None:
+                body = inverse_implementation.body
+                realized_transform = CallTransform.INVERSE
+            else:
+                body = self.body
+                realized_transform = CallTransform.DIRECT
+        else:
+            body = self.body
+            realized_transform = CallTransform.DIRECT
+
+        operands: tuple[ValueBase, ...] = tuple(self.operands)
+        results: tuple[ValueBase, ...] = tuple(self.results)
+        if self.transform.is_controlled and not realized_transform.is_controlled:
+            offset = self.num_body_external_control_qubits
+            operands = operands[offset:]
+            results = results[offset:]
+        if body is not None:
+            if self.transform.is_controlled and not realized_transform.is_controlled:
+                operands = _align_grouped_call_values_to_body(
+                    body.input_values,
+                    operands,
+                )
+                results = _align_grouped_call_values_to_body(
+                    body.output_values,
+                    results,
+                )
+            _validate_selected_body_contract(
+                body,
+                operands,
+                results,
+                callable_name=self.target.name,
+                realized_transform=realized_transform,
+            )
+        return CallableBodySelection(
+            body=body,
+            realized_transform=realized_transform,
+            operands=operands,
+            results=results,
+        )
 
     @property
     def signature(self) -> Signature:

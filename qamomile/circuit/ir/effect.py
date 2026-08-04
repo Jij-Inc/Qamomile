@@ -72,10 +72,10 @@ def callable_bodies(
 ) -> tuple["Block", ...]:
     """Return cached semantic bodies relevant to one call transform.
 
-    An explicit transform implementation takes precedence. Otherwise inverse
-    and controlled calls conservatively inherit the direct body's effects,
-    which keeps the API ready for a future explicit controlled implementation
-    without treating today's generic structural fallback as unitary.
+    An explicit implementation of the complete transform takes precedence.
+    A controlled-inverse call then reuses explicit inverse-body metadata when
+    generic lowering only needs to add controls; all other structural
+    fallbacks conservatively inherit the direct body's effects.
 
     Args:
         definition (CallableDef): Callable definition referenced by a call.
@@ -85,17 +85,22 @@ def callable_bodies(
     Returns:
         tuple[Block, ...]: Candidate bodies whose cached metadata applies.
     """
-    matching_implementations = tuple(
-        implementation
+    matching_bodies = tuple(
+        implementation.body
         for implementation in definition.implementations
-        if implementation.transform is transform
+        if implementation.transform is transform and implementation.body is not None
     )
-    if matching_implementations:
-        return tuple(
+    if matching_bodies:
+        return matching_bodies
+    if transform is CallTransform.CONTROLLED_INVERSE:
+        inverse_bodies = tuple(
             implementation.body
-            for implementation in matching_implementations
-            if implementation.body is not None
+            for implementation in definition.implementations
+            if implementation.transform is CallTransform.INVERSE
+            and implementation.body is not None
         )
+        if inverse_bodies:
+            return inverse_bodies
     if definition.body is not None:
         return (definition.body,)
     return ()
@@ -156,7 +161,7 @@ def _operation_owned_effects(operation: Operation) -> KernelEffect:
         KernelEffect: Effects inherited from owned or referenced bodies.
     """
     if isinstance(operation, InvokeOperation):
-        return callable_effects(operation.definition, operation.transform)
+        return operation.effects
     if isinstance(operation, ControlledUOperation) and operation.block is not None:
         return operation.block.effects
     if isinstance(operation, InverseBlockOperation):
@@ -185,10 +190,7 @@ def _invocation_measurement_seeds(operations: Sequence[Operation]) -> set[str]:
     for operation in walk_operations(operations):
         if not isinstance(operation, InvokeOperation):
             continue
-        indices = callable_measurement_result_indices(
-            operation.definition,
-            operation.transform,
-        )
+        indices = operation.measurement_result_indices
         seeds.update(
             operation.results[index].uuid
             for index in indices

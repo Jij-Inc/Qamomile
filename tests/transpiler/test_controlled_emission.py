@@ -29,7 +29,7 @@ from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import FloatType, QubitType, UIntType
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.errors import EmitError, ValidationError
 from qamomile.circuit.transpiler.passes.analyze import AnalyzePass
 from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
@@ -898,10 +898,22 @@ def test_selected_controlled_implementation_keeps_outer_controls() -> None:
 
     own_control = Value(type=QubitType(), name="own_control")
     target = Value(type=QubitType(), name="target")
+    own_control_result = own_control.next_version()
+    target_result = target.next_version()
     ref = CallableRef(namespace="test", name="controlled_impl")
     implementation = CallableImplementation(
         transform=CallTransform.CONTROLLED,
-        body=Block(input_values=[own_control, target]),
+        body=Block(
+            input_values=[own_control, target],
+            output_values=[own_control_result, target_result],
+            operations=[
+                GateOperation.fixed(
+                    GateOperationType.CX,
+                    [own_control, target],
+                    [own_control_result, target_result],
+                )
+            ],
+        ),
     )
     op = InvokeOperation(
         operands=[own_control, target],
@@ -925,6 +937,193 @@ def test_selected_controlled_implementation_keeps_outer_controls() -> None:
     assert emit_pass._emitter.append_calls == [[7, 3, 5]]
 
 
+def test_selected_controlled_implementation_rejects_input_arity_mismatch() -> None:
+    """A transform body cannot silently ignore invocation operands."""
+    formal_control = Value(type=QubitType(), name="formal_control")
+    actual_control = Value(type=QubitType(), name="actual_control")
+    actual_target = Value(type=QubitType(), name="actual_target")
+    ref = CallableRef(namespace="test", name="short_controlled_body")
+    operation = InvokeOperation(
+        operands=[actual_control, actual_target],
+        results=[actual_control.next_version(), actual_target.next_version()],
+        transform=CallTransform.CONTROLLED,
+        attrs={"num_control_qubits": 1, "num_target_qubits": 1},
+        definition=CallableDef(
+            ref=ref,
+            implementations=[
+                CallableImplementation(
+                    transform=CallTransform.CONTROLLED,
+                    body=Block(
+                        input_values=[formal_control],
+                        output_values=[formal_control],
+                    ),
+                )
+            ],
+        ),
+    )
+
+    with pytest.raises(ValueError, match="input contract expects 1 value"):
+        operation.select_body()
+
+
+def test_selected_controlled_implementation_rejects_input_type_mismatch() -> None:
+    """A transform body cannot bind a quantum actual to a scalar formal."""
+    formal_control = Value(type=QubitType(), name="formal_control")
+    formal_parameter = Value(type=FloatType(), name="formal_parameter")
+    actual_control = Value(type=QubitType(), name="actual_control")
+    actual_target = Value(type=QubitType(), name="actual_target")
+    ref = CallableRef(namespace="test", name="mistyped_controlled_body")
+    operation = InvokeOperation(
+        operands=[actual_control, actual_target],
+        results=[actual_control.next_version(), actual_target.next_version()],
+        transform=CallTransform.CONTROLLED,
+        attrs={"num_control_qubits": 1, "num_target_qubits": 1},
+        definition=CallableDef(
+            ref=ref,
+            implementations=[
+                CallableImplementation(
+                    transform=CallTransform.CONTROLLED,
+                    body=Block(
+                        input_values=[formal_control, formal_parameter],
+                        output_values=[formal_control, formal_parameter],
+                    ),
+                )
+            ],
+        ),
+    )
+
+    with pytest.raises(ValueError, match="input contract value 1 expects"):
+        operation.select_body()
+
+
+def test_selected_controlled_implementation_rejects_output_arity_mismatch() -> None:
+    """A transform body cannot silently omit invocation results."""
+    formal_control = Value(type=QubitType(), name="formal_control")
+    formal_target = Value(type=QubitType(), name="formal_target")
+    actual_control = Value(type=QubitType(), name="actual_control")
+    actual_target = Value(type=QubitType(), name="actual_target")
+    ref = CallableRef(namespace="test", name="short_controlled_output")
+    operation = InvokeOperation(
+        operands=[actual_control, actual_target],
+        results=[actual_control.next_version(), actual_target.next_version()],
+        transform=CallTransform.CONTROLLED,
+        attrs={"num_control_qubits": 1, "num_target_qubits": 1},
+        definition=CallableDef(
+            ref=ref,
+            implementations=[
+                CallableImplementation(
+                    transform=CallTransform.CONTROLLED,
+                    body=Block(
+                        input_values=[formal_control, formal_target],
+                        output_values=[formal_target],
+                    ),
+                )
+            ],
+        ),
+    )
+
+    with pytest.raises(ValueError, match="output contract expects 1 value"):
+        operation.select_body()
+
+
+def test_selected_direct_body_restores_interleaved_declaration_order() -> None:
+    """A controlled direct fallback aligns grouped actuals to body formals."""
+    formal_first = Value(type=QubitType(), name="formal_first")
+    formal_selector = Value(type=UIntType(), name="formal_selector")
+    formal_second = Value(type=QubitType(), name="formal_second")
+    body = Block(
+        input_values=[formal_first, formal_selector, formal_second],
+        output_values=[formal_first, formal_second],
+    )
+    control = Value(type=QubitType(), name="control")
+    first = Value(type=QubitType(), name="first")
+    second = Value(type=QubitType(), name="second")
+    selector = Value(type=UIntType(), name="selector")
+    operation = InvokeOperation(
+        operands=[control, first, second, selector],
+        results=[
+            control.next_version(),
+            first.next_version(),
+            second.next_version(),
+        ],
+        transform=CallTransform.CONTROLLED,
+        attrs={"num_control_qubits": 1, "num_target_qubits": 2},
+        definition=CallableDef(
+            ref=CallableRef(namespace="test", name="interleaved_body"),
+            body=body,
+        ),
+    )
+
+    selection = operation.select_body()
+
+    assert selection.operands == (first, selector, second)
+    assert selection.results == tuple(operation.results[1:])
+
+
+def test_selected_body_width_uses_exact_resource_contract() -> None:
+    """An exact width contract resolves statically bound symbolic arrays."""
+    formal_signal_size = Value(type=UIntType(), name="formal_signal_size")
+    formal_system_size = Value(type=UIntType(), name="formal_system_size")
+    formal_signal = ArrayValue(
+        type=QubitType(),
+        name="formal_signal",
+        shape=(formal_signal_size,),
+    )
+    formal_system = ArrayValue(
+        type=QubitType(),
+        name="formal_system",
+        shape=(formal_system_size,),
+    )
+    body = Block(
+        input_values=[formal_signal, formal_system],
+        output_values=[formal_signal, formal_system],
+    )
+    signal = ArrayValue(
+        type=QubitType(),
+        name="signal",
+        shape=(Value(type=UIntType(), name="signal_size"),),
+    )
+    system = ArrayValue(
+        type=QubitType(),
+        name="system",
+        shape=(Value(type=UIntType(), name="system_size"),),
+    )
+    control = Value(type=QubitType(), name="control")
+    operation = InvokeOperation(
+        operands=[control, signal, system],
+        results=[
+            control.next_version(),
+            signal.next_version(),
+            system.next_version(),
+        ],
+        transform=CallTransform.CONTROLLED,
+        attrs={
+            "num_control_qubits": 1,
+            "num_target_qubits": 3,
+            "resource_contract": {
+                "quantum_operand_widths": [
+                    {"index": 0, "name": "signal", "width": 1},
+                    {"index": 1, "name": "system", "width": 2},
+                ]
+            },
+        },
+        definition=CallableDef(
+            ref=CallableRef(namespace="test", name="contracted_body"),
+            body=body,
+        ),
+    )
+    selection = operation.select_body()
+
+    width = controlled_emission._selected_body_quantum_input_width(
+        _ResolverOnlyEmitPass(),
+        operation,
+        selection,
+        {},
+    )
+
+    assert width == 3
+
+
 def test_nested_inverse_invoke_without_implementation_raises() -> None:
     """Nested inverse invocation never falls back to its forward body."""
     import pytest
@@ -933,6 +1132,7 @@ def test_nested_inverse_invoke_without_implementation_raises() -> None:
 
     target = Value(type=QubitType(), name="target")
     ref = CallableRef(namespace="test", name="forward_only")
+    inner = Value(type=QubitType(), name="inner")
     op = InvokeOperation(
         operands=[target],
         results=[target.next_version()],
@@ -940,7 +1140,7 @@ def test_nested_inverse_invoke_without_implementation_raises() -> None:
         attrs={"num_target_qubits": 1},
         definition=CallableDef(
             ref=ref,
-            body=Block(input_values=[Value(type=QubitType(), name="inner")]),
+            body=Block(input_values=[inner], output_values=[inner]),
         ),
     )
 
@@ -1797,6 +1997,52 @@ def test_controlled_call_profiles_only_fallback_work(
     )
 
     assert appended == ([[0, 1]] if reuse_gate else [])
+
+
+def test_zero_power_maps_results_without_binding_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A concrete zero-powered call never resolves its inactive body."""
+    formal_target = Value(type=QubitType(), name="formal_target")
+    formal_result = formal_target.next_version()
+    operation = _controlled_u_with_power(
+        0,
+        block=Block(
+            input_values=[formal_target],
+            output_values=[formal_result],
+            operations=[
+                GateOperation.fixed(
+                    GateOperationType.X,
+                    [formal_target],
+                    [formal_result],
+                )
+            ],
+        ),
+    )
+    emit_pass = _MultiControlEmitPass()
+
+    def fail_bind(*args: Any, **kwargs: Any) -> None:
+        """Reject any attempt to inspect the inactive body."""
+        del args, kwargs
+        raise AssertionError("zero-powered body was bound")
+
+    monkeypatch.setattr(emit_pass._resolver, "bind_block_params", fail_bind)
+    control, target = operation.operands
+    qubit_map = {
+        QubitAddress(control.uuid): 0,
+        QubitAddress(target.uuid): 1,
+    }
+
+    controlled_emission.emit_controlled_u(
+        emit_pass,
+        object(),
+        operation,
+        qubit_map,
+        {},
+    )
+
+    assert qubit_map[QubitAddress(operation.results[0].uuid)] == 0
+    assert qubit_map[QubitAddress(operation.results[1].uuid)] == 1
 
 
 def test_repeated_fallback_profiles_body_once(

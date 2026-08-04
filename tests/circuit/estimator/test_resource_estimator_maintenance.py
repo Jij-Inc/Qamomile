@@ -8,6 +8,7 @@ import pytest
 import sympy as sp
 
 import qamomile.circuit as qmc
+import qamomile.circuit.estimator._metrics as metrics_module
 import qamomile.circuit.estimator._scheduling as scheduling_module
 import qamomile.observable as qm_o
 import qamomile.observable.hamiltonian as hamiltonian_module
@@ -15,6 +16,7 @@ from qamomile.circuit.estimator import resource_estimator as estimator_module
 from qamomile.circuit.estimator._resolver import ExprResolver
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.circuit.ir.operation.gate import GateOperationType
+from tests.circuit.qkernel_catalog import grover_network_decomposition
 
 
 @qmc.qkernel
@@ -169,7 +171,7 @@ def test_affine_loop_uses_symbolic_disjointness_before_enumeration(
     concrete.assert_not_called()
     assert estimate.gates.total == 64
     assert estimate.depth.depth == 1
-    assert estimate.quality is qmc.EstimateQuality.EXACT
+    assert estimate.guarantee is qmc.EstimateGuarantee.EXACT
 
 
 def test_nonlinear_loop_falls_back_to_concrete_disjointness(
@@ -188,7 +190,7 @@ def test_nonlinear_loop_falls_back_to_concrete_disjointness(
     assert concrete.call_count == 1
     assert estimate.gates.total == 3
     assert estimate.depth.depth == 1
-    assert estimate.quality is qmc.EstimateQuality.EXACT
+    assert estimate.guarantee is qmc.EstimateGuarantee.EXACT
 
 
 def test_concrete_loop_simplifies_constant_depth_fields_once(
@@ -219,12 +221,127 @@ def test_concrete_loop_simplifies_constant_depth_fields_once(
         allocated_qubits=sp.Integer(0),
         clean_ancillas=sp.Integer(0),
         dirty_ancillas=sp.Integer(0),
+        measurement_derived=set(),
     )
 
     assert depth is not None
     for field, invariant in invariants.items():
         assert getattr(depth, field) == invariant
         assert sum(call.args[0] == invariant for call in simplify.call_args_list) == 1
+
+
+def test_public_simplification_skips_branching_resource_expression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deep width summaries bypass SymPy's global simplifier."""
+    parameter = sp.Symbol("n", integer=True, nonnegative=True)
+    expression = parameter
+    for offset in range(estimator_module._PUBLIC_RESOURCE_SIMPLIFY_NODE_LIMIT):
+        expression = sp.Max(
+            expression,
+            sp.Piecewise(
+                (parameter + offset + 1, parameter > offset),
+                (offset, True),
+            ),
+            evaluate=False,
+        )
+    simplify = Mock(
+        side_effect=AssertionError(
+            "branching resource expressions must stay structurally normalized"
+        )
+    )
+    monkeypatch.setattr(estimator_module, "_safe_simplify", simplify)
+
+    assert (
+        estimator_module._simplify_public_resource_expression(expression) == expression
+    )
+    simplify.assert_not_called()
+
+
+def test_resource_max_bounds_conditionally_active_work() -> None:
+    """A zero-or-one activity guard cannot exceed its nonnegative work."""
+    parameter = sp.Symbol("n", integer=True, nonnegative=True)
+    work = 5 * sp.Max(0, parameter - 3) + 5
+    active = metrics_module._ConditionIndicator(sp.Gt(parameter, 0))
+
+    assert metrics_module._resource_max(work, work * active) == work
+
+
+def test_resource_max_recovers_activity_guarded_extension() -> None:
+    """An activity-gated extension keeps its compact dominating completion."""
+    parameter = sp.Symbol("n", integer=True, nonnegative=True)
+    base = sp.Integer(5)
+    extension = sp.Max(0, parameter - 3)
+    active = metrics_module._ConditionIndicator(
+        metrics_module._resource_activity_condition(extension)
+    )
+
+    assert (
+        metrics_module._resource_max(
+            base,
+            (base + extension) * active,
+        )
+        == base + extension
+    )
+
+
+def test_resource_max_fallback_avoids_sympy_relation_proofs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Incomparable maxima remain symbolic without eager pairwise solving."""
+    left, right = sp.symbols("left right", nonnegative=True)
+
+    def reject_relation_proof(*args: object, **kwargs: object) -> None:
+        """Fail if SymPy attempts its general Max relation proof."""
+        raise AssertionError("unexpected eager SymPy Max relation proof")
+
+    monkeypatch.setattr(
+        sp.Max,
+        "_is_connected",
+        staticmethod(reject_relation_proof),
+    )
+
+    maximum = metrics_module._resource_max(left, right)
+
+    assert isinstance(maximum, sp.Max)
+    assert set(maximum.args) == {left, right}
+
+
+def test_structural_nonnegativity_translates_single_nested_extremum() -> None:
+    """Affine offsets around one nested extremum remain structurally provable."""
+    parameter = sp.Symbol("n", integer=True, nonnegative=True)
+    branch = sp.Piecewise(
+        (sp.Integer(2), sp.Gt(sp.Max(0, parameter - 1), 0)),
+        (sp.Integer(0), True),
+    )
+    expression = (
+        sp.Min(
+            2,
+            sp.Max(
+                0,
+                -2 * parameter
+                + sp.Max(2 * parameter + 4, 2 * parameter + branch + 2)
+                - 2,
+            ),
+        )
+        - 2
+    )
+
+    assert metrics_module._is_structurally_nonnegative(expression)
+    assert not metrics_module._is_structurally_nonnegative(
+        sp.Min(2, sp.Max(0, parameter)) - 2
+    )
+
+
+def test_symbolic_catalog_estimation_retains_grover_cost() -> None:
+    """A nested symbolic catalog kernel remains practical and exact."""
+    estimate = grover_network_decomposition.estimate_resources()
+    n = estimate.parameters["n"]
+    iterations = estimate.parameters["n_iters"]
+
+    assert estimate.gates.total == (
+        n + iterations * (4 * n + 2 * sp.Max(0, n - 3) + 5) + 2
+    )
 
 
 def test_seq_all_matches_left_fold_and_preserves_trace_order() -> None:
@@ -261,10 +378,15 @@ def test_seq_all_matches_left_fold_and_preserves_trace_order() -> None:
                         source=f"source_{index}",
                     ),
                 ),
-                quality=(
-                    qmc.EstimateQuality.MODELED
+                derivation=(
+                    qmc.EstimateDerivation.MODELED
                     if index == 5
-                    else qmc.EstimateQuality.UPPER_BOUND
+                    else qmc.EstimateDerivation.STRUCTURAL
+                ),
+                guarantee=(
+                    qmc.EstimateGuarantee.UPPER_BOUND
+                    if index != 5
+                    else qmc.EstimateGuarantee.EXACT
                 ),
                 trace=estimator_module.ResourceTraceNode(
                     name=f"leaf_{index}",
@@ -295,7 +417,8 @@ def test_seq_all_matches_left_fold_and_preserves_trace_order() -> None:
     assert balanced._constraints == left_fold._constraints
     assert balanced._dependency_keys == left_fold._dependency_keys
     assert balanced._guarded_assumptions == left_fold._guarded_assumptions
-    assert balanced._guarded_qualities == left_fold._guarded_qualities
+    assert balanced._guarded_derivations == left_fold._guarded_derivations
+    assert balanced._guarded_guarantees == left_fold._guarded_guarantees
     assert _trace_leaf_names(balanced.trace) == [
         f"leaf_{index}" for index in range(1, 6)
     ]
@@ -307,7 +430,7 @@ def test_seq_all_keeps_large_metadata_reduction_balanced(
 ) -> None:
     """Metadata work grows by balanced levels rather than left-fold history."""
     estimate_count = 1024
-    leaf = qmc.ResourceEstimate(quality=qmc.EstimateQuality.UPPER_BOUND)
+    leaf = qmc.ResourceEstimate(guarantee=qmc.EstimateGuarantee.UPPER_BOUND)
     original = qmc.ResourceEstimate.seq
     seq_calls = 0
     metadata_visits = 0
@@ -316,11 +439,11 @@ def test_seq_all_keeps_large_metadata_reduction_balanced(
         self: qmc.ResourceEstimate,
         other: qmc.ResourceEstimate,
     ) -> qmc.ResourceEstimate:
-        """Count guarded-quality records visited by each binary composition."""
+        """Count guarded-guarantee records visited by each composition."""
         nonlocal metadata_visits, seq_calls
         seq_calls += 1
-        metadata_visits += len(self._guarded_qualities or ())
-        metadata_visits += len(other._guarded_qualities or ())
+        metadata_visits += len(self._guarded_guarantees or ())
+        metadata_visits += len(other._guarded_guarantees or ())
         return original(self, other)
 
     monkeypatch.setattr(qmc.ResourceEstimate, "seq", record_seq)
@@ -328,8 +451,8 @@ def test_seq_all_keeps_large_metadata_reduction_balanced(
 
     assert seq_calls == estimate_count - 1
     assert metadata_visits <= estimate_count * estimate_count.bit_length()
-    assert len(combined._guarded_qualities or ()) == estimate_count
-    assert combined.quality is qmc.EstimateQuality.UPPER_BOUND
+    assert len(combined._guarded_guarantees or ()) == estimate_count
+    assert combined.guarantee is qmc.EstimateGuarantee.UPPER_BOUND
 
 
 def test_all_z_pauli_evolution_skips_pairwise_commutation_scan(
@@ -357,7 +480,7 @@ def test_all_z_pauli_evolution_skips_pairwise_commutation_scan(
     )
 
     pairwise.assert_not_called()
-    assert estimate.quality is qmc.EstimateQuality.EXACT
+    assert estimate.guarantee is qmc.EstimateGuarantee.EXACT
     assert not any(
         "Lie-Trotter" in assumption.message for assumption in estimate.assumptions
     )

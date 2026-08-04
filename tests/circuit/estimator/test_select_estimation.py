@@ -126,7 +126,7 @@ def test_select_phase_survives_inverse_and_outer_control() -> None:
         assert estimate.width.peak_qubits == 2
         assert estimate.depth.depth == 1
         assert estimate.calls == qm.CallResources()
-        assert estimate.quality is qm.EstimateQuality.EXACT
+        assert estimate.guarantee is qm.EstimateGuarantee.EXACT
     for estimate in (outer, outer_inverse):
         assert estimate.gates.total == 1
         assert estimate.gates.two_qubit == 1
@@ -135,7 +135,7 @@ def test_select_phase_survives_inverse_and_outer_control() -> None:
         assert estimate.width.peak_qubits == 3
         assert estimate.depth.depth == 1
         assert estimate.calls == qm.CallResources()
-        assert estimate.quality is qm.EstimateQuality.EXACT
+        assert estimate.guarantee is qm.EstimateGuarantee.EXACT
 
     assert inverse.width == direct.width
     assert inverse.depth == direct.depth
@@ -155,7 +155,8 @@ def test_select_phase_survives_inverse_and_outer_control() -> None:
         assert restored.gates == expected.gates
         assert restored.depth == expected.depth
         assert restored.calls == expected.calls
-        assert restored.quality is expected.quality
+        assert restored.derivation is expected.derivation
+        assert restored.guarantee is expected.guarantee
 
 
 def test_select_clifford_t_rejects_undefined_controlled_hadamard() -> None:

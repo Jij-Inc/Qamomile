@@ -37,7 +37,7 @@ from qamomile.circuit.ir.operation.operation import (
     QInitOperation,
     Signature,
 )
-from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+from qamomile.circuit.ir.types.primitives import BitType, QubitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.serialization import deserialize, serialize
 from qamomile.linalg import PauliLCU, PeriodicShiftLCU
@@ -478,7 +478,7 @@ def test_clean_ancilla_controlled_qkernel_shares_body_control_ladder() -> None:
     assert clean_estimate.width.clean_ancilla_qubits == 2
     assert clean_estimate.width.peak_qubits == 6
     assert clean_estimate.width.circuit_qubits == 6
-    assert clean_estimate.quality is qm.EstimateQuality.UPPER_BOUND
+    assert clean_estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
 
     assert abstract.gates.total == 4
     assert abstract.gates.multi_qubit == 4
@@ -556,7 +556,8 @@ def test_abstract_aggregate_control_shifts_arity_and_bounds_gate_families(
     assert estimate.depth.non_clifford_depth == 4
     assert estimate.width.clean_ancilla_qubits == 1
     assert estimate.width.peak_qubits == 1
-    assert estimate.quality is qm.EstimateQuality.MODELED
+    assert estimate.derivation is qm.EstimateDerivation.MODELED
+    assert estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
     assert any(
         "Gate-family fields are independent field-wise upper bounds"
         in assumption.message
@@ -587,6 +588,8 @@ def test_abstract_aggregate_control_keeps_unclassified_arity_explicit() -> None:
     assert two_controls.gates.single_qubit == 0
     assert two_controls.gates.two_qubit == 0
     assert two_controls.gates.multi_qubit == 4
+    assert one_control.guarantee is qm.EstimateGuarantee.UNKNOWN
+    assert two_controls.guarantee is qm.EstimateGuarantee.UNKNOWN
     assert any(
         "2 gate(s) have unclassified arity" in assumption.message
         for assumption in one_control.assumptions
@@ -670,6 +673,10 @@ def test_abstract_opaque_costs_apply_external_controls_after_base_cost() -> None
     assert fixed.gates.two_qubit == 0
     assert fixed.gates.multi_qubit == 3
     assert fixed.width.clean_ancilla_qubits == 0
+    assert fixed.derivation is qm.EstimateDerivation.MODELED
+    assert fixed.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert callback.derivation is qm.EstimateDerivation.MODELED
+    assert callback.guarantee is qm.EstimateGuarantee.UPPER_BOUND
 
 
 @pytest.mark.parametrize(
@@ -746,7 +753,7 @@ def test_controlled_logical_predicates_honor_concrete_inputs() -> None:
     assert estimate.depth.depth == 0
     assert estimate.width.clean_ancilla_qubits == 0
     assert estimate.parameters == {}
-    assert estimate.quality is qm.EstimateQuality.EXACT
+    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
 
 
 def test_clean_ancilla_controlled_loop_hoists_shared_ladder() -> None:
@@ -900,7 +907,108 @@ def test_transform_specific_open_control_body_keeps_x_bracket() -> None:
     assert estimate.gates.single_qubit == 2
     assert estimate.gates.two_qubit == 1
     assert estimate.depth.depth == 3
-    assert estimate.quality is qm.EstimateQuality.UPPER_BOUND
+    assert estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+
+
+def test_body_backed_oracle_aligns_added_and_declared_controls() -> None:
+    """A base Oracle body retains declared controls and excludes added ones."""
+    formal_declared = Value(type=QubitType(), name="formal_declared")
+    formal_target = Value(type=QubitType(), name="formal_target")
+    formal_declared_result = formal_declared.next_version()
+    formal_target_result = formal_target.next_version()
+    body = Block(
+        input_values=[formal_declared, formal_target],
+        output_values=[formal_declared_result, formal_target_result],
+        operations=[
+            GateOperation.fixed(
+                GateOperationType.CX,
+                [formal_declared, formal_target],
+                [formal_declared_result, formal_target_result],
+            )
+        ],
+    )
+    ref = CallableRef(namespace="test", name="body_backed_oracle")
+    definition_attrs = {
+        "kind": "oracle",
+        "num_control_qubits": 1,
+        "num_declared_control_qubits": 1,
+        "num_added_control_qubits": 0,
+        "num_target_qubits": 1,
+    }
+    added = Value(type=QubitType(), name="added")
+    declared = Value(type=QubitType(), name="declared")
+    target = Value(type=QubitType(), name="target")
+    operation = InvokeOperation(
+        operands=[added, declared, target],
+        results=[
+            added.next_version(),
+            declared.next_version(),
+            target.next_version(),
+        ],
+        target=ref,
+        transform=CallTransform.CONTROLLED,
+        attrs={
+            **definition_attrs,
+            "num_control_qubits": 2,
+            "num_added_control_qubits": 1,
+        },
+        definition=CallableDef(ref=ref, body=body, attrs=definition_attrs),
+    )
+
+    selection = operation.select_body()
+    assert selection.operands == (declared, target)
+    assert selection.results == tuple(operation.results[1:])
+
+    root = Block(
+        operations=[
+            QInitOperation(results=[added]),
+            QInitOperation(results=[declared]),
+            QInitOperation(results=[target]),
+            operation,
+        ],
+        output_values=list(operation.results),
+    )
+    estimate = qm.ResourceEstimator().estimate(root)
+
+    assert estimate.gates.total == 1
+    assert estimate.gates.toffoli == 1
+    assert estimate.width.clean_ancilla_qubits == 0
+
+    projected_target = formal_target.next_version()
+    measured_bit = Value(type=BitType(), name="measured")
+    observed_body = Block(
+        input_values=[formal_declared, formal_target],
+        output_values=[formal_declared, projected_target, measured_bit],
+        operations=[
+            ProjectOperation(
+                operands=[formal_target],
+                results=[projected_target, measured_bit],
+                axis="z",
+            )
+        ],
+    )
+    observed = InvokeOperation(
+        operands=[added, declared, target],
+        results=[
+            added.next_version(),
+            declared.next_version(),
+            target.next_version(),
+            Value(type=BitType(), name="result"),
+        ],
+        target=ref,
+        transform=CallTransform.CONTROLLED,
+        attrs={
+            **definition_attrs,
+            "num_control_qubits": 2,
+            "num_added_control_qubits": 1,
+        },
+        definition=CallableDef(
+            ref=ref,
+            body=observed_body,
+            attrs=definition_attrs,
+        ),
+    )
+    assert observed.measurement_result_indices == frozenset({3})
 
 
 def test_loop_local_power_specializes_without_bound_symbol_leaks() -> None:
@@ -1564,7 +1672,7 @@ def test_zero_iteration_controlled_loop_does_not_evaluate_opaque_callback() -> N
     estimate = circuit.estimate_resources(inputs={"repetitions": 0})
 
     assert estimate.gates.total == 0
-    assert estimate.quality is qm.EstimateQuality.EXACT
+    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
     assert observed == []
 
 
@@ -1987,7 +2095,7 @@ def test_controlled_call_boundary_marks_aggregate_completion_upper_bound() -> No
     assert estimate.gates.total == 6
     assert estimate.depth.gate_depth == 6
     assert estimate.depth.depth == 7
-    assert estimate.quality is qm.EstimateQuality.UPPER_BOUND
+    assert estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
     assert any(
         "aggregate latency" in assumption.message for assumption in estimate.assumptions
     )
@@ -2015,7 +2123,7 @@ def test_scalar_vector_broadcast_discloses_aggregate_element_completion() -> Non
     assert estimate.gates.total == 3
     assert estimate.depth.gate_depth == 3
     assert estimate.depth.depth == 4
-    assert estimate.quality is qm.EstimateQuality.UPPER_BOUND
+    assert estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
     assert any(
         "scalar-to-vector broadcast" in assumption.message
         for assumption in estimate.assumptions
@@ -2394,17 +2502,19 @@ def test_symbolic_open_controlled_phase_specializes_before_batching() -> None:
 
     assert zero.gates.total == 0
     assert zero.width.clean_ancilla_qubits == 0
-    assert zero.quality is direct_zero.quality is qm.EstimateQuality.EXACT
+    assert zero.guarantee is direct_zero.guarantee is qm.EstimateGuarantee.EXACT
     assert zero.assumptions == direct_zero.assumptions == ()
     assert full_turn.gates.total == 0
     assert full_turn.width.clean_ancilla_qubits == 0
-    assert full_turn.quality is direct_full_turn.quality is qm.EstimateQuality.EXACT
+    assert (
+        full_turn.guarantee is direct_full_turn.guarantee is qm.EstimateGuarantee.EXACT
+    )
     assert full_turn.assumptions == direct_full_turn.assumptions == ()
     assert direct_zero.gates.total == 0
     assert direct_full_turn.gates.total == 0
     assert tiny.gates.total > 0
     assert tiny.gates.rotation == 1
-    assert tiny.quality is direct_tiny.quality
+    assert tiny.guarantee is direct_tiny.guarantee
     assert tiny.assumptions == direct_tiny.assumptions
 
 
@@ -2512,7 +2622,7 @@ def test_bodyless_transforms_honor_fail_closed_and_warning_policies(
     ).eval_operations(block.operations, ExprResolver(block))
 
     assert warning.gates.total == 0
-    assert warning.quality is qm.EstimateQuality.MODELED
+    assert warning.derivation is qm.EstimateDerivation.MODELED
     assert any("no implementation body" in item.message for item in warning.assumptions)
 
 
@@ -2613,6 +2723,88 @@ def test_clifford_t_cz_matches_controlled_z_lowering() -> None:
     assert direct_ccz.gates.total == 17
 
 
+def test_logical_exact_control_wrappers_preserve_recipe_guarantee() -> None:
+    """Exact Y, Z, SWAP, and RZZ wrappers stay exact without clean ancillas."""
+
+    @qm.qkernel
+    def y_body(target: qm.Qubit) -> qm.Qubit:
+        """Apply one Pauli-Y gate."""
+        return qm.y(target)
+
+    @qm.qkernel
+    def z_body(target: qm.Qubit) -> qm.Qubit:
+        """Apply one Pauli-Z gate."""
+        return qm.z(target)
+
+    @qm.qkernel
+    def swap_body(
+        left: qm.Qubit,
+        right: qm.Qubit,
+    ) -> tuple[qm.Qubit, qm.Qubit]:
+        """Apply one SWAP gate."""
+        return qm.swap(left, right)
+
+    @qm.qkernel
+    def rzz_body(
+        left: qm.Qubit,
+        right: qm.Qubit,
+    ) -> tuple[qm.Qubit, qm.Qubit]:
+        """Apply one fixed-angle RZZ gate."""
+        return qm.rzz(left, right, 0.25)
+
+    @qm.qkernel
+    def doubly_controlled_y() -> qm.Qubit:
+        """Apply a Y gate under two coherent controls."""
+        controls = qm.qubit_array(2, "controls")
+        target = qm.qubit("target")
+        *_, target = qm.control(y_body, num_controls=2)(controls, target)
+        return target
+
+    @qm.qkernel
+    def doubly_controlled_z() -> qm.Qubit:
+        """Apply a Z gate under two coherent controls."""
+        controls = qm.qubit_array(2, "controls")
+        target = qm.qubit("target")
+        *_, target = qm.control(z_body, num_controls=2)(controls, target)
+        return target
+
+    @qm.qkernel
+    def controlled_swap() -> tuple[qm.Qubit, qm.Qubit]:
+        """Apply a SWAP gate under one coherent control."""
+        control = qm.qubit("control")
+        left = qm.qubit("left")
+        right = qm.qubit("right")
+        _, left, right = qm.control(swap_body)(control, left, right)
+        return left, right
+
+    @qm.qkernel
+    def controlled_rzz() -> tuple[qm.Qubit, qm.Qubit]:
+        """Apply an RZZ gate under one coherent control."""
+        control = qm.qubit("control")
+        left = qm.qubit("left")
+        right = qm.qubit("right")
+        _, left, right = qm.control(rzz_body)(control, left, right)
+        return left, right
+
+    logical_y = doubly_controlled_y.estimate_resources()
+    clifford_t_y = doubly_controlled_y.estimate_resources(
+        basis=qm.GateBasis.CLIFFORD_T,
+    )
+    logical_z = doubly_controlled_z.estimate_resources()
+    logical_swap = controlled_swap.estimate_resources()
+    logical_rzz = controlled_rzz.estimate_resources()
+
+    assert logical_y.gates.total == 3
+    assert logical_y.gates.toffoli == 1
+    assert logical_y.width.clean_ancilla_qubits == 0
+    assert logical_y.guarantee is qm.EstimateGuarantee.EXACT
+    assert clifford_t_y.width.clean_ancilla_qubits == 0
+    assert clifford_t_y.guarantee is qm.EstimateGuarantee.EXACT
+    for estimate in (logical_z, logical_swap, logical_rzz):
+        assert estimate.width.clean_ancilla_qubits == 0
+        assert estimate.guarantee is qm.EstimateGuarantee.EXACT
+
+
 def test_clifford_t_supports_multi_controlled_global_phase() -> None:
     """Fixed and arbitrary phases use defined multi-control lowerings."""
     fixed = _controlled_phase_estimate(
@@ -2627,11 +2819,11 @@ def test_clifford_t_supports_multi_controlled_global_phase() -> None:
     )
 
     assert fixed.gates.t > 0
-    assert fixed.quality is qm.EstimateQuality.EXACT
+    assert fixed.guarantee is qm.EstimateGuarantee.EXACT
     assert fixed.approximation is qm.ApproximationStatus.EXACT
     assert arbitrary.gates.t > fixed.gates.t
     assert arbitrary.width.clean_ancilla_qubits == 1
-    assert arbitrary.quality is qm.EstimateQuality.UPPER_BOUND
+    assert arbitrary.guarantee is qm.EstimateGuarantee.UPPER_BOUND
     assert arbitrary.approximation is qm.ApproximationStatus.APPROXIMATE
 
 
@@ -2670,11 +2862,11 @@ def test_symbolic_controlled_global_phase_retains_angle_classification() -> None
     assert phase_s.gates.clifford == 1
     assert phase_t.gates.t == 1
     assert arbitrary.gates.t > 1
-    assert identity.quality is qm.EstimateQuality.EXACT
-    assert pauli_z.quality is qm.EstimateQuality.EXACT
-    assert phase_s.quality is qm.EstimateQuality.EXACT
-    assert phase_t.quality is qm.EstimateQuality.EXACT
-    assert arbitrary.quality is qm.EstimateQuality.UPPER_BOUND
+    assert identity.guarantee is qm.EstimateGuarantee.EXACT
+    assert pauli_z.guarantee is qm.EstimateGuarantee.EXACT
+    assert phase_s.guarantee is qm.EstimateGuarantee.EXACT
+    assert phase_t.guarantee is qm.EstimateGuarantee.EXACT
+    assert arbitrary.guarantee is qm.EstimateGuarantee.UPPER_BOUND
     assert identity.approximation is qm.ApproximationStatus.EXACT
     assert pauli_z.approximation is qm.ApproximationStatus.EXACT
     assert phase_s.approximation is qm.ApproximationStatus.EXACT
@@ -2749,7 +2941,7 @@ def test_noncommuting_pauli_evolve_reports_trotter_assumption() -> None:
     )
 
     assert active.gates.total == 4
-    assert active.quality is qm.EstimateQuality.EXACT
+    assert active.guarantee is qm.EstimateGuarantee.EXACT
     assert active.approximation is qm.ApproximationStatus.APPROXIMATE
     assert active.to_dict()["approximation"] == "approximate"
     assert [
@@ -2776,7 +2968,7 @@ def test_commuting_pauli_evolve_needs_no_trotter_assumption() -> None:
         }
     )
 
-    assert estimate.quality is qm.EstimateQuality.EXACT
+    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
     assert estimate.approximation is qm.ApproximationStatus.EXACT
     assert not any(
         assumption.source == "PauliEvolveOp" for assumption in estimate.assumptions
@@ -2934,7 +3126,7 @@ def test_pauli_evolve_applies_unknown_policy_and_register_requirement() -> None:
     )
     assert opaque.calls.calls_by_name == {"pauli_evolve": 1}
     assert opaque.calls.queries_by_name == {"pauli_evolve": 1}
-    assert opaque.quality is qm.EstimateQuality.MODELED
+    assert opaque.derivation is qm.EstimateDerivation.MODELED
     assert zero.calls.calls_by_name == {}
     assert zero.gates.total == 0
     assert zero.assumptions
@@ -3136,7 +3328,8 @@ def test_controlled_fixed_opaque_cost_projects_complete_arity_profile(
     assert estimate.width.clean_ancilla_qubits == expected_clean_ancillas
     assert estimate.calls.calls_by_name == {"arity_oracle": 1}
     assert estimate.calls.queries_by_name == {"arity_oracle": 1}
-    assert estimate.quality is qm.EstimateQuality.MODELED
+    assert estimate.derivation is qm.EstimateDerivation.MODELED
+    assert estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
     assert any(
         "uses the aggregate clean-ancilla Toffoli batching model" in assumption.message
         for assumption in estimate.assumptions
@@ -3531,6 +3724,8 @@ def test_partial_opaque_projection_preserves_declared_family_floors() -> None:
     assert estimate.gates.toffoli == 1
     assert estimate.gates.non_clifford >= 1
     assert estimate.depth.toffoli_depth == 1
+    assert estimate.derivation is qm.EstimateDerivation.MODELED
+    assert estimate.guarantee is qm.EstimateGuarantee.UNKNOWN
     assert any(
         "gate-family counts are retained only as field-wise floors"
         in assumption.message
@@ -3549,7 +3744,8 @@ def test_total_only_opaque_cost_is_not_presented_as_a_partial_projection() -> No
 
     assert estimate.gates == base.gates
     assert estimate.depth == base.depth
-    assert estimate.quality is qm.EstimateQuality.MODELED
+    assert estimate.derivation is qm.EstimateDerivation.MODELED
+    assert estimate.guarantee is qm.EstimateGuarantee.UNKNOWN
     assert any(
         "no declared one- or two-qubit gate profile" in assumption.message
         for assumption in estimate.assumptions
@@ -3652,7 +3848,7 @@ def test_symbolic_opaque_control_projection_preserves_zero_control_cost() -> Non
             queries_by_name={"symbolic_arity_oracle": 1},
         ),
         assumptions=(qm.ResourceAssumption("declared aggregate model"),),
-        quality=qm.EstimateQuality.MODELED,
+        derivation=qm.EstimateDerivation.MODELED,
     )
 
     symbolic = base.controlled(controls)
@@ -3663,7 +3859,8 @@ def test_symbolic_opaque_control_projection_preserves_zero_control_cost() -> Non
     assert zero.depth == base.depth
     assert zero.calls == base.calls
     assert zero.assumptions == base.assumptions
-    assert zero.quality is base.quality
+    assert zero.derivation is base.derivation
+    assert zero.guarantee is base.guarantee
     assert symbolic.substitute(controls=2).gates.total == 7
 
 
@@ -3746,7 +3943,8 @@ def test_symbolic_zero_known_arity_uses_total_only_control_branch() -> None:
 
     assert zero.gates == direct.gates
     assert zero.depth == direct.depth
-    assert zero.quality is direct.quality
+    assert zero.derivation is direct.derivation
+    assert zero.guarantee is direct.guarantee
     assert any(
         "no declared one- or two-qubit gate profile" in assumption.message
         and "active controls" in assumption.message
@@ -3758,7 +3956,7 @@ def test_symbolic_zero_known_arity_uses_total_only_control_branch() -> None:
     )
     assert zero_controls.gates == qm.GateResources(total=5)
     assert zero_controls.depth == qm.DepthResources(depth=1)
-    assert zero_controls.quality is qm.EstimateQuality.EXACT
+    assert zero_controls.guarantee is qm.EstimateGuarantee.EXACT
     assert zero_controls.assumptions == ()
     assert positive.gates.total == 7
     assert positive.depth.depth == 7
@@ -3818,7 +4016,8 @@ def test_query_only_opaque_cost_is_not_treated_as_complete_gate_profile() -> Non
     assert estimate.gates == base.gates
     assert estimate.depth == base.depth
     assert estimate.calls == base.calls
-    assert estimate.quality is qm.EstimateQuality.MODELED
+    assert estimate.derivation is qm.EstimateDerivation.MODELED
+    assert estimate.guarantee is qm.EstimateGuarantee.UNKNOWN
     assert any(
         "no declared one- or two-qubit gate profile" in assumption.message
         for assumption in estimate.assumptions
@@ -3834,7 +4033,8 @@ def test_zero_aggregate_cost_does_not_claim_controlled_upper_bound() -> None:
     estimate = qm.ResourceEstimate.zero().controlled(3)
 
     assert estimate.gates.total == 0
-    assert estimate.quality is qm.EstimateQuality.MODELED
+    assert estimate.derivation is qm.EstimateDerivation.MODELED
+    assert estimate.guarantee is qm.EstimateGuarantee.UNKNOWN
     assert any(
         "cannot distinguish an exact identity from an undeclared global phase"
         in assumption.message
@@ -3856,7 +4056,8 @@ def test_incompatible_opaque_gate_family_arity_is_not_projected(
     estimate = qm.ResourceEstimate(gates=gates).controlled(4)
 
     assert estimate.gates == gates
-    assert estimate.quality is qm.EstimateQuality.MODELED
+    assert estimate.derivation is qm.EstimateDerivation.MODELED
+    assert estimate.guarantee is qm.EstimateGuarantee.UNKNOWN
     assert any("exceeds the declared" in item.message for item in estimate.assumptions)
 
 
@@ -4713,7 +4914,7 @@ def test_controlled_basis_neutral_opaque_cost_has_fixed_callback_parity(
     assert estimate.basis is qm.GateBasis.CLIFFORD_T
     assert estimate.calls.calls_by_name == {"neutral_controlled": 1}
     assert estimate.gates.total == 0
-    assert estimate.quality is qm.EstimateQuality.MODELED
+    assert estimate.derivation is qm.EstimateDerivation.MODELED
     assert any(
         "no declared one- or two-qubit gate profile" in assumption.message
         for assumption in estimate.assumptions
@@ -4809,16 +5010,16 @@ def test_formal_quantum_input_is_not_counted_as_body_allocation() -> None:
     assert estimate.width.circuit_qubits == 1
 
 
-def test_quality_and_basis_provenance_survive_resource_algebra() -> None:
-    """Modeled quality and estimator provenance remain visible to users."""
+def test_metadata_axes_and_model_settings_survive_resource_algebra() -> None:
+    """Independent metadata axes and estimator settings remain visible."""
     modeled = qm.ResourceEstimate(
         gates=qm.GateResources(total=1, single_qubit=1),
-        quality=qm.EstimateQuality.MODELED,
+        derivation=qm.EstimateDerivation.MODELED,
         approximation=qm.ApproximationStatus.APPROXIMATE,
     )
 
     transformed = modeled.controlled(2).inverse().repeat(3).choice(modeled)
-    assert transformed.quality is qm.EstimateQuality.MODELED
+    assert transformed.derivation is qm.EstimateDerivation.MODELED
     assert transformed.approximation is qm.ApproximationStatus.APPROXIMATE
 
     default = _four_h_body.estimate_resources()
@@ -5209,7 +5410,8 @@ def test_recursive_lcu_expands_through_inverse_control_and_serialization() -> No
     assert inverse_estimate.width == direct_estimate.width
     assert inverse_estimate.depth == direct_estimate.depth
     assert inverse_estimate.calls == direct_estimate.calls
-    assert inverse_estimate.quality is direct_estimate.quality
+    assert inverse_estimate.derivation is direct_estimate.derivation
+    assert inverse_estimate.guarantee is direct_estimate.guarantee
     assert direct_estimate.width.input_qubits == 3
     assert direct_estimate.width.peak_qubits == 3
 
@@ -5244,7 +5446,8 @@ def test_recursive_lcu_expands_through_inverse_control_and_serialization() -> No
         assert restored.gates == expected.gates
         assert restored.depth == expected.depth
         assert restored.calls == expected.calls
-        assert restored.quality is expected.quality
+        assert restored.derivation is expected.derivation
+        assert restored.guarantee is expected.guarantee
 
 
 @pytest.mark.parametrize(
