@@ -27,7 +27,7 @@ from qamomile.circuit.estimator._metrics import (
     ControlDecomposition,
     DepthResources,
     EstimateDerivation,
-    EstimateGuarantee,
+    EstimateQuality,
     GateBasis,
     GateResources,
     MeasurementResources,
@@ -39,7 +39,7 @@ from qamomile.circuit.estimator._metrics import (
     _GuardedApproximation,
     _GuardedAssumption,
     _GuardedDerivation,
-    _GuardedGuarantee,
+    _GuardedQuality,
     _ResourceConstraint,
 )
 from qamomile.circuit.estimator._serialization import SymbolRegistry
@@ -56,7 +56,7 @@ _MetricT = TypeVar(
     ResetResources,
 )
 _EnumT = TypeVar("_EnumT", bound=enum.Enum)
-_RESOURCE_ESTIMATE_WIRE_VERSION = 3
+_RESOURCE_ESTIMATE_WIRE_VERSION = 4
 _MAX_EXPRESSION_NODES = 100_000
 _MAX_NUMERIC_BITS = 4096
 # ceil(4096 / log2(10)); bounds decimal mantissa parsing independently from a
@@ -271,7 +271,7 @@ def resource_estimate_to_wire(
     expression = encoder.encode
     guarded_assumptions = estimate._guarded_assumptions or ()
     guarded_derivations = estimate._guarded_derivations or ()
-    guarded_guarantees = estimate._guarded_guarantees or ()
+    guarded_qualities = estimate._guarded_qualities or ()
     guarded_approximations = estimate._guarded_approximations or ()
     return {
         "$type": "ResourceEstimate",
@@ -302,7 +302,7 @@ def resource_estimate_to_wire(
             name: expression(symbol) for name, symbol in estimate.parameters.items()
         },
         "derivation": estimate.derivation.value,
-        "guarantee": estimate.guarantee.value,
+        "quality": estimate.quality.value,
         "approximation": estimate.approximation.value,
         "basis": estimate.basis.value,
         "control_decomposition": estimate.control_decomposition.value,
@@ -348,12 +348,12 @@ def resource_estimate_to_wire(
                 }
                 for fact in guarded_derivations
             ],
-            "guarantees": [
+            "qualities": [
                 {
                     "active_when": expression(fact.active_when),
-                    "guarantee": fact.guarantee.value,
+                    "quality": fact.quality.value,
                 }
-                for fact in guarded_guarantees
+                for fact in guarded_qualities
             ],
             "approximations": [
                 {
@@ -431,11 +431,11 @@ def resource_estimate_from_wire(
             "opaque ResourceEstimate derivation provenance",
         )
     )
-    guarded_guarantees = tuple(
-        _guarded_guarantee_from_wire(item, decoder)
+    guarded_qualities = tuple(
+        _guarded_quality_from_wire(item, decoder)
         for item in _sequence(
-            provenance.get("guarantees"),
-            "opaque ResourceEstimate guarantee provenance",
+            provenance.get("qualities"),
+            "opaque ResourceEstimate quality provenance",
         )
     )
     guarded_approximations = tuple(
@@ -495,10 +495,10 @@ def resource_estimate_from_wire(
             record.get("derivation"),
             "opaque ResourceEstimate derivation",
         ),
-        guarantee=_enum_from_wire(
-            EstimateGuarantee,
-            record.get("guarantee"),
-            "opaque ResourceEstimate guarantee",
+        quality=_enum_from_wire(
+            EstimateQuality,
+            record.get("quality"),
+            "opaque ResourceEstimate quality",
         ),
         approximation=_enum_from_wire(
             ApproximationStatus,
@@ -519,7 +519,7 @@ def resource_estimate_from_wire(
         _constraints=requirements,
         _guarded_assumptions=guarded_assumptions,
         _guarded_derivations=guarded_derivations,
-        _guarded_guarantees=guarded_guarantees,
+        _guarded_qualities=guarded_qualities,
         _guarded_approximations=guarded_approximations,
     )
     raw_parameters = _mapping(
@@ -1078,11 +1078,11 @@ def _guarded_derivation_from_wire(
     )
 
 
-def _guarded_guarantee_from_wire(
+def _guarded_quality_from_wire(
     payload: Any,
     decoder: _WireExpressionDecoder,
-) -> _GuardedGuarantee:
-    """Decode one guarded estimate-guarantee fact.
+) -> _GuardedQuality:
+    """Decode one guarded estimate-quality fact.
 
     Args:
         payload (Any): Serialized provenance mapping.
@@ -1090,22 +1090,22 @@ def _guarded_guarantee_from_wire(
             decoder.
 
     Returns:
-        _GuardedGuarantee: Reconstructed guarded fact.
+        _GuardedQuality: Reconstructed guarded fact.
 
     Raises:
-        ValueError: If the guard or guarantee is malformed.
+        ValueError: If the guard or quality is malformed.
     """
-    record = _mapping(payload, "guarded resource guarantee")
-    return _GuardedGuarantee(
+    record = _mapping(payload, "guarded resource quality")
+    return _GuardedQuality(
         active_when=_boolean_expression_from_wire(
             record.get("active_when"),
-            "guarded resource guarantee active_when",
+            "guarded resource quality active_when",
             decoder,
         ),
-        guarantee=_enum_from_wire(
-            EstimateGuarantee,
-            record.get("guarantee"),
-            "guarded resource guarantee",
+        quality=_enum_from_wire(
+            EstimateQuality,
+            record.get("quality"),
+            "guarded resource quality",
         ),
     )
 

@@ -839,7 +839,7 @@ _FIXED_OPAQUE_COST = qmc.ResourceEstimate(
         ),
     ),
     derivation=qmc.EstimateDerivation.MODELED,
-    guarantee=qmc.EstimateGuarantee.UPPER_BOUND,
+    quality=qmc.EstimateQuality.CONSERVATIVE,
     approximation=qmc.ApproximationStatus.APPROXIMATE,
     basis=qmc.GateBasis.CLIFFORD_T,
     control_decomposition=qmc.ControlDecomposition.ABSTRACT,
@@ -1603,7 +1603,7 @@ def test_fixed_opaque_resource_cost_round_trips_with_provenance() -> None:
     expected_inactive = _FIXED_OPAQUE_COST.substitute(opaque_size=0)
     assert inactive.gates.total == 0
     assert inactive.assumptions == ()
-    assert inactive.guarantee is qmc.EstimateGuarantee.EXACT
+    assert inactive.quality is qmc.EstimateQuality.EXACT
     assert inactive.approximation is qmc.ApproximationStatus.EXACT
     assert inactive.trace == expected_inactive.trace
 

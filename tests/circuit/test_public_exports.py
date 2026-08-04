@@ -147,7 +147,7 @@ def test_resource_metric_types_keep_one_canonical_identity() -> None:
         "ControlDecomposition",
         "DepthResources",
         "EstimateDerivation",
-        "EstimateGuarantee",
+        "EstimateQuality",
         "GateBasis",
         "GateResources",
         "MeasurementResources",

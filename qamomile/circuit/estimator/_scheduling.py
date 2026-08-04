@@ -22,7 +22,7 @@ from qamomile.circuit.estimator._metrics import (
     _ONE,
     _ZERO,
     DepthResources,
-    EstimateGuarantee,
+    EstimateQuality,
     ResourceAssumption,
     ResourceExpr,
     WidthResources,
@@ -1152,7 +1152,7 @@ def _with_body_boundary_depth_metadata(
         )
         estimate = estimate._with_metadata(
             assumptions=(assumption,),
-            guarantee=EstimateGuarantee.UPPER_BOUND,
+            quality=EstimateQuality.CONSERVATIVE,
             active_when=bracket_condition,
         )
     broadcast_condition = _and_conditions(
@@ -1167,7 +1167,7 @@ def _with_body_boundary_depth_metadata(
         )
         estimate = estimate._with_metadata(
             assumptions=(assumption,),
-            guarantee=EstimateGuarantee.UPPER_BOUND,
+            quality=EstimateQuality.CONSERVATIVE,
             active_when=broadcast_condition,
         )
     return estimate

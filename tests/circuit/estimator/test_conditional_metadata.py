@@ -12,48 +12,46 @@ _RANGE_GUARD_SYMBOL = sp.Symbol("range_guard", integer=True)
 
 
 def test_resource_metadata_axes_remain_independent_through_composition() -> None:
-    """Derivation, count guarantee, and approximation compose independently."""
-    modeled_upper = qmc.ResourceEstimate(
+    """Derivation, count quality, and approximation compose independently."""
+    modeled_conservative = qmc.ResourceEstimate(
         derivation=qmc.EstimateDerivation.MODELED,
-        guarantee=qmc.EstimateGuarantee.UPPER_BOUND,
+        quality=qmc.EstimateQuality.CONSERVATIVE,
     )
     approximate = qmc.ResourceEstimate(
         approximation=qmc.ApproximationStatus.APPROXIMATE,
     )
 
-    combined = modeled_upper.seq(approximate)
+    combined = modeled_conservative.seq(approximate)
 
     assert combined.derivation is qmc.EstimateDerivation.MODELED
-    assert combined.guarantee is qmc.EstimateGuarantee.UPPER_BOUND
+    assert combined.quality is qmc.EstimateQuality.CONSERVATIVE
     assert combined.approximation is qmc.ApproximationStatus.APPROXIMATE
     assert (
         qmc.ResourceEstimate(
-            guarantee=qmc.EstimateGuarantee.UPPER_BOUND,
+            quality=qmc.EstimateQuality.CONSERVATIVE,
         ).approximation
         is qmc.ApproximationStatus.EXACT
     )
     assert (
         qmc.ResourceEstimate(
             approximation=qmc.ApproximationStatus.APPROXIMATE,
-        ).guarantee
-        is qmc.EstimateGuarantee.EXACT
+        ).quality
+        is qmc.EstimateQuality.EXACT
     )
     assert (
-        combined.seq(
-            qmc.ResourceEstimate(guarantee=qmc.EstimateGuarantee.UNKNOWN)
-        ).guarantee
-        is qmc.EstimateGuarantee.UNKNOWN
+        combined.seq(qmc.ResourceEstimate(quality=qmc.EstimateQuality.UNKNOWN)).quality
+        is qmc.EstimateQuality.UNKNOWN
     )
 
 
 def test_conditional_substitution_restores_each_metadata_axis() -> None:
-    """Specialization prunes guarded derivation and guarantee independently."""
+    """Specialization prunes guarded derivation and quality independently."""
     flag = sp.Symbol("flag", integer=True, nonnegative=True)
-    modeled_upper = qmc.ResourceEstimate(
+    modeled_conservative = qmc.ResourceEstimate(
         derivation=qmc.EstimateDerivation.MODELED,
-        guarantee=qmc.EstimateGuarantee.UPPER_BOUND,
+        quality=qmc.EstimateQuality.CONSERVATIVE,
     )
-    symbolic = modeled_upper.conditional(
+    symbolic = modeled_conservative.conditional(
         qmc.ResourceEstimate.zero(),
         sp.Eq(flag, 1),
     )
@@ -62,22 +60,21 @@ def test_conditional_substitution_restores_each_metadata_axis() -> None:
     inactive = symbolic.substitute(flag=0)
 
     assert active.derivation is qmc.EstimateDerivation.MODELED
-    assert active.guarantee is qmc.EstimateGuarantee.UPPER_BOUND
+    assert active.quality is qmc.EstimateQuality.CONSERVATIVE
     assert inactive.derivation is qmc.EstimateDerivation.STRUCTURAL
-    assert inactive.guarantee is qmc.EstimateGuarantee.EXACT
-    assert "quality" not in symbolic.to_dict()
+    assert inactive.quality is qmc.EstimateQuality.EXACT
     assert symbolic.to_dict()["derivation"] == "modeled"
-    assert symbolic.to_dict()["guarantee"] == "upper_bound"
+    assert symbolic.to_dict()["quality"] == "conservative"
 
 
 @pytest.mark.parametrize("uses_callback", [False, True])
-def test_opaque_cost_preserves_declared_guarantee_and_approximation(
+def test_opaque_cost_preserves_declared_quality_and_approximation(
     uses_callback: bool,
 ) -> None:
     """Opaque boundaries mark derivation without replacing other axes."""
     declared = qmc.ResourceEstimate(
         gates=qmc.GateResources(total=1, single_qubit=1),
-        guarantee=qmc.EstimateGuarantee.UPPER_BOUND,
+        quality=qmc.EstimateQuality.CONSERVATIVE,
         approximation=qmc.ApproximationStatus.APPROXIMATE,
     )
 
@@ -107,7 +104,7 @@ def test_opaque_cost_preserves_declared_guarantee_and_approximation(
     estimate = circuit.estimate_resources()
 
     assert estimate.derivation is qmc.EstimateDerivation.MODELED
-    assert estimate.guarantee is qmc.EstimateGuarantee.UPPER_BOUND
+    assert estimate.quality is qmc.EstimateQuality.CONSERVATIVE
     assert estimate.approximation is qmc.ApproximationStatus.APPROXIMATE
 
 
@@ -133,11 +130,11 @@ def test_conditional_algebra_prunes_inactive_metadata_and_calls() -> None:
     assert selected_taken.calls.calls_by_name == {"taken": 1}
     assert selected_taken.assumptions == ()
     assert selected_taken.derivation is qmc.EstimateDerivation.STRUCTURAL
-    assert selected_taken.guarantee is qmc.EstimateGuarantee.EXACT
+    assert selected_taken.quality is qmc.EstimateQuality.EXACT
     assert selected_untaken.calls.calls_by_name == {"untaken": 1}
     assert selected_untaken.assumptions == (note,)
     assert selected_untaken.derivation is qmc.EstimateDerivation.MODELED
-    assert selected_untaken.guarantee is qmc.EstimateGuarantee.EXACT
+    assert selected_untaken.quality is qmc.EstimateQuality.EXACT
 
 
 def _conditional_opaque_kernel() -> qmc.QKernel:
@@ -173,11 +170,11 @@ def test_qkernel_branch_prunes_inactive_opaque_call_and_trace() -> None:
     untaken = symbolic.substitute(flag=0)
 
     assert taken.calls.calls_by_name == {}
-    assert taken.guarantee is qmc.EstimateGuarantee.EXACT
+    assert taken.quality is qmc.EstimateQuality.EXACT
     assert "conditional_oracle" not in taken.explain()
     assert untaken.calls.calls_by_name == {"conditional_oracle": 1}
     assert untaken.derivation is qmc.EstimateDerivation.MODELED
-    assert untaken.guarantee is qmc.EstimateGuarantee.UNKNOWN
+    assert untaken.quality is qmc.EstimateQuality.UNKNOWN
     assert "conditional_oracle" in untaken.explain()
 
 
@@ -192,10 +189,10 @@ def test_qkernel_branch_prunes_inactive_zero_policy_warning() -> None:
     untaken = symbolic.substitute(flag=0)
 
     assert taken.assumptions == ()
-    assert taken.guarantee is qmc.EstimateGuarantee.EXACT
+    assert taken.quality is qmc.EstimateQuality.EXACT
     assert len(untaken.assumptions) == 1
     assert untaken.derivation is qmc.EstimateDerivation.MODELED
-    assert untaken.guarantee is qmc.EstimateGuarantee.UNKNOWN
+    assert untaken.quality is qmc.EstimateQuality.UNKNOWN
 
 
 def test_call_resources_simplify_prunes_exact_zero_entries() -> None:
@@ -229,7 +226,7 @@ def test_large_concrete_range_prunes_unreachable_guarded_metadata() -> None:
 
     assert estimate.assumptions == ()
     assert estimate.derivation is qmc.EstimateDerivation.STRUCTURAL
-    assert estimate.guarantee is qmc.EstimateGuarantee.EXACT
+    assert estimate.quality is qmc.EstimateQuality.EXACT
 
 
 def test_large_concrete_range_keeps_reachable_guarded_metadata() -> None:
@@ -327,7 +324,7 @@ def test_empty_range_prunes_guarded_metadata() -> None:
 
     assert estimate.assumptions == ()
     assert estimate.derivation is qmc.EstimateDerivation.STRUCTURAL
-    assert estimate.guarantee is qmc.EstimateGuarantee.EXACT
+    assert estimate.quality is qmc.EstimateQuality.EXACT
 
 
 def test_large_range_keeps_unsupported_guards_symbolic() -> None:

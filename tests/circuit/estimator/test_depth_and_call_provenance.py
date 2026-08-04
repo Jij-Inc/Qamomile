@@ -284,7 +284,7 @@ def test_disjoint_concrete_array_view_does_not_alias_the_whole_root() -> None:
     estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
 
     assert estimate.depth.depth == 1
-    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
+    assert estimate.quality is qm.EstimateQuality.EXACT
 
 
 def test_supplied_array_index_sharpens_depth_dependencies() -> None:
@@ -310,13 +310,13 @@ def test_supplied_array_index_sharpens_depth_dependencies() -> None:
     substituted = symbolic.substitute(index=1)
 
     assert disjoint.depth.depth == 1
-    assert disjoint.guarantee is qm.EstimateGuarantee.EXACT
+    assert disjoint.quality is qm.EstimateQuality.EXACT
     assert overlapping.depth.depth == 2
-    assert overlapping.guarantee is qm.EstimateGuarantee.EXACT
+    assert overlapping.quality is qm.EstimateQuality.EXACT
     assert symbolic.depth.depth == 2
-    assert symbolic.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert symbolic.quality is qm.EstimateQuality.CONSERVATIVE
     assert substituted.depth.depth == 2
-    assert substituted.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert substituted.quality is qm.EstimateQuality.CONSERVATIVE
 
 
 def test_equivalent_symbolic_array_indices_share_one_wire() -> None:
@@ -337,7 +337,7 @@ def test_equivalent_symbolic_array_indices_share_one_wire() -> None:
 
     assert estimate.gates.total == 3
     assert estimate.depth.depth == 3
-    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
+    assert estimate.quality is qm.EstimateQuality.EXACT
 
 
 def test_disjoint_symbolic_array_indices_share_one_layer() -> None:
@@ -355,7 +355,7 @@ def test_disjoint_symbolic_array_indices_share_one_layer() -> None:
 
     assert estimate.gates.total == 2
     assert estimate.depth.depth == 1
-    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
+    assert estimate.quality is qm.EstimateQuality.EXACT
 
 
 def test_symbolic_offset_index_skips_disjoint_family_members() -> None:
@@ -385,7 +385,7 @@ def test_potentially_aliasing_symbolic_indices_remain_conservative() -> None:
 
     assert estimate.gates.total == 2
     assert estimate.depth.depth == 2
-    assert estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
 
 
 def test_possible_alias_keeps_exact_guarantee_when_shared_wire_serializes() -> None:
@@ -404,7 +404,7 @@ def test_possible_alias_keeps_exact_guarantee_when_shared_wire_serializes() -> N
 
     assert estimate.gates.total == 2
     assert estimate.depth.depth == 2
-    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
+    assert estimate.quality is qm.EstimateQuality.EXACT
 
 
 def test_possible_alias_in_specialized_depth_marks_estimate_conservative() -> None:
@@ -472,7 +472,7 @@ def test_symbolic_indices_on_distinct_arrays_share_one_layer() -> None:
 
     assert estimate.gates.total == 2
     assert estimate.depth.depth == 1
-    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
+    assert estimate.quality is qm.EstimateQuality.EXACT
 
 
 def test_affine_view_index_matches_equivalent_root_index() -> None:
@@ -491,7 +491,7 @@ def test_affine_view_index_matches_equivalent_root_index() -> None:
 
     assert estimate.gates.total == 2
     assert estimate.depth.depth == 2
-    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
+    assert estimate.quality is qm.EstimateQuality.EXACT
 
 
 def test_even_and_odd_symbolic_views_share_one_layer() -> None:
@@ -511,7 +511,7 @@ def test_even_and_odd_symbolic_views_share_one_layer() -> None:
 
     assert estimate.gates.total == 2
     assert estimate.depth.depth == 1
-    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
+    assert estimate.quality is qm.EstimateQuality.EXACT
 
 
 def test_large_concrete_disjoint_views_preserve_parallel_depth() -> None:
@@ -530,7 +530,7 @@ def test_large_concrete_disjoint_views_preserve_parallel_depth() -> None:
     assert estimate.measurements.total == 600
     assert estimate.depth.depth == 1
     assert estimate.depth.measurement_depth == 1
-    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
+    assert estimate.quality is qm.EstimateQuality.EXACT
 
 
 def test_loop_range_projection_preserves_concrete_wire_dependencies() -> None:
@@ -559,13 +559,13 @@ def test_loop_range_projection_preserves_concrete_wire_dependencies() -> None:
         basis=qm.GateBasis.LOGICAL,
     )
 
-    assert symbolic.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert symbolic.quality is qm.EstimateQuality.CONSERVATIVE
     assert empty.depth.depth == 1
-    assert empty.guarantee is qm.EstimateGuarantee.EXACT
+    assert empty.quality is qm.EstimateQuality.EXACT
     assert disjoint.depth.depth == 1
-    assert disjoint.guarantee is qm.EstimateGuarantee.EXACT
+    assert disjoint.quality is qm.EstimateQuality.EXACT
     assert overlapping.depth.depth == 2
-    assert overlapping.guarantee is qm.EstimateGuarantee.EXACT
+    assert overlapping.quality is qm.EstimateQuality.EXACT
 
 
 def test_nested_loop_range_projection_binds_every_local_index() -> None:
@@ -595,12 +595,12 @@ def test_nested_loop_range_projection_binds_every_local_index() -> None:
         basis=qm.GateBasis.LOGICAL,
     )
 
-    assert symbolic.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert symbolic.quality is qm.EstimateQuality.CONSERVATIVE
     assert disjoint.depth.depth == 1
-    assert disjoint.guarantee is qm.EstimateGuarantee.EXACT
+    assert disjoint.quality is qm.EstimateQuality.EXACT
     assert {index for _owner, index in disjoint._dependency_keys or ()} == {0, 7}
     assert overlapping.depth.depth == 2
-    assert overlapping.guarantee is qm.EstimateGuarantee.EXACT
+    assert overlapping.quality is qm.EstimateQuality.EXACT
     assert {index for _owner, index in overlapping._dependency_keys or ()} == set(
         range(8)
     )
@@ -639,10 +639,10 @@ def test_nested_call_preserves_symbolic_index_alias_relations() -> None:
 
     assert disjoint_estimate.gates.total == 2
     assert disjoint_estimate.depth.depth == 1
-    assert disjoint_estimate.guarantee is qm.EstimateGuarantee.EXACT
+    assert disjoint_estimate.quality is qm.EstimateQuality.EXACT
     assert overlapping_estimate.gates.total == 2
     assert overlapping_estimate.depth.depth == 2
-    assert overlapping_estimate.guarantee is qm.EstimateGuarantee.EXACT
+    assert overlapping_estimate.quality is qm.EstimateQuality.EXACT
 
 
 def test_symbolic_control_pool_index_is_disjoint_from_adjacent_slot() -> None:
@@ -671,7 +671,7 @@ def test_symbolic_control_pool_index_is_disjoint_from_adjacent_slot() -> None:
 
     assert estimate.gates.total == 2
     assert estimate.depth.depth == 1
-    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
+    assert estimate.quality is qm.EstimateQuality.EXACT
 
 
 def test_symbolic_vector_broadcast_has_layer_depth_not_element_depth() -> None:
@@ -696,19 +696,19 @@ def test_symbolic_vector_broadcast_has_layer_depth_not_element_depth() -> None:
     assert symbolic.depth.gate_depth.subs(width, 0) == 0
     assert symbolic.depth.measurement_depth.subs(width, 3) == 1
     assert symbolic.depth.measurement_depth.subs(width, 0) == 0
-    assert symbolic.guarantee is qm.EstimateGuarantee.EXACT
+    assert symbolic.quality is qm.EstimateQuality.EXACT
     assert concrete.gates.total == 6
     assert concrete.measurements.total == 3
     assert concrete.depth.depth == 3
     assert concrete.depth.gate_depth == 2
     assert concrete.depth.measurement_depth == 1
-    assert concrete.guarantee is qm.EstimateGuarantee.EXACT
+    assert concrete.quality is qm.EstimateQuality.EXACT
     assert empty.gates.total == 0
     assert empty.measurements.total == 0
     assert empty.depth.depth == 0
     assert empty.depth.gate_depth == 0
     assert empty.depth.measurement_depth == 0
-    assert empty.guarantee is qm.EstimateGuarantee.EXACT
+    assert empty.quality is qm.EstimateQuality.EXACT
 
 
 def test_repeated_symbolic_branch_depth_omits_redundant_activity_indicator() -> None:
@@ -769,7 +769,7 @@ def test_parallel_loop_reports_stale_completion_as_an_upper_bound() -> None:
     estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
 
     assert estimate.depth.depth == 3
-    assert estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
     assert any("aggregate latency" in note.message for note in estimate.assumptions)
 
 
@@ -790,7 +790,7 @@ def test_large_uniform_parallel_loop_keeps_compact_exact_completion() -> None:
 
     assert estimate.gates.total == 600
     assert estimate.depth.depth == 1
-    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
+    assert estimate.quality is qm.EstimateQuality.EXACT
     assert estimate._dependency_keys is not None
     assert len(estimate._dependency_keys) == 2
 
@@ -811,7 +811,7 @@ def test_large_nonaffine_disjoint_loop_preserves_exact_parallel_depth() -> None:
 
     assert estimate.gates.total == 300
     assert estimate.depth.depth == 1
-    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
+    assert estimate.quality is qm.EstimateQuality.EXACT
 
 
 def test_parallel_measurement_and_reset_counts_do_not_inflate_depth() -> None:
@@ -964,7 +964,7 @@ def test_ordinary_call_uses_only_body_touched_arguments_for_depth() -> None:
     estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
 
     assert estimate.depth.depth == 1
-    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
+    assert estimate.quality is qm.EstimateQuality.EXACT
 
 
 def test_nonunitary_calls_disclose_global_barrier_depth() -> None:
@@ -996,9 +996,9 @@ def test_nonunitary_calls_disclose_global_barrier_depth() -> None:
     inline_estimate = inline.estimate_resources(basis=qm.GateBasis.LOGICAL)
 
     assert inline_estimate.depth.depth == 2
-    assert inline_estimate.guarantee is qm.EstimateGuarantee.EXACT
+    assert inline_estimate.quality is qm.EstimateQuality.EXACT
     assert nested_estimate.depth.depth == 4
-    assert nested_estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert nested_estimate.quality is qm.EstimateQuality.CONSERVATIVE
     assert any(
         "non-unitary callable boundary" in assumption.message
         for assumption in nested_estimate.assumptions
@@ -1020,7 +1020,7 @@ def test_inverse_call_uses_only_body_touched_arguments_for_depth() -> None:
     estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
 
     assert estimate.depth.depth == 1
-    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
+    assert estimate.quality is qm.EstimateQuality.EXACT
 
 
 def test_controlled_call_uses_only_control_and_body_touched_arguments() -> None:
@@ -1039,7 +1039,7 @@ def test_controlled_call_uses_only_control_and_body_touched_arguments() -> None:
     estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
 
     assert estimate.depth.depth == 1
-    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
+    assert estimate.quality is qm.EstimateQuality.EXACT
 
 
 def test_returned_callee_allocation_blocks_its_caller_consumer() -> None:
@@ -1069,7 +1069,7 @@ def test_multi_wire_call_boundary_reports_conservative_depth_guarantee() -> None
     estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
 
     assert estimate.depth.depth == 3
-    assert estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
     assert any("aggregate latency" in note.message for note in estimate.assumptions)
 
 
@@ -1113,9 +1113,9 @@ def test_multi_wire_call_reports_specialized_depth_completion_uncertainty() -> N
     inline_estimate = inline.estimate_resources(basis=qm.GateBasis.LOGICAL)
 
     assert inline_estimate.depth.t_depth == 1
-    assert inline_estimate.guarantee is qm.EstimateGuarantee.EXACT
+    assert inline_estimate.quality is qm.EstimateQuality.EXACT
     assert nested_estimate.depth.t_depth == 2
-    assert nested_estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert nested_estimate.quality is qm.EstimateQuality.CONSERVATIVE
     assert any(
         "aggregate latency" in note.message for note in nested_estimate.assumptions
     )
@@ -1143,7 +1143,7 @@ def test_single_visible_wire_preserves_hidden_specialized_nonuniformity() -> Non
 
     assert estimate.depth.depth == 2
     assert estimate.depth.t_depth == 2
-    assert estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
     assert any("aggregate latency" in note.message for note in estimate.assumptions)
 
 
@@ -1180,7 +1180,7 @@ def test_legacy_inverse_invoke_invalidates_forward_completion() -> None:
     estimate = qm.ResourceEstimator(basis=qm.GateBasis.LOGICAL).estimate(block)
 
     assert estimate.depth.depth == 3
-    assert estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
     assert any("aggregate latency" in note.message for note in estimate.assumptions)
 
 
@@ -1202,7 +1202,7 @@ def test_pauli_evolve_aggregate_boundary_is_not_exact() -> None:
 
     assert estimate.depth.depth == 4
     assert estimate.depth.rotation_depth == 2
-    assert estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
     assert any("aggregate latency" in note.message for note in estimate.assumptions)
 
 
@@ -1229,7 +1229,7 @@ def test_controlled_z_lowering_is_not_uniform() -> None:
     )
 
     assert estimate.depth.depth == 4
-    assert estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
 
 
 def test_controlled_swap_lowering_is_not_uniform() -> None:
@@ -1259,7 +1259,7 @@ def test_controlled_swap_lowering_is_not_uniform() -> None:
     )
 
     assert estimate.depth.depth == 18
-    assert estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
 
 
 def test_multi_controlled_global_phase_completion_is_not_uniform() -> None:
@@ -1293,7 +1293,7 @@ def test_multi_controlled_global_phase_completion_is_not_uniform() -> None:
     )
 
     assert estimate.depth.depth == 18
-    assert estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
 
 
 def test_multi_wire_if_boundary_reports_conservative_depth_guarantee() -> None:
@@ -1317,7 +1317,7 @@ def test_multi_wire_if_boundary_reports_conservative_depth_guarantee() -> None:
     )
 
     assert estimate.depth.depth == 3
-    assert estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
     assert any("aggregate latency" in note.message for note in estimate.assumptions)
 
 
@@ -1339,7 +1339,7 @@ def test_multi_wire_for_boundary_reports_conservative_depth_guarantee() -> None:
     estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
 
     assert estimate.depth.depth == 3
-    assert estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
     assert any("aggregate latency" in note.message for note in estimate.assumptions)
 
 
@@ -1363,7 +1363,7 @@ def test_select_does_not_block_an_unused_pass_through_target() -> None:
     estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
 
     assert estimate.depth.depth == 3
-    assert estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
 
 
 def test_selected_control_pool_slot_does_not_block_a_sibling_slot() -> None:
@@ -1398,13 +1398,13 @@ def test_selected_control_pool_slot_does_not_block_a_sibling_slot() -> None:
     substituted = symbolic.substitute(width=1, index=0)
 
     assert disjoint.depth.depth == 1
-    assert disjoint.guarantee is qm.EstimateGuarantee.EXACT
+    assert disjoint.quality is qm.EstimateQuality.EXACT
     assert overlapping.depth.depth == 2
-    assert overlapping.guarantee is qm.EstimateGuarantee.EXACT
+    assert overlapping.quality is qm.EstimateQuality.EXACT
     assert symbolic.depth.depth == 2
-    assert symbolic.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert symbolic.quality is qm.EstimateQuality.CONSERVATIVE
     assert substituted.depth.depth == 2
-    assert substituted.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert substituted.quality is qm.EstimateQuality.CONSERVATIVE
 
 
 def test_zero_power_body_does_not_join_independent_wire_timelines() -> None:
@@ -1436,7 +1436,7 @@ def test_zero_power_body_does_not_join_independent_wire_timelines() -> None:
 
     assert estimate.depth.depth == 1
     assert substituted.depth.depth == 1
-    assert substituted.guarantee is qm.EstimateGuarantee.EXACT
+    assert substituted.quality is qm.EstimateQuality.EXACT
 
 
 def test_zero_iteration_loop_preserves_independent_wire_timelines() -> None:
@@ -1464,8 +1464,8 @@ def test_zero_iteration_loop_preserves_independent_wire_timelines() -> None:
 
     assert direct.depth.depth == 1
     assert substituted.depth.depth == 1
-    assert direct.guarantee is qm.EstimateGuarantee.EXACT
-    assert substituted.guarantee is qm.EstimateGuarantee.EXACT
+    assert direct.quality is qm.EstimateQuality.EXACT
+    assert substituted.quality is qm.EstimateQuality.EXACT
 
 
 def test_zero_depth_classical_operation_does_not_disable_wire_scheduling() -> None:
@@ -1518,7 +1518,7 @@ def test_open_control_boundary_discloses_aggregate_depth_bound() -> None:
     estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
 
     assert estimate.depth.depth == 4
-    assert estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
     assert any("open-control" in note.message for note in estimate.assumptions)
 
 
@@ -1537,7 +1537,7 @@ def test_controlled_global_phase_does_not_block_pass_through_target() -> None:
     estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
 
     assert estimate.depth.depth == 1
-    assert estimate.guarantee is qm.EstimateGuarantee.EXACT
+    assert estimate.quality is qm.EstimateQuality.EXACT
 
 
 def test_measurement_provenance_sets_runtime_choice_and_feed_forward_depth() -> None:
@@ -1610,7 +1610,7 @@ def test_feed_forward_range_loop_matches_unrolled_depth_fields() -> None:
     assert loop_estimate.depth.depth == 6
     assert loop_estimate.depth.measurement_depth == 3
     assert loop_estimate.depth.t_depth == 3
-    assert loop_estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert loop_estimate.quality is qm.EstimateQuality.CONSERVATIVE
 
 
 def test_symbolic_feed_forward_loop_preserves_nested_call_barriers() -> None:
@@ -1644,7 +1644,7 @@ def test_symbolic_feed_forward_loop_preserves_nested_call_barriers() -> None:
     assert concrete.depth.depth == 6
     assert concrete.depth.measurement_depth == 3
     assert concrete.depth.t_depth == 3
-    assert concrete.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert concrete.quality is qm.EstimateQuality.CONSERVATIVE
 
 
 def test_derived_measurement_condition_keeps_callee_runtime_provenance() -> None:
@@ -1692,7 +1692,7 @@ def test_derived_measurement_condition_keeps_callee_runtime_provenance() -> None
 
     assert derived_estimate.depth == direct_estimate.depth
     assert derived_estimate.depth.depth == 3
-    assert derived_estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert derived_estimate.quality is qm.EstimateQuality.CONSERVATIVE
     assert derived_estimate.parameters == {}
 
 
@@ -1728,7 +1728,7 @@ def test_measurement_result_taint_crosses_nested_call_boundary() -> None:
     assert nested_estimate.gates == inline_estimate.gates
     assert nested_estimate.depth == inline_estimate.depth
     assert nested_estimate.parameters == {}
-    assert nested_estimate.guarantee is qm.EstimateGuarantee.UPPER_BOUND
+    assert nested_estimate.quality is qm.EstimateQuality.CONSERVATIVE
 
 
 def test_expval_result_taint_crosses_nested_call_boundary() -> None:
@@ -1797,7 +1797,7 @@ def test_unrelated_classical_loop_carry_does_not_serialize_disjoint_gates() -> N
     assert carried.gates == plain.gates
     assert carried.depth == plain.depth
     assert carried.depth.depth == 1
-    assert carried.guarantee is qm.EstimateGuarantee.EXACT
+    assert carried.quality is qm.EstimateQuality.EXACT
     assert carried.parameters == {}
 
 
@@ -2223,7 +2223,7 @@ def test_controlled_recursive_resource_driver_reaches_base_case(k: int) -> None:
     assert estimate.depth == reference.depth
     assert estimate.width == reference.width
     assert estimate.derivation is reference.derivation
-    assert estimate.guarantee is reference.guarantee
+    assert estimate.quality is reference.quality
     assert all(
         assumption in estimate.assumptions for assumption in reference.assumptions
     )

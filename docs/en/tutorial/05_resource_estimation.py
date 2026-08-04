@@ -110,7 +110,7 @@ assert decomposed_controls.gates.toffoli == 4
 assert decomposed_controls.width.clean_ancilla_qubits == 2
 assert decomposed_controls.qubits == 6
 assert decomposed_controls.derivation is qmc.EstimateDerivation.STRUCTURAL
-assert decomposed_controls.guarantee is qmc.EstimateGuarantee.UPPER_BOUND
+assert decomposed_controls.quality is qmc.EstimateQuality.CONSERVATIVE
 
 abstract_controls = controlled_h.estimate_resources(
     control_decomposition=qmc.ControlDecomposition.ABSTRACT,
@@ -154,7 +154,7 @@ phase_est = controlled_phase.estimate_resources(
 assert phase_est.substitute(theta=0).gates.total == 0
 assert phase_est.substitute(theta=math.pi / 4).gates.t == 1
 arbitrary_phase = phase_est.substitute(theta=0.3)
-assert arbitrary_phase.guarantee is qmc.EstimateGuarantee.UPPER_BOUND
+assert arbitrary_phase.quality is qmc.EstimateQuality.CONSERVATIVE
 assert arbitrary_phase.approximation is qmc.ApproximationStatus.APPROXIMATE
 
 # %% [markdown]
@@ -168,14 +168,14 @@ assert arbitrary_phase.approximation is qmc.ApproximationStatus.APPROXIMATE
 # | `qmc.control(...)` | Propagate every surrounding control into nested bodies. With `CLEAN_ANCILLA_TOFFOLI`, multi-control decomposition gates and reusable clean ancillas are included. With `ABSTRACT`, each controlled primitive remains one abstract operation. Open controls also include their X brackets. |
 # | `qmc.select(...)` | Sum every emitted controlled case body, including index-bit controls, open-control brackets, vector broadcast, and surrounding controls. The declared index width must match its operands and address all cases. |
 # | `qmc.pauli_evolve(...)` | For a supplied Hermitian Hamiltonian, count Pauli-basis changes, parity ladders, axial rotations, and any controlled constant-term phase. A noncommuting Pauli sum is one first-order Lie–Trotter step in Hamiltonian term order and is marked `approximate`. The target register must cover the Hamiltonian support. |
-# | `if`, `for`, `for_items`, and `while` | Keep compile-time conditions and loop bounds symbolic when possible. Gate and width metrics for a parameter branch use `Piecewise`; a measurement-backed branch uses a conservative maximum. Dependency depth can remain an `upper_bound` when symbolic aliases or multi-wire boundaries prevent an exact schedule. Loop work accumulates while reusable width follows liveness. Unsupported carried recurrences fail explicitly or add a visible assumption. |
-# | `qmc.expval(...)` | Record one abstract expectation query and one measurement layer. Observable grouping, basis rotations, shot count, and executor sampling policy remain engine/executor-dependent, so the result has `derivation=MODELED` and `guarantee=UNKNOWN`, with a visible assumption rather than a fabricated gate count. |
+# | `if`, `for`, `for_items`, and `while` | Keep compile-time conditions and loop bounds symbolic when possible. Gate and width metrics for a parameter branch use `Piecewise`; a measurement-backed branch uses a conservative maximum. Dependency-depth quality can remain `conservative` when symbolic aliases or multi-wire boundaries prevent an exact schedule. Loop work accumulates while reusable width follows liveness. Unsupported carried recurrences fail explicitly or add a visible assumption. |
+# | `qmc.expval(...)` | Record one abstract expectation query and one measurement layer. Observable grouping, basis rotations, shot count, and executor sampling policy remain engine/executor-dependent, so the result has `derivation=MODELED` and `quality=UNKNOWN`, with a visible assumption rather than a fabricated gate count. |
 # | LCU block encodings | Preserve exact signal- and system-register requirements through direct, controlled, inverse, descriptor-bound, and serialized forms. |
 
 # %% [markdown]
-# ### Resource-count derivation, guarantee, and mathematical approximation
+# ### Resource-count derivation, quality, and mathematical approximation
 #
-# Three independent fields answer different questions. `estimate.derivation` reports whether the estimator derived the counts from visible IR and the selected estimator decomposition rules (`STRUCTURAL`) or used a declared/fallback model (`MODELED`). `estimate.guarantee` reports whether those counts are `EXACT`, a conservative `UPPER_BOUND`, or `UNKNOWN`. `estimate.approximation` records mathematical approximations that the estimator recognizes in the selected circuit. Its `EXACT` value means that no known approximation was recorded; it is not a proof about semantics hidden behind an opaque boundary or already lowered by an external helper. Consequently, `UPPER_BOUND` does not imply `APPROXIMATE`, and a modeled estimate may also carry an upper-bound guarantee.
+# Three independent fields answer different questions. `estimate.derivation` reports whether the estimator derived the counts from visible IR and the selected estimator decomposition rules (`STRUCTURAL`) or used a declared/fallback model (`MODELED`). `estimate.quality` reports whether those counts are `EXACT`, `CONSERVATIVE`, or `UNKNOWN`. `CONSERVATIVE` means that the counts may overestimate but must not underestimate the selected circuit model. `estimate.approximation` records mathematical approximations that the estimator recognizes in the selected circuit. Its `EXACT` value means that no known approximation was recorded; it is not a proof about semantics hidden behind an opaque boundary or already lowered by an external helper. Consequently, `CONSERVATIVE` does not imply `APPROXIMATE`, and a modeled estimate may also be conservative.
 
 
 # %%
@@ -203,7 +203,7 @@ commuting_est = pauli_sum_evolution.estimate_resources(
 )
 
 assert noncommuting_est.derivation is qmc.EstimateDerivation.STRUCTURAL
-assert noncommuting_est.guarantee is qmc.EstimateGuarantee.EXACT
+assert noncommuting_est.quality is qmc.EstimateQuality.EXACT
 assert noncommuting_est.approximation is qmc.ApproximationStatus.APPROXIMATE
 assert zero_time_est.approximation is qmc.ApproximationStatus.EXACT
 assert commuting_est.approximation is qmc.ApproximationStatus.EXACT
@@ -250,7 +250,7 @@ print("parameters:", est.parameters)
 assert set(est.parameters.keys()) == {"n"}
 
 # %% [markdown]
-# The output contains SymPy expressions like `n` for qubits and `2*n + Max(0, n - 1)` for total gates. Inspect `est.derivation` to see whether an explicit/fallback model contributed and `est.guarantee` to distinguish exact counts, upper bounds, and counts with no such guarantee.
+# The output contains SymPy expressions like `n` for qubits and `2*n + Max(0, n - 1)` for total gates. Inspect `est.derivation` to see whether an explicit/fallback model contributed and `est.quality` to distinguish exact, conservative, and directionally unknown counts.
 #
 # The `Max(0, ...)` comes from the trip count of `qmc.range(n - 1)`. Since `n` is unbound, the estimator cannot assume `n >= 1`, so it clamps the count at zero rather than letting `n = 0` contribute `-1` iterations. Substituting any concrete `n >= 1` collapses the guard, which is why the totals below come out as plain integers.
 
@@ -276,7 +276,7 @@ assert vector_est.parameters == {}
 # %% [markdown]
 # Widths, indices, and arities are resource requirements, not hints. The estimator retains requirements for nonnegative integer allocations, array accesses and views, control indices, SELECT index width and nonempty target width, Pauli support, and block-encoding signal/system registers. A descriptor-produced block encoding carries its exact one-dimensional quantum-port widths, so `encoding.unitary.estimate_resources()` applies them automatically. Supplying `inputs={"signal": encoding.num_signal_qubits, "system": encoding.num_system_qubits}` remains useful for wrapper qkernels and explicitly validates the same contract. Requirements are checked both when `inputs` are supplied and after `.substitute()`, including through controlled and inverse forms. Invalid values raise `ValueError` instead of being clamped into a plausible-looking estimate. Serialized output exposes these checks in the `requirements` list.
 #
-# Supply concrete structural values through `inputs` in the original `estimate_resources()` call whenever possible. This lets the dependency scheduler resolve physical array indices, views, and loop-carried wire identities before it builds the depth expression. Calling `.substitute()` later safely evaluates the symbolic estimate and validates retained requirements, but it cannot rebuild an already conservative alias schedule; its depth may therefore remain an `upper_bound` even after every symbol is concrete.
+# Supply concrete structural values through `inputs` in the original `estimate_resources()` call whenever possible. This lets the dependency scheduler resolve physical array indices, views, and loop-carried wire identities before it builds the depth expression. Calling `.substitute()` later safely evaluates the symbolic estimate and validates retained requirements, but it cannot rebuild an already conservative alias schedule; its depth quality may therefore remain `conservative` even after every symbol is concrete.
 
 # %% [markdown]
 # ## `ResourceEstimate` Fields Reference
@@ -308,19 +308,19 @@ assert vector_est.parameters == {}
 # | `est.control_decomposition` | Selected coherent-control model (`abstract` or `clean_ancilla_toffoli`) |
 # | `est.precision` | Rotation-synthesis precision for `clifford_t` |
 # | `est.derivation` | `structural` or `modeled`: how the counts were obtained |
-# | `est.guarantee` | `exact`, `upper_bound`, or `unknown`: how the counts relate to the selected circuit cost |
+# | `est.quality` | `exact`, `conservative`, or `unknown`: how the counts relate to the selected circuit cost |
 # | `est.approximation` | `exact` or `approximate`: whether the estimator recognized a mathematical approximation |
 # | `est.assumptions` | Active modeling assumptions made by the estimator |
 # | `est.trace` / `est.explain()` | Optional explanation tree and its text rendering |
 #
-# Numeric resource fields are SymPy expressions. For fixed qkernels they evaluate to plain integers. `derivation` says how the resource counts were obtained, `guarantee` says what relation they have to the selected circuit cost, and `approximation` independently records mathematical approximations recognized by the estimator. Its `exact` value means “no known approximation was recorded,” not a proof about opaque semantics. Measurements and resets are not gates: measuring an `N`-qubit vector contributes `N` to `measurements.total`, while parallel readout can still contribute only one `measurement_depth` layer. Counts describe one logical qkernel execution and are not multiplied by shots. `qmc.expval` leaves `measurements.total` at zero because observable grouping, basis rotations, and shots are executor-dependent; here zero means “not included in this estimate,” not “no measurement is required.” Its modeled derivation, unknown guarantee, assumption, abstract query, and measurement layer expose that uncertainty. `resets.total` counts explicit `qmc.reset` operations, not fresh `|0>` allocation or target-dependent resets inserted by an engine. The category depths are scheduled independently, so they must not be subtracted from or summed to reconstruct `depth.depth`.
+# Numeric resource fields are SymPy expressions. For fixed qkernels they evaluate to plain integers. `derivation` says how the resource counts were obtained, `quality` says what relation they have to the selected circuit cost, and `approximation` independently records mathematical approximations recognized by the estimator. Its `exact` value means “no known approximation was recorded,” not a proof about opaque semantics. Measurements and resets are not gates: measuring an `N`-qubit vector contributes `N` to `measurements.total`, while parallel readout can still contribute only one `measurement_depth` layer. Counts describe one logical qkernel execution and are not multiplied by shots. `qmc.expval` leaves `measurements.total` at zero because observable grouping, basis rotations, and shots are executor-dependent; here zero means “not included in this estimate,” not “no measurement is required.” Its modeled derivation, unknown quality, assumption, abstract query, and measurement layer expose that uncertainty. `resets.total` counts explicit `qmc.reset` operations, not fresh `|0>` allocation or target-dependent resets inserted by an engine. The category depths are scheduled independently, so they must not be subtracted from or summed to reconstruct `depth.depth`.
 #
 # `calls_by_name` deliberately does **not** count ordinary body-backed qkernel calls: those bodies have already been expanded into gates, width, depth, measurements, and resets. It records named boundaries that remain unexpanded in the selected model. These include explicit or unknown opaque calls and modeled semantic boundaries such as `qmc.expval`, whose concrete sampling implementation is executor-dependent. One `expval` therefore records `calls_by_name={"expval": 1}` and `queries_by_name={"expval": 1}` in addition to its modeled measurement layer.
 
 # %% [markdown]
 # ## Opaque Boundaries, Model Settings, and Traces
 #
-# A bodyless callable has no honest gate cost unless you provide one. The default `UnknownResourcePolicy.ERROR` therefore raises. Prefer declaring an explicit `ResourceEstimate` cost on `qmc.opaque(...)` when one is known. For exploratory work, `OPAQUE_CALL` records a named call and query with `derivation=MODELED` and `guarantee=UNKNOWN`, while `ZERO_WITH_WARNING` records a zero-cost assumption with the same metadata. Neither policy pretends the unknown body was decomposed.
+# A bodyless callable has no honest gate cost unless you provide one. The default `UnknownResourcePolicy.ERROR` therefore raises. Prefer declaring an explicit `ResourceEstimate` cost on `qmc.opaque(...)` when one is known. For exploratory work, `OPAQUE_CALL` records a named call and query with `derivation=MODELED` and `quality=UNKNOWN`, while `ZERO_WITH_WARNING` records a zero-cost assumption with the same metadata. Neither policy pretends the unknown body was decomposed.
 #
 # A fixed `ResourceEstimate` and a context-dependent `cost(ctx)` callback share one contract: each describes the base cost of applying the Oracle definition once. That base cost already includes controls declared by `qmc.opaque(..., num_control_qubits=...)`, but it excludes controls added later with `qmc.control(oracle, ...)` and controls inherited from a surrounding controlled qkernel. The estimator applies inverse and those external controls after receiving either form of base cost.
 #
@@ -338,7 +338,7 @@ assert vector_est.parameters == {}
 #
 # Under `ABSTRACT`, external controls keep `total` unchanged and move known arity buckets: a one-qubit gate becomes two-qubit under one control and multi-qubit under two or more. Unclassified arity remains unclassified. Under `CLEAN_ANCILLA_TOFFOLI`, a logical profile with known `single_qubit` or `two_qubit` gates supports a decomposed estimate. With at least two modeled operations and at least two external controls, this estimation model computes the controls' AND once, projects every known primitive under that one effective control, and uncomputes the shared ladder after the body. A one-operation or one-control profile keeps the per-primitive decomposition. `CLEAN_ANCILLA_TOFFOLI` names a fixed resource-estimation model; its formulas do not automatically change when an engine's emission policy changes.
 #
-# Aggregate profiles have no gate names or original schedule. Their arity and gate-family fields are therefore independent field-wise bounds and need not sum to `total`; unclassified gates are not mislabeled as `multi_qubit`. The result has `derivation=MODELED`; its `guarantee` is `UPPER_BOUND` only when the supplied profile is complete enough for a safe projection, and otherwise `UNKNOWN`, with the limitation recorded in `assumptions`. An externally controlled aggregate Clifford+T gate profile is rejected because arity counts alone do not identify the Clifford+T lowering. A calls/query-only cost has no gate profile to transform, so those counters remain unchanged with a visible assumption. Use a body-backed callable when gate-specific transformed costs are required, or define a separate Oracle whose declared controls and base cost already describe that implementation.
+# Aggregate profiles have no gate names or original schedule. Their arity and gate-family fields are therefore independent field-wise bounds and need not sum to `total`; unclassified gates are not mislabeled as `multi_qubit`. The result has `derivation=MODELED`; its `quality` is `CONSERVATIVE` only when the supplied profile is complete enough for a safe projection, and otherwise `UNKNOWN`, with the limitation recorded in `assumptions`. An externally controlled aggregate Clifford+T gate profile is rejected because arity counts alone do not identify the Clifford+T lowering. A calls/query-only cost has no gate profile to transform, so those counters remain unchanged with a visible assumption. Use a body-backed callable when gate-specific transformed costs are required, or define a separate Oracle whose declared controls and base cost already describe that implementation.
 
 
 # %%
@@ -378,7 +378,7 @@ assert costed_est.depth.depth == 9
 assert costed_est.width.clean_ancilla_qubits == 2
 assert costed_est.calls.queries_by_name == {"costed_oracle": 1}
 assert costed_est.derivation is qmc.EstimateDerivation.MODELED
-assert costed_est.guarantee is qmc.EstimateGuarantee.UNKNOWN
+assert costed_est.quality is qmc.EstimateQuality.UNKNOWN
 assert any(
     "2 gate(s) with unclassified arity" in assumption.message
     for assumption in costed_est.assumptions
@@ -413,21 +413,21 @@ opaque_branch = conditional_est.substitute(flag=0)
 
 assert exact_branch.calls.calls_by_name == {}
 assert exact_branch.derivation is qmc.EstimateDerivation.STRUCTURAL
-assert exact_branch.guarantee is qmc.EstimateGuarantee.EXACT
+assert exact_branch.quality is qmc.EstimateQuality.EXACT
 assert "conditional_oracle" not in exact_branch.explain()
 assert opaque_branch.calls.calls_by_name == {"conditional_oracle": 1}
 assert opaque_branch.calls.queries_by_name == {"conditional_oracle": 1}
 assert opaque_branch.derivation is qmc.EstimateDerivation.MODELED
-assert opaque_branch.guarantee is qmc.EstimateGuarantee.UNKNOWN
+assert opaque_branch.quality is qmc.EstimateQuality.UNKNOWN
 assert "conditional_oracle" in opaque_branch.explain()
 
 # %% [markdown]
-# Assumptions, derivation/guarantee facts, call summaries, and trace nodes carry the same symbolic branch guards as the numeric metrics. Once `inputs` or `.substitute()` selects a branch, inactive warnings and opaque calls disappear, as above. Set `trace=True` only when you need the explanation tree; estimates stay compact by default. `est.explain()` renders the retained recursive body/primitive/opaque explanation.
+# Assumptions, derivation/quality facts, call summaries, and trace nodes carry the same symbolic branch guards as the numeric metrics. Once `inputs` or `.substitute()` selects a branch, inactive warnings and opaque calls disappear, as above. Set `trace=True` only when you need the explanation tree; estimates stay compact by default. `est.explain()` renders the retained recursive body/primitive/opaque explanation.
 
 # %% [markdown]
 # ### JSON-friendly output
 #
-# `to_dict()` produces a JSON-friendly report snapshot. Symbolic expressions and structural requirements are stored as strings, alongside basis, precision, derivation, guarantee, approximation status, and assumptions. The opt-in trace is intentionally rendered separately with `explain()` rather than embedded in this compact payload. This snapshot is not a round-trip `ResourceEstimate` serialization format: its strings can contain Qamomile-specific symbolic nodes and should not be evaluated with `sympy.sympify()`. To export a concrete report, specialize the original estimate with `.substitute(...)` first. Persist an unbound qkernel, including supported fixed opaque costs, with `qamomile.circuit.serialization.serialize()` instead.
+# `to_dict()` produces a JSON-friendly report snapshot. Symbolic expressions and structural requirements are stored as strings, alongside basis, precision, derivation, quality, approximation status, and assumptions. The opt-in trace is intentionally rendered separately with `explain()` rather than embedded in this compact payload. This snapshot is not a round-trip `ResourceEstimate` serialization format: its strings can contain Qamomile-specific symbolic nodes and should not be evaluated with `sympy.sympify()`. To export a concrete report, specialize the original estimate with `.substitute(...)` first. Persist an unbound qkernel, including supported fixed opaque costs, with `qamomile.circuit.serialization.serialize()` instead.
 
 
 # %%
@@ -437,7 +437,7 @@ payload = json.loads(json.dumps(conditional_est.to_dict()))
 assert payload["basis"] == "logical"
 assert payload["control_decomposition"] == "clean_ancilla_toffoli"
 assert payload["derivation"] == "modeled"
-assert payload["guarantee"] == "unknown"
+assert payload["quality"] == "unknown"
 assert payload["approximation"] == "exact"
 assert "requirements" in payload
 
@@ -470,7 +470,7 @@ print("default total gates:", shor_est.gates.total)
 print("measurements:", shor_est.measurements.total)
 print("resets:", shor_est.resets.total)
 print("estimate derivation:", shor_est.derivation)
-print("estimate guarantee:", shor_est.guarantee)
+print("estimate quality:", shor_est.quality)
 
 assert shor_est.parameters == {}
 assert shor_est.width.allocated_qubits == 21
@@ -480,7 +480,7 @@ assert shor_est.gates.total == 4585
 assert shor_est.measurements.total == 80
 assert shor_est.resets.total == 80
 assert shor_est.derivation is qmc.EstimateDerivation.STRUCTURAL
-assert shor_est.guarantee is qmc.EstimateGuarantee.UPPER_BOUND
+assert shor_est.quality is qmc.EstimateQuality.CONSERVATIVE
 
 # %% [markdown]
 # This implementation does not keep a `2*n`-qubit counting register at once. It measures and resets one phase qubit for reuse, applying semiclassical inverse-QFT phase corrections from the previously observed bits. Of the 80 measurement/reset events above, 8 come from that phase readout and reuse, while 72 come from measurement-assisted carry venting inside the arithmetic. All explicit resets appear in `resets.total`, not in `gates.total`.
@@ -527,7 +527,7 @@ assert shor_est.gates.total == (
 )
 
 # %% [markdown]
-# `guarantee` is `upper_bound` because branches selected by mid-circuit measurements and classical feed-forward are counted conservatively, and `CLEAN_ANCILLA_TOFFOLI` is a conservative multi-control model. The derivation remains `structural`, and this bound does not by itself make the circuit mathematically approximate. These remain algorithmic circuit resources: they do not include decomposition to device-native gates, routing, error correction, or magic-state production.
+# `quality` is `conservative` because branches selected by mid-circuit measurements and classical feed-forward are counted conservatively, and `CLEAN_ANCILLA_TOFFOLI` is a conservative multi-control model. The derivation remains `structural`, and this bound does not by itself make the circuit mathematically approximate. These remain algorithmic circuit resources: they do not include decomposition to device-native gates, routing, error correction, or magic-state production.
 
 # %% [markdown]
 # ### Why the gate count is `O(n^3)`
@@ -604,7 +604,7 @@ assert short_dlp.output_types == [qmc.Vector[qmc.Bit]]
 # - `expval` is reported as a modeled abstract query and measurement layer; grouping, basis-change, and shot costs are deliberately left to the selected executor.
 # - For parameterized qkernels, results are SymPy expressions showing scaling within the selected model.
 # - `inputs` can supply classical values, array shapes, and an integer width for a one-dimensional quantum Vector; retained requirements reject invalid widths and indices.
-# - Check `basis`, `derivation`, `guarantee`, `approximation`, `assumptions`, and opt-in traces before interpreting a result. `derivation` identifies structural versus modeled counts, `guarantee` classifies their relation to the selected circuit cost, and `approximation` independently records a mathematical approximation known to the estimator. Condition selection removes inactive metadata.
+# - Check `basis`, `derivation`, `quality`, `approximation`, `assumptions`, and opt-in traces before interpreting a result. `derivation` identifies structural versus modeled counts, `quality` classifies their relation to the selected circuit cost, and `approximation` independently records a mathematical approximation known to the estimator. Condition selection removes inactive metadata.
 # - `calls_by_name` describes unexpanded named boundaries, including opaque calls and modeled semantic operations such as `expval`. Body-backed calls are recursively expanded. Fixed and callback opaque costs both describe one base Oracle application; the estimator applies later-added and inherited controls, projects the known one-/two-qubit portion through the selected control decomposition, and keeps any remaining gates as visible modeled placeholders.
 # - `to_dict()` exports a display/report snapshot; use `.substitute(...)` on the original estimate before exporting concrete values.
 # - Use `.substitute(n=...)` to evaluate an existing estimate at specific sizes and check feasibility; use initial `inputs` when concrete structure should sharpen dependency scheduling.

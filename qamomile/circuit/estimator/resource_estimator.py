@@ -28,7 +28,7 @@ from qamomile.circuit.estimator._metrics import (
     ControlDecomposition,
     DepthResources,
     EstimateDerivation,
-    EstimateGuarantee,
+    EstimateQuality,
     GateBasis,
     GateResources,
     MeasurementResources,
@@ -41,7 +41,7 @@ from qamomile.circuit.estimator._metrics import (
     _active_approximation,
     _active_assumptions,
     _active_derivation,
-    _active_guarantee,
+    _active_quality,
     _add_calls,
     _add_depth,
     _add_gates,
@@ -50,7 +50,7 @@ from qamomile.circuit.estimator._metrics import (
     _boolean_condition,
     _combine_approximation,
     _combine_derivation,
-    _combine_guarantee,
+    _combine_quality,
     _conditional_calls,
     _conditional_depth,
     _conditional_gates,
@@ -64,7 +64,7 @@ from qamomile.circuit.estimator._metrics import (
     _GuardedApproximation,
     _GuardedAssumption,
     _GuardedDerivation,
-    _GuardedGuarantee,
+    _GuardedQuality,
     _is_concrete_integer,
     _max_calls,
     _max_depth,
@@ -892,7 +892,7 @@ class ResourceEstimate:
         derivation (EstimateDerivation): Whether counts are derived from
             visible structure or use a resource model. Defaults to
             ``STRUCTURAL``.
-        guarantee (EstimateGuarantee): Relationship between reported counts
+        quality (EstimateQuality): Relationship between reported counts
             and the selected circuit cost. Defaults to ``EXACT``.
         approximation (ApproximationStatus): Whether the selected circuit
             approximates an ideal mathematical operation. Defaults to
@@ -934,9 +934,9 @@ class ResourceEstimate:
         _guarded_derivations (tuple[_GuardedDerivation, ...] | None): Internal
             condition-aware modeled-derivation provenance. ``None`` initializes
             a fact from the public ``derivation`` value.
-        _guarded_guarantees (tuple[_GuardedGuarantee, ...] | None): Internal
-            condition-aware non-exact count guarantees. ``None`` initializes a
-            fact from the public ``guarantee`` value.
+        _guarded_qualities (tuple[_GuardedQuality, ...] | None): Internal
+            condition-aware non-exact count qualities. ``None`` initializes a
+            fact from the public ``quality`` value.
         _guarded_approximations (tuple[_GuardedApproximation, ...] | None):
             Internal condition-aware mathematical approximation provenance.
             ``None`` initializes a fact from the public ``approximation``
@@ -953,7 +953,7 @@ class ResourceEstimate:
     trace: ResourceTraceNode | None = None
     parameters: dict[str, sp.Symbol] = dataclasses.field(default_factory=dict)
     derivation: EstimateDerivation = EstimateDerivation.STRUCTURAL
-    guarantee: EstimateGuarantee = EstimateGuarantee.EXACT
+    quality: EstimateQuality = EstimateQuality.EXACT
     approximation: ApproximationStatus = ApproximationStatus.EXACT
     basis: GateBasis = _DEFAULT_GATE_BASIS
     control_decomposition: ControlDecomposition = _DEFAULT_CONTROL_DECOMPOSITION
@@ -1011,7 +1011,7 @@ class ResourceEstimate:
         repr=False,
         compare=False,
     )
-    _guarded_guarantees: tuple[_GuardedGuarantee, ...] | None = dataclasses.field(
+    _guarded_qualities: tuple[_GuardedQuality, ...] | None = dataclasses.field(
         default=None,
         repr=False,
         compare=False,
@@ -1064,23 +1064,23 @@ class ResourceEstimate:
             )
         self.assumptions = _active_assumptions(self._guarded_assumptions)
         self.derivation = _active_derivation(self._guarded_derivations)
-        if self._guarded_guarantees is None:
-            self._guarded_guarantees = (
-                (_GuardedGuarantee(sp.true, self.guarantee),)
-                if self.guarantee is not EstimateGuarantee.EXACT
+        if self._guarded_qualities is None:
+            self._guarded_qualities = (
+                (_GuardedQuality(sp.true, self.quality),)
+                if self.quality is not EstimateQuality.EXACT
                 else ()
             )
-        elif _combine_guarantee(
-            _active_guarantee(self._guarded_guarantees),
-            self.guarantee,
-        ) is self.guarantee and self.guarantee is not _active_guarantee(
-            self._guarded_guarantees
+        elif _combine_quality(
+            _active_quality(self._guarded_qualities),
+            self.quality,
+        ) is self.quality and self.quality is not _active_quality(
+            self._guarded_qualities
         ):
-            self._guarded_guarantees = (
-                *self._guarded_guarantees,
-                _GuardedGuarantee(sp.true, self.guarantee),
+            self._guarded_qualities = (
+                *self._guarded_qualities,
+                _GuardedQuality(sp.true, self.quality),
             )
-        self.guarantee = _active_guarantee(self._guarded_guarantees)
+        self.quality = _active_quality(self._guarded_qualities)
         if self._guarded_approximations is None:
             self._guarded_approximations = (
                 (_GuardedApproximation(sp.true, self.approximation),)
@@ -1125,18 +1125,18 @@ class ResourceEstimate:
         *,
         assumptions: Sequence[ResourceAssumption] = (),
         derivation: EstimateDerivation = EstimateDerivation.STRUCTURAL,
-        guarantee: EstimateGuarantee = EstimateGuarantee.EXACT,
+        quality: EstimateQuality = EstimateQuality.EXACT,
         approximation: ApproximationStatus = ApproximationStatus.EXACT,
         active_when: sp.Basic = sp.true,
     ) -> ResourceEstimate:
-        """Append guarded assumption, derivation, guarantee, and approximation.
+        """Append guarded assumption, derivation, quality, and approximation.
 
         Args:
             assumptions (Sequence[ResourceAssumption]): Assumptions to append.
                 Defaults to none.
             derivation (EstimateDerivation): Derivation fact to append.
                 ``STRUCTURAL`` adds no fact. Defaults to ``STRUCTURAL``.
-            guarantee (EstimateGuarantee): Count guarantee to append. ``EXACT``
+            quality (EstimateQuality): Count quality to append. ``EXACT``
                 adds no fact. Defaults to ``EXACT``.
             approximation (ApproximationStatus): Mathematical approximation
                 fact to append. ``EXACT`` adds no fact. Defaults to ``EXACT``.
@@ -1149,7 +1149,7 @@ class ResourceEstimate:
         condition = _boolean_condition(active_when)
         guarded_assumptions = self._guarded_assumptions or ()
         guarded_derivations = self._guarded_derivations or ()
-        guarded_guarantees = self._guarded_guarantees or ()
+        guarded_qualities = self._guarded_qualities or ()
         guarded_approximations = self._guarded_approximations or ()
         return dataclasses.replace(
             self,
@@ -1168,11 +1168,11 @@ class ResourceEstimate:
                     else ()
                 ),
             ),
-            _guarded_guarantees=(
-                *guarded_guarantees,
+            _guarded_qualities=(
+                *guarded_qualities,
                 *(
-                    (_GuardedGuarantee(condition, guarantee),)
-                    if guarantee is not EstimateGuarantee.EXACT
+                    (_GuardedQuality(condition, quality),)
+                    if quality is not EstimateQuality.EXACT
                     else ()
                 ),
             ),
@@ -1279,7 +1279,7 @@ class ResourceEstimate:
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_merge_trace("seq", self.trace, other.trace),
             derivation=_combine_derivation(self.derivation, other.derivation),
-            guarantee=_combine_guarantee(self.guarantee, other.guarantee),
+            quality=_combine_quality(self.quality, other.quality),
             approximation=_combine_approximation(
                 self.approximation,
                 other.approximation,
@@ -1302,9 +1302,9 @@ class ResourceEstimate:
                 *(self._guarded_derivations or ()),
                 *(other._guarded_derivations or ()),
             ),
-            _guarded_guarantees=(
-                *(self._guarded_guarantees or ()),
-                *(other._guarded_guarantees or ()),
+            _guarded_qualities=(
+                *(self._guarded_qualities or ()),
+                *(other._guarded_qualities or ()),
             ),
             _guarded_approximations=(
                 *(self._guarded_approximations or ()),
@@ -1362,7 +1362,7 @@ class ResourceEstimate:
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_merge_trace("parallel", self.trace, other.trace),
             derivation=_combine_derivation(self.derivation, other.derivation),
-            guarantee=_combine_guarantee(self.guarantee, other.guarantee),
+            quality=_combine_quality(self.quality, other.quality),
             approximation=_combine_approximation(
                 self.approximation,
                 other.approximation,
@@ -1385,9 +1385,9 @@ class ResourceEstimate:
                 *(self._guarded_derivations or ()),
                 *(other._guarded_derivations or ()),
             ),
-            _guarded_guarantees=(
-                *(self._guarded_guarantees or ()),
-                *(other._guarded_guarantees or ()),
+            _guarded_qualities=(
+                *(self._guarded_qualities or ()),
+                *(other._guarded_qualities or ()),
             ),
             _guarded_approximations=(
                 *(self._guarded_approximations or ()),
@@ -1430,9 +1430,9 @@ class ResourceEstimate:
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_merge_trace("choice", self.trace, other.trace),
             derivation=_combine_derivation(self.derivation, other.derivation),
-            guarantee=_combine_guarantee(
-                EstimateGuarantee.UPPER_BOUND,
-                _combine_guarantee(self.guarantee, other.guarantee),
+            quality=_combine_quality(
+                EstimateQuality.CONSERVATIVE,
+                _combine_quality(self.quality, other.quality),
             ),
             approximation=_combine_approximation(
                 self.approximation,
@@ -1453,10 +1453,10 @@ class ResourceEstimate:
                 *(self._guarded_derivations or ()),
                 *(other._guarded_derivations or ()),
             ),
-            _guarded_guarantees=(
-                *(self._guarded_guarantees or ()),
-                *(other._guarded_guarantees or ()),
-                _GuardedGuarantee(sp.true, EstimateGuarantee.UPPER_BOUND),
+            _guarded_qualities=(
+                *(self._guarded_qualities or ()),
+                *(other._guarded_qualities or ()),
+                _GuardedQuality(sp.true, EstimateQuality.CONSERVATIVE),
             ),
             _guarded_approximations=(
                 *(self._guarded_approximations or ()),
@@ -1521,7 +1521,7 @@ class ResourceEstimate:
             assumptions=(*self.assumptions, *other.assumptions),
             trace=_conditional_trace(condition, self.trace, other.trace),
             derivation=_combine_derivation(self.derivation, other.derivation),
-            guarantee=_combine_guarantee(self.guarantee, other.guarantee),
+            quality=_combine_quality(self.quality, other.quality),
             approximation=_combine_approximation(
                 self.approximation,
                 other.approximation,
@@ -1557,11 +1557,11 @@ class ResourceEstimate:
                     for fact in (other._guarded_derivations or ())
                 ),
             ),
-            _guarded_guarantees=(
-                *(fact.when(condition) for fact in (self._guarded_guarantees or ())),
+            _guarded_qualities=(
+                *(fact.when(condition) for fact in (self._guarded_qualities or ())),
                 *(
                     fact.when(sp.Not(condition))
-                    for fact in (other._guarded_guarantees or ())
+                    for fact in (other._guarded_qualities or ())
                 ),
             ),
             _guarded_approximations=(
@@ -1585,7 +1585,7 @@ class ResourceEstimate:
             )
             estimate = estimate._with_metadata(
                 assumptions=(assumption,),
-                guarantee=EstimateGuarantee.UPPER_BOUND,
+                quality=EstimateQuality.CONSERVATIVE,
                 active_when=_unresolved_condition_guard(condition),
             )
         return estimate
@@ -1632,7 +1632,7 @@ class ResourceEstimate:
                 self.trace.when(active_when) if self.trace is not None else None,
             ),
             derivation=EstimateDerivation.STRUCTURAL,
-            guarantee=EstimateGuarantee.EXACT,
+            quality=EstimateQuality.EXACT,
             approximation=ApproximationStatus.EXACT,
             basis=self.basis,
             control_decomposition=self.control_decomposition,
@@ -1667,8 +1667,8 @@ class ResourceEstimate:
             _guarded_derivations=tuple(
                 fact.when(active_when) for fact in (self._guarded_derivations or ())
             ),
-            _guarded_guarantees=tuple(
-                fact.when(active_when) for fact in (self._guarded_guarantees or ())
+            _guarded_qualities=tuple(
+                fact.when(active_when) for fact in (self._guarded_qualities or ())
             ),
             _guarded_approximations=tuple(
                 fact.when(active_when) for fact in (self._guarded_approximations or ())
@@ -1688,7 +1688,7 @@ class ResourceEstimate:
             )
             estimate = estimate._with_metadata(
                 assumptions=(assumption,),
-                guarantee=EstimateGuarantee.UPPER_BOUND,
+                quality=EstimateQuality.CONSERVATIVE,
                 active_when=active_when,
             )
         return estimate
@@ -1791,7 +1791,7 @@ class ResourceEstimate:
             assumptions=self.assumptions,
             trace=_wrap_trace(f"controlled({controls})", self.trace),
             derivation=self.derivation,
-            guarantee=self.guarantee,
+            quality=self.quality,
             approximation=self.approximation,
             basis=self.basis,
             control_decomposition=self.control_decomposition,
@@ -1807,7 +1807,7 @@ class ResourceEstimate:
             _dependency_completion_uniform=self._dependency_completion_uniform,
             _guarded_assumptions=self._guarded_assumptions,
             _guarded_derivations=self._guarded_derivations,
-            _guarded_guarantees=self._guarded_guarantees,
+            _guarded_qualities=self._guarded_qualities,
             _guarded_approximations=self._guarded_approximations,
             _symbol_aliases=self._symbol_aliases,
         )
@@ -1820,7 +1820,7 @@ class ResourceEstimate:
         return controlled_estimate._with_metadata(
             assumptions=(assumption,),
             derivation=EstimateDerivation.MODELED,
-            guarantee=EstimateGuarantee.UNKNOWN,
+            quality=EstimateQuality.UNKNOWN,
             active_when=sp.And(
                 sp.Gt(controls, _ZERO),
                 activity_guard,
@@ -1852,7 +1852,7 @@ class ResourceEstimate:
             trace=_wrap_trace("inverse", self.trace),
             parameters=self.parameters,
             derivation=self.derivation,
-            guarantee=self.guarantee,
+            quality=self.quality,
             approximation=self.approximation,
             basis=self.basis,
             control_decomposition=self.control_decomposition,
@@ -1870,7 +1870,7 @@ class ResourceEstimate:
             _dependency_completion_uniform=None,
             _guarded_assumptions=self._guarded_assumptions,
             _guarded_derivations=self._guarded_derivations,
-            _guarded_guarantees=self._guarded_guarantees,
+            _guarded_qualities=self._guarded_qualities,
             _guarded_approximations=self._guarded_approximations,
             _symbol_aliases=self._symbol_aliases,
         )
@@ -1965,7 +1965,7 @@ class ResourceEstimate:
             iterations,
         )
         assumptions: tuple[ResourceAssumption, ...] = ()
-        guarantee = EstimateGuarantee.EXACT
+        quality = EstimateQuality.EXACT
         if not width_is_exact:
             assumptions = (
                 *assumptions,
@@ -1975,9 +1975,9 @@ class ResourceEstimate:
                     source=str(loop_symbol),
                 ),
             )
-            guarantee = _combine_guarantee(
-                guarantee,
-                EstimateGuarantee.UPPER_BOUND,
+            quality = _combine_quality(
+                quality,
+                EstimateQuality.CONSERVATIVE,
             )
         estimate = ResourceEstimate(
             width=width,
@@ -2073,7 +2073,7 @@ class ResourceEstimate:
                 )
                 for fact in (self._guarded_derivations or ())
             ),
-            _guarded_guarantees=tuple(
+            _guarded_qualities=tuple(
                 dataclasses.replace(
                     fact,
                     active_when=_activation_over_range(
@@ -2084,7 +2084,7 @@ class ResourceEstimate:
                         iterations,
                     ),
                 )
-                for fact in (self._guarded_guarantees or ())
+                for fact in (self._guarded_qualities or ())
             ),
             _guarded_approximations=tuple(
                 dataclasses.replace(
@@ -2102,7 +2102,7 @@ class ResourceEstimate:
             _symbol_aliases=self._symbol_aliases,
         )._with_metadata(
             assumptions=assumptions,
-            guarantee=guarantee,
+            quality=quality,
             active_when=sp.Gt(iterations, _ZERO),
         )
         return _project_dependency_metadata_over_symbol(
@@ -2288,7 +2288,7 @@ class ResourceEstimate:
                 name: registry.name(symbol) for name, symbol in self.parameters.items()
             },
             "derivation": self.derivation.value,
-            "guarantee": self.guarantee.value,
+            "quality": self.quality.value,
             "approximation": self.approximation.value,
             "basis": self.basis.value,
             "control_decomposition": self.control_decomposition.value,
@@ -2336,7 +2336,7 @@ class ResourceEstimate:
             constraint_fn (Any | None): Optional non-clamping rewrite for
                 structural constraints. Defaults to ``fn``.
             guard_fn (Any | None): Optional rewrite for guarded assumption,
-                derivation, guarantee, and approximation predicates. Defaults
+                derivation, quality, and approximation predicates. Defaults
                 to ``constraint_fn``.
             dependency_fn (Any | None): Optional rewrite for private wire-key
                 indices and per-wire completion depths. Defaults to
@@ -2363,9 +2363,9 @@ class ResourceEstimate:
             for fact in (self._guarded_derivations or ())
             if (mapped := fact.mapped(rewrite_guard)) is not None
         )
-        mapped_guarantees = tuple(
+        mapped_qualities = tuple(
             mapped
-            for fact in (self._guarded_guarantees or ())
+            for fact in (self._guarded_qualities or ())
             if (mapped := fact.mapped(rewrite_guard)) is not None
         )
         mapped_approximations = tuple(
@@ -2450,7 +2450,7 @@ class ResourceEstimate:
             _dependency_completion_uniform=self._dependency_completion_uniform,
             _guarded_assumptions=mapped_assumptions,
             _guarded_derivations=mapped_derivations,
-            _guarded_guarantees=mapped_guarantees,
+            _guarded_qualities=mapped_qualities,
             _guarded_approximations=mapped_approximations,
             _symbol_aliases=self._symbol_aliases,
         )
@@ -4169,7 +4169,7 @@ class ResourceInterpreter:
                 if body._dependency_completion is not None
                 else None
             ),
-        )._with_metadata(guarantee=EstimateGuarantee.UPPER_BOUND)
+        )._with_metadata(quality=EstimateQuality.CONSERVATIVE)
 
     def _block_runtime_observation_summary(
         self,
@@ -4403,7 +4403,7 @@ class ResourceInterpreter:
                     )
                     operation_estimate = operation_estimate._with_metadata(
                         assumptions=(assumption,),
-                        guarantee=EstimateGuarantee.UPPER_BOUND,
+                        quality=EstimateQuality.CONSERVATIVE,
                     )
                 if not self.config.trace:
                     # Every operation estimate is freshly produced for this
@@ -4565,7 +4565,7 @@ class ResourceInterpreter:
                 )
                 result = result._with_metadata(
                     assumptions=(assumption,),
-                    guarantee=EstimateGuarantee.UPPER_BOUND,
+                    quality=EstimateQuality.CONSERVATIVE,
                     active_when=possible_alias_active,
                 )
             if aggregate_completion_active is not sp.false:
@@ -4576,7 +4576,7 @@ class ResourceInterpreter:
                 )
                 result = result._with_metadata(
                     assumptions=(assumption,),
-                    guarantee=EstimateGuarantee.UPPER_BOUND,
+                    quality=EstimateQuality.CONSERVATIVE,
                     active_when=aggregate_completion_active,
                 )
             return result
@@ -4913,14 +4913,14 @@ class ResourceInterpreter:
                     ),
                 )
         if self.config.basis is GateBasis.CLIFFORD_T:
-            upper_bound_when = _clifford_t_upper_bound_condition(
+            conservative_when = _clifford_t_conservative_condition(
                 name,
                 _expr(controls),
             )
-            if upper_bound_when is not sp.false:
+            if conservative_when is not sp.false:
                 estimate = estimate._with_metadata(
-                    guarantee=EstimateGuarantee.UPPER_BOUND,
-                    active_when=upper_bound_when,
+                    quality=EstimateQuality.CONSERVATIVE,
+                    active_when=conservative_when,
                 )
             if _gate_has_rotation(operation):
                 estimate = estimate._with_metadata(
@@ -5238,7 +5238,7 @@ class ResourceInterpreter:
             ),
             assumptions=(assumption,),
             derivation=EstimateDerivation.MODELED,
-            guarantee=EstimateGuarantee.UNKNOWN,
+            quality=EstimateQuality.UNKNOWN,
             trace=ResourceTraceNode(
                 "expval",
                 "opaque",
@@ -5479,7 +5479,7 @@ class ResourceInterpreter:
                     )
                     estimate = estimate._with_metadata(
                         assumptions=(assumption,),
-                        guarantee=EstimateGuarantee.UPPER_BOUND,
+                        quality=EstimateQuality.CONSERVATIVE,
                         active_when=sp.Gt(iterations, _ZERO),
                     )
             elif (
@@ -5509,7 +5509,7 @@ class ResourceInterpreter:
                 )
                 estimate = estimate._with_metadata(
                     assumptions=(assumption,),
-                    guarantee=EstimateGuarantee.UPPER_BOUND,
+                    quality=EstimateQuality.CONSERVATIVE,
                     active_when=sp.Gt(iterations, _ONE),
                 )
         estimate = _with_operation_output_summary(
@@ -6879,7 +6879,7 @@ class ResourceInterpreter:
                 )
                 return combined._with_metadata(
                     assumptions=(assumption,),
-                    guarantee=EstimateGuarantee.UPPER_BOUND,
+                    quality=EstimateQuality.CONSERVATIVE,
                 )
             footprints.append((keys, keys))
 
@@ -6912,7 +6912,7 @@ class ResourceInterpreter:
             )
             result = result._with_metadata(
                 assumptions=(assumption,),
-                guarantee=EstimateGuarantee.UPPER_BOUND,
+                quality=EstimateQuality.CONSERVATIVE,
                 active_when=possible_alias_active,
             )
         aggregate_completion_active = _aggregate_completion_overlap_condition(
@@ -6928,7 +6928,7 @@ class ResourceInterpreter:
             )
             result = result._with_metadata(
                 assumptions=(assumption,),
-                guarantee=EstimateGuarantee.UPPER_BOUND,
+                quality=EstimateQuality.CONSERVATIVE,
                 active_when=aggregate_completion_active,
             )
         return result
@@ -7582,7 +7582,7 @@ class ResourceInterpreter:
                 )
                 estimate = estimate._with_metadata(
                     assumptions=(assumption,),
-                    guarantee=EstimateGuarantee.UPPER_BOUND,
+                    quality=EstimateQuality.CONSERVATIVE,
                 )
             return _with_body_boundary_depth_metadata(
                 estimate,
@@ -7606,7 +7606,7 @@ class ResourceInterpreter:
             estimate = ResourceEstimate(
                 assumptions=(assumption,),
                 derivation=EstimateDerivation.MODELED,
-                guarantee=EstimateGuarantee.UNKNOWN,
+                quality=EstimateQuality.UNKNOWN,
                 trace=ResourceTraceNode(
                     name,
                     "opaque",
@@ -7635,7 +7635,7 @@ class ResourceInterpreter:
             calls=calls,
             assumptions=(assumption,),
             derivation=EstimateDerivation.MODELED,
-            guarantee=EstimateGuarantee.UNKNOWN,
+            quality=EstimateQuality.UNKNOWN,
             trace=ResourceTraceNode(
                 name,
                 "opaque",
@@ -7897,7 +7897,7 @@ class ResourceInterpreter:
                     ),
                     assumptions=(assumption,),
                     derivation=EstimateDerivation.MODELED,
-                    guarantee=EstimateGuarantee.UNKNOWN,
+                    quality=EstimateQuality.UNKNOWN,
                     trace=ResourceTraceNode(
                         name,
                         "opaque",
@@ -7908,7 +7908,7 @@ class ResourceInterpreter:
                 estimate = ResourceEstimate(
                     assumptions=(assumption,),
                     derivation=EstimateDerivation.MODELED,
-                    guarantee=EstimateGuarantee.UNKNOWN,
+                    quality=EstimateQuality.UNKNOWN,
                     trace=ResourceTraceNode(
                         name,
                         "opaque",
@@ -8058,7 +8058,7 @@ class ResourceInterpreter:
                 calls=calls,
                 assumptions=(assumption,),
                 derivation=EstimateDerivation.MODELED,
-                guarantee=EstimateGuarantee.UNKNOWN,
+                quality=EstimateQuality.UNKNOWN,
                 trace=ResourceTraceNode(
                     "pauli_evolve",
                     "modeled",
@@ -8605,7 +8605,7 @@ class ResourceInterpreter:
             )
             estimate = estimate._with_metadata(
                 assumptions=(assumption,),
-                guarantee=EstimateGuarantee.UPPER_BOUND,
+                quality=EstimateQuality.CONSERVATIVE,
                 active_when=_estimate_depth_activity_condition(estimate),
             )
         return estimate
@@ -8637,7 +8637,7 @@ class ResourceInterpreter:
                 ),
                 trace=ResourceTraceNode(name, "opaque"),
                 derivation=EstimateDerivation.MODELED,
-                guarantee=EstimateGuarantee.UNKNOWN,
+                quality=EstimateQuality.UNKNOWN,
             )
         elif self.config.unknown_policy is UnknownResourcePolicy.ZERO_WITH_WARNING:
             assumption = ResourceAssumption(
@@ -8648,7 +8648,7 @@ class ResourceInterpreter:
                 assumptions=(assumption,),
                 trace=ResourceTraceNode(name, "opaque", assumptions=(assumption,)),
                 derivation=EstimateDerivation.MODELED,
-                guarantee=EstimateGuarantee.UNKNOWN,
+                quality=EstimateQuality.UNKNOWN,
             )
         else:
             raise ValueError(
@@ -9977,7 +9977,7 @@ def _clean_ancilla_sequence_estimate(
     gates: GateResources,
     *,
     clean_ancillas: ResourceExpr = _ZERO,
-    guarantee: EstimateGuarantee = EstimateGuarantee.EXACT,
+    quality: EstimateQuality = EstimateQuality.EXACT,
 ) -> ResourceEstimate:
     """Build one clean-ancilla Toffoli decomposition estimate.
 
@@ -9986,7 +9986,7 @@ def _clean_ancilla_sequence_estimate(
         gates (GateResources): Aggregate logical gate resources.
         clean_ancillas (ResourceExpr): Reusable clean-ancilla demand.
             Defaults to zero.
-        guarantee (EstimateGuarantee): Count guarantee. Defaults to ``EXACT``.
+        quality (EstimateQuality): Count quality. Defaults to ``EXACT``.
 
     Returns:
         ResourceEstimate: Serial gate/depth and reusable-width estimate.
@@ -9999,7 +9999,7 @@ def _clean_ancilla_sequence_estimate(
         width=width,
         gates=gates,
         depth=_serial_depth_from_gate_resources(gates),
-        guarantee=guarantee,
+        quality=quality,
         trace=ResourceTraceNode(
             name=name,
             source_kind="clean_ancilla_toffoli",
@@ -10068,7 +10068,7 @@ def _clean_ancilla_generic_multi_control_estimate(
         f"mc-{name}",
         _add_gates(ladder, central),
         clean_ancillas=controls - _ONE,
-        guarantee=EstimateGuarantee.UPPER_BOUND,
+        quality=EstimateQuality.CONSERVATIVE,
     )
 
 
@@ -10691,7 +10691,7 @@ def _project_abstract_aggregate_controlled_cost(
             ),
         ),
         derivation=estimate.derivation,
-        guarantee=estimate.guarantee,
+        quality=estimate.quality,
         approximation=estimate.approximation,
         basis=estimate.basis,
         control_decomposition=estimate.control_decomposition,
@@ -10704,7 +10704,7 @@ def _project_abstract_aggregate_controlled_cost(
         _dependency_keys=estimate._dependency_keys,
         _guarded_assumptions=estimate._guarded_assumptions,
         _guarded_derivations=estimate._guarded_derivations,
-        _guarded_guarantees=estimate._guarded_guarantees,
+        _guarded_qualities=estimate._guarded_qualities,
         _guarded_approximations=estimate._guarded_approximations,
         _symbol_aliases=estimate._symbol_aliases,
     )
@@ -10738,21 +10738,21 @@ def _project_abstract_aggregate_controlled_cost(
         controlled = controlled._with_metadata(
             assumptions=(complete_assumption,),
             derivation=EstimateDerivation.MODELED,
-            guarantee=EstimateGuarantee.UPPER_BOUND,
+            quality=EstimateQuality.CONSERVATIVE,
             active_when=active_controls,
         )
     elif unclassified_count.is_positive is True:
         controlled = controlled._with_metadata(
             assumptions=(partial_assumption,),
             derivation=EstimateDerivation.MODELED,
-            guarantee=EstimateGuarantee.UNKNOWN,
+            quality=EstimateQuality.UNKNOWN,
             active_when=active_controls,
         )
     else:
         controlled = controlled._with_metadata(
             assumptions=(complete_assumption,),
             derivation=EstimateDerivation.MODELED,
-            guarantee=EstimateGuarantee.UPPER_BOUND,
+            quality=EstimateQuality.CONSERVATIVE,
             active_when=sp.And(
                 active_controls,
                 sp.Eq(unclassified_count, _ZERO),
@@ -10760,7 +10760,7 @@ def _project_abstract_aggregate_controlled_cost(
         )._with_metadata(
             assumptions=(partial_assumption,),
             derivation=EstimateDerivation.MODELED,
-            guarantee=EstimateGuarantee.UNKNOWN,
+            quality=EstimateQuality.UNKNOWN,
             active_when=sp.And(
                 active_controls,
                 sp.Gt(unclassified_count, _ZERO),
@@ -10821,7 +10821,7 @@ def _clean_ancilla_shared_aggregate_control_ladder(
         _has_output_summary=body._has_output_summary,
         _dependency_keys=body._dependency_keys,
         _symbol_aliases=body._symbol_aliases,
-    )._with_metadata(guarantee=EstimateGuarantee.UPPER_BOUND)
+    )._with_metadata(quality=EstimateQuality.CONSERVATIVE)
 
 
 def _project_clean_ancilla_aggregate_controlled_cost(
@@ -11019,7 +11019,7 @@ def _project_clean_ancilla_aggregate_controlled_cost(
             projected.trace,
         ),
         derivation=estimate.derivation,
-        guarantee=estimate.guarantee,
+        quality=estimate.quality,
         approximation=estimate.approximation,
         basis=estimate.basis,
         control_decomposition=estimate.control_decomposition,
@@ -11036,7 +11036,7 @@ def _project_clean_ancilla_aggregate_controlled_cost(
         _dependency_keys=estimate._dependency_keys,
         _guarded_assumptions=estimate._guarded_assumptions,
         _guarded_derivations=estimate._guarded_derivations,
-        _guarded_guarantees=estimate._guarded_guarantees,
+        _guarded_qualities=estimate._guarded_qualities,
         _guarded_approximations=estimate._guarded_approximations,
         _symbol_aliases=estimate._symbol_aliases,
     )
@@ -11048,21 +11048,21 @@ def _project_clean_ancilla_aggregate_controlled_cost(
         controlled = controlled._with_metadata(
             assumptions=(complete_assumption,),
             derivation=EstimateDerivation.MODELED,
-            guarantee=EstimateGuarantee.UPPER_BOUND,
+            quality=EstimateQuality.CONSERVATIVE,
             active_when=active_controls,
         )
     elif unresolved_count.is_positive is True:
         controlled = controlled._with_metadata(
             assumptions=(partial_assumption,),
             derivation=EstimateDerivation.MODELED,
-            guarantee=EstimateGuarantee.UNKNOWN,
+            quality=EstimateQuality.UNKNOWN,
             active_when=active_controls,
         )
     else:
         controlled = controlled._with_metadata(
             assumptions=(complete_assumption,),
             derivation=EstimateDerivation.MODELED,
-            guarantee=EstimateGuarantee.UPPER_BOUND,
+            quality=EstimateQuality.CONSERVATIVE,
             active_when=sp.And(
                 active_controls,
                 sp.Eq(unresolved_count, _ZERO),
@@ -11070,7 +11070,7 @@ def _project_clean_ancilla_aggregate_controlled_cost(
         )._with_metadata(
             assumptions=(partial_assumption,),
             derivation=EstimateDerivation.MODELED,
-            guarantee=EstimateGuarantee.UNKNOWN,
+            quality=EstimateQuality.UNKNOWN,
             active_when=sp.And(
                 active_controls,
                 sp.Gt(unresolved_count, _ZERO),
@@ -11094,7 +11094,7 @@ def _project_clean_ancilla_aggregate_controlled_cost(
                 ),
             ),
             derivation=EstimateDerivation.MODELED,
-            guarantee=EstimateGuarantee.UNKNOWN,
+            quality=EstimateQuality.UNKNOWN,
             active_when=active_controls,
         )
         controlled = retained.conditional(
@@ -11225,14 +11225,14 @@ def _estimate_named_gate_in_basis(
             control_decomposition=control_decomposition,
             precision=precision,
         )
-        upper_bound_when = _clifford_t_upper_bound_condition(
+        conservative_when = _clifford_t_conservative_condition(
             normalized_name,
             controls,
         )
-        if upper_bound_when is not sp.false:
+        if conservative_when is not sp.false:
             estimate = estimate._with_metadata(
-                guarantee=EstimateGuarantee.UPPER_BOUND,
-                active_when=upper_bound_when,
+                quality=EstimateQuality.CONSERVATIVE,
+                active_when=conservative_when,
             )
         if normalized_name in _ROTATION_GATES:
             estimate = estimate._with_metadata(
@@ -11544,7 +11544,7 @@ def _gate_has_rotation(operation: GateOperation) -> bool:
     return name in _ROTATION_GATES
 
 
-def _clifford_t_upper_bound_condition(
+def _clifford_t_conservative_condition(
     gate_name: str,
     num_controls: ResourceExpr,
 ) -> sp.Basic:
@@ -12248,7 +12248,7 @@ def _free_symbols(estimate: ResourceEstimate) -> set[sp.Symbol]:
     for fact in (
         *(estimate._guarded_assumptions or ()),
         *(estimate._guarded_derivations or ()),
-        *(estimate._guarded_guarantees or ()),
+        *(estimate._guarded_qualities or ()),
         *(estimate._guarded_approximations or ()),
     ):
         symbols.update(cast(set[sp.Symbol], sp.sympify(fact.active_when).free_symbols))
@@ -12291,7 +12291,7 @@ def _serialization_expressions(
         for fact in (
             *(estimate._guarded_assumptions or ()),
             *(estimate._guarded_derivations or ()),
-            *(estimate._guarded_guarantees or ()),
+            *(estimate._guarded_qualities or ()),
             *(estimate._guarded_approximations or ()),
         )
     )

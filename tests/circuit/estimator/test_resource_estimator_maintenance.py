@@ -171,7 +171,7 @@ def test_affine_loop_uses_symbolic_disjointness_before_enumeration(
     concrete.assert_not_called()
     assert estimate.gates.total == 64
     assert estimate.depth.depth == 1
-    assert estimate.guarantee is qmc.EstimateGuarantee.EXACT
+    assert estimate.quality is qmc.EstimateQuality.EXACT
 
 
 def test_nonlinear_loop_falls_back_to_concrete_disjointness(
@@ -190,7 +190,7 @@ def test_nonlinear_loop_falls_back_to_concrete_disjointness(
     assert concrete.call_count == 1
     assert estimate.gates.total == 3
     assert estimate.depth.depth == 1
-    assert estimate.guarantee is qmc.EstimateGuarantee.EXACT
+    assert estimate.quality is qmc.EstimateQuality.EXACT
 
 
 def test_concrete_loop_simplifies_constant_depth_fields_once(
@@ -383,10 +383,10 @@ def test_seq_all_matches_left_fold_and_preserves_trace_order() -> None:
                     if index == 5
                     else qmc.EstimateDerivation.STRUCTURAL
                 ),
-                guarantee=(
-                    qmc.EstimateGuarantee.UPPER_BOUND
+                quality=(
+                    qmc.EstimateQuality.CONSERVATIVE
                     if index != 5
-                    else qmc.EstimateGuarantee.EXACT
+                    else qmc.EstimateQuality.EXACT
                 ),
                 trace=estimator_module.ResourceTraceNode(
                     name=f"leaf_{index}",
@@ -418,7 +418,7 @@ def test_seq_all_matches_left_fold_and_preserves_trace_order() -> None:
     assert balanced._dependency_keys == left_fold._dependency_keys
     assert balanced._guarded_assumptions == left_fold._guarded_assumptions
     assert balanced._guarded_derivations == left_fold._guarded_derivations
-    assert balanced._guarded_guarantees == left_fold._guarded_guarantees
+    assert balanced._guarded_qualities == left_fold._guarded_qualities
     assert _trace_leaf_names(balanced.trace) == [
         f"leaf_{index}" for index in range(1, 6)
     ]
@@ -430,7 +430,7 @@ def test_seq_all_keeps_large_metadata_reduction_balanced(
 ) -> None:
     """Metadata work grows by balanced levels rather than left-fold history."""
     estimate_count = 1024
-    leaf = qmc.ResourceEstimate(guarantee=qmc.EstimateGuarantee.UPPER_BOUND)
+    leaf = qmc.ResourceEstimate(quality=qmc.EstimateQuality.CONSERVATIVE)
     original = qmc.ResourceEstimate.seq
     seq_calls = 0
     metadata_visits = 0
@@ -439,11 +439,11 @@ def test_seq_all_keeps_large_metadata_reduction_balanced(
         self: qmc.ResourceEstimate,
         other: qmc.ResourceEstimate,
     ) -> qmc.ResourceEstimate:
-        """Count guarded-guarantee records visited by each composition."""
+        """Count guarded-quality records visited by each composition."""
         nonlocal metadata_visits, seq_calls
         seq_calls += 1
-        metadata_visits += len(self._guarded_guarantees or ())
-        metadata_visits += len(other._guarded_guarantees or ())
+        metadata_visits += len(self._guarded_qualities or ())
+        metadata_visits += len(other._guarded_qualities or ())
         return original(self, other)
 
     monkeypatch.setattr(qmc.ResourceEstimate, "seq", record_seq)
@@ -451,8 +451,8 @@ def test_seq_all_keeps_large_metadata_reduction_balanced(
 
     assert seq_calls == estimate_count - 1
     assert metadata_visits <= estimate_count * estimate_count.bit_length()
-    assert len(combined._guarded_guarantees or ()) == estimate_count
-    assert combined.guarantee is qmc.EstimateGuarantee.UPPER_BOUND
+    assert len(combined._guarded_qualities or ()) == estimate_count
+    assert combined.quality is qmc.EstimateQuality.CONSERVATIVE
 
 
 def test_all_z_pauli_evolution_skips_pairwise_commutation_scan(
@@ -480,7 +480,7 @@ def test_all_z_pauli_evolution_skips_pairwise_commutation_scan(
     )
 
     pairwise.assert_not_called()
-    assert estimate.guarantee is qmc.EstimateGuarantee.EXACT
+    assert estimate.quality is qmc.EstimateQuality.EXACT
     assert not any(
         "Lie-Trotter" in assumption.message for assumption in estimate.assumptions
     )

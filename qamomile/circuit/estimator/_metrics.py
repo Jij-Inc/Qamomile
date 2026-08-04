@@ -85,23 +85,23 @@ def _combine_derivation(
     return EstimateDerivation.STRUCTURAL
 
 
-def _combine_guarantee(
-    left: EstimateGuarantee,
-    right: EstimateGuarantee,
-) -> EstimateGuarantee:
-    """Return the weakest resource-count guarantee of two estimates.
+def _combine_quality(
+    left: EstimateQuality,
+    right: EstimateQuality,
+) -> EstimateQuality:
+    """Return the weakest resource-count quality of two estimates.
 
     Args:
-        left (EstimateGuarantee): Left count guarantee.
-        right (EstimateGuarantee): Right count guarantee.
+        left (EstimateQuality): Left count quality.
+        right (EstimateQuality): Right count quality.
 
     Returns:
-        EstimateGuarantee: Combined count guarantee.
+        EstimateQuality: Combined count quality.
     """
     rank = {
-        EstimateGuarantee.EXACT: 0,
-        EstimateGuarantee.UPPER_BOUND: 1,
-        EstimateGuarantee.UNKNOWN: 2,
+        EstimateQuality.EXACT: 0,
+        EstimateQuality.CONSERVATIVE: 1,
+        EstimateQuality.UNKNOWN: 2,
     }
     return left if rank[left] >= rank[right] else right
 
@@ -192,21 +192,22 @@ class EstimateDerivation(enum.StrEnum):
     MODELED = "modeled"
 
 
-class EstimateGuarantee(enum.StrEnum):
-    """Describe how reported counts relate to the selected circuit cost.
+class EstimateQuality(enum.StrEnum):
+    """Describe the directional quality of reported resource counts.
 
     This axis is independent of both count derivation and mathematical
-    approximation. A modeled estimate can therefore be exact, an upper bound,
+    approximation. A modeled estimate can therefore be exact, conservative,
     or unknown with respect to the selected resource model.
 
     Values:
         EXACT: Reported counts exactly follow the selected circuit model.
-        UPPER_BOUND: Reported counts are conservative upper bounds.
-        UNKNOWN: No exact or upper-bound guarantee is available.
+        CONSERVATIVE: Reported counts may overestimate but do not
+            underestimate the selected circuit model.
+        UNKNOWN: No exact or conservative relation is available.
     """
 
     EXACT = "exact"
-    UPPER_BOUND = "upper_bound"
+    CONSERVATIVE = "conservative"
     UNKNOWN = "unknown"
 
 
@@ -325,40 +326,40 @@ class _GuardedDerivation:
 
 
 @dataclasses.dataclass(frozen=True)
-class _GuardedGuarantee:
-    """Associate one non-exact count guarantee with a guard.
+class _GuardedQuality:
+    """Associate one non-exact count quality with a guard.
 
     Args:
-        active_when (sp.Basic): Boolean condition under which the guarantee
+        active_when (sp.Basic): Boolean condition under which the quality
             fact contributes.
-        guarantee (EstimateGuarantee): Non-exact guarantee being guarded.
+        quality (EstimateQuality): Non-exact quality being guarded.
     """
 
     active_when: sp.Basic
-    guarantee: EstimateGuarantee
+    quality: EstimateQuality
 
-    def when(self, condition: sp.Basic) -> _GuardedGuarantee:
+    def when(self, condition: sp.Basic) -> _GuardedQuality:
         """Conjoin another activation condition.
 
         Args:
             condition (sp.Basic): Additional branch or repetition guard.
 
         Returns:
-            _GuardedGuarantee: Guarantee fact guarded by both conditions.
+            _GuardedQuality: Quality fact guarded by both conditions.
         """
         return dataclasses.replace(
             self,
             active_when=_and_conditions(self.active_when, condition),
         )
 
-    def mapped(self, fn: Any) -> _GuardedGuarantee | None:
-        """Rewrite the activation guard and prune a false guarantee fact.
+    def mapped(self, fn: Any) -> _GuardedQuality | None:
+        """Rewrite the activation guard and prune a false quality fact.
 
         Args:
             fn (Any): Symbolic-expression rewrite function.
 
         Returns:
-            _GuardedGuarantee | None: Rewritten fact, or ``None`` when its
+            _GuardedQuality | None: Rewritten fact, or ``None`` when its
                 guard resolves false.
         """
         active_when = _rewrite_condition(self.active_when, fn)
@@ -447,22 +448,22 @@ def _active_derivation(
     return derivation
 
 
-def _active_guarantee(
-    facts: Sequence[_GuardedGuarantee],
-) -> EstimateGuarantee:
-    """Return the weakest active or potentially active count guarantee.
+def _active_quality(
+    facts: Sequence[_GuardedQuality],
+) -> EstimateQuality:
+    """Return the weakest active or potentially active count quality.
 
     Args:
-        facts (Sequence[_GuardedGuarantee]): Guarded guarantee facts.
+        facts (Sequence[_GuardedQuality]): Guarded quality facts.
 
     Returns:
-        EstimateGuarantee: Active or potentially active guarantee.
+        EstimateQuality: Active or potentially active quality.
     """
-    guarantee = EstimateGuarantee.EXACT
+    quality = EstimateQuality.EXACT
     for fact in facts:
         if fact.active_when is not sp.false:
-            guarantee = _combine_guarantee(guarantee, fact.guarantee)
-    return guarantee
+            quality = _combine_quality(quality, fact.quality)
+    return quality
 
 
 def _active_approximation(
