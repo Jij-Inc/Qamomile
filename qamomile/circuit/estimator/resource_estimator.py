@@ -123,12 +123,16 @@ from qamomile.circuit.estimator._scheduling import (
     _disjoint_concrete_loop_depth,
     _estimate_depth_activity_condition,
     _estimate_has_nonzero_depth,
+    _expand_dependency_owner_aliases,
     _invoke_quantum_output_sizes,
     _liveness_width,
     _LocalBlock,
     _loop_body_has_symbolic_quantum_index,
     _map_body_dependency_completion,
     _map_body_dependency_keys,
+    _map_value_dependency_keys,
+    _maximum_live_owner_sizes,
+    _maximum_live_owner_sizes_over_range,
     _maximum_width_over_range,
     _merge_allocation_sites,
     _merge_dependency_keys,
@@ -138,6 +142,7 @@ from qamomile.circuit.estimator._scheduling import (
     _operation_has_unresolved_quantum_index,
     _quantum_allocation_owner,
     _quantum_owner_capacities,
+    _quantum_result_owner_sizes,
     _quantum_wire_keys,
     _qubit_value_size,
     _root_callable_resource_attrs,
@@ -1732,7 +1737,6 @@ class ResourceEstimate:
         control_constraint.validate()
         if controls == _ZERO:
             return self
-        activity = _estimate_activity(self)
         _require_unitary_resource_estimate(
             self,
             transform="coherently control",
@@ -1811,20 +1815,15 @@ class ResourceEstimate:
             _guarded_approximations=self._guarded_approximations,
             _symbol_aliases=self._symbol_aliases,
         )
-        # A raw zero aggregate may still omit a global phase. In contrast, a
-        # symbolic nonzero body that specializes to zero has proven inactivity,
-        # so its transform metadata must disappear with that specialization.
-        activity_guard = (
-            sp.true if activity == _ZERO else _resource_activity_condition(activity)
-        )
+        # Aggregate counts cannot distinguish an identity from a zero-cost
+        # global phase. That remains true when a symbolic profile later
+        # specializes to zero, so only a zero control count disables the
+        # transform uncertainty.
         return controlled_estimate._with_metadata(
             assumptions=(assumption,),
             derivation=EstimateDerivation.MODELED,
             quality=EstimateQuality.UNKNOWN,
-            active_when=sp.And(
-                sp.Gt(controls, _ZERO),
-                activity_guard,
-            ),
+            active_when=sp.Gt(controls, _ZERO),
         )
 
     def inverse(self) -> ResourceEstimate:
@@ -3314,6 +3313,35 @@ def _if_merge_captured_allocations(
     )
 
 
+def _with_conservative_loop_output_liveness(
+    estimate: ResourceEstimate,
+    *,
+    active_when: sp.Basic,
+    source: str,
+) -> ResourceEstimate:
+    """Mark a loop output summary that retains a conservative owner maximum.
+
+    Args:
+        estimate (ResourceEstimate): Loop estimate to annotate.
+        active_when (sp.Basic): Condition under which the maximum can exceed
+            the exact post-loop live state.
+        source (str): Assumption source label.
+
+    Returns:
+        ResourceEstimate: Estimate with guarded conservative-quality metadata.
+    """
+    assumption = ResourceAssumption(
+        "loop-local qubit liveness retains the maximum owner width across "
+        "iterations because an inter-iteration release could not be proven",
+        source=source,
+    )
+    return estimate._with_metadata(
+        assumptions=(assumption,),
+        quality=EstimateQuality.CONSERVATIVE,
+        active_when=active_when,
+    )
+
+
 class ResourceInterpreter:
     """Abstractly interpret IR operations into resource algebra values."""
 
@@ -3379,6 +3407,12 @@ class ResourceInterpreter:
         # Value ancestry. Keep the corresponding allocation-owner identity
         # across nested control-flow and callable evaluation scopes.
         self._allocation_owners_by_uuid: dict[str, str] = {}
+        # Conditional merge results have fresh SSA owners while still
+        # referring to one of their branch-source allocations. Dependency
+        # scheduling retains those possible physical aliases independently of
+        # liveness owner resolution so post-merge work cannot run beside its
+        # selected producer.
+        self._dependency_owner_aliases: dict[str, frozenset[str]] = {}
         # Recursive kernels are valid when concrete inputs reach a base case.
         # Track resolved call states so only cycles or symbolically changing
         # recurrences fail early; a terminating concrete recursion has no
@@ -4456,7 +4490,12 @@ class ResourceInterpreter:
                     )
                     continue
                 if operation_estimate._dependency_keys is not None:
-                    footprint_keys = operation_estimate._dependency_keys
+                    footprint_keys = frozenset(
+                        _expand_dependency_owner_aliases(
+                            set(operation_estimate._dependency_keys),
+                            self._dependency_owner_aliases,
+                        )
+                    )
                     wire_footprints.append((footprint_keys, footprint_keys))
                     reads = set(footprint_keys)
                     writes = set(footprint_keys)
@@ -4469,6 +4508,7 @@ class ResourceInterpreter:
                         resolver,
                         scalar_values=self.condition_values,
                         used_names=self.branch_condition_names,
+                        owner_aliases=self._dependency_owner_aliases,
                     )
                     footprint_keys = frozenset(reads | writes)
                     wire_footprints.append((frozenset(reads), frozenset(writes)))
@@ -4482,6 +4522,18 @@ class ResourceInterpreter:
                 operation_completion = _normalized_dependency_completion(
                     operation_estimate
                 )
+                if operation_completion is not None and self._dependency_owner_aliases:
+                    expanded_completion: dict[WireKey, ResourceExpr] = {}
+                    for key, completion in operation_completion.items():
+                        for expanded_key in _expand_dependency_owner_aliases(
+                            {key},
+                            self._dependency_owner_aliases,
+                        ):
+                            expanded_completion[expanded_key] = _resource_max(
+                                expanded_completion.get(expanded_key, _ZERO),
+                                completion,
+                            )
+                    operation_completion = expanded_completion
                 if operation_completion is None:
                     operation_completion = {
                         key: operation_estimate.depth.depth for key in footprint_keys
@@ -4924,6 +4976,7 @@ class ResourceInterpreter:
                 )
             if _gate_has_rotation(operation):
                 estimate = estimate._with_metadata(
+                    quality=EstimateQuality.UNKNOWN,
                     approximation=ApproximationStatus.APPROXIMATE,
                 )
         return estimate
@@ -5340,9 +5393,19 @@ class ResourceInterpreter:
 
         Returns:
             ResourceEstimate: Loop resource estimate.
+
+        Raises:
+            NotImplementedError: If manually constructed IR carries a quantum
+                value through a loop region argument.
         """
         if len(operation.operands) < 2:
             return ResourceEstimate.zero("empty_for")
+        if any(arg.result.type.is_quantum() for arg in operation.region_args):
+            raise NotImplementedError(
+                "Resource estimation does not support quantum ForOperation "
+                "region arguments. Keep quantum values as explicit loop "
+                "captures or lower the loop before estimation."
+            )
         child, start, stop, step, loop_symbol = build_for_loop_scope(
             operation,
             resolver,
@@ -5356,6 +5419,9 @@ class ResourceInterpreter:
             )
             for bound in (start, stop, step)
         )
+        body_output_sizes: Mapping[str, ResourceExpr] = {}
+        output_maximum_exact = True
+        output_retains_prior = False
         if operation.region_args:
             estimate = self._eval_region_for(
                 operation,
@@ -5366,6 +5432,7 @@ class ResourceInterpreter:
                 loop_symbol=loop_symbol,
                 controls=controls,
             )
+            body_output_sizes = estimate._output_sizes
         else:
             specialized_bounds = tuple(
                 self._apply_condition_values(bound, record_usage=False)
@@ -5385,6 +5452,17 @@ class ResourceInterpreter:
                         child,
                         self._allocation_owners_by_uuid,
                     ),
+                )
+                (
+                    body_output_sizes,
+                    output_maximum_exact,
+                    output_retains_prior,
+                ) = _maximum_live_owner_sizes_over_range(
+                    inner._output_sizes,
+                    loop_symbol,
+                    start,
+                    step,
+                    iterations,
                 )
                 estimate = inner._sum_over(
                     loop_symbol,
@@ -5512,11 +5590,24 @@ class ResourceInterpreter:
                     quality=EstimateQuality.CONSERVATIVE,
                     active_when=sp.Gt(iterations, _ONE),
                 )
+        if not output_maximum_exact:
+            estimate = _with_conservative_loop_output_liveness(
+                estimate,
+                active_when=sp.Gt(iterations, _ZERO),
+                source="for liveness",
+            )
+        elif output_retains_prior:
+            estimate = _with_conservative_loop_output_liveness(
+                estimate,
+                active_when=sp.Gt(iterations, _ONE),
+                source="for liveness",
+            )
         estimate = _with_operation_output_summary(
             estimate,
             operation,
             resolver,
             active_when=sp.Gt(iterations, _ZERO),
+            body_output_sizes=body_output_sizes,
             allocation_owners_by_uuid=self._allocation_owners_by_uuid,
         )
         return estimate
@@ -5603,7 +5694,7 @@ class ResourceInterpreter:
         *,
         controls: ResourceExpr | int,
     ) -> ResourceEstimate:
-        """Interpret a concrete region-argument loop exactly.
+        """Interpret a concrete region-argument loop iteration by iteration.
 
         Args:
             operation (ForOperation): Loop carrying region arguments.
@@ -5671,11 +5762,30 @@ class ResourceInterpreter:
                 anonymous_allocated=anonymous_allocated,
             ),
         )
-        return self._schedule_concrete_loop_depth(
+        scheduled = self._schedule_concrete_loop_depth(
             operation,
             iteration_estimates,
             estimate,
         )
+        if not iteration_estimates:
+            return scheduled
+        output_sizes, retains_prior_output = _maximum_live_owner_sizes(
+            [iteration._output_sizes for iteration in iteration_estimates]
+        )
+        scheduled = dataclasses.replace(
+            scheduled,
+            _output_sizes=output_sizes,
+            _has_output_summary=all(
+                iteration._has_output_summary for iteration in iteration_estimates
+            ),
+        )
+        if retains_prior_output:
+            scheduled = _with_conservative_loop_output_liveness(
+                scheduled,
+                active_when=sp.true,
+                source="for liveness",
+            )
+        return scheduled
 
     def _eval_symbolic_region_for(
         self,
@@ -5873,6 +5983,32 @@ class ResourceInterpreter:
                 assumptions=assumptions,
                 active_when=sp.Gt(iterations, _ZERO),
             )
+        output_sizes, maximum_exact, retains_prior_output = (
+            _maximum_live_owner_sizes_over_range(
+                inner._output_sizes,
+                loop_symbol,
+                start,
+                step,
+                iterations,
+            )
+        )
+        estimate = dataclasses.replace(
+            estimate,
+            _output_sizes=output_sizes,
+            _has_output_summary=inner._has_output_summary,
+        )
+        if not maximum_exact:
+            estimate = _with_conservative_loop_output_liveness(
+                estimate,
+                active_when=sp.Gt(iterations, _ZERO),
+                source="for liveness",
+            )
+        elif retains_prior_output:
+            estimate = _with_conservative_loop_output_liveness(
+                estimate,
+                active_when=sp.Gt(iterations, _ONE),
+                source="for liveness",
+            )
         return estimate
 
     def _apply_condition_values(
@@ -5985,6 +6121,7 @@ class ResourceInterpreter:
             operation,
             resolver,
             active_when=sp.Gt(trip_count, _ZERO),
+            body_output_sizes=inner._output_sizes,
             allocation_owners_by_uuid=self._allocation_owners_by_uuid,
         )
         return estimate
@@ -6080,6 +6217,15 @@ class ResourceInterpreter:
                 false_child,
                 taken=taken,
             )
+            estimate = self._with_if_dependency_outputs(
+                operation,
+                resolver,
+                true_estimate=estimate if taken else None,
+                false_estimate=estimate if not taken else None,
+                combined=estimate,
+                taken=taken,
+                runtime_condition=False,
+            )
             output_sizes = self._if_output_sizes(
                 operation,
                 resolver,
@@ -6153,6 +6299,15 @@ class ResourceInterpreter:
                 false_estimate,
                 _boolean_condition(condition),
             )
+            combined = self._with_if_dependency_outputs(
+                operation,
+                resolver,
+                true_estimate=true_estimate,
+                false_estimate=false_estimate,
+                combined=combined,
+                taken=None,
+                runtime_condition=False,
+            )
             combined = dataclasses.replace(
                 combined,
                 _output_sizes=output_sizes,
@@ -6161,6 +6316,15 @@ class ResourceInterpreter:
             )
             return combined
         combined = true_estimate.choice(false_estimate)
+        combined = self._with_if_dependency_outputs(
+            operation,
+            resolver,
+            true_estimate=true_estimate,
+            false_estimate=false_estimate,
+            combined=combined,
+            taken=None,
+            runtime_condition=True,
+        )
         if note is None:
             combined = dataclasses.replace(
                 combined,
@@ -6259,6 +6423,17 @@ class ResourceInterpreter:
                     self._allocation_owners_by_uuid[merge.result.uuid] = next(
                         iter(owners)
                     )
+                result_owner = _quantum_allocation_owner(merge.result)
+                source_owners = {
+                    _quantum_allocation_owner(value)
+                    for value in selected_values
+                    if isinstance(value, Value) and value.type.is_quantum()
+                }
+                source_owners.discard(result_owner)
+                if source_owners:
+                    self._dependency_owner_aliases[result_owner] = frozenset(
+                        source_owners
+                    )
             if not all(
                 isinstance(value, ArrayValue)
                 for value in (
@@ -6292,6 +6467,138 @@ class ResourceInterpreter:
                         predicate,
                     )
                 resolver.bind(result_dim, cast(sp.Expr, merged_size))
+
+    def _with_if_dependency_outputs(
+        self,
+        operation: IfOperation,
+        resolver: ExprResolver,
+        *,
+        true_estimate: ResourceEstimate | None,
+        false_estimate: ResourceEstimate | None,
+        combined: ResourceEstimate,
+        taken: bool | None,
+        runtime_condition: bool,
+    ) -> ResourceEstimate:
+        """Publish branch completion depths on conditional result owners.
+
+        Branch work is scheduled on each source allocation, whereas operations
+        after the conditional read its fresh merge-result owner. Copying the
+        per-element completion depth to that result connects both sides of the
+        boundary and also lets an enclosing callable map the returned value to
+        its caller.
+
+        Args:
+            operation (IfOperation): Conditional carrying merge records.
+            resolver (ExprResolver): Enclosing resolver after result shapes
+                have been published.
+            true_estimate (ResourceEstimate | None): Evaluated true branch, or
+                ``None`` when it was not selected.
+            false_estimate (ResourceEstimate | None): Evaluated false branch,
+                or ``None`` when it was not selected.
+            combined (ResourceEstimate): Selected or combined branch estimate.
+            taken (bool | None): Statically selected branch, if any.
+            runtime_condition (bool): Whether a measurement selects the branch
+                at runtime.
+
+        Returns:
+            ResourceEstimate: Estimate with merge-result dependency metadata.
+        """
+
+        def mapped_completion(
+            source: Value,
+            estimate: ResourceEstimate | None,
+        ) -> dict[WireKey, ResourceExpr]:
+            """Map one branch source's completion onto its merge result.
+
+            Args:
+                source (Value): Quantum value yielded by the branch.
+                estimate (ResourceEstimate | None): Corresponding branch
+                    estimate, or ``None`` when that branch was not evaluated.
+
+            Returns:
+                dict[WireKey, ResourceExpr]: Result-owner completion depths.
+            """
+            if estimate is None:
+                return {}
+            source_completion = _normalized_dependency_completion(estimate)
+            if source_completion is None:
+                return {}
+            source_owner = _quantum_allocation_owner(source)
+            mapped: dict[WireKey, ResourceExpr] = {}
+            for key, depth in source_completion.items():
+                if key[0] != source_owner:
+                    continue
+                for result_key in _map_value_dependency_keys(
+                    source,
+                    merge.result,
+                    frozenset((key,)),
+                    resolver,
+                    scalar_values=self.condition_values,
+                    used_names=self.branch_condition_names,
+                ):
+                    mapped[result_key] = _resource_max(
+                        mapped.get(result_key, _ZERO),
+                        depth,
+                    )
+            return mapped
+
+        keys = set(combined._dependency_keys or ())
+        completion = dict(_normalized_dependency_completion(combined) or {})
+        condition = _boolean_condition(resolver.resolve(operation.condition))
+        has_ambiguous_alias = False
+        for merge in operation.iter_merges():
+            if not merge.result.type.is_quantum():
+                continue
+            true_completion = mapped_completion(
+                merge.true_value,
+                true_estimate,
+            )
+            false_completion = mapped_completion(
+                merge.false_value,
+                false_estimate,
+            )
+            for key in true_completion.keys() | false_completion.keys():
+                if taken is True:
+                    depth = true_completion.get(key, _ZERO)
+                elif taken is False:
+                    depth = false_completion.get(key, _ZERO)
+                elif runtime_condition:
+                    depth = _resource_max(
+                        true_completion.get(key, _ZERO),
+                        false_completion.get(key, _ZERO),
+                    )
+                else:
+                    depth = _piecewise(
+                        true_completion.get(key, _ZERO),
+                        false_completion.get(key, _ZERO),
+                        condition,
+                    )
+                keys.add(key)
+                completion[key] = _resource_max(
+                    completion.get(key, _ZERO),
+                    depth,
+                )
+            result_owner = _quantum_allocation_owner(merge.result)
+            has_ambiguous_alias |= (
+                len(self._dependency_owner_aliases.get(result_owner, frozenset())) > 1
+            )
+        result = dataclasses.replace(
+            combined,
+            _dependency_keys=frozenset(keys),
+            _dependency_completion=completion,
+            _dependency_completion_uniform=combined._dependency_completion_uniform,
+        )
+        if taken is not None or not has_ambiguous_alias:
+            return result
+        assumption = ResourceAssumption(
+            "an unresolved conditional quantum result may alias either branch "
+            "source and is scheduled conservatively",
+            source="if dependency scheduler",
+        )
+        return result._with_metadata(
+            assumptions=(assumption,),
+            quality=EstimateQuality.CONSERVATIVE,
+        )
 
     def _if_output_sizes(
         self,
@@ -6369,6 +6676,62 @@ class ResourceInterpreter:
             )
             for owner, size in false_inputs.items()
         }
+
+        def local_residual_width(
+            estimate: ResourceEstimate | None,
+            inputs: Mapping[str, ResourceExpr],
+            returned_values: Sequence[Value],
+            branch_resolver: ExprResolver,
+        ) -> ResourceExpr:
+            """Count branch-local live qubits not exposed by merge results.
+
+            Args:
+                estimate (ResourceEstimate | None): Evaluated branch summary.
+                inputs (Mapping[str, ResourceExpr]): Caller-owned allocations
+                    live at branch entry.
+                returned_values (Sequence[Value]): Quantum values selected by
+                    the branch's merge records.
+                branch_resolver (ExprResolver): Resolver for branch-local
+                    result widths.
+
+            Returns:
+                ResourceExpr: Live branch-local width inaccessible through a
+                merge result.
+            """
+            if estimate is None or not estimate._has_output_summary:
+                return _ZERO
+            returned_by_owner = _quantum_result_owner_sizes(
+                returned_values,
+                branch_resolver,
+                self._allocation_owners_by_uuid,
+            )
+            return sum(
+                (
+                    sp.Max(
+                        _ZERO,
+                        size - returned_by_owner.get(owner, _ZERO),
+                    )
+                    for owner, size in estimate._output_sizes.items()
+                    if owner not in inputs
+                ),
+                _ZERO,
+            )
+
+        quantum_merges = tuple(
+            merge for merge in operation.iter_merges() if merge.result.type.is_quantum()
+        )
+        true_residual = local_residual_width(
+            true_estimate,
+            true_inputs,
+            [merge.true_value for merge in quantum_merges],
+            true_resolver,
+        )
+        false_residual = local_residual_width(
+            false_estimate,
+            false_inputs,
+            [merge.false_value for merge in quantum_merges],
+            false_resolver,
+        )
         output_sizes: dict[str, ResourceExpr] = {}
         for owner in true_sizes.keys() | false_sizes.keys():
             true_size = true_sizes.get(owner, _ZERO)
@@ -6384,9 +6747,7 @@ class ResourceInterpreter:
             if size != _ZERO:
                 output_sizes[owner] = size
         owner_map = self._allocation_owners_by_uuid
-        for merge in operation.iter_merges():
-            if not merge.result.type.is_quantum():
-                continue
+        for merge in quantum_merges:
             true_owner = owner_map.get(
                 merge.true_value.uuid,
                 _quantum_allocation_owner(merge.true_value),
@@ -6426,6 +6787,20 @@ class ResourceInterpreter:
             output_sizes[result_owner] = (
                 output_sizes.get(result_owner, _ZERO) + returned
             )
+        if taken is True:
+            residual = true_residual
+        elif taken is False:
+            residual = false_residual
+        elif runtime_condition:
+            residual = _resource_max(true_residual, false_residual)
+        else:
+            residual = _piecewise(
+                true_residual,
+                false_residual,
+                condition,
+            )
+        if residual != _ZERO:
+            output_sizes[f"IfOperation:{operation.condition.uuid}/live"] = residual
         return output_sizes
 
     def _decide_branch(
@@ -6508,10 +6883,18 @@ class ResourceInterpreter:
             ValueError: If the items loop is nested under coherent quantum
                 control.
             NotImplementedError: If an unbound dictionary loop has a body
-                whose resource use depends on the current key or value.
+                whose resource use depends on the current key or value, or if
+                manually constructed IR carries a quantum region argument.
         """
         _require_uncontrolled_operation(operation, controls)
+        if any(arg.result.type.is_quantum() for arg in operation.region_args):
+            raise NotImplementedError(
+                "Resource estimation does not support quantum "
+                "ForItemsOperation region arguments. Keep quantum values as "
+                "explicit loop captures or lower the loop before estimation."
+            )
         cardinality = resolve_for_items_cardinality(operation)
+        body_output_sizes: Mapping[str, ResourceExpr] = {}
         if operation.region_args:
             estimate = self._eval_region_for_items(
                 operation,
@@ -6519,6 +6902,7 @@ class ResourceInterpreter:
                 cardinality=cardinality,
                 controls=controls,
             )
+            body_output_sizes = estimate._output_sizes
         else:
             entries = self._for_items_entries(operation)
             if entries is not None:
@@ -6528,6 +6912,7 @@ class ResourceInterpreter:
                     entries,
                     controls=controls,
                 )
+                body_output_sizes = estimate._output_sizes
             else:
                 context, item_symbols = self._symbolic_for_items_context(operation)
                 child = resolver.child_scope(
@@ -6545,12 +6930,14 @@ class ResourceInterpreter:
                     ),
                 )
                 self._ensure_for_items_resource_independent(inner, item_symbols)
+                body_output_sizes = inner._output_sizes
                 estimate = inner.repeat(cardinality)
         estimate = _with_operation_output_summary(
             estimate,
             operation,
             resolver,
             active_when=sp.Gt(cardinality, _ZERO),
+            body_output_sizes=body_output_sizes,
             allocation_owners_by_uuid=self._allocation_owners_by_uuid,
         )
         return estimate
@@ -6572,8 +6959,8 @@ class ResourceInterpreter:
             controls (ResourceExpr | int): Surrounding controls.
 
         Returns:
-            ResourceEstimate: Exact estimate for bound dictionaries, otherwise a
-            cardinality-based symbolic estimate.
+            ResourceEstimate: Per-entry estimate for bound dictionaries,
+            otherwise a cardinality-based symbolic estimate.
 
         Raises:
             NotImplementedError: If an unbound loop-carried value has a
@@ -6663,7 +7050,7 @@ class ResourceInterpreter:
             inner_block=_LocalBlock(operation.operations),
             extra_context=body_context,
         )
-        estimate = self.eval_operations(
+        inner = self.eval_operations(
             operation.operations,
             child,
             controls=controls,
@@ -6672,11 +7059,38 @@ class ResourceInterpreter:
                 child,
                 self._allocation_owners_by_uuid,
             ),
-        ).sum_over(item_symbol, _ZERO, cardinality, _ONE)
+        )
+        estimate = inner.sum_over(item_symbol, _ZERO, cardinality, _ONE)
         for arg in operation.region_args:
             resolver.bind(arg.result, final_values[arg.result.uuid])
         if assumptions:
             estimate = estimate._with_metadata(assumptions=assumptions)
+        output_sizes, maximum_exact, retains_prior_output = (
+            _maximum_live_owner_sizes_over_range(
+                inner._output_sizes,
+                item_symbol,
+                _ZERO,
+                _ONE,
+                cardinality,
+            )
+        )
+        estimate = dataclasses.replace(
+            estimate,
+            _output_sizes=output_sizes,
+            _has_output_summary=inner._has_output_summary,
+        )
+        if not maximum_exact:
+            estimate = _with_conservative_loop_output_liveness(
+                estimate,
+                active_when=sp.Gt(cardinality, _ZERO),
+                source="items liveness",
+            )
+        elif retains_prior_output:
+            estimate = _with_conservative_loop_output_liveness(
+                estimate,
+                active_when=sp.Gt(cardinality, _ONE),
+                source="items liveness",
+            )
         return estimate
 
     def _eval_concrete_for_items(
@@ -6687,7 +7101,7 @@ class ResourceInterpreter:
         *,
         controls: ResourceExpr | int,
     ) -> ResourceEstimate:
-        """Interpret a bound items loop without carried values exactly.
+        """Interpret a bound items loop without carried values per entry.
 
         Args:
             operation (ForItemsOperation): Bound dictionary loop to evaluate.
@@ -6747,11 +7161,30 @@ class ResourceInterpreter:
                 anonymous_allocated=anonymous_allocated,
             ),
         )
-        return self._schedule_concrete_loop_depth(
+        scheduled = self._schedule_concrete_loop_depth(
             operation,
             entry_estimates,
             estimate,
         )
+        if not entry_estimates:
+            return scheduled
+        output_sizes, retains_prior_output = _maximum_live_owner_sizes(
+            [entry._output_sizes for entry in entry_estimates]
+        )
+        scheduled = dataclasses.replace(
+            scheduled,
+            _output_sizes=output_sizes,
+            _has_output_summary=all(
+                entry._has_output_summary for entry in entry_estimates
+            ),
+        )
+        if retains_prior_output:
+            scheduled = _with_conservative_loop_output_liveness(
+                scheduled,
+                active_when=sp.true,
+                source="items liveness",
+            )
+        return scheduled
 
     def _eval_concrete_region_for_items(
         self,
@@ -6761,7 +7194,7 @@ class ResourceInterpreter:
         *,
         controls: ResourceExpr | int,
     ) -> ResourceEstimate:
-        """Interpret a bound items loop exactly.
+        """Interpret a bound items loop with carried values per entry.
 
         Args:
             operation (ForItemsOperation): Items loop carrying region arguments.
@@ -6827,11 +7260,30 @@ class ResourceInterpreter:
                 anonymous_allocated=anonymous_allocated,
             ),
         )
-        return self._schedule_concrete_loop_depth(
+        scheduled = self._schedule_concrete_loop_depth(
             operation,
             entry_estimates,
             estimate,
         )
+        if not entry_estimates:
+            return scheduled
+        output_sizes, retains_prior_output = _maximum_live_owner_sizes(
+            [entry._output_sizes for entry in entry_estimates]
+        )
+        scheduled = dataclasses.replace(
+            scheduled,
+            _output_sizes=output_sizes,
+            _has_output_summary=all(
+                entry._has_output_summary for entry in entry_estimates
+            ),
+        )
+        if retains_prior_output:
+            scheduled = _with_conservative_loop_output_liveness(
+                scheduled,
+                active_when=sp.true,
+                source="items liveness",
+            )
+        return scheduled
 
     def _schedule_concrete_loop_depth(
         self,
@@ -10730,15 +11182,12 @@ def _project_abstract_aggregate_controlled_cost(
             "The transformed arity fields therefore may not sum to total"
         )
     )
-    active_controls = sp.And(
-        sp.Gt(controls, _ZERO),
-        _resource_activity_condition(_estimate_activity(estimate)),
-    )
+    active_controls = sp.Gt(controls, _ZERO)
     if unclassified_count == _ZERO:
         controlled = controlled._with_metadata(
             assumptions=(complete_assumption,),
             derivation=EstimateDerivation.MODELED,
-            quality=EstimateQuality.CONSERVATIVE,
+            quality=EstimateQuality.UNKNOWN,
             active_when=active_controls,
         )
     elif unclassified_count.is_positive is True:
@@ -10752,7 +11201,7 @@ def _project_abstract_aggregate_controlled_cost(
         controlled = controlled._with_metadata(
             assumptions=(complete_assumption,),
             derivation=EstimateDerivation.MODELED,
-            quality=EstimateQuality.CONSERVATIVE,
+            quality=EstimateQuality.UNKNOWN,
             active_when=sp.And(
                 active_controls,
                 sp.Eq(unclassified_count, _ZERO),
@@ -11040,15 +11489,12 @@ def _project_clean_ancilla_aggregate_controlled_cost(
         _guarded_approximations=estimate._guarded_approximations,
         _symbol_aliases=estimate._symbol_aliases,
     )
-    active_controls = sp.And(
-        sp.Gt(controls, _ZERO),
-        _resource_activity_condition(_estimate_activity(estimate)),
-    )
+    active_controls = sp.Gt(controls, _ZERO)
     if unresolved_count == _ZERO:
         controlled = controlled._with_metadata(
             assumptions=(complete_assumption,),
             derivation=EstimateDerivation.MODELED,
-            quality=EstimateQuality.CONSERVATIVE,
+            quality=EstimateQuality.UNKNOWN,
             active_when=active_controls,
         )
     elif unresolved_count.is_positive is True:
@@ -11062,7 +11508,7 @@ def _project_clean_ancilla_aggregate_controlled_cost(
         controlled = controlled._with_metadata(
             assumptions=(complete_assumption,),
             derivation=EstimateDerivation.MODELED,
-            quality=EstimateQuality.CONSERVATIVE,
+            quality=EstimateQuality.UNKNOWN,
             active_when=sp.And(
                 active_controls,
                 sp.Eq(unresolved_count, _ZERO),
@@ -11236,6 +11682,7 @@ def _estimate_named_gate_in_basis(
             )
         if normalized_name in _ROTATION_GATES:
             estimate = estimate._with_metadata(
+                quality=EstimateQuality.UNKNOWN,
                 approximation=ApproximationStatus.APPROXIMATE,
             )
         return estimate
@@ -11548,17 +11995,17 @@ def _clifford_t_conservative_condition(
     gate_name: str,
     num_controls: ResourceExpr,
 ) -> sp.Basic:
-    """Return when a Clifford+T gate estimate uses an upper-bound synthesis.
+    """Return when a Clifford+T gate uses a conservative exact decomposition.
 
     Args:
         gate_name (str): Lowercase logical gate name.
         num_controls (ResourceExpr): Number of surrounding coherent controls.
 
     Returns:
-        sp.Basic: Boolean activation condition for upper-bound provenance.
+        sp.Basic: Boolean activation condition for conservative provenance.
     """
     if gate_name in _ROTATION_GATES:
-        return sp.true
+        return sp.false
     inherent_controls = {"x": 0, "cx": 1, "toffoli": 2}
     if gate_name in inherent_controls:
         return _boolean_condition(sp.Gt(num_controls + inherent_controls[gate_name], 2))
@@ -11587,8 +12034,9 @@ def _classify_clifford_t_gate(
 
     Exact canonical decompositions are used for X-family, Pauli, SWAP, and
     fixed phases. Arbitrary uncontrolled axial rotations use the
-    Ross-Selinger asymptotic upper bound
-    ``ceil(3 log2(1 / precision))`` T gates. A controlled primitive is
+    Ross-Selinger asymptotic cost model
+    ``ceil(3 log2(1 / precision))`` T gates. This scalar formula is not a
+    field-wise upper bound for a concrete synthesized sequence. A controlled primitive is
     rejected unless this estimator defines an explicit Clifford+T lowering.
 
     Args:

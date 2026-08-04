@@ -557,7 +557,7 @@ def test_abstract_aggregate_control_shifts_arity_and_bounds_gate_families(
     assert estimate.width.clean_ancilla_qubits == 1
     assert estimate.width.peak_qubits == 1
     assert estimate.derivation is qm.EstimateDerivation.MODELED
-    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
+    assert estimate.quality is qm.EstimateQuality.UNKNOWN
     assert any(
         "Gate-family fields are independent field-wise upper bounds"
         in assumption.message
@@ -674,9 +674,9 @@ def test_abstract_opaque_costs_apply_external_controls_after_base_cost() -> None
     assert fixed.gates.multi_qubit == 3
     assert fixed.width.clean_ancilla_qubits == 0
     assert fixed.derivation is qm.EstimateDerivation.MODELED
-    assert fixed.quality is qm.EstimateQuality.CONSERVATIVE
+    assert fixed.quality is qm.EstimateQuality.UNKNOWN
     assert callback.derivation is qm.EstimateDerivation.MODELED
-    assert callback.quality is qm.EstimateQuality.CONSERVATIVE
+    assert callback.quality is qm.EstimateQuality.UNKNOWN
 
 
 @pytest.mark.parametrize(
@@ -2821,7 +2821,7 @@ def test_clifford_t_supports_multi_controlled_global_phase() -> None:
     assert fixed.approximation is qm.ApproximationStatus.EXACT
     assert arbitrary.gates.t > fixed.gates.t
     assert arbitrary.width.clean_ancilla_qubits == 1
-    assert arbitrary.quality is qm.EstimateQuality.CONSERVATIVE
+    assert arbitrary.quality is qm.EstimateQuality.UNKNOWN
     assert arbitrary.approximation is qm.ApproximationStatus.APPROXIMATE
 
 
@@ -2864,7 +2864,7 @@ def test_symbolic_controlled_global_phase_retains_angle_classification() -> None
     assert pauli_z.quality is qm.EstimateQuality.EXACT
     assert phase_s.quality is qm.EstimateQuality.EXACT
     assert phase_t.quality is qm.EstimateQuality.EXACT
-    assert arbitrary.quality is qm.EstimateQuality.CONSERVATIVE
+    assert arbitrary.quality is qm.EstimateQuality.UNKNOWN
     assert identity.approximation is qm.ApproximationStatus.EXACT
     assert pauli_z.approximation is qm.ApproximationStatus.EXACT
     assert phase_s.approximation is qm.ApproximationStatus.EXACT
@@ -3291,7 +3291,7 @@ def test_controlled_fixed_opaque_cost_projects_complete_arity_profile(
     expected_total: int,
     expected_clean_ancillas: int,
 ) -> None:
-    """Complete opaque arity counts receive a controlled upper bound."""
+    """Complete opaque arity counts receive a controlled projection model."""
     oracle = qm.opaque(
         "arity_oracle",
         num_qubits=1,
@@ -3327,7 +3327,7 @@ def test_controlled_fixed_opaque_cost_projects_complete_arity_profile(
     assert estimate.calls.calls_by_name == {"arity_oracle": 1}
     assert estimate.calls.queries_by_name == {"arity_oracle": 1}
     assert estimate.derivation is qm.EstimateDerivation.MODELED
-    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
+    assert estimate.quality is qm.EstimateQuality.UNKNOWN
     assert any(
         "uses the aggregate clean-ancilla Toffoli batching model" in assumption.message
         for assumption in estimate.assumptions
@@ -3809,6 +3809,7 @@ def test_symbolic_opaque_gate_count_uses_fixed_shared_threshold() -> None:
     two_control_choice = estimate.substitute(total=2, controls=2)
     three_control_single = estimate.substitute(total=1, controls=3)
     three_control_shared = estimate.substitute(total=2, controls=3)
+    controlled_zero_profile = estimate.substitute(total=0, controls=2)
     zero_control = estimate.substitute(total=2, controls=0)
 
     assert two_control_single.gates.total == 7
@@ -3819,6 +3820,8 @@ def test_symbolic_opaque_gate_count_uses_fixed_shared_threshold() -> None:
     assert three_control_single.width.clean_ancilla_qubits == 3
     assert three_control_shared.gates.total == 10
     assert three_control_shared.width.clean_ancilla_qubits == 3
+    assert controlled_zero_profile.gates.total == 0
+    assert controlled_zero_profile.quality is qm.EstimateQuality.UNKNOWN
     assert zero_control.gates == qm.GateResources(total=2, two_qubit=2)
 
 

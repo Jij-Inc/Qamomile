@@ -684,6 +684,7 @@ def _quantum_value_wire_keys(
     *,
     scalar_values: Mapping[str, sp.Expr] | None = None,
     used_names: set[str] | None = None,
+    owner_aliases: Mapping[str, frozenset[str]] | None = None,
 ) -> set[WireKey]:
     """Return dependency keys for one quantum value.
 
@@ -700,17 +701,23 @@ def _quantum_value_wire_keys(
             dependency values. Defaults to ``None``.
         used_names (set[str] | None): Optional set updated with used input
             names. Defaults to ``None``.
+        owner_aliases (Mapping[str, frozenset[str]] | None): Optional
+            conditional-result owners mapped to every physical owner they may
+            select. Defaults to ``None``.
 
     Returns:
         set[WireKey]: Root-owner and optional scalar-index keys.
     """
     carrier_keys = _cast_carrier_wire_keys(value)
     if carrier_keys is not None:
-        return carrier_keys
+        return _expand_dependency_owner_aliases(carrier_keys, owner_aliases)
     owner = _quantum_allocation_owner(value)
     if isinstance(value, ArrayValue):
         if value.slice_of is None:
-            return {(owner, None)}
+            return _expand_dependency_owner_aliases(
+                {(owner, None)},
+                owner_aliases,
+            )
         size = _specialize_dependency_expression(
             _qubit_value_size(value, resolver),
             scalar_values,
@@ -721,7 +728,7 @@ def _quantum_value_wire_keys(
             and _is_concrete_integer(size)
             and 0 <= size <= _MAX_CONCRETE_VIEW_WIRE_EXPANSION
         ):
-            return {
+            keys = {
                 _array_wire_key_at_index(
                     value,
                     index,
@@ -731,21 +738,67 @@ def _quantum_value_wire_keys(
                 )
                 for index in range(int(size))
             }
-        return {(owner, None)}
+            return _expand_dependency_owner_aliases(keys, owner_aliases)
+        return _expand_dependency_owner_aliases(
+            {(owner, None)},
+            owner_aliases,
+        )
     if value.parent_array is None:
-        return {(owner, None)}
+        return _expand_dependency_owner_aliases(
+            {(owner, None)},
+            owner_aliases,
+        )
     index = _quantum_element_index_expression(
         value,
         resolver,
         scalar_values=scalar_values,
         used_names=used_names,
     )
-    return {
-        (
-            owner,
-            (None if index is None else _normalize_wire_index(index)),
-        )
-    }
+    return _expand_dependency_owner_aliases(
+        {
+            (
+                owner,
+                (None if index is None else _normalize_wire_index(index)),
+            )
+        },
+        owner_aliases,
+    )
+
+
+def _expand_dependency_owner_aliases(
+    keys: set[WireKey],
+    owner_aliases: Mapping[str, frozenset[str]] | None,
+) -> set[WireKey]:
+    """Add every transitive physical-owner alias for dependency keys.
+
+    Conditional merge results have their own SSA owner even though a later
+    access physically touches one of the branch-source allocations. Retaining
+    both the result key and all possible source keys lets call-boundary mapping
+    see the result while preventing either possible source from running in the
+    same layer.
+
+    Args:
+        keys (set[WireKey]): Dependency keys before alias expansion.
+        owner_aliases (Mapping[str, frozenset[str]] | None): Conditional owner
+            aliases, or ``None`` when no aliases are known.
+
+    Returns:
+        set[WireKey]: Original keys plus transitive owner aliases at the same
+        scalar index.
+    """
+    if not owner_aliases:
+        return keys
+    expanded = set(keys)
+    pending = list(keys)
+    while pending:
+        owner, index = pending.pop()
+        for alias in owner_aliases.get(owner, frozenset()):
+            key = (alias, index)
+            if key in expanded:
+                continue
+            expanded.add(key)
+            pending.append(key)
+    return expanded
 
 
 def _array_wire_key_at_index(
@@ -1179,6 +1232,7 @@ def _quantum_wire_keys(
     *,
     scalar_values: Mapping[str, sp.Expr] | None = None,
     used_names: set[str] | None = None,
+    owner_aliases: Mapping[str, frozenset[str]] | None = None,
 ) -> tuple[set[WireKey], set[WireKey]]:
     """Collect quantum logical wires read and written by one operation.
 
@@ -1189,6 +1243,8 @@ def _quantum_wire_keys(
             dependency values. Defaults to ``None``.
         used_names (set[str] | None): Optional set updated with used input
             names. Defaults to ``None``.
+        owner_aliases (Mapping[str, frozenset[str]] | None): Optional
+            conditional-result owner aliases. Defaults to ``None``.
 
     Returns:
         tuple[set[WireKey], set[WireKey]]: Physical owner/index keys read and
@@ -1204,6 +1260,7 @@ def _quantum_wire_keys(
                     resolver,
                     scalar_values=scalar_values,
                     used_names=used_names,
+                    owner_aliases=owner_aliases,
                 )
             )
     writes: set[WireKey] = set()
@@ -1215,6 +1272,7 @@ def _quantum_wire_keys(
                     resolver,
                     scalar_values=scalar_values,
                     used_names=used_names,
+                    owner_aliases=owner_aliases,
                 )
             )
     if isinstance(operation, HasNestedOps):
@@ -1226,6 +1284,7 @@ def _quantum_wire_keys(
                     resolver,
                     scalar_values=scalar_values,
                     used_names=used_names,
+                    owner_aliases=owner_aliases,
                 )
                 nested_keys |= child_reads | child_writes
         reads |= nested_keys
@@ -2657,6 +2716,7 @@ def _with_operation_output_summary(
     resolver: ExprResolver,
     *,
     active_when: sp.Basic,
+    body_output_sizes: Mapping[str, ResourceExpr] | None = None,
     allocation_owners_by_uuid: Mapping[str, str] | None = None,
 ) -> ResourceEstimate:
     """Attach authoritative live quantum results to a nested estimate.
@@ -2668,6 +2728,10 @@ def _with_operation_output_summary(
         resolver (ExprResolver): Resolver after publishing carried results.
         active_when (sp.Basic): Condition under which the body executes at
             least once.
+        body_output_sizes (Mapping[str, ResourceExpr] | None): Authoritative
+            retained live-owner summary across modeled body executions.
+            Loop evaluators may provide owner-wise maxima when a final-state
+            release cannot be proven. Defaults to ``None``.
         allocation_owners_by_uuid (Mapping[str, str] | None): Optional
             enclosing QInit UUID to logical-owner map for synthetic tuple
             carriers. Defaults to ``None``.
@@ -2692,13 +2756,27 @@ def _with_operation_output_summary(
         owner: _piecewise(size, _ZERO, condition)
         for owner, size in body_consumed.items()
     }
+    output_sizes = _quantum_result_owner_sizes(
+        operation.results,
+        resolver,
+        allocation_owners_by_uuid,
+    )
+    residual = sum(
+        (
+            size
+            for owner, size in (body_output_sizes or {}).items()
+            if owner not in captured
+        ),
+        _ZERO,
+    )
+    guarded_residual = _piecewise(residual, _ZERO, condition)
+    if guarded_residual != _ZERO:
+        output_sizes[f"{type(operation).__name__}:{id(operation)}/live"] = (
+            guarded_residual
+        )
     return dataclasses.replace(
         estimate,
-        _output_sizes=_quantum_result_owner_sizes(
-            operation.results,
-            resolver,
-            allocation_owners_by_uuid,
-        ),
+        _output_sizes=output_sizes,
         _input_sizes=consumed,
         _has_output_summary=True,
     )
@@ -3613,6 +3691,107 @@ def _maximum_width_over_range(
         maximized_sites,
         exact,
     )
+
+
+def _maximum_live_owner_sizes(
+    summaries: Sequence[Mapping[str, ResourceExpr]],
+) -> tuple[dict[str, ResourceExpr], bool]:
+    """Retain the largest observed live size for every loop-local owner.
+
+    A later concrete iteration may report a smaller size for the same static
+    allocation site. Without an explicit inter-iteration release proof, using
+    only that final report could silently discard qubits that were live after
+    an earlier iteration. Taking the owner-wise maximum is order-independent
+    and conservative.
+
+    Args:
+        summaries (Sequence[Mapping[str, ResourceExpr]]): Live-owner summaries
+            produced after each concrete iteration.
+
+    Returns:
+        tuple[dict[str, ResourceExpr], bool]: Owner-wise maximum sizes and
+        whether the maximum retains anything not present in the final summary.
+    """
+    if not summaries:
+        return {}, False
+    owners = sorted({owner for summary in summaries for owner in summary})
+    maxima = {
+        owner: _resource_max_many([summary.get(owner, _ZERO) for summary in summaries])
+        for owner in owners
+    }
+    final = summaries[-1]
+    retains_prior_output = any(
+        _safe_simplify(maximum - final.get(owner, _ZERO)) != _ZERO
+        for owner, maximum in maxima.items()
+    )
+    return maxima, retains_prior_output
+
+
+def _maximum_live_owner_sizes_over_range(
+    sizes: Mapping[str, ResourceExpr],
+    loop_symbol: sp.Symbol,
+    start: ResourceExpr,
+    step: ResourceExpr,
+    iterations: ResourceExpr,
+) -> tuple[dict[str, ResourceExpr], bool, bool]:
+    """Maximize live loop-local owners across a symbolic iteration range.
+
+    Args:
+        sizes (Mapping[str, ResourceExpr]): Per-iteration live-owner sizes.
+        loop_symbol (sp.Symbol): Loop variable symbol.
+        start (ResourceExpr): First loop value.
+        step (ResourceExpr): Loop step.
+        iterations (ResourceExpr): Number of executed iterations.
+
+    Returns:
+        tuple[dict[str, ResourceExpr], bool, bool]: Owner-wise maximum sizes,
+        whether every symbolic maximum is exact, and whether a maximum can
+        retain owner width from before the final iteration.
+    """
+    maxima: dict[str, ResourceExpr] = {}
+    exact = True
+    retains_prior_output = False
+    for owner in sorted(sizes):
+        size = sizes[owner]
+        maximum, maximum_is_exact = _maximum_expr_over_range(
+            size,
+            loop_symbol,
+            start,
+            step,
+            iterations,
+        )
+        maxima[owner] = maximum
+        exact = exact and maximum_is_exact
+        final = _piecewise(
+            cast(
+                ResourceExpr,
+                size.subs(loop_symbol, start + (iterations - _ONE) * step),
+            ),
+            _ZERO,
+            sp.Gt(iterations, _ZERO),
+        )
+        maximum_matches_final = _safe_simplify(maximum - final) == _ZERO
+        if (
+            not maximum_matches_final
+            and maximum_is_exact
+            and loop_symbol in size.free_symbols
+        ):
+            index = sp.Dummy("live_owner_index", integer=True, nonnegative=True)
+            transformed = cast(
+                sp.Expr,
+                size.subs(loop_symbol, start + step * index),
+            )
+            try:
+                polynomial = sp.Poly(transformed, index)
+            except sp.PolynomialError:
+                polynomial = None
+            maximum_matches_final = (
+                polynomial is not None
+                and polynomial.degree() <= 1
+                and _is_structurally_nonnegative(polynomial.coeff_monomial(index))
+            )
+        retains_prior_output = retains_prior_output or not maximum_matches_final
+    return maxima, exact, retains_prior_output
 
 
 def _qubit_value_size(value: Value, resolver: ExprResolver) -> ResourceExpr:

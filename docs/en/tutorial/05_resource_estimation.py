@@ -154,11 +154,11 @@ phase_est = controlled_phase.estimate_resources(
 assert phase_est.substitute(theta=0).gates.total == 0
 assert phase_est.substitute(theta=math.pi / 4).gates.t == 1
 arbitrary_phase = phase_est.substitute(theta=0.3)
-assert arbitrary_phase.quality is qmc.EstimateQuality.CONSERVATIVE
+assert arbitrary_phase.quality is qmc.EstimateQuality.UNKNOWN
 assert arbitrary_phase.approximation is qmc.ApproximationStatus.APPROXIMATE
 
 # %% [markdown]
-# A standalone global phase is unobservable and costs zero in this target-neutral model. Under coherent control it becomes a relative phase, as the example shows. Substitution classifies canonical angles such as zero, Z, S, and T exactly; an arbitrary angle uses the requested synthesis model.
+# A standalone global phase is unobservable and costs zero in this target-neutral model. Under coherent control it becomes a relative phase, as the example shows. Substitution classifies canonical angles such as zero, Z, S, and T exactly; an arbitrary angle uses the requested asymptotic synthesis model. That formula is not a proven field-by-field upper bound for a concrete synthesized sequence, so the result is approximate with directionally unknown quality rather than conservative.
 #
 # Higher-level operations are interpreted from their executable meaning rather than counted as one opaque box:
 #
@@ -338,7 +338,7 @@ assert vector_est.parameters == {}
 #
 # Under `ABSTRACT`, external controls keep `total` unchanged and move known arity buckets: a one-qubit gate becomes two-qubit under one control and multi-qubit under two or more. Unclassified arity remains unclassified. Under `CLEAN_ANCILLA_TOFFOLI`, a logical profile with known `single_qubit` or `two_qubit` gates supports a decomposed estimate. With at least two modeled operations and at least two external controls, this estimation model computes the controls' AND once, projects every known primitive under that one effective control, and uncomputes the shared ladder after the body. A one-operation or one-control profile keeps the per-primitive decomposition. `CLEAN_ANCILLA_TOFFOLI` names a fixed resource-estimation model; its formulas do not automatically change when an engine's emission policy changes.
 #
-# Aggregate profiles have no gate names or original schedule. Their arity and gate-family fields are therefore independent field-wise bounds and need not sum to `total`; unclassified gates are not mislabeled as `multi_qubit`. The result has `derivation=MODELED`; its `quality` is `CONSERVATIVE` only when the supplied profile is complete enough for a safe projection, and otherwise `UNKNOWN`, with the limitation recorded in `assumptions`. An externally controlled aggregate Clifford+T gate profile is rejected because arity counts alone do not identify the Clifford+T lowering. A calls/query-only cost has no gate profile to transform, so those counters remain unchanged with a visible assumption. Use a body-backed callable when gate-specific transformed costs are required, or define a separate Oracle whose declared controls and base cost already describe that implementation.
+# Aggregate profiles have no gate names, global-phase contract, or original schedule. Their arity and gate-family fields are therefore independent field-wise bounds and need not sum to `total`; unclassified gates are not mislabeled as `multi_qubit`. The result has `derivation=MODELED` and `quality=UNKNOWN`, even for a complete arity profile: two operations with the same aggregate counts can require different resources after control when one carries an otherwise invisible global phase. The projected numbers remain useful as a declared-profile model, and the limitation is recorded in `assumptions`. An externally controlled aggregate Clifford+T gate profile is rejected because arity counts alone do not identify the Clifford+T lowering. A calls/query-only cost has no gate profile to transform, so those counters remain unchanged with a visible assumption. Use a body-backed callable when gate-specific transformed costs are required, or define a separate Oracle whose declared controls and base cost already describe that implementation.
 
 
 # %%

@@ -154,11 +154,11 @@ phase_est = controlled_phase.estimate_resources(
 assert phase_est.substitute(theta=0).gates.total == 0
 assert phase_est.substitute(theta=math.pi / 4).gates.t == 1
 arbitrary_phase = phase_est.substitute(theta=0.3)
-assert arbitrary_phase.quality is qmc.EstimateQuality.CONSERVATIVE
+assert arbitrary_phase.quality is qmc.EstimateQuality.UNKNOWN
 assert arbitrary_phase.approximation is qmc.ApproximationStatus.APPROXIMATE
 
 # %% [markdown]
-# 単独のglobal phaseは観測できないため、このtarget非依存モデルではコストを0とします。上の例のように量子制御下ではrelative phaseになります。代入後の角度が0、Z、S、Tなどのcanonicalな値なら厳密に分類し、任意の角度には指定した合成モデルを使います。
+# 単独のglobal phaseは観測できないため、このtarget非依存モデルではコストを0とします。上の例のように量子制御下ではrelative phaseになります。代入後の角度が0、Z、S、Tなどのcanonicalな値なら厳密に分類し、任意の角度には指定した漸近的な合成モデルを使います。この式は具体的な合成列についてfieldごとの上界を証明するものではないため、結果は`APPROXIMATE`かつ、安全側かどうかは判断できない`UNKNOWN`になります。
 #
 # 高水準の演算はopaqueな箱1個として数えず、実行上の意味に基づいて推定します。
 #
@@ -250,7 +250,7 @@ print("parameters:", est.parameters)
 assert set(est.parameters.keys()) == {"n"}
 
 # %% [markdown]
-# 出力には、量子ビット数を表す`n`や総ゲート数を表す`2*n + Max(0, n - 1)`のようなSymPy式が含まれます。明示的またはfallbackのmodelを使ったかは`est.derivation`、countが厳密か、上界か、どちらも保証できないかは`est.quality`で確認できます。
+# 出力には、量子ビット数を表す`n`や総ゲート数を表す`2*n + Max(0, n - 1)`のようなSymPy式が含まれます。明示的またはfallbackのmodelを使ったかは`est.derivation`、countが厳密か、過小評価しない安全側か、方向を判断できないかは`est.quality`で確認できます。
 #
 # `Max(0, ...)`は`qmc.range(n - 1)`のループ回数に由来します。`n`が未束縛のため`n >= 1`を仮定できず、`n = 0`のときに回数が`-1`になってしまわないよう0で下限を取っています。具体的な`n >= 1`を代入すればこのガードは外れるので、後述の合計値はそのまま整数になります。
 
@@ -338,7 +338,7 @@ assert vector_est.parameters == {}
 #
 # `ABSTRACT`では、外部controlを追加しても`total`を変えず、arityが分かっているbucketだけを移します。1量子ビットgateは1制御で2量子ビットgateになり、2制御以上ではmulti-qubitになります。arity不明のgateは不明のままです。`CLEAN_ANCILLA_TOFFOLI`では、`single_qubit`または`two_qubit`が分かるlogical profileを分解して推定できます。2個以上のモデル化されたoperationへ2個以上の外部controlを付ける場合、この推定modelはcontrolのANDを1回だけ計算し、既知の各primitiveをその1個の実効controlの下へ投影して、本体の後で共有ladderを逆計算します。operationが1個だけ、または外部controlが1個だけの場合は、primitiveごとの分解を使います。`CLEAN_ANCILLA_TOFFOLI`は固定されたresource-estimation modelの名前です。その式は、engine側のemission policyを変更しても自動的には変化しません。
 #
-# aggregate profileにはgate名や元のscheduleがありません。そのためarity fieldとgate-family fieldはfieldごとに独立したboundであり、その和が`total`と一致しない場合があります。arity不明のgateを`multi_qubit`へ誤分類することはありません。結果は`derivation=MODELED`です。与えたprofileが安全側へ投影するのに十分なら`quality=CONSERVATIVE`、不足する場合は`quality=UNKNOWN`とし、その制限を`assumptions`へ記録します。aggregateなClifford+T gate profileへ外部controlを付ける場合は、arity countだけではClifford+T loweringを特定できないため拒否します。calls/queryだけのcostには変換対象のgate profileがないので、それらのcounterは見える仮定とともに変更せず保持します。gate固有の変換後costが必要なら本体を持つcallableを使うか、宣言controlとbase costにその実装を含めた別Oracleを定義します。
+# aggregate profileにはgate名、global phaseの契約、元のscheduleがありません。そのためarity fieldとgate-family fieldはfieldごとに独立したboundであり、その和が`total`と一致しない場合があります。arity不明のgateを`multi_qubit`へ誤分類することはありません。結果は`derivation=MODELED`、`quality=UNKNOWN`です。arity profileが完全でも、通常時のaggregate countが同じ二つのoperationの一方に不可視のglobal phaseがあれば、control後に必要なresourceは異なり得るためです。投影した数値は宣言profileに基づくmodelとして利用でき、その制限を`assumptions`へ記録します。aggregateなClifford+T gate profileへ外部controlを付ける場合は、arity countだけではClifford+T loweringを特定できないため拒否します。calls/queryだけのcostには変換対象のgate profileがないので、それらのcounterは見える仮定とともに変更せず保持します。gate固有の変換後costが必要なら本体を持つcallableを使うか、宣言controlとbase costにその実装を含めた別Oracleを定義します。
 
 
 # %%

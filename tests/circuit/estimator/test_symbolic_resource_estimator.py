@@ -73,7 +73,7 @@ def test_clifford_t_basis_lowers_body_gates_and_reports_metadata() -> None:
     assert lowered.gates.two_qubit == 6
     assert lowered.gates.t == 16
     assert lowered.gates.rotation == 0
-    assert lowered.quality is qm.EstimateQuality.CONSERVATIVE
+    assert lowered.quality is qm.EstimateQuality.UNKNOWN
     assert lowered.approximation is qm.ApproximationStatus.APPROXIMATE
 
 
@@ -392,31 +392,31 @@ def test_clifford_t_basis_lowers_controlled_toffoli_with_clean_ancilla() -> None
         pytest.param(
             "p",
             0,
-            (9, 9, 9, 0, 9, 0, qm.EstimateQuality.CONSERVATIVE),
+            (9, 9, 9, 0, 9, 0, qm.EstimateQuality.UNKNOWN),
             id="phase-rotation",
         ),
         pytest.param(
             "p",
             1,
-            (29, 27, 20, 2, 18, 0, qm.EstimateQuality.CONSERVATIVE),
+            (29, 27, 20, 2, 18, 0, qm.EstimateQuality.UNKNOWN),
             id="controlled-phase-parallel-rotations",
         ),
         pytest.param(
             "p",
             2,
-            (59, 41, 50, 18, 24, 1, qm.EstimateQuality.CONSERVATIVE),
+            (59, 41, 50, 18, 24, 1, qm.EstimateQuality.UNKNOWN),
             id="multi-controlled-phase",
         ),
         pytest.param(
             "cp",
             0,
-            (29, 27, 20, 2, 18, 0, qm.EstimateQuality.CONSERVATIVE),
+            (29, 27, 20, 2, 18, 0, qm.EstimateQuality.UNKNOWN),
             id="cp-parallel-rotations",
         ),
         pytest.param(
             "cp",
             1,
-            (59, 41, 50, 18, 24, 1, qm.EstimateQuality.CONSERVATIVE),
+            (59, 41, 50, 18, 24, 1, qm.EstimateQuality.UNKNOWN),
             id="controlled-cp",
         ),
         pytest.param(
@@ -764,8 +764,8 @@ def test_width_reuses_affinely_released_qubits() -> None:
     assert estimate.circuit_qubits == 2
 
 
-def test_loop_body_release_precedes_nested_and_later_allocations() -> None:
-    """A nonempty loop can release a capture before reusing its capacity."""
+def test_loop_body_release_retains_unconsumed_local_allocation() -> None:
+    """A loop releases a capture but retains its unconsumed local allocation."""
 
     @qm.qkernel
     def circuit() -> qm.Qubit:
@@ -779,7 +779,7 @@ def test_loop_body_release_precedes_nested_and_later_allocations() -> None:
     estimate = circuit.estimate_resources()
 
     assert estimate.width.allocated_qubits == 3
-    assert estimate.width.peak_qubits == 1
+    assert estimate.width.peak_qubits == 2
     assert estimate.width.circuit_qubits == 3
 
 
