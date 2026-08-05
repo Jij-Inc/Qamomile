@@ -13,7 +13,7 @@ import sympy as sp
 
 from qamomile.circuit.estimator._loop_executor import symbolic_iterations
 from qamomile.circuit.estimator._resolver import ExprResolver, UnresolvedValueError
-from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.callable import (
     CallTransform,
     InvokeOperation,
@@ -56,6 +56,16 @@ from qamomile.circuit.transpiler.passes.analyze import (
     build_dependency_graph,
     find_measurement_derived_values,
     find_measurement_results,
+)
+from qamomile.circuit.transpiler.passes.array_bounds_validation import (
+    ArrayBoundsValidationPass,
+)
+from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
+    CompileTimeIfLoweringPass,
+)
+from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
+from qamomile.circuit.transpiler.passes.parameter_shape_resolution import (
+    ParameterShapeResolutionPass,
 )
 
 if TYPE_CHECKING:
@@ -1098,12 +1108,18 @@ class ResourceEstimator:
         Raises:
             ValueError: If an input name is neither a free symbol nor a declared
                 kernel argument.
+            ValidationError: If concrete array inputs make a reachable array
+                access fall outside its resolved extent.
         """
         build_inputs, estimation_inputs = _partition_estimation_inputs(kernel, inputs)
         block_or_ops = self._coerce_input(
             kernel,
             build_inputs,
             estimation_inputs,
+        )
+        _validate_estimation_input_bounds(
+            block_or_ops,
+            {**build_inputs, **estimation_inputs},
         )
         config = dataclasses.replace(
             self.config,
@@ -1118,11 +1134,16 @@ class ResourceEstimator:
         if build_inputs:
             estimate = _substitute_bindings(estimate, build_inputs)
         if estimation_inputs:
+            expanded_inputs, derived_input_sources = _expand_array_shape_inputs(
+                block_or_ops,
+                estimation_inputs,
+            )
             estimate = _apply_inputs(
                 estimate,
-                _expand_array_shape_inputs(block_or_ops, estimation_inputs),
+                expanded_inputs,
                 contract_names=_contract_names(block_or_ops),
                 branch_condition_names=interpreter.branch_condition_names,
+                derived_input_sources=derived_input_sources,
             )
         if config.simplify:
             estimate = estimate.simplify()
@@ -1230,8 +1251,24 @@ class ResourceInterpreter:
                 for value in block_or_ops.input_values
                 if isinstance(value, Value) and value.type.is_quantum()
             }
+            input_value_uuids = {
+                value.uuid
+                for value in block_or_ops.input_values
+                if isinstance(value, Value) and value.type.is_quantum()
+            }
+            # Top-level tracing represents caller-owned quantum ports with
+            # QInit markers sharing the port UUID. They establish the input
+            # handles but are not body allocations.
+            operations = [
+                operation
+                for operation in block_or_ops.operations
+                if not (
+                    isinstance(operation, QInitOperation)
+                    and operation.results[0].uuid in input_value_uuids
+                )
+            ]
             body = self.eval_operations(
-                block_or_ops.operations,
+                operations,
                 resolver,
                 initial_allocations=input_allocations,
             )
@@ -5298,10 +5335,62 @@ def _contract_names(
     return frozenset(slot.name for slot in block_or_ops.param_slots)
 
 
+def _validate_estimation_input_bounds(
+    block_or_ops: "Block | Sequence[Operation]",
+    inputs: Mapping[str, Any],
+) -> None:
+    """Validate concrete array accesses on a specialized diagnostic copy.
+
+    Resource interpretation deliberately keeps scalar sizes symbolic until
+    after traversal. That avoids constructing problem-sized circuits, but it
+    also means a later substitution cannot recover frontend array-bound
+    contracts. This focused pass sequence resolves only shapes, constants,
+    and compile-time branches before applying the compiler's reachable bounds
+    validator; the original symbolic block remains unchanged for estimation.
+
+    Args:
+        block_or_ops (Block | Sequence[Operation]): IR input selected for
+            resource interpretation.
+        inputs (Mapping[str, Any]): Build-time and estimation-time values used
+            to specialize reachable array accesses.
+
+    Returns:
+        None: The function only validates the diagnostic block copy.
+
+    Raises:
+        ValidationError: If a reachable concrete array access is outside its
+            resolved extent.
+    """
+    if not isinstance(block_or_ops, Block) or not inputs:
+        return
+    if block_or_ops.kind not in (
+        BlockKind.TRACED,
+        BlockKind.HIERARCHICAL,
+        BlockKind.AFFINE,
+    ):
+        return
+
+    diagnostic = block_or_ops
+    if diagnostic.kind is not BlockKind.HIERARCHICAL:
+        diagnostic = dataclasses.replace(diagnostic, kind=BlockKind.HIERARCHICAL)
+    concrete_inputs = dict(inputs)
+    diagnostic = ParameterShapeResolutionPass(concrete_inputs).run(diagnostic)
+    diagnostic = ConstantFoldingPass(
+        concrete_inputs,
+        strip_slice_ops=False,
+    ).run(diagnostic)
+    diagnostic = CompileTimeIfLoweringPass(concrete_inputs).run(diagnostic)
+    diagnostic = ConstantFoldingPass(
+        concrete_inputs,
+        strip_slice_ops=False,
+    ).run(diagnostic)
+    ArrayBoundsValidationPass().run(diagnostic)
+
+
 def _expand_array_shape_inputs(
     block_or_ops: "Block | Sequence[Operation]",
     inputs: Mapping[str, Any],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, str]]:
     """Expand supplied array shapes into their IR dimension symbols.
 
     Args:
@@ -5309,12 +5398,14 @@ def _expand_array_shape_inputs(
         inputs (Mapping[str, Any]): User-provided estimation inputs.
 
     Returns:
-        dict[str, Any]: Inputs plus one concrete value for each matching array
-        dimension symbol.
+        tuple[dict[str, Any], dict[str, str]]: Inputs plus one concrete value
+            for each matching array dimension symbol, followed by a mapping
+            from each derived dimension name to its declared source input.
     """
     expanded = dict(inputs)
+    derived_input_sources: dict[str, str] = {}
     if not isinstance(block_or_ops, Block):
-        return expanded
+        return expanded, derived_input_sources
     for name, ir_value in zip(block_or_ops.label_args, block_or_ops.input_values):
         if name not in inputs or not isinstance(ir_value, ArrayValue):
             continue
@@ -5322,7 +5413,8 @@ def _expand_array_shape_inputs(
         for dimension, size in zip(ir_value.shape, shape):
             if dimension.name:
                 expanded[dimension.name] = size
-    return expanded
+                derived_input_sources[dimension.name] = name
+    return expanded, derived_input_sources
 
 
 def _concrete_input_shape(value: Any) -> tuple[int, ...]:
@@ -5384,6 +5476,7 @@ def _apply_inputs(
     *,
     contract_names: frozenset[str] | None = None,
     branch_condition_names: set[str] | None = None,
+    derived_input_sources: Mapping[str, str] | None = None,
 ) -> ResourceEstimate:
     """Specialize a symbolic estimate with qkernel input values.
 
@@ -5409,6 +5502,9 @@ def _apply_inputs(
         branch_condition_names (set[str] | None): Names that participated in a
             compile-time branch predicate during interpretation. Defaults to
             ``None``.
+        derived_input_sources (Mapping[str, str] | None): Internal array-shape
+            symbol names mapped to their declared source inputs. Defaults to
+            ``None``.
 
     Returns:
         ResourceEstimate: Estimate with the inputs applied.
@@ -5431,8 +5527,13 @@ def _apply_inputs(
         symbols_by_name.setdefault(_symbol_display_name(symbol), []).append(symbol)
     known = contract_names or frozenset()
     referenced = branch_condition_names or set()
+    derived_sources = derived_input_sources or {}
     unknown = [
-        name for name in inputs if name not in symbols_by_name and name not in known
+        name
+        for name in inputs
+        if name not in symbols_by_name
+        and name not in known
+        and name not in derived_sources
     ]
     if unknown:
         available = ", ".join(sorted(set(symbols_by_name) | set(known))) or "(none)"
@@ -5443,12 +5544,24 @@ def _apply_inputs(
         )
     subs: dict[sp.Symbol, sp.Expr] = {}
     ignored: list[str] = []
+    shape_specialized_sources = {
+        source
+        for derived_name, source in derived_sources.items()
+        if derived_name in symbols_by_name
+    }
     for name, value in inputs.items():
         if name not in symbols_by_name:
             # Not a free symbol: either it participated in a branch predicate
             # (silent — specialization or undecidable-note covers it) or it
-            # genuinely affects nothing (recorded as an ignored no-op).
-            if name not in referenced:
+            # supplied an array shape through a derived dimension symbol, or it
+            # genuinely affects nothing (recorded as an ignored no-op). Derived
+            # dimension names are internal aliases and never surface as ignored
+            # user inputs.
+            if (
+                name not in referenced
+                and name not in derived_sources
+                and name not in shape_specialized_sources
+            ):
                 ignored.append(name)
             continue
         sympified = sp.sympify(value)

@@ -3,7 +3,9 @@ from __future__ import annotations
 import itertools
 import math
 from dataclasses import dataclass, field
+from typing import Any
 
+import numpy as np
 import sympy as sp
 
 import qamomile.circuit as qmc
@@ -15,18 +17,33 @@ from qamomile.circuit.ir.operation.callable import (
     CompositeGateType,
     InvokeOperation,
 )
+from qamomile.linalg import PauliLCU, PeriodicShiftLCU
 
 
 @dataclass(frozen=True)
 class QKernelEntry:
-    """A catalog entry for a qkernel circuit."""
+    """A catalog entry for a qkernel circuit.
+
+    ``min_params`` contains numeric sweep parameters, while ``fixed_inputs``
+    carries structural values such as static block-encoding descriptors that
+    remain unchanged across the sweep.
+    """
 
     id: str
     qkernel: QKernel
     description: str
     param_names: tuple[str, ...] = ()
     min_params: dict[str, int] = field(default_factory=dict)
+    fixed_inputs: dict[str, Any] = field(default_factory=dict)
     tags: tuple[str, ...] = ()
+
+    def minimum_inputs(self) -> dict[str, Any]:
+        """Return fixed inputs combined with the minimum sweep parameters.
+
+        Returns:
+            dict[str, Any]: Complete minimum input mapping for this entry.
+        """
+        return {**self.fixed_inputs, **self.min_params}
 
 
 # ============================================================
@@ -1207,6 +1224,140 @@ def cdkm_adder(
 
 
 # ============================================================
+# Block encoding / QSVT resource consumers
+# ============================================================
+
+
+@qmc.qkernel
+def block_encoding_consumer(
+    encoding: qmc.LCUBlockEncoding,
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+    r"""Allocate and apply one exact block encoding.
+
+    Let ``a`` and ``n`` be the signal and system widths. In the notation of
+    Gilyén et al. (arXiv:1806.01838, Definition 43), the descriptor implements
+
+    ``B = (<0|**a tensor I) U (|0>**a tensor I) = A / alpha``,
+
+    where ``alpha = encoding.normalization``. Qamomile's current LCU
+    descriptors are exact, so the paper's block-encoding error ``epsilon`` is
+    zero. This consumer allocates both registers before invoking ``U``;
+    consequently its logical width is ``a + n``.
+
+    Args:
+        encoding (qmc.LCUBlockEncoding): Static exact block-encoding
+            descriptor whose all-zero signal block is consumed.
+
+    Returns:
+        tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Signal and system
+            registers after one application of the block-encoding unitary.
+    """
+    signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+    system = qmc.qubit_array(encoding.num_system_qubits, "system")
+    return encoding.unitary(signal, system)
+
+
+@qmc.qkernel
+def qsvt_consumer(
+    encoding: qmc.LCUBlockEncoding,
+    phases: qmc.Vector[qmc.Float],
+    phase_count: qmc.UInt,
+) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+    r"""Allocate and apply one QSVT sequence in projector-phase convention.
+
+    Write ``Pi = |0><0|**a tensor I`` and
+    ``R(phi) = exp(i phi (2 Pi - I))``. For ``phase_count = d + 1``, Qamomile
+    chronologically applies ``R(phi_0), U, R(phi_1), U dagger, ...,
+    R(phi_d)``. Thus the circuit makes exactly ``d`` block-encoding or inverse
+    queries and ``d + 1`` projector rotations.
+
+    If ``B = W Sigma V dagger`` is the normalized encoded block, Gilyén et al.
+    (arXiv:1806.01838, Definitions 15-17) show that projection back onto the
+    signal-zero subspace gives ``W P(Sigma) V dagger`` for odd ``P`` and
+    ``V P(Sigma) V dagger`` for even ``P``. In particular, the Qamomile phases
+    ``(0, -pi/2, pi/2)`` realize ``T_2(x) = 2 x**2 - 1``, so the expected even
+    transform is ``2 B dagger B - I``. For the non-Hermitian catalog canary
+    ``B = |0><1|``, this is ``-Z`` rather than the incorrect matrix polynomial
+    ``B**2 = 0``.
+
+    One Qamomile projector rotation contains ``2a`` X gates, two MCX gates,
+    and one RZ gate, hence logical cost ``2a + 3``. If one encoding query costs
+    ``C_U``, the complete logical estimate is therefore
+    ``d C_U + (d + 1)(2a + 3)`` gates and ``n + a + 1`` qubits; the final one
+    is the reusable projector auxiliary. Martyn et al. (arXiv:2105.02859,
+    Section II and Appendix A) explain why phases synthesized in the different
+    ``Wx`` convention require conversion before being used here.
+
+    Args:
+        encoding (qmc.LCUBlockEncoding): Static exact block encoding of
+            ``A / alpha``.
+        phases (qmc.Vector[qmc.Float]): Projector-rotation phases in sequence
+            order.
+        phase_count (qmc.UInt): Positive number ``d + 1`` of phases to apply.
+
+    Returns:
+        tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Signal and system
+            registers after the singular-value transformation.
+    """
+    signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
+    system = qmc.qubit_array(encoding.num_system_qubits, "system")
+    return qmc.qsvt(
+        signal,
+        system,
+        phases,
+        encoding,
+        phase_count=phase_count,
+    )
+
+
+# The catalog values are mathematical canaries, not application benchmarks:
+# they span signal widths a=1, 2, 3 and include complex/non-Hermitian blocks.
+# Qamomile keeps one pass-through signal qubit for the identity descriptor so
+# it remains composable, although Definition 44's abstract trivial encoding
+# could use a=0.
+_BLOCK_ENCODING_IDENTITY = qmc.identity_block_encoding(num_system_qubits=2)
+# PauliLCU.from_matrix encodes B = |0><1| with alpha=1. Its zero singular
+# value makes the even T_2 result -Z and detects an accidental B**2 transform.
+_BLOCK_ENCODING_PAULI = qmc.pauli_lcu_block_encoding(
+    PauliLCU.from_matrix(
+        np.asarray([[0.0, 1.0], [0.0, 0.0]], dtype=np.complex128),
+        atol=1e-12,
+    )
+)
+# The diagonal Ising operator is A = 0.5 I + Z_0 - 0.25 i Z_1, with
+# alpha = 0.5 + 1 + 0.25 = 1.75 and a two-qubit selector for three terms.
+_BLOCK_ENCODING_ISING_Z = qmc.ising_z_block_encoding(
+    {(): 0.5, (0,): 1.0, (1,): -0.25j},
+    num_system_qubits=2,
+)
+# This is the periodic second-difference operator A = S^-1 - 2I + S. The LCU
+# normalization is alpha = |1| + |-2| + |1| = 4.
+_BLOCK_ENCODING_PERIODIC_SHIFT = qmc.periodic_shift_lcu_block_encoding(
+    PeriodicShiftLCU.from_coefficients(
+        {-1: 1.0, 0: -2.0, 1: 1.0},
+        register_sizes=(2,),
+    )
+)
+# Lemma 52 of arXiv:1806.01838 gives the recursive normalization
+# alpha = sum_j |c_j| alpha_j = 0.75 + 0.5 * 1.75 = 1.625. The outer selector
+# adds one signal qubit to the two-qubit Ising child, giving a=3.
+_BLOCK_ENCODING_RECURSIVE_LCU = qmc.lcu_block_encoding(
+    (
+        qmc.LCUBlockEncodingTerm(0.75, _BLOCK_ENCODING_IDENTITY),
+        qmc.LCUBlockEncodingTerm(-0.5j, _BLOCK_ENCODING_ISING_Z),
+    )
+)
+
+_BLOCK_ENCODING_CATALOG_CASES = (
+    ("identity", _BLOCK_ENCODING_IDENTITY),
+    ("pauli", _BLOCK_ENCODING_PAULI),
+    ("ising_z", _BLOCK_ENCODING_ISING_Z),
+    ("periodic_shift", _BLOCK_ENCODING_PERIODIC_SHIFT),
+    ("recursive_lcu", _BLOCK_ENCODING_RECURSIVE_LCU),
+)
+
+
+# ============================================================
 # Catalog
 # ============================================================
 
@@ -1555,6 +1706,29 @@ QKERNEL_CATALOG: list[QKernelEntry] = [
         },
         tags=("oracle",),
     ),
+    # --- Block encoding / QSVT ---
+    *[
+        QKernelEntry(
+            id=f"block_encoding_{name}",
+            qkernel=block_encoding_consumer,
+            description=f"Resource consumer for the {name} block encoding",
+            fixed_inputs={"encoding": encoding},
+            tags=("block_encoding", "resource_estimation"),
+        )
+        for name, encoding in _BLOCK_ENCODING_CATALOG_CASES
+    ],
+    *[
+        QKernelEntry(
+            id=f"qsvt_{name}",
+            qkernel=qsvt_consumer,
+            description=f"QSVT resource consumer for the {name} block encoding",
+            param_names=("phase_count",),
+            min_params={"phase_count": 1},
+            fixed_inputs={"encoding": encoding},
+            tags=("qsvt", "resource_estimation"),
+        )
+        for name, encoding in _BLOCK_ENCODING_CATALOG_CASES
+    ],
     # --- Arithmetic ---
     QKernelEntry(
         id="maj",
