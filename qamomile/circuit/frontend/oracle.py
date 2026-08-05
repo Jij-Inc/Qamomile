@@ -76,8 +76,15 @@ class Oracle:
             Optional explicit cost for this bodyless callable. Both forms
             describe one ordinary application of the Oracle as declared,
             including ``num_control_qubits``. Controls added later with
-            ``qmc.control`` are projected by resource estimation. Defaults to
-            ``None``.
+            ``qmc.control`` are projected by resource estimation. This is a
+            complete definition-level contract: the author must include any
+            phase-relevant work that later coherent controls need. The
+            estimator does not infer omitted global-phase overhead. An
+            intrinsic nonidentity phase is represented as a logical primitive
+            in the aggregate gate and arity counts. A one-qubit phase entry is
+            an upper-bound representative for the target-free phase, not an
+            angle-aware reconstruction; use a body-backed global phase when
+            angle-specific classification is required. Defaults to ``None``.
 
     Raises:
         TypeError: If a supplied ``num_qubits`` or ``num_control_qubits`` is
@@ -123,7 +130,13 @@ class Oracle:
                 Optional fixed or context-dependent opaque cost. The returned
                 estimate describes one ordinary application of this Oracle
                 definition, including its declared controls but excluding
-                controls added by an outer transform. Defaults to ``None``.
+                controls added by an outer transform. The result must be a
+                complete definition-level contract, including phase-relevant
+                work that an outer coherent control must transform. Represent
+                an intrinsic nonidentity phase as a logical primitive in the
+                aggregate gate and arity counts. A one-qubit phase entry is an
+                upper-bound representative; use a body-backed global phase
+                for angle-specific classification. Defaults to ``None``.
 
         Raises:
             TypeError: If a supplied ``num_qubits`` or
@@ -858,7 +871,12 @@ def opaque(
         cost (ResourceEstimate | Callable[[OpaqueCostContext], ResourceEstimate] | None):
             Optional fixed or context-dependent opaque cost. Both forms
             describe one ordinary application of this Oracle definition,
-            including declared controls. Defaults to ``None``.
+            including declared controls and any phase-relevant work that later
+            coherent controls must transform. The estimator treats this as a
+            complete definition-level contract and does not add hidden
+            global-phase overhead. A one-qubit phase entry is an upper-bound
+            representative rather than an angle-aware reconstruction.
+            Defaults to ``None``.
 
     Returns:
         Oracle: Opaque callable backed by ``InvokeOperation`` with no body.

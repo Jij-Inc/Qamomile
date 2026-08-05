@@ -37,6 +37,8 @@
 # # !pip install "qamomile[qiskit,visualization]"
 
 # %%
+from dataclasses import replace
+
 import qamomile.circuit as qmc
 
 # %% [markdown]
@@ -322,7 +324,9 @@ assert vector_est.parameters == {}
 #
 # 本体を持たないcallableは、コストを指定しない限り正確なgate数が分かりません。そのため既定の`UnknownResourcePolicy.ERROR`ではエラーになります。コストが分かっている場合は、`qmc.opaque(...)`に明示的な`ResourceEstimate`を指定してください。探索的な用途では、`OPAQUE_CALL`は名前付きのcallとqueryを記録し、`derivation=MODELED`、`quality=UNKNOWN`とします。`ZERO_WITH_WARNING`も同じmetadataでコスト0という仮定を記録します。どちらも未知の本体を分解したかのようには扱いません。
 #
-# 固定`ResourceEstimate`とcontext-dependentな`cost(ctx)` callbackは、どちらもOracle定義を1回適用するbase costを記述します。このbase costには`qmc.opaque(..., num_control_qubits=...)`で宣言したcontrol（D）がすでに含まれますが、後から`qmc.control(oracle, ...)`で追加したcontrol（A）と、外側のcontrolled qkernelから継承したcontrol（K）は含まれません。推定器はどちらのbase costを受け取った後も、inverseとこれらの外部controlを適用します。
+# 固定`ResourceEstimate`とcontext-dependentな`cost(ctx)` callbackは、どちらもOracle定義を1回適用するbase costを完全に記述します。このbase costには`qmc.opaque(..., num_control_qubits=...)`で宣言したcontrol（D）がすでに含まれますが、後から`qmc.control(oracle, ...)`で追加したcontrol（A）と、外側のcontrolled qkernelから継承したcontrol（K）は含まれません。推定器はどちらのbase costを受け取った後も、inverseとこれらの外部controlを適用します。cost作成者は、後から付くcoherent controlが変換する必要のあるphase関連のworkもbase costへ含めます。推定器は省略されたglobal-phase contributionを推測して追加しません。
+#
+# `GateResources`には、opaque定義が内部に持つphase値だけを保存する独立fieldはありません。本体を持たないOracleにnontrivialなphaseが含まれ、そのOracleへ後からcoherent controlを付ける可能性がある場合、phase関連workをlogical primitiveとして宣言profileへ含めます。具体的には`total`と対応するarity bucket（通常は`single_qubit`）を1増やし、familyまで分かる場合は`rotation`にも入れます。aggregateのcontrol上界は、このentryもほかのprimitiveと同じように変換します。本来targetを持たないphaseをone-qubit bucketで表すのは、exactな再構成ではなく意図的な上界用の代表値です。角度を読めるphase分解よりcontrolを1段多く適用して数える場合があり、完全aggregateの結果が`CONSERVATIVE`になる理由の一つです。identity phaseならentryは不要です。phase角そのものからnamed gateや合成costを決めたい場合は、角度を持たないaggregate profileではなく、本体を持つ`qmc.global_phase(...)`経路を使います。
 #
 # callbackが受け取るのは完全なcall siteではなく、`OpaqueCostContext`です。`target_qubits`、targetごとの`target_shapes`、`definition_control_qubits`、`basis`、`control_decomposition`、`precision`、任意のbase `strategy`を参照できます。追加control、継承control、inverse、open-control値は意図的に含めていません。callbackは定義levelのbase costだけを記述し、これらのcall-site transformは推定器だけが反映します。ただし、ほかの利用者指定costと同様に、callbackの作成者にはこの契約に沿ったbase costを返す責任があります。
 #
@@ -338,7 +342,34 @@ assert vector_est.parameters == {}
 #
 # `ABSTRACT`では、外部controlを追加しても`total`を変えず、arityが分かっているbucketだけを移します。1量子ビットgateは1制御で2量子ビットgateになり、2制御以上ではmulti-qubitになります。arity不明のgateは不明のままです。`CLEAN_ANCILLA_TOFFOLI`では、`single_qubit`または`two_qubit`が分かるlogical profileを分解して推定できます。2個以上のモデル化されたoperationへ2個以上の外部controlを付ける場合、この推定modelはcontrolのANDを1回だけ計算し、既知の各primitiveをその1個の実効controlの下へ投影して、本体の後で共有ladderを逆計算します。operationが1個だけ、または外部controlが1個だけの場合は、primitiveごとの分解を使います。`CLEAN_ANCILLA_TOFFOLI`は固定されたresource-estimation modelの名前です。その式は、engine側のemission policyを変更しても自動的には変化しません。
 #
-# aggregate profileにはgate名、global phaseの契約、元のscheduleがありません。そのためarity fieldとgate-family fieldはfieldごとに独立したboundであり、その和が`total`と一致しない場合があります。arity不明のgateを`multi_qubit`へ誤分類することはありません。結果は`derivation=MODELED`、`quality=UNKNOWN`です。arity profileが完全でも、通常時のaggregate countが同じ二つのoperationの一方に不可視のglobal phaseがあれば、control後に必要なresourceは異なり得るためです。投影した数値は宣言profileに基づくmodelとして利用でき、その制限を`assumptions`へ記録します。aggregateなClifford+T gate profileへ外部controlを付ける場合は、arity countだけではClifford+T loweringを特定できないため拒否します。calls/queryだけのcostには変換対象のgate profileがないので、それらのcounterは見える仮定とともに変更せず保持します。gate固有の変換後costが必要なら本体を持つcallableを使うか、宣言controlとbase costにその実装を含めた別Oracleを定義します。
+# aggregate profileにはgate名と元のscheduleがありません。そのためarity fieldとgate-family fieldはfieldごとに独立したboundであり、その和が`total`と一致しない場合があります。arity不明のgateを`multi_qubit`へ誤分類することはありません。`CLEAN_ANCILLA_TOFFOLI`では、measurement/resetがなく、`total == single_qubit + two_qubit`ならlogical profileは完全です。推定器は各arityについて対応する全gateの上界を取り、control後のdepthを安全側に直列化するので、元の`quality`が`EXACT`または`CONSERVATIVE`である空でない完全profileは`derivation=MODELED`、`quality=CONSERVATIVE`になります。元の`quality=UNKNOWN`は安全側へ強めず、同じprojection後も`UNKNOWN`のままです。`ABSTRACT`ではmulti-qubit operationを分解せずarityだけ移すため、完全性の条件は`total == single_qubit + two_qubit + multi_qubit`です。正の残りがある場合、または`CLEAN_ANCILLA_TOFFOLI`で未分解のmulti-qubit gateがある場合は`UNKNOWN`のままです。aggregateなClifford+T gate profileへ外部controlを付ける場合は、arity countだけではClifford+T loweringを特定できないため拒否します。calls/queryだけのcostには変換対象のgate profileがないので、それらのcounterは見える仮定とともに変更せず保持します。gate固有の変換後costが必要なら本体を持つcallableを使います。
+
+
+# %%
+complete_profile = qmc.ResourceEstimate(
+    gates=qmc.GateResources(
+        total=3,
+        single_qubit=2,
+        two_qubit=1,
+    ),
+)
+complete_controlled = complete_profile.controlled(2)
+
+assert complete_controlled.gates.total == 7
+assert complete_controlled.depth.depth == 7
+assert complete_controlled.width.clean_ancilla_qubits == 2
+assert complete_controlled.derivation is qmc.EstimateDerivation.MODELED
+assert complete_controlled.quality is qmc.EstimateQuality.CONSERVATIVE
+
+unknown_source = replace(
+    complete_profile,
+    quality=qmc.EstimateQuality.UNKNOWN,
+)
+assert unknown_source.controlled(2).quality is qmc.EstimateQuality.UNKNOWN
+
+
+# %% [markdown]
+# この完全profileでは2制御のshared ladderを1本使います。ANDの計算と逆計算がToffoli 2個、1量子ビットentry 2個がcontrolled gate 2個、2量子ビットの保守的envelopeが3gateなので、`2 + 2 + 3 = 7`です。gate名と元のscheduleは分からないため、結果はexactではなくconservativeです。
 
 
 # %%

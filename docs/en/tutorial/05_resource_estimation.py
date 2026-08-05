@@ -37,6 +37,8 @@
 # # !pip install "qamomile[qiskit,visualization]"
 
 # %%
+from dataclasses import replace
+
 import qamomile.circuit as qmc
 
 # %% [markdown]
@@ -322,7 +324,9 @@ assert vector_est.parameters == {}
 #
 # A bodyless callable has no honest gate cost unless you provide one. The default `UnknownResourcePolicy.ERROR` therefore raises. Prefer declaring an explicit `ResourceEstimate` cost on `qmc.opaque(...)` when one is known. For exploratory work, `OPAQUE_CALL` records a named call and query with `derivation=MODELED` and `quality=UNKNOWN`, while `ZERO_WITH_WARNING` records a zero-cost assumption with the same metadata. Neither policy pretends the unknown body was decomposed.
 #
-# A fixed `ResourceEstimate` and a context-dependent `cost(ctx)` callback share one contract: each describes the base cost of applying the Oracle definition once. That base cost already includes controls declared by `qmc.opaque(..., num_control_qubits=...)`, but it excludes controls added later with `qmc.control(oracle, ...)` and controls inherited from a surrounding controlled qkernel. The estimator applies inverse and those external controls after receiving either form of base cost.
+# A fixed `ResourceEstimate` and a context-dependent `cost(ctx)` callback share one contract: each completely describes the base cost of applying the Oracle definition once. That base cost already includes controls declared by `qmc.opaque(..., num_control_qubits=...)`, but it excludes controls added later with `qmc.control(oracle, ...)` and controls inherited from a surrounding controlled qkernel. The estimator applies inverse and those external controls after receiving either form of base cost. The cost author must include any phase-relevant work that those later coherent controls need to transform; the estimator does not infer an omitted global-phase contribution.
+#
+# `GateResources` has no separate scalar field for an opaque definition's hidden phase. If a nontrivial phase is part of a bodyless Oracle and that Oracle may later be coherently controlled, represent the phase-relevant work as a logical primitive in the declared profile: increment `total` and its arity bucket (normally `single_qubit`), and use `rotation` when that family is known. The controlled aggregate envelope then includes that entry. Using the one-qubit bucket for an intrinsically target-free phase is deliberately an upper-bound representative, not an exact reconstruction: it may apply one more level of control than an angle-aware phase lowering would need. This is one reason the complete aggregate result is `CONSERVATIVE`. An identity phase needs no entry. If the exact phase angle must determine a named gate or a synthesis cost, use a body-backed `qmc.global_phase(...)` path instead of an angle-free aggregate profile.
 #
 # The callback receives an `OpaqueCostContext`, not the complete call site. It can read `target_qubits`, per-target `target_shapes`, `definition_control_qubits`, `basis`, `control_decomposition`, `precision`, and an optional base `strategy`. Added and inherited controls, inverse, and open-control values are deliberately absent: the callback describes only the definition-level base cost, while the estimator has sole responsibility for those call-site transforms. As with every user-supplied cost, the callback author remains responsible for returning a base cost that follows this contract.
 #
@@ -338,7 +342,34 @@ assert vector_est.parameters == {}
 #
 # Under `ABSTRACT`, external controls keep `total` unchanged and move known arity buckets: a one-qubit gate becomes two-qubit under one control and multi-qubit under two or more. Unclassified arity remains unclassified. Under `CLEAN_ANCILLA_TOFFOLI`, a logical profile with known `single_qubit` or `two_qubit` gates supports a decomposed estimate. With at least two modeled operations and at least two external controls, this estimation model computes the controls' AND once, projects every known primitive under that one effective control, and uncomputes the shared ladder after the body. A one-operation or one-control profile keeps the per-primitive decomposition. `CLEAN_ANCILLA_TOFFOLI` names a fixed resource-estimation model; its formulas do not automatically change when an engine's emission policy changes.
 #
-# Aggregate profiles have no gate names, global-phase contract, or original schedule. Their arity and gate-family fields are therefore independent field-wise bounds and need not sum to `total`; unclassified gates are not mislabeled as `multi_qubit`. The result has `derivation=MODELED` and `quality=UNKNOWN`, even for a complete arity profile: two operations with the same aggregate counts can require different resources after control when one carries an otherwise invisible global phase. The projected numbers remain useful as a declared-profile model, and the limitation is recorded in `assumptions`. An externally controlled aggregate Clifford+T gate profile is rejected because arity counts alone do not identify the Clifford+T lowering. A calls/query-only cost has no gate profile to transform, so those counters remain unchanged with a visible assumption. Use a body-backed callable when gate-specific transformed costs are required, or define a separate Oracle whose declared controls and base cost already describe that implementation.
+# Aggregate profiles have no gate names or original schedule. Their arity and gate-family fields are therefore independent field-wise bounds and need not sum to `total`; unclassified gates are not mislabeled as `multi_qubit`. A logical profile is complete for `CLEAN_ANCILLA_TOFFOLI` when `total == single_qubit + two_qubit` and no measurement or reset is present. The estimator applies an upper envelope over every supported gate in each declared arity and serializes the projected depth, so a nonempty complete profile whose source quality is `EXACT` or `CONSERVATIVE` has `derivation=MODELED` and `quality=CONSERVATIVE`. A source `quality=UNKNOWN` is never strengthened and remains `UNKNOWN` after the same projection. For `ABSTRACT`, completeness instead means `total == single_qubit + two_qubit + multi_qubit`, because this mode shifts a declared multi-qubit operation without decomposing it. A positive remainder or an undecomposed multi-qubit gate under `CLEAN_ANCILLA_TOFFOLI` leaves the result `UNKNOWN`. An externally controlled aggregate Clifford+T gate profile is rejected because arity counts alone do not identify the Clifford+T lowering. A calls/query-only cost has no gate profile to transform, so those counters remain unchanged with a visible assumption. Use a body-backed callable when gate-specific transformed costs are required.
+
+
+# %%
+complete_profile = qmc.ResourceEstimate(
+    gates=qmc.GateResources(
+        total=3,
+        single_qubit=2,
+        two_qubit=1,
+    ),
+)
+complete_controlled = complete_profile.controlled(2)
+
+assert complete_controlled.gates.total == 7
+assert complete_controlled.depth.depth == 7
+assert complete_controlled.width.clean_ancilla_qubits == 2
+assert complete_controlled.derivation is qmc.EstimateDerivation.MODELED
+assert complete_controlled.quality is qmc.EstimateQuality.CONSERVATIVE
+
+unknown_source = replace(
+    complete_profile,
+    quality=qmc.EstimateQuality.UNKNOWN,
+)
+assert unknown_source.controlled(2).quality is qmc.EstimateQuality.UNKNOWN
+
+
+# %% [markdown]
+# This complete profile uses one shared two-control ladder. Its compute and uncompute steps cost two Toffolis, the two one-qubit entries cost two controlled gates, and the conservative two-qubit envelope costs three gates, for `2 + 2 + 3 = 7`. Gate names and the original schedule are still absent, so the result is conservative rather than exact.
 
 
 # %%

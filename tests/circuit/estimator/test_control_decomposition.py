@@ -557,7 +557,7 @@ def test_abstract_aggregate_control_shifts_arity_and_bounds_gate_families(
     assert estimate.width.clean_ancilla_qubits == 1
     assert estimate.width.peak_qubits == 1
     assert estimate.derivation is qm.EstimateDerivation.MODELED
-    assert estimate.quality is qm.EstimateQuality.UNKNOWN
+    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
     assert any(
         "Gate-family fields are independent field-wise upper bounds"
         in assumption.message
@@ -591,7 +591,7 @@ def test_abstract_aggregate_control_keeps_unclassified_arity_explicit() -> None:
     assert one_control.quality is qm.EstimateQuality.UNKNOWN
     assert two_controls.quality is qm.EstimateQuality.UNKNOWN
     assert any(
-        "2 gate(s) have unclassified arity" in assumption.message
+        "one or more source gates have unclassified arity" in assumption.message
         for assumption in one_control.assumptions
     )
     assert any(
@@ -674,9 +674,11 @@ def test_abstract_opaque_costs_apply_external_controls_after_base_cost() -> None
     assert fixed.gates.multi_qubit == 3
     assert fixed.width.clean_ancilla_qubits == 0
     assert fixed.derivation is qm.EstimateDerivation.MODELED
-    assert fixed.quality is qm.EstimateQuality.UNKNOWN
+    assert fixed.quality is qm.EstimateQuality.CONSERVATIVE
+    assert fixed.approximation is qm.ApproximationStatus.EXACT
     assert callback.derivation is qm.EstimateDerivation.MODELED
-    assert callback.quality is qm.EstimateQuality.UNKNOWN
+    assert callback.quality is qm.EstimateQuality.CONSERVATIVE
+    assert callback.approximation is qm.ApproximationStatus.EXACT
 
 
 @pytest.mark.parametrize(
@@ -2518,6 +2520,9 @@ def _controlled_phase_estimate(
     num_controls: int = 3,
     control_value: int | None = None,
     basis: qm.GateBasis = qm.GateBasis.LOGICAL,
+    control_decomposition: qm.ControlDecomposition = (
+        qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
+    ),
     precision: float = 1e-10,
 ) -> qm.ResourceEstimate:
     """Return the estimate for a pure phase under three controls.
@@ -2528,6 +2533,8 @@ def _controlled_phase_estimate(
         control_value (int | None): Optional activation pattern for the
             controls. Defaults to the all-ones pattern.
         basis (qm.GateBasis): Requested resource basis. Defaults to logical.
+        control_decomposition (qm.ControlDecomposition): Coherent-control
+            resource model. Defaults to clean-ancilla Toffoli.
         precision (float): Clifford+T rotation precision. Defaults to
             ``1e-10``.
 
@@ -2552,7 +2559,11 @@ def _controlled_phase_estimate(
         )(controls, target)
         return target
 
-    return circuit.estimate_resources(basis=basis, precision=precision)
+    return circuit.estimate_resources(
+        basis=basis,
+        control_decomposition=control_decomposition,
+        precision=precision,
+    )
 
 
 def test_controlled_global_phase_uses_clean_ancilla_phase_lowering() -> None:
@@ -3491,7 +3502,7 @@ def test_controlled_fixed_opaque_cost_projects_complete_arity_profile(
     assert estimate.calls.calls_by_name == {"arity_oracle": 1}
     assert estimate.calls.queries_by_name == {"arity_oracle": 1}
     assert estimate.derivation is qm.EstimateDerivation.MODELED
-    assert estimate.quality is qm.EstimateQuality.UNKNOWN
+    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
     assert any(
         "uses the aggregate clean-ancilla Toffoli batching model" in assumption.message
         for assumption in estimate.assumptions
@@ -3500,6 +3511,9 @@ def test_controlled_fixed_opaque_cost_projects_complete_arity_profile(
         "Arity fields are independent field-wise upper bounds and may not sum to total"
         in assumption.message
         for assumption in estimate.assumptions
+    )
+    assert any(
+        "complete contract" in assumption.message for assumption in estimate.assumptions
     )
 
 
@@ -3654,6 +3668,123 @@ def test_open_control_brackets_wrap_projected_fixed_opaque_cost() -> None:
     assert estimate.depth.depth == 9
     assert estimate.width.clean_ancilla_qubits == 2
     assert estimate.calls.queries_by_name == {"open_arity_oracle": 1}
+
+
+@pytest.mark.parametrize("cost_kind", ["fixed", "callback"])
+@pytest.mark.parametrize(
+    "control_decomposition",
+    [
+        qm.ControlDecomposition.ABSTRACT,
+        qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+    ],
+)
+def test_empty_opaque_cost_omits_added_open_control_brackets(
+    cost_kind: str,
+    control_decomposition: qm.ControlDecomposition,
+) -> None:
+    """An explicitly empty opaque call emits no open-control X brackets."""
+
+    def empty_cost(_: qm.OpaqueCostContext) -> qm.ResourceEstimate:
+        """Return the complete empty cost for this opaque definition.
+
+        Args:
+            _ (qm.OpaqueCostContext): Unused definition-level context.
+
+        Returns:
+            qm.ResourceEstimate: Explicit identity cost.
+        """
+        return qm.ResourceEstimate.zero()
+
+    cost = qm.ResourceEstimate.zero() if cost_kind == "fixed" else empty_cost
+    oracle = qm.opaque(
+        f"empty_open_{cost_kind}",
+        num_qubits=1,
+        cost=cost,
+    )
+
+    @qm.qkernel
+    def circuit() -> qm.Qubit:
+        """Apply an empty opaque definition under one open control."""
+        control = qm.qubit("control")
+        target = qm.qubit("target")
+        _, target = qm.control(oracle, control_value=0)(control, target)
+        return target
+
+    estimate = circuit.estimate_resources(
+        control_decomposition=control_decomposition,
+    )
+
+    assert estimate.gates.total == 0
+    assert estimate.depth.depth == 0
+    assert estimate.derivation is qm.EstimateDerivation.MODELED
+    assert estimate.quality is qm.EstimateQuality.EXACT
+
+
+def test_empty_opaque_cost_omits_declared_open_control_brackets() -> None:
+    """An empty Oracle with a declared open control remains an identity."""
+    oracle = qm.opaque(
+        "empty_declared_open",
+        num_qubits=1,
+        num_control_qubits=1,
+        cost=qm.ResourceEstimate.zero(),
+    )
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Qubit, qm.Qubit]:
+        """Invoke the empty Oracle with its declared control open."""
+        control = qm.qubit("control")
+        target = qm.qubit("target")
+        return oracle(target, controls=(control,), control_value=0)
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.gates.total == 0
+    assert estimate.depth.depth == 0
+    assert estimate.quality is qm.EstimateQuality.EXACT
+
+
+def test_symbolic_empty_opaque_cost_removes_open_control_brackets() -> None:
+    """Late zero specialization agrees with an early empty opaque cost."""
+    count = sp.Symbol("count", integer=True, nonnegative=True)
+
+    def make_circuit(cost: qm.ResourceEstimate) -> qm.QKernel:
+        """Build one open-controlled opaque call with the supplied cost.
+
+        Args:
+            cost (qm.ResourceEstimate): Definition-level opaque cost.
+
+        Returns:
+            qm.QKernel: Kernel containing one open-controlled invocation.
+        """
+        oracle = qm.opaque(
+            "symbolic_empty_open",
+            num_qubits=1,
+            cost=cost,
+        )
+
+        @qm.qkernel
+        def circuit() -> qm.Qubit:
+            """Invoke the symbolic opaque definition under an open control."""
+            control = qm.qubit("control")
+            target = qm.qubit("target")
+            _, target = qm.control(oracle, control_value=0)(control, target)
+            return target
+
+        return circuit
+
+    symbolic_cost = qm.ResourceEstimate(
+        gates=qm.GateResources(total=count, single_qubit=count),
+    )
+    late = make_circuit(symbolic_cost).estimate_resources().substitute(count=0)
+    early = make_circuit(symbolic_cost.substitute(count=0)).estimate_resources()
+    active = make_circuit(symbolic_cost).estimate_resources().substitute(count=1)
+
+    assert late.to_dict() == early.to_dict()
+    assert late.gates.total == 0
+    assert late.depth.depth == 0
+    assert late.quality is qm.EstimateQuality.EXACT
+    assert active.gates.total == 3
+    assert active.depth.depth == 3
 
 
 def test_declared_open_control_brackets_base_oracle_cost() -> None:
@@ -3821,6 +3952,7 @@ def test_incomplete_opaque_arity_profile_projects_known_gate_counts() -> None:
     assert estimate.gates.single_qubit == complete.gates.single_qubit
     assert estimate.gates.two_qubit == complete.gates.two_qubit
     assert estimate.gates.multi_qubit == complete.gates.multi_qubit
+    assert estimate.quality is qm.EstimateQuality.UNKNOWN
     assert (
         estimate.gates.single_qubit
         + estimate.gates.two_qubit
@@ -3828,7 +3960,8 @@ def test_incomplete_opaque_arity_profile_projects_known_gate_counts() -> None:
         != estimate.gates.total
     )
     assert any(
-        "2 gate(s) with unclassified arity" in assumption.message
+        "unresolved portion may include gates with unclassified arity"
+        in assumption.message
         for assumption in estimate.assumptions
     )
     assert any(
@@ -3860,8 +3993,10 @@ def test_partial_opaque_projection_preserves_declared_multi_qubit_gates() -> Non
     assert partial.depth.depth == 8
     assert partial.width.clean_ancilla_qubits == 2
     assert partial.gates.multi_qubit == complete.gates.multi_qubit + 1
+    assert partial.quality is qm.EstimateQuality.UNKNOWN
     assert any(
-        "0 gate(s) with unclassified arity" in assumption.message
+        "declared multi_qubit gates remain classified but are not decomposed"
+        in assumption.message
         for assumption in partial.assumptions
     )
 
@@ -3978,14 +4113,18 @@ def test_symbolic_opaque_gate_count_uses_fixed_shared_threshold() -> None:
 
     assert two_control_single.gates.total == 7
     assert two_control_single.width.clean_ancilla_qubits == 2
+    assert two_control_single.quality is qm.EstimateQuality.CONSERVATIVE
     assert two_control_choice.gates.total == 8
     assert two_control_choice.width.clean_ancilla_qubits == 2
+    assert two_control_choice.quality is qm.EstimateQuality.CONSERVATIVE
     assert three_control_single.gates.total == 9
     assert three_control_single.width.clean_ancilla_qubits == 3
+    assert three_control_single.quality is qm.EstimateQuality.CONSERVATIVE
     assert three_control_shared.gates.total == 10
     assert three_control_shared.width.clean_ancilla_qubits == 3
+    assert three_control_shared.quality is qm.EstimateQuality.CONSERVATIVE
     assert controlled_zero_profile.gates.total == 0
-    assert controlled_zero_profile.quality is qm.EstimateQuality.UNKNOWN
+    assert controlled_zero_profile.quality is qm.EstimateQuality.EXACT
     assert zero_control.gates == qm.GateResources(total=2, two_qubit=2)
 
 
@@ -4048,7 +4187,7 @@ def test_symbolic_opaque_arity_constraints_reject_invalid_specialization() -> No
     assert "rotations" in estimate.parameters
     assert any(
         requirement["label"]
-        == "Clean-ancilla aggregate rotation count within total gate count"
+        == "Controlled aggregate rotation count within total gate count"
         for requirement in estimate.to_dict()["requirements"]
     )
     with pytest.raises(ValueError, match="rotation count within total"):
@@ -4074,7 +4213,7 @@ def test_symbolic_partial_arity_remainder_is_validated_only_under_control() -> N
     assert valid.gates.total == 7
     assert valid.depth.depth == 7
     assert any(
-        requirement["label"] == "Clean-ancilla aggregate unclassified arity remainder"
+        requirement["label"] == "Aggregate controlled unclassified arity remainder"
         for requirement in estimate.to_dict()["requirements"]
     )
     with pytest.raises(ValueError, match="unclassified arity remainder"):
@@ -4112,7 +4251,7 @@ def test_symbolic_zero_known_arity_uses_total_only_control_branch() -> None:
     assert zero.quality is direct.quality
     assert any(
         "no declared one- or two-qubit gate profile" in assumption.message
-        and "active controls" in assumption.message
+        and "active coherent controls" in assumption.message
         for assumption in zero.assumptions
     )
     assert any(
@@ -4125,11 +4264,13 @@ def test_symbolic_zero_known_arity_uses_total_only_control_branch() -> None:
     assert zero_controls.assumptions == ()
     assert positive.gates.total == 7
     assert positive.depth.depth == 7
+    assert positive.quality is qm.EstimateQuality.UNKNOWN
     assert not any(
         "no declared one- or two-qubit gate profile" in assumption.message
         for assumption in positive.assumptions
     )
     assert complete.gates.total == 7
+    assert complete.quality is qm.EstimateQuality.CONSERVATIVE
     assert any(
         "uses the aggregate clean-ancilla Toffoli batching model" in assumption.message
         for assumption in complete.assumptions
@@ -4138,6 +4279,40 @@ def test_symbolic_zero_known_arity_uses_total_only_control_branch() -> None:
         "with unclassified arity" in assumption.message
         for assumption in complete.assumptions
     )
+
+
+def test_symbolic_aggregate_assumptions_match_early_and_late_binding() -> None:
+    """Concrete metadata is independent of when aggregate symbols are bound."""
+    total = sp.Symbol("total", integer=True, nonnegative=True)
+    single = sp.Symbol("single", integer=True, nonnegative=True)
+    controls = sp.Symbol("controls", integer=True, nonnegative=True)
+    cases = (
+        (
+            qm.ResourceEstimate(
+                gates=qm.GateResources(total=total),
+                control_decomposition=qm.ControlDecomposition.ABSTRACT,
+            ),
+            {"total": 1},
+        ),
+        (
+            qm.ResourceEstimate(gates=qm.GateResources(total=total)),
+            {"total": 1},
+        ),
+        (
+            qm.ResourceEstimate(
+                gates=qm.GateResources(total=5, single_qubit=single),
+            ),
+            {"single": 0},
+        ),
+    )
+
+    for base, values in cases:
+        late = base.controlled(controls).substitute(**values, controls=1)
+        early = base.substitute(**values).controlled(1)
+
+        assert late.parameters == {}
+        assert late.assumptions == early.assumptions
+        assert late.to_dict()["assumptions"] == early.to_dict()["assumptions"]
 
 
 def test_symbolic_arity_branch_preserves_internal_metadata() -> None:
@@ -4184,7 +4359,7 @@ def test_query_only_opaque_cost_is_not_treated_as_complete_gate_profile() -> Non
     assert estimate.derivation is qm.EstimateDerivation.MODELED
     assert estimate.quality is qm.EstimateQuality.UNKNOWN
     assert any(
-        "no declared one- or two-qubit gate profile" in assumption.message
+        "zero gate profile has no declared primitive arity" in assumption.message
         for assumption in estimate.assumptions
     )
     assert not any(
@@ -4193,18 +4368,462 @@ def test_query_only_opaque_cost_is_not_treated_as_complete_gate_profile() -> Non
     )
 
 
-def test_zero_aggregate_cost_does_not_claim_controlled_upper_bound() -> None:
-    """An empty aggregate cannot reveal hidden controlled global phase."""
+def test_zero_aggregate_cost_remains_exact_under_control() -> None:
+    """An explicit empty cost is a complete identity contract."""
     estimate = qm.ResourceEstimate.zero().controlled(3)
 
     assert estimate.gates.total == 0
+    assert estimate.derivation is qm.EstimateDerivation.STRUCTURAL
+    assert estimate.quality is qm.EstimateQuality.EXACT
+    assert estimate.assumptions == ()
+
+
+@pytest.mark.parametrize(
+    "control_decomposition",
+    [
+        qm.ControlDecomposition.ABSTRACT,
+        qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+    ],
+)
+def test_symbolic_empty_aggregate_matches_early_substitution(
+    control_decomposition: qm.ControlDecomposition,
+) -> None:
+    """A complete symbolic profile stays exact when it specializes to empty."""
+    count = sp.Symbol("count", integer=True, nonnegative=True)
+    base = qm.ResourceEstimate(
+        gates=qm.GateResources(total=count, single_qubit=count),
+        control_decomposition=control_decomposition,
+    )
+
+    late = base.controlled(2).substitute(count=0)
+    early = base.substitute(count=0).controlled(2)
+
+    assert late.to_dict() == early.to_dict()
+    assert late.derivation is qm.EstimateDerivation.STRUCTURAL
+    assert late.quality is qm.EstimateQuality.EXACT
+
+
+@pytest.mark.parametrize(
+    "control_decomposition",
+    [
+        qm.ControlDecomposition.ABSTRACT,
+        qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+    ],
+)
+@pytest.mark.parametrize("residual_kind", ["depth", "ancilla", "call"])
+def test_symbolic_zero_gate_profile_preserves_residual_uncertainty(
+    control_decomposition: qm.ControlDecomposition,
+    residual_kind: str,
+) -> None:
+    """A zero gate specialization cannot erase other transform resources."""
+    count = sp.Symbol("count", integer=True, nonnegative=True)
+    options: dict[str, object] = {}
+    if residual_kind == "depth":
+        options["depth"] = qm.DepthResources(depth=1, gate_depth=1)
+    elif residual_kind == "ancilla":
+        options["width"] = qm.WidthResources(
+            clean_ancilla_qubits=1,
+            peak_qubits=1,
+        )
+    else:
+        options["calls"] = qm.CallResources(
+            calls_by_name={"residual": 1},
+            queries_by_name={"residual": 1},
+        )
+    base = qm.ResourceEstimate(
+        gates=qm.GateResources(total=count, single_qubit=count),
+        control_decomposition=control_decomposition,
+        **options,
+    )
+
+    late = base.controlled(2).substitute(count=0)
+    early = base.substitute(count=0).controlled(2)
+
+    assert late.to_dict() == early.to_dict()
+    assert late.derivation is qm.EstimateDerivation.MODELED
+    assert late.quality is qm.EstimateQuality.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "control_decomposition",
+    [
+        qm.ControlDecomposition.ABSTRACT,
+        qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+    ],
+)
+def test_symbolic_total_only_zero_matches_explicit_empty_cost(
+    control_decomposition: qm.ControlDecomposition,
+) -> None:
+    """A total-only symbolic profile drops fallback metadata at exact zero."""
+    count = sp.Symbol("count", integer=True, nonnegative=True)
+    base = qm.ResourceEstimate(
+        gates=qm.GateResources(total=count),
+        control_decomposition=control_decomposition,
+    )
+
+    late = base.controlled(2).substitute(count=0)
+    early = base.substitute(count=0).controlled(2)
+
+    assert late.to_dict() == early.to_dict()
+    assert late.derivation is qm.EstimateDerivation.STRUCTURAL
+    assert late.quality is qm.EstimateQuality.EXACT
+
+
+def test_symbolic_control_on_empty_cost_retains_nonnegative_requirement() -> None:
+    """An empty operation still validates a symbolic control count."""
+    controls = sp.Symbol("controls", integer=True)
+
+    estimate = qm.ResourceEstimate.zero().controlled(controls)
+
+    assert estimate.gates.total == 0
+    assert estimate.quality is qm.EstimateQuality.EXACT
+    assert "controls" in estimate.parameters
+    with pytest.raises(ValueError, match="control qubit"):
+        estimate.substitute(controls=-1)
+
+
+@pytest.mark.parametrize(
+    "control_decomposition",
+    [
+        qm.ControlDecomposition.ABSTRACT,
+        qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+    ],
+)
+def test_zero_total_specialization_validates_residual_arity_profile(
+    control_decomposition: qm.ControlDecomposition,
+) -> None:
+    """A symbolic zero total cannot hide a positive arity declaration."""
+    total = sp.Symbol("total", integer=True, nonnegative=True)
+    base = qm.ResourceEstimate(
+        gates=qm.GateResources(
+            total=total,
+            single_qubit=1,
+        ),
+        control_decomposition=control_decomposition,
+    )
+
+    estimate = base.controlled(2)
+
+    with pytest.raises(ValueError, match="unclassified arity remainder"):
+        estimate.substitute(total=0)
+    with pytest.raises(ValueError, match="unclassified arity remainder"):
+        base.substitute(total=0).controlled(2)
+
+
+@pytest.mark.parametrize(
+    "control_decomposition",
+    [
+        qm.ControlDecomposition.ABSTRACT,
+        qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+    ],
+)
+def test_invalid_symbolic_profile_is_guarded_by_symbolic_controls(
+    control_decomposition: qm.ControlDecomposition,
+) -> None:
+    """Profile constraints are inactive when symbolic controls become zero."""
+    single = sp.Symbol("single", integer=True, nonnegative=True)
+    controls = sp.Symbol("controls", integer=True, nonnegative=True)
+    base = qm.ResourceEstimate(
+        gates=qm.GateResources(total=1, single_qubit=single),
+        control_decomposition=control_decomposition,
+    )
+
+    late_binding = base.controlled(controls).substitute(single=2, controls=0)
+    early_binding = (
+        base.substitute(single=2).controlled(controls).substitute(controls=0)
+    )
+
+    assert late_binding.gates == qm.GateResources(total=1, single_qubit=2)
+    assert early_binding.to_dict() == late_binding.to_dict()
+    with pytest.raises(ValueError, match="unclassified arity remainder"):
+        base.controlled(controls).substitute(single=2, controls=1)
+    with pytest.raises(ValueError, match="unclassified arity remainder"):
+        base.substitute(single=2).controlled(controls).substitute(controls=1)
+
+
+@pytest.mark.parametrize(
+    ("control_decomposition", "total", "expected_quality"),
+    [
+        (
+            qm.ControlDecomposition.ABSTRACT,
+            2,
+            qm.EstimateQuality.CONSERVATIVE,
+        ),
+        (
+            qm.ControlDecomposition.ABSTRACT,
+            3,
+            qm.EstimateQuality.UNKNOWN,
+        ),
+        (
+            qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+            2,
+            qm.EstimateQuality.CONSERVATIVE,
+        ),
+        (
+            qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+            3,
+            qm.EstimateQuality.UNKNOWN,
+        ),
+    ],
+)
+def test_aggregate_projection_combines_existing_metadata_axes(
+    control_decomposition: qm.ControlDecomposition,
+    total: int,
+    expected_quality: qm.EstimateQuality,
+) -> None:
+    """Projection weakens quality without changing approximation status."""
+    base = qm.ResourceEstimate(
+        gates=qm.GateResources(total=total, single_qubit=1, two_qubit=1),
+        derivation=qm.EstimateDerivation.MODELED,
+        quality=qm.EstimateQuality.CONSERVATIVE,
+        approximation=qm.ApproximationStatus.APPROXIMATE,
+        control_decomposition=control_decomposition,
+    )
+
+    estimate = base.controlled(2)
+
+    assert estimate.derivation is qm.EstimateDerivation.MODELED
+    assert estimate.quality is expected_quality
+    assert estimate.approximation is qm.ApproximationStatus.APPROXIMATE
+
+
+@pytest.mark.parametrize(
+    "control_decomposition",
+    [
+        qm.ControlDecomposition.ABSTRACT,
+        qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+    ],
+)
+def test_complete_aggregate_projection_preserves_unknown_input_quality(
+    control_decomposition: qm.ControlDecomposition,
+) -> None:
+    """A complete profile cannot strengthen an explicitly unknown source."""
+    base = qm.ResourceEstimate(
+        gates=qm.GateResources(
+            total=2,
+            single_qubit=1,
+            two_qubit=1,
+        ),
+        quality=qm.EstimateQuality.UNKNOWN,
+        control_decomposition=control_decomposition,
+    )
+
+    estimate = base.controlled(2)
+
     assert estimate.derivation is qm.EstimateDerivation.MODELED
     assert estimate.quality is qm.EstimateQuality.UNKNOWN
-    assert any(
-        "cannot distinguish an exact identity from an undeclared global phase"
-        in assumption.message
-        for assumption in estimate.assumptions
+
+
+@pytest.mark.parametrize(
+    ("control_decomposition", "expected_total", "expected_clean_ancillas"),
+    [
+        (qm.ControlDecomposition.ABSTRACT, 1, 0),
+        (qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI, 3, 1),
+    ],
+)
+def test_complete_aggregate_phase_representative_uses_controlled_upper_bound(
+    control_decomposition: qm.ControlDecomposition,
+    expected_total: int,
+    expected_clean_ancillas: int,
+) -> None:
+    """A declared phase primitive is included in the controlled envelope."""
+    base = qm.ResourceEstimate(
+        gates=qm.GateResources(
+            total=1,
+            single_qubit=1,
+            rotation=1,
+        ),
+        control_decomposition=control_decomposition,
     )
+
+    estimate = base.controlled(2)
+
+    assert estimate.gates.total == expected_total
+    assert estimate.gates.rotation >= 1
+    assert estimate.width.clean_ancilla_qubits == expected_clean_ancillas
+    assert estimate.derivation is qm.EstimateDerivation.MODELED
+    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
+
+
+@pytest.mark.parametrize(
+    "control_decomposition",
+    [
+        qm.ControlDecomposition.ABSTRACT,
+        qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+    ],
+)
+@pytest.mark.parametrize("num_controls", [1, 2, 3, 5])
+@pytest.mark.parametrize("phase", [math.pi / 4, math.pi, 0.3])
+def test_aggregate_phase_representative_bounds_body_backed_phase(
+    control_decomposition: qm.ControlDecomposition,
+    num_controls: int,
+    phase: float,
+) -> None:
+    """The phase representative bounds angle-aware cost across control counts."""
+    aggregate = qm.ResourceEstimate(
+        gates=qm.GateResources(
+            total=1,
+            single_qubit=1,
+            rotation=1,
+        ),
+        control_decomposition=control_decomposition,
+    ).controlled(num_controls)
+    body_backed = _controlled_phase_estimate(
+        phase,
+        num_controls=num_controls,
+        control_decomposition=control_decomposition,
+    )
+
+    # The one-qubit representative deliberately applies one extra control to
+    # a target-free phase, so its arity buckets model a stronger primitive
+    # rather than reproducing the angle-aware phase buckets field by field.
+    # Total, family, depth, and workspace costs must still be upper bounds.
+    assert aggregate.gates.total >= body_backed.gates.total
+    for field in dataclasses.fields(qm.GateResources):
+        if field.name in {"total", "single_qubit", "two_qubit", "multi_qubit"}:
+            continue
+        assert getattr(aggregate.gates, field.name) >= getattr(
+            body_backed.gates,
+            field.name,
+        )
+    for field in dataclasses.fields(qm.DepthResources):
+        assert getattr(aggregate.depth, field.name) >= getattr(
+            body_backed.depth,
+            field.name,
+        )
+    assert (
+        aggregate.width.clean_ancilla_qubits >= body_backed.width.clean_ancilla_qubits
+    )
+    assert aggregate.quality is qm.EstimateQuality.CONSERVATIVE
+
+
+@pytest.mark.parametrize(
+    "control_decomposition",
+    [
+        qm.ControlDecomposition.ABSTRACT,
+        qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+    ],
+)
+def test_aggregate_control_rejects_fractional_gate_counts(
+    control_decomposition: qm.ControlDecomposition,
+) -> None:
+    """A conservative aggregate projection requires integral gate counts."""
+    base = qm.ResourceEstimate(
+        gates=qm.GateResources(
+            total=sp.Rational(1, 2),
+            single_qubit=sp.Rational(1, 2),
+        ),
+        control_decomposition=control_decomposition,
+    )
+
+    with pytest.raises(ValueError, match="integer"):
+        base.controlled(2)
+
+
+@pytest.mark.parametrize(
+    "control_decomposition",
+    [
+        qm.ControlDecomposition.ABSTRACT,
+        qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+    ],
+)
+def test_aggregate_control_rejects_negative_gate_counts(
+    control_decomposition: qm.ControlDecomposition,
+) -> None:
+    """Negative aggregate counts cannot become an exact controlled cost."""
+    base = qm.ResourceEstimate(
+        gates=qm.GateResources(total=-1, single_qubit=-1),
+        control_decomposition=control_decomposition,
+    )
+
+    with pytest.raises(ValueError, match="must be at least 0"):
+        base.controlled(2)
+
+
+@pytest.mark.parametrize(
+    "control_decomposition",
+    [
+        qm.ControlDecomposition.ABSTRACT,
+        qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+    ],
+)
+@pytest.mark.parametrize(
+    ("resource_options", "expected_message"),
+    [
+        (
+            {
+                "calls": qm.CallResources(
+                    calls_by_name={"invalid_call": -1},
+                )
+            },
+            "at least 0",
+        ),
+        (
+            {
+                "calls": qm.CallResources(
+                    queries_by_name={"invalid_query": sp.Rational(1, 2)},
+                )
+            },
+            "integer",
+        ),
+        ({"depth": qm.DepthResources(depth=-1)}, "at least 0"),
+        (
+            {
+                "width": qm.WidthResources(
+                    clean_ancilla_qubits=sp.Rational(1, 2),
+                )
+            },
+            "integer",
+        ),
+    ],
+)
+def test_aggregate_control_rejects_invalid_nongate_resources(
+    control_decomposition: qm.ControlDecomposition,
+    resource_options: dict[str, object],
+    expected_message: str,
+) -> None:
+    """Every declared aggregate resource must be a nonnegative integer."""
+    base = qm.ResourceEstimate(
+        gates=qm.GateResources(total=1, single_qubit=1),
+        control_decomposition=control_decomposition,
+        **resource_options,
+    )
+
+    with pytest.raises(ValueError, match=expected_message):
+        base.controlled(2)
+
+
+@pytest.mark.parametrize(
+    "control_decomposition",
+    [
+        qm.ControlDecomposition.ABSTRACT,
+        qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+    ],
+)
+def test_invalid_symbolic_nongate_resource_is_guarded_by_controls(
+    control_decomposition: qm.ControlDecomposition,
+) -> None:
+    """Residual-resource constraints apply only when control is active."""
+    call_count = sp.Symbol("call_count", integer=True)
+    controls = sp.Symbol("controls", integer=True, nonnegative=True)
+    base = qm.ResourceEstimate(
+        gates=qm.GateResources(total=1, single_qubit=1),
+        calls=qm.CallResources(calls_by_name={"symbolic_call": call_count}),
+        control_decomposition=control_decomposition,
+    )
+
+    inactive = base.controlled(controls).substitute(
+        call_count=-1,
+        controls=0,
+    )
+
+    expected = base.substitute(call_count=-1)
+    assert inactive.gates == expected.gates
+    assert inactive.calls == expected.calls
+    assert inactive.quality is expected.quality
+    assert inactive.assumptions == expected.assumptions
+    with pytest.raises(ValueError, match="at least 0"):
+        base.controlled(controls).substitute(call_count=-1, controls=1)
 
 
 @pytest.mark.parametrize(
@@ -4214,16 +4833,14 @@ def test_zero_aggregate_cost_does_not_claim_controlled_upper_bound() -> None:
         qm.GateResources(total=1, two_qubit=1, t=1),
     ],
 )
-def test_incompatible_opaque_gate_family_arity_is_not_projected(
+def test_incompatible_opaque_gate_family_arity_is_rejected(
     gates: qm.GateResources,
 ) -> None:
-    """Known family/arity contradictions keep their declared aggregate cost."""
-    estimate = qm.ResourceEstimate(gates=gates).controlled(4)
+    """Known family/arity contradictions fail before aggregate projection."""
+    base = qm.ResourceEstimate(gates=gates)
 
-    assert estimate.gates == gates
-    assert estimate.derivation is qm.EstimateDerivation.MODELED
-    assert estimate.quality is qm.EstimateQuality.UNKNOWN
-    assert any("exceeds the declared" in item.message for item in estimate.assumptions)
+    with pytest.raises(ValueError, match="count within"):
+        base.controlled(4)
 
 
 def test_opaque_callback_separates_declared_and_inherited_controls() -> None:
@@ -4372,6 +4989,8 @@ def test_declared_oracle_controls_are_already_in_fixed_base_cost() -> None:
 
     assert estimate.gates == qm.GateResources(total=1, multi_qubit=1)
     assert estimate.width.clean_ancilla_qubits == 0
+    assert estimate.derivation is qm.EstimateDerivation.MODELED
+    assert estimate.quality is qm.EstimateQuality.EXACT
 
 
 def test_opaque_cost_projects_only_added_and_inherited_controls() -> None:
@@ -4861,6 +5480,92 @@ def test_opaque_callback_arity_profile_uses_fixed_cost_projection() -> None:
     assert callback_estimate.calls.calls_by_name == {
         "base_definition_controls=0": 1,
     }
+    assert callback_estimate.derivation is qm.EstimateDerivation.MODELED
+    assert fixed_estimate.derivation is qm.EstimateDerivation.MODELED
+    assert callback_estimate.quality is qm.EstimateQuality.CONSERVATIVE
+    assert fixed_estimate.quality is qm.EstimateQuality.CONSERVATIVE
+    assert callback_estimate.approximation is qm.ApproximationStatus.EXACT
+    assert fixed_estimate.approximation is qm.ApproximationStatus.EXACT
+
+
+@pytest.mark.parametrize("uses_callback", [False, True], ids=["fixed", "callback"])
+@pytest.mark.parametrize(
+    "control_decomposition",
+    [
+        qm.ControlDecomposition.ABSTRACT,
+        qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+    ],
+)
+@pytest.mark.parametrize(
+    ("gates", "expected_quality"),
+    [
+        pytest.param(
+            qm.GateResources(),
+            qm.EstimateQuality.EXACT,
+            id="empty",
+        ),
+        pytest.param(
+            qm.GateResources(total=1, single_qubit=1, rotation=1),
+            qm.EstimateQuality.CONSERVATIVE,
+            id="complete-phase-representative",
+        ),
+        pytest.param(
+            qm.GateResources(total=3, single_qubit=1, two_qubit=1),
+            qm.EstimateQuality.UNKNOWN,
+            id="partial",
+        ),
+    ],
+)
+def test_fixed_and_callback_opaque_costs_share_aggregate_transform_contract(
+    uses_callback: bool,
+    control_decomposition: qm.ControlDecomposition,
+    gates: qm.GateResources,
+    expected_quality: qm.EstimateQuality,
+) -> None:
+    """Fixed and callback costs use identical aggregate transform rules."""
+    base_cost = qm.ResourceEstimate(
+        gates=gates,
+        control_decomposition=control_decomposition,
+    )
+
+    def callback(ctx: qm.OpaqueCostContext) -> qm.ResourceEstimate:
+        """Return the definition-level cost for the requested model.
+
+        Args:
+            ctx (qm.OpaqueCostContext): Definition-level cost context.
+
+        Returns:
+            qm.ResourceEstimate: Cost matching the active resource model.
+        """
+        assert ctx.control_decomposition is control_decomposition
+        return base_cost
+
+    oracle = qm.opaque(
+        f"aggregate_contract_{uses_callback}_{control_decomposition.value}",
+        num_qubits=1,
+        cost=callback if uses_callback else base_cost,
+    )
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
+        """Apply two external controls to the opaque definition."""
+        return qm.control(oracle, num_controls=2)(
+            qm.qubit("control_0"),
+            qm.qubit("control_1"),
+            qm.qubit("target"),
+        )
+
+    estimate = circuit.estimate_resources(
+        control_decomposition=control_decomposition,
+    )
+    expected = base_cost.controlled(2)
+
+    assert estimate.gates == expected.gates
+    assert estimate.depth == expected.depth
+    assert estimate.width.clean_ancilla_qubits == expected.width.clean_ancilla_qubits
+    assert estimate.derivation is qm.EstimateDerivation.MODELED
+    assert estimate.quality is expected_quality
+    assert estimate.approximation is qm.ApproximationStatus.EXACT
 
 
 def test_opaque_aggregate_and_enclosing_body_share_recipe_predicate() -> None:
@@ -5081,7 +5786,7 @@ def test_controlled_basis_neutral_opaque_cost_has_fixed_callback_parity(
     assert estimate.gates.total == 0
     assert estimate.derivation is qm.EstimateDerivation.MODELED
     assert any(
-        "no declared one- or two-qubit gate profile" in assumption.message
+        "zero gate profile has no declared primitive arity" in assumption.message
         for assumption in estimate.assumptions
     )
 
