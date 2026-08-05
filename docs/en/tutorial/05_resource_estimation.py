@@ -411,7 +411,7 @@ assert costed_est.calls.queries_by_name == {"costed_oracle": 1}
 assert costed_est.derivation is qmc.EstimateDerivation.MODELED
 assert costed_est.quality is qmc.EstimateQuality.UNKNOWN
 assert any(
-    "2 gate(s) with unclassified arity" in assumption.message
+    "unresolved portion may include gates with unclassified arity" in assumption.message
     for assumption in costed_est.assumptions
 )
 
