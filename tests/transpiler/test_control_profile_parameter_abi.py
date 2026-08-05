@@ -21,9 +21,40 @@ from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
     QubitAddress,
 )
 from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
-from qamomile.cudaq import CudaqTranspiler
-from qamomile.qiskit import QiskitTranspiler
-from qamomile.quri_parts import QuriPartsTranspiler
+
+BACKENDS = [
+    pytest.param("qiskit", id="qiskit"),
+    pytest.param("quri_parts", marks=pytest.mark.quri_parts, id="quri_parts"),
+    pytest.param("cudaq", marks=pytest.mark.cudaq, id="cudaq"),
+]
+
+
+def _make_transpiler(backend: str) -> Any:
+    """Build one installed backend transpiler or skip its test.
+
+    Args:
+        backend (str): One of ``qiskit``, ``quri_parts``, or ``cudaq``.
+
+    Returns:
+        Any: Backend transpiler when its optional SDK is installed.
+    """
+    if backend == "qiskit":
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        return QiskitTranspiler()
+    if backend == "quri_parts":
+        pytest.importorskip("quri_parts")
+        pytest.importorskip("quri_parts.qulacs")
+        from qamomile.quri_parts import QuriPartsTranspiler
+
+        return QuriPartsTranspiler()
+    if backend == "cudaq":
+        pytest.importorskip("cudaq")
+        from qamomile.cudaq import CudaqTranspiler
+
+        return CudaqTranspiler()
+    raise AssertionError(f"Unknown backend {backend!r}")
 
 
 @qmc.qkernel
@@ -503,7 +534,7 @@ def test_zero_work_profile_does_not_create_phantom_parameter(
     kernel: Any,
 ) -> None:
     """An empty controlled body has no runtime parameter in its emitted ABI."""
-    executable = QiskitTranspiler().transpile(kernel, parameters=["theta"])
+    executable = _make_transpiler("qiskit").transpile(kernel, parameters=["theta"])
     segment = executable.compiled_quantum[0]
 
     assert not segment.circuit.parameters
@@ -541,7 +572,7 @@ def test_zero_work_huge_power_validates_bookkeeping_once(
         count_validation_calls,
     )
 
-    executable = QiskitTranspiler().transpile(
+    executable = _make_transpiler("qiskit").transpile(
         _controlled_parameterized_identity,
         parameters=["theta"],
     )
@@ -554,7 +585,7 @@ def test_zero_work_huge_power_validates_bookkeeping_once(
 
 def test_profile_then_real_emission_records_one_parameter() -> None:
     """A real controlled rotation records its probed parameter exactly once."""
-    executable = QiskitTranspiler().transpile(
+    executable = _make_transpiler("qiskit").transpile(
         _controlled_parameterized_rotation,
         parameters=["theta"],
     )
@@ -567,14 +598,14 @@ def test_profile_then_real_emission_records_one_parameter() -> None:
 
 
 @pytest.mark.parametrize(
-    "transpiler_type",
-    [QiskitTranspiler, QuriPartsTranspiler, CudaqTranspiler],
+    "backend",
+    BACKENDS,
 )
 def test_parameter_abi_tracks_real_use_on_every_engine(
-    transpiler_type: type[Any],
+    backend: str,
 ) -> None:
     """Every engine omits probed-only parameters and retains gate inputs."""
-    transpiler = transpiler_type()
+    transpiler = _make_transpiler(backend)
     parameter_names = []
     for kernel in (
         _controlled_parameterized_identity,
@@ -597,4 +628,4 @@ def test_parameter_abi_tracks_real_use_on_every_engine(
 def test_zero_work_controlled_body_still_runs_return_validation() -> None:
     """Zero quantum work cannot hide invalid array-return bookkeeping."""
     with pytest.raises(EmitError, match="target does not match"):
-        QiskitTranspiler().transpile(_controlled_invalid_zero_work_array_return)
+        _make_transpiler("qiskit").transpile(_controlled_invalid_zero_work_array_return)
