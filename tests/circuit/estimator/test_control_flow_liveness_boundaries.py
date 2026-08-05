@@ -132,6 +132,35 @@ def _items_retains_carry_sized_local_owner(
 
 
 @qm.qkernel
+def _range_consumes_every_captured_element() -> qm.Qubit:
+    """Measure every captured array element before a later allocation."""
+    controls = qm.qubit_array(3, "controls")
+    for index in qm.range(3):
+        qm.measure(controls[index])
+    return qm.qubit("later")
+
+
+@qm.qkernel
+def _range_consumes_one_captured_element() -> qm.Qubit:
+    """Measure one captured array element before a later allocation."""
+    controls = qm.qubit_array(3, "controls")
+    for index in qm.range(1):
+        qm.measure(controls[index])
+    return qm.qubit("later")
+
+
+@qm.qkernel
+def _items_consume_captured_elements(
+    data: qm.Dict[qm.UInt, qm.Float],
+) -> qm.Qubit:
+    """Measure captured elements selected by concrete dictionary keys."""
+    controls = qm.qubit_array(2, "controls")
+    for index, _value in qm.items(data):
+        qm.measure(controls[index])
+    return qm.qubit("later")
+
+
+@qm.qkernel
 def _while_retains_unmeasured_sibling() -> tuple[qm.Qubit, qm.Vector[qm.Qubit]]:
     """Leave one while-local array sibling live after each modeled trip."""
     retained = qm.qubit("retained")
@@ -369,6 +398,47 @@ def test_items_projects_live_width_to_final_carry(
     assert direct.parameters == {}
     assert direct.width.peak_qubits == expected_width
     assert substituted.width == direct.width
+
+
+@pytest.mark.parametrize(
+    ("kernel", "expected_peak"),
+    [
+        (_range_consumes_every_captured_element, 3),
+        (_range_consumes_one_captured_element, 3),
+    ],
+)
+def test_concrete_range_projects_captured_measurement_consumption(
+    kernel: object,
+    expected_peak: int,
+) -> None:
+    """Concrete range indices release exactly the measured captured slots."""
+    estimate = kernel.estimate_resources()
+
+    assert estimate.width.allocated_qubits == 4
+    assert estimate.width.peak_qubits == expected_peak
+    assert estimate.quality is qm.EstimateQuality.EXACT
+
+
+@pytest.mark.parametrize(
+    ("data", "expected_peak"),
+    [
+        ({}, 3),
+        ({0: 0.1}, 2),
+        ({0: 0.1, 1: 0.2}, 2),
+    ],
+)
+def test_concrete_items_projects_captured_measurement_consumption(
+    data: dict[int, float],
+    expected_peak: int,
+) -> None:
+    """Concrete item keys release exactly the measured captured slots."""
+    estimate = _items_consume_captured_elements.estimate_resources(
+        inputs={"data": data}
+    )
+
+    assert estimate.width.allocated_qubits == 3
+    assert estimate.width.peak_qubits == expected_peak
+    assert estimate.quality is qm.EstimateQuality.EXACT
 
 
 @pytest.mark.parametrize(("trip_count", "expected_peak"), [(0, 3), (1, 4)])

@@ -317,8 +317,12 @@ class _DecodeContext:
                 payload
             )
         for definition_id, payload in self._definition_entries.items():
-            decoded = _decode_callable_def(payload, self)
             placeholder = self._definitions[definition_id]
+            decoded = _decode_callable_def(
+                payload,
+                self,
+                predecoded_attrs=placeholder.attrs,
+            )
             if placeholder.ref != decoded.ref:
                 raise ValueError(
                     f"callable definition {definition_id!r} changed ref while decoding"
@@ -2277,12 +2281,20 @@ def _decode_signature(d: Any, ctx: _DecodeContext) -> Signature | None:
     return Signature(operands=operands, results=results)
 
 
-def _decode_callable_def(d: Any, ctx: _DecodeContext) -> CallableDef:
+def _decode_callable_def(
+    d: Any,
+    ctx: _DecodeContext,
+    *,
+    predecoded_attrs: dict[str, Any] | None = None,
+) -> CallableDef:
     """Decode a callable definition.
 
     Args:
         d (Any): Serialized definition payload.
         ctx (_DecodeContext): Active decode context.
+        predecoded_attrs (dict[str, Any] | None): Attributes decoded during
+            callable-table prelinking. Defaults to ``None``, which decodes the
+            attributes from ``d`` for standalone definitions.
 
     Returns:
         CallableDef: Reconstructed definition.
@@ -2292,7 +2304,11 @@ def _decode_callable_def(d: Any, ctx: _DecodeContext) -> CallableDef:
     """
     if not isinstance(d, dict):
         raise ValueError("CallableDef payload must be a dict")
-    attrs = _decode_callable_definition_attrs(d)
+    attrs = (
+        _decode_callable_definition_attrs(d)
+        if predecoded_attrs is None
+        else predecoded_attrs
+    )
     raw_opaque_cost = d.get("opaque_cost")
     opaque_cost = None
     if raw_opaque_cost is not None:

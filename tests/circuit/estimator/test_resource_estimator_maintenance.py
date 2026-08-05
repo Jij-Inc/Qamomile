@@ -90,12 +90,11 @@ def test_ir_gate_arity_profile_is_exhaustive_and_disjoint() -> None:
     assert ir_names.isdisjoint(synthetic_names)
 
 
-def test_operation_taint_analysis_is_cached_by_operation_list_identity(
+def test_runtime_observation_analysis_is_cached_by_block_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Repeated evaluation reuses structural taint analysis for the same list."""
+    """Repeated observation summaries reuse analysis for the same block."""
     block = _taint_cache_body.build()
-    operations = block.operations
     original = estimator_module.build_dependency_graph
     analyzed: list[list[estimator_module.Operation]] = []
 
@@ -116,15 +115,20 @@ def test_operation_taint_analysis_is_cached_by_operation_list_identity(
         bindings={},
     )
 
-    interpreter.eval_operations(operations, ExprResolver(block=block))
-    interpreter.eval_operations(operations, ExprResolver(block=block))
-    copied_operations = list(operations)
-    interpreter.eval_operations(copied_operations, ExprResolver(block=block))
+    interpreter._block_runtime_observation_summary(block)
+    first_analysis_count = len(analyzed)
+    assert first_analysis_count > 0
 
-    assert len(analyzed) == 2
-    assert analyzed[0] is operations
-    assert analyzed[1] is copied_operations
-    assert interpreter._operation_taint_cache[id(operations)][0] is operations
+    interpreter._block_runtime_observation_summary(block)
+    assert len(analyzed) == first_analysis_count
+    assert interpreter._runtime_observation_cache[id(block)][0] is block
+
+    distinct_block = _taint_cache_body.build()
+    interpreter._block_runtime_observation_summary(distinct_block)
+    assert len(analyzed) > first_analysis_count
+    assert interpreter._runtime_observation_cache[id(distinct_block)][0] is (
+        distinct_block
+    )
 
 
 def test_eval_operations_reuses_precomputed_wire_footprints(
@@ -221,7 +225,6 @@ def test_concrete_loop_simplifies_constant_depth_fields_once(
         allocated_qubits=sp.Integer(0),
         clean_ancillas=sp.Integer(0),
         dirty_ancillas=sp.Integer(0),
-        measurement_derived=set(),
     )
 
     assert depth is not None

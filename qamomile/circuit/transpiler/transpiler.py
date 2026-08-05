@@ -12,6 +12,7 @@ from qamomile.circuit.frontend.param_validation import (
 from qamomile.circuit.frontend.qkernel_like import QKernelLike
 from qamomile.circuit.frontend.static_binding import without_static_bindings
 from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.dataflow import find_loop_carried_condition_uuids
 from qamomile.circuit.transpiler.compiler import QamomileCompiler
 from qamomile.circuit.transpiler.config import TranspilerConfig
 from qamomile.circuit.transpiler.errors import (
@@ -212,11 +213,13 @@ class Transpiler(ABC, Generic[T]):
         block: Block,
         bindings: dict[str, Any] | None = None,
     ) -> Block:
-        """Fixed-point loop of inline ↔ partial_eval for self-recursive kernels.
+        """Fixed-point loop of inline and branch lowering for recursion.
 
         Each iteration unrolls one layer of self-referential inline
-        callable invocation and then folds the base-case
-        ``IfOperation`` via ``partial_eval``. Terminates when no
+        callable invocation and then lowers its compile-time base-case
+        ``IfOperation``. Loop-carried Bit conditions remain visible until the
+        final validation pass so first-iteration constants cannot erase a real
+        backedge read. Terminates when no
         inline callable invocation remains (success), when every residual call
         is trapped inside an operation-owned block whose recursive callable
         contract is unsupported (control / inverse / select over a recursive
@@ -229,7 +232,7 @@ class Transpiler(ABC, Generic[T]):
                 (still containing self-referential callable invocations)
                 or already ``AFFINE`` (returned unchanged).
             bindings (dict[str, Any] | None): Compile-time bindings used by
-                ``partial_eval`` to fold the base-case condition. Defaults
+                condition lowering to select the base case. Defaults
                 to None, meaning no bindings are applied.
 
         Returns:
@@ -253,15 +256,20 @@ class Transpiler(ABC, Generic[T]):
 
         for _ in range(self.MAX_UNROLL_DEPTH):
             block = self.inline(block)
-            block = self.partial_eval(block, bindings)
+            block = CompileTimeIfLoweringPass(
+                bindings,
+                preserved_condition_uuids=find_loop_carried_condition_uuids(
+                    block.operations
+                ),
+            ).run(block)
             if count_inline_invokes(block.operations) == 0:
-                # ``partial_eval`` keeps ``block.kind`` from the input,
+                # Compile-time if lowering keeps ``block.kind`` from the input,
                 # which stays HIERARCHICAL even after the last
                 # inline callable invocation was folded away.  Re-run ``inline``
                 # to refresh the kind to AFFINE so downstream
                 # ``affine_validate`` is happy.
                 return self.inline(block)
-            # After a full inline + partial_eval iteration, if calls remain
+            # After a full inline + branch-lowering iteration, if calls remain
             # only inside operation-owned blocks (a ControlledUOperation's
             # ``block``, an InverseBlockOperation's nested blocks, or a
             # SelectOperation case block), the fixed-point loop deliberately
@@ -292,8 +300,8 @@ class Transpiler(ABC, Generic[T]):
             f"{self.MAX_UNROLL_DEPTH} unroll iterations.  Either the "
             f"recursion does not terminate under the provided bindings, "
             f"or the parameter driving the base-case condition was not "
-            f"bound to a compile-time constant so partial_eval could "
-            f"not fold the base case."
+            f"bound to a compile-time constant, so compile-time branch "
+            f"lowering could not select the base case."
         )
 
     def affine_validate(self, block: Block) -> Block:

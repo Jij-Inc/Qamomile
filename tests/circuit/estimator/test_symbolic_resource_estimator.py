@@ -1435,8 +1435,8 @@ def test_float_parameter_remains_real_in_symbolic_branches() -> None:
     assert circuit.estimate_resources(inputs={"theta": -0.5}).gates.total == 2
 
 
-def test_float_region_carry_fallback_remains_real() -> None:
-    """An unsupported Float recurrence never becomes an integer condition."""
+def test_float_region_carry_used_by_resources_fails_closed() -> None:
+    """An unresolved Float carry cannot become a public branch parameter."""
 
     @qm.qkernel
     def circuit(n: qm.UInt) -> qm.Qubit:
@@ -1453,34 +1453,14 @@ def test_float_region_carry_fallback_remains_real() -> None:
             q = qm.x(q)
         return q
 
-    estimate = circuit.estimate_resources()
-
-    # The nonlinear recurrence is intentionally modeled symbolically. Its
-    # Float-typed result must keep the equality undecidable, so the estimator
-    # preserves the branch instead of simplifying a non-integer equality
-    # against an incorrectly integer-typed symbol.
-    fallback = estimate.parameters["total_after_loop"]
-    assert fallback.is_real is True
-    assert fallback.is_integer is None
-    assert estimate.gates.total == sp.Piecewise(
-        (
-            3,
-            sp.And(
-                sp.Ne(estimate.parameters["n"], 0),
-                sp.Eq(fallback, sp.Float(0.25)),
-            ),
-        ),
-        (1, True),
-    )
-    assert estimate.substitute(n=1, total_after_loop=0.25).gates.total == 3
-    zero_trip = estimate.substitute(n=0)
+    with pytest.raises(NotImplementedError, match="unresolved loop-carried"):
+        circuit.estimate_resources()
+    assert circuit.estimate_resources(inputs={"n": 1}).gates.total == 3
+    zero_trip = circuit.estimate_resources(inputs={"n": 0})
     assert zero_trip.gates.total == 1
     assert not any(
         "recurrence could not be reduced" in assumption.message
         for assumption in zero_trip.assumptions
-    )
-    assert any(
-        "recurrence could not be reduced" in a.message for a in estimate.assumptions
     )
 
 
@@ -1617,8 +1597,8 @@ def test_same_named_runtime_if_merges_remain_independent() -> None:
     assert estimate.gates.total == 3
 
 
-def test_runtime_if_uint_merge_symbol_keeps_ir_domain() -> None:
-    """An undecidable UInt merge remains a nonnegative integer."""
+def test_runtime_if_uint_merge_cannot_drive_resource_loop() -> None:
+    """A shot-dependent UInt loop bound fails instead of becoming public."""
 
     @qm.qkernel
     def circuit() -> qm.Qubit:
@@ -1635,17 +1615,12 @@ def test_runtime_if_uint_merge_symbol_keeps_ir_domain() -> None:
             q = qm.h(q)
         return q
 
-    estimate = circuit.estimate_resources()
-    (count_symbol,) = estimate.parameters.values()
-
-    assert set(estimate.parameters) == {"uint_const_merge_0"}
-    assert count_symbol.is_integer is True
-    assert count_symbol.is_nonnegative is True
-    assert estimate.substitute(uint_const_merge_0=2).gates.total == 2
+    with pytest.raises(NotImplementedError, match="runtime-derived"):
+        circuit.estimate_resources()
 
 
-def test_measurement_provenance_crosses_qkernel_call_boundary() -> None:
-    """A helper's runtime merge stays fresh instead of nesting Piecewise."""
+def test_runtime_resource_value_crossing_qkernel_call_fails_closed() -> None:
+    """A helper's shot-dependent loop count never becomes a parameter."""
 
     @qm.qkernel
     def select_count(measured: qm.Bit) -> qm.UInt:
@@ -1665,13 +1640,8 @@ def test_measurement_provenance_crosses_qkernel_call_boundary() -> None:
             target = qm.h(target)
         return target
 
-    estimate = circuit.estimate_resources()
-    (count_symbol,) = estimate.parameters.values()
-
-    assert not estimate.gates.total.has(sp.Piecewise)
-    assert estimate.gates.total == count_symbol
-    assert count_symbol.is_integer is True
-    assert count_symbol.is_nonnegative is True
+    with pytest.raises(NotImplementedError, match="runtime-derived"):
+        circuit.estimate_resources()
 
 
 def test_runtime_if_bit_merge_symbol_keeps_ir_domain() -> None:
@@ -2663,8 +2633,8 @@ def test_nested_qinit_identity_is_namespaced_by_helper_callsite() -> None:
     assert repeated_emitted.num_qubits == repeated.width.allocated_qubits
 
 
-def test_same_named_range_fallback_symbols_remain_independent() -> None:
-    """Separate unsupported range recurrences never collapse by source name."""
+def test_same_named_range_fallbacks_fail_closed() -> None:
+    """Unsupported range carries never become same-named public inputs."""
 
     @qm.qkernel
     def circuit(n: qm.UInt, m: qm.UInt) -> qm.Bit:
@@ -2688,16 +2658,9 @@ def test_same_named_range_fallback_symbols_remain_independent() -> None:
             q = qm.x(q)
         return qm.measure(q)
 
-    estimate = circuit.estimate_resources()
-    final_symbols = [
-        symbol
-        for symbol in estimate.gates.total.free_symbols
-        if symbol.name == "total_after_loop"
-    ]
-
-    assert len(final_symbols) == 2
-    assert final_symbols[0] != final_symbols[1]
-    assert estimate.gates.total != 1
+    with pytest.raises(NotImplementedError, match="unresolved loop-carried"):
+        circuit.estimate_resources()
+    assert circuit.estimate_resources(inputs={"n": 0, "m": 0}).gates.total == 3
 
     pytest.importorskip("qiskit")
     from qamomile.qiskit import QiskitTranspiler
@@ -2711,8 +2674,8 @@ def test_same_named_range_fallback_symbols_remain_independent() -> None:
     assert emitted.quantum_circuit.count_ops()["z"] == 1
 
 
-def test_same_named_for_items_fallback_symbols_remain_independent() -> None:
-    """Separate unsupported items recurrences never collapse by source name."""
+def test_same_named_for_items_fallbacks_fail_closed() -> None:
+    """Unsupported items carries never become same-named public inputs."""
 
     @qm.qkernel
     def circuit(
@@ -2739,16 +2702,12 @@ def test_same_named_for_items_fallback_symbols_remain_independent() -> None:
             q = qm.x(q)
         return q
 
-    estimate = circuit.estimate_resources()
-    final_symbols = [
-        symbol
-        for symbol in estimate.gates.total.free_symbols
-        if symbol.name == "total_after_items"
-    ]
-
-    assert len(final_symbols) == 2
-    assert final_symbols[0] != final_symbols[1]
-    assert estimate.gates.total != 1
+    with pytest.raises(NotImplementedError, match="unresolved loop-carried"):
+        circuit.estimate_resources()
+    concrete = circuit.estimate_resources(
+        inputs={"left_data": {}, "right_data": {}},
+    )
+    assert concrete.gates.total == 3
 
 
 def test_allocation_site_identity_is_internal_to_resource_estimates() -> None:

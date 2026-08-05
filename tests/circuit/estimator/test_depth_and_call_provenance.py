@@ -21,12 +21,34 @@ from qamomile.circuit.estimator._scheduling import (
     _quantum_value_wire_keys,
     _record_disjoint_wire_footprint,
 )
+from qamomile.circuit.estimator.resource_estimator import (
+    ResourceInterpreter,
+    _ResourceEstimatorConfig,
+)
 from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.operation.callable import CallTransform, InvokeOperation
-from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
+from qamomile.circuit.ir.operation.callable import (
+    CallableDef,
+    CallableImplementation,
+    CallableRef,
+    CallTransform,
+    InvokeOperation,
+)
+from qamomile.circuit.ir.operation.expval import ExpvalOp
+from qamomile.circuit.ir.operation.gate import (
+    GateOperation,
+    GateOperationType,
+    MeasureOperation,
+    ProjectOperation,
+)
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
-from qamomile.circuit.ir.operation.operation import QInitOperation
-from qamomile.circuit.ir.types.primitives import QubitType, UIntType
+from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperation
+from qamomile.circuit.ir.types import ObservableType
+from qamomile.circuit.ir.types.primitives import (
+    BitType,
+    FloatType,
+    QubitType,
+    UIntType,
+)
 from qamomile.circuit.ir.value import ArrayValue, Value
 
 
@@ -751,6 +773,39 @@ def test_concrete_loop_parallelizes_disjoint_array_elements() -> None:
     assert estimate.depth.measurement_depth == 1
 
 
+def test_region_carry_does_not_serialize_disjoint_loop_depth() -> None:
+    """A classical loop carry does not serialize independent quantum wires."""
+
+    @qm.qkernel
+    def circuit(
+        repetitions: qm.UInt,
+    ) -> tuple[qm.Vector[qm.Qubit], qm.UInt]:
+        """Gate distinct targets while incrementing an unrelated counter."""
+        targets = qm.qubit_array(65, "targets")
+        total = qm.uint(0)
+        for index in qm.range(repetitions):
+            targets[index] = qm.h(targets[index])
+            total = total + 1
+        return targets, total
+
+    symbolic = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    repetitions = symbolic.parameters["repetitions"]
+    large = circuit.estimate_resources(
+        inputs={"repetitions": 65},
+        basis=qm.GateBasis.LOGICAL,
+    )
+
+    expected_depth = sp.Piecewise((1, repetitions > 0), (0, True))
+    assert symbolic.gates.total == repetitions
+    assert symbolic.depth.depth == expected_depth
+    assert symbolic.substitute(repetitions=3).depth.depth == 1
+    assert symbolic.substitute(repetitions=65).depth.depth == 1
+    assert large.gates.total == 65
+    assert large.depth.depth == 1
+    assert symbolic.quality is qm.EstimateQuality.EXACT
+    assert large.quality is qm.EstimateQuality.EXACT
+
+
 def test_parallel_loop_reports_stale_completion_as_an_upper_bound() -> None:
     """Parallel loop depth must not make aggregate exit latency look exact."""
 
@@ -967,8 +1022,8 @@ def test_ordinary_call_uses_only_body_touched_arguments_for_depth() -> None:
     assert estimate.quality is qm.EstimateQuality.EXACT
 
 
-def test_nonunitary_calls_disclose_global_barrier_depth() -> None:
-    """Measurement-bearing call boundaries report conservative serialization."""
+def test_nonunitary_calls_preserve_touched_wire_depth() -> None:
+    """Measurement-bearing calls on disjoint targets remain parallel."""
 
     @qm.qkernel
     def measured_body(target: qm.Qubit) -> qm.Bit:
@@ -997,12 +1052,98 @@ def test_nonunitary_calls_disclose_global_barrier_depth() -> None:
 
     assert inline_estimate.depth.depth == 2
     assert inline_estimate.quality is qm.EstimateQuality.EXACT
-    assert nested_estimate.depth.depth == 4
-    assert nested_estimate.quality is qm.EstimateQuality.CONSERVATIVE
-    assert any(
-        "non-unitary callable boundary" in assumption.message
-        for assumption in nested_estimate.assumptions
+    assert nested_estimate.depth.depth == 2
+    assert nested_estimate.quality is qm.EstimateQuality.EXACT
+    assert nested_estimate.assumptions == ()
+
+
+@pytest.mark.parametrize("resource_kind", ["measurement", "reset"])
+def test_bodyless_nonunitary_cost_occupies_only_its_operands(
+    resource_kind: str,
+) -> None:
+    """Opaque measurement/reset depth remains local to the call operands."""
+    nonunitary = qm.opaque(
+        f"opaque_{resource_kind}",
+        num_qubits=1,
+        cost=qm.ResourceEstimate(
+            measurements=qm.MeasurementResources(
+                total=1 if resource_kind == "measurement" else 0
+            ),
+            resets=qm.ResetResources(total=1 if resource_kind == "reset" else 0),
+            depth=qm.DepthResources(
+                depth=1,
+                measurement_depth=1 if resource_kind == "measurement" else 0,
+                reset_depth=1 if resource_kind == "reset" else 0,
+            ),
+        ),
     )
+
+    @qm.qkernel
+    def circuit() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
+        """Place an opaque non-unitary call between disjoint T gates."""
+        left = qm.t(qm.qubit("left"))
+        middle = qm.qubit("middle")
+        (middle,) = nonunitary(middle)
+        right = qm.t(qm.qubit("right"))
+        return left, middle, right
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.depth.depth == 1
+    assert estimate.quality is qm.EstimateQuality.EXACT
+    assert estimate.assumptions == ()
+
+
+@pytest.mark.parametrize("container", ["if", "for"])
+def test_nested_bodyless_nonunitary_cost_preserves_disjoint_parallelism(
+    container: str,
+) -> None:
+    """A structured region keeps opaque latency on its touched operand."""
+    nonunitary = qm.opaque(
+        f"opaque_measure_nested_{container}",
+        num_qubits=1,
+        cost=qm.ResourceEstimate(
+            measurements=qm.MeasurementResources(total=1),
+            depth=qm.DepthResources(depth=1, measurement_depth=1),
+        ),
+    )
+
+    if container == "if":
+
+        @qm.qkernel
+        def circuit(flag: qm.UInt) -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
+            """Place the opaque call inside a compile-time branch."""
+            left = qm.t(qm.qubit("left"))
+            middle = qm.qubit("middle")
+            if flag:
+                (middle,) = nonunitary(middle)
+            right = qm.t(qm.qubit("right"))
+            return left, middle, right
+
+        active = circuit.estimate_resources(inputs={"flag": 1})
+        inactive = circuit.estimate_resources(inputs={"flag": 0})
+    else:
+
+        @qm.qkernel
+        def circuit(repetitions: qm.UInt) -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
+            """Place the opaque call inside a concrete range loop."""
+            left = qm.t(qm.qubit("left"))
+            middle = qm.qubit("middle")
+            for _ in qm.range(repetitions):
+                (middle,) = nonunitary(middle)
+            right = qm.t(qm.qubit("right"))
+            return left, middle, right
+
+        active = circuit.estimate_resources(inputs={"repetitions": 1})
+        inactive = circuit.estimate_resources(inputs={"repetitions": 0})
+
+    assert active.measurements.total == 1
+    assert active.depth.depth == 1
+    assert active.quality is qm.EstimateQuality.EXACT
+    assert active.assumptions == ()
+    assert inactive.measurements.total == 0
+    assert inactive.depth.depth == 1
+    assert inactive.quality is qm.EstimateQuality.EXACT
 
 
 def test_inverse_call_uses_only_body_touched_arguments_for_depth() -> None:
@@ -1054,8 +1195,8 @@ def test_returned_callee_allocation_blocks_its_caller_consumer() -> None:
     assert circuit.estimate_resources(basis=qm.GateBasis.LOGICAL).depth.depth == 2
 
 
-def test_multi_wire_call_boundary_reports_conservative_depth_guarantee() -> None:
-    """Unequal body exit layers are disclosed as an upper-bound estimate."""
+def test_multi_wire_inline_call_preserves_per_wire_depth() -> None:
+    """An ordinary helper keeps each output wire's exact completion layer."""
 
     @qm.qkernel
     def circuit() -> tuple[qm.Qubit, qm.Qubit]:
@@ -1068,13 +1209,13 @@ def test_multi_wire_call_boundary_reports_conservative_depth_guarantee() -> None
 
     estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
 
-    assert estimate.depth.depth == 3
-    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
-    assert any("aggregate latency" in note.message for note in estimate.assumptions)
+    assert estimate.depth.depth == 2
+    assert estimate.quality is qm.EstimateQuality.EXACT
+    assert estimate.assumptions == ()
 
 
-def test_multi_wire_call_reports_specialized_depth_completion_uncertainty() -> None:
-    """A uniform total exit can still hide unequal T-depth completions."""
+def test_inline_call_preserves_specialized_depth_completion() -> None:
+    """Ordinary helper extraction preserves exact family-specific depth."""
 
     @qm.qkernel
     def body(
@@ -1114,15 +1255,14 @@ def test_multi_wire_call_reports_specialized_depth_completion_uncertainty() -> N
 
     assert inline_estimate.depth.t_depth == 1
     assert inline_estimate.quality is qm.EstimateQuality.EXACT
-    assert nested_estimate.depth.t_depth == 2
-    assert nested_estimate.quality is qm.EstimateQuality.CONSERVATIVE
-    assert any(
-        "aggregate latency" in note.message for note in nested_estimate.assumptions
-    )
+    assert nested_estimate.depth == inline_estimate.depth
+    assert nested_estimate.depth.t_depth == 1
+    assert nested_estimate.quality is qm.EstimateQuality.EXACT
+    assert nested_estimate.assumptions == ()
 
 
-def test_single_visible_wire_preserves_hidden_specialized_nonuniformity() -> None:
-    """Hidden body-local work prevents an exact specialized-depth boundary."""
+def test_inline_call_schedules_hidden_work_on_its_own_wire() -> None:
+    """Body-local work remains parallel with a visible helper output."""
 
     @qm.qkernel
     def body(target: qm.Qubit) -> qm.Qubit:
@@ -1142,9 +1282,9 @@ def test_single_visible_wire_preserves_hidden_specialized_nonuniformity() -> Non
     estimate = nested.estimate_resources(basis=qm.GateBasis.LOGICAL)
 
     assert estimate.depth.depth == 2
-    assert estimate.depth.t_depth == 2
-    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
-    assert any("aggregate latency" in note.message for note in estimate.assumptions)
+    assert estimate.depth.t_depth == 1
+    assert estimate.quality is qm.EstimateQuality.EXACT
+    assert estimate.assumptions == ()
 
 
 def test_legacy_inverse_invoke_invalidates_forward_completion() -> None:
@@ -1550,8 +1690,8 @@ def test_measurement_provenance_sets_runtime_choice_and_feed_forward_depth() -> 
     assert estimate.parameters == {}
 
 
-def test_feed_forward_barrier_orders_every_specialized_depth_field() -> None:
-    """A runtime branch separates same-category work even with zero duration."""
+def test_feed_forward_orders_only_dependent_specialized_depth_fields() -> None:
+    """A runtime branch leaves unrelated measurements and T gates parallel."""
 
     @qm.qkernel
     def circuit() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
@@ -1567,8 +1707,10 @@ def test_feed_forward_barrier_orders_every_specialized_depth_field() -> None:
 
     estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
 
-    assert estimate.depth.measurement_depth == 2
-    assert estimate.depth.t_depth == 2
+    assert estimate.depth.depth == 2
+    assert estimate.depth.measurement_depth == 1
+    assert estimate.depth.t_depth == 1
+    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
 
 
 def test_feed_forward_range_loop_matches_unrolled_depth_fields() -> None:
@@ -1607,14 +1749,14 @@ def test_feed_forward_range_loop_matches_unrolled_depth_fields() -> None:
     unrolled_estimate = unrolled.estimate_resources(basis=qm.GateBasis.LOGICAL)
 
     assert loop_estimate.depth == unrolled_estimate.depth
-    assert loop_estimate.depth.depth == 6
-    assert loop_estimate.depth.measurement_depth == 3
-    assert loop_estimate.depth.t_depth == 3
+    assert loop_estimate.depth.depth == 2
+    assert loop_estimate.depth.measurement_depth == 1
+    assert loop_estimate.depth.t_depth == 1
     assert loop_estimate.quality is qm.EstimateQuality.CONSERVATIVE
 
 
-def test_symbolic_feed_forward_loop_preserves_nested_call_barriers() -> None:
-    """A symbolic loop sums barriers disclosed by a measurement-bearing call."""
+def test_symbolic_feed_forward_loop_preserves_per_wire_dependencies() -> None:
+    """A symbolic loop keeps independent measured call lanes parallel."""
 
     @qm.qkernel
     def measured_call(control: qm.Qubit, target: qm.Qubit) -> qm.Qubit:
@@ -1641,9 +1783,9 @@ def test_symbolic_feed_forward_loop_preserves_nested_call_barriers() -> None:
     substituted = symbolic.substitute(width=3)
 
     assert substituted.depth == concrete.depth
-    assert concrete.depth.depth == 6
-    assert concrete.depth.measurement_depth == 3
-    assert concrete.depth.t_depth == 3
+    assert concrete.depth.depth == 2
+    assert concrete.depth.measurement_depth == 1
+    assert concrete.depth.t_depth == 1
     assert concrete.quality is qm.EstimateQuality.CONSERVATIVE
 
 
@@ -1691,7 +1833,7 @@ def test_derived_measurement_condition_keeps_callee_runtime_provenance() -> None
     derived_estimate = derived.estimate_resources(basis=qm.GateBasis.LOGICAL)
 
     assert derived_estimate.depth == direct_estimate.depth
-    assert derived_estimate.depth.depth == 3
+    assert derived_estimate.depth.depth == 2
     assert derived_estimate.quality is qm.EstimateQuality.CONSERVATIVE
     assert derived_estimate.parameters == {}
 
@@ -2089,6 +2231,239 @@ def test_expval_is_a_modeled_runtime_observation() -> None:
     assert any(assumption.source == "ExpvalOp" for assumption in estimate.assumptions)
 
 
+def test_nested_invoke_uses_selected_measurement_provenance() -> None:
+    """Nested calls do not reintroduce another strategy's measurement output."""
+    direct_target = Value(type=QubitType(), name="direct_target")
+    direct_result = Value(type=BitType(), name="direct_result")
+    direct_body = Block(
+        input_values=[direct_target],
+        output_values=[direct_result],
+        operations=[CInitOperation(results=[direct_result])],
+    )
+
+    native_target = Value(type=QubitType(), name="native_target")
+    native_result = Value(type=BitType(), name="native_result")
+    native_body = Block(
+        input_values=[native_target],
+        output_values=[native_result],
+        operations=[
+            MeasureOperation(operands=[native_target], results=[native_result])
+        ],
+    )
+
+    leaf_ref = CallableRef(namespace="test", name="leaf")
+    actual_target = Value(type=QubitType(), name="actual_target")
+    actual_result = Value(type=BitType(), name="actual_result")
+    leaf = InvokeOperation(
+        operands=[actual_target],
+        results=[actual_result],
+        target=leaf_ref,
+        definition=CallableDef(
+            ref=leaf_ref,
+            body=direct_body,
+            implementations=[
+                CallableImplementation(
+                    transform=CallTransform.DIRECT,
+                    strategy="native",
+                    body=native_body,
+                )
+            ],
+        ),
+    )
+
+    outer_body = Block(
+        input_values=[actual_target],
+        output_values=[actual_result],
+        operations=[leaf],
+    )
+    outer_ref = CallableRef(namespace="test", name="outer")
+    outer = InvokeOperation(
+        operands=[Value(type=QubitType(), name="caller_target")],
+        results=[Value(type=BitType(), name="caller_result")],
+        target=outer_ref,
+        definition=CallableDef(ref=outer_ref, body=outer_body),
+    )
+    interpreter = ResourceInterpreter(
+        config=_ResourceEstimatorConfig(
+            strategies={"leaf": "portable", "outer": "portable"}
+        ),
+        bindings={},
+    )
+
+    assert leaf.measurement_result_indices == frozenset({0})
+    assert leaf.measurement_result_indices_for(strategy="portable") == frozenset()
+    assert interpreter._invoke_runtime_observation_summary(outer) == (
+        frozenset(),
+        False,
+    )
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_selected_unitary_strategy_keeps_invoke_dependency_schedulable(
+    nested: bool,
+) -> None:
+    """An unselected measurement body does not serialize unitary work."""
+    direct_target = Value(type=QubitType(), name="direct_target")
+    direct_result = direct_target.next_version()
+    direct_plain = Value(type=BitType(), name="direct_plain")
+    direct_body = Block(
+        input_values=[direct_target],
+        output_values=[direct_result, direct_plain],
+        operations=[
+            GateOperation(
+                gate_type=GateOperationType.H,
+                operands=[direct_target],
+                results=[direct_result],
+            ),
+            CInitOperation(results=[direct_plain]),
+        ],
+    )
+
+    native_target = Value(type=QubitType(), name="native_target")
+    native_result = native_target.next_version()
+    native_measured = Value(type=BitType(), name="native_measured")
+    native_body = Block(
+        input_values=[native_target],
+        output_values=[native_result, native_measured],
+        operations=[
+            ProjectOperation(
+                operands=[native_target],
+                results=[native_result, native_measured],
+                axis="z",
+            )
+        ],
+    )
+
+    leaf_ref = CallableRef(namespace="test", name="selected_unitary_leaf")
+    leaf_definition = CallableDef(
+        ref=leaf_ref,
+        body=direct_body,
+        implementations=[
+            CallableImplementation(
+                transform=CallTransform.DIRECT,
+                strategy="native",
+                body=native_body,
+            )
+        ],
+    )
+    callable_target = Value(type=QubitType(), name="callable_target")
+    callable_result = callable_target.next_version()
+    callable_plain = Value(type=BitType(), name="callable_plain")
+    selected_call = InvokeOperation(
+        operands=[callable_target],
+        results=[callable_result, callable_plain],
+        target=leaf_ref,
+        definition=leaf_definition,
+    )
+    operation = selected_call
+    strategies = {"selected_unitary_leaf": "portable"}
+
+    if nested:
+        outer_body = Block(
+            input_values=[callable_target],
+            output_values=[callable_result, callable_plain],
+            operations=[selected_call],
+        )
+        outer_ref = CallableRef(namespace="test", name="selected_unitary_outer")
+        root_target = Value(type=QubitType(), name="root_target")
+        operation = InvokeOperation(
+            operands=[root_target],
+            results=[
+                root_target.next_version(),
+                Value(type=BitType(), name="root_plain"),
+            ],
+            target=outer_ref,
+            definition=CallableDef(ref=outer_ref, body=outer_body),
+        )
+        strategies["selected_unitary_outer"] = "portable"
+
+    left = Value(type=QubitType(), name="left")
+    right = Value(type=QubitType(), name="right")
+    root = Block(
+        operations=[
+            QInitOperation(results=[left]),
+            QInitOperation(results=[operation.operands[0]]),
+            QInitOperation(results=[right]),
+            GateOperation(
+                gate_type=GateOperationType.H,
+                operands=[left],
+                results=[left.next_version()],
+            ),
+            operation,
+            GateOperation(
+                gate_type=GateOperationType.H,
+                operands=[right],
+                results=[right.next_version()],
+            ),
+        ]
+    )
+
+    assert selected_call.effects is qm.KernelEffect.MEASUREMENT
+    estimate = qm.ResourceEstimator(strategies=strategies).estimate(root)
+
+    assert estimate.gates.total == 3
+    assert estimate.measurements.total == 0
+    assert estimate.depth.depth == 1
+    assert estimate.quality is qm.EstimateQuality.EXACT
+    assert estimate.assumptions == ()
+
+
+@pytest.mark.parametrize("query_b_first", [False, True])
+def test_recursive_runtime_observations_reach_an_order_independent_fixed_point(
+    query_b_first: bool,
+) -> None:
+    """Recursive selected bodies propagate expval provenance in either order."""
+    block_a = Block(name="A")
+    block_b = Block(name="B")
+    ref_a = CallableRef(namespace="test", name="A")
+    ref_b = CallableRef(namespace="test", name="B")
+    definition_a = CallableDef(ref=ref_a, body=block_a)
+    definition_b = CallableDef(ref=ref_b, body=block_b)
+
+    output_a = Value(type=FloatType(), name="output_a")
+    output_b = Value(type=FloatType(), name="output_b")
+    nested_b = Value(type=FloatType(), name="nested_b")
+    block_a.output_values = [output_a]
+    block_b.output_values = [output_b]
+    block_a.operations.extend(
+        [
+            InvokeOperation(
+                results=[nested_b],
+                target=ref_b,
+                definition=definition_b,
+            ),
+            ExpvalOp(
+                operands=[
+                    Value(type=QubitType(), name="observed"),
+                    Value(type=ObservableType(), name="observable"),
+                ],
+                results=[output_a],
+            ),
+        ]
+    )
+    block_b.operations.append(
+        InvokeOperation(
+            results=[output_b],
+            target=ref_a,
+            definition=definition_a,
+        )
+    )
+    interpreter = ResourceInterpreter(
+        config=_ResourceEstimatorConfig(),
+        bindings={},
+    )
+
+    first, second = (block_b, block_a) if query_b_first else (block_a, block_b)
+    assert interpreter._block_runtime_observation_summary(first) == (
+        frozenset({0}),
+        True,
+    )
+    assert interpreter._block_runtime_observation_summary(second) == (
+        frozenset({0}),
+        True,
+    )
+
+
 def test_expval_runtime_taint_does_not_change_kernel_effects() -> None:
     """Estimator-local expval taint preserves the executable effect contract."""
 
@@ -2144,8 +2519,8 @@ def test_tuple_expval_forms_a_barrier_and_releases_each_carrier() -> None:
     estimate = circuit.estimate_resources(inputs={"observable": observable})
 
     assert estimate.measurements.total == 2
-    assert estimate.depth.depth == 3
-    assert estimate.depth.measurement_depth == 2
+    assert estimate.depth.depth == 2
+    assert estimate.depth.measurement_depth == 1
     assert estimate.width.allocated_qubits == 4
     assert estimate.width.peak_qubits == 2
     assert estimate.width.circuit_qubits == 4
@@ -2242,8 +2617,8 @@ def test_symbolic_controlled_recursive_driver_fails_with_guidance() -> None:
         _controlled_resource_recursive_circuit.estimate_resources()
 
 
-def test_zero_trip_while_retains_feedforward_depth_barrier() -> None:
-    """A zero-trip runtime while still orders work after its predicate."""
+def test_while_orders_only_its_predicate_and_touched_target() -> None:
+    """A runtime while leaves unrelated work parallel at every trip count."""
 
     @qm.qkernel
     def circuit() -> tuple[qm.Qubit, qm.Qubit, qm.Bit]:
@@ -2262,9 +2637,9 @@ def test_zero_trip_while_retains_feedforward_depth_barrier() -> None:
     zero_trip = symbolic.substitute(**{"|while|": 0})
     three_trips = symbolic.substitute(**{"|while|": 3})
 
-    assert zero_trip.depth.depth == 2
-    assert zero_trip.depth.t_depth == 2
-    assert zero_trip.depth.measurement_depth == 2
-    assert three_trips.depth.depth == 5
-    assert three_trips.depth.t_depth == 5
-    assert three_trips.depth.measurement_depth == 5
+    assert zero_trip.depth.depth == 1
+    assert zero_trip.depth.t_depth == 1
+    assert zero_trip.depth.measurement_depth == 1
+    assert three_trips.depth.depth == 4
+    assert three_trips.depth.t_depth == 3
+    assert three_trips.depth.measurement_depth == 4

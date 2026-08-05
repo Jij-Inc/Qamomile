@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import uuid as uuid_module
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from qamomile.circuit.ir.block import Block
@@ -202,6 +202,40 @@ class CallableBodySelection:
             bool: True when ``realized_transform`` includes coherent control.
         """
         return self.realized_transform.is_controlled
+
+    def map_result_indices(
+        self,
+        body_indices: Iterable[int],
+        invocation_results: Sequence[ValueBase],
+    ) -> frozenset[int]:
+        """Map selected-body output positions to invocation result positions.
+
+        Generic controlled lowering removes the external control prefix before
+        aligning a direct body. Transform-specific implementations instead use
+        the complete invocation ABI. Mapping through the selected call-site
+        result values handles both layouts, including any quantum/non-quantum
+        reordering performed while aligning a fallback body.
+
+        Args:
+            body_indices (Iterable[int]): Selected-body output positions to
+                map.
+            invocation_results (Sequence[ValueBase]): Complete caller-side
+                invocation results.
+
+        Returns:
+            frozenset[int]: Corresponding positions in ``invocation_results``.
+        """
+        caller_indices = {
+            result.uuid: index for index, result in enumerate(invocation_results)
+        }
+        mapped: set[int] = set()
+        for body_index in body_indices:
+            if body_index < 0 or body_index >= len(self.results):
+                continue
+            caller_index = caller_indices.get(self.results[body_index].uuid)
+            if caller_index is not None:
+                mapped.add(caller_index)
+        return frozenset(mapped)
 
 
 def _validate_selected_body_contract(
@@ -1290,39 +1324,100 @@ class InvokeOperation(Operation):
 
     @property
     def measurement_result_indices(self) -> frozenset[int]:
-        """Return invocation result positions derived from measurement.
+        """Return a conservative union of measurement-derived results.
 
-        Transform-specific bodies use the full invocation result ABI. When a
-        controlled call instead lowers a direct or inverse body, the body's
-        result positions are shifted past the structurally added controls.
+        A backend- or strategy-specific implementation may expose different
+        measurement provenance from the direct fallback body. This property
+        enumerates every distinct implementation-selection context recorded by
+        the callable and unions the exact caller-local result mappings. Use
+        :meth:`measurement_result_indices_for` when the backend and strategy
+        are known.
 
         Returns:
-            frozenset[int]: Caller-local result indices with measurement
-                provenance.
+            frozenset[int]: Caller-local result indices derived from
+                measurement in any applicable implementation selection.
         """
-        from qamomile.circuit.ir.effect import (
-            callable_measurement_result_indices,
-        )
-
-        indices = callable_measurement_result_indices(
-            self.definition,
-            self.transform,
-        )
-        offset = (
-            self.num_body_external_control_qubits
-            if self.transform.is_controlled
-            and not any(
-                implementation.transform is self.transform
-                and implementation.body is not None
-                for implementation in (
-                    self.definition.implementations
-                    if self.definition is not None
-                    else ()
+        indices: set[int] = set()
+        for backend, strategy in self._measurement_selection_contexts():
+            indices.update(
+                self.measurement_result_indices_for(
+                    backend=backend,
+                    strategy=strategy,
                 )
             )
-            else 0
+        return frozenset(indices)
+
+    def measurement_result_indices_for(
+        self,
+        *,
+        backend: str | None = None,
+        strategy: str | None = None,
+    ) -> frozenset[int]:
+        """Return measurement-derived results for one selected implementation.
+
+        Args:
+            backend (str | None): Backend name used for implementation
+                selection. Defaults to ``None``.
+            strategy (str | None): Strategy name used for implementation
+                selection. Defaults to the invocation's ``strategy_name``.
+
+        Returns:
+            frozenset[int]: Caller-local result positions derived from
+                measurement in the selected body.
+
+        Raises:
+            ValueError: If the selected body disagrees with the invocation's
+                input or output contract.
+        """
+        selection = self.select_body(backend=backend, strategy=strategy)
+        if selection.body is None:
+            return frozenset()
+        return selection.map_result_indices(
+            selection.body.measurement_result_indices,
+            self.results,
         )
-        return frozenset(offset + index for index in indices)
+
+    def _measurement_selection_contexts(
+        self,
+    ) -> tuple[tuple[str | None, str | None], ...]:
+        """Return selector pairs covering every possible body selection.
+
+        Implementation ranking can change only when a requested backend or
+        strategy equals metadata declared by an implementation. A synthetic
+        unmatched strategy also represents compiler overrides that select only
+        strategy-generic implementations or the direct fallback body.
+
+        Returns:
+            tuple[tuple[str | None, str | None], ...]: Backend and strategy
+                pairs whose union conservatively covers every selection.
+        """
+        implementations = (
+            self.definition.implementations if self.definition is not None else ()
+        )
+        backends: list[str | None] = [None]
+        backends.extend(
+            sorted(
+                {
+                    implementation.backend
+                    for implementation in implementations
+                    if implementation.backend is not None
+                }
+            )
+        )
+        declared_strategies = {
+            implementation.strategy
+            for implementation in implementations
+            if implementation.strategy is not None
+        }
+        strategies: list[str | None] = [None, *sorted(declared_strategies)]
+        if declared_strategies or self.strategy_name is not None:
+            unmatched = "__qamomile_unmatched_strategy__"
+            while unmatched in declared_strategies or unmatched == self.strategy_name:
+                unmatched += "_"
+            strategies.append(unmatched)
+        return tuple(
+            (backend, strategy) for backend in backends for strategy in strategies
+        )
 
     @body.setter
     def body(self, value: Block | None) -> None:

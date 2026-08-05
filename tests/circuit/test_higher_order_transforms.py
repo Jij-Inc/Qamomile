@@ -8,7 +8,13 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
+from qamomile.circuit.frontend.operation.inverse import InverseGate
+from qamomile.circuit.frontend.qkernel_callable import (
+    qkernel_callable_attrs,
+    qkernel_callable_ref,
+)
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
+from qamomile.circuit.ir.operation.callable import CallableRef, InvokeOperation
 from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
     GateOperation,
@@ -387,3 +393,47 @@ def test_double_inverse_qkernel_wrapper_returns_original_qkernel() -> None:
         return qmc.s(target)
 
     assert qmc.inverse(qmc.inverse(layer)) is layer
+
+
+def test_double_inverse_preserves_effective_callable_metadata() -> None:
+    """Cancelling inverse wrappers retains identity and resource contracts."""
+
+    @qmc.qkernel
+    def layer(target: qmc.Qubit) -> qmc.Qubit:
+        """Apply one phase gate."""
+        return qmc.s(target)
+
+    callable_ref = CallableRef(
+        namespace="test.inverse.metadata",
+        name="contracted_layer",
+    )
+    callable_attrs = qkernel_callable_attrs(layer)
+    callable_attrs["resource_contract"] = {
+        "quantum_operand_widths": [
+            {"index": 0, "name": "target", "width": 1},
+        ],
+    }
+    restored = qmc.inverse(
+        InverseGate(
+            layer,
+            callable_ref=callable_ref,
+            callable_attrs=callable_attrs,
+        )
+    )
+
+    assert restored is not layer
+    assert qkernel_callable_ref(restored) == callable_ref
+    assert qkernel_callable_attrs(restored) == callable_attrs
+
+    @qmc.qkernel
+    def circuit() -> qmc.Qubit:
+        """Invoke the restored callable once."""
+        return restored(qmc.qubit("target"))
+
+    [operation] = [
+        operation
+        for operation in circuit.block.operations
+        if isinstance(operation, InvokeOperation)
+    ]
+    assert operation.target == callable_ref
+    assert operation.attrs == callable_attrs

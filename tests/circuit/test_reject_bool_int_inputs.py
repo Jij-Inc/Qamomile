@@ -102,6 +102,15 @@ class TestControlNumControlsRejectsBool:
         assert qmc.control(_phase, num_controls=2)._num_controls == 2
         assert qmc.control(_phase)._num_controls == 1
 
+    @pytest.mark.parametrize(
+        "value",
+        [pytest.param(2.0, id="python"), pytest.param(np.float64(2.0), id="numpy")],
+    )
+    def test_num_controls_rejects_integer_valued_real(self, value: object) -> None:
+        """Control widths remain integral-type-only, unlike gate powers."""
+        with pytest.raises(TypeError, match="positive integer or UInt"):
+            qmc.control(_phase, num_controls=value)  # type: ignore[arg-type]
+
     @pytest.mark.parametrize("target", [_phase, qmc.x])
     def test_num_controls_normalizes_numpy_integer(self, target):
         """Qkernels and built-in gates normalize NumPy integral widths."""

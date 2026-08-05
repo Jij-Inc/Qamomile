@@ -78,6 +78,8 @@ from qamomile.circuit.ir.types.primitives import QubitType
 from qamomile.circuit.ir.types.q_register import QFixedType, QUIntType
 from qamomile.circuit.ir.value import (
     ArrayValue,
+    DictValue,
+    TupleValue,
     Value,
     ValueBase,
     split_indexed_identifier,
@@ -137,6 +139,7 @@ _WIRE_RANGE_OFFSET = sp.Dummy(
 _MAX_EXACT_LOOP_WIRE_EXPANSION = 256
 _MAX_EXACT_LOOP_DISJOINTNESS_EXPANSION = 4096
 _MAX_CONCRETE_VIEW_WIRE_EXPANSION = 4096
+_CLASSICAL_DEPENDENCY_OWNER_PREFIX = "$resource_classical:"
 
 
 class _WireRelation(enum.Enum):
@@ -145,6 +148,72 @@ class _WireRelation(enum.Enum):
     DEFINITE_OVERLAP = enum.auto()
     DISJOINT = enum.auto()
     POSSIBLE_OVERLAP = enum.auto()
+
+
+def _classical_dependency_key(uuid: str) -> WireKey:
+    """Return the scheduler key for one immutable classical SSA value.
+
+    Args:
+        uuid (str): Classical value UUID.
+
+    Returns:
+        WireKey: Dependency key used to carry the value's readiness vector.
+    """
+    return (f"{_CLASSICAL_DEPENDENCY_OWNER_PREFIX}{uuid}", None)
+
+
+def _is_classical_dependency_key(key: WireKey) -> bool:
+    """Return whether a dependency key denotes immutable classical data.
+
+    Args:
+        key (WireKey): Scheduler dependency key.
+
+    Returns:
+        bool: Whether ``key`` is a classical SSA readiness token.
+    """
+    return key[0].startswith(_CLASSICAL_DEPENDENCY_OWNER_PREFIX)
+
+
+def _classical_dependency_footprint(
+    source_token_conditions: Mapping[str, Boolean],
+    written_source_token_conditions: Mapping[str, Boolean],
+) -> tuple[frozenset[WireKey], frozenset[WireKey], Boolean]:
+    """Collect classical source-token reads and result writes.
+
+    Classical facts have already resolved structural SSA ancestry into stable
+    source tokens. Reads constrain an operation's start, while only newly
+    published result tokens receive a completion write.
+
+    Args:
+        source_token_conditions (Mapping[str, Boolean]): Classical source
+            tokens read by the operation and their activation guards.
+        written_source_token_conditions (Mapping[str, Boolean]): Classical
+            source tokens first published by the operation's results.
+
+    Returns:
+        tuple[frozenset[WireKey], frozenset[WireKey], Boolean]: Read tokens,
+            written tokens, and the union of their activation conditions.
+    """
+    read_uuids = {
+        token
+        for token, condition in source_token_conditions.items()
+        if _boolean_condition(condition) is not sp.false
+    }
+    written_uuids = {
+        token
+        for token, condition in written_source_token_conditions.items()
+        if _boolean_condition(condition) is not sp.false
+    }
+    conditions = [
+        *(source_token_conditions[token] for token in read_uuids),
+        *(written_source_token_conditions[token] for token in written_uuids),
+    ]
+    active = _boolean_condition(sp.Or(*conditions)) if conditions else sp.false
+    return (
+        frozenset(_classical_dependency_key(uuid) for uuid in read_uuids),
+        frozenset(_classical_dependency_key(uuid) for uuid in written_uuids),
+        active,
+    )
 
 
 def _symbolic_wire_range_index(
@@ -679,12 +748,13 @@ def _quantum_element_wire_index(
 
 
 def _quantum_value_wire_keys(
-    value: Value,
+    value: Value | ArrayValue,
     resolver: ExprResolver,
     *,
     scalar_values: Mapping[str, sp.Expr] | None = None,
     used_names: set[str] | None = None,
     owner_aliases: Mapping[str, frozenset[str]] | None = None,
+    allocation_owners_by_uuid: Mapping[str, str] | None = None,
 ) -> set[WireKey]:
     """Return dependency keys for one quantum value.
 
@@ -695,7 +765,7 @@ def _quantum_value_wire_keys(
     their own logical identity with an owner-wide key.
 
     Args:
-        value (Value): Quantum scalar, array, or array view.
+        value (Value | ArrayValue): Quantum scalar, array, or array view.
         resolver (ExprResolver): Resolver for element and view indices.
         scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
             dependency values. Defaults to ``None``.
@@ -704,11 +774,19 @@ def _quantum_value_wire_keys(
         owner_aliases (Mapping[str, frozenset[str]] | None): Optional
             conditional-result owners mapped to every physical owner they may
             select. Defaults to ``None``.
+        allocation_owners_by_uuid (Mapping[str, str] | None): Optional root
+            allocation UUID-to-logical-owner mapping for synthetic carriers.
+            Defaults to ``None``.
 
     Returns:
         set[WireKey]: Root-owner and optional scalar-index keys.
     """
-    carrier_keys = _cast_carrier_wire_keys(value)
+    carrier_keys = _runtime_carrier_wire_keys(
+        value,
+        allocation_owners_by_uuid or {},
+    )
+    if carrier_keys is None:
+        carrier_keys = _cast_carrier_wire_keys(value)
     if carrier_keys is not None:
         return _expand_dependency_owner_aliases(carrier_keys, owner_aliases)
     owner = _quantum_allocation_owner(value)
@@ -1077,8 +1155,35 @@ def _map_body_dependency_completion(
     return mapped
 
 
+def _iter_quantum_carrier_values(value: ValueBase) -> Sequence[Value | ArrayValue]:
+    """Return scalar or array quantum leaves nested in one IR carrier.
+
+    Args:
+        value (ValueBase): Scalar, array, tuple, or dictionary carrier.
+
+    Returns:
+        Sequence[Value | ArrayValue]: Quantum leaves in deterministic order.
+    """
+    if isinstance(value, TupleValue):
+        return tuple(
+            leaf
+            for element in value.elements
+            for leaf in _iter_quantum_carrier_values(element)
+        )
+    if isinstance(value, DictValue):
+        return tuple(
+            leaf
+            for key, entry_value in value.entries
+            for element in (key, entry_value)
+            for leaf in _iter_quantum_carrier_values(element)
+        )
+    if isinstance(value, (Value, ArrayValue)) and value.type.is_quantum():
+        return (value,)
+    return ()
+
+
 def _wire_keys_for_values(
-    values: Sequence[Value],
+    values: Sequence[ValueBase],
     resolver: ExprResolver,
     *,
     scalar_values: Mapping[str, sp.Expr] | None = None,
@@ -1087,7 +1192,7 @@ def _wire_keys_for_values(
     """Collect caller dependency keys for quantum values.
 
     Args:
-        values (Sequence[Value]): Values whose physical keys are needed.
+        values (Sequence[ValueBase]): Values whose physical keys are needed.
         resolver (ExprResolver): Resolver for array elements and views.
         scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
             dependency values. Defaults to ``None``.
@@ -1099,10 +1204,10 @@ def _wire_keys_for_values(
     """
     keys: set[WireKey] = set()
     for value in values:
-        if value.type.is_quantum():
+        for quantum_value in _iter_quantum_carrier_values(value):
             keys.update(
                 _quantum_value_wire_keys(
-                    value,
+                    quantum_value,
                     resolver,
                     scalar_values=scalar_values,
                     used_names=used_names,
@@ -1233,6 +1338,7 @@ def _quantum_wire_keys(
     scalar_values: Mapping[str, sp.Expr] | None = None,
     used_names: set[str] | None = None,
     owner_aliases: Mapping[str, frozenset[str]] | None = None,
+    allocation_owners_by_uuid: Mapping[str, str] | None = None,
 ) -> tuple[set[WireKey], set[WireKey]]:
     """Collect quantum logical wires read and written by one operation.
 
@@ -1245,6 +1351,9 @@ def _quantum_wire_keys(
             names. Defaults to ``None``.
         owner_aliases (Mapping[str, frozenset[str]] | None): Optional
             conditional-result owner aliases. Defaults to ``None``.
+        allocation_owners_by_uuid (Mapping[str, str] | None): Optional root
+            allocation UUID-to-logical-owner mapping for synthetic carriers.
+            Defaults to ``None``.
 
     Returns:
         tuple[set[WireKey], set[WireKey]]: Physical owner/index keys read and
@@ -1253,26 +1362,28 @@ def _quantum_wire_keys(
     """
     reads: set[WireKey] = set()
     for value in operation.all_input_values():
-        if isinstance(value, Value) and value.type.is_quantum():
+        for quantum_value in _iter_quantum_carrier_values(value):
             reads.update(
                 _quantum_value_wire_keys(
-                    value,
+                    quantum_value,
                     resolver,
                     scalar_values=scalar_values,
                     used_names=used_names,
                     owner_aliases=owner_aliases,
+                    allocation_owners_by_uuid=allocation_owners_by_uuid,
                 )
             )
     writes: set[WireKey] = set()
     for value in operation.results:
-        if value.type.is_quantum():
+        for quantum_value in _iter_quantum_carrier_values(value):
             writes.update(
                 _quantum_value_wire_keys(
-                    value,
+                    quantum_value,
                     resolver,
                     scalar_values=scalar_values,
                     used_names=used_names,
                     owner_aliases=owner_aliases,
+                    allocation_owners_by_uuid=allocation_owners_by_uuid,
                 )
             )
     if isinstance(operation, HasNestedOps):
@@ -1285,6 +1396,7 @@ def _quantum_wire_keys(
                     scalar_values=scalar_values,
                     used_names=used_names,
                     owner_aliases=owner_aliases,
+                    allocation_owners_by_uuid=allocation_owners_by_uuid,
                 )
                 nested_keys |= child_reads | child_writes
         reads |= nested_keys
@@ -1314,6 +1426,16 @@ def _operation_has_unresolved_quantum_index(
     """
     values = [*operation.all_input_values(), *operation.results]
     for value in values:
+        if isinstance(value, Value) and value.type.is_quantum():
+            runtime = value.metadata.array_runtime
+            if runtime is not None and any(
+                parent_uuid and parent_index < 0
+                for parent_uuid, parent_index in zip(
+                    runtime.element_parent_uuids,
+                    runtime.element_parent_indices,
+                )
+            ):
+                return True
         if (
             isinstance(value, ArrayValue)
             and value.type.is_quantum()
@@ -1350,53 +1472,22 @@ def _operation_has_unresolved_quantum_index(
     return False
 
 
-def _uses_measurement_derived_classical_input(
-    operation: Operation,
-    measurement_derived: set[str],
-) -> bool:
-    """Return whether an operation consumes measurement-derived classical data.
-
-    Args:
-        operation (Operation): Operation whose inputs should be inspected.
-        measurement_derived (set[str]): UUIDs tainted by measurement results.
-
-    Returns:
-        bool: Whether a non-quantum input carries measurement provenance.
-    """
-    return any(
-        isinstance(value, ValueBase)
-        and not value.type.is_quantum()
-        and value.uuid in measurement_derived
-        for value in operation.all_input_values()
-    )
-
-
 def _operation_depth_is_dependency_schedulable(
     operation: Operation,
-    measurement_derived: set[str],
-    global_barrier_operation_ids: set[int] | frozenset[int] = frozenset(),
 ) -> bool:
     """Return whether wire dependencies fully describe an operation's depth.
 
-    Body-backed unitary calls and compile-time control flow can be scheduled by
-    their quantum footprints just like primitive gates. Runtime feed-forward
-    and while loops retain sequential composition because their classical
-    dependencies are not represented by quantum logical IDs.
+    Every supported aggregate carries its conditional global-ordering need in
+    ``ResourceEstimate._global_barrier_condition``. This classifier therefore
+    handles only operation kinds whose structure cannot be represented by the
+    ordinary quantum footprint at all; it must not inspect nested bodies and
+    thereby erase their branch activation conditions.
 
     Args:
         operation (Operation): Operation to classify.
-        measurement_derived (set[str]): UUIDs tainted by measurement results.
-        global_barrier_operation_ids (set[int] | frozenset[int]): Operation
-            identities whose nested bodies contain runtime observations not
-            captured by quantum wire dependencies. Defaults to an empty set.
-
     Returns:
         bool: Whether dependency scheduling is exact for this operation.
     """
-    if _uses_measurement_derived_classical_input(operation, measurement_derived):
-        return False
-    if id(operation) in global_barrier_operation_ids:
-        return False
     if isinstance(
         operation,
         (
@@ -1412,71 +1503,26 @@ def _operation_depth_is_dependency_schedulable(
     ):
         return True
     if isinstance(operation, InvokeOperation):
-        return operation.effects.is_unitary
+        # The selected body or opaque model is scheduled on the invocation's
+        # actual operands. ``operation.effects`` is a conservative union over
+        # every backend/strategy implementation and must not serialize an
+        # unrelated unitary selection.
+        return True
     if isinstance(
         operation,
         (ControlledUOperation, InverseBlockOperation, SelectOperation),
     ):
         return True
+    if isinstance(operation, (IfOperation, ForOperation, ForItemsOperation)):
+        return True
     if isinstance(operation, WhileOperation):
-        return False
-    if isinstance(operation, IfOperation):
-        if operation.condition.uuid in measurement_derived:
-            return False
-        return all(
-            _operation_depth_is_dependency_schedulable(
-                child,
-                measurement_derived,
-                global_barrier_operation_ids,
-            )
-            for body in operation.nested_op_lists()
-            for child in body
-        )
-    if isinstance(operation, (ForOperation, ForItemsOperation)):
-        return all(
-            _operation_depth_is_dependency_schedulable(
-                child,
-                measurement_derived,
-                global_barrier_operation_ids,
-            )
-            for body in operation.nested_op_lists()
-            for child in body
-        )
-    if not isinstance(operation, HasNestedOps) and not any(
-        isinstance(value, Value) and value.type.is_quantum()
-        for value in (*operation.all_input_values(), *operation.results)
-    ):
-        # Pure classical address arithmetic has no quantum duration. Once
-        # measurement-derived inputs have been excluded above, it cannot turn
-        # an otherwise schedulable nested quantum body into a global barrier.
+        return True
+    if not isinstance(operation, HasNestedOps):
+        # Every supported atomic operation either has an explicit quantum
+        # footprint or zero duration. Unknown atomic operations are rejected
+        # by the interpreter before scheduling reaches this classifier.
         return True
     return False
-
-
-def _operation_has_runtime_control_boundary(
-    operation: Operation,
-    measurement_derived: set[str],
-) -> bool:
-    """Return whether control resolution is active even for a zero-depth body.
-
-    A measurement-backed ``if`` and a ``while`` must resolve their runtime
-    predicate before operations after the control-flow boundary can proceed.
-    That ordering remains observable when the selected branch is empty or a
-    while loop executes zero iterations, so it cannot be inferred from the
-    body's depth-activity guard.
-
-    Args:
-        operation (Operation): Operation whose control boundary is inspected.
-        measurement_derived (set[str]): UUIDs tainted by measurement results.
-
-    Returns:
-        bool: Whether the runtime control boundary is unconditionally active.
-    """
-    if isinstance(operation, WhileOperation):
-        return True
-    return isinstance(operation, IfOperation) and (
-        operation.condition.uuid in measurement_derived
-    )
 
 
 def _operation_has_uniform_intrinsic_completion(
@@ -1526,6 +1572,7 @@ def _operation_has_uniform_intrinsic_completion(
     if any(
         demand != _ZERO
         for demand in (
+            estimate.width.allocated_qubits,
             estimate.width.clean_ancilla_qubits,
             estimate.width.dirty_ancilla_qubits,
         )
@@ -1580,8 +1627,6 @@ def _disjoint_concrete_loop_depth(
     allocated_qubits: ResourceExpr,
     clean_ancillas: ResourceExpr,
     dirty_ancillas: ResourceExpr,
-    measurement_derived: set[str],
-    global_barrier_operation_ids: set[int] | frozenset[int] = frozenset(),
     scalar_values: Mapping[str, sp.Expr] | None = None,
     used_names: set[str] | None = None,
 ) -> DepthResources | None:
@@ -1607,11 +1652,6 @@ def _disjoint_concrete_loop_depth(
             between sequential iterations.
         clean_ancillas (ResourceExpr): Shared fallback ancilla demand.
         dirty_ancillas (ResourceExpr): Shared dirty-ancilla demand.
-        measurement_derived (set[str]): Classical UUIDs carrying runtime
-            measurement provenance in the loop scope.
-        global_barrier_operation_ids (set[int] | frozenset[int]): Nested
-            operation identities that require global ordering. Defaults to an
-            empty set.
         scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
             dependency values. Defaults to ``None``.
         used_names (set[str] | None): Optional set updated with used input
@@ -1621,15 +1661,6 @@ def _disjoint_concrete_loop_depth(
         DepthResources | None: Parallel critical-path depth when disjointness
             is proven, otherwise ``None``.
     """
-    if any(
-        not _operation_depth_is_dependency_schedulable(
-            body_operation,
-            measurement_derived,
-            global_barrier_operation_ids,
-        )
-        for body_operation in operation.operations
-    ):
-        return None
     iterations = _bounded_concrete_loop_values(
         start,
         stop,
@@ -2112,8 +2143,6 @@ def _symbolic_disjoint_loop_depth(
     allocated_qubits: ResourceExpr,
     clean_ancillas: ResourceExpr,
     dirty_ancillas: ResourceExpr,
-    measurement_derived: set[str],
-    global_barrier_operation_ids: set[int] | frozenset[int] = frozenset(),
     scalar_values: Mapping[str, sp.Expr] | None = None,
     used_names: set[str] | None = None,
 ) -> DepthResources | None:
@@ -2135,11 +2164,6 @@ def _symbolic_disjoint_loop_depth(
             between sequential iterations.
         clean_ancillas (ResourceExpr): Shared decomposition ancilla demand.
         dirty_ancillas (ResourceExpr): Shared dirty-ancilla demand.
-        measurement_derived (set[str]): Classical UUIDs carrying runtime
-            measurement provenance in the loop scope.
-        global_barrier_operation_ids (set[int] | frozenset[int]): Nested
-            operation identities that require global ordering. Defaults to an
-            empty set.
         scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
             dependency values. Defaults to ``None``.
         used_names (set[str] | None): Optional set updated with used input
@@ -2149,24 +2173,11 @@ def _symbolic_disjoint_loop_depth(
         DepthResources | None: One-iteration depth guarded by a nonempty range,
             or ``None`` when injectivity cannot be proven.
     """
-    if (
-        any(
-            not _operation_depth_is_dependency_schedulable(
-                body_operation,
-                measurement_derived,
-                global_barrier_operation_ids,
-            )
-            for body_operation in operation.operations
-        )
-        or any(
-            demand != _ZERO
-            for demand in (allocated_qubits, clean_ancillas, dirty_ancillas)
-        )
-        or any(
-            loop_symbol
-            in cast(ResourceExpr, getattr(body_depth, field.name)).free_symbols
-            for field in dataclasses.fields(DepthResources)
-        )
+    if any(
+        demand != _ZERO for demand in (allocated_qubits, clean_ancillas, dirty_ancillas)
+    ) or any(
+        loop_symbol in cast(ResourceExpr, getattr(body_depth, field.name)).free_symbols
+        for field in dataclasses.fields(DepthResources)
     ):
         return None
     ignored_operations = (
@@ -2176,11 +2187,21 @@ def _symbolic_disjoint_loop_depth(
         ReturnQuantumArrayElementOperation,
     )
     indices_by_owner: dict[str, list[ResourceExpr]] = {}
-    for body_operation in operation.operations:
+    pending_operations = list(reversed(operation.operations))
+    while pending_operations:
+        body_operation = pending_operations.pop()
         if isinstance(body_operation, ignored_operations):
             continue
         if isinstance(body_operation, HasNestedOps):
-            return None
+            if not isinstance(body_operation, IfOperation):
+                return None
+            for region in reversed(body_operation.nested_regions()):
+                pending_operations.extend(reversed(region.operations))
+            # The branch's own merge values only alias the physical values
+            # already inspected in its regions. Including those aggregate
+            # ArrayValues would turn an otherwise injective ``register[i]``
+            # body into an owner-wide footprint and defeat the proof.
+            continue
         quantum_values = [
             value
             for value in (
@@ -2289,8 +2310,7 @@ def _dependency_depth(
     wire_footprints: Sequence[_WireFootprint | None],
     *,
     activity_conditions: Sequence[Boolean] | None = None,
-    measurement_derived: set[str] | None = None,
-    global_barrier_operation_ids: set[int] | frozenset[int] = frozenset(),
+    read_conditions: Sequence[Mapping[WireKey, Boolean]] | None = None,
     scalar_values: Mapping[str, sp.Expr] | None = None,
     used_names: set[str] | None = None,
 ) -> tuple[DepthResources, dict[WireKey, ResourceExpr], Boolean, bool]:
@@ -2305,13 +2325,9 @@ def _dependency_depth(
         activity_conditions (Sequence[Boolean] | None): Optional precomputed
             depth-activity guards aligned with ``scheduled``. Defaults to
             computing them once for this call.
-        measurement_derived (set[str] | None): Classical values transitively
-            derived from runtime quantum observations. Operations that consume
-            them, plus other unschedulable hybrid/control operations, form
-            global ordering barriers. Defaults to ``None``.
-        global_barrier_operation_ids (set[int] | frozenset[int]): Operation
-            identities whose selected nested body requires global ordering.
-            Defaults to an empty set.
+        read_conditions (Sequence[Mapping[WireKey, Boolean]] | None): Optional
+            per-operation guards for individual dependency reads. Missing keys
+            are unconditional. Defaults to unconditional reads.
         scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
             values used only to prove completion uniformity. Defaults to
             ``None``.
@@ -2332,10 +2348,17 @@ def _dependency_depth(
     """
     if activity_conditions is None:
         activity_conditions = _scheduled_depth_activity_conditions(scheduled)
-    if not (len(scheduled) == len(wire_footprints) == len(activity_conditions)):
+    if read_conditions is None:
+        read_conditions = tuple({} for _ in scheduled)
+    if not (
+        len(scheduled)
+        == len(wire_footprints)
+        == len(activity_conditions)
+        == len(read_conditions)
+    ):
         raise AssertionError(
-            "Scheduled operations, wire footprints, and activity conditions "
-            "must have equal lengths."
+            "Scheduled operations, wire footprints, activity conditions, and "
+            "read conditions must have equal lengths."
         )
     fields = tuple(field.name for field in dataclasses.fields(DepthResources))
     availability: dict[
@@ -2347,29 +2370,32 @@ def _dependency_depth(
     peaks: dict[str, ResourceExpr] = {field: _ZERO for field in fields}
     possible_alias_conditions: set[Boolean] = set()
     completion_is_uniform = True
-    for (operation, estimate), footprint, operation_active in zip(
+    for (operation, estimate), footprint, operation_active, operation_reads in zip(
         scheduled,
         wire_footprints,
         activity_conditions,
+        read_conditions,
         strict=True,
     ):
-        schedulable = _operation_depth_is_dependency_schedulable(
-            operation,
-            measurement_derived or set(),
-            global_barrier_operation_ids,
+        structurally_schedulable = _operation_depth_is_dependency_schedulable(operation)
+        barrier_condition = (
+            estimate._global_barrier_condition if structurally_schedulable else sp.true
         )
-        runtime_control_boundary = _operation_has_runtime_control_boundary(
-            operation,
-            measurement_derived or set(),
-        )
-        if not _estimate_has_nonzero_depth(estimate) and not runtime_control_boundary:
+        footprint_reads = set(footprint[0]) if footprint is not None else set()
+        footprint_writes = set(footprint[1]) if footprint is not None else set()
+        if (
+            not _estimate_has_nonzero_depth(estimate)
+            and barrier_condition is sp.false
+            and not footprint_reads
+            and not footprint_writes
+        ):
             continue
         if footprint is None and _estimate_has_nonzero_depth(estimate):
             raise AssertionError(
                 "A nonzero-depth scheduled operation requires a wire footprint."
             )
-        reads = set(footprint[0]) if footprint is not None else set()
-        writes = set(footprint[1]) if footprint is not None else set()
+        reads = footprint_reads
+        writes = footprint_writes
         if estimate.width.clean_ancilla_qubits != _ZERO:
             # Width reports one reusable clean-ancilla pool (a maximum across
             # sequential operations). Treat that pool as a shared dependency
@@ -2382,13 +2408,32 @@ def _dependency_depth(
             shared_dirty_pool = ("$resource_dirty_ancilla_pool", None)
             reads.add(shared_dirty_pool)
             writes.add(shared_dirty_pool)
-        touched = reads | writes
+        if (
+            _estimate_has_nonzero_depth(estimate)
+            and estimate.width.allocated_qubits != _ZERO
+        ):
+            anonymous_workspace = (
+                f"$resource_anonymous_workspace:{id(operation)}",
+                None,
+            )
+            reads.add(anonymous_workspace)
+            writes.add(anonymous_workspace)
+        # Quantum resources are occupied for the whole operation even when an
+        # operation consumes them without returning a quantum result (for
+        # example measurement).  Classical SSA tokens are immutable and may
+        # fan out, so reading one must not delay another independent consumer.
+        occupied = {
+            key for key in reads | writes if not _is_classical_dependency_key(key)
+        }
+        occupied.update(key for key in writes if _is_classical_dependency_key(key))
         if (
             estimate._dependency_keys is not None
             and estimate._dependency_completion_uniform is not True
         ):
             completion_is_uniform = False
-        scheduling_active = sp.true if runtime_control_boundary else operation_active
+        scheduling_active = _boolean_condition(
+            sp.Or(operation_active, barrier_condition)
+        )
         if scheduling_active is sp.false:
             continue
         for field in fields:
@@ -2397,6 +2442,9 @@ def _dependency_depth(
             definite_dependencies: list[ResourceExpr] = []
             possible_dependencies: list[ResourceExpr] = []
             for owner, index in reads:
+                read_condition = operation_reads.get((owner, index), sp.true)
+                if read_condition is sp.false:
+                    continue
                 owner_indices = indices_by_owner.get(owner)
                 if owner_indices is None:
                     continue
@@ -2405,6 +2453,12 @@ def _dependency_depth(
                     depth = wire_depths.get(candidate_index)
                     if depth is None:
                         continue
+                    if read_condition is not sp.true:
+                        depth = _conditional_completion(
+                            depth,
+                            _ZERO,
+                            read_condition,
+                        )
                     relation = _wire_index_relation(index, candidate_index)
                     if relation is _WireRelation.DISJOINT:
                         continue
@@ -2412,17 +2466,28 @@ def _dependency_depth(
                         definite_dependencies.append(depth)
                     else:
                         possible_dependencies.append(depth)
-            if schedulable:
+            if structurally_schedulable:
                 baseline_start = _resource_max_many(
-                    [
-                        *definite_dependencies,
-                        barrier_availability[field],
-                    ]
+                    [*definite_dependencies, barrier_availability[field]]
                 )
-                start = _resource_max_many([baseline_start, *possible_dependencies])
+                dependency_start = _resource_max_many(
+                    [baseline_start, *possible_dependencies]
+                )
+                barrier_start = _resource_max(
+                    peaks[field],
+                    barrier_availability[field],
+                )
+                start = _conditional_completion(
+                    barrier_start,
+                    dependency_start,
+                    barrier_condition,
+                )
                 for dependency_depth in possible_dependencies:
                     condition = _and_conditions(
-                        scheduling_active,
+                        _and_conditions(
+                            operation_active,
+                            cast(Boolean, sp.Not(barrier_condition)),
+                        ),
                         _and_conditions(
                             _resource_activity_condition(dependency_depth),
                             sp.Gt(
@@ -2440,15 +2505,15 @@ def _dependency_depth(
                 )
             finish = start + duration
             peaks[field] = _resource_max(peaks[field], finish)
-            if not schedulable:
+            if barrier_condition is not sp.false:
                 previous_barrier = barrier_availability[field]
                 barrier_availability[field] = _completion_after_conditional_duration(
                     finish,
                     start,
                     previous_barrier,
-                    scheduling_active,
+                    barrier_condition,
                 )
-            for owner, index in touched:
+            for owner, index in occupied:
                 wire_depth = owner_depths.setdefault(owner, {})
                 previous = wire_depth.get(index, _ZERO)
                 wire_depth[index] = _completion_after_conditional_duration(
@@ -2457,7 +2522,7 @@ def _dependency_depth(
                     previous,
                     scheduling_active,
                 )
-        for owner, index in touched:
+        for owner, index in occupied:
             indices_by_owner.setdefault(owner, _OwnerWireIndices()).add(index)
     completion_keys = {
         (owner, index)
@@ -2717,6 +2782,7 @@ def _with_operation_output_summary(
     *,
     active_when: sp.Basic,
     body_output_sizes: Mapping[str, ResourceExpr] | None = None,
+    additional_consumed_allocations: Mapping[str, ResourceExpr] | None = None,
     allocation_owners_by_uuid: Mapping[str, str] | None = None,
 ) -> ResourceEstimate:
     """Attach authoritative live quantum results to a nested estimate.
@@ -2732,6 +2798,10 @@ def _with_operation_output_summary(
             retained live-owner summary across modeled body executions.
             Loop evaluators may provide owner-wise maxima when a final-state
             release cannot be proven. Defaults to ``None``.
+        additional_consumed_allocations (Mapping[str, ResourceExpr] | None):
+            Captured owners proven consumed by the union of concrete loop
+            iterations, in addition to whole-owner body operations. Defaults
+            to ``None``.
         allocation_owners_by_uuid (Mapping[str, str] | None): Optional
             enclosing QInit UUID to logical-owner map for synthetic tuple
             carriers. Defaults to ``None``.
@@ -2751,6 +2821,7 @@ def _with_operation_output_summary(
         resolver,
         allocation_owners_by_uuid,
     )
+    body_consumed.update(additional_consumed_allocations or {})
     condition = _boolean_condition(active_when)
     consumed = {
         owner: _piecewise(size, _ZERO, condition)
@@ -2835,6 +2906,160 @@ def _definitely_consumed_captured_allocations(
     }
 
 
+def _loop_captured_observation_consumption(
+    operations: Sequence[Operation],
+    captured: Mapping[str, ResourceExpr],
+    resolvers: Sequence[ExprResolver],
+    *,
+    definite_iterations: bool,
+    allocation_owners_by_uuid: Mapping[str, str] | None = None,
+) -> tuple[dict[str, ResourceExpr], bool]:
+    """Project destructive loop observations onto captured allocation slots.
+
+    Every resolver represents one possible loop iteration. When the complete
+    iteration set is concrete, unconditional observations are unioned by
+    physical owner/index and an owner is released only if every scalar slot is
+    covered. Observations nested under control flow are never treated as
+    definite because they may not execute on every runtime path. For symbolic
+    or truncated iteration sets, the helper reports uncertainty instead of
+    claiming an exact final liveness state.
+
+    Args:
+        operations (Sequence[Operation]): Loop-body operations.
+        captured (Mapping[str, ResourceExpr]): Live captured owner capacities.
+        resolvers (Sequence[ExprResolver]): Per-iteration resolvers, or one
+            symbolic probe resolver when the iteration set is unresolved.
+        definite_iterations (bool): Whether ``resolvers`` enumerates every
+            executed iteration exactly.
+        allocation_owners_by_uuid (Mapping[str, str] | None): Optional QInit
+            UUID to physical owner mapping. Defaults to ``None``.
+
+    Returns:
+        tuple[dict[str, ResourceExpr], bool]: Captured owners proven fully
+            consumed, and whether any observed captured owner remains
+            conservatively live.
+    """
+    if not resolvers or not captured:
+        return {}, False
+    owner_map = allocation_owners_by_uuid or {}
+    fully_consumed: set[str] = set()
+    covered_indices: dict[str, set[int]] = {}
+    uncertain_owners: set[str] = set()
+    destructive_types = (
+        MeasureOperation,
+        MeasureVectorOperation,
+        MeasureQFixedOperation,
+        ExpvalOp,
+    )
+
+    def record_observation(
+        operation: Operation,
+        resolver: ExprResolver,
+        *,
+        unconditional: bool,
+    ) -> None:
+        """Record one destructive operation for one iteration resolver.
+
+        Args:
+            operation (Operation): Destructive observation operation.
+            resolver (ExprResolver): Resolver for one iteration.
+            unconditional (bool): Whether the operation is outside nested
+                control flow and therefore executes on every represented path.
+        """
+        quantum_inputs = [
+            value
+            for value in operation.all_input_values()
+            if isinstance(value, Value) and value.type.is_quantum()
+        ]
+        for value in quantum_inputs:
+            sizes = _quantum_result_owner_sizes([value], resolver, owner_map)
+            keys = _quantum_value_wire_keys(
+                value,
+                resolver,
+                allocation_owners_by_uuid=owner_map,
+            )
+            for owner, size in sizes.items():
+                capacity = captured.get(owner)
+                if capacity is None:
+                    continue
+                if not definite_iterations or not unconditional:
+                    uncertain_owners.add(owner)
+                    continue
+                if _safe_simplify(size - capacity) == _ZERO:
+                    fully_consumed.add(owner)
+                    continue
+                concrete_keys = 0
+                for key_owner, index in keys:
+                    if key_owner != owner:
+                        continue
+                    if not isinstance(index, (int, sp.Expr)):
+                        uncertain_owners.add(owner)
+                        continue
+                    normalized = _normalize_wire_index(index)
+                    if isinstance(normalized, int):
+                        covered_indices.setdefault(owner, set()).add(normalized)
+                        concrete_keys += 1
+                    elif isinstance(normalized, sp.Integer):
+                        covered_indices.setdefault(owner, set()).add(int(normalized))
+                        concrete_keys += 1
+                if (
+                    not size.is_number
+                    or not _is_concrete_integer(size)
+                    or concrete_keys < int(size)
+                ):
+                    uncertain_owners.add(owner)
+
+    def visit(
+        body: Sequence[Operation],
+        resolver: ExprResolver,
+        *,
+        unconditional: bool,
+    ) -> None:
+        """Visit observations while retaining control-path certainty.
+
+        Args:
+            body (Sequence[Operation]): Operations to inspect.
+            resolver (ExprResolver): Resolver for one iteration.
+            unconditional (bool): Whether every operation in ``body`` is on
+                the unconditional loop path.
+        """
+        for operation in body:
+            if isinstance(operation, destructive_types):
+                record_observation(
+                    operation,
+                    resolver,
+                    unconditional=unconditional,
+                )
+            if isinstance(operation, HasNestedOps):
+                for nested in operation.nested_op_lists():
+                    visit(nested, resolver, unconditional=False)
+
+    for iteration_resolver in resolvers:
+        visit(operations, iteration_resolver, unconditional=True)
+
+    for owner, indices in covered_indices.items():
+        capacity = captured[owner]
+        if (
+            capacity.is_number
+            and _is_concrete_integer(capacity)
+            and int(capacity) >= 0
+            and indices.issuperset(range(int(capacity)))
+        ):
+            fully_consumed.add(owner)
+    consumed = {
+        owner: (
+            captured[owner] if owner in fully_consumed else sp.Integer(len(indices))
+        )
+        for owner, indices in covered_indices.items()
+        if owner in fully_consumed or indices
+    }
+    consumed.update(
+        {owner: captured[owner] for owner in fully_consumed if owner not in consumed}
+    )
+    uncertain_owners.difference_update(fully_consumed)
+    return consumed, bool(uncertain_owners)
+
+
 def _without_input_allocation_sites(
     sites: Mapping[str, ResourceExpr],
     operations: Sequence[Operation],
@@ -2881,6 +3106,60 @@ def _quantum_root_array(value: Value) -> ArrayValue | None:
     while array.slice_of is not None:
         array = array.slice_of
     return array
+
+
+def _runtime_carrier_wire_keys(
+    value: Value | ArrayValue,
+    allocation_owners_by_uuid: Mapping[str, str],
+) -> set[WireKey] | None:
+    """Recover physical keys stored by a synthetic quantum array carrier.
+
+    Tuple-form expectation values and similar frontend adapters pack otherwise
+    unrelated qubits into an ``ArrayValue``.  The carrier's own logical ID is
+    not physical storage; its runtime metadata retains each standalone logical
+    ID or root-array UUID/index instead.
+
+    Args:
+        value (Value | ArrayValue): Candidate synthetic quantum carrier.
+        allocation_owners_by_uuid (Mapping[str, str]): Root allocation UUIDs
+            mapped to logical scheduler owners.
+
+    Returns:
+        set[WireKey] | None: Physical element keys, or ``None`` when no complete
+            carrier metadata is present.
+    """
+    runtime = value.metadata.array_runtime
+    if runtime is None or not runtime.element_uuids or not runtime.element_logical_ids:
+        return None
+    if len(runtime.element_uuids) != len(runtime.element_logical_ids):
+        return None
+    parent_addresses = value.get_element_parent_addresses()
+    keys: set[WireKey] = set()
+    for index, logical_id in enumerate(runtime.element_logical_ids):
+        address = parent_addresses[index] if index < len(parent_addresses) else None
+        if address is not None:
+            parent_uuid, parent_index = address
+            owner = allocation_owners_by_uuid.get(parent_uuid)
+            if owner is not None:
+                keys.add((owner, parent_index))
+                continue
+        if (
+            index < len(runtime.element_parent_uuids)
+            and index < len(runtime.element_parent_indices)
+            and runtime.element_parent_uuids[index]
+            and runtime.element_parent_indices[index] < 0
+        ):
+            owner = allocation_owners_by_uuid.get(runtime.element_parent_uuids[index])
+            if owner is not None:
+                keys.add((owner, None))
+                continue
+        indexed = split_indexed_identifier(logical_id)
+        if indexed is not None:
+            owner, scalar_index = indexed
+            keys.add((owner, int(scalar_index)))
+        else:
+            keys.add((logical_id, None))
+    return keys
 
 
 def _cast_carrier_wire_keys(value: Value) -> set[WireKey] | None:
@@ -2962,10 +3241,14 @@ def _runtime_carrier_owner_sizes(
     owners: dict[str, ResourceExpr] = {}
     for index, logical_id in enumerate(runtime.element_logical_ids):
         address = parent_addresses[index] if index < len(parent_addresses) else None
-        owner = (
-            allocation_owners_by_uuid.get(address[0], logical_id)
-            if address is not None
-            else logical_id
+        parent_uuid = (
+            runtime.element_parent_uuids[index]
+            if index < len(runtime.element_parent_uuids)
+            else ""
+        )
+        owner = allocation_owners_by_uuid.get(
+            address[0] if address is not None else parent_uuid,
+            logical_id,
         )
         owners[owner] = owners.get(owner, _ZERO) + _ONE
     return owners
@@ -3622,7 +3905,7 @@ def _maximum_width_over_range(
     start: ResourceExpr,
     step: ResourceExpr,
     iterations: ResourceExpr,
-) -> tuple[WidthResources, dict[str, ResourceExpr], bool]:
+) -> tuple[WidthResources, dict[str, ResourceExpr], Boolean]:
     """Maximize reusable width across a symbolic loop range.
 
     Additive resources such as gates and depth are summed across loop
@@ -3639,13 +3922,14 @@ def _maximum_width_over_range(
         iterations (ResourceExpr): Number of executed iterations.
 
     Returns:
-        tuple[WidthResources, dict[str, ResourceExpr], bool]: Maximum reusable
-        width, maximized allocation sites, and whether every maximum is exact.
+        tuple[WidthResources, dict[str, ResourceExpr], Boolean]: Maximum
+        reusable width, maximized allocation sites, and the condition under
+        which at least one conservative maximum may overestimate.
     """
     maximized_sites: dict[str, ResourceExpr] = {}
-    exact = True
+    conservative_guards: list[Boolean] = []
     for site, size in sites.items():
-        maximum, maximum_is_exact = _maximum_expr_over_range(
+        maximum, conservative_when = _maximum_expr_over_range(
             size,
             loop_symbol,
             start,
@@ -3653,23 +3937,23 @@ def _maximum_width_over_range(
             iterations,
         )
         maximized_sites[site] = maximum
-        exact = exact and maximum_is_exact
+        conservative_guards.append(conservative_when)
 
     anonymous = _anonymous_allocation_width(width, sites)
-    maximum_anonymous, anonymous_is_exact = _maximum_expr_over_range(
+    maximum_anonymous, anonymous_conservative_when = _maximum_expr_over_range(
         anonymous,
         loop_symbol,
         start,
         step,
         iterations,
     )
-    exact = exact and anonymous_is_exact
+    conservative_guards.append(anonymous_conservative_when)
 
     maxima: dict[str, ResourceExpr] = {}
     for field in dataclasses.fields(WidthResources):
         if field.name == "allocated_qubits":
             continue
-        maximum, maximum_is_exact = _maximum_expr_over_range(
+        maximum, conservative_when = _maximum_expr_over_range(
             getattr(width, field.name),
             loop_symbol,
             start,
@@ -3677,7 +3961,7 @@ def _maximum_width_over_range(
             iterations,
         )
         maxima[field.name] = maximum
-        exact = exact and maximum_is_exact
+        conservative_guards.append(conservative_when)
     maximized_width = WidthResources(
         allocated_qubits=_ZERO,
         **maxima,
@@ -3689,13 +3973,13 @@ def _maximum_width_over_range(
             anonymous_allocated=maximum_anonymous,
         ),
         maximized_sites,
-        exact,
+        _boolean_condition(sp.Or(*conservative_guards)),
     )
 
 
 def _maximum_live_owner_sizes(
     summaries: Sequence[Mapping[str, ResourceExpr]],
-) -> tuple[dict[str, ResourceExpr], bool]:
+) -> tuple[dict[str, ResourceExpr], Boolean]:
     """Retain the largest observed live size for every loop-local owner.
 
     A later concrete iteration may report a smaller size for the same static
@@ -3709,22 +3993,27 @@ def _maximum_live_owner_sizes(
             produced after each concrete iteration.
 
     Returns:
-        tuple[dict[str, ResourceExpr], bool]: Owner-wise maximum sizes and
-        whether the maximum retains anything not present in the final summary.
+        tuple[dict[str, ResourceExpr], Boolean]: Owner-wise maximum sizes and
+        the condition under which the maximum retains anything not present in
+        the final summary.
     """
     if not summaries:
-        return {}, False
+        return {}, sp.false
     owners = sorted({owner for summary in summaries for owner in summary})
     maxima = {
         owner: _resource_max_many([summary.get(owner, _ZERO) for summary in summaries])
         for owner in owners
     }
     final = summaries[-1]
-    retains_prior_output = any(
-        _safe_simplify(maximum - final.get(owner, _ZERO)) != _ZERO
-        for owner, maximum in maxima.items()
+    retains_prior_when = _boolean_condition(
+        sp.Or(
+            *(
+                sp.Gt(maximum, final.get(owner, _ZERO))
+                for owner, maximum in maxima.items()
+            )
+        )
     )
-    return maxima, retains_prior_output
+    return maxima, retains_prior_when
 
 
 def _maximum_live_owner_sizes_over_range(
@@ -3733,7 +4022,7 @@ def _maximum_live_owner_sizes_over_range(
     start: ResourceExpr,
     step: ResourceExpr,
     iterations: ResourceExpr,
-) -> tuple[dict[str, ResourceExpr], bool, bool]:
+) -> tuple[dict[str, ResourceExpr], Boolean, Boolean]:
     """Maximize live loop-local owners across a symbolic iteration range.
 
     Args:
@@ -3744,16 +4033,17 @@ def _maximum_live_owner_sizes_over_range(
         iterations (ResourceExpr): Number of executed iterations.
 
     Returns:
-        tuple[dict[str, ResourceExpr], bool, bool]: Owner-wise maximum sizes,
-        whether every symbolic maximum is exact, and whether a maximum can
-        retain owner width from before the final iteration.
+        tuple[dict[str, ResourceExpr], Boolean, Boolean]: Owner-wise maximum
+        sizes, the condition under which a symbolic maximum may overestimate,
+        and the condition under which a maximum retains owner width from
+        before the final iteration.
     """
     maxima: dict[str, ResourceExpr] = {}
-    exact = True
-    retains_prior_output = False
+    conservative_guards: list[Boolean] = []
+    retention_guards: list[Boolean] = []
     for owner in sorted(sizes):
         size = sizes[owner]
-        maximum, maximum_is_exact = _maximum_expr_over_range(
+        maximum, conservative_when = _maximum_expr_over_range(
             size,
             loop_symbol,
             start,
@@ -3761,7 +4051,7 @@ def _maximum_live_owner_sizes_over_range(
             iterations,
         )
         maxima[owner] = maximum
-        exact = exact and maximum_is_exact
+        conservative_guards.append(conservative_when)
         final = _piecewise(
             cast(
                 ResourceExpr,
@@ -3773,7 +4063,7 @@ def _maximum_live_owner_sizes_over_range(
         maximum_matches_final = _safe_simplify(maximum - final) == _ZERO
         if (
             not maximum_matches_final
-            and maximum_is_exact
+            and conservative_when is sp.false
             and loop_symbol in size.free_symbols
         ):
             index = sp.Dummy("live_owner_index", integer=True, nonnegative=True)
@@ -3790,8 +4080,16 @@ def _maximum_live_owner_sizes_over_range(
                 and polynomial.degree() <= 1
                 and _is_structurally_nonnegative(polynomial.coeff_monomial(index))
             )
-        retains_prior_output = retains_prior_output or not maximum_matches_final
-    return maxima, exact, retains_prior_output
+        retention_guards.append(
+            sp.false
+            if maximum_matches_final
+            else _boolean_condition(sp.Gt(maximum, final))
+        )
+    return (
+        maxima,
+        _boolean_condition(sp.Or(*conservative_guards)),
+        _boolean_condition(sp.Or(*retention_guards)),
+    )
 
 
 def _qubit_value_size(value: Value, resolver: ExprResolver) -> ResourceExpr:

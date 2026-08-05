@@ -18,6 +18,30 @@ if TYPE_CHECKING:
     from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
 
 
+def is_exact_real_zero(value: Any) -> bool:
+    """Return whether a value is a concrete real scalar equal to zero.
+
+    The comparison intentionally has no tolerance: a tiny nonzero value must
+    remain observable, while backend parameter expressions remain unresolved.
+
+    Args:
+        value (Any): Concrete numeric value or backend parameter expression.
+
+    Returns:
+        bool: ``True`` only for a non-boolean real scalar exactly equal to
+        zero.
+    """
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return False
+    symbolic_zero = getattr(value, "is_zero", None)
+    if symbolic_zero is not None:
+        return symbolic_zero is True
+    try:
+        return bool(value == 0)
+    except (TypeError, ValueError):
+        return False
+
+
 def is_identity_phase_angle(angle: Any) -> bool:
     """Return whether a concrete angle is exactly zero modulo two pi.
 
@@ -34,13 +58,17 @@ def is_identity_phase_angle(angle: Any) -> bool:
     """
     if isinstance(angle, bool) or not isinstance(angle, Real):
         return False
-    numeric = float(angle)
-    return math.isfinite(numeric) and math.isclose(
-        math.fmod(numeric, math.tau),
-        0.0,
-        rel_tol=0.0,
-        abs_tol=0.0,
-    )
+    if is_exact_real_zero(angle):
+        return True
+    try:
+        numeric = float(angle)
+    except (OverflowError, TypeError, ValueError):
+        return False
+    if not math.isfinite(numeric) or numeric == 0.0:
+        # A nonzero exact value that underflows during binary64 conversion is
+        # still an observable phase and must fail closed.
+        return False
+    return is_exact_real_zero(math.fmod(numeric, math.tau))
 
 
 def _require_global_phase_hook(

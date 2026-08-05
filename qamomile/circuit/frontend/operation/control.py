@@ -23,6 +23,7 @@ from typing import (
     overload,
 )
 
+from qamomile._utils import coerce_nonnegative_integral
 from qamomile.circuit.frontend.handle import Handle, Observable
 from qamomile.circuit.frontend.handle.primitives import Float, Qubit, UInt
 from qamomile.circuit.frontend.param_validation import (
@@ -523,34 +524,25 @@ class ControlledGate:
         """Normalize power to an IR-compatible type (``int`` or ``Value``).
 
         ``UInt`` handles are unwrapped to their underlying ``Value`` so
-        that the IR never stores frontend types.  Concrete ``int`` values
-        are validated for strict positivity.
+        that the IR never stores frontend types. Concrete Python, NumPy, and
+        SymPy real scalars with integer values are normalized to nonnegative
+        Python integers.
 
         Args:
-            power: The power value from the user API.
+            power (int | UInt): The power value from the user API. Runtime
+                validation also accepts integer-valued real scalar types.
 
         Returns:
             ``int`` for concrete values, ``Value`` for symbolic expressions.
 
         Raises:
-            TypeError: If *power* is ``bool``, ``float``, or another
-                unsupported type.
-            ValueError: If a concrete *power* is ``<= 0``.
+            TypeError: If *power* is ``bool``, non-finite, non-integral, or
+                not a real scalar.
+            ValueError: If a concrete *power* is negative.
         """
-        if isinstance(power, bool):
-            raise TypeError(
-                f"power must be a positive integer, got bool ({power}). "
-                f"Use an integer value like power=1 or power=2."
-            )
         if isinstance(power, UInt):
             return power.value
-        if isinstance(power, int):
-            if power <= 0:
-                raise ValueError(
-                    f"power must be a strictly positive integer, got {power}."
-                )
-            return power
-        raise TypeError(f"power must be int or UInt, got {type(power).__name__}.")
+        return coerce_nonnegative_integral(power, label="power")
 
     @staticmethod
     def _normalize_global_phase(
@@ -808,7 +800,7 @@ class ControlledGate:
             operands (list[Any]): Control, target, and classical operands.
             results (list[Value]): Quantum results in control-then-target order.
             num_controls (int | Value): Number of leading control qubits.
-            power (int | Value): Positive application count.
+            power (int | Value): Nonnegative application count.
             num_target_qubits (int | None): Compile-time scalar width of the
                 target register. ``None`` preserves the callable's symbolic-
                 width sentinel while keeping its controlled invocation
@@ -2023,9 +2015,10 @@ class ControlledGate:
             *args (Any): Control and sub-kernel arguments per the
                 mode-specific protocol described above.
             power (int | UInt): How many times to apply ``U``.  Must
-                be a strictly positive integer (``UInt`` handles are
-                accepted for symbolic powers, e.g. ``2 ** k`` in QPE).
-                Defaults to ``1``.
+                be a nonnegative Python, NumPy, or SymPy real scalar with an
+                integer value. ``UInt`` handles are accepted for symbolic
+                powers, e.g. ``2 ** k`` in QPE. Zero is the identity and
+                emits no controlled body. Defaults to ``1``.
             global_phase (float | int | Float): Global phase attached to the
                 target unitary before power and control. The exact semantics
                 are ``control((exp(i * global_phase) * U) ** power)``; under
@@ -2054,7 +2047,8 @@ class ControlledGate:
             ValueError: ``control_indices`` is non-``None`` in
                 concrete mode, or the qubit-count split in concrete
                 mode falls inside an argument.
-            TypeError: ``power`` is not a positive integer / ``UInt``,
+            TypeError: ``power`` is not a nonnegative integer-valued real /
+                ``UInt``,
                 ``global_phase`` is not a number / ``Float``, a
                 ``control_indices`` entry is not ``int`` / ``UInt``, or a
                 sub-kernel kwarg does not match the wrapped kernel's
@@ -2429,7 +2423,7 @@ class ControlledGate:
 
         Args:
             args (tuple[Any, ...]): Positional control and qkernel arguments.
-            power (int | Value): Normalized positive application count.
+            power (int | Value): Normalized nonnegative application count.
             global_phase (Value | None): Normalized target-global phase.
             sub_kwargs (dict[str, Any]): Keyword arguments for the qkernel.
             control_indices (Sequence[int | UInt] | None): Optional selected

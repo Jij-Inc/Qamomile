@@ -12,7 +12,6 @@ the corresponding ``_emit_pauli_evolve`` method; calling
 from __future__ import annotations
 
 import math
-from numbers import Real
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -21,10 +20,14 @@ if TYPE_CHECKING:
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.value import ArrayValue
 from qamomile.circuit.transpiler.errors import EmitError
-from qamomile.observable.hamiltonian import HERMITIAN_IMAG_ATOL, PAULI_TERM_ZERO_ATOL
+from qamomile.observable.hamiltonian import (
+    HERMITIAN_IMAG_ATOL,
+    PAULI_TERM_ZERO_ATOL,
+    Hamiltonian,
+)
 
 from .gate_emission import resolve_angle_value
-from .global_phase_emission import emit_resolved_global_phase
+from .global_phase_emission import emit_resolved_global_phase, is_exact_real_zero
 from .qubit_address import QubitAddress, QubitMap
 
 
@@ -68,14 +71,55 @@ def is_zero_evolution_time(gamma: Any) -> bool:
     Returns:
         bool: ``True`` only for a concrete numeric zero.
     """
-    if isinstance(gamma, bool):
-        return False
-    return isinstance(gamma, Real) and math.isclose(
-        float(gamma),
-        0.0,
-        rel_tol=0.0,
-        abs_tol=0.0,
-    )
+    return is_exact_real_zero(gamma)
+
+
+def validate_hermitian_hamiltonian(hamiltonian: Hamiltonian) -> None:
+    """Validate every coefficient before Pauli-evolution emission starts.
+
+    This validation deliberately completes before the zero-time shortcut and
+    before any circuit mutation. Consequently, malformed Hamiltonians fail
+    consistently for controlled and uncontrolled evolution, and a late
+    invalid term cannot leave a partially emitted circuit behind.
+
+    Args:
+        hamiltonian (Hamiltonian): Hamiltonian whose constant and Pauli-term
+            coefficients must be real within ``HERMITIAN_IMAG_ATOL``.
+
+    Raises:
+        EmitError: If the constant or any Pauli-term coefficient is non-finite
+            or has an imaginary component outside the Hermiticity tolerance.
+    """
+    constant = complex(hamiltonian.constant)
+    if not math.isfinite(constant.real) or not math.isfinite(constant.imag):
+        raise EmitError(
+            "PauliEvolveOp requires finite Hamiltonian coefficients, but "
+            f"found constant {hamiltonian.constant}.",
+            operation="PauliEvolveOp",
+        )
+    if abs(constant.imag) > HERMITIAN_IMAG_ATOL:
+        raise EmitError(
+            "PauliEvolveOp requires a Hermitian Hamiltonian (real "
+            f"coefficients), but found complex constant {hamiltonian.constant}.",
+            operation="PauliEvolveOp",
+        )
+    for operators, coefficient in hamiltonian:
+        numeric_coefficient = complex(coefficient)
+        if not math.isfinite(numeric_coefficient.real) or not math.isfinite(
+            numeric_coefficient.imag
+        ):
+            raise EmitError(
+                "PauliEvolveOp requires finite Hamiltonian coefficients, but "
+                f"found coefficient {coefficient} on term {operators}.",
+                operation="PauliEvolveOp",
+            )
+        if abs(numeric_coefficient.imag) > HERMITIAN_IMAG_ATOL:
+            raise EmitError(
+                "PauliEvolveOp requires a Hermitian Hamiltonian "
+                "(real coefficients), but found complex coefficient "
+                f"{coefficient} on term {operators}.",
+                operation="PauliEvolveOp",
+            )
 
 
 def _scale_gamma(gamma: Any, factor: float) -> Any:
@@ -229,22 +273,10 @@ def emit_pauli_evolve(
         if n_resolved is not None:
             validate_hamiltonian_within_register(num_h_qubits, n_resolved)
 
-    # Validate Hermitian (real coefficients), including the identity constant.
+    # Complete validation before the zero-time shortcut or any circuit
+    # mutation. The later emission pass is intentionally a second traversal.
+    validate_hermitian_hamiltonian(hamiltonian)
     constant = complex(hamiltonian.constant)
-    if abs(constant.imag) > HERMITIAN_IMAG_ATOL:
-        raise EmitError(
-            "PauliEvolveOp requires a Hermitian Hamiltonian (real "
-            f"coefficients), but found complex constant {hamiltonian.constant}.",
-            operation="PauliEvolveOp",
-        )
-    for operators, coeff in hamiltonian:
-        if abs(coeff.imag) > HERMITIAN_IMAG_ATOL:
-            raise EmitError(
-                f"PauliEvolveOp requires a Hermitian Hamiltonian "
-                f"(real coefficients), but found complex coefficient "
-                f"{coeff} on term {operators}.",
-                operation="PauliEvolveOp",
-            )
 
     # Resolve qubit indices from the input array. For a sliced view
     # (``pauli_evolve(q[1::2], H, gamma)``) walk the ``slice_of`` chain

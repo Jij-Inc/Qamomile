@@ -60,6 +60,9 @@ from qamomile.circuit.transpiler.circuit_ir.model import (
     _contains_classical_bit,
     _is_zero_scalar,
 )
+from qamomile.circuit.transpiler.circuit_ir.parameter_usage import (
+    reconcile_parameter_metadata,
+)
 from qamomile.circuit.transpiler.circuit_ir.verify import verify_circuit
 from qamomile.circuit.transpiler.compiled_segments import CompiledQuantumSegment
 from qamomile.circuit.transpiler.errors import EmitError
@@ -1128,26 +1131,14 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
             _resolve_gamma,
             is_zero_evolution_time,
             validate_hamiltonian_within_register,
+            validate_hermitian_hamiltonian,
         )
-        from qamomile.observable.hamiltonian import HERMITIAN_IMAG_ATOL
 
         hamiltonian = self._resolver.resolve_bound_value(op.observable, bindings)
         if not isinstance(hamiltonian, qm_o.Hamiltonian):
             raise EmitError("PauliEvolveOp requires a Hamiltonian binding")
-        if abs(hamiltonian.constant.imag) > HERMITIAN_IMAG_ATOL:
-            raise EmitError(
-                "PauliEvolveOp requires a real Hamiltonian constant; "
-                "a complex constant is non-Hermitian",
-                operation="PauliEvolveOp",
-            )
+        validate_hermitian_hamiltonian(hamiltonian)
         gamma = _resolve_gamma(self, op, bindings)
-        for operators, coefficient in hamiltonian:
-            if abs(coefficient.imag) > HERMITIAN_IMAG_ATOL:
-                raise EmitError(
-                    f"PauliEvolveOp requires a Hermitian Hamiltonian, but "
-                    f"coefficient {coefficient} on term {operators} is non-real",
-                    operation="PauliEvolveOp",
-                )
 
         input_array = op.qubits
         if not isinstance(input_array, ArrayValue):
@@ -1370,6 +1361,10 @@ def lower_circuit_plan(
     for segment in lowered.compiled_quantum:
         program = segment.circuit.freeze()
         verify_circuit(program)
+        parameter_metadata = reconcile_parameter_metadata(
+            program,
+            segment.parameter_metadata,
+        )
         quantum_segments.append(
             CompiledQuantumSegment(
                 segment=segment.segment,
@@ -1377,7 +1372,7 @@ def lower_circuit_plan(
                 qubit_map=segment.qubit_map,
                 clbit_map=segment.clbit_map,
                 measurement_qubit_map=segment.measurement_qubit_map,
-                parameter_metadata=segment.parameter_metadata,
+                parameter_metadata=parameter_metadata,
             )
         )
     return ExecutableProgram(

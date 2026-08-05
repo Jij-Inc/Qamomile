@@ -2084,6 +2084,30 @@ class InverseGate:
             return dict(self._target_callable_attrs)
         return qkernel_callable_attrs(self._qkernel)
 
+    def _restored_qkernel(self) -> QKernel:
+        """Restore the forward qkernel without discarding callable metadata.
+
+        Returns the wrapped object itself when its compiler-facing identity and
+        attributes already match the effective inverse-wrapper metadata.
+        Otherwise, returns an isolated clone carrying the effective metadata so
+        cancelling two inverse transforms preserves callable selection and
+        resource contracts.
+
+        Returns:
+            QKernel: Forward qkernel with the effective callable reference and
+                attributes retained.
+        """
+        callable_ref = self._callable_ref()
+        callable_attrs = self._callable_attrs()
+        if callable_ref == qkernel_callable_ref(
+            self._qkernel
+        ) and callable_attrs == qkernel_callable_attrs(self._qkernel):
+            return self._qkernel
+
+        restored = self._qkernel._clone_with_callable_attrs(callable_attrs)
+        setattr(restored, "_callable_ref_override", callable_ref)
+        return restored
+
     def _bind_arguments(self, *args: Any, **kwargs: Any) -> "BoundArguments":
         """Bind and literal-promote call arguments.
 
@@ -2704,7 +2728,7 @@ def inverse(
     if isinstance(target, ControlledGate):
         return target._inverted()
     if isinstance(target, InverseGate):
-        return target._qkernel
+        return target._restored_qkernel()
     if isinstance(target, _InverseComposite):
         return target.kernel
     known_inverse = _inverse_known_qft_target(target)

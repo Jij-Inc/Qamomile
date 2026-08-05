@@ -1,13 +1,20 @@
 """Tests for controlled-emission support helpers."""
 
 import math
+from fractions import Fraction
 from typing import Any
 
+import numpy as np
 import pytest
+import sympy as sp
 
 import qamomile.circuit as qmc
 from qamomile._utils import coerce_nonnegative_integral
 from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    RuntimeClassicalExpr,
+    RuntimeOpKind,
+)
 from qamomile.circuit.ir.operation.callable import (
     CallableDef,
     CallableImplementation,
@@ -16,6 +23,7 @@ from qamomile.circuit.ir.operation.callable import (
     CompositeGateType,
     InvokeOperation,
 )
+from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.circuit.ir.operation.gate import (
     ConcreteControlledU,
@@ -36,6 +44,9 @@ from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
 from qamomile.circuit.transpiler.passes.emit_support import (
     controlled_emission,
     inverse_emission,
+)
+from qamomile.circuit.transpiler.passes.emit_support.control_batching import (
+    should_batch_controlled_body,
 )
 from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
     _gate_matches_qubit_count,
@@ -142,6 +153,21 @@ def test_qinit_does_not_contribute_controlled_batch_weight() -> None:
         ).weight
         == 0
     )
+
+
+def test_controlled_walker_rejects_unhandled_classical_operation() -> None:
+    """A classical marker without walker semantics must fail closed."""
+    operation = RuntimeClassicalExpr(kind=RuntimeOpKind.NOT)
+
+    with pytest.raises(EmitError, match="Unsupported operation"):
+        emit_controlled_operations(
+            _MultiControlEmitPass(),
+            object(),
+            [operation],
+            [0],
+            {},
+            {},
+        )
 
 
 @pytest.mark.parametrize(
@@ -376,6 +402,10 @@ def test_controlled_power_analysis_accepts_integral_float_binding() -> None:
         pytest.param(0, 0, id="zero"),
         pytest.param(2, 2, id="integer"),
         pytest.param(2.0, 2, id="whole-float"),
+        pytest.param(np.int64(2), 2, id="numpy-integer"),
+        pytest.param(np.float64(2.0), 2, id="numpy-whole-float"),
+        pytest.param(sp.Float(2.0), 2, id="sympy-whole-float"),
+        pytest.param(Fraction(2, 1), 2, id="fraction-whole-real"),
     ],
 )
 def test_controlled_power_layers_share_accepted_values(
@@ -403,7 +433,27 @@ def test_controlled_power_layers_share_accepted_values(
     [
         pytest.param(True, TypeError, "bool", id="bool"),
         pytest.param(-1, ValueError, "nonnegative", id="negative"),
-        pytest.param(1.5, TypeError, "non-integer float", id="fractional-float"),
+        pytest.param(1.5, TypeError, "non-integer", id="fractional-float"),
+        pytest.param(
+            np.float64(1.5),
+            TypeError,
+            "non-integer",
+            id="numpy-fractional-float",
+        ),
+        pytest.param(
+            sp.Float(1.5),
+            TypeError,
+            "non-integer",
+            id="sympy-fractional-float",
+        ),
+        pytest.param(
+            Fraction(3, 2),
+            TypeError,
+            "non-integer",
+            id="fraction-non-integer-real",
+        ),
+        pytest.param(math.inf, TypeError, "finite integer", id="positive-infinity"),
+        pytest.param(math.nan, TypeError, "finite integer", id="nan"),
         pytest.param("2", TypeError, "str", id="string"),
     ],
 )
@@ -606,6 +656,78 @@ def test_batch_weight_folds_logical_predicate_chains() -> None:
     assert estimate.gates.total == 0
     assert estimate.gates.toffoli == 0
     assert estimate.width.clean_ancilla_qubits == 0
+
+
+def test_cast_bookkeeping_matches_x_only_control_width_and_batching() -> None:
+    """A carrier cast adds no work or shared-ladder ancilla demand."""
+    pytest.importorskip("quri_parts")
+    from qamomile.quri_parts import QuriPartsTranspiler
+
+    @qmc.qkernel
+    def cast_x(targets: qmc.Vector[qmc.Qubit]) -> qmc.QFixed:
+        """Apply X before consuming its carrier register through a cast."""
+        targets[0] = qmc.x(targets[0])
+        return qmc.cast(targets, qmc.QFixed, int_bits=0)
+
+    @qmc.qkernel
+    def plain_x(targets: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        """Apply the same X without the bookkeeping cast."""
+        targets[0] = qmc.x(targets[0])
+        return targets
+
+    @qmc.qkernel
+    def cast_circuit() -> qmc.Vector[qmc.Bit]:
+        """Control the cast-bearing body with two coherent controls."""
+        qubits = qmc.qubit_array(3, "qubits")
+        _control_0, _control_1, fixed = qmc.control(
+            cast_x,
+            num_controls=2,
+        )(qubits[0], qubits[1], qubits[2:3])
+        return qmc.measure(fixed)
+
+    @qmc.qkernel
+    def plain_circuit() -> qmc.Vector[qmc.Bit]:
+        """Control the X-only baseline with two coherent controls."""
+        qubits = qmc.qubit_array(3, "qubits")
+        _control_0, _control_1, targets = qmc.control(
+            plain_x,
+            num_controls=2,
+        )(qubits[0], qubits[1], qubits[2:3])
+        return qmc.measure(targets)
+
+    controlled = next(
+        operation
+        for operation in cast_circuit.build().operations
+        if isinstance(operation, ConcreteControlledU)
+    )
+    assert controlled.block is not None
+    assert sum(isinstance(op, CastOperation) for op in controlled.block.operations) == 1
+    profile = controlled_emission._controlled_body_batch_profile(
+        _ResolverOnlyEmitPass(),
+        controlled.block.operations,
+        {},
+    )
+
+    cast_estimate = cast_circuit.estimate_resources()
+    plain_estimate = plain_circuit.estimate_resources()
+    transpiler = QuriPartsTranspiler()
+    cast_emitted = transpiler.transpile(cast_circuit).compiled_quantum[0].circuit
+    plain_emitted = transpiler.transpile(plain_circuit).compiled_quantum[0].circuit
+
+    assert profile.weight == 1
+    assert not should_batch_controlled_body(num_controls=2, profile=profile)
+    assert cast_estimate.gates == plain_estimate.gates
+    assert cast_estimate.width == plain_estimate.width
+    assert cast_estimate.gates.total == cast_estimate.gates.toffoli == 1
+    assert cast_estimate.width.allocated_qubits == 3
+    assert cast_estimate.width.clean_ancilla_qubits == 0
+    assert cast_estimate.qubits == cast_emitted.qubit_count == 3
+    assert plain_estimate.qubits == plain_emitted.qubit_count == 3
+    assert (
+        [gate.name for gate in cast_emitted.gates]
+        == [gate.name for gate in plain_emitted.gates]
+        == ["TOFFOLI"]
+    )
 
 
 def test_batch_weight_binds_invoke_actuals_before_descending() -> None:
@@ -1926,11 +2048,11 @@ def test_batch_profile_stops_after_a_decisive_loop_iteration(
     [False, True],
     ids=["zero-power", "reusable-gate"],
 )
-def test_controlled_call_profiles_only_fallback_work(
+def test_controlled_call_profiles_before_reusable_gate_emission(
     monkeypatch: pytest.MonkeyPatch,
     reuse_gate: bool,
 ) -> None:
-    """Identity powers and reusable gates skip fallback-only profiling."""
+    """Zero power skips analysis while reusable emission first proves work."""
     control = Value(type=QubitType(), name="control")
     target = Value(type=QubitType(), name="target")
     formal_target = Value(type=QubitType(), name="formal_target")
@@ -1974,15 +2096,22 @@ def test_controlled_call_profiles_only_fallback_work(
             raising=False,
         )
 
-    def fail_profile(*args: Any, **kwargs: Any) -> None:
-        """Fail if a non-fallback path performs semantic profiling."""
+    profile_calls = 0
+
+    def record_profile(*args: Any, **kwargs: Any) -> Any:
+        """Record the pre-emission profile and preserve this body's work."""
+        nonlocal profile_calls
         del args, kwargs
-        raise AssertionError("fallback profile was computed eagerly")
+        profile_calls += 1
+        return controlled_emission.ControlBatchProfile(
+            weight=1,
+            selects_exact_two=True,
+        )
 
     monkeypatch.setattr(
         controlled_emission,
         "_controlled_body_batch_profile",
-        fail_profile,
+        record_profile,
     )
 
     controlled_emission.emit_controlled_u(
@@ -1997,6 +2126,7 @@ def test_controlled_call_profiles_only_fallback_work(
     )
 
     assert appended == ([[0, 1]] if reuse_gate else [])
+    assert profile_calls == int(reuse_gate)
 
 
 def test_zero_power_maps_results_without_binding_body(
@@ -2189,8 +2319,8 @@ def test_open_controlled_identity_phase_skips_x_brackets(angle: float) -> None:
     assert emit_pass._emitter.calls == []
 
 
-def test_open_controlled_zero_weight_body_uses_reusable_gate() -> None:
-    """Zero batch weight alone never proves a reusable body is identity."""
+def test_open_controlled_zero_weight_body_skips_reusable_gate() -> None:
+    """A proven zero-work body runs bookkeeping without a gate or brackets."""
 
     class ReusableGateEmitter(_RecordingEmitter):
         """Record open-control brackets and reusable-gate emission."""
@@ -2273,6 +2403,7 @@ def test_open_controlled_zero_weight_body_uses_reusable_gate() -> None:
         block=body,
     )
     emit_pass = ReusableGateEmitPass()
+    emit_pass._active_qubit_map = {QubitAddress(workspace.uuid): 2}
 
     controlled_emission.emit_controlled_u(
         emit_pass,
@@ -2285,12 +2416,7 @@ def test_open_controlled_zero_weight_body_uses_reusable_gate() -> None:
         {},
     )
 
-    assert emit_pass._emitter.calls == [
-        ("x", 0),
-        ("gate_controlled", 1),
-        ("append_gate", (0, 1)),
-        ("x", 0),
-    ]
+    assert emit_pass._emitter.calls == []
 
 
 @pytest.mark.parametrize("operation_kind", ["invoke", "inverse"])

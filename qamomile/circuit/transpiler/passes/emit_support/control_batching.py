@@ -6,25 +6,14 @@ import dataclasses
 from collections.abc import Iterable
 
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.arithmetic_operations import (
-    BinOp,
-    CompOp,
-    CondOp,
-    NotOp,
+from qamomile.circuit.ir.operation.control_work import (
+    ControlWorkKind,
+    classify_control_work,
 )
-from qamomile.circuit.ir.operation.callable import InvokeOperation
-from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
 from qamomile.circuit.ir.operation.gate import (
-    ControlledUOperation,
     GateOperation,
     GateOperationType,
 )
-from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
-from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
-from qamomile.circuit.ir.operation.operation import QInitOperation
-from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
-from qamomile.circuit.ir.operation.return_operation import ReturnOperation
-from qamomile.circuit.ir.operation.select import SelectOperation
 
 CONTROL_BATCH_MIN_WEIGHT = 2
 
@@ -46,20 +35,6 @@ CONTROL_BATCH_DIRECT_AT_TWO_CONTROLS: frozenset[GateOperationType] = frozenset(
         GateOperationType.X,
         GateOperationType.Z,
     }
-)
-
-_CONTEXT_DEPENDENT_OPERATION_TYPES = (
-    BinOp,
-    CompOp,
-    CondOp,
-    NotOp,
-    ControlledUOperation,
-    ForOperation,
-    GlobalPhaseOperation,
-    IfOperation,
-    InvokeOperation,
-    InverseBlockOperation,
-    PauliEvolveOp,
 )
 
 
@@ -121,9 +96,11 @@ def static_controlled_batch_profile(
         ControlBatchProfile | None: Context-free emission profile, or ``None``
             when engine-specific value resolution is required.
     """
-    if isinstance(operation, (ReturnOperation, QInitOperation)):
+    work_kind = classify_control_work(operation)
+    if work_kind is ControlWorkKind.BOOKKEEPING:
         return ControlBatchProfile()
-    if isinstance(operation, GateOperation):
+    if work_kind is ControlWorkKind.QUANTUM_LEAF:
+        assert isinstance(operation, GateOperation)
         return ControlBatchProfile(
             weight=(
                 CONTROL_BATCH_MIN_WEIGHT
@@ -134,9 +111,7 @@ def static_controlled_batch_profile(
                 operation.gate_type not in CONTROL_BATCH_DIRECT_AT_TWO_CONTROLS
             ),
         )
-    if isinstance(operation, SelectOperation):
-        return None
-    if isinstance(operation, _CONTEXT_DEPENDENT_OPERATION_TYPES):
+    if work_kind is ControlWorkKind.CONTEXT_DEPENDENT:
         return None
     return ControlBatchProfile(weight=1, selects_exact_two=True)
 

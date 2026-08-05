@@ -8,6 +8,7 @@ import math
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
@@ -32,7 +33,11 @@ from qamomile.circuit.ir.types import BitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.errors import EmitError, ValidationError
 from qamomile.hugr import HugrTranspiler
-from qamomile.hugr.lowerer import _lower_while, _resolve_transformed_power
+from qamomile.hugr.lowerer import (
+    _lower_while,
+    _resolve_transformed_power,
+    _validate_pauli_evolution_hamiltonian,
+)
 
 
 def _hugr_operation_names(package: Package) -> list[str]:
@@ -56,6 +61,33 @@ def _hugr_float_constants(package: Package) -> list[float]:
         for _, data in package.modules[0].nodes()
         if isinstance(data.op, ops.Const) and isinstance(data.op.val, FloatVal)
     ]
+
+
+@pytest.mark.parametrize(
+    ("location", "coefficient"),
+    [
+        pytest.param("constant", float("nan"), id="constant-nan"),
+        pytest.param("constant", float("inf"), id="constant-infinity"),
+        pytest.param("term", float("nan"), id="term-nan"),
+        pytest.param("term", float("inf"), id="term-infinity"),
+    ],
+)
+def test_hugr_rejects_nonfinite_pauli_coefficients(
+    location: str,
+    coefficient: float,
+) -> None:
+    """HUGR validation rejects non-finite constants and Pauli terms."""
+    hamiltonian = qm_o.Hamiltonian()
+    if location == "constant":
+        hamiltonian.constant = coefficient
+    else:
+        hamiltonian.add_term(
+            (qm_o.PauliOperator(qm_o.Pauli.X, 0),),
+            coefficient,
+        )
+
+    with pytest.raises(EmitError, match="finite Hamiltonian coefficients"):
+        _validate_pauli_evolution_hamiltonian(hamiltonian)
 
 
 @qmc.qkernel
@@ -2369,6 +2401,7 @@ def test_hugr_rejects_runtime_controlled_power_explicitly() -> None:
         pytest.param(0, 0, id="zero"),
         pytest.param(2, 2, id="integer"),
         pytest.param(2.0, 2, id="whole-float"),
+        pytest.param(np.int64(2), 2, id="numpy-integer"),
     ],
 )
 def test_hugr_transformed_power_accepts_shared_integral_domain(

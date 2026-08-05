@@ -7,22 +7,28 @@ import enum
 import itertools
 import math
 import numbers
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import partial
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
 
 import sympy as sp
+from sympy.core.function import AppliedUndef
 from sympy.logic.boolalg import Boolean
 
-from qamomile.circuit._array_shape import _rectangular_array_shape
+from qamomile.circuit._array_shape import (
+    _ARRAY_PROTOCOL_ERRORS,
+    _rectangular_array_shape,
+)
 from qamomile.circuit.estimator._control_decomposition import (
     CLEAN_ANCILLA_BATCH_MIN_WORK,
     static_clean_ancilla_batch_profile,
 )
 from qamomile.circuit.estimator._loop_executor import symbolic_iterations
 from qamomile.circuit.estimator._metrics import (
+    _SYMPY_SIMPLIFICATION_ERRORS,
     ApproximationStatus,
     CallResources,
     ControlDecomposition,
@@ -47,6 +53,7 @@ from qamomile.circuit.estimator._metrics import (
     _add_gates,
     _add_measurements,
     _add_resets,
+    _and_conditions,
     _boolean_condition,
     _combine_approximation,
     _combine_derivation,
@@ -65,6 +72,7 @@ from qamomile.circuit.estimator._metrics import (
     _GuardedAssumption,
     _GuardedDerivation,
     _GuardedQuality,
+    _has_large_concrete_sum,
     _is_concrete_integer,
     _max_calls,
     _max_depth,
@@ -101,6 +109,9 @@ from qamomile.circuit.estimator._metrics import (
 from qamomile.circuit.estimator._resolver import (
     ExprResolver,
     UnresolvedValueError,
+    _ArrayState,
+    _fact_from_expression,
+    _ResolvedClassicalFact,
     input_shape_dimension_aliases,
 )
 from qamomile.circuit.estimator._scheduling import (
@@ -114,6 +125,8 @@ from qamomile.circuit.estimator._scheduling import (
     _branch_owner_sizes,
     _branch_width_with_static_allocations,
     _captured_quantum_allocations,
+    _classical_dependency_footprint,
+    _classical_dependency_key,
     _concrete_loop_dependency_completion,
     _controlled_u_control_wire_keys,
     _count_qinit,
@@ -121,13 +134,13 @@ from qamomile.circuit.estimator._scheduling import (
     _dependency_depth,
     _dependency_keys_depend_on_symbol,
     _disjoint_concrete_loop_depth,
-    _estimate_depth_activity_condition,
     _estimate_has_nonzero_depth,
     _expand_dependency_owner_aliases,
     _invoke_quantum_output_sizes,
     _liveness_width,
     _LocalBlock,
     _loop_body_has_symbolic_quantum_index,
+    _loop_captured_observation_consumption,
     _map_body_dependency_completion,
     _map_body_dependency_keys,
     _map_value_dependency_keys,
@@ -162,11 +175,13 @@ from qamomile.circuit.estimator._scheduling import (
 )
 from qamomile.circuit.estimator._serialization import SymbolRegistry
 from qamomile.circuit.ir._resource_contract import quantum_operand_widths
-from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.dataflow import (
     build_dependency_graph,
+    find_loop_carried_condition_uuids,
     find_measurement_derived_values,
     find_measurement_results,
+    has_legacy_scalar_bit_rebinds,
     walk_operations,
 )
 from qamomile.circuit.ir.operation.arithmetic_operations import (
@@ -187,7 +202,12 @@ from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
     HasNestedOps,
     IfOperation,
+    LoopCarriedRebind,
     WhileOperation,
+)
+from qamomile.circuit.ir.operation.control_work import (
+    ControlWorkKind,
+    classify_control_work,
 )
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.gate import (
@@ -206,9 +226,14 @@ from qamomile.circuit.ir.operation.operation import (
     Operation,
     OperationKind,
     QInitOperation,
+    Signature,
 )
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.select import SelectOperation
+from qamomile.circuit.ir.operation.slice_array import (
+    ReleaseSliceViewOperation,
+    SliceArrayOperation,
+)
 from qamomile.circuit.ir.types.primitives import (
     BitType,
     FloatType,
@@ -220,18 +245,87 @@ from qamomile.circuit.ir.value import (
     TupleValue,
     Value,
     ValueBase,
+    ValueLike,
+    collect_value_like_uuids,
     resolve_root_array_index,
 )
 from qamomile.circuit.transpiler.block_parameter_binding import pair_block_operands
+from qamomile.circuit.transpiler.errors import ValidationError
+from qamomile.circuit.transpiler.passes.analyze import (
+    reject_loop_carried_classical_rebinds,
+)
+from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
+    CompileTimeIfLoweringPass,
+)
+from qamomile.circuit.transpiler.passes.inline import (
+    InlinePass,
+    count_inline_invokes,
+)
 
 if TYPE_CHECKING:
     from qamomile.circuit.frontend.qkernel import QKernel
 
 _ZERO = sp.Integer(0)
 _ONE = sp.Integer(1)
+_OBSERVATION_SOURCE_PREFIX = "$observation"
+_LOOP_ARRAY_SOURCE_PREFIX = "$loop-array"
+
+
+@dataclasses.dataclass
+class _ResourceInlineBoundaryOperation(Operation):
+    """Retain resource-only call state after a body is inlined.
+
+    The operation is an estimator-only, zero-work marker. It validates an
+    optional quantum-width contract and snapshots caller classical arrays into
+    cloned callee entry values at the original call position. Referenced values
+    deliberately do not appear in :attr:`Operation.operands`, so dependency
+    scheduling and liveness do not mistake the boundary for executable work.
+
+    Args:
+        constraint_operands (tuple[Value, ...]): Caller-scoped quantum target
+            operands whose widths must satisfy the callable contract.
+        callable_attrs (Mapping[str, Any]): Merged callable definition and
+            invocation attributes that carry the width declaration.
+        source (str): Callable name used in diagnostics.
+        array_state_bindings (tuple[tuple[ArrayValue, tuple[ArrayValue, ...]],
+            ...]): Caller arrays paired with cloned callee entry values that
+            receive simultaneous call-time snapshots.
+    """
+
+    constraint_operands: tuple[Value, ...] = ()
+    callable_attrs: Mapping[str, Any] = dataclasses.field(default_factory=dict)
+    source: str = "callable"
+    array_state_bindings: tuple[
+        tuple[ArrayValue, tuple[ArrayValue, ...]],
+        ...,
+    ] = ()
+
+    @property
+    def signature(self) -> Signature:
+        """Return an empty signature for the zero-work marker.
+
+        Returns:
+            Signature: Empty operation signature.
+        """
+        return Signature()
+
+    @property
+    def operation_kind(self) -> OperationKind:
+        """Classify the marker as classical zero work.
+
+        Returns:
+            OperationKind: ``CLASSICAL`` so quantum scheduling ignores it.
+        """
+        return OperationKind.CLASSICAL
+
+
 _DEFAULT_GATE_BASIS = GateBasis.LOGICAL
 _DEFAULT_CONTROL_DECOMPOSITION = ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
 _DEFAULT_ROTATION_SYNTHESIS_PRECISION = 1e-10
+# Circuit transpilation performs one initial inline pass before its 64-round
+# recursion loop. The validation copy starts from the original Block, so it
+# needs one additional round to cover the same supported concrete depth.
+_MAX_LOOP_VALIDATION_INLINE_DEPTH = 65
 _DEFER_RESOURCE_SYMBOL_METADATA = ContextVar(
     "qamomile_defer_resource_symbol_metadata",
     default=False,
@@ -245,7 +339,10 @@ _PHASE_CLASS_CODES = {
     "tdg": 5,
     "p": -1,
 }
+
+
 _CONCRETE_REGION_REPLAY_LIMIT = 64
+_MAX_RUNTIME_DOMAIN_ALTERNATIVES = 16
 # Global SymPy simplification becomes superlinear on nested branch extrema;
 # resource composition has already normalized larger expressions structurally.
 _PUBLIC_RESOURCE_SIMPLIFY_NODE_LIMIT = 32
@@ -356,6 +453,8 @@ def _simplify_public_resource_expression(
             unsafe or disproportionately expensive.
     """
     normalized = _expr(expression)
+    if _has_large_concrete_sum(normalized):
+        return normalized
     has_branching_structure = False
     for node_count, node in enumerate(
         sp.preorder_traversal(normalized),
@@ -620,6 +719,23 @@ class _EstimatorControlBatchProfile:
                 cast(ResourceExpr, self.work) * true_indicator
                 + cast(ResourceExpr, other.work) * false_indicator
             ),
+        )
+
+    def choice(
+        self,
+        other: _EstimatorControlBatchProfile,
+    ) -> _EstimatorControlBatchProfile:
+        """Take the conservative work maximum of two possible branches.
+
+        Args:
+            other (_EstimatorControlBatchProfile): Alternative branch profile.
+
+        Returns:
+            _EstimatorControlBatchProfile: Field-wise branch maximum, capped
+                at the shared-ladder threshold.
+        """
+        return _EstimatorControlBatchProfile(
+            work=sp.Min(2, sp.Max(self.work, other.work)),
         )
 
     def sum_over(
@@ -925,6 +1041,14 @@ class ResourceEstimate:
         _dependency_keys (frozenset[WireKey] | None): Internal caller-scoped
             quantum wires that contribute nonzero depth. ``None`` requests the
             enclosing operation's conservative ordinary footprint.
+        _dependency_reads (frozenset[WireKey] | None): Internal scheduler
+            inputs for rescheduling an already interpreted body, including
+            immutable classical observation tokens. ``None`` means that only
+            ``_dependency_keys`` is available.
+        _dependency_writes (frozenset[WireKey] | None): Internal scheduler
+            outputs for rescheduling an already interpreted body, including
+            newly published observation tokens. ``None`` means that only
+            ``_dependency_keys`` is available.
         _dependency_completion (dict[WireKey, ResourceExpr] | None): Internal
             caller-visible completion depth for each dependency wire.
             ``None`` requests conservative reconstruction from
@@ -933,6 +1057,13 @@ class ResourceEstimate:
             caller-visible wire is proven to complete at the aggregate peak
             of every depth field. ``None`` means that field-wise uniformity
             was not proven.
+        _global_barrier_condition (Boolean): Condition under which an opaque,
+            nested non-unitary, or runtime-control boundary lacks enough
+            wire-level provenance for exact dependency scheduling.
+        _measurement_taint_conditions (dict[str, Boolean]): Estimator-local
+            conditions under which classical SSA values derive from runtime
+            quantum observations. This state is used only while recursively
+            interpreting a body and is not a public resource metric.
         _guarded_assumptions (tuple[_GuardedAssumption, ...] | None): Internal
             condition-aware assumption provenance. ``None`` initializes facts
             from the public ``assumptions`` tuple.
@@ -996,6 +1127,16 @@ class ResourceEstimate:
         repr=False,
         compare=False,
     )
+    _dependency_reads: frozenset[WireKey] | None = dataclasses.field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    _dependency_writes: frozenset[WireKey] | None = dataclasses.field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
     _dependency_completion: dict[WireKey, ResourceExpr] | None = dataclasses.field(
         default=None,
         repr=False,
@@ -1003,6 +1144,16 @@ class ResourceEstimate:
     )
     _dependency_completion_uniform: bool | None = dataclasses.field(
         default=None,
+        repr=False,
+        compare=False,
+    )
+    _global_barrier_condition: Boolean = dataclasses.field(
+        default=sp.false,
+        repr=False,
+        compare=False,
+    )
+    _measurement_taint_conditions: dict[str, Boolean] = dataclasses.field(
+        default_factory=dict,
         repr=False,
         compare=False,
     )
@@ -1036,6 +1187,14 @@ class ResourceEstimate:
 
     def __post_init__(self) -> None:
         """Normalize guarded metadata and derive the public parameter map."""
+        self._constraints = tuple(
+            constraint
+            for constraint in self._constraints
+            if constraint.active_when is not sp.false
+        )
+        self._global_barrier_condition = _boolean_condition(
+            self._global_barrier_condition
+        )
         if self._guarded_assumptions is None:
             self._guarded_assumptions = tuple(
                 _GuardedAssumption(sp.true, assumption)
@@ -1298,7 +1457,25 @@ class ResourceEstimate:
             ),
             _constraints=(*self._constraints, *other._constraints),
             _dependency_keys=_merge_dependency_keys(self, other),
+            _dependency_reads=_merge_dependency_accesses(
+                self,
+                other,
+                writes=False,
+            ),
+            _dependency_writes=_merge_dependency_accesses(
+                self,
+                other,
+                writes=True,
+            ),
             _dependency_completion=_seq_dependency_completion(self, other),
+            _global_barrier_condition=sp.Or(
+                self._global_barrier_condition,
+                other._global_barrier_condition,
+            ),
+            _measurement_taint_conditions=_merge_measurement_taint_conditions(
+                self._measurement_taint_conditions,
+                other._measurement_taint_conditions,
+            ),
             _guarded_assumptions=(
                 *(self._guarded_assumptions or ()),
                 *(other._guarded_assumptions or ()),
@@ -1381,7 +1558,25 @@ class ResourceEstimate:
             ),
             _constraints=(*self._constraints, *other._constraints),
             _dependency_keys=_merge_dependency_keys(self, other),
+            _dependency_reads=_merge_dependency_accesses(
+                self,
+                other,
+                writes=False,
+            ),
+            _dependency_writes=_merge_dependency_accesses(
+                self,
+                other,
+                writes=True,
+            ),
             _dependency_completion=_max_dependency_completion(self, other),
+            _global_barrier_condition=sp.Or(
+                self._global_barrier_condition,
+                other._global_barrier_condition,
+            ),
+            _measurement_taint_conditions=_merge_measurement_taint_conditions(
+                self._measurement_taint_conditions,
+                other._measurement_taint_conditions,
+            ),
             _guarded_assumptions=(
                 *(self._guarded_assumptions or ()),
                 *(other._guarded_assumptions or ()),
@@ -1449,7 +1644,25 @@ class ResourceEstimate:
             _allocation_sites=allocation_sites,
             _constraints=(*self._constraints, *other._constraints),
             _dependency_keys=_merge_dependency_keys(self, other),
+            _dependency_reads=_merge_dependency_accesses(
+                self,
+                other,
+                writes=False,
+            ),
+            _dependency_writes=_merge_dependency_accesses(
+                self,
+                other,
+                writes=True,
+            ),
             _dependency_completion=_max_dependency_completion(self, other),
+            _global_barrier_condition=sp.Or(
+                self._global_barrier_condition,
+                other._global_barrier_condition,
+            ),
+            _measurement_taint_conditions=_merge_measurement_taint_conditions(
+                self._measurement_taint_conditions,
+                other._measurement_taint_conditions,
+            ),
             _guarded_assumptions=(
                 *(self._guarded_assumptions or ()),
                 *(other._guarded_assumptions or ()),
@@ -1543,10 +1756,31 @@ class ResourceEstimate:
                 ),
             ),
             _dependency_keys=dependency_keys,
+            _dependency_reads=_merge_dependency_accesses(
+                self,
+                other,
+                writes=False,
+            ),
+            _dependency_writes=_merge_dependency_accesses(
+                self,
+                other,
+                writes=True,
+            ),
             _dependency_completion=_conditional_dependency_completion(
                 self,
                 other,
                 condition,
+            ),
+            _global_barrier_condition=sp.Or(
+                sp.And(condition, self._global_barrier_condition),
+                sp.And(sp.Not(condition), other._global_barrier_condition),
+            ),
+            _measurement_taint_conditions=(
+                _conditional_measurement_taint_conditions(
+                    self._measurement_taint_conditions,
+                    other._measurement_taint_conditions,
+                    condition,
+                )
             ),
             _guarded_assumptions=(
                 *(fact.when(condition) for fact in (self._guarded_assumptions or ())),
@@ -1648,6 +1882,8 @@ class ResourceEstimate:
             )
             + ((factor_constraint,) if not f.is_number else ()),
             _dependency_keys=(frozenset() if f == _ZERO else self._dependency_keys),
+            _dependency_reads=(frozenset() if f == _ZERO else self._dependency_reads),
+            _dependency_writes=(frozenset() if f == _ZERO else self._dependency_writes),
             _dependency_completion=(
                 {
                     key: cast(
@@ -1666,6 +1902,14 @@ class ResourceEstimate:
                 else None
             ),
             _dependency_completion_uniform=self._dependency_completion_uniform,
+            _global_barrier_condition=sp.And(
+                self._global_barrier_condition,
+                active_when,
+            ),
+            _measurement_taint_conditions=_guard_measurement_taint_conditions(
+                self._measurement_taint_conditions,
+                active_when,
+            ),
             _guarded_assumptions=tuple(
                 fact.when(active_when) for fact in (self._guarded_assumptions or ())
             ),
@@ -1694,7 +1938,10 @@ class ResourceEstimate:
             estimate = estimate._with_metadata(
                 assumptions=(assumption,),
                 quality=EstimateQuality.CONSERVATIVE,
-                active_when=active_when,
+                active_when=sp.And(
+                    active_when,
+                    _resource_activity_condition(self.depth.depth),
+                ),
             )
         return estimate
 
@@ -1807,8 +2054,12 @@ class ResourceEstimate:
             _input_sizes=self._input_sizes,
             _has_output_summary=self._has_output_summary,
             _dependency_keys=self._dependency_keys,
+            _dependency_reads=self._dependency_reads,
+            _dependency_writes=self._dependency_writes,
             _dependency_completion=self._dependency_completion,
             _dependency_completion_uniform=self._dependency_completion_uniform,
+            _global_barrier_condition=self._global_barrier_condition,
+            _measurement_taint_conditions=self._measurement_taint_conditions,
             _guarded_assumptions=self._guarded_assumptions,
             _guarded_derivations=self._guarded_derivations,
             _guarded_qualities=self._guarded_qualities,
@@ -1862,11 +2113,15 @@ class ResourceEstimate:
             _input_sizes=self._input_sizes,
             _has_output_summary=self._has_output_summary,
             _dependency_keys=self._dependency_keys,
+            _dependency_reads=self._dependency_reads,
+            _dependency_writes=self._dependency_writes,
             # Reversing a multi-wire aggregate preserves its touched wires but
             # can change which wire finishes first. Only a gate-by-gate inverse
             # can reconstruct exact caller-visible completion layers.
             _dependency_completion=None,
             _dependency_completion_uniform=None,
+            _global_barrier_condition=self._global_barrier_condition,
+            _measurement_taint_conditions=self._measurement_taint_conditions,
             _guarded_assumptions=self._guarded_assumptions,
             _guarded_derivations=self._guarded_derivations,
             _guarded_qualities=self._guarded_qualities,
@@ -1955,7 +2210,7 @@ class ResourceEstimate:
                 step=dependency_step,
                 iterations=projected_iterations,
             )
-        width, allocation_sites, width_is_exact = _maximum_width_over_range(
+        width, allocation_sites, width_conservative_when = _maximum_width_over_range(
             self.width,
             self._allocation_sites,
             loop_symbol,
@@ -1963,21 +2218,6 @@ class ResourceEstimate:
             step,
             iterations,
         )
-        assumptions: tuple[ResourceAssumption, ...] = ()
-        quality = EstimateQuality.EXACT
-        if not width_is_exact:
-            assumptions = (
-                *assumptions,
-                ResourceAssumption(
-                    "symbolic loop width uses a conservative sum bound "
-                    "because its maximum could not be proven",
-                    source=str(loop_symbol),
-                ),
-            )
-            quality = _combine_quality(
-                quality,
-                EstimateQuality.CONSERVATIVE,
-            )
         estimate = ResourceEstimate(
             width=width,
             gates=_sum_gates(self.gates, loop_symbol, start, step, iterations),
@@ -2015,11 +2255,13 @@ class ResourceEstimate:
                         start,
                         step,
                         iterations,
-                    )
+                    ).when(sp.Gt(iterations, _ZERO))
                     for constraint in self._constraints
                 ),
             ),
             _dependency_keys=self._dependency_keys,
+            _dependency_reads=self._dependency_reads,
+            _dependency_writes=self._dependency_writes,
             _dependency_completion=(
                 {
                     key: cast(
@@ -2046,6 +2288,27 @@ class ResourceEstimate:
                 if self._dependency_completion is not None
                 else None
             ),
+            _global_barrier_condition=_boolean_condition(
+                _activation_over_range(
+                    self._global_barrier_condition,
+                    loop_symbol,
+                    start,
+                    step,
+                    iterations,
+                )
+            ),
+            _measurement_taint_conditions={
+                uuid: _boolean_condition(
+                    _activation_over_range(
+                        condition,
+                        loop_symbol,
+                        start,
+                        step,
+                        iterations,
+                    )
+                )
+                for uuid, condition in self._measurement_taint_conditions.items()
+            },
             _guarded_assumptions=tuple(
                 dataclasses.replace(
                     fact,
@@ -2099,11 +2362,19 @@ class ResourceEstimate:
                 for fact in (self._guarded_approximations or ())
             ),
             _symbol_aliases=self._symbol_aliases,
-        )._with_metadata(
-            assumptions=assumptions,
-            quality=quality,
-            active_when=sp.Gt(iterations, _ZERO),
         )
+        if width_conservative_when is not sp.false:
+            estimate = estimate._with_metadata(
+                assumptions=(
+                    ResourceAssumption(
+                        "symbolic loop width uses a conservative excess-sum "
+                        "bound because its maximum could not be proven",
+                        source=str(loop_symbol),
+                    ),
+                ),
+                quality=EstimateQuality.CONSERVATIVE,
+                active_when=width_conservative_when,
+            )
         return _project_dependency_metadata_over_symbol(
             estimate,
             loop_symbol,
@@ -2165,7 +2436,7 @@ class ResourceEstimate:
         mapped = self._map_expr(
             substitute_expression,
             constraint_fn=lambda expr: _safe_constraint_substitute(expr, subs),
-            guard_fn=substitute_expression,
+            guard_fn=lambda expr: _safe_constraint_substitute(expr, subs),
             dependency_fn=substitute_expression,
         )
         # Substitution often collapses a previously large branch expression to
@@ -2295,6 +2566,7 @@ class ResourceEstimate:
             "requirements": [
                 {
                     "expression": serialize(constraint.expression),
+                    "active_when": serialize(constraint.active_when),
                     "minimum": constraint.minimum,
                     "minimum_inclusive": constraint.minimum_inclusive,
                     "finite": constraint.finite,
@@ -2350,7 +2622,10 @@ class ResourceEstimate:
             rewrite_constraint if dependency_fn is None else dependency_fn
         )
         mapped_constraints = tuple(
-            constraint.mapped(rewrite_constraint) for constraint in self._constraints
+            mapped
+            for constraint in self._constraints
+            if (mapped := constraint.mapped(rewrite_constraint)).active_when
+            is not sp.false
         )
         mapped_assumptions = tuple(
             mapped
@@ -2442,11 +2717,26 @@ class ResourceEstimate:
                 self._dependency_keys,
                 rewrite_dependency,
             ),
+            _dependency_reads=_map_dependency_keys(
+                self._dependency_reads,
+                rewrite_dependency,
+            ),
+            _dependency_writes=_map_dependency_keys(
+                self._dependency_writes,
+                rewrite_dependency,
+            ),
             _dependency_completion=_map_dependency_completion(
                 self._dependency_completion,
                 rewrite_dependency,
             ),
             _dependency_completion_uniform=self._dependency_completion_uniform,
+            _global_barrier_condition=_boolean_condition(
+                rewrite_guard(self._global_barrier_condition)
+            ),
+            _measurement_taint_conditions={
+                uuid: _boolean_condition(rewrite_guard(condition))
+                for uuid, condition in self._measurement_taint_conditions.items()
+            },
             _guarded_assumptions=mapped_assumptions,
             _guarded_derivations=mapped_derivations,
             _guarded_qualities=mapped_qualities,
@@ -2688,6 +2978,101 @@ def _merge_symbol_aliases(
             merged[symbol] = alias
             claimed_aliases.add(alias)
     return merged
+
+
+def _merge_measurement_taint_conditions(
+    *mappings: Mapping[str, Boolean],
+) -> dict[str, Boolean]:
+    """Merge guarded measurement provenance by SSA value identity.
+
+    Args:
+        *mappings (Mapping[str, Boolean]): UUID-keyed provenance conditions.
+
+    Returns:
+        dict[str, Boolean]: Conditions combined with Boolean OR, excluding
+            values whose merged condition is definitely false.
+    """
+    merged: dict[str, Boolean] = {}
+    for mapping in mappings:
+        for uuid, condition in mapping.items():
+            combined = _boolean_condition(sp.Or(merged.get(uuid, sp.false), condition))
+            if combined is sp.false:
+                merged.pop(uuid, None)
+            else:
+                merged[uuid] = combined
+    return merged
+
+
+def _guard_measurement_taint_conditions(
+    mapping: Mapping[str, Boolean],
+    condition: sp.Basic,
+) -> dict[str, Boolean]:
+    """Conjoin one activation condition with every taint entry.
+
+    Args:
+        mapping (Mapping[str, Boolean]): UUID-keyed provenance conditions.
+        condition (sp.Basic): Additional activation predicate.
+
+    Returns:
+        dict[str, Boolean]: Guarded non-false provenance entries.
+    """
+    active = _boolean_condition(condition)
+    return {
+        uuid: guarded
+        for uuid, value in mapping.items()
+        if (guarded := _boolean_condition(sp.And(active, value))) is not sp.false
+    }
+
+
+def _conditional_measurement_taint_conditions(
+    when_true: Mapping[str, Boolean],
+    when_false: Mapping[str, Boolean],
+    condition: sp.Basic,
+) -> dict[str, Boolean]:
+    """Select guarded provenance from two compile-time branches.
+
+    Args:
+        when_true (Mapping[str, Boolean]): True-branch provenance.
+        when_false (Mapping[str, Boolean]): False-branch provenance.
+        condition (sp.Basic): Branch selection predicate.
+
+    Returns:
+        dict[str, Boolean]: Branch-guarded union of both mappings.
+    """
+    predicate = _boolean_condition(condition)
+    return _merge_measurement_taint_conditions(
+        _guard_measurement_taint_conditions(when_true, predicate),
+        _guard_measurement_taint_conditions(when_false, sp.Not(predicate)),
+    )
+
+
+def _estimate_uses_unresolved_functions(
+    estimate: ResourceEstimate,
+    functions: Iterable[Any],
+) -> bool:
+    """Return whether resource algebra retains an unresolved carry function.
+
+    Comparing one concrete function application is insufficient after loop
+    summation because SymPy can rewrite ``carry(k)`` to ``carry(0)`` or another
+    application of the same undefined function. Matching the function identity
+    catches every such rewrite without confusing independent same-name carries.
+
+    Args:
+        estimate (ResourceEstimate): Estimate whose serialized algebra is
+            inspected.
+        functions (Iterable[Any]): Identity-distinct undefined SymPy functions
+            created for unsupported loop-carried recurrences.
+
+    Returns:
+        bool: Whether any resource or guarded metadata expression contains an
+            application of one of the supplied functions.
+    """
+    unresolved = tuple(functions)
+    return bool(unresolved) and any(
+        expression.has(*unresolved)
+        for expression in _serialization_expressions(estimate)
+        if isinstance(expression, sp.Basic)
+    )
 
 
 def _validate_opaque_cost_provenance(
@@ -3143,6 +3528,11 @@ class ResourceEstimator:
                     source=root_source,
                 ),
             )
+        # Runtime-domain alternatives may contain ordinary qkernel symbols.
+        # Expand them before applying user inputs so the normal substitution
+        # and constraint validation path specializes every alternative rather
+        # than reintroducing an already supplied symbol afterward.
+        estimate = interpreter.resolve_finite_runtime_constraints(estimate)
         if build_inputs:
             estimate._refresh_symbol_metadata()
             estimate = _substitute_bindings(estimate, build_inputs)
@@ -3184,6 +3574,7 @@ class ResourceEstimator:
                 config.precision if config.basis is GateBasis.CLIFFORD_T else None
             ),
         )
+        interpreter.validate_no_internal_resource_symbols(estimate)
         return estimate
 
     def _coerce_input(
@@ -3234,7 +3625,9 @@ def _find_runtime_observation_results(
     Expectation values behave like observations for estimator scheduling and
     branch specialization, but they deliberately are not sample-only
     ``KernelEffect.MEASUREMENT`` effects. Keeping the additional seeds local to
-    the estimator avoids changing compiler effect validation.
+    the estimator avoids changing compiler effect validation. Invoke results
+    are deliberately excluded because each caller adds provenance from the
+    implementation selected by the current resource strategy.
 
     Args:
         operations (Sequence[Operation]): Operation tree to inspect.
@@ -3246,13 +3639,791 @@ def _find_runtime_observation_results(
     for operation in walk_operations(operations):
         if isinstance(operation, ExpvalOp):
             results.update(result.uuid for result in operation.results)
-        elif isinstance(operation, InvokeOperation):
-            results.update(
-                operation.results[index].uuid
-                for index in operation.measurement_result_indices
-                if index < len(operation.results)
-            )
     return results
+
+
+def _operation_input_taint_condition(
+    operation: Operation,
+    taint_conditions: Mapping[str, Boolean],
+) -> Boolean:
+    """Return when an operation consumes observation-derived classical data.
+
+    Args:
+        operation (Operation): Operation whose inputs should be inspected.
+        taint_conditions (Mapping[str, Boolean]): UUID-keyed observation
+            provenance in the current evaluation scope.
+
+    Returns:
+        Boolean: Union of active provenance conditions on classical inputs.
+    """
+    conditions = [
+        _value_taint_condition(value, taint_conditions)
+        for value in operation.all_input_values()
+        if isinstance(value, ValueBase) and not value.type.is_quantum()
+    ]
+    return _boolean_condition(sp.Or(*conditions)) if conditions else sp.false
+
+
+def _value_taint_condition(
+    value: ValueBase,
+    taint_conditions: Mapping[str, Boolean],
+) -> Boolean:
+    """Return guarded observation provenance through value ancestry.
+
+    Args:
+        value (ValueBase): Classical scalar, container, or array element.
+        taint_conditions (Mapping[str, Boolean]): UUID-keyed provenance map.
+
+    Returns:
+        Boolean: Union of provenance on the value and structural ancestors.
+    """
+    conditions = [
+        taint_conditions[uuid]
+        for uuid in collect_value_like_uuids(cast(ValueLike, value))
+        if uuid in taint_conditions
+    ]
+    return _boolean_condition(sp.Or(*conditions)) if conditions else sp.false
+
+
+def _merge_classical_source_conditions(
+    target: dict[str, Boolean],
+    additions: Mapping[str, sp.Basic],
+) -> None:
+    """Merge guarded observation-source conditions into one mapping.
+
+    Args:
+        target (dict[str, Boolean]): Mutable destination keyed by source token.
+        additions (Mapping[str, sp.Basic]): Source guards to union into the
+            destination.
+    """
+    for source, raw_condition in additions.items():
+        condition = _boolean_condition(raw_condition)
+        merged = _boolean_condition(sp.Or(target.get(source, sp.false), condition))
+        if merged is sp.false:
+            target.pop(source, None)
+        else:
+            target[source] = merged
+
+
+def _resolved_classical_source_conditions(
+    values: Iterable[ValueBase],
+    resolver: ExprResolver,
+    *,
+    ignored_uuids: frozenset[str] = frozenset(),
+) -> dict[str, Boolean]:
+    """Resolve semantic classical dependencies without broadening elements.
+
+    A classical array element is resolved as one fact. Its parent array is not
+    traversed again, because doing so would reintroduce a coarse whole-array
+    dependency after the persistent array state proved the selected element
+    clean. Quantum values contribute only classical address metadata.
+
+    Args:
+        values (Iterable[ValueBase]): Values whose semantic dependencies are
+            collected.
+        resolver (ExprResolver): Resolver carrying classical facts.
+        ignored_uuids (frozenset[str]): Structural inputs that are not consumed
+            by the operation. Defaults to an empty set.
+
+    Returns:
+        dict[str, Boolean]: Classical source tokens and activation guards.
+    """
+    source_conditions: dict[str, Boolean] = {}
+
+    def visit(value: ValueBase) -> None:
+        """Collect dependencies from one aggregate or scalar value.
+
+        Args:
+            value (ValueBase): Value to inspect.
+        """
+        if isinstance(value, TupleValue):
+            for element in value.elements:
+                visit(element)
+            return
+        if isinstance(value, DictValue):
+            for key, entry_value in value.entries:
+                visit(key)
+                visit(entry_value)
+            return
+        if not isinstance(value, Value) or value.uuid in ignored_uuids:
+            return
+        if value.type.is_quantum():
+            metadata: list[Value] = []
+            if isinstance(value, ArrayValue):
+                metadata.extend(value.shape)
+                if value.slice_start is not None:
+                    metadata.append(value.slice_start)
+                if value.slice_step is not None:
+                    metadata.append(value.slice_step)
+            else:
+                metadata.extend(value.element_indices)
+            for item in metadata:
+                _merge_classical_source_conditions(
+                    source_conditions,
+                    resolver.resolve_classical_fact(item).dependencies,
+                )
+            return
+        if isinstance(value, ArrayValue):
+            _merge_classical_source_conditions(
+                source_conditions,
+                resolver.array_state_dependencies(value),
+            )
+            for item in (
+                *value.shape,
+                *((value.slice_start,) if value.slice_start is not None else ()),
+                *((value.slice_step,) if value.slice_step is not None else ()),
+            ):
+                _merge_classical_source_conditions(
+                    source_conditions,
+                    resolver.resolve_classical_fact(item).dependencies,
+                )
+            return
+        _merge_classical_source_conditions(
+            source_conditions,
+            resolver.resolve_classical_fact(value).dependencies,
+        )
+
+    for root in values:
+        visit(root)
+    return source_conditions
+
+
+def _resolved_classical_facts(
+    values: Iterable[ValueBase],
+    resolver: ExprResolver,
+) -> tuple[_ResolvedClassicalFact, ...]:
+    """Resolve semantic scalar or aggregate facts without broad ancestry.
+
+    Args:
+        values (Iterable[ValueBase]): Classical values read by one operation.
+        resolver (ExprResolver): Resolver carrying value and array state.
+
+    Returns:
+        tuple[_ResolvedClassicalFact, ...]: Facts associated with the supplied
+            semantic inputs.
+    """
+    facts: list[_ResolvedClassicalFact] = []
+
+    def visit(value: ValueBase) -> None:
+        """Append facts represented by one structured value.
+
+        Args:
+            value (ValueBase): Value to inspect.
+        """
+        if isinstance(value, TupleValue):
+            for element in value.elements:
+                visit(element)
+            return
+        if isinstance(value, DictValue):
+            for key, entry_value in value.entries:
+                visit(key)
+                visit(entry_value)
+            return
+        if isinstance(value, Value) and not value.type.is_quantum():
+            facts.append(resolver.resolve_classical_fact(value))
+
+    for root in values:
+        visit(root)
+    return tuple(facts)
+
+
+def _classical_fact_runtime_condition(
+    fact: _ResolvedClassicalFact,
+) -> Boolean:
+    """Return when a resolved classical fact depends on an observation.
+
+    Args:
+        fact (_ResolvedClassicalFact): Resolved value and guarded source tokens.
+
+    Returns:
+        Boolean: Union of all active source guards, or false when independent.
+    """
+    dependencies = {
+        source: guard
+        for source, guard in fact.dependencies.items()
+        if source.startswith(_OBSERVATION_SOURCE_PREFIX)
+    }
+    return (
+        _boolean_condition(sp.Or(*dependencies.values())) if dependencies else sp.false
+    )
+
+
+def _classical_fact_uncertainty_condition(
+    fact: _ResolvedClassicalFact,
+) -> Boolean:
+    """Return when a fact depends on a conservative loop-array fallback.
+
+    Loop-array source tokens are scheduler readiness edges, not runtime
+    observations. Keeping this condition separate prevents an unresolved
+    symbolic loop state from being mistaken for measurement feed-forward.
+
+    Args:
+        fact (_ResolvedClassicalFact): Resolved value and guarded source tokens.
+
+    Returns:
+        Boolean: Union of active loop-array fallback guards, or false.
+    """
+    dependencies = {
+        source: guard
+        for source, guard in fact.dependencies.items()
+        if source.startswith(_LOOP_ARRAY_SOURCE_PREFIX)
+    }
+    return (
+        _boolean_condition(sp.Or(*dependencies.values())) if dependencies else sp.false
+    )
+
+
+def _operation_classical_dependency_inputs(
+    operation: Operation,
+) -> tuple[ValueBase, ...]:
+    """Return values semantically read by one scheduling boundary.
+
+    Structured ``if`` and loop regions require guarded traversal and are
+    handled by ``_scheduling_classical_input_sources``. Other operations retain
+    their ordinary IR input list.
+
+    Args:
+        operation (Operation): Operation whose semantic reads are requested.
+
+    Returns:
+        tuple[ValueBase, ...]: Values whose classical readiness can delay the
+            operation.
+    """
+    return tuple(operation.all_input_values())
+
+
+def _operation_classical_dependency_outputs(
+    operation: Operation,
+) -> tuple[ValueBase, ...]:
+    """Return classical boundary values whose source tokens become ready.
+
+    Loop-carried array rewrites are represented by ``LoopCarriedRebind``
+    records rather than ordinary operation results. Their exposed ``after``
+    values must still publish accumulated observation readiness at the loop
+    boundary so later feed-forward work cannot start at loop entry.
+
+    Args:
+        operation (Operation): Operation whose boundary outputs are requested.
+
+    Returns:
+        tuple[ValueBase, ...]: Ordinary results plus loop-rebound values.
+    """
+    outputs: list[ValueBase] = list(operation.results)
+    if isinstance(operation, (ForOperation, ForItemsOperation, WhileOperation)):
+        outputs.extend(rebind.after for rebind in _loop_array_state_rebinds(operation))
+        outputs.extend(
+            rebind.after
+            for rebind in operation.loop_carried_rebinds
+            if not isinstance(rebind.after, ArrayValue)
+        )
+    return tuple(outputs)
+
+
+def _loop_array_state_rebinds(
+    operation: ForOperation | ForItemsOperation | WhileOperation,
+) -> tuple[LoopCarriedRebind, ...]:
+    """Return explicit and inferred classical-array loop state boundaries.
+
+    A direct element Store can expose its produced array SSA value after a loop
+    without creating a frontend ``LoopCarriedRebind`` record. The estimator
+    infers that boundary from each logical lineage's unproduced entry operand
+    and last produced result so detached iteration scopes retain the same
+    semantics as the shared traced graph.
+
+    Args:
+        operation (ForOperation | ForItemsOperation | WhileOperation): Loop
+            whose classical-array state boundaries are requested.
+
+    Returns:
+        tuple[LoopCarriedRebind, ...]: Explicit records followed by inferred
+        classical-array records in body order.
+    """
+    explicit = tuple(
+        rebind
+        for rebind in operation.loop_carried_rebinds
+        if isinstance(rebind.before, ArrayValue)
+        and isinstance(rebind.after, ArrayValue)
+        and not rebind.before.type.is_quantum()
+        and not rebind.after.type.is_quantum()
+    )
+    covered_lineages = {
+        cast(ArrayValue, rebind.before).logical_id for rebind in explicit
+    }
+    nested = tuple(walk_operations(operation.operations))
+    produced = {
+        result.uuid
+        for nested_operation in nested
+        for result in nested_operation.results
+        if isinstance(result, ArrayValue)
+    }
+    entries: dict[str, ArrayValue] = {}
+    exits: dict[str, ArrayValue] = {}
+    for nested_operation in nested:
+        for operand in nested_operation.operands:
+            if (
+                isinstance(operand, ArrayValue)
+                and not operand.type.is_quantum()
+                and operand.uuid not in produced
+            ):
+                entries.setdefault(operand.logical_id, operand)
+        for result in nested_operation.results:
+            if isinstance(result, ArrayValue) and not result.type.is_quantum():
+                exits[result.logical_id] = result
+    inferred = tuple(
+        LoopCarriedRebind(
+            var_name=entry.name,
+            before=entry,
+            after=exits[logical_id],
+        )
+        for logical_id, entry in entries.items()
+        if logical_id in exits and logical_id not in covered_lineages
+    )
+    return (*explicit, *inferred)
+
+
+def _structural_value_ancestry(value: ValueBase) -> tuple[ValueBase, ...]:
+    """Return one value and recursively embedded structural values.
+
+    Args:
+        value (ValueBase): Scalar, array, tuple, or dictionary IR value.
+
+    Returns:
+        tuple[ValueBase, ...]: Identity-deduplicated ancestry in visit order.
+    """
+    ordered: list[ValueBase] = []
+    visited: set[str] = set()
+
+    def visit(current: ValueBase) -> None:
+        """Visit one structural value.
+
+        Args:
+            current (ValueBase): Value whose embedded ancestry is traversed.
+        """
+        if current.uuid in visited:
+            return
+        visited.add(current.uuid)
+        ordered.append(current)
+        if isinstance(current, TupleValue):
+            for element in current.elements:
+                visit(element)
+        elif isinstance(current, DictValue):
+            for key, entry_value in current.entries:
+                visit(key)
+                visit(entry_value)
+        elif isinstance(current, ArrayValue):
+            for dimension in current.shape:
+                visit(dimension)
+            if current.slice_of is not None:
+                visit(current.slice_of)
+            if current.slice_start is not None:
+                visit(current.slice_start)
+            if current.slice_step is not None:
+                visit(current.slice_step)
+        elif isinstance(current, Value):
+            if current.parent_array is not None:
+                visit(current.parent_array)
+            for index in current.element_indices:
+                visit(index)
+
+    visit(value)
+    return tuple(ordered)
+
+
+def _direct_observation_result_uuids(operation: Operation) -> tuple[str, ...]:
+    """Return result UUIDs directly produced by a runtime observation.
+
+    Args:
+        operation (Operation): Operation whose direct results should be
+            classified.
+
+    Returns:
+        tuple[str, ...]: Direct measurement or expectation-value result UUIDs.
+    """
+    if isinstance(
+        operation,
+        (MeasureOperation, MeasureVectorOperation, MeasureQFixedOperation, ExpvalOp),
+    ):
+        return tuple(result.uuid for result in operation.results)
+    if isinstance(operation, ProjectOperation) and len(operation.results) > 1:
+        return (operation.results[1].uuid,)
+    return ()
+
+
+def _direct_observation_source_conditions(
+    operation: Operation,
+    resolver: ExprResolver,
+) -> dict[str, Boolean]:
+    """Return source tokens created by one direct observation operation.
+
+    Array-state projection deliberately avoids treating a whole array as one
+    element dependency. A vector observation is the exception at its producer
+    boundary: its aggregate result fact is where the scheduler first learns
+    that the source token becomes ready. Element reads remain precise after
+    this publication.
+
+    Args:
+        operation (Operation): Operation whose direct observation results are
+            inspected.
+        resolver (ExprResolver): Resolver containing the newly published
+            result facts.
+
+    Returns:
+        dict[str, Boolean]: Newly created source tokens and activation guards.
+    """
+    direct_results = frozenset(_direct_observation_result_uuids(operation))
+    source_conditions: dict[str, Boolean] = {}
+    for result in operation.results:
+        if not isinstance(result, Value) or result.uuid not in direct_results:
+            continue
+        _merge_classical_source_conditions(
+            source_conditions,
+            resolver.resolve_classical_fact(result).dependencies,
+        )
+    return source_conditions
+
+
+def _propagate_operation_measurement_taint(
+    operation: Operation,
+    estimate: ResourceEstimate,
+    inherited: Mapping[str, Boolean],
+) -> dict[str, Boolean]:
+    """Propagate guarded observation provenance across one operation.
+
+    Structured operations publish branch- and loop-aware result conditions in
+    their estimate. Ordinary operations retain the existing conservative
+    all-input-to-all-result dataflow rule without flattening nested region
+    edges into the enclosing scope.
+
+    Args:
+        operation (Operation): Evaluated operation.
+        estimate (ResourceEstimate): Operation estimate carrying any nested
+            result provenance.
+        inherited (Mapping[str, Boolean]): Provenance before the operation.
+
+    Returns:
+        dict[str, Boolean]: Updated provenance for the current scope.
+    """
+    updated = _merge_measurement_taint_conditions(
+        inherited,
+        estimate._measurement_taint_conditions,
+    )
+    if not isinstance(operation, HasNestedOps):
+        input_condition = _operation_input_taint_condition(operation, updated)
+        if input_condition is not sp.false:
+            updated = _merge_measurement_taint_conditions(
+                updated,
+                {result.uuid: input_condition for result in operation.results},
+            )
+    direct = _direct_observation_result_uuids(operation)
+    if direct:
+        updated = _merge_measurement_taint_conditions(
+            updated,
+            {uuid: sp.true for uuid in direct},
+        )
+    return updated
+
+
+@dataclasses.dataclass(frozen=True)
+class _LoopMayTaint:
+    """Summarize path-insensitive observation provenance for a loop.
+
+    Args:
+        at_iteration (dict[str, Boolean]): Carried block arguments that may be
+            observation-derived in at least one loop iteration.
+        final (dict[str, Boolean]): Carried block arguments whose corresponding
+            loop results may be observation-derived after the loop.
+    """
+
+    at_iteration: dict[str, Boolean]
+    final: dict[str, Boolean]
+
+
+def _loop_may_taint(
+    operation: ForOperation | ForItemsOperation,
+    initial: Mapping[str, Boolean],
+    probe_estimate: ResourceEstimate,
+) -> _LoopMayTaint:
+    """Compute a two-point may-be-runtime fixed point for a symbolic loop.
+
+    The analysis intentionally discards path and iteration correlations.  A
+    source that can reach a carried value in any iteration marks that value as
+    runtime-derived for resource decisions.  This is the requested
+    conservative policy and avoids constructing a symbolic Boolean recurrence
+    whose exactness is not useful once runtime branches are combined by their
+    field-wise maxima.
+
+    Args:
+        operation (ForOperation | ForItemsOperation): Symbolic region loop.
+        initial (Mapping[str, Boolean]): Observation provenance on entry.
+        probe_estimate (ResourceEstimate): One body probe carrying selected
+            callable observation results and ordinary dataflow propagation.
+
+    Returns:
+        _LoopMayTaint: May-provenance at an arbitrary iteration and loop exit.
+    """
+    graph = build_dependency_graph(operation.operations)
+    for arg in operation.region_args:
+        # The next iteration's block argument receives this iteration's yield.
+        graph.setdefault(arg.block_arg.uuid, set()).add(arg.yielded.uuid)
+    seeds = {uuid for uuid, condition in initial.items() if condition is not sp.false}
+    seeds.update(
+        uuid
+        for uuid, condition in probe_estimate._measurement_taint_conditions.items()
+        if condition is not sp.false
+    )
+    # A yielded array element can depend on an observation through its index
+    # or view metadata without having a producer edge of its own. Seed that
+    # synthetic leaf explicitly so the loop backedge cannot turn it into an
+    # apparently clean public carry.
+    seeds.update(
+        arg.yielded.uuid
+        for arg in operation.region_args
+        if _value_taint_condition(
+            arg.yielded,
+            probe_estimate._measurement_taint_conditions,
+        )
+        is not sp.false
+    )
+    derived = find_measurement_derived_values(graph, seeds)
+    at_iteration = {
+        arg.block_arg.uuid: sp.true
+        for arg in operation.region_args
+        if arg.block_arg.uuid in derived
+        or initial.get(arg.block_arg.uuid, sp.false) is not sp.false
+    }
+    final = {
+        arg.block_arg.uuid: sp.true
+        for arg in operation.region_args
+        if initial.get(arg.block_arg.uuid, sp.false) is not sp.false
+        or arg.yielded.uuid in derived
+    }
+    return _LoopMayTaint(at_iteration=at_iteration, final=final)
+
+
+def _conditional_resource_map(
+    when_true: Mapping[str, ResourceExpr],
+    when_false: Mapping[str, ResourceExpr],
+    condition: sp.Basic,
+) -> dict[str, ResourceExpr]:
+    """Select resource-map values field by field under one condition.
+
+    Args:
+        when_true (Mapping[str, ResourceExpr]): Values used when the condition
+            holds.
+        when_false (Mapping[str, ResourceExpr]): Values used otherwise.
+        condition (sp.Basic): Boolean selection predicate.
+
+    Returns:
+        dict[str, ResourceExpr]: Conditional values for the union of keys.
+    """
+    predicate = _boolean_condition(condition)
+    return {
+        key: _piecewise(
+            when_true.get(key, _ZERO),
+            when_false.get(key, _ZERO),
+            predicate,
+        )
+        for key in when_true.keys() | when_false.keys()
+    }
+
+
+def _refine_boolean_under_assumption(
+    condition: Boolean,
+    assumption: Boolean,
+) -> Boolean:
+    """Refine a Boolean expression within a known symbolic branch.
+
+    Runtime-observation values can appear in a merged classical expression only
+    on the branch where their provenance guard is active. Refining the ordinary
+    compile-time predicate under the complement removes those unreachable
+    symbols before resource formulas and structural constraints are composed.
+
+    Args:
+        condition (Boolean): Predicate to simplify.
+        assumption (Boolean): Branch fact known to hold.
+
+    Returns:
+        Boolean: Refined predicate, or the original condition if SymPy cannot
+        safely refine it.
+    """
+    free_assumption_symbols = assumption.free_symbols
+    zero_substitutions: dict[sp.Symbol, sp.Integer] = {}
+    for atom in sp.preorder_traversal(assumption):
+        if isinstance(atom, sp.Equality):
+            if (
+                isinstance(atom.lhs, sp.Symbol)
+                and atom.lhs in free_assumption_symbols
+                and atom.rhs == _ZERO
+            ):
+                zero_substitutions[atom.lhs] = _ZERO
+            elif (
+                isinstance(atom.rhs, sp.Symbol)
+                and atom.rhs in free_assumption_symbols
+                and atom.lhs == _ZERO
+            ):
+                zero_substitutions[atom.rhs] = _ZERO
+        elif isinstance(atom, sp.LessThan):
+            if (
+                isinstance(atom.lhs, sp.Symbol)
+                and atom.lhs in free_assumption_symbols
+                and atom.lhs.is_nonnegative is True
+                and atom.rhs == _ZERO
+            ):
+                zero_substitutions[atom.lhs] = _ZERO
+    narrowed = cast(Boolean, condition.xreplace(zero_substitutions))
+    try:
+        folded = cast(Boolean, sp.piecewise_fold(narrowed))
+    except (RecursionError, TypeError, ValueError):
+        folded = narrowed
+
+    # ``assumption`` identifies the domain where this projection is used.
+    # Its complement is therefore a genuine don't-care set.  In particular,
+    # a measurement-selected merge is represented as ``Piecewise(runtime,
+    # guard, compile_value)``; ordinary ``refine`` does not reliably remove
+    # the runtime-only symbol when ``guard`` is a nested conjunction.
+    try:
+        projected = cast(
+            Boolean,
+            sp.simplify_logic(
+                folded,
+                dontcare=sp.Not(assumption),
+                force=False,
+            ),
+        )
+    except (RecursionError, TypeError, ValueError):
+        projected = folded
+    try:
+        refined = sp.refine(projected, assumption)
+    except (RecursionError, TypeError, ValueError):
+        refined = projected
+    return _boolean_condition(cast(sp.Basic, refined))
+
+
+def _publish_invoke_classical_results(
+    body_outputs: Sequence[ValueLike],
+    caller_outputs: Sequence[ValueBase],
+    body_resolver: ExprResolver,
+    caller_resolver: ExprResolver,
+) -> None:
+    """Publish selected-body classical results into the caller resolver.
+
+    A call is a dataflow boundary, so the caller resolver cannot discover a
+    scalar result by scanning the callee block. Explicitly carrying the selected
+    body's expression across that boundary keeps later compile-time branches,
+    loop bounds, and array dimensions equivalent to an inlined body.
+
+    Args:
+        body_outputs (Sequence[ValueLike]): Selected body outputs in ABI order.
+        caller_outputs (Sequence[ValueBase]): Aligned call-site results.
+        body_resolver (ExprResolver): Resolver containing callee expressions.
+        caller_resolver (ExprResolver): Resolver to update for later caller work.
+
+    Raises:
+        ValueError: If the already-validated selected ABI has inconsistent
+            aggregate or array-shape arity.
+    """
+
+    def needs_publication(value: ValueBase) -> bool:
+        """Return whether one caller output carries classical resolver state.
+
+        Args:
+            value (ValueBase): Caller-side output to inspect.
+
+        Returns:
+            bool: Whether scalar contents or array dimensions must be copied.
+        """
+        if isinstance(value, TupleValue):
+            return any(needs_publication(element) for element in value.elements)
+        if isinstance(value, DictValue):
+            return any(
+                needs_publication(key) or needs_publication(entry)
+                for key, entry in value.entries
+            )
+        if isinstance(value, ArrayValue):
+            return True
+        return isinstance(value, Value) and not value.type.is_quantum()
+
+    def publish(body_value: ValueLike, caller_value: ValueBase) -> None:
+        """Publish one recursively aligned output value.
+
+        Args:
+            body_value (ValueLike): Callee-side output value.
+            caller_value (ValueBase): Caller-side aligned result.
+
+        Raises:
+            ValueError: If aggregate or shape arity is inconsistent.
+        """
+        if isinstance(body_value, TupleValue):
+            if not isinstance(caller_value, TupleValue) or len(
+                body_value.elements
+            ) != len(caller_value.elements):
+                raise ValueError(
+                    "Selected callable tuple output arity is inconsistent."
+                )
+            for nested_body, nested_caller in zip(
+                body_value.elements,
+                caller_value.elements,
+                strict=True,
+            ):
+                publish(nested_body, nested_caller)
+            return
+        if isinstance(body_value, DictValue):
+            if not isinstance(caller_value, DictValue) or len(
+                body_value.entries
+            ) != len(caller_value.entries):
+                raise ValueError(
+                    "Selected callable dictionary output arity is inconsistent."
+                )
+            for (body_key, body_entry), (caller_key, caller_entry) in zip(
+                body_value.entries,
+                caller_value.entries,
+                strict=True,
+            ):
+                publish(body_key, caller_key)
+                publish(body_entry, caller_entry)
+            return
+        if not isinstance(body_value, Value) or not isinstance(caller_value, Value):
+            raise ValueError("Selected callable output value kinds are inconsistent.")
+        if isinstance(body_value, ArrayValue):
+            if not isinstance(caller_value, ArrayValue) or len(body_value.shape) != len(
+                caller_value.shape
+            ):
+                raise ValueError("Selected callable array output rank is inconsistent.")
+            for body_dimension, caller_dimension in zip(
+                body_value.shape,
+                caller_value.shape,
+                strict=True,
+            ):
+                caller_resolver.bind_classical_fact(
+                    caller_dimension,
+                    body_resolver.resolve_classical_fact(body_dimension),
+                )
+            if not body_value.type.is_quantum():
+                caller_resolver.bind_array_state(
+                    caller_value,
+                    body_resolver.snapshot_array_state(body_value),
+                )
+                caller_resolver.bind_classical_fact(
+                    caller_value,
+                    body_resolver.resolve_classical_fact(body_value),
+                )
+            return
+        if not body_value.type.is_quantum():
+            caller_resolver.bind_classical_fact(
+                caller_value,
+                body_resolver.resolve_classical_fact(body_value),
+            )
+
+    if not any(needs_publication(output) for output in caller_outputs):
+        return
+    if len(body_outputs) != len(caller_outputs):
+        raise ValueError("Selected callable output arity is inconsistent.")
+    for body_output, caller_output in zip(
+        body_outputs,
+        caller_outputs,
+        strict=True,
+    ):
+        publish(body_output, caller_output)
 
 
 def _if_merge_captured_allocations(
@@ -3331,8 +4502,8 @@ def _with_conservative_loop_output_liveness(
         ResourceEstimate: Estimate with guarded conservative-quality metadata.
     """
     assumption = ResourceAssumption(
-        "loop-local qubit liveness retains the maximum owner width across "
-        "iterations because an inter-iteration release could not be proven",
+        "post-loop qubit liveness retains a conservative owner width because "
+        "an inter-iteration release could not be proven",
         source=source,
     )
     return estimate._with_metadata(
@@ -3372,26 +4543,33 @@ class ResourceInterpreter:
         # duplicated at trace time (e.g. a Python-level loop) yields one
         # assumption, not one per copy.
         self._reported_undecidable: set[str] = set()
-        self._measurement_derived: set[str] = set()
+        self._measurement_taint_conditions: dict[str, Boolean] = {}
+        # Direct observation result UUIDs identify traced SSA definitions, not
+        # repeated runtime occurrences. Concrete loop replay extends this path
+        # per iteration so independent observations receive independent
+        # scheduler readiness tokens. Symbolic loops use one family scope.
+        self._observation_occurrence_path: tuple[tuple[str, int, int], ...] = ()
+        # Fresh symbols created for shot-dependent branch merges are semantic
+        # placeholders, not user-substitutable resource parameters. Keep their
+        # identities separate from the equally fresh placeholders that model
+        # unsupported but compile-time loop recurrences.
+        self._runtime_observation_symbols: set[sp.Symbol] = set()
+        self._runtime_value_domains: dict[
+            sp.Symbol,
+            tuple[sp.Expr, ...] | None,
+        ] = {}
+        # Symbols used only as internal placeholders for an unsupported
+        # loop-carried value must never become user-substitutable resource
+        # parameters. Finalization rejects an estimate if one reaches a
+        # public metric, constraint, guard, or trace expression.
+        self._unresolved_resource_symbols: set[sp.Symbol] = set()
+        # Structural constraints discovered while interpreting an inactive
+        # branch or zero-trip loop must remain guarded until specialization.
+        self._constraint_scope_condition: Boolean = sp.true
         # Array legality is a pure function of the fully resolved structural
         # constraint. Repeated body invocations commonly rediscover the same
         # element bounds, so retain whether each one was already proven.
         self._array_constraint_proven: dict[_ResourceConstraint, bool] = {}
-        # The graph and locally introduced measurement roots depend only on
-        # operation-list identity, not the resolver used for a particular
-        # concrete loop iteration. Inherited taint remains context-dependent
-        # and is propagated from these cached ingredients on every visit.
-        # Keep the sequence strongly referenced so an ``id`` cannot be reused
-        # for an unrelated transient list during this interpretation.
-        self._operation_taint_cache: dict[
-            int,
-            tuple[
-                list[Operation],
-                dict[str, set[str]],
-                frozenset[str],
-                frozenset[int],
-            ],
-        ] = {}
         # Selected callable bodies can expose runtime observations that are
         # not represented by KernelEffect, notably expectation values. Cache
         # their output indices and whether the body contains any observation,
@@ -3400,9 +4578,6 @@ class ResourceInterpreter:
             int,
             tuple[Block, frozenset[int], bool],
         ] = {}
-        # Operation identities whose selected nested body forms a global
-        # scheduling barrier in the current operation-list scope.
-        self._global_barrier_operation_ids: set[int] = set()
         # Synthetic tuple carriers retain physical parent UUIDs rather than
         # Value ancestry. Keep the corresponding allocation-owner identity
         # across nested control-flow and callable evaluation scopes.
@@ -3448,6 +4623,600 @@ class ResourceInterpreter:
             Operation,
         ] = {}
 
+    @contextmanager
+    def _guarded_constraint_scope(
+        self,
+        active_when: sp.Basic,
+    ) -> Iterator[None]:
+        """Conjoin one activation guard while nested constraints are built.
+
+        Args:
+            active_when (sp.Basic): Predicate under which the nested scope can
+                execute.
+
+        Yields:
+            None: Control returns to the caller while the guard is active.
+        """
+        previous = self._constraint_scope_condition
+        self._constraint_scope_condition = _and_conditions(previous, active_when)
+        try:
+            yield
+        finally:
+            self._constraint_scope_condition = previous
+
+    @contextmanager
+    def _measurement_taint_scope(
+        self,
+        additions: Mapping[str, Boolean],
+    ) -> Iterator[None]:
+        """Expose temporary guarded observation provenance in a nested scope.
+
+        Args:
+            additions (Mapping[str, Boolean]): UUID-keyed provenance to merge
+                for the nested evaluation.
+
+        Yields:
+            None: Control returns while the temporary mapping is visible.
+        """
+        previous = self._measurement_taint_conditions
+        self._measurement_taint_conditions = _merge_measurement_taint_conditions(
+            previous,
+            additions,
+        )
+        try:
+            yield
+        finally:
+            self._measurement_taint_conditions = previous
+
+    @contextmanager
+    def _observation_occurrence_scope(
+        self,
+        kind: str,
+        operation: Operation,
+        ordinal: int,
+    ) -> Iterator[None]:
+        """Qualify direct observation tokens within one repeated body visit.
+
+        Args:
+            kind (str): Stable loop-family label such as ``"range"``.
+            operation (Operation): Repeated operation owning the body.
+            ordinal (int): Concrete visit ordinal, or ``-1`` for one symbolic
+                occurrence family.
+
+        Yields:
+            None: Control returns while newly published observation tokens are
+            qualified by this occurrence path.
+        """
+        previous = self._observation_occurrence_path
+        self._observation_occurrence_path = (
+            *previous,
+            (kind, id(operation), ordinal),
+        )
+        try:
+            yield
+        finally:
+            self._observation_occurrence_path = previous
+
+    def _observation_source_token(
+        self,
+        operation: Operation,
+        result_uuid: str,
+        result_slot: int,
+        resolver: ExprResolver,
+    ) -> str:
+        """Return one identity-qualified scheduler token for an observation.
+
+        Args:
+            operation (Operation): Direct observation operation.
+            result_uuid (str): UUID of the observed classical result.
+            result_slot (int): Position in the operation's direct results.
+            resolver (ExprResolver): Resolver carrying the callable path.
+
+        Returns:
+            str: Token unique to the call path, repeated occurrence, and slot.
+        """
+        call_scope = "/".join(
+            f"{call_id:x}:{body_id:x}" for call_id, body_id in resolver.structural_scope
+        )
+        occurrence = "/".join(
+            f"{kind}:{owner_id:x}:{ordinal}"
+            for kind, owner_id, ordinal in self._observation_occurrence_path
+        )
+        scope = "/".join(part for part in (call_scope, occurrence) if part)
+        identity = (
+            f"{result_uuid}@{scope}#{result_slot}"
+            if scope
+            else f"{result_uuid}#{result_slot}"
+        )
+        return f"{_OBSERVATION_SOURCE_PREFIX}:{identity}"
+
+    @contextmanager
+    def _isolated_loop_taint_probe_state(self) -> Iterator[None]:
+        """Prevent discarded loop probes from mutating interpretation results.
+
+        Definition-cost and observation-summary caches remain shared because
+        they are identity-keyed pure memoization and prevent user callbacks from
+        being executed repeatedly. Runtime-observation symbol identities also
+        remain shared because the probe resolver expressions are reused by the
+        recurrence analysis after this scope exits. Reporting, constraint, and
+        owner state is restored so extra provenance probes cannot suppress
+        assumptions, claim input usage, or change final scheduling metadata.
+
+        Yields:
+            None: Control returns while disposable probe mutations are isolated.
+        """
+        branch_condition_names = set(self.branch_condition_names)
+        reported_undecidable = set(self._reported_undecidable)
+        constraint_scope_condition = self._constraint_scope_condition
+        array_constraint_proven = dict(self._array_constraint_proven)
+        allocation_owners_by_uuid = dict(self._allocation_owners_by_uuid)
+        dependency_owner_aliases = dict(self._dependency_owner_aliases)
+        try:
+            yield
+        finally:
+            self.branch_condition_names.clear()
+            self.branch_condition_names.update(branch_condition_names)
+            self._reported_undecidable.clear()
+            self._reported_undecidable.update(reported_undecidable)
+            self._constraint_scope_condition = constraint_scope_condition
+            self._array_constraint_proven.clear()
+            self._array_constraint_proven.update(array_constraint_proven)
+            self._allocation_owners_by_uuid.clear()
+            self._allocation_owners_by_uuid.update(allocation_owners_by_uuid)
+            self._dependency_owner_aliases.clear()
+            self._dependency_owner_aliases.update(dependency_owner_aliases)
+
+    def _record_runtime_value_symbols(
+        self,
+        operation: Operation,
+        resolver: ExprResolver,
+    ) -> None:
+        """Classify resolver fallbacks for observation-derived IR values.
+
+        Ordinary expressions can mix runtime state with public inputs, for
+        example ``measured_choice + n``.  Their free symbols must therefore
+        remain classified independently.  Only the resolver-owned fallback
+        for a value that cannot otherwise be expressed is newly internalized.
+        This covers direct observations and array contents selected through a
+        runtime-derived index or view without mistaking ``n`` for an outcome.
+
+        Args:
+            operation (Operation): Recently evaluated operation and its inputs.
+            resolver (ExprResolver): Resolver that names scalar values.
+        """
+        candidates = (
+            value
+            for root in (*operation.all_input_values(), *operation.results)
+            for value in _structural_value_ancestry(root)
+            if isinstance(value, Value) and not value.type.is_quantum()
+        )
+        for value in candidates:
+            if (
+                _value_taint_condition(
+                    value,
+                    self._measurement_taint_conditions,
+                )
+                is sp.false
+            ):
+                continue
+            symbol = resolver.unresolved_fallback_symbol(value)
+            if symbol is None:
+                continue
+            self._runtime_observation_symbols.add(symbol)
+            if symbol in self._runtime_value_domains:
+                continue
+            self._runtime_value_domains[symbol] = (
+                (_ZERO, _ONE) if isinstance(value.type, BitType) else None
+            )
+
+    def _publish_operation_classical_facts(
+        self,
+        operation: Operation,
+        resolver: ExprResolver,
+        input_sources: Mapping[str, Boolean],
+    ) -> None:
+        """Publish one operation's classical values into the shared fact model.
+
+        Direct observations create readiness-source tokens. Ordinary
+        classical results retain the guarded sources of their semantic inputs.
+        Nested operations publish their own boundary results because their
+        branch, loop, or callable structure determines more precise facts.
+
+        Args:
+            operation (Operation): Operation whose results were just evaluated.
+            resolver (ExprResolver): Resolver updated for subsequent work.
+            input_sources (Mapping[str, Boolean]): Observation sources consumed
+                by the operation before it was evaluated.
+        """
+        direct_sources = _direct_observation_result_uuids(operation)
+        if direct_sources:
+            direct_slots = {
+                result_uuid: slot for slot, result_uuid in enumerate(direct_sources)
+            }
+            for result in operation.results:
+                if not isinstance(result, Value) or result.uuid not in direct_slots:
+                    continue
+                source_token = self._observation_source_token(
+                    operation,
+                    result.uuid,
+                    direct_slots[result.uuid],
+                    resolver,
+                )
+                resolver.bind_classical_fact(
+                    result,
+                    _ResolvedClassicalFact.create(
+                        resolver.resolve(result),
+                        {source_token: sp.true},
+                    ),
+                )
+            return
+        if isinstance(operation, (HasNestedOps, InvokeOperation)):
+            return
+        source_facts = _resolved_classical_facts(
+            _operation_classical_dependency_inputs(operation),
+            resolver,
+        )
+        for result in operation.results:
+            if not isinstance(result, Value) or result.type.is_quantum():
+                continue
+            resolved = resolver.resolve(result)
+            if resolver.unresolved_fallback_symbol(result) is not None:
+                fact = _ResolvedClassicalFact.create(resolved, input_sources)
+            else:
+                fact = _fact_from_expression(resolved, *source_facts)
+            resolver.bind_classical_fact(
+                result,
+                fact,
+            )
+
+    def _scheduling_classical_input_sources(
+        self,
+        operation: Operation,
+        resolver: ExprResolver,
+    ) -> dict[str, Boolean]:
+        """Resolve guarded classical reads for one scheduling boundary.
+
+        A structured operation contributes only the reads of regions that can
+        execute. Compile-time branch predicates therefore guard reads inside
+        their respective regions instead of turning every captured source into
+        an unconditional dependency. Range-local predicates are projected over
+        the finite iteration domain, so a read is retained exactly when at
+        least one reachable iteration can execute it.
+
+        Args:
+            operation (Operation): Operation whose scheduling reads are needed.
+            resolver (ExprResolver): Resolver for the enclosing scope.
+
+        Returns:
+            dict[str, Boolean]: Classical source tokens and their execution
+            guards at the operation boundary.
+        """
+        collected: dict[str, Boolean] = {}
+
+        def project_over_ranges(
+            condition: Boolean,
+            ranges: tuple[
+                tuple[sp.Symbol, ResourceExpr, ResourceExpr, ResourceExpr],
+                ...,
+            ],
+        ) -> Boolean:
+            """Project a per-iteration guard to the enclosing boundary.
+
+            Args:
+                condition (Boolean): Guard expressed in nested loop scopes.
+                ranges (tuple[tuple[sp.Symbol, ResourceExpr, ResourceExpr,
+                    ResourceExpr], ...]): Enclosing range domains from outer
+                    to inner.
+
+            Returns:
+                Boolean: Existential guard with every range induction symbol
+                bound inside a finite-domain predicate.
+            """
+            projected: sp.Basic = condition
+            for loop_symbol, start, step, iterations in reversed(ranges):
+                projected = _activation_over_range(
+                    projected,
+                    loop_symbol,
+                    start,
+                    step,
+                    iterations,
+                )
+            return _boolean_condition(projected)
+
+        def add_values(
+            values: Iterable[ValueBase],
+            scope: ExprResolver,
+            active_when: Boolean,
+            ranges: tuple[
+                tuple[sp.Symbol, ResourceExpr, ResourceExpr, ResourceExpr],
+                ...,
+            ],
+        ) -> None:
+            """Add guarded source tokens from semantic input values.
+
+            Args:
+                values (Iterable[ValueBase]): Values read by the region.
+                scope (ExprResolver): Resolver for the values' region.
+                active_when (Boolean): Guard under which the read executes.
+                ranges (tuple[tuple[sp.Symbol, ResourceExpr, ResourceExpr,
+                    ResourceExpr], ...]): Enclosing finite range domains.
+            """
+            if active_when is sp.false:
+                return
+            additions = _resolved_classical_source_conditions(values, scope)
+            _merge_classical_source_conditions(
+                collected,
+                {
+                    source: project_over_ranges(
+                        _and_conditions(active_when, guard),
+                        ranges,
+                    )
+                    for source, guard in additions.items()
+                },
+            )
+
+        def branch_conditions(
+            predicate: Boolean,
+            active_when: Boolean,
+            unprojectable_symbols: frozenset[sp.Symbol],
+        ) -> tuple[Boolean, Boolean]:
+            """Return guarded true/false activity for one nested branch.
+
+            Args:
+                predicate (Boolean): Resolved branch predicate.
+                active_when (Boolean): Activity inherited from parent regions.
+                unprojectable_symbols (frozenset[sp.Symbol]): Loop-local
+                    symbols whose finite values are unavailable at this
+                    boundary, such as dictionary keys.
+
+            Returns:
+                tuple[Boolean, Boolean]: True- and false-region guards. When
+                an unprojectable local symbol participates, both retain the
+                parent guard as a safe envelope.
+            """
+            if predicate.free_symbols & unprojectable_symbols:
+                return active_when, active_when
+            return (
+                _and_conditions(active_when, predicate),
+                _and_conditions(
+                    active_when,
+                    cast(Boolean, sp.Not(predicate)),
+                ),
+            )
+
+        def visit_operations(
+            operations: Iterable[Operation],
+            scope: ExprResolver,
+            active_when: Boolean,
+            ranges: tuple[
+                tuple[sp.Symbol, ResourceExpr, ResourceExpr, ResourceExpr],
+                ...,
+            ],
+            unprojectable_symbols: frozenset[sp.Symbol],
+        ) -> None:
+            """Visit one structured region in program order.
+
+            Args:
+                operations (Iterable[Operation]): Region operations to visit.
+                scope (ExprResolver): Resolver for the region.
+                active_when (Boolean): Guard under which the region executes.
+                ranges (tuple[tuple[sp.Symbol, ResourceExpr, ResourceExpr,
+                    ResourceExpr], ...]): Enclosing finite range domains.
+                unprojectable_symbols (frozenset[sp.Symbol]): Loop-local
+                    symbols without an enumerable range.
+            """
+            for nested in operations:
+                visit(
+                    nested,
+                    scope,
+                    active_when,
+                    ranges,
+                    unprojectable_symbols,
+                )
+
+        def visit(
+            current: Operation,
+            scope: ExprResolver,
+            active_when: Boolean,
+            ranges: tuple[
+                tuple[sp.Symbol, ResourceExpr, ResourceExpr, ResourceExpr],
+                ...,
+            ],
+            unprojectable_symbols: frozenset[sp.Symbol],
+        ) -> None:
+            """Collect source reads from one atomic or structured operation.
+
+            Args:
+                current (Operation): Operation to inspect.
+                scope (ExprResolver): Resolver for the operation's region.
+                active_when (Boolean): Guard under which it executes.
+                ranges (tuple[tuple[sp.Symbol, ResourceExpr, ResourceExpr,
+                    ResourceExpr], ...]): Enclosing finite range domains.
+                unprojectable_symbols (frozenset[sp.Symbol]): Loop-local
+                    symbols without an enumerable range.
+            """
+            if active_when is sp.false:
+                return
+            if isinstance(current, IfOperation):
+                add_values((current.condition,), scope, active_when, ranges)
+                predicate = _boolean_condition(
+                    scope.resolve_classical_fact(current.condition).value
+                )
+                true_active, false_active = branch_conditions(
+                    predicate,
+                    active_when,
+                    unprojectable_symbols,
+                )
+                true_child, false_child = build_if_scopes(current, scope)
+                visit_operations(
+                    current.true_operations,
+                    true_child,
+                    true_active,
+                    ranges,
+                    unprojectable_symbols,
+                )
+                visit_operations(
+                    current.false_operations,
+                    false_child,
+                    false_active,
+                    ranges,
+                    unprojectable_symbols,
+                )
+                return
+            if isinstance(current, ForOperation) and len(current.operands) >= 3:
+                add_values(current.operands[:3], scope, active_when, ranges)
+                child, start, stop, step, loop_symbol = build_for_loop_scope(
+                    current,
+                    scope,
+                )
+                iterations = symbolic_iterations(start, stop, step)
+                visit_operations(
+                    current.operations,
+                    child,
+                    active_when,
+                    (*ranges, (loop_symbol, start, step, iterations)),
+                    unprojectable_symbols,
+                )
+                return
+            if isinstance(current, ForItemsOperation) and current.operands:
+                loop_active = _and_conditions(
+                    active_when,
+                    cast(Boolean, sp.Gt(resolve_for_items_cardinality(current), _ZERO)),
+                )
+                # Dictionary values are not structural bounds. Guard their
+                # readiness by nonempty iteration before visiting the body.
+                add_values(current.operands, scope, loop_active, ranges)
+                child = build_for_items_scope(current, scope)
+                local_values = (
+                    *(current.key_var_values or ()),
+                    *((current.value_var_value,) if current.value_var_value else ()),
+                )
+                local_symbols = {
+                    symbol
+                    for value in local_values
+                    for symbol in child.resolve(value).free_symbols
+                    if isinstance(symbol, sp.Symbol)
+                }
+                visit_operations(
+                    current.operations,
+                    child,
+                    loop_active,
+                    ranges,
+                    unprojectable_symbols | frozenset(local_symbols),
+                )
+                return
+            if isinstance(current, WhileOperation):
+                if current.operands:
+                    add_values(current.operands[:1], scope, active_when, ranges)
+                operation_key = (scope.structural_scope, id(current))
+                cached_name = self._while_trip_count_names.get(operation_key)
+                trip_count_name = (
+                    cached_name[1]
+                    if cached_name is not None and cached_name[0] is current
+                    else "|while|"
+                )
+                child, trip_count = build_while_scope(
+                    current,
+                    scope,
+                    trip_count_name=trip_count_name,
+                )
+                visit_operations(
+                    current.operations,
+                    child,
+                    _and_conditions(
+                        active_when,
+                        cast(Boolean, sp.Gt(trip_count, _ZERO)),
+                    ),
+                    ranges,
+                    unprojectable_symbols,
+                )
+                return
+            add_values(
+                _operation_classical_dependency_inputs(current),
+                scope,
+                active_when,
+                ranges,
+            )
+
+        visit(operation, resolver, sp.true, (), frozenset())
+        return collected
+
+    def _finite_runtime_alternatives(
+        self,
+        expression: sp.Expr,
+    ) -> tuple[sp.Expr, ...] | None:
+        """Expand an expression over registered finite runtime domains.
+
+        Args:
+            expression (sp.Expr): Runtime or compile-time scalar expression.
+
+        Returns:
+            tuple[sp.Expr, ...] | None: Structural alternatives, or ``None``
+                when a participating runtime value is unbounded or the fixed
+                expansion limit would be exceeded.
+        """
+        runtime_symbols = sorted(
+            (
+                symbol
+                for symbol in expression.free_symbols
+                if isinstance(symbol, sp.Symbol)
+                and symbol in self._runtime_value_domains
+            ),
+            key=sp.default_sort_key,
+        )
+        if not runtime_symbols:
+            return (expression,)
+        domains = [self._runtime_value_domains[symbol] for symbol in runtime_symbols]
+        if any(domain is None for domain in domains):
+            return None
+        finite_domains = cast(list[tuple[sp.Expr, ...]], domains)
+        alternative_count = math.prod(len(domain) for domain in finite_domains)
+        if alternative_count > _MAX_RUNTIME_DOMAIN_ALTERNATIVES:
+            return None
+        alternatives: list[sp.Expr] = []
+        for values in itertools.product(*finite_domains):
+            replacement: dict[sp.Symbol, sp.Expr] = dict(
+                zip(runtime_symbols, values, strict=True)
+            )
+            candidate = cast(
+                sp.Expr,
+                expression.subs(list(replacement.items()), simultaneous=True),
+            )
+            if candidate not in alternatives:
+                alternatives.append(candidate)
+        return tuple(alternatives)
+
+    def _register_runtime_value_domain(
+        self,
+        symbol: sp.Symbol,
+        *sources: sp.Expr,
+    ) -> tuple[sp.Expr, ...] | None:
+        """Register the finite union of runtime branch-source alternatives.
+
+        Args:
+            symbol (sp.Symbol): Fresh internal runtime merge symbol.
+            *sources (sp.Expr): Values selected by the runtime branches.
+
+        Returns:
+            tuple[sp.Expr, ...] | None: Registered finite alternatives, or
+                ``None`` when the runtime domain cannot be bounded safely.
+        """
+        alternatives: list[sp.Expr] = []
+        for source in sources:
+            expanded = self._finite_runtime_alternatives(source)
+            if expanded is None:
+                self._runtime_value_domains[symbol] = None
+                return None
+            for candidate in expanded:
+                if candidate not in alternatives:
+                    alternatives.append(candidate)
+            if len(alternatives) > _MAX_RUNTIME_DOMAIN_ALTERNATIVES:
+                self._runtime_value_domains[symbol] = None
+                return None
+        domain = tuple(alternatives)
+        self._runtime_value_domains[symbol] = domain
+        return domain
+
     def estimate(self, block_or_ops: Block | Sequence[Operation]) -> ResourceEstimate:
         """Estimate resources for a block or operation sequence.
 
@@ -3456,8 +5225,18 @@ class ResourceInterpreter:
 
         Returns:
             ResourceEstimate: Estimated logical resources.
+
+        Raises:
+            QubitConsumedError: If compiler-equivalent inlining finds duplicate
+                quantum operands at one call site.
+            ValueError: If a selected inline body violates its invocation
+                contract.
+            NotImplementedError: If the IR contains legacy scalar Bit state
+                that cannot flow correctly between loop iterations.
         """
         if isinstance(block_or_ops, Block):
+            self._validate_legacy_scalar_bit_rebinds(block_or_ops)
+            block_or_ops = self._resource_estimation_view(block_or_ops)
             # Only genuine classical parameters may decide a branch — a
             # measurement bit is never a param slot, so this prevents a runtime
             # ``if bit:`` from being specialized by a same-named value.
@@ -3481,6 +5260,11 @@ class ResourceInterpreter:
             body = _with_constraints(
                 body,
                 *_block_input_constraints(block_or_ops, resolver),
+                *_block_output_constraints(
+                    block_or_ops,
+                    resolver,
+                    proven_cache=self._array_constraint_proven,
+                ),
             )
             input_qubits = sum(input_allocations.values(), _ZERO)
             width = dataclasses.replace(
@@ -3497,10 +5281,384 @@ class ResourceInterpreter:
                     else None
                 ),
             )
+        sequence_block = Block(
+            name="operation_sequence",
+            operations=list(block_or_ops),
+            kind=BlockKind.HIERARCHICAL,
+        )
+        self._validate_legacy_scalar_bit_rebinds(sequence_block)
+        sequence_view = self._resource_estimation_view(sequence_block)
         resolver = ExprResolver(
             context=_root_input_binding_context(block_or_ops, self.bindings)
         )
-        return self.eval_operations(list(block_or_ops), resolver)
+        return self.eval_operations(sequence_view.operations, resolver)
+
+    def _resource_estimation_view(self, block: Block) -> Block:
+        """Build the compiler-equivalent block used for interpretation.
+
+        Ordinary direct qkernel calls are compiler-level organization rather
+        than resource boundaries. Expanding them before scheduling preserves
+        the readiness of individual measurement results and quantum wires, so
+        extracting code into a helper does not change the estimate. Explicit
+        quantum-width contracts remain as zero-work validation markers at the
+        original call sites.
+
+        Args:
+            block (Block): Hierarchical root block to interpret.
+
+        Returns:
+            Block: Non-mutating view with eligible direct calls inlined.
+
+        Raises:
+            QubitConsumedError: If inlining detects duplicate quantum actuals.
+            ValueError: If a selected body violates the invocation contract.
+        """
+        return InlinePass(
+            body_selector=self._resource_estimation_inline_body,
+            inline_prefix_factory=self._resource_estimation_inline_prefix,
+            preserve_bound_quantum_identity=True,
+            preserve_bound_array_identity=True,
+        ).run(block)
+
+    def _resource_estimation_inline_body(
+        self,
+        operation: InvokeOperation,
+    ) -> Block | None:
+        """Select the strategy-specific body for resource inlining.
+
+        Args:
+            operation (InvokeOperation): Direct inline-policy invocation being
+                considered for expansion.
+
+        Returns:
+            Block | None: Strategy-selected body, or ``None`` when no inline
+                body is available.
+
+        Raises:
+            ValueError: If the selected body violates the invocation contract.
+        """
+        return self._loop_validation_inline_body(operation)
+
+    def _resource_estimation_inline_prefix(
+        self,
+        operation: InvokeOperation,
+        array_state_bindings: tuple[
+            tuple[ArrayValue, tuple[ArrayValue, ...]],
+            ...,
+        ],
+    ) -> tuple[Operation, ...]:
+        """Preserve resource-only state while dissolving a call boundary.
+
+        Args:
+            operation (InvokeOperation): Caller-substituted invocation whose
+                selected body is about to be inlined.
+            array_state_bindings (tuple[tuple[ArrayValue,
+                tuple[ArrayValue, ...]], ...]): Caller arrays paired with
+                cloned callee entries that need call-time snapshots.
+
+        Returns:
+            tuple[Operation, ...]: One zero-work boundary marker when the call
+                declares a quantum width or carries array state, otherwise an
+                empty tuple.
+        """
+        callable_attrs = {
+            **(operation.definition.attrs if operation.definition is not None else {}),
+            **operation.attrs,
+        }
+        legacy_width = callable_attrs.get("num_target_qubits")
+        has_width_contract = callable_attrs.get("resource_contract") is not None or (
+            type(legacy_width) is int and legacy_width > 0
+        )
+        if not has_width_contract and not array_state_bindings:
+            return ()
+        return (
+            _ResourceInlineBoundaryOperation(
+                constraint_operands=tuple(operation.target_qubits),
+                callable_attrs=callable_attrs,
+                source=operation.custom_name,
+                array_state_bindings=array_state_bindings,
+            ),
+        )
+
+    def resolve_finite_runtime_constraints(
+        self,
+        estimate: ResourceEstimate,
+    ) -> ResourceEstimate:
+        """Expand structural constraints over finite runtime alternatives.
+
+        Runtime indices can be scheduled conservatively on their whole owner
+        while still having a small, known value domain such as a measured Bit.
+        Every alternative must satisfy the structural constraint, after which
+        no internal outcome symbol needs to remain in the public payload.
+
+        Args:
+            estimate (ResourceEstimate): Specialized estimate to rewrite.
+
+        Returns:
+            ResourceEstimate: Estimate whose finitely bounded runtime
+                constraints have been expanded and validated.
+
+        Raises:
+            ValueError: If any runtime alternative violates a constraint.
+        """
+        expanded_constraints: list[_ResourceConstraint] = []
+        for constraint in estimate._constraints:
+            expressions: list[sp.Basic] = [
+                sp.sympify(constraint.expression),
+                sp.sympify(constraint.active_when),
+            ]
+            if constraint.expected is not None:
+                expressions.append(sp.sympify(constraint.expected))
+            for loop_range in constraint.ranges:
+                expressions.extend(
+                    sp.sympify(value)
+                    for value in (
+                        loop_range.start,
+                        loop_range.step,
+                        loop_range.iterations,
+                    )
+                )
+            symbols = set().union(
+                *(expression.free_symbols for expression in expressions)
+            )
+            runtime_symbols = sorted(
+                (
+                    symbol
+                    for symbol in symbols
+                    if isinstance(symbol, sp.Symbol)
+                    and symbol in self._runtime_value_domains
+                ),
+                key=sp.default_sort_key,
+            )
+            if not runtime_symbols:
+                expanded_constraints.append(constraint)
+                continue
+            domains = [
+                self._runtime_value_domains[symbol] for symbol in runtime_symbols
+            ]
+            if any(domain is None for domain in domains):
+                expanded_constraints.append(constraint)
+                continue
+            finite_domains = cast(list[tuple[sp.Expr, ...]], domains)
+            if (
+                math.prod(len(domain) for domain in finite_domains)
+                > _MAX_RUNTIME_DOMAIN_ALTERNATIVES
+            ):
+                expanded_constraints.append(constraint)
+                continue
+            for values in itertools.product(*finite_domains):
+                replacements: dict[sp.Symbol, sp.Expr] = dict(
+                    zip(runtime_symbols, values, strict=True)
+                )
+                expanded_constraints.append(
+                    constraint.mapped(
+                        lambda expression, replacements=replacements: cast(
+                            sp.Expr,
+                            sp.sympify(expression).subs(
+                                list(replacements.items()),
+                                simultaneous=True,
+                            ),
+                        )
+                    )
+                )
+        return dataclasses.replace(
+            estimate,
+            _constraints=tuple(expanded_constraints),
+        )
+
+    def validate_no_internal_resource_symbols(
+        self,
+        estimate: ResourceEstimate,
+    ) -> None:
+        """Reject internal runtime values that escaped into public algebra.
+
+        Internal observation outcomes and unresolved loop carries are semantic
+        execution state, not user inputs. Hiding them from ``parameters``
+        would leave an unsubstitutable expression, while publishing them would
+        let a user choose an outcome and silently underestimate a runtime
+        worst case. The estimator therefore fails closed when such a value
+        affects any serialized metric, constraint, metadata guard, or trace.
+
+        Args:
+            estimate (ResourceEstimate): Final specialized estimate to check.
+
+        Raises:
+            NotImplementedError: If an internal runtime or unresolved carry
+                symbol remains in the public estimate payload.
+        """
+        internal_symbols = (
+            self._runtime_observation_symbols | self._unresolved_resource_symbols
+        )
+        escaped = (
+            _free_symbols(estimate) | _trace_guard_free_symbols(estimate.trace)
+        ) & internal_symbols
+        if not escaped:
+            return
+        names = ", ".join(sorted(_symbol_display_name(symbol) for symbol in escaped))
+        raise NotImplementedError(
+            "Resource estimation cannot bound a runtime-derived or unresolved "
+            f"loop-carried value used by resource-sensitive structure ({names}). "
+            "Provide concrete structural inputs or rewrite the continuation so "
+            "its resource cost does not depend on that runtime value."
+        )
+
+    def _validate_legacy_scalar_bit_rebinds(
+        self,
+        block_or_operations: Block | Sequence[Operation],
+        *,
+        output_values: Sequence[ValueLike] | None = None,
+        local_bindings: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Reuse compiler loop-state validation before interpreting a body.
+
+        Args:
+            block_or_operations (Block | Sequence[Operation]): Semantic body
+                to validate. A Block is inlined into a temporary affine view
+                so only callee inputs that the selected body actually reads
+                count as loop back-edge reads.
+            output_values (Sequence[ValueLike] | None): Body outputs used for
+                post-loop liveness when a bare operation sequence is passed.
+                A Block always supplies its own outputs. Defaults to ``None``.
+            local_bindings (Mapping[str, Any] | None): Resolved callee-formal
+                values added to root resource inputs. Defaults to ``None``.
+
+        Raises:
+            NotImplementedError: If a legacy scalar Bit rebind cannot be
+                represented across the loop boundary.
+        """
+        operations = (
+            block_or_operations.operations
+            if isinstance(block_or_operations, Block)
+            else block_or_operations
+        )
+        validation_bindings = {
+            name: self._compiler_validation_binding(value)
+            for name, value in self.bindings.items()
+        }
+        validation_bindings.update(
+            {
+                name: self._compiler_validation_binding(value)
+                for name, value in self.condition_values.items()
+            }
+        )
+        if local_bindings is not None:
+            validation_bindings.update(
+                {
+                    name: self._compiler_validation_binding(value)
+                    for name, value in local_bindings.items()
+                }
+            )
+        validation_outputs = output_values
+        if isinstance(block_or_operations, Block):
+            validation_block = self._loop_validation_view(
+                block_or_operations,
+                validation_bindings,
+            )
+            operations = validation_block.operations
+            validation_outputs = validation_block.output_values
+        if not has_legacy_scalar_bit_rebinds(operations):
+            return
+        try:
+            reject_loop_carried_classical_rebinds(
+                list(operations),
+                bindings=validation_bindings,
+                output_values=(
+                    list(validation_outputs) if validation_outputs is not None else None
+                ),
+            )
+        except ValidationError as exc:
+            raise NotImplementedError(str(exc)) from exc
+
+    def _loop_validation_view(
+        self,
+        block: Block,
+        bindings: dict[str, Any],
+    ) -> Block:
+        """Build the compiler-equivalent view used by loop-state validation.
+
+        Resource interpretation intentionally preserves callable boundaries,
+        but the compiler validates loop-carried state after inline-policy calls
+        have been expanded. This temporary view follows the same selected-body
+        and compile-time specialization rules without changing the Block that
+        resource evaluation traverses. Repeating inline then specialization
+        also handles concrete self-recursion up to the compiler's supported
+        unroll depth.
+
+        Args:
+            block (Block): Hierarchical semantic body to validate.
+            bindings (dict[str, Any]): Concrete compiler-domain bindings used
+                for branch specialization.
+
+        Returns:
+            Block: Non-mutating validation view. A recursive call that does not
+                converge within the supported depth remains boxed and is
+                handled conservatively by the shared validator.
+
+        Raises:
+            ValueError: If a strategy-selected body violates the invocation
+                input or output contract.
+            QubitConsumedError: If inlining detects duplicate quantum actuals.
+            ValidationError: If compile-time specialization encounters invalid
+                IR.
+        """
+        inline = InlinePass(body_selector=self._loop_validation_inline_body)
+        view = block
+        for _ in range(_MAX_LOOP_VALIDATION_INLINE_DEPTH):
+            view = inline.run(view)
+            if view.kind is not BlockKind.HIERARCHICAL:
+                return view
+            preserved_conditions = find_loop_carried_condition_uuids(view.operations)
+            view = CompileTimeIfLoweringPass(
+                bindings,
+                preserved_condition_uuids=preserved_conditions,
+            ).run(view)
+            if count_inline_invokes(view.operations) == 0:
+                # Lowering the final base-case branch can remove the last
+                # invocation while the copied block still carries its stale
+                # HIERARCHICAL kind. Refresh it exactly as recursion unrolling
+                # does so the supported depth boundary stays identical.
+                return inline.run(view)
+        name = block.name or "qkernel"
+        raise ValueError(
+            f"Recursive resource validation for '{name}' did not reach a "
+            "base case within the supported inline depth. Supply a concrete "
+            "recursion-driving value in inputs, or replace the "
+            "recursion with a bounded loop."
+        )
+
+    def _loop_validation_inline_body(self, operation: InvokeOperation) -> Block | None:
+        """Select the body that resource interpretation would evaluate.
+
+        Args:
+            operation (InvokeOperation): Inline-policy invocation being copied
+                into the validation view.
+
+        Returns:
+            Block | None: Strategy-selected body, or None when unavailable.
+
+        Raises:
+            ValueError: If the selected body violates the invocation contract.
+        """
+        return operation.select_body(strategy=self._strategy_for(operation)).body
+
+    @staticmethod
+    def _compiler_validation_binding(value: Any) -> Any:
+        """Convert a concrete SymPy scalar to the compiler binding domain.
+
+        Args:
+            value (Any): Resource-estimator input or resolved callee value.
+
+        Returns:
+            Any: Equivalent Python scalar when concrete, otherwise the
+                original binding object.
+        """
+        if not isinstance(value, sp.Expr) or not value.is_number:
+            return value
+        if _is_concrete_integer(value):
+            return int(value)
+        if value.is_real is True:
+            return float(value)
+        return value
 
     def _reserve_while_trip_count_names(
         self,
@@ -3618,6 +5776,112 @@ class ResourceInterpreter:
             *_block_input_constraints(block, resolver),
         )
 
+    @staticmethod
+    def _bind_resource_inline_array_states(
+        operation: _ResourceInlineBoundaryOperation,
+        resolver: ExprResolver,
+    ) -> None:
+        """Snapshot caller arrays into one inlined callable's entry values.
+
+        Every caller state is captured before any callee entry is rebound.
+        This preserves simultaneous call-argument semantics even when future
+        IR permits two classical formals to alias one array lineage.
+
+        Args:
+            operation (_ResourceInlineBoundaryOperation): Zero-work call
+                boundary carrying caller-to-callee array bindings.
+            resolver (ExprResolver): Resolver at the original call position.
+        """
+        snapshots = tuple(
+            (entries, resolver.snapshot_array_state(actual))
+            for actual, entries in operation.array_state_bindings
+        )
+        for entries, state in snapshots:
+            for entry in entries:
+                resolver.bind_array_state(entry, state)
+
+    @staticmethod
+    def _control_batch_profile_requires_state(
+        operations: Sequence[Operation],
+    ) -> bool:
+        """Return whether batching depends on sequential classical state.
+
+        Most controlled bodies contain only quantum leaves and pure scalar
+        expressions that the resolver can trace lazily. Array stores, inlined
+        call boundaries, and classical control-flow results instead require
+        program-order state publication before a later activity predicate can
+        be classified.
+
+        Args:
+            operations (Sequence[Operation]): One sequential body to profile.
+
+        Returns:
+            bool: Whether a resource-neutral state prepass is required.
+        """
+        for operation in operations:
+            if isinstance(operation, StoreArrayElementOperation):
+                return True
+            if (
+                isinstance(operation, _ResourceInlineBoundaryOperation)
+                and operation.array_state_bindings
+            ):
+                return True
+            if isinstance(operation, IfOperation) and any(
+                not merge.result.type.is_quantum() for merge in operation.iter_merges()
+            ):
+                return True
+            if isinstance(operation, (ForOperation, ForItemsOperation)) and (
+                operation.region_args
+                or operation.loop_carried_rebinds
+                or _loop_array_state_rebinds(operation)
+            ):
+                return True
+            if isinstance(operation, WhileOperation) and (
+                operation.region_args or operation.loop_carried_rebinds
+            ):
+                return True
+        return False
+
+    def _control_batch_profile_resolver(
+        self,
+        operations: Sequence[Operation],
+        resolver: ExprResolver,
+    ) -> ExprResolver:
+        """Prepare resolved sequential state for control-work profiling.
+
+        The normal interpreter is the sole owner of array, branch-merge, and
+        loop-exit semantics. Reusing it as a zero-control prepass avoids a
+        second, drifting state machine in the batching walker. The detached
+        resolver preserves the caller state and all user-visible estimator
+        metadata; opaque definition costs remain safely memoized.
+
+        Args:
+            operations (Sequence[Operation]): Sequential controlled body.
+            resolver (ExprResolver): Resolver at the body entry.
+
+        Returns:
+            ExprResolver: Original resolver for stateless bodies, otherwise a
+            detached resolver containing every program-order classical result.
+        """
+        if not self._control_batch_profile_requires_state(operations):
+            return resolver
+        body = _LocalBlock(list(operations))
+        prepared = resolver.child_scope(inner_block=body)
+        prepared.copy_array_context()
+        with self._isolated_loop_taint_probe_state():
+            self.eval_operations(
+                list(operations),
+                prepared,
+                controls=_ZERO,
+                initial_allocations=_captured_quantum_allocations(
+                    operations,
+                    prepared,
+                    self._allocation_owners_by_uuid,
+                ),
+                allow_control_batching=False,
+            )
+        return prepared
+
     def _controlled_operation_batch_profile(
         self,
         operation: Operation,
@@ -3637,6 +5901,15 @@ class ResourceInterpreter:
         Returns:
             _EstimatorControlBatchProfile: Capped symbolic work.
         """
+        if isinstance(operation, _ResourceInlineBoundaryOperation):
+            self._bind_resource_inline_array_states(operation, resolver)
+            return _EstimatorControlBatchProfile()
+        if isinstance(operation, StoreArrayElementOperation):
+            # Classical array stores update the estimator's resolver state but
+            # are not coherent quantum work.  They intentionally remain an
+            # emitter error if compile-time lowering fails to remove them;
+            # resource estimation runs earlier on the semantic IR.
+            return _EstimatorControlBatchProfile()
         static_profile = static_clean_ancilla_batch_profile(operation)
         if static_profile is not None:
             return _EstimatorControlBatchProfile(work=static_profile.work)
@@ -3695,6 +5968,7 @@ class ResourceInterpreter:
                 operation,
                 resolver,
             )
+            child.copy_array_context()
             start = self._apply_condition_values(start, record_usage=False)
             stop = self._apply_condition_values(stop, record_usage=False)
             step = self._apply_condition_values(step, record_usage=False)
@@ -3720,8 +5994,9 @@ class ResourceInterpreter:
                 iterations,
             )
         if isinstance(operation, IfOperation):
+            condition_fact = resolver.resolve_classical_fact(operation.condition)
             condition = self._apply_condition_values(
-                resolver.resolve(operation.condition),
+                cast(sp.Expr, condition_fact.value),
                 record_usage=False,
             )
             true_child, false_child = build_if_scopes(operation, resolver)
@@ -3744,9 +6019,33 @@ class ResourceInterpreter:
                 operation.false_operations,
                 false_child,
             )
-            return true_profile.conditional(
+            uncertainty_guard = _classical_fact_uncertainty_condition(condition_fact)
+            if uncertainty_guard is sp.false:
+                return true_profile.conditional(
+                    false_profile,
+                    _boolean_condition(condition),
+                )
+            choice_profile = true_profile.choice(false_profile)
+            if uncertainty_guard is sp.true:
+                return choice_profile
+            internal_symbols = (
+                condition.free_symbols & self._unresolved_resource_symbols
+            )
+            representative = cast(
+                sp.Expr,
+                condition.xreplace({symbol: _ZERO for symbol in internal_symbols}),
+            )
+            compile_condition = _refine_boolean_under_assumption(
+                _boolean_condition(representative),
+                cast(Boolean, sp.Not(uncertainty_guard)),
+            )
+            compile_profile = true_profile.conditional(
                 false_profile,
-                _boolean_condition(condition),
+                compile_condition,
+            )
+            return choice_profile.conditional(
+                compile_profile,
+                uncertainty_guard,
             )
         if isinstance(operation, InvokeOperation):
             strategy = self._strategy_for(operation)
@@ -3913,17 +6212,19 @@ class ResourceInterpreter:
             extra_context=probe_context,
             extra_loop_vars={operation.loop_var: loop_symbol},
         )
-        self.eval_operations(
-            operation.operations,
-            probe,
-            controls=_ZERO,
-            initial_allocations=_captured_quantum_allocations(
+        probe.copy_array_context()
+        with self._isolated_loop_taint_probe_state():
+            self.eval_operations(
                 operation.operations,
                 probe,
-                self._allocation_owners_by_uuid,
-            ),
-            allow_control_batching=False,
-        )
+                controls=_ZERO,
+                initial_allocations=_captured_quantum_allocations(
+                    operation.operations,
+                    probe,
+                    self._allocation_owners_by_uuid,
+                ),
+                allow_control_batching=False,
+            )
 
         at_iteration: dict[str, sp.Expr] = {}
         all_carry_symbols = set(carry_symbols.values())
@@ -3961,6 +6262,7 @@ class ResourceInterpreter:
             extra_context=body_context,
             extra_loop_vars={operation.loop_var: loop_symbol},
         )
+        child.copy_array_context()
         return self._controlled_body_batch_profile(
             operation.operations,
             child,
@@ -4018,27 +6320,30 @@ class ResourceInterpreter:
         }
         profiles: list[_EstimatorControlBatchProfile] = []
         body = _LocalBlock(operation.operations)
+        profile_parent = resolver.child_scope(inner_block=body)
+        profile_parent.copy_array_context()
         for offset in range(iteration_count):
             loop_value = sp.Integer(concrete_start + concrete_step * offset)
             context = dict(carried)
             if operation.loop_var_value is not None:
                 context[operation.loop_var_value.uuid] = loop_value
-            child = resolver.child_scope(
+            child = profile_parent.child_scope(
                 inner_block=body,
                 extra_context=context,
                 extra_loop_vars={operation.loop_var: loop_value},
             )
-            self.eval_operations(
-                operation.operations,
-                child,
-                controls=_ZERO,
-                initial_allocations=_captured_quantum_allocations(
+            with self._isolated_loop_taint_probe_state():
+                self.eval_operations(
                     operation.operations,
                     child,
-                    self._allocation_owners_by_uuid,
-                ),
-                allow_control_batching=False,
-            )
+                    controls=_ZERO,
+                    initial_allocations=_captured_quantum_allocations(
+                        operation.operations,
+                        child,
+                        self._allocation_owners_by_uuid,
+                    ),
+                    allow_control_batching=False,
+                )
             profiles.append(
                 self._controlled_body_batch_profile(
                     operation.operations,
@@ -4071,6 +6376,7 @@ class ResourceInterpreter:
         Returns:
             _EstimatorControlBatchProfile: Capped symbolic work.
         """
+        resolver = self._control_batch_profile_resolver(operations, resolver)
         return _EstimatorControlBatchProfile.combine(
             self._controlled_operation_batch_profile(operation, resolver)
             for operation in operations
@@ -4191,6 +6497,8 @@ class ResourceInterpreter:
             _input_sizes=body._input_sizes,
             _has_output_summary=body._has_output_summary,
             _dependency_keys=body._dependency_keys,
+            _dependency_reads=body._dependency_reads,
+            _dependency_writes=body._dependency_writes,
             _dependency_completion=(
                 {
                     key: cast(
@@ -4208,20 +6516,19 @@ class ResourceInterpreter:
     def _block_runtime_observation_summary(
         self,
         block: Block,
-        *,
-        active_blocks: frozenset[int] = frozenset(),
     ) -> tuple[frozenset[int], bool]:
-        """Summarize runtime-observation outputs and barriers for one body.
+        """Summarize selected runtime observations as a least fixed point.
 
         Measurement provenance is cached in the IR, while expectation values
         intentionally are not a ``KernelEffect``. Resource scheduling needs
         both, so this estimator-local summary recursively follows the same
-        selected Invoke bodies used for resource evaluation.
+        selected Invoke bodies used for resource evaluation. Recursive
+        callable graphs start at the empty summary and iterate until no output
+        provenance or observation flag grows, so a cycle never caches a
+        partial result based on access order.
 
         Args:
             block (Block): Selected callable body to inspect.
-            active_blocks (frozenset[int]): Body identities already active on
-                the recursive path. Defaults to an empty set.
 
         Returns:
             tuple[frozenset[int], bool]: Body output indices derived from a
@@ -4230,75 +6537,146 @@ class ResourceInterpreter:
         cached = self._runtime_observation_cache.get(id(block))
         if cached is not None and cached[0] is block:
             return cached[1], cached[2]
-        if id(block) in active_blocks:
-            return block.measurement_result_indices, not block.effects.is_unitary
 
+        reachable = self._selected_runtime_observation_blocks(block)
+        summaries: dict[int, tuple[frozenset[int], bool]] = {
+            id(candidate): (frozenset(), False) for candidate in reachable
+        }
+        while True:
+            changed = False
+            updated: dict[int, tuple[frozenset[int], bool]] = {}
+            for candidate in reachable:
+                output_indices, has_observation = self._runtime_observation_equation(
+                    candidate, summaries
+                )
+                previous_indices, previous_observation = summaries[id(candidate)]
+                summary = (
+                    previous_indices | output_indices,
+                    previous_observation or has_observation,
+                )
+                updated[id(candidate)] = summary
+                changed = changed or summary != summaries[id(candidate)]
+            summaries = updated
+            if not changed:
+                break
+
+        for candidate in reachable:
+            output_indices, has_observation = summaries[id(candidate)]
+            self._runtime_observation_cache[id(candidate)] = (
+                candidate,
+                output_indices,
+                has_observation,
+            )
+        result = summaries[id(block)]
+        return result
+
+    def _selected_runtime_observation_blocks(
+        self,
+        root: Block,
+    ) -> tuple[Block, ...]:
+        """Collect blocks reachable through selected Invoke implementations.
+
+        Args:
+            root (Block): Selected body at the root of the callable graph.
+
+        Returns:
+            tuple[Block, ...]: Strongly referenced blocks in deterministic
+                preorder.
+        """
+        blocks: dict[int, Block] = {}
+        pending = [root]
+        while pending:
+            block = pending.pop()
+            identity = id(block)
+            if identity in blocks:
+                continue
+            blocks[identity] = block
+            children: list[Block] = []
+            for operation in walk_operations(block.operations):
+                if not isinstance(operation, InvokeOperation):
+                    continue
+                selection = operation.select_body(
+                    strategy=self._strategy_for(operation)
+                )
+                if isinstance(selection.body, Block):
+                    children.append(selection.body)
+            pending.extend(reversed(children))
+        return tuple(blocks.values())
+
+    def _runtime_observation_equation(
+        self,
+        block: Block,
+        summaries: Mapping[int, tuple[frozenset[int], bool]],
+    ) -> tuple[frozenset[int], bool]:
+        """Apply one selected-observation equation to a block.
+
+        Args:
+            block (Block): Body whose local equation should be evaluated.
+            summaries (Mapping[int, tuple[frozenset[int], bool]]): Previous
+                fixed-point approximation for every reachable selected body.
+
+        Returns:
+            tuple[frozenset[int], bool]: Output provenance and observation flag
+                derived in this iteration.
+        """
         roots = _find_runtime_observation_results(block.operations)
         has_observation = bool(roots)
-        nested_active = active_blocks | {id(block)}
         for operation in walk_operations(block.operations):
             if not isinstance(operation, InvokeOperation):
                 continue
-            indices, nested_has_observation = self._invoke_runtime_observation_summary(
-                operation,
-                active_blocks=nested_active,
+            selection = operation.select_body(strategy=self._strategy_for(operation))
+            if not isinstance(selection.body, Block):
+                continue
+            body_indices, nested_has_observation = summaries[id(selection.body)]
+            mapped_indices = selection.map_result_indices(
+                body_indices,
+                operation.results,
             )
             roots.update(
                 operation.results[index].uuid
-                for index in indices
+                for index in mapped_indices
                 if index < len(operation.results)
             )
             has_observation = has_observation or nested_has_observation
 
-        graph = build_dependency_graph(block.operations)
-        derived = find_measurement_derived_values(graph, roots)
-        derived.update(roots)
-        output_indices = frozenset(
-            index
-            for index, output in enumerate(block.output_values)
-            if output.uuid in derived
+        derived = find_measurement_derived_values(
+            build_dependency_graph(block.operations),
+            roots,
         )
-        self._runtime_observation_cache[id(block)] = (
-            block,
-            output_indices,
+        derived.update(roots)
+        return (
+            frozenset(
+                index
+                for index, output in enumerate(block.output_values)
+                if output.uuid in derived
+            ),
             has_observation,
         )
-        return output_indices, has_observation
 
     def _invoke_runtime_observation_summary(
         self,
         operation: InvokeOperation,
-        *,
-        active_blocks: frozenset[int] = frozenset(),
     ) -> tuple[frozenset[int], bool]:
         """Map a selected body's runtime observations to Invoke results.
 
         Args:
             operation (InvokeOperation): Callable invocation to inspect.
-            active_blocks (frozenset[int]): Body identities already active on
-                the recursive path. Defaults to an empty set.
 
         Returns:
             tuple[frozenset[int], bool]: Caller result indices derived from an
             observation and whether the selected body contains an observation.
         """
-        selection = operation.select_body(strategy=self._strategy_for(operation))
+        strategy = self._strategy_for(operation)
+        selection = operation.select_body(strategy=strategy)
         body = selection.body
         if not isinstance(body, Block):
-            return operation.measurement_result_indices, bool(
-                operation.measurement_result_indices
-            )
+            indices = operation.measurement_result_indices_for(strategy=strategy)
+            return indices, bool(indices)
         body_indices, has_observation = self._block_runtime_observation_summary(
             body,
-            active_blocks=active_blocks,
         )
-        offset = len(operation.results) - len(selection.results)
         return (
-            frozenset(
-                index + offset
-                for index in body_indices
-                if index + offset < len(operation.results)
-            ),
+            selection.map_result_indices(body_indices, operation.results),
             has_observation,
         )
 
@@ -4373,55 +6751,60 @@ class ResourceInterpreter:
             )
             return shared.conditional(direct, batch_condition)
 
-        previous_taint = self._measurement_derived
-        previous_global_barriers = self._global_barrier_operation_ids
-        cache_entry = self._operation_taint_cache.get(id(operations))
-        if cache_entry is not None and cache_entry[0] is operations:
-            graph = cache_entry[1]
-            local_measurement_roots = cache_entry[2]
-            local_global_barriers = cache_entry[3]
-        else:
-            graph = build_dependency_graph(operations)
-            measurement_roots = _find_runtime_observation_results(operations)
-            global_barriers: set[int] = set()
-            for nested_operation in walk_operations(operations):
-                if not isinstance(nested_operation, InvokeOperation):
-                    continue
-                indices, has_observation = self._invoke_runtime_observation_summary(
-                    nested_operation
-                )
-                measurement_roots.update(
-                    nested_operation.results[index].uuid
-                    for index in indices
-                    if index < len(nested_operation.results)
-                )
-                if has_observation:
-                    global_barriers.add(id(nested_operation))
-            local_measurement_roots = frozenset(measurement_roots)
-            local_global_barriers = frozenset(global_barriers)
-            self._operation_taint_cache[id(operations)] = (
-                operations,
-                graph,
-                local_measurement_roots,
-                local_global_barriers,
-            )
-        propagated_taint = find_measurement_derived_values(
-            graph,
-            set(previous_taint) | set(local_measurement_roots),
-        )
-        self._measurement_derived = previous_taint | propagated_taint
-        self._global_barrier_operation_ids = previous_global_barriers | set(
-            local_global_barriers
-        )
+        previous_taint = self._measurement_taint_conditions
+        self._measurement_taint_conditions = dict(previous_taint)
         try:
             scheduled: list[tuple[Operation, ResourceEstimate]] = []
+            scheduled_classical_sources: list[
+                tuple[dict[str, Boolean], dict[str, Boolean]]
+            ] = []
+            known_classical_sources: set[str] = set()
             seen_array_constraints: set[_ResourceConstraint] = set()
             for operation in operations:
+                structural_input_sources = _resolved_classical_source_conditions(
+                    operation.all_input_values(),
+                    resolver,
+                )
+                known_classical_sources.update(structural_input_sources)
+                classical_input_sources = self._scheduling_classical_input_sources(
+                    operation,
+                    resolver,
+                )
                 operation_estimate = self.eval_operation(
                     operation,
                     resolver,
                     controls=control_count,
                 )
+                if isinstance(operation, StoreArrayElementOperation):
+                    resolver.record_array_store(operation)
+                self._measurement_taint_conditions = (
+                    _propagate_operation_measurement_taint(
+                        operation,
+                        operation_estimate,
+                        self._measurement_taint_conditions,
+                    )
+                )
+                self._record_runtime_value_symbols(operation, resolver)
+                self._publish_operation_classical_facts(
+                    operation,
+                    resolver,
+                    classical_input_sources,
+                )
+                classical_output_sources = _resolved_classical_source_conditions(
+                    _operation_classical_dependency_outputs(operation),
+                    resolver,
+                )
+                _merge_classical_source_conditions(
+                    classical_output_sources,
+                    _direct_observation_source_conditions(operation, resolver),
+                )
+                published_classical_sources = {
+                    source: guard
+                    for source, guard in classical_output_sources.items()
+                    if source not in known_classical_sources
+                }
+                known_classical_sources.update(classical_output_sources)
+                known_classical_sources.update(published_classical_sources)
                 if _estimate_has_nonzero_depth(
                     operation_estimate
                 ) and _operation_has_unresolved_quantum_index(
@@ -4445,13 +6828,19 @@ class ResourceInterpreter:
                     # sequential fold avoids constructing a deep tree that the
                     # public estimator would discard at the end anyway.
                     operation_estimate.trace = None
-                array_constraints = tuple(
-                    constraint
-                    for constraint in _operation_array_constraints(
+                discovered_constraints = (
+                    ()
+                    if isinstance(operation, HasNestedOps)
+                    else _operation_array_constraints(
                         operation,
                         resolver,
+                        active_when=self._constraint_scope_condition,
                         proven_cache=self._array_constraint_proven,
                     )
+                )
+                array_constraints = tuple(
+                    constraint
+                    for constraint in discovered_constraints
                     if constraint not in seen_array_constraints
                     and constraint not in operation_estimate._constraints
                 )
@@ -4471,11 +6860,59 @@ class ResourceInterpreter:
                     ),
                 )
                 scheduled.append((operation, operation_estimate))
+                scheduled_classical_sources.append(
+                    (classical_input_sources, published_classical_sources)
+                )
             dependency_keys: set[WireKey] = set()
             wire_footprints: list[_WireFootprint | None] = []
+            classical_dependency_conditions: list[Boolean] = []
+            classical_read_conditions: list[dict[WireKey, Boolean]] = []
             scheduled_with_dependencies: list[tuple[Operation, ResourceEstimate]] = []
-            for operation, operation_estimate in scheduled:
-                if not _estimate_has_nonzero_depth(operation_estimate):
+            for (
+                operation,
+                operation_estimate,
+            ), (
+                classical_input_sources,
+                classical_output_sources,
+            ) in zip(
+                scheduled,
+                scheduled_classical_sources,
+                strict=True,
+            ):
+                classical_reads, classical_writes, classical_active = (
+                    _classical_dependency_footprint(
+                        classical_input_sources,
+                        classical_output_sources,
+                    )
+                )
+                classical_dependency_conditions.append(classical_active)
+                classical_read_conditions.append(
+                    {
+                        _classical_dependency_key(source): condition
+                        for source, raw_condition in classical_input_sources.items()
+                        if (condition := _boolean_condition(raw_condition))
+                        is not sp.false
+                    }
+                )
+                if isinstance(operation, (IfOperation, WhileOperation)):
+                    condition_value = (
+                        operation.condition
+                        if isinstance(operation, IfOperation)
+                        else operation.operands[0]
+                    )
+                    condition_runtime = _classical_fact_runtime_condition(
+                        resolver.resolve_classical_fact(condition_value),
+                    )
+                    if condition_runtime is not sp.false and not classical_reads:
+                        raise AssertionError(
+                            "A runtime control-flow operation must read its "
+                            "observation dependency token."
+                        )
+                if (
+                    not _estimate_has_nonzero_depth(operation_estimate)
+                    and not classical_reads
+                    and not classical_writes
+                ):
                     wire_footprints.append(None)
                     scheduled_with_dependencies.append(
                         (
@@ -4496,7 +6933,6 @@ class ResourceInterpreter:
                             self._dependency_owner_aliases,
                         )
                     )
-                    wire_footprints.append((footprint_keys, footprint_keys))
                     reads = set(footprint_keys)
                     writes = set(footprint_keys)
                     completion_uniform = (
@@ -4509,15 +6945,21 @@ class ResourceInterpreter:
                         scalar_values=self.condition_values,
                         used_names=self.branch_condition_names,
                         owner_aliases=self._dependency_owner_aliases,
+                        allocation_owners_by_uuid=self._allocation_owners_by_uuid,
                     )
                     footprint_keys = frozenset(reads | writes)
-                    wire_footprints.append((frozenset(reads), frozenset(writes)))
                     completion_uniform = _operation_has_uniform_intrinsic_completion(
                         operation,
                         operation_estimate,
                         footprint_keys,
                         surrounding_controls=_expr(control_count),
                     )
+                wire_footprints.append(
+                    (
+                        frozenset((*reads, *classical_reads)),
+                        frozenset((*writes, *classical_writes)),
+                    )
+                )
                 dependency_keys.update(footprint_keys)
                 operation_completion = _normalized_dependency_completion(
                     operation_estimate
@@ -4564,6 +7006,14 @@ class ResourceInterpreter:
                     for footprint in wire_footprints
                 ]
             depth_activity_conditions = _scheduled_depth_activity_conditions(scheduled)
+            depth_activity_conditions = tuple(
+                _boolean_condition(sp.Or(depth_active, classical_active))
+                for depth_active, classical_active in zip(
+                    depth_activity_conditions,
+                    classical_dependency_conditions,
+                    strict=True,
+                )
+            )
             (
                 scheduled_depth,
                 scheduled_completion,
@@ -4573,8 +7023,7 @@ class ResourceInterpreter:
                 scheduled,
                 depth_footprints,
                 activity_conditions=depth_activity_conditions,
-                measurement_derived=self._measurement_derived,
-                global_barrier_operation_ids=self._global_barrier_operation_ids,
+                read_conditions=classical_read_conditions,
                 scalar_values=self.condition_values,
                 used_names=self.branch_condition_names,
             )
@@ -4599,6 +7048,28 @@ class ResourceInterpreter:
                     initial_allocations or {},
                 ),
                 _dependency_keys=frozenset(dependency_keys),
+                _dependency_reads=frozenset(
+                    key
+                    for (_operation, operation_estimate), footprint in zip(
+                        scheduled,
+                        wire_footprints,
+                        strict=True,
+                    )
+                    if footprint is not None
+                    and _estimate_has_nonzero_depth(operation_estimate)
+                    for key in footprint[0]
+                ),
+                _dependency_writes=frozenset(
+                    key
+                    for (_operation, operation_estimate), footprint in zip(
+                        scheduled,
+                        wire_footprints,
+                        strict=True,
+                    )
+                    if footprint is not None
+                    and _estimate_has_nonzero_depth(operation_estimate)
+                    for key in footprint[1]
+                ),
                 _dependency_completion={
                     key: completion
                     for key, completion in scheduled_completion.items()
@@ -4608,6 +7079,7 @@ class ResourceInterpreter:
                 _output_sizes=liveness.final_live_by_owner,
                 _input_sizes=dict(initial_allocations or {}),
                 _has_output_summary=True,
+                _measurement_taint_conditions=dict(self._measurement_taint_conditions),
             )
             if possible_alias_active is not sp.false:
                 assumption = ResourceAssumption(
@@ -4633,8 +7105,7 @@ class ResourceInterpreter:
                 )
             return result
         finally:
-            self._measurement_derived = previous_taint
-            self._global_barrier_operation_ids = previous_global_barriers
+            self._measurement_taint_conditions = previous_taint
 
     def eval_operation(
         self,
@@ -4655,10 +7126,23 @@ class ResourceInterpreter:
             ResourceEstimate: Operation resource estimate.
 
         Raises:
+            ValueError: If an estimator-only call-site width contract is
+                malformed or violated.
             NotImplementedError: If the operation kind is not supported by
                 resource estimation.
         """
         match operation:
+            case _ResourceInlineBoundaryOperation():
+                self._bind_resource_inline_array_states(operation, resolver)
+                return _with_constraints(
+                    ResourceEstimate.zero(),
+                    *_quantum_operand_width_constraints(
+                        operation.callable_attrs,
+                        operation.constraint_operands,
+                        resolver,
+                        source=operation.source,
+                    ),
+                )
             case GateOperation():
                 return self.eval_gate(operation, controls=controls)
             case QInitOperation():
@@ -4706,8 +7190,19 @@ class ResourceInterpreter:
                     controls=controls,
                 )
             case UnaryMathOp():
+                if classify_control_work(operation) is ControlWorkKind.UNSUPPORTED:
+                    _require_uncontrolled_operation(operation, controls)
                 return self.eval_unary_math(operation, resolver)
             case CastOperation() | ReturnQuantumArrayElementOperation():
+                return ResourceEstimate.zero()
+            case StoreArrayElementOperation():
+                # The enclosing sequential interpreter publishes the updated
+                # array state after this zero-resource semantic operation.
+                return ResourceEstimate.zero()
+            case SliceArrayOperation() | ReleaseSliceViewOperation():
+                # Estimation runs before the transpiler strips slice-lifetime
+                # markers. They are valid zero-work structure here even though
+                # either marker reaching the later emit walker is an error.
                 return ResourceEstimate.zero()
             case HasNestedOps():
                 raise NotImplementedError(
@@ -4715,6 +7210,8 @@ class ResourceInterpreter:
                     f"{type(operation).__name__}."
                 )
             case _:
+                if classify_control_work(operation) is ControlWorkKind.UNSUPPORTED:
+                    _require_uncontrolled_operation(operation, controls)
                 if operation.operation_kind is OperationKind.CLASSICAL:
                     return ResourceEstimate.zero()
                 raise NotImplementedError(
@@ -4833,18 +7330,35 @@ class ResourceInterpreter:
             ValueError: If recursive expansion repeats a resolved call state,
                 changes only symbolically, or exhausts Python's call stack
                 before reaching a base case.
+            NotImplementedError: If the selected body contains legacy scalar
+                Bit state that cannot flow between loop iterations.
         """
         block_identity = id(block)
-        call_state = tuple(
-            [
+        resolved_classical_inputs = tuple(
+            (
+                formal,
                 self._apply_condition_values(
                     child.resolve(formal),
                     record_usage=False,
-                )
-                for formal in block.input_values
-                if not formal.type.is_quantum()
-            ]
-            + [_expr(controls)]
+                ),
+            )
+            for formal in block.input_values
+            if not formal.type.is_quantum()
+        )
+        call_state = tuple(
+            [value for _formal, value in resolved_classical_inputs] + [_expr(controls)]
+        )
+        local_bindings: dict[str, sp.Expr] = {}
+        for formal, value in resolved_classical_inputs:
+            if not value.is_number:
+                continue
+            local_bindings[formal.name] = value
+            parameter_name = formal.parameter_name()
+            if parameter_name is not None:
+                local_bindings[parameter_name] = value
+        self._validate_legacy_scalar_bit_rebinds(
+            block,
+            local_bindings=local_bindings,
         )
         active_states = self._active_call_states.setdefault(block_identity, [])
         repeated_state = call_state in active_states
@@ -4865,18 +7379,36 @@ class ResourceInterpreter:
             )
         active_states.append(call_state)
         tainted_formals = {
-            formal.uuid
+            formal.uuid: condition
             for formal, actual in pair_block_operands(block, actual_operands)
-            if actual.uuid in self._measurement_derived
+            if (
+                condition := _value_taint_condition(
+                    actual,
+                    self._measurement_taint_conditions,
+                )
+            )
+            is not sp.false
         }
-        previous_taint = self._measurement_derived
-        self._measurement_derived = previous_taint | tainted_formals
+        previous_taint = self._measurement_taint_conditions
+        self._measurement_taint_conditions = _merge_measurement_taint_conditions(
+            previous_taint,
+            tainted_formals,
+        )
         try:
-            return self.eval_operations(
+            estimate = self.eval_operations(
                 block.operations,
                 child,
                 controls=controls,
                 initial_allocations=_block_input_allocations(block, child),
+            )
+            return _with_constraints(
+                estimate,
+                *_block_output_constraints(
+                    block,
+                    child,
+                    active_when=self._constraint_scope_condition,
+                    proven_cache=self._array_constraint_proven,
+                ),
             )
         except RecursionError as error:
             name = block.name or "qkernel"
@@ -4887,7 +7419,7 @@ class ResourceInterpreter:
                 "recursion with a bounded loop."
             ) from error
         finally:
-            self._measurement_derived = previous_taint
+            self._measurement_taint_conditions = previous_taint
             active_states.pop()
             if not active_states:
                 self._active_call_states.pop(block_identity, None)
@@ -5376,6 +7908,430 @@ class ResourceInterpreter:
             ),
         )
 
+    def _initial_loop_array_states(
+        self,
+        operation: ForOperation | ForItemsOperation,
+        resolver: ExprResolver,
+    ) -> dict[LoopCarriedRebind, _ArrayState]:
+        """Capture array states entering the first concrete loop iteration.
+
+        Args:
+            operation (ForOperation | ForItemsOperation): Loop whose explicit
+                trace-time rebind records are inspected.
+            resolver (ExprResolver): Resolver for the enclosing scope.
+
+        Returns:
+            dict[LoopCarriedRebind, _ArrayState]: Immutable entry snapshots for
+            array rebind records only.
+        """
+        return {
+            rebind: resolver.snapshot_array_state(cast(ArrayValue, rebind.before))
+            for rebind in _loop_array_state_rebinds(operation)
+        }
+
+    def _bind_loop_array_states(
+        self,
+        operation: ForOperation | ForItemsOperation,
+        resolver: ExprResolver,
+        states: Mapping[LoopCarriedRebind, _ArrayState],
+    ) -> None:
+        """Bind prior array snapshots to one loop body's entry SSA values.
+
+        Args:
+            operation (ForOperation | ForItemsOperation): Loop being replayed.
+            resolver (ExprResolver): Detached resolver for the next iteration.
+            states (Mapping[LoopCarriedRebind, _ArrayState]): Prior exit state
+                for every carried array lineage.
+        """
+        for rebind, state in states.items():
+            assert isinstance(rebind.before, ArrayValue)
+            resolver.bind_loop_array_input(
+                operation.operations,
+                rebind.before,
+                state,
+            )
+
+    def _next_loop_array_states(
+        self,
+        resolver: ExprResolver,
+        states: Mapping[LoopCarriedRebind, _ArrayState],
+    ) -> dict[LoopCarriedRebind, _ArrayState]:
+        """Capture array states produced by one concrete loop iteration.
+
+        Args:
+            resolver (ExprResolver): Evaluated iteration resolver.
+            states (Mapping[LoopCarriedRebind, _ArrayState]): Carried records
+                whose next snapshots are requested.
+
+        Returns:
+            dict[LoopCarriedRebind, _ArrayState]: Immutable exit snapshots.
+        """
+        return {
+            rebind: resolver.snapshot_array_state(cast(ArrayValue, rebind.after))
+            for rebind in states
+        }
+
+    def _summarize_for_array_states(
+        self,
+        operation: ForOperation | ForItemsOperation,
+        resolver: ExprResolver,
+        body_resolver: ExprResolver,
+        initial_states: Mapping[LoopCarriedRebind, _ArrayState],
+        *,
+        loop_symbol: sp.Symbol,
+        start: ResourceExpr,
+        step: ResourceExpr,
+        iterations: ResourceExpr,
+        concrete_iterations: range | None,
+        updates_are_unresolved: bool = False,
+    ) -> dict[LoopCarriedRebind, _ArrayState]:
+        """Build caller-visible array states after a range loop.
+
+        One traced body is a persistent state transition. Concrete large loops
+        instantiate and fold that transition in execution order; unresolved
+        ranges retain a quantified summary so body-local induction symbols do
+        not escape as public resource parameters.
+
+        Args:
+            operation (ForOperation | ForItemsOperation): Loop owning the body
+                transition.
+            resolver (ExprResolver): Enclosing resolver used to instantiate
+                persistent states.
+            body_resolver (ExprResolver): Evaluated one-iteration resolver.
+            initial_states (Mapping[LoopCarriedRebind, _ArrayState]): Array
+                snapshots before the first iteration.
+            loop_symbol (sp.Symbol): Symbolic induction variable.
+            start (ResourceExpr): First range value.
+            step (ResourceExpr): Range stride.
+            iterations (ResourceExpr): Number of range iterations.
+            concrete_iterations (range | None): Concrete range when every
+                bound is known, otherwise ``None``.
+            updates_are_unresolved (bool): Whether symbolic iteration keys or
+                values prevent an element-specific update summary. Defaults
+                to ``False``.
+
+        Returns:
+            dict[LoopCarriedRebind, _ArrayState]: Folded or quantified exit
+                states keyed by carried array boundary.
+        """
+        if not initial_states:
+            return {}
+        if concrete_iterations is None and updates_are_unresolved:
+            exit_states: dict[LoopCarriedRebind, _ArrayState] = {}
+            for rebind, initial_state in initial_states.items():
+                assert isinstance(rebind.after, ArrayValue)
+                fallback = _typed_value_symbol(
+                    rebind.after,
+                    f"{rebind.var_name}_after_loop_element",
+                    fresh=True,
+                )
+                self._unresolved_resource_symbols.add(fallback)
+                if isinstance(rebind.after.type, BitType):
+                    self._runtime_value_domains[fallback] = (_ZERO, _ONE)
+                uncertainty_token = f"$loop-array:{id(operation):x}:{rebind.after.uuid}"
+                exit_states[rebind] = resolver.unknown_loop_array_summary_state(
+                    initial=initial_state,
+                    iterations=cast(sp.Expr, iterations),
+                    fallback=fallback,
+                    uncertainty_token=uncertainty_token,
+                )
+            return exit_states
+        transition_states = self._next_loop_array_states(
+            body_resolver,
+            initial_states,
+        )
+        if concrete_iterations is not None:
+            exit_states = dict(initial_states)
+            for loop_value in concrete_iterations:
+                replacements = tuple(
+                    (initial_states[rebind], exit_states[rebind])
+                    for rebind in initial_states
+                )
+                exit_states = {
+                    rebind: resolver.instantiate_array_state(
+                        transition_states[rebind],
+                        state_replacements=replacements,
+                        substitutions={loop_symbol: sp.Integer(loop_value)},
+                    )
+                    for rebind in initial_states
+                }
+            return exit_states
+
+        exit_states: dict[LoopCarriedRebind, _ArrayState] = {}
+        for rebind, initial_state in initial_states.items():
+            assert isinstance(rebind.after, ArrayValue)
+            fallback = _typed_value_symbol(
+                rebind.after,
+                f"{rebind.var_name}_after_loop_element",
+                fresh=True,
+            )
+            self._unresolved_resource_symbols.add(fallback)
+            if isinstance(rebind.after.type, BitType):
+                self._runtime_value_domains[fallback] = (_ZERO, _ONE)
+            uncertainty_token = f"$loop-array:{id(operation):x}:{rebind.after.uuid}"
+            exit_states[rebind] = resolver.loop_array_summary_state(
+                initial=initial_state,
+                iteration=transition_states[rebind],
+                loop_symbol=loop_symbol,
+                start=cast(sp.Expr, start),
+                step=cast(sp.Expr, step),
+                iterations=cast(sp.Expr, iterations),
+                fallback=fallback,
+                uncertainty_token=uncertainty_token,
+            )
+        return exit_states
+
+    def _conservative_loop_body_array_states(
+        self,
+        operation: ForOperation | ForItemsOperation,
+        resolver: ExprResolver,
+        initial_states: Mapping[LoopCarriedRebind, _ArrayState],
+        *,
+        completed_iterations: sp.Expr,
+    ) -> tuple[dict[LoopCarriedRebind, _ArrayState], frozenset[str]]:
+        """Represent carried array elements conservatively inside a loop body.
+
+        A single symbolic trace cannot know the value written by every prior
+        iteration. The first iteration retains the initial state; later
+        iterations project an internal fallback value with an explicit source
+        token. Resource-affecting reads therefore select the safe runtime
+        branch instead of reusing only the first iteration's value.
+
+        Args:
+            operation (ForOperation | ForItemsOperation): Loop owning the
+                carried array lineages.
+            resolver (ExprResolver): Resolver used to create immutable summary
+                states.
+            initial_states (Mapping[LoopCarriedRebind, _ArrayState]): Array
+                snapshots before the loop.
+            completed_iterations (sp.Expr): Number of iterations preceding the
+                body instance being summarized.
+
+        Returns:
+            tuple[dict[LoopCarriedRebind, _ArrayState], frozenset[str]]: Body
+            entry states and the uncertainty source tokens they introduce.
+        """
+        states: dict[LoopCarriedRebind, _ArrayState] = {}
+        source_tokens: set[str] = set()
+        for rebind, initial_state in initial_states.items():
+            assert isinstance(rebind.after, ArrayValue)
+            fallback = _typed_value_symbol(
+                rebind.after,
+                f"{rebind.var_name}_loop_body_element",
+                fresh=True,
+            )
+            self._unresolved_resource_symbols.add(fallback)
+            if isinstance(rebind.after.type, BitType):
+                self._runtime_value_domains[fallback] = (_ZERO, _ONE)
+            source_token = f"$loop-array-body:{id(operation):x}:{rebind.after.uuid}"
+            source_tokens.add(source_token)
+            states[rebind] = resolver.unknown_loop_array_summary_state(
+                initial=initial_state,
+                iterations=completed_iterations,
+                fallback=fallback,
+                uncertainty_token=source_token,
+            )
+        return states, frozenset(source_tokens)
+
+    @staticmethod
+    def _estimate_reads_source_tokens(
+        estimate: ResourceEstimate,
+        source_tokens: Iterable[str],
+    ) -> bool:
+        """Return whether quantum work reads any supplied classical source.
+
+        Args:
+            estimate (ResourceEstimate): Body estimate carrying directed
+                scheduler accesses.
+            source_tokens (Iterable[str]): Classical source-token identities to
+                test.
+
+        Returns:
+            bool: Whether a token is read, or access metadata is unavailable
+            and the safe answer is therefore unknown.
+        """
+        dependency_keys = frozenset(
+            _classical_dependency_key(token) for token in source_tokens
+        )
+        if not dependency_keys:
+            return False
+        if estimate._dependency_reads is None:
+            return True
+        return not dependency_keys.isdisjoint(estimate._dependency_reads)
+
+    def _apply_disjoint_loop_depth(
+        self,
+        operation: ForOperation,
+        resolver: ExprResolver,
+        body_resolver: ExprResolver,
+        body: ResourceEstimate,
+        sequential: ResourceEstimate,
+        *,
+        start: ResourceExpr,
+        stop: ResourceExpr,
+        step: ResourceExpr,
+        loop_symbol: sp.Symbol,
+        iterations: ResourceExpr,
+        specialized_iterations: ResourceExpr,
+        controls: ResourceExpr | int,
+        has_cross_iteration_dependency: bool = False,
+    ) -> ResourceEstimate:
+        """Use parallel depth when distinct loop iterations touch distinct wires.
+
+        The same projection applies whether or not the loop carries classical
+        region arguments. Classical carries affect later values, but do not by
+        themselves serialize quantum work on provably disjoint wires.
+
+        Args:
+            operation (ForOperation): Loop whose body is summarized.
+            resolver (ExprResolver): Enclosing resolver for concrete wire
+                projections.
+            body_resolver (ExprResolver): Resolver used to evaluate one
+                symbolic body iteration.
+            body (ResourceEstimate): One-iteration resource estimate.
+            sequential (ResourceEstimate): Sum of the body over all iterations.
+            start (ResourceExpr): Inclusive range start.
+            stop (ResourceExpr): Exclusive range stop.
+            step (ResourceExpr): Range stride.
+            loop_symbol (sp.Symbol): Symbol used for the body iteration.
+            iterations (ResourceExpr): Unspecialized iteration count.
+            specialized_iterations (ResourceExpr): Iteration count after
+                supplied input values are applied.
+            controls (ResourceExpr | int): Controls surrounding the loop.
+            has_cross_iteration_dependency (bool): Whether classical state
+                used by quantum work may flow from one iteration into the
+                next. Defaults to ``False``.
+
+        Returns:
+            ResourceEstimate: Estimate with parallel depth when disjointness is
+            proven, or the sequential estimate with conservative metadata when
+            symbolic wire aliasing remains unresolved.
+        """
+        loop_barrier_condition = sequential._global_barrier_condition
+        if specialized_iterations.is_zero is True:
+            return sequential
+        if has_cross_iteration_dependency:
+            assumption = ResourceAssumption(
+                "loop depth is sequential because classical state used by "
+                "quantum work may flow between iterations",
+                source="for",
+            )
+            return sequential._with_metadata(
+                assumptions=(assumption,),
+                quality=EstimateQuality.CONSERVATIVE,
+                active_when=sp.Gt(iterations, _ONE),
+            )
+        if _expr(controls) != _ZERO or loop_barrier_condition is sp.true:
+            return sequential
+
+        parallel_depth = _symbolic_disjoint_loop_depth(
+            operation,
+            body_resolver,
+            body.depth,
+            loop_symbol=loop_symbol,
+            iterations=iterations,
+            allocated_qubits=body.width.allocated_qubits,
+            clean_ancillas=body.width.clean_ancilla_qubits,
+            dirty_ancillas=body.width.dirty_ancilla_qubits,
+            scalar_values=self.condition_values,
+            used_names=self.branch_condition_names,
+        )
+        if parallel_depth is None:
+            parallel_depth = _disjoint_concrete_loop_depth(
+                operation,
+                resolver,
+                body.depth,
+                body_dependency_keys=body._dependency_keys,
+                start=start,
+                stop=stop,
+                step=step,
+                loop_symbol=loop_symbol,
+                allocated_qubits=body.width.allocated_qubits,
+                clean_ancillas=body.width.clean_ancilla_qubits,
+                dirty_ancillas=body.width.dirty_ancilla_qubits,
+                scalar_values=self.condition_values,
+                used_names=self.branch_condition_names,
+            )
+        if parallel_depth is None:
+            if _dependency_keys_depend_on_symbol(
+                body._dependency_keys,
+                loop_symbol,
+            ) or _loop_body_has_symbolic_quantum_index(
+                operation,
+                body_resolver,
+                loop_symbol,
+                scalar_values=self.condition_values,
+                used_names=self.branch_condition_names,
+            ):
+                assumption = ResourceAssumption(
+                    "symbolic loop depth is sequential because disjoint "
+                    "iteration footprints could not be proven",
+                    source="for",
+                )
+                return sequential._with_metadata(
+                    assumptions=(assumption,),
+                    quality=EstimateQuality.CONSERVATIVE,
+                    active_when=sp.And(
+                        sp.Not(loop_barrier_condition),
+                        sp.Gt(iterations, _ONE),
+                    ),
+                )
+            return sequential
+
+        parallel_completion = _concrete_loop_dependency_completion(
+            body._dependency_completion,
+            loop_symbol,
+            start=start,
+            stop=stop,
+            step=step,
+            scalar_values=self.condition_values,
+            used_names=self.branch_condition_names,
+        )
+        if parallel_completion is None:
+            parallel_completion = _uniform_parallel_loop_dependency_completion(
+                body._dependency_completion,
+                body_depth=body.depth.depth,
+                projected_keys=sequential._dependency_keys,
+                parallel_depth=parallel_depth.depth,
+                loop_symbol=loop_symbol,
+            )
+        parallel_estimate = dataclasses.replace(
+            sequential,
+            depth=parallel_depth,
+            _dependency_completion=(
+                parallel_completion
+                if parallel_completion is not None
+                else sequential._dependency_completion
+            ),
+            _dependency_completion_uniform=(
+                body._dependency_completion_uniform is True
+                and all(
+                    loop_symbol
+                    not in cast(
+                        ResourceExpr,
+                        getattr(body.depth, field.name),
+                    ).free_symbols
+                    for field in dataclasses.fields(DepthResources)
+                )
+            ),
+            _global_barrier_condition=sp.false,
+        )
+        if parallel_completion is None and parallel_estimate._dependency_keys:
+            assumption = ResourceAssumption(
+                "parallel loop uses aggregate completion latency because "
+                "per-wire exit layers could not be projected exactly",
+                source="for",
+            )
+            parallel_estimate = parallel_estimate._with_metadata(
+                assumptions=(assumption,),
+                quality=EstimateQuality.CONSERVATIVE,
+                active_when=sp.Gt(iterations, _ZERO),
+            )
+        return sequential.conditional(
+            parallel_estimate,
+            loop_barrier_condition,
+        )
+
     def eval_for(
         self,
         operation: ForOperation,
@@ -5411,6 +8367,56 @@ class ResourceInterpreter:
             resolver,
         )
         iterations = symbolic_iterations(start, stop, step)
+        initial_array_states = self._initial_loop_array_states(operation, resolver)
+        specialized_bounds = tuple(
+            self._apply_condition_values(bound, record_usage=False)
+            for bound in (start, stop, step)
+        )
+        specialized_iterations = symbolic_iterations(*specialized_bounds)
+        captured_allocations = _captured_quantum_allocations(
+            operation.operations,
+            child,
+            self._allocation_owners_by_uuid,
+        )
+        consumption_resolvers: tuple[ExprResolver, ...]
+        consumption_iterations_are_definite = False
+        concrete_iteration_range: range | None = None
+        concrete_specialized_bounds = tuple(
+            self._concrete_scalar(bound) for bound in specialized_bounds
+        )
+        if all(bound is not None for bound in concrete_specialized_bounds):
+            concrete_start, concrete_stop, concrete_step = cast(
+                tuple[int, int, int],
+                concrete_specialized_bounds,
+            )
+            concrete_range = range(concrete_start, concrete_stop, concrete_step)
+            concrete_iteration_range = concrete_range
+            if (
+                operation.loop_var_value is not None
+                and len(concrete_range[: _MAX_EXACT_LOOP_WIRE_EXPANSION + 1])
+                <= _MAX_EXACT_LOOP_WIRE_EXPANSION
+            ):
+                consumption_resolvers = tuple(
+                    child.child_scope(
+                        _LocalBlock(operation.operations),
+                        extra_context={
+                            operation.loop_var_value.uuid: sp.Integer(iteration)
+                        },
+                        extra_loop_vars={operation.loop_var: sp.Integer(iteration)},
+                    )
+                    for iteration in concrete_range
+                )
+                consumption_iterations_are_definite = True
+            elif not concrete_range:
+                consumption_resolvers = ()
+                consumption_iterations_are_definite = True
+            else:
+                consumption_resolvers = (child,)
+        elif specialized_iterations.is_zero is True:
+            consumption_resolvers = ()
+            consumption_iterations_are_definite = True
+        else:
+            consumption_resolvers = (child,)
         dependency_start, dependency_stop, dependency_step = (
             _specialize_dependency_expression(
                 bound,
@@ -5420,43 +8426,91 @@ class ResourceInterpreter:
             for bound in (start, stop, step)
         )
         body_output_sizes: Mapping[str, ResourceExpr] = {}
-        output_maximum_exact = True
-        output_retains_prior = False
+        output_maximum_conservative_when: Boolean = sp.false
+        output_retains_prior_when: Boolean = sp.false
+        replayed_concrete_body = False
+        loop_exit_array_states: dict[LoopCarriedRebind, _ArrayState] | None = None
+        loop_body_reads_carried_array = False
         if operation.region_args:
-            estimate = self._eval_region_for(
-                operation,
-                resolver,
-                start=start,
-                stop=stop,
-                step=step,
-                loop_symbol=loop_symbol,
-                controls=controls,
-            )
+            with self._guarded_constraint_scope(sp.Gt(iterations, _ZERO)):
+                estimate = self._eval_region_for(
+                    operation,
+                    resolver,
+                    start=start,
+                    stop=stop,
+                    step=step,
+                    loop_symbol=loop_symbol,
+                    controls=controls,
+                )
             body_output_sizes = estimate._output_sizes
+            replayed_concrete_body = True
         else:
-            specialized_bounds = tuple(
-                self._apply_condition_values(bound, record_usage=False)
-                for bound in (start, stop, step)
-            )
-            specialized_iterations = symbolic_iterations(*specialized_bounds)
             inner: ResourceEstimate | None = None
             if specialized_iterations.is_zero is True:
                 estimate = ResourceEstimate.zero("empty_for")
+                loop_exit_array_states = dict(initial_array_states)
+            elif (
+                concrete_iteration_range is not None
+                and (
+                    bool(operation.loop_carried_rebinds)
+                    or any(
+                        isinstance(nested, StoreArrayElementOperation)
+                        for nested in walk_operations(operation.operations)
+                    )
+                )
+                and len(concrete_iteration_range[: _CONCRETE_REGION_REPLAY_LIMIT + 1])
+                <= _CONCRETE_REGION_REPLAY_LIMIT
+            ):
+                with self._guarded_constraint_scope(sp.Gt(iterations, _ZERO)):
+                    estimate = self._eval_concrete_region_for(
+                        operation,
+                        resolver,
+                        concrete_iteration_range,
+                        controls=controls,
+                    )
+                body_output_sizes = estimate._output_sizes
+                replayed_concrete_body = True
             else:
-                inner = self.eval_operations(
-                    operation.operations,
+                child.copy_array_context()
+                completed_iterations = cast(
+                    sp.Expr,
+                    sp.simplify((loop_symbol - start) / step),
+                )
+                body_array_states, body_array_source_tokens = (
+                    self._conservative_loop_body_array_states(
+                        operation,
+                        resolver,
+                        initial_array_states,
+                        completed_iterations=completed_iterations,
+                    )
+                )
+                self._bind_loop_array_states(
+                    operation,
                     child,
-                    controls=controls,
-                    initial_allocations=_captured_quantum_allocations(
+                    body_array_states,
+                )
+                with self._guarded_constraint_scope(sp.Gt(iterations, _ZERO)):
+                    inner = self.eval_operations(
                         operation.operations,
                         child,
-                        self._allocation_owners_by_uuid,
-                    ),
+                        controls=controls,
+                        initial_allocations=captured_allocations,
+                    )
+                    inner = _with_constraints(
+                        inner,
+                        *self._loop_iteration_array_constraints(
+                            operation,
+                            child,
+                        ),
+                    )
+                loop_body_reads_carried_array = self._estimate_reads_source_tokens(
+                    inner,
+                    body_array_source_tokens,
                 )
                 (
                     body_output_sizes,
-                    output_maximum_exact,
-                    output_retains_prior,
+                    output_maximum_conservative_when,
+                    output_retains_prior_when,
                 ) = _maximum_live_owner_sizes_over_range(
                     inner._output_sizes,
                     loop_symbol,
@@ -5473,144 +8527,115 @@ class ResourceInterpreter:
                     dependency_stop=dependency_stop,
                     dependency_step=dependency_step,
                 )
-            parallel_depth: DepthResources | None = None
-            if specialized_iterations.is_zero is not True and _expr(controls) == _ZERO:
-                assert inner is not None
-                parallel_depth = _symbolic_disjoint_loop_depth(
+                loop_exit_array_states = self._summarize_for_array_states(
                     operation,
+                    resolver,
                     child,
-                    inner.depth,
+                    initial_array_states,
                     loop_symbol=loop_symbol,
+                    start=start,
+                    step=step,
                     iterations=iterations,
-                    allocated_qubits=inner.width.allocated_qubits,
-                    clean_ancillas=inner.width.clean_ancilla_qubits,
-                    dirty_ancillas=inner.width.dirty_ancilla_qubits,
-                    measurement_derived=self._measurement_derived,
-                    global_barrier_operation_ids=(self._global_barrier_operation_ids),
-                    scalar_values=self.condition_values,
-                    used_names=self.branch_condition_names,
+                    concrete_iterations=(
+                        None if body_array_source_tokens else concrete_iteration_range
+                    ),
+                    updates_are_unresolved=bool(body_array_source_tokens),
                 )
-                if parallel_depth is None:
-                    parallel_depth = _disjoint_concrete_loop_depth(
-                        operation,
-                        resolver,
-                        inner.depth,
-                        body_dependency_keys=inner._dependency_keys,
-                        start=start,
-                        stop=stop,
-                        step=step,
-                        loop_symbol=loop_symbol,
-                        allocated_qubits=inner.width.allocated_qubits,
-                        clean_ancillas=inner.width.clean_ancilla_qubits,
-                        dirty_ancillas=inner.width.dirty_ancilla_qubits,
-                        measurement_derived=self._measurement_derived,
-                        global_barrier_operation_ids=(
-                            self._global_barrier_operation_ids
-                        ),
-                        scalar_values=self.condition_values,
-                        used_names=self.branch_condition_names,
-                    )
-            if parallel_depth is not None:
-                assert inner is not None
-                parallel_completion = _concrete_loop_dependency_completion(
-                    inner._dependency_completion,
-                    loop_symbol,
+            if not replayed_concrete_body and inner is not None:
+                estimate = self._apply_disjoint_loop_depth(
+                    operation,
+                    resolver,
+                    child,
+                    inner,
+                    estimate,
                     start=start,
                     stop=stop,
                     step=step,
-                    scalar_values=self.condition_values,
-                    used_names=self.branch_condition_names,
+                    loop_symbol=loop_symbol,
+                    iterations=iterations,
+                    specialized_iterations=specialized_iterations,
+                    controls=controls,
+                    has_cross_iteration_dependency=(loop_body_reads_carried_array),
                 )
-                if parallel_completion is None:
-                    parallel_completion = _uniform_parallel_loop_dependency_completion(
-                        inner._dependency_completion,
-                        body_depth=inner.depth.depth,
-                        projected_keys=estimate._dependency_keys,
-                        parallel_depth=parallel_depth.depth,
-                        loop_symbol=loop_symbol,
-                    )
-                estimate = dataclasses.replace(
-                    estimate,
-                    depth=parallel_depth,
-                    _dependency_completion=(
-                        parallel_completion
-                        if parallel_completion is not None
-                        else estimate._dependency_completion
-                    ),
-                    _dependency_completion_uniform=(
-                        inner._dependency_completion_uniform is True
-                        and all(
-                            loop_symbol
-                            not in cast(
-                                ResourceExpr,
-                                getattr(inner.depth, field.name),
-                            ).free_symbols
-                            for field in dataclasses.fields(DepthResources)
-                        )
-                    ),
-                )
-                if parallel_completion is None and estimate._dependency_keys:
-                    assumption = ResourceAssumption(
-                        "parallel loop uses aggregate completion latency because "
-                        "per-wire exit layers could not be projected exactly",
-                        source="for",
-                    )
-                    estimate = estimate._with_metadata(
-                        assumptions=(assumption,),
-                        quality=EstimateQuality.CONSERVATIVE,
-                        active_when=sp.Gt(iterations, _ZERO),
-                    )
-            elif (
-                specialized_iterations.is_zero is not True
-                and _expr(controls) == _ZERO
-                and (
-                    inner is not None
-                    and (
-                        _dependency_keys_depend_on_symbol(
-                            inner._dependency_keys,
-                            loop_symbol,
-                        )
-                        or _loop_body_has_symbolic_quantum_index(
-                            operation,
-                            child,
-                            loop_symbol,
-                            scalar_values=self.condition_values,
-                            used_names=self.branch_condition_names,
-                        )
-                    )
-                )
-            ):
-                assumption = ResourceAssumption(
-                    "symbolic loop depth is sequential because disjoint "
-                    "iteration footprints could not be proven",
-                    source="for",
-                )
+        if output_maximum_conservative_when is not sp.false:
+            estimate = _with_conservative_loop_output_liveness(
+                estimate,
+                active_when=output_maximum_conservative_when,
+                source="for liveness",
+            )
+        if output_retains_prior_when is not sp.false:
+            estimate = _with_conservative_loop_output_liveness(
+                estimate,
+                active_when=_and_conditions(
+                    sp.Gt(iterations, _ONE),
+                    output_retains_prior_when,
+                ),
+                source="for liveness",
+            )
+        if not replayed_concrete_body:
+            if loop_body_reads_carried_array:
                 estimate = estimate._with_metadata(
-                    assumptions=(assumption,),
+                    assumptions=(
+                        ResourceAssumption(
+                            "loop body resources use a conservative summary "
+                            "of carried classical array state",
+                            source="for classical state",
+                        ),
+                    ),
                     quality=EstimateQuality.CONSERVATIVE,
                     active_when=sp.Gt(iterations, _ONE),
                 )
-        if not output_maximum_exact:
-            estimate = _with_conservative_loop_output_liveness(
+            if loop_exit_array_states:
+                estimate = estimate._with_metadata(
+                    assumptions=(
+                        ResourceAssumption(
+                            "loop-exit classical array readiness is summarized "
+                            "at the loop completion boundary",
+                            source="for classical state",
+                        ),
+                    ),
+                    quality=EstimateQuality.CONSERVATIVE,
+                    active_when=sp.Gt(iterations, _ZERO),
+                )
+            estimate = self._publish_loop_rebind_results(
+                operation,
+                resolver,
+                child,
                 estimate,
                 active_when=sp.Gt(iterations, _ZERO),
-                source="for liveness",
+                array_states=loop_exit_array_states,
             )
-        elif output_retains_prior:
-            estimate = _with_conservative_loop_output_liveness(
-                estimate,
-                active_when=sp.Gt(iterations, _ONE),
-                source="for liveness",
+        additional_consumed, retained_consumption_is_conservative = (
+            _loop_captured_observation_consumption(
+                operation.operations,
+                captured_allocations,
+                consumption_resolvers,
+                definite_iterations=consumption_iterations_are_definite,
+                allocation_owners_by_uuid=self._allocation_owners_by_uuid,
             )
+        )
         estimate = _with_operation_output_summary(
             estimate,
             operation,
             resolver,
             active_when=sp.Gt(iterations, _ZERO),
             body_output_sizes=body_output_sizes,
+            additional_consumed_allocations=additional_consumed,
             allocation_owners_by_uuid=self._allocation_owners_by_uuid,
         )
-        return estimate
+        if retained_consumption_is_conservative:
+            estimate = _with_conservative_loop_output_liveness(
+                estimate,
+                active_when=sp.Gt(iterations, _ZERO),
+                source="for liveness",
+            )
+        return _with_constraints(
+            estimate,
+            *self._loop_initial_array_constraints(
+                operation,
+                resolver,
+            ),
+        )
 
     def _eval_region_for(
         self,
@@ -5710,12 +8735,29 @@ class ResourceInterpreter:
             arg.block_arg.uuid: self._apply_condition_values(resolver.resolve(arg.init))
             for arg in operation.region_args
         }
+        carried_facts = {
+            arg.block_arg.uuid: resolver.resolve_classical_fact(arg.init)
+            for arg in operation.region_args
+        }
+        carried_taint = {
+            arg.block_arg.uuid: condition
+            for arg in operation.region_args
+            if (
+                condition := _value_taint_condition(
+                    arg.init,
+                    self._measurement_taint_conditions,
+                )
+            )
+            is not sp.false
+        }
         composer = _SequentialEstimateComposer()
         iteration_estimates: list[ResourceEstimate] = []
         iteration_width = WidthResources.zero()
         anonymous_allocated = _ZERO
         body = _LocalBlock(operation.operations)
-        for loop_value in iterations:
+        last_child = resolver
+        array_states = self._initial_loop_array_states(operation, resolver)
+        for ordinal, loop_value in enumerate(iterations):
             loop_expr = sp.Integer(loop_value)
             context = dict(carried)
             if operation.loop_var_value is not None:
@@ -5725,16 +8767,37 @@ class ResourceInterpreter:
                 extra_context=context,
                 extra_loop_vars={operation.loop_var: loop_expr},
             )
-            iteration_estimate = self.eval_operations(
-                operation.operations,
-                child,
-                controls=controls,
-                initial_allocations=_captured_quantum_allocations(
-                    operation.operations,
-                    child,
-                    self._allocation_owners_by_uuid,
-                ),
-            )
+            child.copy_array_context()
+            self._bind_loop_array_states(operation, child, array_states)
+            last_child = child
+            for arg in operation.region_args:
+                fact = carried_facts[arg.block_arg.uuid]
+                child.bind_classical_fact(
+                    arg.block_arg,
+                    _ResolvedClassicalFact.create(
+                        carried[arg.block_arg.uuid],
+                        fact.dependencies,
+                    ),
+                )
+            with self._observation_occurrence_scope("range", operation, ordinal):
+                with self._measurement_taint_scope(carried_taint):
+                    iteration_estimate = self.eval_operations(
+                        operation.operations,
+                        child,
+                        controls=controls,
+                        initial_allocations=_captured_quantum_allocations(
+                            operation.operations,
+                            child,
+                            self._allocation_owners_by_uuid,
+                        ),
+                    )
+                    iteration_estimate = _with_constraints(
+                        iteration_estimate,
+                        *self._loop_iteration_array_constraints(
+                            operation,
+                            child,
+                        ),
+                    )
             composer.append(iteration_estimate)
             iteration_estimates.append(iteration_estimate)
             iteration_width = _max_width(iteration_width, iteration_estimate.width)
@@ -5751,8 +8814,31 @@ class ResourceInterpreter:
                 )
                 for arg in operation.region_args
             }
+            carried_facts = {
+                arg.block_arg.uuid: child.resolve_classical_fact(arg.yielded)
+                for arg in operation.region_args
+            }
+            carried_taint = {
+                arg.block_arg.uuid: condition
+                for arg in operation.region_args
+                if (
+                    condition := _value_taint_condition(
+                        arg.yielded,
+                        iteration_estimate._measurement_taint_conditions,
+                    )
+                )
+                is not sp.false
+            }
+            array_states = self._next_loop_array_states(child, array_states)
         for arg in operation.region_args:
-            resolver.bind(arg.result, carried[arg.block_arg.uuid])
+            fact = carried_facts[arg.block_arg.uuid]
+            resolver.bind_classical_fact(
+                arg.result,
+                _ResolvedClassicalFact.create(
+                    carried[arg.block_arg.uuid],
+                    fact.dependencies,
+                ),
+            )
         estimate = composer.finish()
         estimate = dataclasses.replace(
             estimate,
@@ -5767,9 +8853,29 @@ class ResourceInterpreter:
             iteration_estimates,
             estimate,
         )
+        result_taint = {
+            arg.result.uuid: carried_taint[arg.block_arg.uuid]
+            for arg in operation.region_args
+            if arg.block_arg.uuid in carried_taint
+        }
+        scheduled = dataclasses.replace(
+            scheduled,
+            _measurement_taint_conditions=_merge_measurement_taint_conditions(
+                scheduled._measurement_taint_conditions,
+                result_taint,
+            ),
+        )
+        scheduled = self._publish_loop_rebind_results(
+            operation,
+            resolver,
+            last_child,
+            scheduled,
+            active_when=sp.true if iteration_estimates else sp.false,
+            array_states=array_states,
+        )
         if not iteration_estimates:
             return scheduled
-        output_sizes, retains_prior_output = _maximum_live_owner_sizes(
+        output_sizes, retains_prior_when = _maximum_live_owner_sizes(
             [iteration._output_sizes for iteration in iteration_estimates]
         )
         scheduled = dataclasses.replace(
@@ -5779,10 +8885,10 @@ class ResourceInterpreter:
                 iteration._has_output_summary for iteration in iteration_estimates
             ),
         )
-        if retains_prior_output:
+        if retains_prior_when is not sp.false:
             scheduled = _with_conservative_loop_output_liveness(
                 scheduled,
-                active_when=sp.true,
+                active_when=retains_prior_when,
                 source="for liveness",
             )
         return scheduled
@@ -5820,7 +8926,7 @@ class ResourceInterpreter:
             ValueError: If input specialization produces a concrete zero-step
                 range.
             NotImplementedError: If quantum resource use depends on an
-                unsupported nonlinear loop-carried recurrence.
+                unsupported symbolic loop-carried recurrence.
         """
         carry_symbols = {
             arg.block_arg.uuid: _typed_value_symbol(
@@ -5830,38 +8936,86 @@ class ResourceInterpreter:
             )
             for arg in operation.region_args
         }
+        initial_carry_facts = {
+            arg.block_arg.uuid: resolver.resolve_classical_fact(arg.init)
+            for arg in operation.region_args
+        }
+        initial_array_states = self._initial_loop_array_states(operation, resolver)
         context: dict[str, sp.Expr] = dict(carry_symbols)
         if operation.loop_var_value is not None:
             context[operation.loop_var_value.uuid] = loop_symbol
+        initial_carry_taint = {
+            arg.block_arg.uuid: condition
+            for arg in operation.region_args
+            if (
+                condition := _value_taint_condition(
+                    arg.init,
+                    self._measurement_taint_conditions,
+                )
+            )
+            is not sp.false
+        }
         probe = resolver.child_scope(
             inner_block=_LocalBlock(operation.operations),
             extra_context=context,
             extra_loop_vars={operation.loop_var: loop_symbol},
         )
+        probe.copy_array_context()
+        self._bind_loop_array_states(operation, probe, initial_array_states)
+        for arg in operation.region_args:
+            initial_fact = initial_carry_facts[arg.block_arg.uuid]
+            probe.bind_classical_fact(
+                arg.block_arg,
+                _ResolvedClassicalFact.create(
+                    carry_symbols[arg.block_arg.uuid],
+                    initial_fact.dependencies,
+                ),
+            )
         # Evaluate once so branch phi results become available to the resolver
         # before recurrence expressions are inspected. The estimate itself is
         # discarded and recomputed with the closed-form carry-at-iteration values.
-        self.eval_operations(
-            operation.operations,
-            probe,
-            controls=controls,
-            initial_allocations=_captured_quantum_allocations(
-                operation.operations,
-                probe,
-                self._allocation_owners_by_uuid,
-            ),
+        with self._observation_occurrence_scope("range-family", operation, -1):
+            with self._isolated_loop_taint_probe_state():
+                with self._measurement_taint_scope(initial_carry_taint):
+                    probe_estimate = self.eval_operations(
+                        operation.operations,
+                        probe,
+                        controls=controls,
+                        initial_allocations=_captured_quantum_allocations(
+                            operation.operations,
+                            probe,
+                            self._allocation_owners_by_uuid,
+                        ),
+                    )
+        loop_taint = _loop_may_taint(
+            operation,
+            initial_carry_taint,
+            probe_estimate,
         )
+        loop_source_conditions: dict[str, Boolean] = {}
+        for fact in initial_carry_facts.values():
+            _merge_classical_source_conditions(
+                loop_source_conditions,
+                fact.dependencies,
+            )
+        for arg in operation.region_args:
+            _merge_classical_source_conditions(
+                loop_source_conditions,
+                probe.resolve_classical_fact(arg.yielded).dependencies,
+            )
 
         iterations = symbolic_iterations(start, stop, step)
         specialized_bounds = tuple(
-            self._concrete_scalar(
-                self._apply_condition_values(bound, record_usage=False)
-            )
+            self._apply_condition_values(bound, record_usage=False)
             for bound in (start, stop, step)
         )
+        specialized_iterations = symbolic_iterations(*specialized_bounds)
+        concrete_specialized_bounds = tuple(
+            self._concrete_scalar(bound) for bound in specialized_bounds
+        )
         concrete_bounds = (
-            cast(tuple[int, int, int], specialized_bounds)
-            if all(bound is not None for bound in specialized_bounds)
+            cast(tuple[int, int, int], concrete_specialized_bounds)
+            if all(bound is not None for bound in concrete_specialized_bounds)
             else None
         )
         concrete_replay: range | None = None
@@ -5877,8 +9031,8 @@ class ResourceInterpreter:
             concrete_replay = candidate
         at_iteration: dict[str, sp.Expr] = {}
         final_values: dict[str, sp.Expr] = {}
-        unresolved_iteration_values: list[sp.Expr] = []
-        assumptions: list[ResourceAssumption] = []
+        unresolved_iteration_functions: list[Any] = []
+        guarded_assumptions: list[tuple[ResourceAssumption, Boolean]] = []
         all_carry_symbols = set(carry_symbols.values())
         for arg in operation.region_args:
             init = resolver.resolve(arg.init)
@@ -5902,26 +9056,51 @@ class ResourceInterpreter:
                         concrete_replay,
                         controls=controls,
                     )
-                at_value = sp.Function(f"{arg.var_name}_carry")(loop_symbol)
-                unresolved_iteration_values.append(at_value)
+                carry_function = sp.Function(f"{arg.var_name}_carry")
+                at_value = carry_function(loop_symbol)
+                unresolved_iteration_functions.append(carry_function)
                 unknown_final_value = _typed_value_symbol(
                     arg.result,
                     f"{arg.var_name}_after_loop",
                     fresh=True,
                 )
+                self._unresolved_resource_symbols.add(unknown_final_value)
+                identity_guard = _invariant_identity_branch_guard(
+                    yielded,
+                    carry_symbol=carry_symbol,
+                    invariant_symbols=(
+                        _loop_invariant_symbols(
+                            resolver,
+                            operation.captures,
+                            bound_expressions=(start, stop, step),
+                        )
+                        - self._runtime_observation_symbols
+                        - all_carry_symbols
+                        - {loop_symbol}
+                    ),
+                )
                 final_value = cast(
                     sp.Expr,
                     sp.Piecewise(
-                        (init, sp.Eq(iterations, _ZERO)),
+                        (
+                            init,
+                            sp.Or(sp.Eq(iterations, _ZERO), identity_guard),
+                        ),
                         (unknown_final_value, True),
                     ),
                 )
-                assumptions.append(
-                    ResourceAssumption(
-                        "loop-carried recurrence could not be reduced to an "
-                        "independent affine closed form; its final value remains "
-                        "symbolic",
-                        source=arg.var_name,
+                guarded_assumptions.append(
+                    (
+                        ResourceAssumption(
+                            "loop-carried recurrence could not be reduced to an "
+                            "independent affine closed form; its final value "
+                            "remains symbolic",
+                            source=arg.var_name,
+                        ),
+                        _and_conditions(
+                            sp.Gt(iterations, _ZERO),
+                            cast(Boolean, sp.Not(identity_guard)),
+                        ),
                     )
                 )
             else:
@@ -5937,27 +9116,67 @@ class ResourceInterpreter:
             extra_context=body_context,
             extra_loop_vars={operation.loop_var: loop_symbol},
         )
-        inner = self.eval_operations(
-            operation.operations,
-            child,
-            controls=controls,
-            initial_allocations=_captured_quantum_allocations(
-                operation.operations,
-                child,
-                self._allocation_owners_by_uuid,
-            ),
+        child.copy_array_context()
+        completed_iterations = cast(
+            sp.Expr,
+            sp.simplify((loop_symbol - start) / step),
         )
-        if any(
-            expression.has(unresolved)
-            for expression in _serialization_expressions(inner)
-            if isinstance(expression, sp.Basic)
-            for unresolved in unresolved_iteration_values
+        body_array_states, body_array_source_tokens = (
+            self._conservative_loop_body_array_states(
+                operation,
+                resolver,
+                initial_array_states,
+                completed_iterations=completed_iterations,
+            )
+        )
+        self._bind_loop_array_states(operation, child, body_array_states)
+        for arg in operation.region_args:
+            sources = (
+                loop_source_conditions
+                if arg.block_arg.uuid in loop_taint.at_iteration
+                else initial_carry_facts[arg.block_arg.uuid].dependencies
+            )
+            child.bind_classical_fact(
+                arg.block_arg,
+                _ResolvedClassicalFact.create(
+                    at_iteration[arg.block_arg.uuid],
+                    sources,
+                ),
+            )
+        with self._observation_occurrence_scope("range-family", operation, -1):
+            with self._guarded_constraint_scope(sp.Gt(iterations, _ZERO)):
+                with self._measurement_taint_scope(loop_taint.at_iteration):
+                    inner = self.eval_operations(
+                        operation.operations,
+                        child,
+                        controls=controls,
+                        initial_allocations=_captured_quantum_allocations(
+                            operation.operations,
+                            child,
+                            self._allocation_owners_by_uuid,
+                        ),
+                    )
+                    inner = _with_constraints(
+                        inner,
+                        *self._loop_iteration_array_constraints(
+                            operation,
+                            child,
+                        ),
+                    )
+        loop_body_reads_carried_array = self._estimate_reads_source_tokens(
+            inner,
+            body_array_source_tokens,
+        )
+        if _estimate_uses_unresolved_functions(
+            inner,
+            unresolved_iteration_functions,
         ):
             raise NotImplementedError(
                 "Resource estimation cannot keep a symbolic loop compact when "
-                "its quantum resource use depends on an unsupported nonlinear "
-                "loop-carried recurrence. Use an affine or fixed-point carry, "
-                "or supply concrete loop bounds so the loop can be replayed."
+                "its quantum resource use depends on an unsupported symbolic "
+                "loop-carried recurrence. Use a supported affine or fixed-point "
+                "carry, or supply concrete loop bounds so the loop can be "
+                "replayed."
             )
         dependency_start, dependency_stop, dependency_step = (
             _specialize_dependency_expression(
@@ -5976,14 +9195,57 @@ class ResourceInterpreter:
             dependency_stop=dependency_stop,
             dependency_step=dependency_step,
         )
+        estimate = self._apply_disjoint_loop_depth(
+            operation,
+            resolver,
+            child,
+            inner,
+            estimate,
+            start=start,
+            stop=stop,
+            step=step,
+            loop_symbol=loop_symbol,
+            iterations=iterations,
+            specialized_iterations=specialized_iterations,
+            controls=controls,
+            has_cross_iteration_dependency=(
+                bool(loop_taint.at_iteration) or loop_body_reads_carried_array
+            ),
+        )
+        active_iterations = _boolean_condition(sp.Gt(iterations, _ZERO))
+        zero_iterations = _boolean_condition(sp.Eq(iterations, _ZERO))
         for arg in operation.region_args:
-            resolver.bind(arg.result, final_values[arg.result.uuid])
-        if assumptions:
-            estimate = estimate._with_metadata(
-                assumptions=assumptions,
-                active_when=sp.Gt(iterations, _ZERO),
+            final_sources: dict[str, Boolean] = {}
+            _merge_classical_source_conditions(
+                final_sources,
+                {
+                    source: _and_conditions(zero_iterations, guard)
+                    for source, guard in initial_carry_facts[
+                        arg.block_arg.uuid
+                    ].dependencies.items()
+                },
             )
-        output_sizes, maximum_exact, retains_prior_output = (
+            if arg.block_arg.uuid in loop_taint.final:
+                _merge_classical_source_conditions(
+                    final_sources,
+                    {
+                        source: _and_conditions(active_iterations, guard)
+                        for source, guard in loop_source_conditions.items()
+                    },
+                )
+            resolver.bind_classical_fact(
+                arg.result,
+                _ResolvedClassicalFact.create(
+                    final_values[arg.result.uuid],
+                    final_sources,
+                ),
+            )
+        for assumption, active_when in guarded_assumptions:
+            estimate = estimate._with_metadata(
+                assumptions=(assumption,),
+                active_when=active_when,
+            )
+        output_sizes, maximum_conservative_when, retains_prior_when = (
             _maximum_live_owner_sizes_over_range(
                 inner._output_sizes,
                 loop_symbol,
@@ -5997,19 +9259,77 @@ class ResourceInterpreter:
             _output_sizes=output_sizes,
             _has_output_summary=inner._has_output_summary,
         )
-        if not maximum_exact:
+        result_taint = {
+            arg.result.uuid: loop_taint.final[arg.block_arg.uuid]
+            for arg in operation.region_args
+            if arg.block_arg.uuid in loop_taint.final
+        }
+        estimate = dataclasses.replace(
+            estimate,
+            _measurement_taint_conditions=_merge_measurement_taint_conditions(
+                estimate._measurement_taint_conditions,
+                result_taint,
+            ),
+        )
+        if maximum_conservative_when is not sp.false:
             estimate = _with_conservative_loop_output_liveness(
                 estimate,
-                active_when=sp.Gt(iterations, _ZERO),
+                active_when=maximum_conservative_when,
                 source="for liveness",
             )
-        elif retains_prior_output:
+        if retains_prior_when is not sp.false:
             estimate = _with_conservative_loop_output_liveness(
                 estimate,
+                active_when=_and_conditions(
+                    sp.Gt(iterations, _ONE),
+                    retains_prior_when,
+                ),
+                source="for liveness",
+            )
+        exit_array_states = self._summarize_for_array_states(
+            operation,
+            resolver,
+            child,
+            initial_array_states,
+            loop_symbol=loop_symbol,
+            start=start,
+            step=step,
+            iterations=iterations,
+            concrete_iterations=(None if body_array_source_tokens else concrete_replay),
+            updates_are_unresolved=bool(body_array_source_tokens),
+        )
+        if loop_body_reads_carried_array:
+            estimate = estimate._with_metadata(
+                assumptions=(
+                    ResourceAssumption(
+                        "loop body resources use a conservative summary of "
+                        "carried classical array state",
+                        source="for classical state",
+                    ),
+                ),
+                quality=EstimateQuality.CONSERVATIVE,
                 active_when=sp.Gt(iterations, _ONE),
-                source="for liveness",
             )
-        return estimate
+        if exit_array_states:
+            estimate = estimate._with_metadata(
+                assumptions=(
+                    ResourceAssumption(
+                        "loop-exit classical array readiness is summarized at "
+                        "the loop completion boundary",
+                        source="for classical state",
+                    ),
+                ),
+                quality=EstimateQuality.CONSERVATIVE,
+                active_when=sp.Gt(iterations, _ZERO),
+            )
+        return self._publish_loop_rebind_results(
+            operation,
+            resolver,
+            child,
+            estimate,
+            active_when=sp.Gt(iterations, _ZERO),
+            array_states=exit_array_states,
+        )
 
     def _apply_condition_values(
         self,
@@ -6106,16 +9426,24 @@ class ResourceInterpreter:
             resolver,
             trip_count_name=trip_count_name,
         )
-        inner = self.eval_operations(
-            operation.operations,
-            child,
-            controls=controls,
-            initial_allocations=_captured_quantum_allocations(
+        with self._guarded_constraint_scope(sp.Gt(trip_count, _ZERO)):
+            inner = self.eval_operations(
                 operation.operations,
                 child,
-                self._allocation_owners_by_uuid,
-            ),
-        )
+                controls=controls,
+                initial_allocations=_captured_quantum_allocations(
+                    operation.operations,
+                    child,
+                    self._allocation_owners_by_uuid,
+                ),
+            )
+            inner = _with_constraints(
+                inner,
+                *self._loop_iteration_array_constraints(
+                    operation,
+                    child,
+                ),
+            )
         estimate = _with_operation_output_summary(
             inner.repeat(trip_count),
             operation,
@@ -6124,7 +9452,35 @@ class ResourceInterpreter:
             body_output_sizes=inner._output_sizes,
             allocation_owners_by_uuid=self._allocation_owners_by_uuid,
         )
-        return estimate
+        assumption = ResourceAssumption(
+            "runtime while resources use the declared trip count and a "
+            "wire-local dependency envelope",
+            source="while",
+        )
+        estimate = estimate._with_metadata(
+            assumptions=(assumption,),
+            quality=EstimateQuality.CONSERVATIVE,
+        )
+        array_taint = self._guard_array_updates(
+            operation.operations,
+            resolver,
+            estimate,
+            active_when=sp.Gt(trip_count, _ZERO),
+        )
+        estimate = dataclasses.replace(
+            estimate,
+            _measurement_taint_conditions={
+                **estimate._measurement_taint_conditions,
+                **array_taint,
+            },
+        )
+        return _with_constraints(
+            estimate,
+            *self._loop_initial_array_constraints(
+                operation,
+                resolver,
+            ),
+        )
 
     def eval_if(
         self,
@@ -6151,7 +9507,59 @@ class ResourceInterpreter:
             ResourceEstimate: Taken-branch estimate when decidable, otherwise the
             maximum of the true and false branches.
         """
-        taken, note = self._decide_branch(resolver.resolve(operation.condition))
+        condition_fact = resolver.resolve_classical_fact(operation.condition)
+        resolved_condition = cast(sp.Expr, condition_fact.value)
+        predicate = _boolean_condition(resolved_condition)
+        runtime_guard = _classical_fact_runtime_condition(condition_fact)
+        uncertainty_guard = _classical_fact_uncertainty_condition(condition_fact)
+        conservative_guard = _boolean_condition(sp.Or(runtime_guard, uncertainty_guard))
+        compile_predicate = (
+            _refine_boolean_under_assumption(
+                predicate,
+                cast(Boolean, sp.Not(conservative_guard)),
+            )
+            if conservative_guard is not sp.false
+            else predicate
+        )
+        internal_choice_symbols = {
+            symbol
+            for symbol in predicate.free_symbols
+            if isinstance(symbol, sp.Symbol)
+            and (
+                symbol
+                in (
+                    self._runtime_observation_symbols
+                    | self._unresolved_resource_symbols
+                )
+                or any(
+                    symbol.name.endswith(uuid)
+                    for uuid in self._measurement_taint_conditions
+                )
+            )
+        }
+        if conservative_guard is not sp.false and internal_choice_symbols:
+            # A source guard proves that internal values are semantic
+            # don't-cares on its complement. Give those roots one arbitrary
+            # representative before retrying the bounded projection so nested
+            # Piecewise carry formulas cannot retain a dead internal token.
+            representative = _boolean_condition(
+                cast(
+                    sp.Basic,
+                    predicate.xreplace(
+                        {symbol: _ZERO for symbol in internal_choice_symbols}
+                    ),
+                )
+            )
+            compile_predicate = _refine_boolean_under_assumption(
+                representative,
+                cast(Boolean, sp.Not(conservative_guard)),
+            )
+        taken, note = self._decide_branch(resolved_condition)
+        if conservative_guard is not sp.false:
+            # Under this guard the branch is selected by a shot-dependent
+            # observation or unresolved loop state, even if the compile-time
+            # projection happens to simplify elsewhere.
+            taken = None
         true_child, false_child = build_if_scopes(operation, resolver)
         true_inputs = _captured_quantum_allocations(
             operation.true_operations,
@@ -6216,6 +9624,16 @@ class ResourceInterpreter:
                 true_child,
                 false_child,
                 taken=taken,
+                runtime_condition=sp.false,
+            )
+            result_taint = self._if_merge_taint_conditions(
+                operation,
+                true_estimate=estimate if taken else None,
+                false_estimate=estimate if not taken else None,
+                predicate=predicate,
+                runtime_guard=sp.false,
+                conservative_guard=sp.false,
+                taken=taken,
             )
             estimate = self._with_if_dependency_outputs(
                 operation,
@@ -6225,6 +9643,7 @@ class ResourceInterpreter:
                 combined=estimate,
                 taken=taken,
                 runtime_condition=False,
+                condition=predicate,
             )
             output_sizes = self._if_output_sizes(
                 operation,
@@ -6237,6 +9656,7 @@ class ResourceInterpreter:
                 false_inputs=false_inputs,
                 taken=taken,
                 runtime_condition=False,
+                condition=predicate,
                 true_consumed=true_consumed,
                 false_consumed=false_consumed,
             )
@@ -6249,32 +9669,82 @@ class ResourceInterpreter:
                 _output_sizes=output_sizes,
                 _input_sizes=true_inputs if taken else false_inputs,
                 _has_output_summary=True,
+                _measurement_taint_conditions=_merge_measurement_taint_conditions(
+                    estimate._measurement_taint_conditions,
+                    result_taint,
+                ),
             )
-            return estimate
-        is_runtime_condition = operation.condition.uuid in self._measurement_derived
-        if is_runtime_condition:
+            return _with_constraints(
+                estimate,
+                *self._if_boundary_array_constraints(
+                    operation,
+                    resolver,
+                    true_child,
+                    false_child,
+                    taken=taken,
+                    predicate=predicate,
+                    conservative_guard=sp.false,
+                ),
+            )
+        if runtime_guard is not sp.false:
             _require_uncontrolled_operation(operation, controls)
-        true_estimate = self.eval_operations(
-            operation.true_operations,
-            true_child,
-            controls=controls,
-            initial_allocations=true_inputs,
+        conservative_control = conservative_guard is not sp.false
+        true_active = (
+            sp.true if conservative_control else _boolean_condition(compile_predicate)
         )
-        false_estimate = self.eval_operations(
-            operation.false_operations,
-            false_child,
-            controls=controls,
-            initial_allocations=false_inputs,
+        false_active = (
+            sp.true
+            if conservative_control
+            else _boolean_condition(sp.Not(compile_predicate))
         )
+        with self._guarded_constraint_scope(true_active):
+            true_estimate = self.eval_operations(
+                operation.true_operations,
+                true_child,
+                controls=controls,
+                initial_allocations=true_inputs,
+            )
+        with self._guarded_constraint_scope(false_active):
+            false_estimate = self.eval_operations(
+                operation.false_operations,
+                false_child,
+                controls=controls,
+                initial_allocations=false_inputs,
+            )
         self._publish_if_results(
             operation,
             resolver,
             true_child,
             false_child,
             taken=None,
+            runtime_condition=runtime_guard,
+            conservative_condition=uncertainty_guard,
         )
-        condition = resolver.resolve(operation.condition)
-        output_sizes = self._if_output_sizes(
+        result_taint = self._if_merge_taint_conditions(
+            operation,
+            true_estimate=true_estimate,
+            false_estimate=false_estimate,
+            predicate=compile_predicate,
+            runtime_guard=runtime_guard,
+            conservative_guard=uncertainty_guard,
+            taken=None,
+        )
+
+        compile_combined = true_estimate.conditional(
+            false_estimate,
+            compile_predicate,
+        )
+        compile_combined = self._with_if_dependency_outputs(
+            operation,
+            resolver,
+            true_estimate=true_estimate,
+            false_estimate=false_estimate,
+            combined=compile_combined,
+            taken=None,
+            runtime_condition=False,
+            condition=compile_predicate,
+        )
+        compile_output_sizes = self._if_output_sizes(
             operation,
             resolver,
             true_child,
@@ -6284,67 +9754,145 @@ class ResourceInterpreter:
             true_inputs=true_inputs,
             false_inputs=false_inputs,
             taken=None,
-            runtime_condition=is_runtime_condition,
+            runtime_condition=False,
+            condition=compile_predicate,
             true_consumed=true_consumed,
             false_consumed=false_consumed,
         )
-        input_sizes = _branch_owner_sizes(
+        compile_input_sizes = _branch_owner_sizes(
             true_inputs,
             false_inputs,
-            condition=_boolean_condition(condition),
-            runtime_condition=is_runtime_condition,
+            condition=compile_predicate,
+            runtime_condition=False,
         )
-        if not is_runtime_condition:
-            combined = true_estimate.conditional(
-                false_estimate,
-                _boolean_condition(condition),
-            )
-            combined = self._with_if_dependency_outputs(
-                operation,
-                resolver,
-                true_estimate=true_estimate,
-                false_estimate=false_estimate,
-                combined=combined,
-                taken=None,
-                runtime_condition=False,
-            )
-            combined = dataclasses.replace(
-                combined,
-                _output_sizes=output_sizes,
-                _input_sizes=input_sizes,
-                _has_output_summary=True,
-            )
-            return combined
-        combined = true_estimate.choice(false_estimate)
-        combined = self._with_if_dependency_outputs(
+        compile_combined = dataclasses.replace(
+            compile_combined,
+            _output_sizes=compile_output_sizes,
+            _input_sizes=compile_input_sizes,
+            _has_output_summary=True,
+        )
+        if note is not None:
+            trace = compile_combined.trace
+            if trace is not None:
+                trace = dataclasses.replace(
+                    trace,
+                    assumptions=(*trace.assumptions, note),
+                )
+            compile_combined = dataclasses.replace(compile_combined, trace=trace)
+            compile_combined = compile_combined._with_metadata(assumptions=(note,))
+
+        conservative_combined = true_estimate.choice(false_estimate)
+        conservative_combined = self._with_if_dependency_outputs(
             operation,
             resolver,
             true_estimate=true_estimate,
             false_estimate=false_estimate,
-            combined=combined,
+            combined=conservative_combined,
             taken=None,
             runtime_condition=True,
+            condition=compile_predicate,
         )
-        if note is None:
-            combined = dataclasses.replace(
-                combined,
-                _output_sizes=output_sizes,
-                _input_sizes=input_sizes,
-                _has_output_summary=True,
+        conservative_output_sizes = self._if_output_sizes(
+            operation,
+            resolver,
+            true_child,
+            false_child,
+            true_estimate=true_estimate,
+            false_estimate=false_estimate,
+            true_inputs=true_inputs,
+            false_inputs=false_inputs,
+            taken=None,
+            runtime_condition=True,
+            condition=compile_predicate,
+            true_consumed=true_consumed,
+            false_consumed=false_consumed,
+        )
+        conservative_input_sizes = _branch_owner_sizes(
+            true_inputs,
+            false_inputs,
+            condition=compile_predicate,
+            runtime_condition=True,
+        )
+        conservative_reason = (
+            "measurement-derived"
+            if uncertainty_guard is sp.false
+            else (
+                "unresolved loop-state"
+                if runtime_guard is sp.false
+                else "measurement-derived or unresolved loop-state"
             )
-            return combined
-        trace = combined.trace
-        if trace is not None:
-            trace = dataclasses.replace(trace, assumptions=(*trace.assumptions, note))
-        combined = dataclasses.replace(
-            combined,
-            trace=trace,
-            _output_sizes=output_sizes,
-            _input_sizes=input_sizes,
+        )
+        conservative_assumption = ResourceAssumption(
+            f"{conservative_reason} conditional resources are combined field "
+            "by field across all possible branches",
+            source="if",
+        )
+        conservative_combined = dataclasses.replace(
+            conservative_combined,
+            _output_sizes=conservative_output_sizes,
+            _input_sizes=conservative_input_sizes,
             _has_output_summary=True,
         )
-        combined = combined._with_metadata(assumptions=(note,))
-        return combined
+        conservative_combined = conservative_combined._with_metadata(
+            assumptions=(conservative_assumption,),
+            quality=EstimateQuality.CONSERVATIVE,
+        )
+
+        if conservative_guard is sp.true:
+            conservative_combined = dataclasses.replace(
+                conservative_combined,
+                _measurement_taint_conditions=_merge_measurement_taint_conditions(
+                    conservative_combined._measurement_taint_conditions,
+                    result_taint,
+                ),
+            )
+            return _with_constraints(
+                conservative_combined,
+                *self._if_boundary_array_constraints(
+                    operation,
+                    resolver,
+                    true_child,
+                    false_child,
+                    taken=None,
+                    predicate=compile_predicate,
+                    conservative_guard=conservative_guard,
+                ),
+            )
+
+        combined = conservative_combined.conditional(
+            compile_combined,
+            conservative_guard,
+        )
+        combined = dataclasses.replace(
+            combined,
+            _output_sizes=_conditional_resource_map(
+                conservative_output_sizes,
+                compile_output_sizes,
+                conservative_guard,
+            ),
+            _input_sizes=_conditional_resource_map(
+                conservative_input_sizes,
+                compile_input_sizes,
+                conservative_guard,
+            ),
+            _has_output_summary=True,
+            _measurement_taint_conditions=_merge_measurement_taint_conditions(
+                combined._measurement_taint_conditions,
+                result_taint,
+            ),
+        )
+        return _with_constraints(
+            combined,
+            *self._if_boundary_array_constraints(
+                operation,
+                resolver,
+                true_child,
+                false_child,
+                taken=None,
+                predicate=compile_predicate,
+                conservative_guard=conservative_guard,
+            ),
+        )
 
     def _publish_if_results(
         self,
@@ -6354,6 +9902,8 @@ class ResourceInterpreter:
         false_resolver: ExprResolver,
         *,
         taken: bool | None,
+        runtime_condition: Boolean = sp.false,
+        conservative_condition: Boolean = sp.false,
     ) -> None:
         """Publish branch-merge results into the enclosing symbolic environment.
 
@@ -6364,44 +9914,140 @@ class ResourceInterpreter:
             false_resolver (ExprResolver): Resolver for the false branch.
             taken (bool | None): Decided branch, or ``None`` when the condition
                 remains symbolic or runtime-dependent.
+            runtime_condition (Boolean): Condition under which the branch is
+                selected from an observation at runtime. Defaults to false.
+            conservative_condition (Boolean): Condition under which an
+                unresolved loop state requires a branch-wise conservative
+                choice. Defaults to false.
         """
-        condition = resolver.resolve(operation.condition)
-        runtime_condition = operation.condition.uuid in self._measurement_derived
-        predicate = _boolean_condition(condition)
+        condition_fact = resolver.resolve_classical_fact(operation.condition)
+        predicate = _boolean_condition(condition_fact.value)
+        nondeterministic_condition = _boolean_condition(
+            sp.Or(runtime_condition, conservative_condition)
+        )
         for merge in operation.iter_merges():
+            if (
+                all(
+                    isinstance(value, ArrayValue)
+                    for value in (
+                        merge.true_value,
+                        merge.false_value,
+                        merge.result,
+                    )
+                )
+                and not merge.result.type.is_quantum()
+            ):
+                true_array = cast(ArrayValue, merge.true_value)
+                false_array = cast(ArrayValue, merge.false_value)
+                result_array = cast(ArrayValue, merge.result)
+                true_state = true_resolver.snapshot_array_state(true_array)
+                false_state = false_resolver.snapshot_array_state(false_array)
+                if taken is True:
+                    resolver.bind_array_state(result_array, true_state)
+                elif taken is False:
+                    resolver.bind_array_state(result_array, false_state)
+                else:
+                    resolver.bind_array_state_selection(
+                        result_array,
+                        true_state,
+                        false_state,
+                        condition_fact,
+                    )
+                for true_dim, false_dim, result_dim in zip(
+                    true_array.shape,
+                    false_array.shape,
+                    result_array.shape,
+                    strict=True,
+                ):
+                    true_size = true_resolver.resolve(true_dim)
+                    false_size = false_resolver.resolve(false_dim)
+                    if taken is True:
+                        merged_size = true_size
+                    elif taken is False:
+                        merged_size = false_size
+                    else:
+                        compile_size = _piecewise(
+                            true_size,
+                            false_size,
+                            predicate,
+                        )
+                        merged_size = _piecewise(
+                            sp.Max(true_size, false_size),
+                            compile_size,
+                            nondeterministic_condition,
+                        )
+                    true_fact = true_resolver.resolve_classical_fact(true_dim)
+                    false_fact = false_resolver.resolve_classical_fact(false_dim)
+                    if taken is True:
+                        resolver.bind_classical_fact(result_dim, true_fact)
+                    elif taken is False:
+                        resolver.bind_classical_fact(result_dim, false_fact)
+                    else:
+                        resolver.bind_classical_selection(
+                            result_dim,
+                            true_fact,
+                            false_fact,
+                            condition_fact,
+                            value_override=merged_size,
+                        )
+                true_array_fact = true_resolver.resolve_classical_fact(true_array)
+                false_array_fact = false_resolver.resolve_classical_fact(false_array)
+                if taken is True:
+                    resolver.bind_classical_fact(result_array, true_array_fact)
+                elif taken is False:
+                    resolver.bind_classical_fact(result_array, false_array_fact)
+                else:
+                    resolver.bind_classical_selection(
+                        result_array,
+                        true_array_fact,
+                        false_array_fact,
+                        condition_fact,
+                    )
+                continue
             true_value = true_resolver.resolve(merge.true_value)
             false_value = false_resolver.resolve(merge.false_value)
             if taken is True:
                 merged = true_value
             elif taken is False:
                 merged = false_value
-            elif runtime_condition:
-                # A runtime measurement chooses the merge value shot by shot.
-                # Keeping every such merge as a nested Piecewise expression
-                # makes feed-forward-heavy FTQC circuits grow exponentially
-                # during final SymPy simplification, even though resource
-                # counting already conservatively combines the branches with
-                # ``choice`` above. A fresh typed symbol preserves the unknown
-                # runtime value without coupling unrelated later estimates to
-                # the complete measurement history.
-                merged = _typed_value_symbol(
-                    merge.result,
-                    merge.result.name,
-                    fresh=True,
-                )
-            elif bool(getattr(condition, "is_Boolean", False)):
-                merged = sp.Piecewise(
-                    (true_value, cast(Any, condition)),
-                    (false_value, True),
-                )
             else:
-                merged = _typed_value_symbol(
+                # A runtime measurement or unresolved loop state chooses one
+                # merge value. Keeping that choice as a nested Piecewise makes
+                # feed-forward-heavy circuits grow exponentially even though
+                # resource counting already combines both branches above. A
+                # fresh typed symbol preserves the unknown value without
+                # coupling later estimates to the complete selection history.
+                runtime_value = _typed_value_symbol(
                     merge.result,
                     merge.result.name,
                     fresh=True,
                 )
-            resolver.bind(merge.result, cast(sp.Expr, merged))
+                runtime_domain = self._register_runtime_value_domain(
+                    runtime_value,
+                    cast(sp.Expr, true_value),
+                    cast(sp.Expr, false_value),
+                )
+                if runtime_domain is not None and len(runtime_domain) == 1:
+                    runtime_branch_value = runtime_domain[0]
+                    self._runtime_value_domains.pop(runtime_value, None)
+                else:
+                    runtime_branch_value = runtime_value
+                    if runtime_condition is not sp.false:
+                        self._runtime_observation_symbols.add(runtime_value)
+                    else:
+                        self._unresolved_resource_symbols.add(runtime_value)
+                compile_value = _piecewise(
+                    cast(ResourceExpr, true_value),
+                    cast(ResourceExpr, false_value),
+                    predicate,
+                )
+                merged = _piecewise(
+                    cast(ResourceExpr, runtime_branch_value),
+                    cast(ResourceExpr, compile_value),
+                    nondeterministic_condition,
+                )
             if merge.result.type.is_quantum():
+                resolver.bind(merge.result, cast(sp.Expr, merged))
                 selected_values = (
                     (merge.true_value,)
                     if taken is True
@@ -6434,39 +10080,464 @@ class ResourceInterpreter:
                     self._dependency_owner_aliases[result_owner] = frozenset(
                         source_owners
                     )
-            if not all(
-                isinstance(value, ArrayValue)
-                for value in (
+            else:
+                true_fact = true_resolver.resolve_classical_fact(merge.true_value)
+                false_fact = false_resolver.resolve_classical_fact(merge.false_value)
+                if taken is True:
+                    resolver.bind_classical_fact(merge.result, true_fact)
+                elif taken is False:
+                    resolver.bind_classical_fact(merge.result, false_fact)
+                else:
+                    resolver.bind_classical_selection(
+                        merge.result,
+                        true_fact,
+                        false_fact,
+                        condition_fact,
+                        value_override=merged,
+                    )
+
+    def _if_merge_taint_conditions(
+        self,
+        operation: IfOperation,
+        *,
+        true_estimate: ResourceEstimate | None,
+        false_estimate: ResourceEstimate | None,
+        predicate: Boolean,
+        runtime_guard: Boolean,
+        conservative_guard: Boolean,
+        taken: bool | None,
+    ) -> dict[str, Boolean]:
+        """Map guarded observation provenance onto conditional results.
+
+        A runtime-selected merge is observation-derived regardless of the
+        selected source. Outside that guard, provenance follows the ordinary
+        compile-time predicate to the corresponding branch source.
+
+        Args:
+            operation (IfOperation): Conditional carrying merge records.
+            true_estimate (ResourceEstimate | None): Evaluated true branch, or
+                ``None`` when it was not selected.
+            false_estimate (ResourceEstimate | None): Evaluated false branch,
+                or ``None`` when it was not selected.
+            predicate (Boolean): Compile-time branch predicate.
+            runtime_guard (Boolean): Condition selecting runtime semantics.
+            conservative_guard (Boolean): Condition under which unresolved
+                loop state can select either branch.
+            taken (bool | None): Statically selected branch, if any.
+
+        Returns:
+            dict[str, Boolean]: Observation provenance keyed by merge-result
+            UUID.
+        """
+        result: dict[str, Boolean] = {}
+        for merge in operation.iter_merges():
+            if merge.result.type.is_quantum():
+                continue
+            true_taint = (
+                _value_taint_condition(
                     merge.true_value,
-                    merge.false_value,
-                    merge.result,
+                    true_estimate._measurement_taint_conditions,
                 )
+                if true_estimate is not None
+                else sp.false
+            )
+            false_taint = (
+                _value_taint_condition(
+                    merge.false_value,
+                    false_estimate._measurement_taint_conditions,
+                )
+                if false_estimate is not None
+                else sp.false
+            )
+            if taken is True:
+                condition = true_taint
+            elif taken is False:
+                condition = false_taint
+            else:
+                condition = _boolean_condition(
+                    sp.Or(
+                        runtime_guard,
+                        sp.And(
+                            conservative_guard,
+                            sp.Or(true_taint, false_taint),
+                        ),
+                        sp.And(
+                            sp.Not(conservative_guard),
+                            predicate,
+                            true_taint,
+                        ),
+                        sp.And(
+                            sp.Not(conservative_guard),
+                            sp.Not(predicate),
+                            false_taint,
+                        ),
+                    )
+                )
+            if condition is not sp.false:
+                result[merge.result.uuid] = condition
+        return result
+
+    def _if_boundary_array_constraints(
+        self,
+        operation: IfOperation,
+        resolver: ExprResolver,
+        true_resolver: ExprResolver,
+        false_resolver: ExprResolver,
+        *,
+        taken: bool | None,
+        predicate: Boolean,
+        conservative_guard: Boolean,
+    ) -> tuple[_ResourceConstraint, ...]:
+        """Collect condition and merge-only array constraints with guards.
+
+        Branch operations own their ordinary array accesses. Merge records can
+        reference an array element without emitting any operation, so those
+        boundary-only values are collected here under the branch condition
+        that can actually select them.
+
+        Args:
+            operation (IfOperation): Conditional carrying merge records.
+            resolver (ExprResolver): Enclosing resolver for the condition.
+            true_resolver (ExprResolver): True-branch resolver.
+            false_resolver (ExprResolver): False-branch resolver.
+            taken (bool | None): Statically selected branch, if any.
+            predicate (Boolean): Compile-time branch predicate.
+            conservative_guard (Boolean): Condition requiring both branch
+                constraints to remain active.
+
+        Returns:
+            tuple[_ResourceConstraint, ...]: Validated guarded requirements.
+        """
+        outer = self._constraint_scope_condition
+        constraints = [
+            constraint.when(outer)
+            for constraint in _collect_array_value_constraints(
+                (operation.condition,),
+                resolver,
+            )
+        ]
+        if taken is True:
+            true_active = outer
+            false_active = sp.false
+        elif taken is False:
+            true_active = sp.false
+            false_active = outer
+        else:
+            true_active = _and_conditions(
+                outer,
+                sp.Or(conservative_guard, predicate),
+            )
+            false_active = _and_conditions(
+                outer,
+                sp.Or(conservative_guard, sp.Not(predicate)),
+            )
+        true_values = tuple(merge.true_value for merge in operation.iter_merges())
+        false_values = tuple(merge.false_value for merge in operation.iter_merges())
+        constraints.extend(
+            constraint.when(true_active)
+            for constraint in _collect_array_value_constraints(
+                true_values,
+                true_resolver,
+            )
+        )
+        constraints.extend(
+            constraint.when(false_active)
+            for constraint in _collect_array_value_constraints(
+                false_values,
+                false_resolver,
+            )
+        )
+        return _validated_unproven_array_constraints(
+            constraints,
+            proven_cache=self._array_constraint_proven,
+        )
+
+    def _loop_initial_array_constraints(
+        self,
+        operation: ForOperation | ForItemsOperation | WhileOperation,
+        resolver: ExprResolver,
+    ) -> tuple[_ResourceConstraint, ...]:
+        """Collect array requirements evaluated before entering a loop.
+
+        Args:
+            operation (ForOperation | ForItemsOperation | WhileOperation): Loop
+                whose entry-side boundary is inspected.
+            resolver (ExprResolver): Enclosing resolver for entry values.
+
+        Returns:
+            tuple[_ResourceConstraint, ...]: Validated entry requirements.
+        """
+        if isinstance(operation, WhileOperation):
+            initial_values: list[ValueBase] = list(operation.operands[:1])
+        else:
+            initial_values = [cast(ValueBase, value) for value in operation.operands]
+        for region_arg in operation.region_args:
+            initial_values.append(region_arg.init)
+        explicit_rebinds = tuple(
+            rebind
+            for rebind in operation.loop_carried_rebinds
+            if not isinstance(rebind.before, ArrayValue)
+            or not isinstance(rebind.after, ArrayValue)
+        )
+        for rebind in (*_loop_array_state_rebinds(operation), *explicit_rebinds):
+            initial_values.append(rebind.before)
+        constraints = [
+            constraint.when(self._constraint_scope_condition)
+            for constraint in _collect_array_value_constraints(
+                initial_values,
+                resolver,
+            )
+        ]
+        return _validated_unproven_array_constraints(
+            constraints,
+            proven_cache=self._array_constraint_proven,
+        )
+
+    def _loop_iteration_array_constraints(
+        self,
+        operation: ForOperation | ForItemsOperation | WhileOperation,
+        body_resolver: ExprResolver,
+    ) -> tuple[_ResourceConstraint, ...]:
+        """Collect array requirements evaluated by one loop iteration.
+
+        These constraints must be attached to the one-iteration estimate before
+        a symbolic range is summed. That lets ``ResourceEstimate._sum_over``
+        quantify induction variables and closed-form carried values instead of
+        leaking them as public parameters or validating only one representative
+        iteration.
+
+        Args:
+            operation (ForOperation | ForItemsOperation | WhileOperation): Loop
+                whose body-side boundary is inspected.
+            body_resolver (ExprResolver): Resolver for one body iteration.
+
+        Returns:
+            tuple[_ResourceConstraint, ...]: Validated per-iteration
+            requirements under the current constraint scope.
+        """
+        body_values: list[ValueBase] = []
+        if isinstance(operation, WhileOperation):
+            body_values.extend(operation.operands[1:])
+        body_values.extend(arg.yielded for arg in operation.region_args)
+        body_values.extend(rebind.after for rebind in operation.loop_carried_rebinds)
+        constraints = [
+            constraint.when(self._constraint_scope_condition)
+            for constraint in _collect_array_value_constraints(
+                body_values,
+                body_resolver,
+            )
+        ]
+        return _validated_unproven_array_constraints(
+            constraints,
+            proven_cache=self._array_constraint_proven,
+        )
+
+    def _publish_loop_rebind_results(
+        self,
+        operation: ForOperation | ForItemsOperation,
+        resolver: ExprResolver,
+        body_resolver: ExprResolver,
+        estimate: ResourceEstimate,
+        *,
+        active_when: sp.Basic,
+        array_states: Mapping[LoopCarriedRebind, _ArrayState] | None = None,
+    ) -> ResourceEstimate:
+        """Publish loop-exit values and guarded observation provenance.
+
+        A classical Bit-array store currently remains a body-local SSA rewrite:
+        the traced store reads the pre-loop array version on every iteration,
+        and the frontend exposes its result after the loop without a RegionArg.
+        Bind that result to the source array on a zero-trip path while retaining
+        the one traced body result when at least one iteration executes.
+
+        Args:
+            operation (ForOperation | ForItemsOperation): Loop containing
+                trace-time rebound records.
+            resolver (ExprResolver): Enclosing resolver to update.
+            body_resolver (ExprResolver): Resolver for one body execution.
+            estimate (ResourceEstimate): Loop estimate carrying body taint.
+            active_when (sp.Basic): Predicate that at least one iteration runs.
+            array_states (Mapping[LoopCarriedRebind, _ArrayState] | None):
+                Optional already-folded loop-exit snapshots. Defaults to
+                ``None``, which snapshots the evaluated body resolver.
+
+        Returns:
+            ResourceEstimate: Estimate with rebound-result provenance.
+        """
+        active = _boolean_condition(active_when)
+        selector_fact = _ResolvedClassicalFact.create(active)
+        explicit_nonarray_rebinds = tuple(
+            rebind
+            for rebind in operation.loop_carried_rebinds
+            if not (
+                isinstance(rebind.before, ArrayValue)
+                and isinstance(rebind.after, ArrayValue)
+            )
+        )
+        rebinds = (
+            *_loop_array_state_rebinds(operation),
+            *explicit_nonarray_rebinds,
+        )
+        array_before_states = {
+            rebind: resolver.snapshot_array_state(cast(ArrayValue, rebind.before))
+            for rebind in rebinds
+            if isinstance(rebind.before, ArrayValue)
+            and isinstance(rebind.after, ArrayValue)
+        }
+        array_before_facts = {
+            rebind: resolver.resolve_classical_fact(rebind.before)
+            for rebind in array_before_states
+        }
+        result_taint = self._guard_array_updates(
+            operation.operations,
+            resolver,
+            estimate,
+            active_when=active,
+        )
+        for rebind in rebinds:
+            if isinstance(rebind.before, ArrayValue) or isinstance(
+                rebind.after,
+                ArrayValue,
+            ):
+                if not isinstance(rebind.before, ArrayValue) or not isinstance(
+                    rebind.after,
+                    ArrayValue,
+                ):
+                    continue
+                before_state = array_before_states[rebind]
+                after_state = (
+                    array_states[rebind]
+                    if array_states is not None and rebind in array_states
+                    else body_resolver.snapshot_array_state(rebind.after)
+                )
+                if active is sp.true:
+                    resolver.bind_array_state(rebind.after, after_state)
+                elif active is sp.false:
+                    resolver.bind_array_state(rebind.after, before_state)
+                else:
+                    resolver.bind_array_state_selection(
+                        rebind.after,
+                        after_state,
+                        before_state,
+                        selector_fact,
+                    )
+                resolver.bind_classical_selection(
+                    rebind.after,
+                    body_resolver.resolve_classical_fact(rebind.after),
+                    array_before_facts[rebind],
+                    selector_fact,
+                )
+                before_taint = _value_taint_condition(
+                    rebind.before,
+                    self._measurement_taint_conditions,
+                )
+                after_taint = _value_taint_condition(
+                    rebind.after,
+                    estimate._measurement_taint_conditions,
+                )
+                condition = _boolean_condition(
+                    sp.Or(
+                        sp.And(active, after_taint),
+                        sp.And(sp.Not(active), before_taint),
+                    )
+                )
+                if condition is not sp.false:
+                    result_taint[rebind.after.uuid] = condition
+                continue
+            before_fact = resolver.resolve_classical_fact(rebind.before)
+            after_fact = (
+                before_fact
+                if active is sp.false
+                else body_resolver.resolve_classical_fact(rebind.after)
+            )
+            resolver.bind_classical_selection(
+                cast(Value, rebind.after),
+                after_fact,
+                before_fact,
+                selector_fact,
+                value_override=_piecewise(
+                    cast(ResourceExpr, after_fact.value),
+                    cast(ResourceExpr, before_fact.value),
+                    active,
+                ),
+            )
+            before_taint = _value_taint_condition(
+                rebind.before,
+                self._measurement_taint_conditions,
+            )
+            after_taint = _value_taint_condition(
+                rebind.after,
+                estimate._measurement_taint_conditions,
+            )
+            condition = _boolean_condition(
+                sp.Or(
+                    sp.And(active, after_taint),
+                    sp.And(sp.Not(active), before_taint),
+                )
+            )
+            if condition is not sp.false:
+                result_taint[rebind.after.uuid] = condition
+        if not result_taint:
+            return estimate
+        return dataclasses.replace(
+            estimate,
+            _measurement_taint_conditions={
+                **estimate._measurement_taint_conditions,
+                **result_taint,
+            },
+        )
+
+    def _guard_array_updates(
+        self,
+        operations: Sequence[Operation],
+        resolver: ExprResolver,
+        estimate: ResourceEstimate | None = None,
+        *,
+        active_when: sp.Basic,
+    ) -> dict[str, Boolean]:
+        """Guard nested classical-array stores by one region's reachability.
+
+        Array-state bindings are shared by related resolver scopes. Walking the
+        complete nested operation tree therefore composes loop and branch
+        reachability from the innermost region outward while keeping each
+        Store's input as its pre-region array version.
+
+        Args:
+            operations (Sequence[Operation]): Region operations whose nested
+                stores are guarded.
+            resolver (ExprResolver): Resolver owning the shared array-state
+                bindings.
+            estimate (ResourceEstimate | None): Region estimate carrying
+                observation provenance. Defaults to ``None`` when the caller
+                publishes provenance separately.
+            active_when (sp.Basic): Predicate that the region executes.
+
+        Returns:
+            dict[str, Boolean]: Store-result observation provenance guarded by
+                the region reachability condition.
+        """
+        active = _boolean_condition(active_when)
+        taint: dict[str, Boolean] = {}
+        for operation in walk_operations(operations):
+            if not isinstance(operation, StoreArrayElementOperation):
+                continue
+            if not operation.results or not isinstance(
+                operation.results[0],
+                ArrayValue,
             ):
                 continue
-            true_array = cast(ArrayValue, merge.true_value)
-            false_array = cast(ArrayValue, merge.false_value)
-            result_array = cast(ArrayValue, merge.result)
-            for true_dim, false_dim, result_dim in zip(
-                true_array.shape,
-                false_array.shape,
-                result_array.shape,
-                strict=True,
-            ):
-                true_size = true_resolver.resolve(true_dim)
-                false_size = false_resolver.resolve(false_dim)
-                if taken is True:
-                    merged_size = true_size
-                elif taken is False:
-                    merged_size = false_size
-                elif runtime_condition:
-                    merged_size = sp.Max(true_size, false_size)
-                else:
-                    merged_size = _piecewise(
-                        true_size,
-                        false_size,
-                        predicate,
-                    )
-                resolver.bind(result_dim, cast(sp.Expr, merged_size))
+            result = operation.results[0]
+            resolver.guard_array_update(result, operation.array, active)
+            if estimate is None:
+                continue
+            condition = _value_taint_condition(
+                result,
+                estimate._measurement_taint_conditions,
+            )
+            guarded = _and_conditions(active, condition)
+            if guarded is not sp.false:
+                taint[result.uuid] = guarded
+        return taint
 
     def _with_if_dependency_outputs(
         self,
@@ -6478,6 +10549,7 @@ class ResourceInterpreter:
         combined: ResourceEstimate,
         taken: bool | None,
         runtime_condition: bool,
+        condition: Boolean | None = None,
     ) -> ResourceEstimate:
         """Publish branch completion depths on conditional result owners.
 
@@ -6499,6 +10571,9 @@ class ResourceInterpreter:
             taken (bool | None): Statically selected branch, if any.
             runtime_condition (bool): Whether a measurement selects the branch
                 at runtime.
+            condition (Boolean | None): Compile-time predicate already refined
+                for the active provenance branch. Defaults to resolving the
+                operation condition in the caller scope.
 
         Returns:
             ResourceEstimate: Estimate with merge-result dependency metadata.
@@ -6544,7 +10619,11 @@ class ResourceInterpreter:
 
         keys = set(combined._dependency_keys or ())
         completion = dict(_normalized_dependency_completion(combined) or {})
-        condition = _boolean_condition(resolver.resolve(operation.condition))
+        selected_condition = (
+            condition
+            if condition is not None
+            else _boolean_condition(resolver.resolve(operation.condition))
+        )
         has_ambiguous_alias = False
         for merge in operation.iter_merges():
             if not merge.result.type.is_quantum():
@@ -6571,7 +10650,7 @@ class ResourceInterpreter:
                     depth = _piecewise(
                         true_completion.get(key, _ZERO),
                         false_completion.get(key, _ZERO),
-                        condition,
+                        selected_condition,
                     )
                 keys.add(key)
                 completion[key] = _resource_max(
@@ -6585,6 +10664,8 @@ class ResourceInterpreter:
         result = dataclasses.replace(
             combined,
             _dependency_keys=frozenset(keys),
+            _dependency_reads=frozenset(keys),
+            _dependency_writes=frozenset(keys),
             _dependency_completion=completion,
             _dependency_completion_uniform=combined._dependency_completion_uniform,
         )
@@ -6613,6 +10694,7 @@ class ResourceInterpreter:
         false_inputs: Mapping[str, ResourceExpr],
         taken: bool | None,
         runtime_condition: bool,
+        condition: Boolean | None = None,
         true_consumed: Mapping[str, ResourceExpr],
         false_consumed: Mapping[str, ResourceExpr],
     ) -> dict[str, ResourceExpr]:
@@ -6639,6 +10721,9 @@ class ResourceInterpreter:
             taken (bool | None): Statically selected branch, if any.
             runtime_condition (bool): Whether a measurement selects the branch
                 at runtime.
+            condition (Boolean | None): Compile-time predicate already refined
+                for the active provenance branch. Defaults to resolving the
+                operation condition in the caller scope.
             true_consumed (Mapping[str, ResourceExpr]): Captured owner widths
                 destroyed by the true branch.
             false_consumed (Mapping[str, ResourceExpr]): Captured owner widths
@@ -6647,7 +10732,11 @@ class ResourceInterpreter:
         Returns:
             dict[str, ResourceExpr]: Live merged output width by root owner.
         """
-        condition = _boolean_condition(resolver.resolve(operation.condition))
+        selected_condition = (
+            condition
+            if condition is not None
+            else _boolean_condition(resolver.resolve(operation.condition))
+        )
         true_authoritative = bool(
             true_estimate is not None and true_estimate._has_output_summary
         )
@@ -6743,7 +10832,7 @@ class ResourceInterpreter:
             elif runtime_condition:
                 size = sp.Max(true_size, false_size)
             else:
-                size = _piecewise(true_size, false_size, condition)
+                size = _piecewise(true_size, false_size, selected_condition)
             if size != _ZERO:
                 output_sizes[owner] = size
         owner_map = self._allocation_owners_by_uuid
@@ -6776,7 +10865,7 @@ class ResourceInterpreter:
                 returned = _piecewise(
                     true_returned,
                     false_returned,
-                    condition,
+                    selected_condition,
                 )
             if returned == _ZERO:
                 continue
@@ -6797,7 +10886,7 @@ class ResourceInterpreter:
             residual = _piecewise(
                 true_residual,
                 false_residual,
-                condition,
+                selected_condition,
             )
         if residual != _ZERO:
             output_sizes[f"IfOperation:{operation.condition.uuid}/live"] = residual
@@ -6894,17 +10983,56 @@ class ResourceInterpreter:
                 "explicit loop captures or lower the loop before estimation."
             )
         cardinality = resolve_for_items_cardinality(operation)
+        initial_array_states = self._initial_loop_array_states(operation, resolver)
+        entries = self._for_items_entries(operation)
+        symbolic_item_context, _item_symbols = self._symbolic_for_items_context(
+            operation
+        )
+        symbolic_item_resolver = resolver.child_scope(
+            inner_block=_LocalBlock(operation.operations),
+            extra_context=symbolic_item_context,
+        )
+        symbolic_item_resolver.copy_array_context()
+        self._bind_loop_array_states(
+            operation,
+            symbolic_item_resolver,
+            initial_array_states,
+        )
+        captured_allocations = _captured_quantum_allocations(
+            operation.operations,
+            symbolic_item_resolver,
+            self._allocation_owners_by_uuid,
+        )
+        consumption_iterations_are_definite = False
+        if entries is not None and len(entries) <= _MAX_EXACT_LOOP_WIRE_EXPANSION:
+            consumption_resolvers = tuple(
+                resolver.child_scope(
+                    inner_block=_LocalBlock(operation.operations),
+                    extra_context=self._concrete_for_items_context(
+                        operation,
+                        key,
+                        value,
+                    ),
+                )
+                for key, value in entries
+            )
+            consumption_iterations_are_definite = True
+        elif entries == ():
+            consumption_resolvers = ()
+            consumption_iterations_are_definite = True
+        else:
+            consumption_resolvers = (symbolic_item_resolver,)
         body_output_sizes: Mapping[str, ResourceExpr] = {}
         if operation.region_args:
-            estimate = self._eval_region_for_items(
-                operation,
-                resolver,
-                cardinality=cardinality,
-                controls=controls,
-            )
+            with self._guarded_constraint_scope(sp.Gt(cardinality, _ZERO)):
+                estimate = self._eval_region_for_items(
+                    operation,
+                    resolver,
+                    cardinality=cardinality,
+                    controls=controls,
+                )
             body_output_sizes = estimate._output_sizes
         else:
-            entries = self._for_items_entries(operation)
             if entries is not None:
                 estimate = self._eval_concrete_for_items(
                     operation,
@@ -6915,32 +11043,136 @@ class ResourceInterpreter:
                 body_output_sizes = estimate._output_sizes
             else:
                 context, item_symbols = self._symbolic_for_items_context(operation)
+                item_ordinal = sp.Dummy(
+                    "item_index",
+                    integer=True,
+                    nonnegative=True,
+                )
                 child = resolver.child_scope(
                     inner_block=_LocalBlock(operation.operations),
                     extra_context=context,
                 )
-                inner = self.eval_operations(
-                    operation.operations,
-                    child,
-                    controls=controls,
-                    initial_allocations=_captured_quantum_allocations(
-                        operation.operations,
-                        child,
-                        self._allocation_owners_by_uuid,
-                    ),
+                child.copy_array_context()
+                body_array_states, body_array_source_tokens = (
+                    self._conservative_loop_body_array_states(
+                        operation,
+                        resolver,
+                        initial_array_states,
+                        completed_iterations=item_ordinal,
+                    )
                 )
+                self._bind_loop_array_states(
+                    operation,
+                    child,
+                    body_array_states,
+                )
+                with self._guarded_constraint_scope(sp.Gt(cardinality, _ZERO)):
+                    with self._observation_occurrence_scope(
+                        "items-family",
+                        operation,
+                        -1,
+                    ):
+                        inner = self.eval_operations(
+                            operation.operations,
+                            child,
+                            controls=controls,
+                            initial_allocations=_captured_quantum_allocations(
+                                operation.operations,
+                                child,
+                                self._allocation_owners_by_uuid,
+                            ),
+                        )
+                    inner = _with_constraints(
+                        inner,
+                        *self._loop_iteration_array_constraints(
+                            operation,
+                            child,
+                        ),
+                    )
                 self._ensure_for_items_resource_independent(inner, item_symbols)
+                loop_body_reads_carried_array = self._estimate_reads_source_tokens(
+                    inner,
+                    body_array_source_tokens,
+                )
                 body_output_sizes = inner._output_sizes
-                estimate = inner.repeat(cardinality)
+                estimate = inner.sum_over(
+                    item_ordinal,
+                    _ZERO,
+                    cardinality,
+                    _ONE,
+                )
+                exit_array_states = self._summarize_for_array_states(
+                    operation,
+                    resolver,
+                    child,
+                    initial_array_states,
+                    loop_symbol=item_ordinal,
+                    start=_ZERO,
+                    step=_ONE,
+                    iterations=cardinality,
+                    concrete_iterations=None,
+                    updates_are_unresolved=True,
+                )
+                if loop_body_reads_carried_array:
+                    estimate = estimate._with_metadata(
+                        assumptions=(
+                            ResourceAssumption(
+                                "items-loop body resources use a conservative "
+                                "summary of carried classical array state",
+                                source="items classical state",
+                            ),
+                        ),
+                        quality=EstimateQuality.CONSERVATIVE,
+                        active_when=sp.Gt(cardinality, _ONE),
+                    )
+                if exit_array_states:
+                    estimate = estimate._with_metadata(
+                        assumptions=(
+                            ResourceAssumption(
+                                "items-loop classical array state is unknown "
+                                "after one or more unbound entries",
+                                source="items classical state",
+                            ),
+                        ),
+                        quality=EstimateQuality.CONSERVATIVE,
+                        active_when=sp.Gt(cardinality, _ZERO),
+                    )
+                estimate = self._publish_loop_rebind_results(
+                    operation,
+                    resolver,
+                    child,
+                    estimate,
+                    active_when=sp.Gt(cardinality, _ZERO),
+                    array_states=exit_array_states,
+                )
+        additional_consumed, retained_consumption_is_conservative = (
+            _loop_captured_observation_consumption(
+                operation.operations,
+                captured_allocations,
+                consumption_resolvers,
+                definite_iterations=consumption_iterations_are_definite,
+                allocation_owners_by_uuid=self._allocation_owners_by_uuid,
+            )
+        )
         estimate = _with_operation_output_summary(
             estimate,
             operation,
             resolver,
             active_when=sp.Gt(cardinality, _ZERO),
             body_output_sizes=body_output_sizes,
+            additional_consumed_allocations=additional_consumed,
             allocation_owners_by_uuid=self._allocation_owners_by_uuid,
         )
-        return estimate
+        if retained_consumption_is_conservative:
+            estimate = _with_conservative_loop_output_liveness(
+                estimate,
+                active_when=sp.Gt(cardinality, _ZERO),
+                source="items liveness",
+            )
+        return _with_constraints(
+            estimate,
+            *self._loop_initial_array_constraints(operation, resolver),
+        )
 
     def _eval_region_for_items(
         self,
@@ -6964,7 +11196,9 @@ class ResourceInterpreter:
 
         Raises:
             NotImplementedError: If an unbound loop-carried value has a
-                recurrence that depends on the current item key or value.
+                recurrence that depends on the current item key or value, or
+                if quantum resource use depends on an unsupported symbolic
+                recurrence.
         """
         entries = self._for_items_entries(operation)
         if entries is not None:
@@ -6975,7 +11209,7 @@ class ResourceInterpreter:
                 controls=controls,
             )
 
-        item_symbol = sp.Symbol("item_index", integer=True, nonnegative=True)
+        item_symbol = sp.Dummy("item_index", integer=True, nonnegative=True)
         context, item_symbols = self._symbolic_for_items_context(operation)
         carry_symbols = {
             arg.block_arg.uuid: _typed_value_symbol(
@@ -6985,26 +11219,77 @@ class ResourceInterpreter:
             )
             for arg in operation.region_args
         }
+        initial_carry_facts = {
+            arg.block_arg.uuid: resolver.resolve_classical_fact(arg.init)
+            for arg in operation.region_args
+        }
+        initial_array_states = self._initial_loop_array_states(operation, resolver)
+        initial_carry_taint = {
+            arg.block_arg.uuid: condition
+            for arg in operation.region_args
+            if (
+                condition := _value_taint_condition(
+                    arg.init,
+                    self._measurement_taint_conditions,
+                )
+            )
+            is not sp.false
+        }
         context.update(carry_symbols)
         probe = resolver.child_scope(
             inner_block=_LocalBlock(operation.operations),
             extra_context=context,
         )
-        probe_estimate = self.eval_operations(
-            operation.operations,
+        probe.copy_array_context()
+        self._bind_loop_array_states(
+            operation,
             probe,
-            controls=controls,
-            initial_allocations=_captured_quantum_allocations(
-                operation.operations,
-                probe,
-                self._allocation_owners_by_uuid,
-            ),
+            initial_array_states,
         )
+        for arg in operation.region_args:
+            initial_fact = initial_carry_facts[arg.block_arg.uuid]
+            probe.bind_classical_fact(
+                arg.block_arg,
+                _ResolvedClassicalFact.create(
+                    carry_symbols[arg.block_arg.uuid],
+                    initial_fact.dependencies,
+                ),
+            )
+        with self._observation_occurrence_scope("items-family", operation, -1):
+            with self._isolated_loop_taint_probe_state():
+                with self._measurement_taint_scope(initial_carry_taint):
+                    probe_estimate = self.eval_operations(
+                        operation.operations,
+                        probe,
+                        controls=controls,
+                        initial_allocations=_captured_quantum_allocations(
+                            operation.operations,
+                            probe,
+                            self._allocation_owners_by_uuid,
+                        ),
+                    )
+        loop_taint = _loop_may_taint(
+            operation,
+            initial_carry_taint,
+            probe_estimate,
+        )
+        loop_source_conditions: dict[str, Boolean] = {}
+        for fact in initial_carry_facts.values():
+            _merge_classical_source_conditions(
+                loop_source_conditions,
+                fact.dependencies,
+            )
+        for arg in operation.region_args:
+            _merge_classical_source_conditions(
+                loop_source_conditions,
+                probe.resolve_classical_fact(arg.yielded).dependencies,
+            )
         self._ensure_for_items_resource_independent(probe_estimate, item_symbols)
 
         at_iteration: dict[str, sp.Expr] = {}
         final_values: dict[str, sp.Expr] = {}
-        assumptions: list[ResourceAssumption] = []
+        unresolved_iteration_functions: list[Any] = []
+        guarded_assumptions: list[tuple[ResourceAssumption, Boolean]] = []
         all_carry_symbols = set(carry_symbols.values())
         for arg in operation.region_args:
             carry_symbol = carry_symbols[arg.block_arg.uuid]
@@ -7027,17 +11312,52 @@ class ResourceInterpreter:
                 init=resolver.resolve(arg.init),
             )
             if recurrence is None:
-                at_value = sp.Function(f"{arg.var_name}_carry")(item_symbol)
-                final_value = _typed_value_symbol(
+                carry_function = sp.Function(f"{arg.var_name}_carry")
+                at_value = carry_function(item_symbol)
+                unresolved_iteration_functions.append(carry_function)
+                unknown_final_value = _typed_value_symbol(
                     arg.result,
                     f"{arg.var_name}_after_items",
                     fresh=True,
                 )
-                assumptions.append(
-                    ResourceAssumption(
-                        "items-loop carry could not be reduced to an independent "
-                        "affine closed form; its final value remains symbolic",
-                        source=arg.var_name,
+                self._unresolved_resource_symbols.add(unknown_final_value)
+                identity_guard = _invariant_identity_branch_guard(
+                    yielded,
+                    carry_symbol=carry_symbol,
+                    invariant_symbols=(
+                        _loop_invariant_symbols(
+                            resolver,
+                            operation.captures,
+                            bound_expressions=(cardinality,),
+                        )
+                        - self._runtime_observation_symbols
+                        - all_carry_symbols
+                        - item_symbols
+                        - {item_symbol}
+                    ),
+                )
+                final_value = cast(
+                    sp.Expr,
+                    sp.Piecewise(
+                        (
+                            resolver.resolve(arg.init),
+                            sp.Or(sp.Eq(cardinality, _ZERO), identity_guard),
+                        ),
+                        (unknown_final_value, True),
+                    ),
+                )
+                guarded_assumptions.append(
+                    (
+                        ResourceAssumption(
+                            "items-loop carry could not be reduced to an "
+                            "independent affine closed form; its final value "
+                            "remains symbolic",
+                            source=arg.var_name,
+                        ),
+                        _and_conditions(
+                            sp.Gt(cardinality, _ZERO),
+                            cast(Boolean, sp.Not(identity_guard)),
+                        ),
                     )
                 )
             else:
@@ -7050,22 +11370,158 @@ class ResourceInterpreter:
             inner_block=_LocalBlock(operation.operations),
             extra_context=body_context,
         )
-        inner = self.eval_operations(
-            operation.operations,
+        child.copy_array_context()
+        body_array_states, body_array_source_tokens = (
+            self._conservative_loop_body_array_states(
+                operation,
+                resolver,
+                initial_array_states,
+                completed_iterations=item_symbol,
+            )
+        )
+        self._bind_loop_array_states(
+            operation,
             child,
-            controls=controls,
-            initial_allocations=_captured_quantum_allocations(
-                operation.operations,
+            body_array_states,
+        )
+        for arg in operation.region_args:
+            sources = (
+                loop_source_conditions
+                if arg.block_arg.uuid in loop_taint.at_iteration
+                else initial_carry_facts[arg.block_arg.uuid].dependencies
+            )
+            child.bind_classical_fact(
+                arg.block_arg,
+                _ResolvedClassicalFact.create(
+                    at_iteration[arg.block_arg.uuid],
+                    sources,
+                ),
+            )
+        with self._observation_occurrence_scope("items-family", operation, -1):
+            with self._measurement_taint_scope(loop_taint.at_iteration):
+                inner = self.eval_operations(
+                    operation.operations,
+                    child,
+                    controls=controls,
+                    initial_allocations=_captured_quantum_allocations(
+                        operation.operations,
+                        child,
+                        self._allocation_owners_by_uuid,
+                    ),
+                )
+        inner = _with_constraints(
+            inner,
+            *self._loop_iteration_array_constraints(
+                operation,
                 child,
-                self._allocation_owners_by_uuid,
             ),
         )
+        loop_body_reads_carried_array = self._estimate_reads_source_tokens(
+            inner,
+            body_array_source_tokens,
+        )
+        self._ensure_for_items_resource_independent(inner, item_symbols)
+        if _estimate_uses_unresolved_functions(
+            inner,
+            unresolved_iteration_functions,
+        ):
+            raise NotImplementedError(
+                "Resource estimation cannot keep a symbolic items loop compact "
+                "when its quantum resource use depends on an unsupported "
+                "symbolic loop-carried recurrence. Supply a concrete dictionary "
+                "or use a supported affine or fixed-point carry."
+            )
         estimate = inner.sum_over(item_symbol, _ZERO, cardinality, _ONE)
+        if loop_body_reads_carried_array:
+            estimate = estimate._with_metadata(
+                assumptions=(
+                    ResourceAssumption(
+                        "items-loop body resources use a conservative summary "
+                        "of carried classical array state",
+                        source="items classical state",
+                    ),
+                ),
+                quality=EstimateQuality.CONSERVATIVE,
+                active_when=sp.Gt(cardinality, _ONE),
+            )
+        active_entries = _boolean_condition(sp.Gt(cardinality, _ZERO))
+        zero_entries = _boolean_condition(sp.Eq(cardinality, _ZERO))
         for arg in operation.region_args:
-            resolver.bind(arg.result, final_values[arg.result.uuid])
-        if assumptions:
-            estimate = estimate._with_metadata(assumptions=assumptions)
-        output_sizes, maximum_exact, retains_prior_output = (
+            final_sources: dict[str, Boolean] = {}
+            _merge_classical_source_conditions(
+                final_sources,
+                {
+                    source: _and_conditions(zero_entries, guard)
+                    for source, guard in initial_carry_facts[
+                        arg.block_arg.uuid
+                    ].dependencies.items()
+                },
+            )
+            if arg.block_arg.uuid in loop_taint.final:
+                _merge_classical_source_conditions(
+                    final_sources,
+                    {
+                        source: _and_conditions(active_entries, guard)
+                        for source, guard in loop_source_conditions.items()
+                    },
+                )
+            resolver.bind_classical_fact(
+                arg.result,
+                _ResolvedClassicalFact.create(
+                    final_values[arg.result.uuid],
+                    final_sources,
+                ),
+            )
+        result_taint = {
+            arg.result.uuid: loop_taint.final[arg.block_arg.uuid]
+            for arg in operation.region_args
+            if arg.block_arg.uuid in loop_taint.final
+        }
+        estimate = dataclasses.replace(
+            estimate,
+            _measurement_taint_conditions=_merge_measurement_taint_conditions(
+                estimate._measurement_taint_conditions,
+                result_taint,
+            ),
+        )
+        exit_array_states = self._summarize_for_array_states(
+            operation,
+            resolver,
+            child,
+            initial_array_states,
+            loop_symbol=item_symbol,
+            start=_ZERO,
+            step=_ONE,
+            iterations=cardinality,
+            concrete_iterations=None,
+            updates_are_unresolved=True,
+        )
+        if exit_array_states:
+            estimate = estimate._with_metadata(
+                assumptions=(
+                    ResourceAssumption(
+                        "items-loop classical array state is unknown after one "
+                        "or more unbound entries",
+                        source="items classical state",
+                    ),
+                ),
+                quality=EstimateQuality.CONSERVATIVE,
+                active_when=sp.Gt(cardinality, _ZERO),
+            )
+        estimate = self._publish_loop_rebind_results(
+            operation,
+            resolver,
+            child,
+            estimate,
+            active_when=sp.Gt(cardinality, _ZERO),
+            array_states=exit_array_states,
+        )
+        for assumption, active_when in guarded_assumptions:
+            estimate = estimate._with_metadata(
+                assumptions=(assumption,),
+                active_when=active_when,
+            )
+        output_sizes, maximum_conservative_when, retains_prior_when = (
             _maximum_live_owner_sizes_over_range(
                 inner._output_sizes,
                 item_symbol,
@@ -7079,16 +11535,19 @@ class ResourceInterpreter:
             _output_sizes=output_sizes,
             _has_output_summary=inner._has_output_summary,
         )
-        if not maximum_exact:
+        if maximum_conservative_when is not sp.false:
             estimate = _with_conservative_loop_output_liveness(
                 estimate,
-                active_when=sp.Gt(cardinality, _ZERO),
+                active_when=maximum_conservative_when,
                 source="items liveness",
             )
-        elif retains_prior_output:
+        if retains_prior_when is not sp.false:
             estimate = _with_conservative_loop_output_liveness(
                 estimate,
-                active_when=sp.Gt(cardinality, _ONE),
+                active_when=_and_conditions(
+                    sp.Gt(cardinality, _ONE),
+                    retains_prior_when,
+                ),
                 source="items liveness",
             )
         return estimate
@@ -7120,7 +11579,9 @@ class ResourceInterpreter:
         entry_estimates: list[ResourceEstimate] = []
         iteration_width = WidthResources.zero()
         anonymous_allocated = _ZERO
-        for key, value in entries:
+        last_child = resolver
+        array_states = self._initial_loop_array_states(operation, resolver)
+        for ordinal, (key, value) in enumerate(entries):
             child = resolver.child_scope(
                 inner_block=_LocalBlock(operation.operations),
                 extra_context=self._concrete_for_items_context(
@@ -7129,16 +11590,27 @@ class ResourceInterpreter:
                     value,
                 ),
             )
-            entry_estimate = self.eval_operations(
-                operation.operations,
-                child,
-                controls=controls,
-                initial_allocations=_captured_quantum_allocations(
+            child.copy_array_context()
+            self._bind_loop_array_states(operation, child, array_states)
+            last_child = child
+            with self._observation_occurrence_scope("items", operation, ordinal):
+                entry_estimate = self.eval_operations(
                     operation.operations,
                     child,
-                    self._allocation_owners_by_uuid,
-                ),
-            )
+                    controls=controls,
+                    initial_allocations=_captured_quantum_allocations(
+                        operation.operations,
+                        child,
+                        self._allocation_owners_by_uuid,
+                    ),
+                )
+                entry_estimate = _with_constraints(
+                    entry_estimate,
+                    *self._loop_iteration_array_constraints(
+                        operation,
+                        child,
+                    ),
+                )
             composer.append(entry_estimate)
             entry_estimates.append(entry_estimate)
             iteration_width = _max_width(iteration_width, entry_estimate.width)
@@ -7149,6 +11621,7 @@ class ResourceInterpreter:
                     entry_estimate._allocation_sites,
                 ),
             )
+            array_states = self._next_loop_array_states(child, array_states)
         # ``seq`` counts every concrete visit to a QInit. Keep sequential
         # gate/depth/call totals, take reusable width fields per-entry, and
         # replace only allocated_qubits with the distinct static-site union.
@@ -7166,9 +11639,17 @@ class ResourceInterpreter:
             entry_estimates,
             estimate,
         )
+        scheduled = self._publish_loop_rebind_results(
+            operation,
+            resolver,
+            last_child,
+            scheduled,
+            active_when=sp.true if entries else sp.false,
+            array_states=array_states,
+        )
         if not entry_estimates:
             return scheduled
-        output_sizes, retains_prior_output = _maximum_live_owner_sizes(
+        output_sizes, retains_prior_when = _maximum_live_owner_sizes(
             [entry._output_sizes for entry in entry_estimates]
         )
         scheduled = dataclasses.replace(
@@ -7178,10 +11659,10 @@ class ResourceInterpreter:
                 entry._has_output_summary for entry in entry_estimates
             ),
         )
-        if retains_prior_output:
+        if retains_prior_when is not sp.false:
             scheduled = _with_conservative_loop_output_liveness(
                 scheduled,
-                active_when=sp.true,
+                active_when=retains_prior_when,
                 source="items liveness",
             )
         return scheduled
@@ -7210,11 +11691,28 @@ class ResourceInterpreter:
             arg.block_arg.uuid: self._apply_condition_values(resolver.resolve(arg.init))
             for arg in operation.region_args
         }
+        carried_facts = {
+            arg.block_arg.uuid: resolver.resolve_classical_fact(arg.init)
+            for arg in operation.region_args
+        }
+        carried_taint = {
+            arg.block_arg.uuid: condition
+            for arg in operation.region_args
+            if (
+                condition := _value_taint_condition(
+                    arg.init,
+                    self._measurement_taint_conditions,
+                )
+            )
+            is not sp.false
+        }
         composer = _SequentialEstimateComposer()
         entry_estimates: list[ResourceEstimate] = []
         iteration_width = WidthResources.zero()
         anonymous_allocated = _ZERO
-        for key, value in entries:
+        last_child = resolver
+        array_states = self._initial_loop_array_states(operation, resolver)
+        for ordinal, (key, value) in enumerate(entries):
             context = {
                 **carried,
                 **self._concrete_for_items_context(operation, key, value),
@@ -7223,14 +11721,35 @@ class ResourceInterpreter:
                 inner_block=_LocalBlock(operation.operations),
                 extra_context=context,
             )
-            iteration_estimate = self.eval_operations(
-                operation.operations,
-                child,
-                controls=controls,
-                initial_allocations=_captured_quantum_allocations(
-                    operation.operations,
+            child.copy_array_context()
+            self._bind_loop_array_states(operation, child, array_states)
+            last_child = child
+            for arg in operation.region_args:
+                fact = carried_facts[arg.block_arg.uuid]
+                child.bind_classical_fact(
+                    arg.block_arg,
+                    _ResolvedClassicalFact.create(
+                        carried[arg.block_arg.uuid],
+                        fact.dependencies,
+                    ),
+                )
+            with self._observation_occurrence_scope("items", operation, ordinal):
+                with self._measurement_taint_scope(carried_taint):
+                    iteration_estimate = self.eval_operations(
+                        operation.operations,
+                        child,
+                        controls=controls,
+                        initial_allocations=_captured_quantum_allocations(
+                            operation.operations,
+                            child,
+                            self._allocation_owners_by_uuid,
+                        ),
+                    )
+            iteration_estimate = _with_constraints(
+                iteration_estimate,
+                *self._loop_iteration_array_constraints(
+                    operation,
                     child,
-                    self._allocation_owners_by_uuid,
                 ),
             )
             composer.append(iteration_estimate)
@@ -7249,8 +11768,31 @@ class ResourceInterpreter:
                 )
                 for arg in operation.region_args
             }
+            carried_facts = {
+                arg.block_arg.uuid: child.resolve_classical_fact(arg.yielded)
+                for arg in operation.region_args
+            }
+            carried_taint = {
+                arg.block_arg.uuid: condition
+                for arg in operation.region_args
+                if (
+                    condition := _value_taint_condition(
+                        arg.yielded,
+                        iteration_estimate._measurement_taint_conditions,
+                    )
+                )
+                is not sp.false
+            }
+            array_states = self._next_loop_array_states(child, array_states)
         for arg in operation.region_args:
-            resolver.bind(arg.result, carried[arg.block_arg.uuid])
+            fact = carried_facts[arg.block_arg.uuid]
+            resolver.bind_classical_fact(
+                arg.result,
+                _ResolvedClassicalFact.create(
+                    carried[arg.block_arg.uuid],
+                    fact.dependencies,
+                ),
+            )
         estimate = composer.finish()
         estimate = dataclasses.replace(
             estimate,
@@ -7265,9 +11807,29 @@ class ResourceInterpreter:
             entry_estimates,
             estimate,
         )
+        result_taint = {
+            arg.result.uuid: carried_taint[arg.block_arg.uuid]
+            for arg in operation.region_args
+            if arg.block_arg.uuid in carried_taint
+        }
+        scheduled = dataclasses.replace(
+            scheduled,
+            _measurement_taint_conditions=_merge_measurement_taint_conditions(
+                scheduled._measurement_taint_conditions,
+                result_taint,
+            ),
+        )
+        scheduled = self._publish_loop_rebind_results(
+            operation,
+            resolver,
+            last_child,
+            scheduled,
+            active_when=sp.true if entries else sp.false,
+            array_states=array_states,
+        )
         if not entry_estimates:
             return scheduled
-        output_sizes, retains_prior_output = _maximum_live_owner_sizes(
+        output_sizes, retains_prior_when = _maximum_live_owner_sizes(
             [entry._output_sizes for entry in entry_estimates]
         )
         scheduled = dataclasses.replace(
@@ -7277,10 +11839,10 @@ class ResourceInterpreter:
                 entry._has_output_summary for entry in entry_estimates
             ),
         )
-        if retains_prior_output:
+        if retains_prior_when is not sp.false:
             scheduled = _with_conservative_loop_output_liveness(
                 scheduled,
-                active_when=sp.true,
+                active_when=retains_prior_when,
                 source="items liveness",
             )
         return scheduled
@@ -7333,7 +11895,17 @@ class ResourceInterpreter:
                     assumptions=(assumption,),
                     quality=EstimateQuality.CONSERVATIVE,
                 )
-            footprints.append((keys, keys))
+            reads = (
+                entry_estimate._dependency_reads
+                if entry_estimate._dependency_reads is not None
+                else keys
+            )
+            writes = (
+                entry_estimate._dependency_writes
+                if entry_estimate._dependency_writes is not None
+                else keys
+            )
+            footprints.append((reads, writes))
 
         depth_activity_conditions = _scheduled_depth_activity_conditions(scheduled)
         (
@@ -7345,8 +11917,6 @@ class ResourceInterpreter:
             scheduled,
             footprints,
             activity_conditions=depth_activity_conditions,
-            measurement_derived=self._measurement_derived,
-            global_barrier_operation_ids=self._global_barrier_operation_ids,
             scalar_values=self.condition_values,
             used_names=self.branch_condition_names,
         )
@@ -8016,6 +12586,8 @@ class ResourceInterpreter:
                 estimate = dataclasses.replace(
                     estimate,
                     _dependency_keys=frozenset(mapped_keys),
+                    _dependency_reads=frozenset(mapped_keys),
+                    _dependency_writes=frozenset(mapped_keys),
                     _dependency_completion=_complete_dependency_completion(
                         dependency_completion,
                         mapped_keys,
@@ -8260,6 +12832,8 @@ class ResourceInterpreter:
                 case_estimate = dataclasses.replace(
                     case_estimate,
                     _dependency_keys=frozenset(mapped_keys),
+                    _dependency_reads=frozenset(mapped_keys),
+                    _dependency_writes=frozenset(mapped_keys),
                     _dependency_completion=_complete_dependency_completion(
                         dependency_completion,
                         mapped_keys,
@@ -8386,6 +12960,12 @@ class ResourceInterpreter:
             actual_operands,
             controls=_expr(controls) + operation.num_control_qubits,
         )
+        _publish_invoke_classical_results(
+            operation.implementation_block.output_values,
+            operation.results[operation.num_control_qubits :],
+            child,
+            resolver,
+        )
         # ``implementation_block`` is already the gate-by-gate inverse
         # fallback. Applying ``ResourceEstimate.inverse()`` here would
         # transform an opaque callback result twice and incorrectly reject an
@@ -8435,6 +13015,8 @@ class ResourceInterpreter:
             estimate = dataclasses.replace(
                 estimate,
                 _dependency_keys=frozenset(mapped_keys),
+                _dependency_reads=frozenset(mapped_keys),
+                _dependency_writes=frozenset(mapped_keys),
                 _dependency_completion=_complete_dependency_completion(
                     dependency_completion,
                     mapped_keys,
@@ -8531,13 +13113,26 @@ class ResourceInterpreter:
 
         gamma = self._apply_condition_values(resolver.resolve(operation.gamma))
         constant = complex(hamiltonian.constant)
+        if not math.isfinite(constant.real) or not math.isfinite(constant.imag):
+            raise ValueError(
+                "PauliEvolveOp requires finite Hamiltonian coefficients, but "
+                f"the constant is {hamiltonian.constant}."
+            )
         if abs(constant.imag) > HERMITIAN_IMAG_ATOL:
             raise ValueError(
                 "PauliEvolveOp requires a Hermitian Hamiltonian (real "
                 "constant), but the constant has a nonzero imaginary part."
             )
         for _operators, coefficient in hamiltonian:
-            if abs(complex(coefficient).imag) > HERMITIAN_IMAG_ATOL:
+            numeric_coefficient = complex(coefficient)
+            if not math.isfinite(numeric_coefficient.real) or not math.isfinite(
+                numeric_coefficient.imag
+            ):
+                raise ValueError(
+                    "PauliEvolveOp requires finite Hamiltonian coefficients, "
+                    f"but a term coefficient is {coefficient}."
+                )
+            if abs(numeric_coefficient.imag) > HERMITIAN_IMAG_ATOL:
                 raise ValueError(
                     "PauliEvolveOp requires a Hermitian Hamiltonian (real "
                     "Pauli coefficients), but a term has a nonzero imaginary "
@@ -8801,6 +13396,8 @@ class ResourceInterpreter:
                 _input_sizes={},
                 _has_output_summary=False,
                 _dependency_keys=None,
+                _dependency_reads=None,
+                _dependency_writes=None,
             ),
             operation,
         )
@@ -8827,6 +13424,15 @@ class ResourceInterpreter:
             estimate = self._with_zero_control_bracket(
                 estimate,
                 zero_controls=transform.zero_controls,
+            )
+        has_quantum_endpoint = any(
+            isinstance(value, ValueBase) and value.type.is_quantum()
+            for value in (*operation.all_input_values(), *operation.results)
+        )
+        if _estimate_has_nonzero_depth(estimate) and not has_quantum_endpoint:
+            raise ValueError(
+                f"nonzero-depth opaque callable '{operation.custom_name}' has "
+                "no quantum operand on which to place its scheduling dependency"
             )
         estimate = dataclasses.replace(
             estimate,
@@ -8960,6 +13566,12 @@ class ResourceInterpreter:
             actual_operands,
             controls=total_controls,
         )
+        _publish_invoke_classical_results(
+            body.output_values,
+            selection.results,
+            child,
+            resolver,
+        )
         body_dependency_estimate = body_estimate
         if operation.transform.is_inverse and not body_implements_inverse:
             body_estimate = body_estimate.inverse()
@@ -9007,6 +13619,8 @@ class ResourceInterpreter:
             body_estimate = dataclasses.replace(
                 body_estimate,
                 _dependency_keys=frozenset(mapped_keys),
+                _dependency_reads=frozenset(mapped_keys),
+                _dependency_writes=frozenset(mapped_keys),
                 _dependency_completion=_complete_dependency_completion(
                     dependency_completion,
                     mapped_keys,
@@ -9045,20 +13659,28 @@ class ResourceInterpreter:
             source=operation.custom_name,
             zero_controls=zero_controls,
         )
-        _observation_outputs, has_runtime_observation = (
+        observation_outputs, _has_runtime_observation = (
             self._block_runtime_observation_summary(body)
         )
-        if not body.effects.is_unitary or has_runtime_observation:
-            assumption = ResourceAssumption(
-                "runtime-observation or non-unitary callable boundary is "
-                "scheduled as a global barrier and may overestimate depth "
-                "on disjoint wires",
-                source=operation.custom_name,
+        caller_taint: dict[str, Boolean] = {}
+        for body_index, output in enumerate(body.output_values):
+            condition = _value_taint_condition(
+                output,
+                body_estimate._measurement_taint_conditions,
             )
-            estimate = estimate._with_metadata(
-                assumptions=(assumption,),
-                quality=EstimateQuality.CONSERVATIVE,
-                active_when=_estimate_depth_activity_condition(estimate),
+            if condition is sp.false and body_index in observation_outputs:
+                condition = sp.true
+            if condition is sp.false:
+                continue
+            for caller_index in selection.map_result_indices(
+                (body_index,),
+                operation.results,
+            ):
+                caller_taint[operation.results[caller_index].uuid] = condition
+        if caller_taint:
+            estimate = dataclasses.replace(
+                estimate,
+                _measurement_taint_conditions=caller_taint,
             )
         return estimate
 
@@ -9236,6 +13858,7 @@ def _operation_array_constraints(
     operation: Operation,
     resolver: ExprResolver,
     *,
+    active_when: sp.Basic = sp.true,
     proven_cache: dict[_ResourceConstraint, bool] | None = None,
 ) -> tuple[_ResourceConstraint, ...]:
     """Collect unresolved array-access requirements for one operation.
@@ -9253,6 +13876,8 @@ def _operation_array_constraints(
             and are therefore not recursively walked here.
         resolver (ExprResolver): Resolver for array dimensions, element
             indices, and view affine-map expressions in the operation's scope.
+        active_when (sp.Basic): Predicate under which the operation executes.
+            Defaults to true.
         proven_cache (dict[_ResourceConstraint, bool] | None): Optional cache
             of previously validated requirements and whether their symbolic
             assumptions prove them. Defaults to ``None``.
@@ -9265,6 +13890,62 @@ def _operation_array_constraints(
         ValueError: If an access has the wrong number of indices, a view has
             malformed rank/affine metadata, or a concrete access is out of
             bounds.
+    """
+    constraints = list(
+        _collect_array_value_constraints(
+            (*operation.all_input_values(), *operation.results),
+            resolver,
+        )
+    )
+
+    if isinstance(operation, StoreArrayElementOperation):
+        constraints.extend(
+            _array_index_constraints(
+                operation.array,
+                operation.index_values,
+                resolver,
+                access_kind="store",
+            )
+        )
+    elif isinstance(operation, ReturnQuantumArrayElementOperation):
+        constraints.extend(
+            _array_index_constraints(
+                operation.array,
+                operation.target_indices,
+                resolver,
+                access_kind="return target",
+            )
+        )
+        constraints.extend(
+            _array_index_constraints(
+                operation.array,
+                operation.source_indices,
+                resolver,
+                access_kind="return source",
+            )
+        )
+
+    return _validated_unproven_array_constraints(
+        tuple(constraint.when(active_when) for constraint in constraints),
+        proven_cache=proven_cache,
+    )
+
+
+def _collect_array_value_constraints(
+    values: Iterable[ValueBase],
+    resolver: ExprResolver,
+) -> tuple[_ResourceConstraint, ...]:
+    """Collect unvalidated array requirements embedded in values.
+
+    Args:
+        values (Iterable[ValueBase]): Values whose element and view ancestry
+            should be inspected.
+        resolver (ExprResolver): Resolver for dimensions, indices, and affine
+            view metadata.
+
+    Returns:
+        tuple[_ResourceConstraint, ...]: Raw, possibly duplicated structural
+        requirements.
     """
     constraints: list[_ResourceConstraint] = []
     visited: set[str] = set()
@@ -9314,41 +13995,9 @@ def _operation_array_constraints(
             for index in value.element_indices:
                 visit(index)
 
-    for value in (*operation.all_input_values(), *operation.results):
-        if isinstance(value, ValueBase):
-            visit(value)
-
-    if isinstance(operation, StoreArrayElementOperation):
-        constraints.extend(
-            _array_index_constraints(
-                operation.array,
-                operation.index_values,
-                resolver,
-                access_kind="store",
-            )
-        )
-    elif isinstance(operation, ReturnQuantumArrayElementOperation):
-        constraints.extend(
-            _array_index_constraints(
-                operation.array,
-                operation.target_indices,
-                resolver,
-                access_kind="return target",
-            )
-        )
-        constraints.extend(
-            _array_index_constraints(
-                operation.array,
-                operation.source_indices,
-                resolver,
-                access_kind="return source",
-            )
-        )
-
-    return _validated_unproven_array_constraints(
-        constraints,
-        proven_cache=proven_cache,
-    )
+    for value in values:
+        visit(value)
+    return tuple(constraints)
 
 
 def _array_index_constraints(
@@ -9590,6 +14239,34 @@ def _estimate_activity(estimate: ResourceEstimate) -> ResourceExpr:
     )
 
 
+def _estimate_nonunitary_boundary_condition(
+    estimate: ResourceEstimate,
+) -> Boolean:
+    """Return when an estimate declares measurement or reset work.
+
+    Bodyless opaque calls cannot expose output-level observation provenance,
+    but their explicit resource contract can still prove that the call is a
+    non-unitary scheduling boundary.
+
+    Args:
+        estimate (ResourceEstimate): Aggregate invocation estimate to inspect.
+
+    Returns:
+        Boolean: Condition under which a measurement/reset count or
+            corresponding depth may be nonzero.
+    """
+    conditions = tuple(
+        _resource_activity_condition(value)
+        for value in (
+            estimate.measurements.total,
+            estimate.resets.total,
+            estimate.depth.measurement_depth,
+            estimate.depth.reset_depth,
+        )
+    )
+    return _boolean_condition(sp.Or(*conditions))
+
+
 def _normalized_dependency_completion(
     estimate: ResourceEstimate,
 ) -> dict[WireKey, ResourceExpr] | None:
@@ -9611,6 +14288,50 @@ def _normalized_dependency_completion(
             return {}
         return None
     return {key: estimate.depth.depth for key in keys}
+
+
+def _merge_dependency_accesses(
+    left: ResourceEstimate,
+    right: ResourceEstimate,
+    *,
+    writes: bool,
+) -> frozenset[WireKey] | None:
+    """Merge body-level scheduler reads or writes across two estimates.
+
+    Args:
+        left (ResourceEstimate): Left composition operand.
+        right (ResourceEstimate): Right composition operand.
+        writes (bool): Whether to merge write sets instead of read sets.
+
+    Returns:
+        frozenset[WireKey] | None: Union of known access sets, or ``None``
+            when a nonempty operand has no recoverable footprint.
+    """
+
+    def normalized(estimate: ResourceEstimate) -> frozenset[WireKey] | None:
+        """Recover one access set from explicit or symmetric metadata.
+
+        Args:
+            estimate (ResourceEstimate): Estimate whose access set is needed.
+
+        Returns:
+            frozenset[WireKey] | None: Explicit access set, symmetric fallback,
+                empty set for zero depth, or ``None`` when unknown.
+        """
+        accesses = estimate._dependency_writes if writes else estimate._dependency_reads
+        if accesses is not None:
+            return accesses
+        if estimate._dependency_keys is not None:
+            return estimate._dependency_keys
+        if not _estimate_has_nonzero_depth(estimate):
+            return frozenset()
+        return None
+
+    left_accesses = normalized(left)
+    right_accesses = normalized(right)
+    if left_accesses is None or right_accesses is None:
+        return None
+    return left_accesses | right_accesses
 
 
 def _project_dependency_metadata_over_symbol(
@@ -9731,6 +14452,18 @@ def _project_dependency_metadata_over_symbol(
         if keys is not None
         else None
     )
+    reads = estimate._dependency_reads
+    projected_reads = (
+        frozenset(projected for key in reads for projected in project(key))
+        if reads is not None
+        else None
+    )
+    writes = estimate._dependency_writes
+    projected_writes = (
+        frozenset(projected for key in writes for projected in project(key))
+        if writes is not None
+        else None
+    )
     completion = estimate._dependency_completion
     projected_completion: dict[WireKey, ResourceExpr] | None
     if completion is None:
@@ -9739,16 +14472,15 @@ def _project_dependency_metadata_over_symbol(
         projected_completion = {}
         for key, depth in completion.items():
             for projected in project(key):
-                projected_completion[projected] = cast(
-                    ResourceExpr,
-                    sp.Max(
-                        projected_completion.get(projected, _ZERO),
-                        depth,
-                    ),
+                projected_completion[projected] = _resource_max(
+                    projected_completion.get(projected, _ZERO),
+                    depth,
                 )
     return dataclasses.replace(
         estimate,
         _dependency_keys=projected_keys,
+        _dependency_reads=projected_reads,
+        _dependency_writes=projected_writes,
         _dependency_completion=projected_completion,
     )
 
@@ -9801,12 +14533,9 @@ def _max_dependency_completion(
     if left_completion is None or right_completion is None:
         return None
     return {
-        key: cast(
-            ResourceExpr,
-            sp.Max(
-                left_completion.get(key, _ZERO),
-                right_completion.get(key, _ZERO),
-            ),
+        key: _resource_max(
+            left_completion.get(key, _ZERO),
+            right_completion.get(key, _ZERO),
         )
         for key in left_completion.keys() | right_completion.keys()
     }
@@ -10082,11 +14811,18 @@ def _solve_affine_recurrence(
         final carry after all iterations, or ``None`` when the recurrence is
         nonlinear, coupled, or has an index-dependent multiplier.
     """
-    fixed_point_residual = sp.simplify(yielded.subs(carry_symbol, init) - init)
+    try:
+        fixed_point_residual = sp.simplify(yielded.subs(carry_symbol, init) - init)
+        coefficient = sp.simplify(sp.diff(yielded, carry_symbol))
+        remainder = sp.simplify(yielded - coefficient * carry_symbol)
+    except _SYMPY_SIMPLIFICATION_ERRORS:
+        # Nested symbolic sums and piecewise observation values can exceed
+        # SymPy's polynomial reduction domain. Such a failure means only that
+        # this optional compact solver cannot prove an affine closed form; the
+        # caller already has a conservative symbolic or concrete-replay path.
+        return None
     if fixed_point_residual == _ZERO:
         return init, init
-    coefficient = sp.simplify(sp.diff(yielded, carry_symbol))
-    remainder = sp.simplify(yielded - coefficient * carry_symbol)
     if (
         carry_symbol in coefficient.free_symbols
         or carry_symbol in remainder.free_symbols
@@ -10136,8 +14872,117 @@ def _solve_affine_recurrence(
             sp.simplify(coefficient**count * init + accumulated),
         )
 
-    completed_at_loop_value = sp.simplify((loop_symbol - start) / step)
-    return value_after(completed_at_loop_value), value_after(iterations)
+    try:
+        completed_at_loop_value = sp.simplify((loop_symbol - start) / step)
+        at_iteration = value_after(completed_at_loop_value)
+        final = value_after(iterations)
+    except _SYMPY_SIMPLIFICATION_ERRORS:
+        return None
+    nonfinite_atoms = (sp.nan, sp.zoo, sp.oo, -sp.oo)
+    if at_iteration.has(*nonfinite_atoms) or final.has(*nonfinite_atoms):
+        return None
+    return at_iteration, final
+
+
+def _invariant_identity_branch_guard(
+    yielded: sp.Expr,
+    *,
+    carry_symbol: sp.Symbol,
+    invariant_symbols: set[sp.Symbol],
+) -> Boolean:
+    """Return where an unsupported recurrence provably preserves its carry.
+
+    Only ordered ``Piecewise`` branches whose value is exactly the incoming
+    carry are considered. Every symbol in an effective guard must come from an
+    enclosing capture or loop bound that the caller proved invariant. This
+    positive proof avoids mistaking an unresolved body-local fallback symbol
+    for an immutable input. Unresolved functions are rejected as well.
+
+    Args:
+        yielded (sp.Expr): Expression yielded by one loop iteration.
+        carry_symbol (sp.Symbol): Symbol representing the incoming carry.
+        invariant_symbols (set[sp.Symbol]): Symbols proven to come from
+            immutable enclosing captures or loop bounds.
+
+    Returns:
+        Boolean: Ordered condition under which every iteration is an identity,
+        or ``False`` when no such invariant branch can be proved.
+    """
+    if not isinstance(yielded, sp.Piecewise):
+        return sp.false
+    branches = cast(tuple[Any, ...], yielded.args)
+    if not branches or branches[-1][1] is not sp.true:
+        return sp.false
+    remaining: Boolean = sp.true
+    identity_guards: list[Boolean] = []
+    for value, raw_guard in branches:
+        branch_guard = _boolean_condition(cast(sp.Basic, raw_guard))
+        effective_guard = _and_conditions(remaining, branch_guard)
+        guard_symbols = cast(set[sp.Symbol], effective_guard.free_symbols)
+        guard_is_invariant = not (
+            not guard_symbols <= invariant_symbols
+            or any(
+                isinstance(node, AppliedUndef)
+                for node in sp.preorder_traversal(effective_guard)
+            )
+        )
+        preserves_carry = value == carry_symbol
+        if guard_is_invariant and preserves_carry:
+            identity_guards.append(effective_guard)
+        remaining = _and_conditions(
+            remaining,
+            cast(Boolean, sp.Not(branch_guard)),
+        )
+        if remaining is sp.false:
+            break
+    return cast(Boolean, sp.Or(*identity_guards))
+
+
+def _loop_invariant_symbols(
+    resolver: ExprResolver,
+    captures: Iterable[ValueBase],
+    *,
+    bound_expressions: Iterable[sp.Expr],
+) -> set[sp.Symbol]:
+    """Collect symbols proven invariant for one loop invocation.
+
+    Region captures are explicit IR references to values defined outside the
+    loop body. Scalar captures and captured array dimensions therefore remain
+    fixed throughout that invocation, as do the already-resolved loop bounds.
+    Container contents are deliberately not guessed from their printed form.
+
+    Args:
+        resolver (ExprResolver): Resolver for the enclosing loop scope.
+        captures (Iterable[ValueBase]): Explicit outer-scope region captures.
+        bound_expressions (Iterable[sp.Expr]): Resolved bounds or cardinality
+            expressions fixed before the loop begins.
+
+    Returns:
+        set[sp.Symbol]: SymPy identities with an IR-backed invariance proof.
+    """
+    invariant: set[sp.Symbol] = set()
+
+    def add_expression(expression: sp.Expr) -> None:
+        """Add every scalar symbol in one proven-invariant expression.
+
+        Args:
+            expression (sp.Expr): Resolved enclosing expression.
+        """
+        invariant.update(
+            symbol
+            for symbol in expression.free_symbols
+            if isinstance(symbol, sp.Symbol)
+        )
+
+    for expression in bound_expressions:
+        add_expression(expression)
+    for capture in captures:
+        if isinstance(capture, ArrayValue):
+            for dimension in capture.shape:
+                add_expression(resolver.resolve(dimension))
+        elif isinstance(capture, Value) and not capture.type.is_quantum():
+            add_expression(resolver.resolve(capture))
+    return invariant
 
 
 def build_while_scope(
@@ -10181,6 +15026,8 @@ def build_if_scopes(
     false_child = resolver.child_scope(
         inner_block=_LocalBlock(operation.false_operations)
     )
+    true_child.copy_array_context()
+    false_child.copy_array_context()
     return true_child, false_child
 
 
@@ -11154,6 +16001,10 @@ def _project_abstract_aggregate_controlled_cost(
         _input_sizes=estimate._input_sizes,
         _has_output_summary=estimate._has_output_summary,
         _dependency_keys=estimate._dependency_keys,
+        _dependency_reads=estimate._dependency_reads,
+        _dependency_writes=estimate._dependency_writes,
+        _global_barrier_condition=estimate._global_barrier_condition,
+        _measurement_taint_conditions=estimate._measurement_taint_conditions,
         _guarded_assumptions=estimate._guarded_assumptions,
         _guarded_derivations=estimate._guarded_derivations,
         _guarded_qualities=estimate._guarded_qualities,
@@ -11269,6 +16120,8 @@ def _clean_ancilla_shared_aggregate_control_ladder(
         _input_sizes=body._input_sizes,
         _has_output_summary=body._has_output_summary,
         _dependency_keys=body._dependency_keys,
+        _dependency_reads=body._dependency_reads,
+        _dependency_writes=body._dependency_writes,
         _symbol_aliases=body._symbol_aliases,
     )._with_metadata(quality=EstimateQuality.CONSERVATIVE)
 
@@ -11483,6 +16336,10 @@ def _project_clean_ancilla_aggregate_controlled_cost(
         _input_sizes=estimate._input_sizes,
         _has_output_summary=estimate._has_output_summary,
         _dependency_keys=estimate._dependency_keys,
+        _dependency_reads=estimate._dependency_reads,
+        _dependency_writes=estimate._dependency_writes,
+        _global_barrier_condition=estimate._global_barrier_condition,
+        _measurement_taint_conditions=estimate._measurement_taint_conditions,
         _guarded_assumptions=estimate._guarded_assumptions,
         _guarded_derivations=estimate._guarded_derivations,
         _guarded_qualities=estimate._guarded_qualities,
@@ -11554,6 +16411,8 @@ def _project_clean_ancilla_aggregate_controlled_cost(
             _input_sizes=estimate._input_sizes,
             _has_output_summary=estimate._has_output_summary,
             _dependency_keys=estimate._dependency_keys,
+            _dependency_reads=estimate._dependency_reads,
+            _dependency_writes=estimate._dependency_writes,
             _symbol_aliases=estimate._symbol_aliases,
         )
     return controlled, ""
@@ -12671,6 +17530,49 @@ def _block_input_constraints(
     return tuple(constraints)
 
 
+def _block_output_constraints(
+    block: Block,
+    resolver: ExprResolver,
+    *,
+    active_when: sp.Basic = sp.true,
+    proven_cache: dict[_ResourceConstraint, bool] | None = None,
+) -> tuple[_ResourceConstraint, ...]:
+    """Return array-access requirements carried only by block outputs.
+
+    A returned array element need not appear in any operation operand. The
+    output interface must therefore be inspected explicitly so a root return
+    such as ``register[index]`` cannot bypass the same bounds validation used
+    for ordinary operations and nested callable bodies.
+
+    Args:
+        block (Block): Block whose output values are inspected.
+        resolver (ExprResolver): Resolver for output indices and array shapes.
+        active_when (sp.Basic): Predicate under which the block output is
+            reached. Defaults to true.
+        proven_cache (dict[_ResourceConstraint, bool] | None): Optional cache
+            of previously proved structural requirements. Defaults to
+            ``None``.
+
+    Returns:
+        tuple[_ResourceConstraint, ...]: Validated requirements not already
+            implied by symbolic type assumptions.
+
+    Raises:
+        ValueError: If an output access is malformed or concretely out of
+            bounds.
+    """
+    return _validated_unproven_array_constraints(
+        tuple(
+            constraint.when(active_when)
+            for constraint in _collect_array_value_constraints(
+                block.output_values,
+                resolver,
+            )
+        ),
+        proven_cache=proven_cache,
+    )
+
+
 def _free_symbols(estimate: ResourceEstimate) -> set[sp.Symbol]:
     """Collect all free symbols from an estimate.
 
@@ -12678,13 +17580,15 @@ def _free_symbols(estimate: ResourceEstimate) -> set[sp.Symbol]:
         estimate (ResourceEstimate): Estimate to inspect.
 
     Returns:
-        set[sp.Symbol]: Free symbols used by any metric.
+        set[sp.Symbol]: Free symbols used by metrics, constraints, metadata,
+            or scheduler state.
     """
     symbols: set[sp.Symbol] = set()
     for expr in _all_exprs(estimate):
         symbols.update(cast(set[sp.Symbol], sp.sympify(expr).free_symbols))
     for constraint in estimate._constraints:
         constraint_symbols = set(sp.sympify(constraint.expression).free_symbols)
+        constraint_symbols.update(sp.sympify(constraint.active_when).free_symbols)
         if constraint.expected is not None:
             constraint_symbols.update(sp.sympify(constraint.expected).free_symbols)
         bound_symbols = {loop_range.symbol for loop_range in constraint.ranges}
@@ -12700,6 +17604,41 @@ def _free_symbols(estimate: ResourceEstimate) -> set[sp.Symbol]:
         *(estimate._guarded_approximations or ()),
     ):
         symbols.update(cast(set[sp.Symbol], sp.sympify(fact.active_when).free_symbols))
+    symbols.update(
+        cast(
+            set[sp.Symbol],
+            sp.sympify(estimate._global_barrier_condition).free_symbols,
+        )
+    )
+    return symbols
+
+
+def _trace_guard_free_symbols(
+    trace: ResourceTraceNode | None,
+) -> set[sp.Symbol]:
+    """Collect symbols used only by explanation-node activity guards.
+
+    Trace-only symbols do not become public substitution parameters, but an
+    internal runtime outcome or unresolved carry must still be rejected if it
+    would escape through :meth:`ResourceEstimate.explain` or serialization.
+
+    Args:
+        trace (ResourceTraceNode | None): Optional explanation tree root.
+
+    Returns:
+        set[sp.Symbol]: Free symbols used by trace activity guards.
+    """
+    symbols: set[sp.Symbol] = set()
+    pending = [trace] if trace is not None else []
+    while pending:
+        node = pending.pop()
+        symbols.update(
+            cast(
+                set[sp.Symbol],
+                sp.sympify(node.active_when).free_symbols,
+            )
+        )
+        pending.extend(node.children)
     return symbols
 
 
@@ -12723,6 +17662,7 @@ def _serialization_expressions(
     expressions: list[sp.Basic | int | float] = list(_all_exprs(estimate))
     for constraint in estimate._constraints:
         expressions.append(constraint.expression)
+        expressions.append(constraint.active_when)
         if constraint.expected is not None:
             expressions.append(constraint.expected)
         for loop_range in constraint.ranges:
@@ -12743,6 +17683,7 @@ def _serialization_expressions(
             *(estimate._guarded_approximations or ()),
         )
     )
+    expressions.append(estimate._global_barrier_condition)
     pending_trace_nodes = [estimate.trace] if estimate.trace is not None else []
     while pending_trace_nodes:
         trace_node = pending_trace_nodes.pop()
@@ -13251,14 +18192,13 @@ def _expand_array_shape_inputs(
                     "or an array-like value; got "
                     f"{type(supplied).__name__} ({supplied!r})."
                 )
-        if shape and len(shape) != len(ir_value.shape):
+        if len(shape) != len(ir_value.shape):
             raise ValueError(
                 f"array input '{name}' has rank {len(shape)}, but the qkernel "
                 f"declares rank {len(ir_value.shape)}."
             )
-        if shape:
-            consumed.add(name)
-        if ir_value.type.is_quantum() and shape:
+        consumed.add(name)
+        if ir_value.type.is_quantum():
             expanded.pop(name, None)
         for dimension, size in zip(ir_value.shape, shape):
             dimension_name = shape_aliases.get(dimension.uuid)
@@ -13280,6 +18220,7 @@ def _expand_array_shape_inputs(
                         f"but inputs also specify {dimension_name}={existing!r}."
                     )
                 expanded[dimension_name] = size
+                consumed.add(dimension_name)
     return expanded, frozenset(consumed)
 
 
@@ -13311,11 +18252,14 @@ def _is_array_like_input(value: Any) -> bool:
     Returns:
         bool: Whether ``value`` is a non-scalar array or sequence.
     """
-    shape = getattr(value, "shape", None)
+    try:
+        shape = getattr(value, "shape", None)
+    except _ARRAY_PROTOCOL_ERRORS:
+        return False
     if shape is not None:
         try:
             return len(shape) > 0
-        except TypeError:
+        except _ARRAY_PROTOCOL_ERRORS:
             return False
     return isinstance(value, Sequence) and not isinstance(value, (str, bytes))
 
@@ -13436,7 +18380,9 @@ def _apply_inputs(
     referenced = set(branch_condition_names or ()) | set(consumed_input_names or ())
     declared_types = input_types or {}
     unknown = [
-        name for name in inputs if name not in symbols_by_name and name not in known
+        name
+        for name in inputs
+        if name not in symbols_by_name and name not in known and name not in referenced
     ]
     if unknown:
         available = ", ".join(sorted(set(symbols_by_name) | set(known))) or "(none)"
@@ -13636,18 +18582,46 @@ def _controlled_u_child_resolver(
         return resolver.child_scope(block)
 
     extra: dict[str, ResourceExpr] = {}
+    classical_inputs: list[tuple[Value, Value]] = []
+    array_inputs: list[tuple[ArrayValue, ArrayValue]] = []
     actual_operands = _controlled_u_body_operands(operation)
     for formal, actual in pair_block_operands(block, actual_operands):
         extra[formal.uuid] = resolver.resolve(actual)
+        if (
+            isinstance(formal, Value)
+            and isinstance(actual, Value)
+            and not formal.type.is_quantum()
+            and not isinstance(formal, ArrayValue)
+            and not isinstance(actual, ArrayValue)
+        ):
+            classical_inputs.append((formal, actual))
         if isinstance(formal, ArrayValue) and isinstance(actual, ArrayValue):
-            for formal_dim, actual_dim in zip(formal.shape, actual.shape):
+            if not formal.type.is_quantum():
+                array_inputs.append((formal, actual))
+            for formal_dim, actual_dim in zip(
+                formal.shape,
+                actual.shape,
+                strict=True,
+            ):
                 extra[formal_dim.uuid] = resolver.resolve(actual_dim)
 
-    return resolver.isolated_scope(
+    child = resolver.isolated_scope(
         block,
         extra,
         structural_scope=resolver.call_structural_scope(operation, block),
     )
+    for formal, actual in classical_inputs:
+        child.bind_classical_fact(
+            formal,
+            resolver.resolve_classical_fact(actual),
+        )
+    for formal, actual in array_inputs:
+        child.bind_call_array_input(
+            block,
+            formal,
+            resolver.snapshot_array_state(actual),
+        )
+    return child
 
 
 def _select_case_child_resolver(
@@ -13668,17 +18642,45 @@ def _select_case_child_resolver(
     """
     actual_operands = [*operation.target_operands, *operation.param_operands]
     extra: dict[str, ResourceExpr] = {}
+    classical_inputs: list[tuple[Value, Value]] = []
+    array_inputs: list[tuple[ArrayValue, ArrayValue]] = []
     for formal, actual in pair_block_operands(case_block, actual_operands):
         extra[formal.uuid] = resolver.resolve(actual)
+        if (
+            isinstance(formal, Value)
+            and isinstance(actual, Value)
+            and not formal.type.is_quantum()
+            and not isinstance(formal, ArrayValue)
+            and not isinstance(actual, ArrayValue)
+        ):
+            classical_inputs.append((formal, actual))
         if isinstance(formal, ArrayValue) and isinstance(actual, ArrayValue):
-            for formal_dim, actual_dim in zip(formal.shape, actual.shape):
+            if not formal.type.is_quantum():
+                array_inputs.append((formal, actual))
+            for formal_dim, actual_dim in zip(
+                formal.shape,
+                actual.shape,
+                strict=True,
+            ):
                 extra[formal_dim.uuid] = resolver.resolve(actual_dim)
 
-    return resolver.isolated_scope(
+    child = resolver.isolated_scope(
         case_block,
         extra,
         structural_scope=resolver.call_structural_scope(operation, case_block),
     )
+    for formal, actual in classical_inputs:
+        child.bind_classical_fact(
+            formal,
+            resolver.resolve_classical_fact(actual),
+        )
+    for formal, actual in array_inputs:
+        child.bind_call_array_input(
+            case_block,
+            formal,
+            resolver.snapshot_array_state(actual),
+        )
+    return child
 
 
 def _scalar_target_broadcast_factor(
@@ -13729,15 +18731,43 @@ def _inverse_block_child_resolver(
         return resolver.child_scope(impl)
 
     extra: dict[str, ResourceExpr] = {}
+    classical_inputs: list[tuple[Value, Value]] = []
+    array_inputs: list[tuple[ArrayValue, ArrayValue]] = []
     operands = [*operation.target_qubits, *operation.parameters]
     for formal, actual in pair_block_operands(impl, operands):
         extra[formal.uuid] = resolver.resolve(actual)
+        if (
+            isinstance(formal, Value)
+            and isinstance(actual, Value)
+            and not formal.type.is_quantum()
+            and not isinstance(formal, ArrayValue)
+            and not isinstance(actual, ArrayValue)
+        ):
+            classical_inputs.append((formal, actual))
         if isinstance(formal, ArrayValue) and isinstance(actual, ArrayValue):
-            for formal_dim, actual_dim in zip(formal.shape, actual.shape):
+            if not formal.type.is_quantum():
+                array_inputs.append((formal, actual))
+            for formal_dim, actual_dim in zip(
+                formal.shape,
+                actual.shape,
+                strict=True,
+            ):
                 extra[formal_dim.uuid] = resolver.resolve(actual_dim)
 
-    return resolver.isolated_scope(
+    child = resolver.isolated_scope(
         impl,
         extra,
         structural_scope=resolver.call_structural_scope(operation, impl),
     )
+    for formal, actual in classical_inputs:
+        child.bind_classical_fact(
+            formal,
+            resolver.resolve_classical_fact(actual),
+        )
+    for formal, actual in array_inputs:
+        child.bind_call_array_input(
+            impl,
+            formal,
+            resolver.snapshot_array_state(actual),
+        )
+    return child

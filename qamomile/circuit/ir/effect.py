@@ -85,25 +85,38 @@ def callable_bodies(
     Returns:
         tuple[Block, ...]: Candidate bodies whose cached metadata applies.
     """
-    matching_bodies = tuple(
-        implementation.body
+    matching_implementations = tuple(
+        implementation
         for implementation in definition.implementations
         if implementation.transform is transform and implementation.body is not None
     )
-    if matching_bodies:
-        return matching_bodies
+    bodies: list["Block"] = []
+    for implementation in matching_implementations:
+        assert implementation.body is not None
+        bodies.append(implementation.body)
+    if any(
+        implementation.backend is None and implementation.strategy is None
+        for implementation in matching_implementations
+    ):
+        return tuple(bodies)
     if transform is CallTransform.CONTROLLED_INVERSE:
-        inverse_bodies = tuple(
-            implementation.body
+        inverse_implementations = tuple(
+            implementation
             for implementation in definition.implementations
             if implementation.transform is CallTransform.INVERSE
             and implementation.body is not None
         )
-        if inverse_bodies:
-            return inverse_bodies
+        for implementation in inverse_implementations:
+            assert implementation.body is not None
+            bodies.append(implementation.body)
+        if any(
+            implementation.backend is None and implementation.strategy is None
+            for implementation in inverse_implementations
+        ):
+            return tuple(bodies)
     if definition.body is not None:
-        return (definition.body,)
-    return ()
+        bodies.append(definition.body)
+    return tuple(bodies)
 
 
 def callable_effects(
@@ -160,21 +173,65 @@ def _operation_owned_effects(operation: Operation) -> KernelEffect:
     Returns:
         KernelEffect: Effects inherited from owned or referenced bodies.
     """
+    effects = KernelEffect.NONE
+    for body in _operation_owned_effect_bodies(operation):
+        effects |= body.effects
+    return effects
+
+
+def _operation_owned_effect_bodies(operation: Operation) -> tuple["Block", ...]:
+    """Return callable bodies whose effects are inherited by an operation.
+
+    This structural helper never reads a body's cached effects, so it can also
+    discover recursive callable graphs before fixed-point evaluation begins.
+
+    Args:
+        operation (Operation): Semantic operation to inspect.
+
+    Returns:
+        tuple[Block, ...]: Referenced or owned bodies relevant to the
+            operation's effect contract.
+    """
     if isinstance(operation, InvokeOperation):
-        return operation.effects
+        if operation.definition is None:
+            return ()
+        return callable_bodies(operation.definition, operation.transform)
     if isinstance(operation, ControlledUOperation) and operation.block is not None:
-        return operation.block.effects
+        return (operation.block,)
     if isinstance(operation, InverseBlockOperation):
         if operation.implementation_block is not None:
-            return operation.implementation_block.effects
+            return (operation.implementation_block,)
         if operation.source_block is not None:
-            return operation.source_block.effects
+            return (operation.source_block,)
     if isinstance(operation, SelectOperation):
-        effects = KernelEffect.NONE
-        for case_block in operation.case_blocks:
-            effects |= case_block.effects
-        return effects
-    return KernelEffect.NONE
+        return tuple(operation.case_blocks)
+    return ()
+
+
+def _reachable_effect_blocks(root: "Block") -> tuple["Block", ...]:
+    """Collect the finite block graph participating in ``root`` effects.
+
+    Args:
+        root (Block): Block whose reachable callable graph should be walked.
+
+    Returns:
+        tuple[Block, ...]: Strongly referenced blocks in deterministic preorder.
+    """
+    blocks: dict[int, "Block"] = {}
+    pending = [root]
+    while pending:
+        block = pending.pop()
+        identity = id(block)
+        if identity in blocks:
+            continue
+        blocks[identity] = block
+        children = [
+            child
+            for operation in walk_operations(block.operations)
+            for child in _operation_owned_effect_bodies(operation)
+        ]
+        pending.extend(reversed(children))
+    return tuple(blocks.values())
 
 
 def _invocation_measurement_seeds(operations: Sequence[Operation]) -> set[str]:
@@ -243,24 +300,71 @@ def summarize_block_effects(
 
 
 def refresh_block_effects(block: "Block") -> None:
-    """Refresh one block's cached effect and output-provenance metadata.
+    """Refresh reachable effect metadata as a least fixed point.
+
+    Recursive and mutually recursive callables are valid serialized IR. Their
+    semantic effects therefore cannot be populated with an ordinary recursive
+    cache: a cycle would expose and then persist a partial ``NONE`` result.
+    The effect and measured-output lattices are finite, so this routine starts
+    every reachable body at the empty summary and repeatedly applies the
+    ordinary local equations until no flag or result index grows.
 
     Args:
         block (Block): Mutable semantic block whose operations are finalized.
     """
     if block._effects_refreshing:
         return
-    block._effects_refreshing = True
-    try:
-        effects, result_indices = summarize_block_effects(
-            block.operations,
-            block.output_values,
+    reachable = _reachable_effect_blocks(block)
+    previous = {
+        id(candidate): (
+            candidate._effects,
+            candidate._measurement_result_indices,
+            candidate._effects_valid,
+            candidate._effects_refreshing,
         )
-        block._effects = effects
-        block._measurement_result_indices = result_indices
-        block._effects_valid = True
-    finally:
-        block._effects_refreshing = False
+        for candidate in reachable
+    }
+    for candidate in reachable:
+        candidate._effects = KernelEffect.NONE
+        candidate._measurement_result_indices = frozenset()
+        candidate._effects_valid = True
+        candidate._effects_refreshing = True
+    try:
+        while True:
+            summaries = {
+                id(candidate): summarize_block_effects(
+                    candidate.operations,
+                    candidate.output_values,
+                )
+                for candidate in reachable
+            }
+            changed = False
+            for candidate in reachable:
+                effects, result_indices = summaries[id(candidate)]
+                effects |= candidate._effects
+                result_indices |= candidate._measurement_result_indices
+                if (
+                    effects != candidate._effects
+                    or result_indices != candidate._measurement_result_indices
+                ):
+                    changed = True
+                candidate._effects = effects
+                candidate._measurement_result_indices = result_indices
+            if not changed:
+                break
+    except Exception:
+        for candidate in reachable:
+            (
+                candidate._effects,
+                candidate._measurement_result_indices,
+                candidate._effects_valid,
+                candidate._effects_refreshing,
+            ) = previous[id(candidate)]
+        raise
+    else:
+        for candidate in reachable:
+            candidate._effects_valid = True
+            candidate._effects_refreshing = False
 
 
 def format_kernel_effects(effects: KernelEffect) -> str:

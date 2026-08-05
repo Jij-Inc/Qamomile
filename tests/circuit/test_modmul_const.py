@@ -243,7 +243,11 @@ def test_modmul_const_control_is_derived_from_the_controlled_body() -> None:
     assert plain.assumptions
     assert plain.quality is qmc.EstimateQuality.CONSERVATIVE
     assert ctrl.quality is qmc.EstimateQuality.CONSERVATIVE
-    assert all("depth" in assumption.message for assumption in plain.assumptions)
+    assert any("depth" in assumption.message for assumption in plain.assumptions)
+    assert any(
+        "measurement-derived conditional" in assumption.message
+        for assumption in plain.assumptions
+    )
     assert plain.gates.two_qubit > 0
     assert ctrl.gates.multi_qubit > 0
 

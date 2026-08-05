@@ -618,6 +618,44 @@ def test_all_ones_control_value_uses_the_canonical_default() -> None:
     assert operation.control_value is None
 
 
+def test_nested_default_controls_keep_the_canonical_default() -> None:
+    """Composing ordinary control groups does not create an explicit pattern."""
+    transformed = qmc.control(
+        qmc.control(qmc.x, num_controls=2),
+        num_controls=1,
+    )
+
+    assert transformed._control_value is None
+
+    @qmc.qkernel
+    def circuit(
+        outer: Qubit,
+        inner_0: Qubit,
+        inner_1: Qubit,
+        target: Qubit,
+    ) -> tuple[Qubit, Qubit, Qubit, Qubit]:
+        """Trace the flattened three-control X operation.
+
+        Args:
+            outer (Qubit): Newly prepended control qubit.
+            inner_0 (Qubit): First original control qubit.
+            inner_1 (Qubit): Second original control qubit.
+            target (Qubit): Target qubit.
+
+        Returns:
+            tuple[Qubit, Qubit, Qubit, Qubit]: Updated controls and target.
+        """
+        return transformed(outer, inner_0, inner_1, target)
+
+    [operation] = [
+        operation
+        for operation in circuit.block.operations
+        if isinstance(operation, ConcreteControlledU)
+    ]
+    assert operation.num_controls == 3
+    assert operation.control_value is None
+
+
 def test_control_value_is_preserved_on_an_opaque_oracle() -> None:
     """Opaque controlled calls retain activation metadata for target emitters."""
     oracle = qmc.opaque("control_value_oracle", num_qubits=1)

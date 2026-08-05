@@ -18,6 +18,7 @@ import sympy as sp
 from sympy.calculus.util import minimum as calculus_minimum
 from sympy.core.relational import Relational
 from sympy.logic.boolalg import Boolean
+from sympy.polys.polyerrors import BasePolynomialError
 
 from qamomile.circuit.estimator._serialization import (
     SymbolRegistry,
@@ -27,6 +28,16 @@ from qamomile.circuit.estimator._serialization import (
 ResourceExpr = sp.Expr
 _ZERO = sp.Integer(0)
 _ONE = sp.Integer(1)
+_SUM_EAGER_EVALUATION_LIMIT = 1024
+_SYMPY_SIMPLIFICATION_ERRORS = (
+    ArithmeticError,
+    AttributeError,
+    BasePolynomialError,
+    NotImplementedError,
+    RecursionError,
+    TypeError,
+    ValueError,
+)
 
 
 def _symbol_display_name(symbol: sp.Basic) -> str:
@@ -1001,6 +1012,8 @@ class _ResourceConstraint:
         ranges (tuple[_ConstraintRange, ...]): Outer-to-inner loop ranges that
             quantify internal symbols in ``expression``. Defaults to an empty
             tuple.
+        active_when (Boolean): Predicate under which the requirement applies.
+            Defaults to true.
     """
 
     expression: ResourceExpr
@@ -1012,6 +1025,7 @@ class _ResourceConstraint:
     finite: bool = False
     expected: ResourceExpr | None = None
     ranges: tuple[_ConstraintRange, ...] = ()
+    active_when: Boolean = sp.true
 
     def mapped(self, fn: Any) -> _ResourceConstraint:
         """Rewrite and validate the constrained expression.
@@ -1031,6 +1045,7 @@ class _ResourceConstraint:
             expression=fn(self.expression),
             expected=(fn(self.expected) if self.expected is not None else None),
             ranges=tuple(loop_range.mapped(fn) for loop_range in self.ranges),
+            active_when=_boolean_condition(fn(self.active_when)),
         )
         mapped.validate()
         return mapped
@@ -1045,16 +1060,9 @@ class _ResourceConstraint:
         Returns:
             _ResourceConstraint: Conditionally active requirement.
         """
-        predicate = _boolean_condition(condition)
-        fallback = self._valid_fallback()
-        expected = self.expected
-        if expected is not None:
-            expected = _piecewise(expected, _ZERO, predicate)
-            fallback = _ZERO
         return dataclasses.replace(
             self,
-            expression=_piecewise(self.expression, fallback, predicate),
-            expected=expected,
+            active_when=_and_conditions(self.active_when, condition),
         )
 
     def validate(self) -> None:
@@ -1098,7 +1106,14 @@ class _ResourceConstraint:
         Raises:
             ValueError: If a concrete range or constrained value is invalid.
         """
+        active = _boolean_condition(
+            _substitute_basic_lazily(self.active_when, substitutions)
+        )
+        if active is sp.false:
+            return
         if range_index == len(self.ranges):
+            if active is not sp.true:
+                return
             resolved = _safe_constraint_substitute(self.expression, substitutions)
             if resolved.is_number:
                 self._validate_value(resolved, substitutions)
@@ -1132,6 +1147,7 @@ class _ResourceConstraint:
                 step,
                 count,
                 substitutions,
+                budget,
             ):
                 return
             raise ValueError(
@@ -1154,6 +1170,7 @@ class _ResourceConstraint:
         step: sp.Expr,
         count: int,
         substitutions: Mapping[sp.Symbol, sp.Expr],
+        budget: list[int],
     ) -> bool:
         """Prove a large one-dimensional quantified requirement analytically.
 
@@ -1163,6 +1180,8 @@ class _ResourceConstraint:
             step (sp.Expr): Concrete loop step.
             count (int): Concrete positive iteration count.
             substitutions (Mapping[sp.Symbol, sp.Expr]): Outer loop values.
+            budget (list[int]): Remaining point-validation budget shared by
+                enclosing quantified ranges.
 
         Returns:
             bool: Whether integrality and the lower bound were proven without
@@ -1173,16 +1192,33 @@ class _ResourceConstraint:
                 requirement.
         """
         expression = _safe_constraint_substitute(self.expression, substitutions)
+        active_when = _boolean_condition(
+            _substitute_basic_lazily(self.active_when, substitutions)
+        )
+        if active_when is sp.false:
+            return True
         expected = (
             _safe_constraint_substitute(self.expected, substitutions)
             if self.expected is not None
             else None
         )
         external_symbols = expression.free_symbols - {loop_range.symbol}
+        external_symbols.update(active_when.free_symbols - {loop_range.symbol})
         if expected is not None:
             external_symbols.update(expected.free_symbols - {loop_range.symbol})
         if external_symbols:
             return True
+        if active_when is not sp.true:
+            return self._validate_guarded_large_range(
+                expression,
+                active_when,
+                loop_range,
+                start,
+                step,
+                count,
+                substitutions,
+                budget,
+            )
 
         index = sp.Dummy("constraint_index", integer=True, nonnegative=True)
         indexed = cast(
@@ -1281,6 +1317,166 @@ class _ResourceConstraint:
                 },
             )
         return integer_proven and finite_proven and real_proven
+
+    def _validate_guarded_large_range(
+        self,
+        expression: ResourceExpr,
+        active_when: Boolean,
+        loop_range: _ConstraintRange,
+        start: sp.Expr,
+        step: sp.Expr,
+        count: int,
+        substitutions: Mapping[sp.Symbol, sp.Expr],
+        budget: list[int],
+    ) -> bool:
+        """Validate only the active subset of a large guarded range.
+
+        The guard is converted to an integer offset set within the concrete
+        loop range. Small sets are checked point by point under the shared
+        validation budget. Large arithmetic ranges reuse the same analytic
+        proof as an unguarded loop, so inequalities, descending ranges, and
+        disjoint unions do not need separate ad-hoc boundary rules.
+
+        Args:
+            expression (ResourceExpr): Constraint expression before indexing.
+            active_when (Boolean): Loop-index-dependent activation predicate.
+            loop_range (_ConstraintRange): Quantified loop range.
+            start (sp.Expr): Concrete first loop value.
+            step (sp.Expr): Concrete loop step.
+            count (int): Concrete positive iteration count.
+            substitutions (Mapping[sp.Symbol, sp.Expr]): Concrete outer-range
+                substitutions.
+            budget (list[int]): Remaining point-validation budget shared by
+                enclosing quantified ranges.
+
+        Returns:
+            bool: Whether every active point was proven and validated.
+
+        Raises:
+            ValueError: If an active point violates the requirement.
+        """
+        index = sp.Dummy("constraint_index", integer=True, nonnegative=True)
+        indexed_guard = _boolean_condition(
+            _substitute_basic_lazily(
+                active_when,
+                {loop_range.symbol: start + step * index},
+            )
+        )
+        if indexed_guard.free_symbols - {index}:
+            return False
+        try:
+            active_values = cast(
+                sp.Set,
+                sp.Intersection(
+                    sp.Range(_ZERO, sp.Integer(count)),
+                    indexed_guard.as_set(),
+                ),
+            )
+        except (
+            ArithmeticError,
+            AttributeError,
+            NotImplementedError,
+            RecursionError,
+            TypeError,
+            ValueError,
+        ):
+            return False
+
+        cardinality = _finite_integer_set_cardinality(active_values)
+        if cardinality is None or not _is_concrete_integer(cardinality):
+            return False
+        active_count = int(cardinality)
+        if active_count <= 0:
+            return True
+
+        expression_is_constant = loop_range.symbol not in expression.free_symbols
+        expected_is_constant = (
+            self.expected is None or loop_range.symbol not in self.expected.free_symbols
+        )
+        if expression_is_constant and expected_is_constant and expression.is_number:
+            self._validate_value(expression, substitutions)
+            budget[0] -= 1
+            return True
+
+        def validate_offset(offset: sp.Expr) -> bool:
+            """Validate one active integer loop offset.
+
+            Args:
+                offset (sp.Expr): Zero-based concrete loop offset.
+
+            Returns:
+                bool: Whether the offset resolved to a concrete valid value.
+
+            Raises:
+                ValueError: If the active constraint is violated.
+            """
+            if not offset.is_number or not _is_concrete_integer(offset):
+                return False
+            loop_value = start + step * offset
+            point_substitutions = {
+                **substitutions,
+                loop_range.symbol: loop_value,
+            }
+            resolved = _safe_constraint_substitute(expression, point_substitutions)
+            if not resolved.is_number:
+                return False
+            self._validate_value(resolved, point_substitutions)
+            budget[0] -= 1
+            return True
+
+        if active_count <= budget[0]:
+            try:
+                offsets = tuple(
+                    cast(sp.Expr, value) for value in cast(Any, active_values)
+                )
+            except (NotImplementedError, TypeError, ValueError):
+                return False
+            return len(offsets) == active_count and all(
+                validate_offset(offset) for offset in offsets
+            )
+
+        def validate_set(values: sp.Set) -> bool:
+            """Validate one normalized component of the active offset set.
+
+            Args:
+                values (sp.Set): Finite integer offsets or arithmetic range.
+
+            Returns:
+                bool: Whether the component was validated analytically or
+                within the remaining point budget.
+            """
+            component_count = _finite_integer_set_cardinality(values)
+            if component_count is None or not _is_concrete_integer(component_count):
+                return False
+            size = int(component_count)
+            if size <= 0:
+                return True
+            if size <= budget[0]:
+                try:
+                    offsets = tuple(cast(sp.Expr, value) for value in cast(Any, values))
+                except (NotImplementedError, TypeError, ValueError):
+                    return False
+                return len(offsets) == size and all(
+                    validate_offset(offset) for offset in offsets
+                )
+            if isinstance(values, sp.Range):
+                range_size = cast(sp.Expr, values.size)
+                if not _is_concrete_integer(range_size):
+                    return False
+                unguarded = dataclasses.replace(self, active_when=sp.true)
+                return unguarded._validate_large_range(
+                    loop_range,
+                    start + step * cast(sp.Expr, values.start),
+                    step * cast(sp.Expr, values.step),
+                    int(range_size),
+                    substitutions,
+                    budget,
+                )
+            if isinstance(values, sp.Union):
+                return all(validate_set(cast(sp.Set, subset)) for subset in values.args)
+            return False
+
+        return validate_set(active_values)
 
     def _validate_value(
         self,
@@ -1405,10 +1601,12 @@ class _ResourceConstraint:
         appears_in_expected = (
             self.expected is not None and loop_symbol in self.expected.free_symbols
         )
+        appears_in_activation = loop_symbol in self.active_when.free_symbols
         if (
             loop_symbol not in self.expression.free_symbols
             and not appears_in_expected
             and not appears_in_nested_range
+            and not appears_in_activation
         ):
             return self
         quantified_range = _ConstraintRange(
@@ -1421,6 +1619,7 @@ class _ResourceConstraint:
             self.expected is not None
             or self.ranges
             or loop_symbol not in self.expression.free_symbols
+            or appears_in_activation
         ):
             bound = dataclasses.replace(
                 self,
@@ -1482,7 +1681,7 @@ def _expr(value: ResourceExpr | int | float) -> ResourceExpr:
         return cast(ResourceExpr, value)
     if isinstance(value, int):
         return sp.Integer(value)
-    return sp.Float(value)
+    return cast(ResourceExpr, sp.Float(value))
 
 
 def _substitute_resource_expr(
@@ -1494,8 +1693,11 @@ def _substitute_resource_expr(
     Symbolic simplification and later substitution are separate phases, so a
     boundary substitution can expose a negative concrete expression even when
     the symbolic estimate was retained in an unspecialized form. Resource
-    metrics cannot be negative, so only fully concrete negative results are
-    clamped; partially symbolic expressions stay unchanged.
+    metrics cannot be negative, so concrete negative results are clamped when
+    their sign can be resolved safely.  A retained huge finite Sum is never
+    evaluated merely to discover its sign; an explicitly negative wrapper
+    that cannot be proved is instead kept behind an unevaluated ``Max(0, ...)``
+    clamp.
 
     Args:
         expression (sp.Expr): Resource expression to rewrite.
@@ -1510,6 +1712,18 @@ def _substitute_resource_expr(
         sp.Expr,
         _substitute_basic_lazily(_expr(expression), substitutions),
     )
+    if _has_large_concrete_sum(substituted):
+        # A retained finite Sum is already an exact expression. Asking SymPy
+        # to ``doit`` it can enter Euler--Maclaurin evaluation whose cost grows
+        # with an arbitrarily large user-supplied loop bound.
+        if _large_sum_expression_is_structurally_negative(substituted):
+            return _ZERO
+        if _large_sum_expression_is_structurally_nonnegative(substituted):
+            return substituted
+        return cast(
+            sp.Expr,
+            sp.Max(_ZERO, substituted, evaluate=False),
+        )
     resolved = cast(sp.Expr, substituted.doit())
     if not resolved.free_symbols <= substituted.free_symbols:
         resolved = substituted
@@ -1578,7 +1792,324 @@ def _substitute_basic_lazily(
     )
     if rewritten_args == expression.args:
         return expression
+    if isinstance(expression, sp.Sum):
+        rewritten_sum = cast(sp.Sum, expression.func(*rewritten_args))
+        evaluated = _evaluate_constant_piecewise_sum(rewritten_sum)
+        return rewritten_sum if evaluated is None else evaluated
+    if isinstance(
+        expression,
+        (
+            sp.Max,
+            sp.Min,
+            Relational,
+            sp.floor,
+            sp.ceiling,
+            sp.Mod,
+            sp.Abs,
+            sp.Pow,
+            sp.Add,
+            sp.Mul,
+        ),
+    ) and any(_has_large_concrete_sum(argument) for argument in rewritten_args):
+        # Max/Min try to compare their arguments during construction. For an
+        # unevaluated huge finite Sum that comparison invokes numerical
+        # summation even though retaining the exact symbolic node is enough.
+        constructor = cast(Any, expression.func)
+        return cast(sp.Basic, constructor(*rewritten_args, evaluate=False))
     return cast(sp.Basic, expression.func(*rewritten_args))
+
+
+def _large_sum_expression_is_structurally_negative(expression: sp.Expr) -> bool:
+    """Prove a simple negative multiple of positive concrete sums.
+
+    Querying SymPy's generic sign properties on an unsupported huge ``Sum``
+    can itself invoke numerical summation. This deliberately narrow proof
+    preserves the resource clamping contract for the common ``-Sum(...)``
+    shape without evaluating arbitrary wrappers.
+
+    Args:
+        expression (sp.Expr): Large-sum expression to inspect.
+
+    Returns:
+        bool: Whether the expression is a negative coefficient times factors
+            that are structurally nonnegative and include a positive finite
+            sum.
+    """
+    coefficient, remainder = expression.as_coeff_Mul()
+    if coefficient.is_negative is not True:
+        return False
+    factors = remainder.args if isinstance(remainder, sp.Mul) else (remainder,)
+    has_positive_sum = False
+    for factor in factors:
+        if isinstance(factor, sp.Sum):
+            if factor.function.is_nonnegative is not True:
+                return False
+            for limit in factor.limits:
+                if len(limit) != 3:
+                    return False
+                _symbol, lower, upper = limit
+                count = cast(sp.Expr, upper - lower + _ONE)
+                if count.is_positive is not True:
+                    return False
+            has_positive_sum = True
+        else:
+            # Asking a wrapper around the same Sum for generic sign metadata
+            # can trigger the expensive summation that this proof exists to
+            # avoid. Only direct Sum factors are intentionally recognized.
+            return False
+    return has_positive_sum
+
+
+def _large_sum_expression_is_structurally_nonnegative(expression: sp.Expr) -> bool:
+    """Prove nonnegativity without evaluating a retained finite sum.
+
+    Each finite sum is replaced by a fresh nonnegative proxy only when its
+    summand is already known nonnegative and every limit has nonnegative
+    cardinality. The surrounding arithmetic can then use inexpensive SymPy
+    sign inference without invoking finite-sum evaluation. Failure to prove a
+    sign is intentional: the caller retains the resource lower-bound contract
+    with an unevaluated ``Max(0, expression)``.
+
+    Args:
+        expression (sp.Expr): Large-sum expression to inspect.
+
+    Returns:
+        bool: Whether the complete expression is structurally nonnegative.
+    """
+    if isinstance(expression, sp.Max):
+        for argument in expression.args:
+            if not _has_large_concrete_sum(argument):
+                if argument.is_nonnegative is True:
+                    return True
+                continue
+            if _large_sum_expression_is_structurally_nonnegative(
+                cast(sp.Expr, argument)
+            ):
+                return True
+        return False
+
+    replacements: dict[sp.Sum, sp.Dummy] = {}
+    for index, summation in enumerate(expression.atoms(sp.Sum)):
+        if not _finite_sum_is_structurally_nonnegative(summation):
+            return False
+        replacements[summation] = sp.Dummy(
+            f"resource_sum_{index}",
+            nonnegative=True,
+        )
+    if not replacements:
+        return expression.is_nonnegative is True
+    proxy = cast(sp.Expr, expression.xreplace(replacements))
+    return proxy.is_nonnegative is True
+
+
+def _finite_sum_is_structurally_nonnegative(summation: sp.Sum) -> bool:
+    """Prove one finite sum nonnegative from its rectangular limits.
+
+    In addition to SymPy's direct sign metadata, this recognizes affine
+    summands whose minimum lies at a known endpoint of each finite range. It
+    deliberately declines nonlinear or sign-ambiguous cases instead of
+    invoking a general optimizer.
+
+    Args:
+        summation (sp.Sum): Finite sum to inspect without evaluating.
+
+    Returns:
+        bool: Whether every summand in the declared finite ranges is proven
+            nonnegative and each range has nonnegative cardinality.
+    """
+    minimum = cast(sp.Expr, summation.function)
+    for limit in summation.limits:
+        if len(limit) != 3:
+            return False
+        symbol, lower, upper = limit
+        count = cast(sp.Expr, upper - lower + _ONE)
+        if count.is_nonnegative is not True:
+            return False
+        if minimum.is_nonnegative is True:
+            continue
+        try:
+            polynomial = sp.Poly(minimum, symbol)
+        except sp.PolynomialError:
+            return False
+        if polynomial.degree() > 1:
+            return False
+        coefficient = cast(sp.Expr, sp.diff(minimum, symbol))
+        if symbol in coefficient.free_symbols:
+            return False
+        if coefficient.is_nonnegative is True:
+            endpoint = lower
+        elif coefficient.is_nonpositive is True:
+            endpoint = upper
+        else:
+            return False
+        minimum = cast(sp.Expr, minimum.subs(symbol, endpoint))
+    return minimum.is_nonnegative is True
+
+
+def _has_large_concrete_sum(expression: sp.Basic) -> bool:
+    """Return whether an expression contains an expensive concrete sum.
+
+    Args:
+        expression (sp.Basic): Expression whose finite sums should be checked.
+
+    Returns:
+        bool: Whether any concrete sum dimension, or their known combined
+            work, exceeds the eager evaluation budget.
+    """
+    for summation in expression.atoms(sp.Sum):
+        concrete_work = _ONE
+        for limit in summation.limits:
+            if len(limit) != 3:
+                # An indefinite or malformed dimension says nothing about a
+                # later finite dimension, which can still exceed the eager
+                # evaluation budget on its own.
+                continue
+            _symbol, lower, upper = limit
+            count = cast(sp.Expr, upper - lower + _ONE)
+            if not (count.is_number and _is_concrete_integer(count)):
+                continue
+            if count.is_zero is True:
+                concrete_work = _ZERO
+                continue
+            if count.is_negative is True:
+                # SymPy uses Karr's reversed-limit convention rather than an
+                # empty range, so a large negative cardinality can still be an
+                # expensive symbolic evaluation.
+                count = cast(sp.Expr, sp.Abs(count))
+            concrete_work = cast(sp.Expr, concrete_work * count)
+            if (
+                sp.Gt(
+                    concrete_work,
+                    _SUM_EAGER_EVALUATION_LIMIT,
+                )
+                is sp.true
+            ):
+                return True
+    return False
+
+
+def _evaluate_constant_piecewise_sum(
+    summation: sp.Sum,
+) -> ResourceExpr | None:
+    """Evaluate a concrete constant-valued Piecewise sum by set cardinality.
+
+    A branch such as ``Piecewise((1, k > 0), (0, True))`` has a constant
+    value on each integer region. Counting those regions is independent of the
+    range magnitude, unlike SymPy's generic finite-sum evaluator. Unsupported
+    predicates or index-dependent branch values deliberately retain ``Sum``.
+
+    Args:
+        summation (sp.Sum): Candidate one-dimensional finite sum.
+
+    Returns:
+        ResourceExpr | None: Exact closed form when every active integer region
+            has a supported cardinality, otherwise ``None``.
+    """
+    limits = tuple(tuple(limit) for limit in summation.limits)
+    if len(limits) != 1:
+        return None
+    limit = limits[0]
+    if len(limit) != 3:
+        return None
+    symbol, lower, upper = limit
+    count = cast(sp.Expr, upper - lower + _ONE)
+    if not (
+        isinstance(symbol, sp.Symbol)
+        and lower.is_number
+        and upper.is_number
+        and _is_concrete_integer(lower)
+        and _is_concrete_integer(upper)
+        and count.is_positive is True
+        and isinstance(summation.function, sp.Piecewise)
+    ):
+        return None
+
+    domain = sp.Range(lower, upper + _ONE)
+    prior_conditions: list[Boolean] = []
+    terms: list[ResourceExpr] = []
+    has_terminal_branch = False
+    for pair in summation.function.args:
+        value, raw_condition = pair.args
+        if symbol in value.free_symbols:
+            return None
+        condition = _boolean_condition(cast(sp.Basic, raw_condition))
+        effective = cast(
+            Boolean,
+            sp.And(
+                condition,
+                *(sp.Not(previous) for previous in prior_conditions),
+            ),
+        )
+        if effective is sp.false:
+            cardinality = _ZERO
+        elif effective is sp.true:
+            cardinality = count
+        else:
+            if effective.free_symbols - {symbol}:
+                return None
+            _boundaries, supported = _linear_condition_boundaries(
+                effective,
+                symbol,
+            )
+            if not supported:
+                return None
+            try:
+                active_values = sp.Intersection(domain, effective.as_set())
+            except (
+                ArithmeticError,
+                AttributeError,
+                NotImplementedError,
+                RecursionError,
+                TypeError,
+                ValueError,
+            ):
+                return None
+            cardinality = _finite_integer_set_cardinality(active_values)
+            if cardinality is None:
+                return None
+        terms.append(cast(ResourceExpr, value * cardinality))
+        prior_conditions.append(condition)
+        if condition is sp.true:
+            has_terminal_branch = True
+            break
+    return cast(ResourceExpr, sp.Add(*terms)) if has_terminal_branch else None
+
+
+def _finite_integer_set_cardinality(values: sp.Set) -> ResourceExpr | None:
+    """Return the exact cardinality of a normalized finite integer set.
+
+    Args:
+        values (sp.Set): Set produced by intersecting a concrete ``Range``
+            with a Boolean predicate.
+
+    Returns:
+        ResourceExpr | None: Exact finite cardinality, or ``None`` when the set
+            representation does not provide a cheap disjoint decomposition.
+    """
+    if values is sp.S.EmptySet or values.is_empty is True:
+        return _ZERO
+    if isinstance(values, sp.FiniteSet):
+        return sp.Integer(len(values))
+    if isinstance(values, sp.Range):
+        return cast(ResourceExpr, values.size)
+    if isinstance(values, sp.Union):
+        subsets = tuple(cast(sp.Set, subset) for subset in values.args)
+        for index, left in enumerate(subsets):
+            if any(
+                sp.Intersection(left, right).is_empty is not True
+                for right in subsets[index + 1 :]
+            ):
+                return None
+        cardinalities = tuple(
+            _finite_integer_set_cardinality(subset) for subset in subsets
+        )
+        if any(cardinality is None for cardinality in cardinalities):
+            return None
+        return cast(
+            ResourceExpr,
+            sp.Add(*(cast(ResourceExpr, value) for value in cardinalities)),
+        )
+    return None
 
 
 @lru_cache(maxsize=4096)
@@ -1599,15 +2130,11 @@ def _safe_simplify(expression: ResourceExpr) -> ResourceExpr:
         simplify it safely.
     """
     normalized = _expr(expression)
+    if _has_large_concrete_sum(normalized):
+        return normalized
     try:
         simplified = cast(ResourceExpr, sp.simplify(normalized))
-    except (
-        ArithmeticError,
-        AttributeError,
-        NotImplementedError,
-        RecursionError,
-        TypeError,
-    ):
+    except _SYMPY_SIMPLIFICATION_ERRORS:
         return normalized
     if simplified.free_symbols <= normalized.free_symbols:
         return simplified
@@ -1631,6 +2158,8 @@ def _safe_constraint_substitute(
         ResourceExpr,
         _substitute_basic_lazily(_expr(expression), substitutions),
     )
+    if _has_large_concrete_sum(substituted):
+        return substituted
     evaluated = cast(ResourceExpr, substituted.doit())
     if not evaluated.free_symbols <= substituted.free_symbols:
         return substituted
@@ -1688,6 +2217,24 @@ def _boolean_condition(condition: sp.Basic) -> Boolean:
     Returns:
         Boolean: Boolean predicate with numeric truth represented as nonzero.
     """
+    branches = cast(tuple[Any, ...], condition.args)
+    if isinstance(condition, sp.Piecewise) and branches[-1][1] is sp.true:
+        remaining: Boolean = sp.true
+        active_terms: list[Boolean] = []
+        for value, raw_guard in branches:
+            guard = _boolean_condition(cast(sp.Basic, raw_guard))
+            active_terms.append(
+                cast(
+                    Boolean,
+                    sp.And(
+                        remaining,
+                        guard,
+                        _boolean_condition(cast(sp.Basic, value)),
+                    ),
+                )
+            )
+            remaining = cast(Boolean, sp.And(remaining, sp.Not(guard)))
+        return cast(Boolean, sp.Or(*active_terms))
     if (
         condition in (sp.true, sp.false)
         or isinstance(condition, sp.logic.boolalg.BooleanFunction)
@@ -1838,6 +2385,85 @@ class _RangeAny(sp.Function):
             if transformed is sp.true:
                 return _ONE
             if transformed is not sp.false:
+                unresolved = True
+        return None if unresolved else _ZERO
+
+
+class _RangeAtLeastTwo(sp.Function):
+    """Represent whether a finite integer range activates a guard twice.
+
+    The predicate is stored in a one-argument ``Lambda`` so its induction
+    variable remains bound during substitution. Concrete ranges up to the
+    shared replay limit are evaluated directly; larger or symbolic ranges
+    retain this bounded expression rather than constructing a relational over
+    an unevaluated ``Sum``.
+    """
+
+    nargs = 4
+    is_integer = True
+    is_nonnegative = True
+
+    @classmethod
+    def eval(
+        cls,
+        predicate: sp.Basic,
+        start: sp.Expr,
+        step: sp.Expr,
+        iterations: sp.Expr,
+    ) -> sp.Integer | None:
+        """Resolve whether at least two concrete positions satisfy a guard.
+
+        Args:
+            predicate (sp.Basic): One-argument Boolean Lambda.
+            start (sp.Expr): First Python-range value.
+            step (sp.Expr): Python-range step.
+            iterations (sp.Expr): Number of executed iterations.
+
+        Returns:
+            sp.Integer | None: One when at least two positions satisfy the
+                predicate, zero when fewer than two do, or ``None`` when the
+                bounded check must remain symbolic.
+        """
+        if not isinstance(predicate, sp.Lambda) or len(predicate.variables) != 1:
+            return None
+        if not (
+            iterations.is_integer is True
+            and iterations.is_number
+            and start.is_integer is True
+            and start.is_number
+            and step.is_integer is True
+            and step.is_number
+        ):
+            return None
+        count = int(iterations)
+        if count <= 1:
+            return _ZERO
+        loop_symbol = predicate.variables[0]
+        condition = _boolean_condition(cast(sp.Basic, predicate.expr))
+        if loop_symbol not in condition.free_symbols:
+            if condition is sp.true:
+                return _ONE
+            if condition is sp.false:
+                return _ZERO
+            return None
+        if condition.free_symbols - {loop_symbol}:
+            return None
+        if count > _RANGE_ANY_REPLAY_LIMIT:
+            return None
+        matches = 0
+        unresolved = False
+        for offset in range(count):
+            transformed = _boolean_condition(
+                cast(
+                    sp.Basic,
+                    condition.subs(loop_symbol, start + step * offset),
+                )
+            )
+            if transformed is sp.true:
+                matches += 1
+                if matches >= 2:
+                    return _ONE
+            elif transformed is not sp.false:
                 unresolved = True
         return None if unresolved else _ZERO
 
@@ -2491,6 +3117,12 @@ def _is_structurally_less_equal(
     """
     if left == right:
         return True
+    left_coefficient, left_remainder = left.as_coeff_Mul()
+    right_coefficient, right_remainder = right.as_coeff_Mul()
+    if left_remainder == right_remainder and _is_structurally_nonnegative(
+        cast(ResourceExpr, right_coefficient - left_coefficient)
+    ):
+        return True
     if isinstance(left, _ConditionIndicator):
         return _is_structurally_less_equal(_ONE, right)
     if isinstance(left, sp.Mul) and any(
@@ -2843,7 +3475,7 @@ def _maximum_expr_over_range(
     start: ResourceExpr,
     step: ResourceExpr,
     iterations: ResourceExpr,
-) -> tuple[ResourceExpr, bool]:
+) -> tuple[ResourceExpr, Boolean]:
     """Maximize one nonnegative resource expression over a loop range.
 
     Constant, affine, finite, and provably monotone expressions are reduced
@@ -2858,11 +3490,23 @@ def _maximum_expr_over_range(
         iterations (ResourceExpr): Number of executed iterations.
 
     Returns:
-        tuple[ResourceExpr, bool]: Maximum expression and whether it is exact.
+        tuple[ResourceExpr, Boolean]: Maximum expression and the condition
+        under which its conservative fallback may overestimate.
     """
     condition = sp.Gt(iterations, _ZERO)
     if loop_symbol not in expr.free_symbols:
-        return _piecewise(expr, _ZERO, condition), True
+        return _piecewise(expr, _ZERO, condition), sp.false
+
+    if expr.has(sp.Piecewise) and isinstance(expr, (sp.Min, sp.Max)):
+        normalized = _safe_simplify(expr)
+        if normalized != expr:
+            return _maximum_expr_over_range(
+                normalized,
+                loop_symbol,
+                start,
+                step,
+                iterations,
+            )
 
     if not isinstance(expr, sp.Piecewise) and expr.has(sp.Piecewise):
         folded = cast(ResourceExpr, sp.piecewise_fold(expr))
@@ -2878,12 +3522,12 @@ def _maximum_expr_over_range(
     if isinstance(iterations, sp.Integer) and 0 <= int(iterations) <= 64:
         count = int(iterations)
         if count == 0:
-            return _ZERO, True
+            return _ZERO, sp.false
         values = [
             cast(ResourceExpr, expr.subs(loop_symbol, start + step * index))
             for index in range(count)
         ]
-        return cast(ResourceExpr, sp.Max(*values)), True
+        return cast(ResourceExpr, sp.Max(*values)), sp.false
 
     if isinstance(expr, sp.Max):
         argument_maxima = [
@@ -2898,7 +3542,7 @@ def _maximum_expr_over_range(
         ]
         return (
             cast(ResourceExpr, sp.Max(*(maximum for maximum, _ in argument_maxima))),
-            all(exact for _, exact in argument_maxima),
+            _boolean_condition(sp.Or(*(guard for _, guard in argument_maxima))),
         )
 
     if isinstance(expr, sp.Piecewise):
@@ -2922,16 +3566,15 @@ def _maximum_expr_over_range(
     except sp.PolynomialError:
         polynomial = None
     if polynomial is not None and polynomial.degree() <= 1:
-        return _piecewise(sp.Max(first, last), _ZERO, condition), True
+        return _piecewise(sp.Max(first, last), _ZERO, condition), sp.false
 
-    upper_bound = _sum_expr(
-        cast(ResourceExpr, sp.Max(_ZERO, expr)),
+    return _conservative_maximum_sum_bound(
+        expr,
         loop_symbol,
         start,
         step,
         iterations,
     )
-    return _piecewise(upper_bound, _ZERO, condition), False
 
 
 def _maximum_piecewise_over_range(
@@ -2940,7 +3583,7 @@ def _maximum_piecewise_over_range(
     start: ResourceExpr,
     step: ResourceExpr,
     iterations: ResourceExpr,
-) -> tuple[ResourceExpr, bool]:
+) -> tuple[ResourceExpr, Boolean]:
     """Maximize an endpoint-bounded Piecewise expression over a loop.
 
     Piecewise resource formulas commonly encode special control arities, such
@@ -2957,8 +3600,8 @@ def _maximum_piecewise_over_range(
         iterations (ResourceExpr): Number of executed iterations.
 
     Returns:
-        tuple[ResourceExpr, bool]: Predicate-aware maximum and whether the
-        endpoint proof was exact.
+        tuple[ResourceExpr, Boolean]: Predicate-aware maximum and the
+        condition under which its conservative fallback may overestimate.
     """
     index = sp.Dummy("piecewise_index", integer=True, nonnegative=True)
     folded = cast(sp.Piecewise, sp.piecewise_fold(expression))
@@ -3002,18 +3645,76 @@ def _maximum_piecewise_over_range(
             _guarded_range_candidate(transformed, index, candidate, iterations)
             for candidate in candidates
         ]
-        return cast(ResourceExpr, sp.Max(*values)), True
+        return cast(ResourceExpr, sp.Max(*values)), sp.false
 
-    upper_bound = _sum_expr(
-        cast(ResourceExpr, sp.Max(_ZERO, folded)),
+    return _conservative_maximum_sum_bound(
+        cast(ResourceExpr, folded),
         loop_symbol,
         start,
         step,
         iterations,
     )
+
+
+def _conservative_maximum_sum_bound(
+    expression: ResourceExpr,
+    loop_symbol: sp.Symbol,
+    start: ResourceExpr,
+    step: ResourceExpr,
+    iterations: ResourceExpr,
+) -> tuple[ResourceExpr, Boolean]:
+    """Bound a loop maximum while preserving its first-iteration baseline.
+
+    Summing the complete nonnegative expression is safe but unnecessarily
+    multiplies every loop-invariant baseline.  Instead, retain the first
+    iteration once and sum only positive excess above it.  Besides producing a
+    tighter bound, this keeps an inactive conditional contribution at zero
+    after later parameter substitution.
+
+    Args:
+        expression (ResourceExpr): Per-iteration nonnegative resource value.
+        loop_symbol (sp.Symbol): Loop variable symbol.
+        start (ResourceExpr): First loop value.
+        step (ResourceExpr): Loop step.
+        iterations (ResourceExpr): Number of executed iterations.
+
+    Returns:
+        tuple[ResourceExpr, Boolean]: Conservative maximum and the condition
+        under which positive excess occurs in multiple iterations and makes
+        the bound potentially inexact.
+    """
+    first = cast(ResourceExpr, expression.subs(loop_symbol, start))
+    baseline = _resource_max(_ZERO, first)
+    excess = _resource_max(
+        _ZERO,
+        cast(ResourceExpr, expression - baseline),
+    )
+    if excess.has(sp.Piecewise):
+        try:
+            excess = cast(ResourceExpr, sp.piecewise_fold(excess))
+        except (RecursionError, TypeError, ValueError):
+            pass
+    upper_bound = cast(
+        ResourceExpr,
+        baseline
+        + _sum_expr(
+            excess,
+            loop_symbol,
+            start,
+            step,
+            iterations,
+        ),
+    )
+    repeated_excess = _RangeAtLeastTwo(
+        sp.Lambda(loop_symbol, _resource_activity_condition(excess)),
+        start,
+        step,
+        iterations,
+    )
+    conservative_when = _boolean_condition(sp.Ne(repeated_excess, _ZERO))
     return (
         _piecewise(upper_bound, _ZERO, sp.Gt(iterations, _ZERO)),
-        False,
+        conservative_when,
     )
 
 
@@ -3183,7 +3884,15 @@ def _sum_expr(
         lower=_ZERO,
         upper=iterations - 1,
     )
-    summation = sp.Sum(transformed, (k, 0, iterations - 1))
+    summation = cast(
+        sp.Sum,
+        sp.Sum(transformed, (k, 0, iterations - 1)),
+    )
+    piecewise_total = _evaluate_constant_piecewise_sum(summation)
+    if piecewise_total is not None:
+        return piecewise_total
+    if _has_large_concrete_sum(summation):
+        return cast(ResourceExpr, summation)
     evaluated = cast(ResourceExpr, summation.doit())
     if not evaluated.free_symbols <= summation.free_symbols:
         return cast(ResourceExpr, summation)

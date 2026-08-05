@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import pytest
 import sympy as sp
+from sympy.logic.boolalg import Boolean
 
 import qamomile.circuit as qmc
+import qamomile.circuit.estimator.resource_estimator as resource_estimator_module
 from qamomile.circuit.estimator._metrics import _RangeAny
 
 _RANGE_GUARD_SYMBOL = sp.Symbol("range_guard", integer=True)
@@ -65,6 +67,45 @@ def test_conditional_substitution_restores_each_metadata_axis() -> None:
     assert inactive.quality is qmc.EstimateQuality.EXACT
     assert symbolic.to_dict()["derivation"] == "modeled"
     assert symbolic.to_dict()["quality"] == "conservative"
+
+
+def test_substitute_keeps_boolean_guards_out_of_numeric_rewriter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Metadata guards use the non-clamping structural substitution path."""
+    original = resource_estimator_module._substitute_resource_expr
+
+    def reject_boolean(
+        expression: sp.Basic,
+        substitutions: dict[sp.Symbol, sp.Expr],
+    ) -> sp.Basic:
+        """Reject Boolean input to the numeric resource-expression helper.
+
+        Args:
+            expression (sp.Basic): Expression selected for substitution.
+            substitutions (dict[sp.Symbol, sp.Expr]): Concrete replacements.
+
+        Returns:
+            sp.Basic: Substituted numeric expression.
+        """
+        assert not isinstance(expression, Boolean)
+        return original(expression, substitutions)
+
+    monkeypatch.setattr(
+        resource_estimator_module,
+        "_substitute_resource_expr",
+        reject_boolean,
+    )
+    flag = sp.Symbol("flag", integer=True, nonnegative=True)
+    symbolic = qmc.ResourceEstimate(
+        quality=qmc.EstimateQuality.CONSERVATIVE,
+    ).conditional(qmc.ResourceEstimate.zero(), sp.Eq(flag, 1))
+
+    active = symbolic.substitute(flag=1)
+    inactive = symbolic.substitute(flag=0)
+
+    assert active.quality is qmc.EstimateQuality.CONSERVATIVE
+    assert inactive.quality is qmc.EstimateQuality.EXACT
 
 
 @pytest.mark.parametrize("uses_callback", [False, True])

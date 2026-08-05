@@ -42,6 +42,18 @@ The resource estimator operates on Qamomile's target-neutral semantic IR. It the
 
 **Future fix**: add a post-materialization resource-estimation interface, or let target capability and synthesis declarations contribute their exact gate, depth, and ancillary-qubit costs to the estimator.
 
+## Invocation-dependent opaque cost callbacks are not serializable
+
+A fixed `ResourceEstimate` may contain symbolic parameters such as `n`, and supported symbolic expressions over those parameters survive qkernel serialization. A symbolic value does not by itself require a `cost(ctx)` callback. The wire format deliberately accepts only a closed, validated symbolic-expression language, however, so an expression such as `factorial(n)` is rejected before serialization even though the simpler symbol `n` is supported. Merely adding `factorial` to the allowlist would be unsafe because a small payload such as a factorial of a huge concrete integer can consume unbounded CPU time and memory while decoding.
+
+**When it bites**: an opaque callable's cost depends on an expression outside the safe wire language, or it is supplied as a Python `cost(ctx)` callback. The callback form computes the base cost of one invocation of the Oracle as it was defined: it can inspect the current `OpaqueCostContext`, including controls declared by the Oracle definition, operand shapes, basis, decomposition mode, precision, and strategy. Controls later added with `qmc.control`, controls inherited from an enclosing controlled qkernel, and a later inverse are intentionally absent from that context; the estimator applies those call-site transforms after obtaining the callback's base cost. Python callback objects are process-local implementation state and are not serialized, so a qkernel that relies on one cannot be reconstructed with the same cost model in another process from the serialized artifact alone.
+
+**Why this trade-off was chosen**: symmetric validation at encode and decode time prevents Qamomile from producing an artifact it cannot read and prevents untrusted symbolic payloads from requesting arbitrary Python execution or unbounded eager mathematics. Serializing Python bytecode, import paths, or closures would make the format environment-dependent and would expand the deserialization attack surface.
+
+**Workaround**: express the cost as a fixed `ResourceEstimate` using the supported symbolic operations and substitute its public parameters later. When the cost genuinely depends on invocation context, reconstruct or register the Python callback in the receiving process instead of expecting it to travel with the qkernel artifact.
+
+**Future fix**: introduce a versioned declarative cost-expression AST with explicit, portable references to approved `OpaqueCostContext` fields. The decoder would interpret that AST without importing or executing arbitrary Python, and each operation would have symmetric encode/decode validation plus function-specific size and evaluation budgets. Expensive functions such as factorial would require bounded arguments or a safe unevaluated representation rather than a blanket allowlist entry.
+
 ## Loop-carried classical scalars are supported in `for` / `for-items`; runtime `while` carries and genuine measurement-backed `Bit` carries remain restricted
 
 A qkernel loop body is traced exactly once, so a Python reassignment such as `total = total + i` needs an explicit representation of "the value from the previous iteration." Qamomile represents that value with `RegionArg(init, block_arg, yielded, result)` records on `qmc.range(...)` and `qmc.items(...)` loops. The AST transform creates the body-entry value in `loop_region_enter` (`qamomile/circuit/frontend/operation/control_flow.py`), and compile-time folding, the classical segment interpreter, and emit-time unrolling all implement the same seed / advance / publish semantics. `sum(range(4))` therefore produces `6`; augmented assignment, branch-mediated updates, all-constant updates, nested loops, simultaneous tuple swaps, sub-qkernel calls, gate-angle-driving values, and later-range-bound-driving values all follow Python iteration semantics. Loops with region arguments always unroll at emit (`LoopAnalyzer.should_unroll`).
@@ -175,18 +187,6 @@ Element-granularity consumption (`if sel: _ = qmc.measure(qs[0])` followed by re
 **Why this trade-off was chosen**: the current design keeps inverse fallback blocks explicit in Qamomile IR so every quantum SDK has a correct decomposition when its native inverse path is unavailable. Deferring fallback construction would require a later transpiler pass to build the inverse after parameter-shape resolution and to keep serialization / canonicalization compatible with a lazy inverse representation.
 
 **Future fix**: make inverse fallback construction lazy for blocks that need transpile-time shape, loop-bound, or branch resolution, or add a dedicated pass that lowers unresolved `InverseBlockOperation` implementations after `resolve_parameter_shapes` / `partial_eval`. That pass would also let bindings-resolved `if` branches invert by folding the selected branch.
-
-## `qmc.control` rejects a self-recursive qkernel before the fixed-point loop can converge
-
-**When it bites**: a self-recursive qkernel — one whose body calls itself and stops through a base-case `if` on a compile-time-constant driver — is passed to `qmc.control`. The same qkernel can transpile when called directly because the top-level `inline` / `partial_eval` fixed-point loop exposes one recursion layer and folds its base case. `qmc.inverse` commonly fails earlier for the separate eager control-flow restriction described above.
-
-**Why it remains**: `qmc.control` stores the unitary body in `ControlledUOperation.block`. `InlinePass` enters this block and expands one recursion layer while its cycle guard leaves the inner self-call for a later fixed-point iteration. `CompileTimeIfLoweringPass` now also enters the controlled block with call-site parameter bindings and can fold the newly exposed base-case branch. The remaining rejection comes from an older early-exit assumption in `unroll_recursion`: after the first iteration, `count_unrollable_inline_invokes` deliberately does not look inside operation-owned blocks, returns zero, and triggers a targeted `FrontendTransformError` even though another `inline` / `partial_eval` iteration can make progress.
-
-This is therefore a conservative fixed-point-driver restriction, not a missing controlled-block lowering capability. `count_inline_invokes` correctly sees the residual call, but the location-only `count_unrollable_inline_invokes` test rejects it before convergence can be observed.
-
-**Workaround**: rewrite the qkernel non-recursively, manually unrolled to the required depth, before passing it to `qmc.control`. A pass-through wrapper that forwards to a non-recursive leaf qkernel is supported.
-
-**Future fix**: remove the location-only early rejection and allow later fixed-point iterations to run. If a fast failure is still desired, detect actual lack of structural progress across iterations rather than treating every residual call inside an operation-owned block as permanently stuck. The current failure regression should then become a successful controlled-recursion test.
 
 ## Controlled Pauli evolution requires a compile-time-numeric gamma on QURI Parts
 

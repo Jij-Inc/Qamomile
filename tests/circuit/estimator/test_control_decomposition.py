@@ -1081,7 +1081,7 @@ def test_resource_sensitive_nonlinear_carry_requires_concrete_bounds() -> None:
     """Unsupported nonlinear work replays any concrete loop exactly."""
     with pytest.raises(
         NotImplementedError,
-        match="unsupported nonlinear loop-carried recurrence",
+        match="unsupported symbolic loop-carried recurrence",
     ):
         _unsupported_nonlinear_resource_circuit.estimate_resources()
 
@@ -1177,6 +1177,133 @@ def test_symbolic_loop_activity_selects_body_wide_two_control_ladder() -> None:
         assert specialized.width == direct.width
         assert direct.gates.total == expected_total
         assert direct.width.clean_ancilla_qubits == expected_clean
+
+
+def test_controlled_array_choice_selects_fixed_two_control_recipe() -> None:
+    """Resolved array state selects per-primitive or shared control work."""
+
+    @qm.qkernel
+    def body(target: qm.Qubit, selector: qm.UInt) -> qm.Qubit:
+        """Apply a second X when the selected classical array contains true."""
+        target = qm.x(target)
+        disabled = qm.bit_array(1)
+        enabled = qm.bit_array(1)
+        enabled[0] = True
+        selected = disabled
+        if selector:
+            selected = enabled
+        if selected[0]:
+            target = qm.x(target)
+        return target
+
+    @qm.qkernel
+    def circuit(selector: qm.UInt) -> qm.Qubit:
+        """Apply the array-dependent body under exactly two controls."""
+        controls = qm.qubit_array(2, "controls")
+        target = qm.qubit("target")
+        *_, target = qm.control(body, num_controls=2)(
+            controls,
+            target,
+            selector,
+        )
+        return target
+
+    for selector, expected_total, expected_depth, expected_clean in (
+        (0, 1, 1, 0),
+        (1, 4, 4, 1),
+    ):
+        estimate = circuit.estimate_resources(inputs={"selector": selector})
+
+        assert estimate.gates.total == expected_total
+        assert estimate.gates.toffoli == 1 + selector
+        assert estimate.depth.depth == expected_depth
+        assert estimate.width.clean_ancilla_qubits == expected_clean
+        assert estimate.parameters == {}
+
+
+def test_symbolic_inlined_array_loop_selects_fixed_two_control_recipe() -> None:
+    """Inlined array-loop state keeps only its public activity parameter."""
+
+    @qm.qkernel
+    def set_enabled(
+        bits: qm.Vector[qm.Bit],
+        repetitions: qm.UInt,
+    ) -> qm.Vector[qm.Bit]:
+        """Set one classical array element in every requested iteration."""
+        for _index in qm.range(repetitions):
+            bits[0] = True
+        return bits
+
+    @qm.qkernel
+    def body(target: qm.Qubit, repetitions: qm.UInt) -> qm.Qubit:
+        """Apply a second X when the inlined helper leaves its bit enabled."""
+        target = qm.x(target)
+        bits = set_enabled(qm.bit_array(1), repetitions)
+        if bits[0]:
+            target = qm.x(target)
+        return target
+
+    @qm.qkernel
+    def circuit(repetitions: qm.UInt) -> qm.Qubit:
+        """Apply the helper-dependent body under exactly two controls."""
+        controls = qm.qubit_array(2, "controls")
+        target = qm.qubit("target")
+        *_, target = qm.control(body, num_controls=2)(
+            controls,
+            target,
+            repetitions,
+        )
+        return target
+
+    symbolic = circuit.estimate_resources()
+    assert set(symbolic.parameters) == {"repetitions"}
+
+    for repetitions, expected_total, expected_clean in (
+        (0, 1, 0),
+        (1, 4, 1),
+        (2, 4, 1),
+    ):
+        specialized = symbolic.substitute(repetitions=repetitions)
+        direct = circuit.estimate_resources(inputs={"repetitions": repetitions})
+
+        assert specialized.gates == direct.gates
+        assert specialized.depth == direct.depth
+        assert specialized.width == direct.width
+        assert specialized.parameters == direct.parameters == {}
+        assert direct.gates.total == expected_total
+        assert direct.width.clean_ancilla_qubits == expected_clean
+
+
+def test_huge_conditional_loop_sum_uses_a_closed_cardinality() -> None:
+    """A concrete huge affine branch count avoids generic finite summation."""
+
+    @qm.qkernel
+    def body(target: qm.Qubit, repetitions: qm.UInt) -> qm.Qubit:
+        """Apply X on every strictly positive loop index."""
+        for index in qm.range(repetitions):
+            if index > 0:
+                target = qm.x(target)
+        return target
+
+    @qm.qkernel
+    def circuit(repetitions: qm.UInt) -> qm.Qubit:
+        """Apply the conditional loop under three coherent controls."""
+        controls = qm.qubit_array(3, "controls")
+        target = qm.qubit("target")
+        *_, target = qm.control(body, num_controls=3)(
+            controls,
+            target,
+            repetitions,
+        )
+        return target
+
+    repetitions = 2**100
+    estimate = circuit.estimate_resources(inputs={"repetitions": repetitions})
+
+    assert estimate.parameters == {}
+    assert estimate.gates.total == repetitions + 3
+    assert estimate.depth.depth == repetitions + 3
+    assert estimate.width.clean_ancilla_qubits == 2
 
 
 def test_symbolic_branch_uses_one_body_wide_shared_ladder() -> None:
@@ -3054,6 +3181,43 @@ def test_pauli_evolve_zero_time_specialization_removes_all_resources() -> None:
     assert controlled_zero.width.peak_qubits == 4
     assert controlled_active.gates.total > 0
     assert controlled_active.width.clean_ancilla_qubits == 2
+
+
+@pytest.mark.parametrize("time", [0.0, 0.25])
+@pytest.mark.parametrize(
+    ("location", "coefficient"),
+    [
+        pytest.param("constant", float("nan"), id="constant-nan"),
+        pytest.param("constant", float("inf"), id="constant-infinity"),
+        pytest.param("constant", complex(1.0, float("nan")), id="constant-imag-nan"),
+        pytest.param("term", float("nan"), id="term-nan"),
+        pytest.param("term", float("inf"), id="term-infinity"),
+        pytest.param("term", complex(1.0, float("nan")), id="term-imag-nan"),
+    ],
+)
+def test_pauli_evolve_estimator_rejects_nonfinite_hamiltonian(
+    time: float,
+    location: str,
+    coefficient: complex | float,
+) -> None:
+    """Resource estimation validates finite coefficients before zero-time exit."""
+    hamiltonian = qm_o.Hamiltonian()
+    if location == "constant":
+        hamiltonian.constant = complex(coefficient)
+    else:
+        hamiltonian.add_term(
+            (qm_o.PauliOperator(qm_o.Pauli.X, 0),),
+            coefficient,
+        )
+
+    with pytest.raises(ValueError, match="finite Hamiltonian coefficients"):
+        _renamed_pauli_evolution.estimate_resources(
+            inputs={
+                "register": 1,
+                "observable": hamiltonian,
+                "time": time,
+            }
+        )
 
 
 def test_raw_ir_inputs_bind_hamiltonian_during_interpretation() -> None:

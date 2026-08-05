@@ -2,11 +2,49 @@
 
 from collections.abc import Iterator
 
+import pytest
+
+from qamomile.circuit.estimator._control_decomposition import (
+    StaticCleanAncillaBatchProfile,
+    static_clean_ancilla_batch_profile,
+)
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    BinOpKind,
+    CompOp,
+    CompOpKind,
+    CondOp,
+    CondOpKind,
+    NotOp,
+    RuntimeClassicalExpr,
+    RuntimeOpKind,
+    UnaryMathOp,
+    UnaryMathOpKind,
+)
+from qamomile.circuit.ir.operation.cast import CastOperation
+from qamomile.circuit.ir.operation.classical_ops import (
+    DecodeQFixedOperation,
+    DictGetItemOperation,
+    ReturnQuantumArrayElementOperation,
+    StoreArrayElementOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
-from qamomile.circuit.ir.operation.operation import QInitOperation
+from qamomile.circuit.ir.operation.operation import (
+    CInitOperation,
+    Operation,
+    OperationKind,
+    QInitOperation,
+    Signature,
+)
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.operation.slice_array import (
+    ReleaseSliceViewOperation,
+    SliceArrayOperation,
+)
+from qamomile.circuit.ir.types.primitives import UIntType
+from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.passes.emit_support.control_batching import (
     CONTROL_BATCH_DIRECT_AT_TWO_CONTROLS,
     CONTROL_BATCH_HEAVY_GATES,
@@ -30,10 +68,93 @@ def _gate(gate_type: GateOperationType) -> GateOperation:
     return GateOperation(gate_type=gate_type)
 
 
-def test_static_batch_profile_classifies_context_free_operations() -> None:
+class _UnknownClassicalOperation(Operation):
+    """Classical marker deliberately absent from the supported walker."""
+
+    @property
+    def signature(self) -> Signature:
+        """Return an empty test-only signature."""
+        return Signature()
+
+    @property
+    def operation_kind(self) -> OperationKind:
+        """Classify the marker as classical without making it bookkeeping."""
+        return OperationKind.CLASSICAL
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        ReturnOperation(),
+        CInitOperation(),
+        BinOp(kind=BinOpKind.ADD),
+        CompOp(kind=CompOpKind.EQ),
+        CondOp(kind=CondOpKind.AND),
+        NotOp(),
+        DictGetItemOperation(),
+        UnaryMathOp(
+            operands=[Value(type=UIntType(), name="input")],
+            results=[Value(type=UIntType(), name="output")],
+            kind=UnaryMathOpKind.CEIL,
+        ),
+        CastOperation(),
+        QInitOperation(),
+        ReturnQuantumArrayElementOperation(),
+    ],
+)
+def test_static_batch_profile_classifies_bookkeeping_as_zero_work(
+    operation: Operation,
+) -> None:
+    """Emitter and estimator share the complete zero-work classification."""
+    assert static_controlled_batch_profile(operation) == ControlBatchProfile()
+    assert (
+        static_clean_ancilla_batch_profile(operation)
+        == StaticCleanAncillaBatchProfile()
+    )
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        StoreArrayElementOperation(),
+        RuntimeClassicalExpr(kind=RuntimeOpKind.NOT),
+        DecodeQFixedOperation(),
+        _UnknownClassicalOperation(),
+    ],
+)
+def test_static_batch_profile_keeps_unsupported_operations_visible(
+    operation: Operation,
+) -> None:
+    """Unsupported markers contribute conservative work in both profiles."""
+    assert static_controlled_batch_profile(operation) == ControlBatchProfile(
+        weight=1,
+        selects_exact_two=True,
+    )
+    assert static_clean_ancilla_batch_profile(
+        operation
+    ) == StaticCleanAncillaBatchProfile(work=1)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [SliceArrayOperation(), ReleaseSliceViewOperation()],
+)
+def test_slice_markers_follow_their_pipeline_stage(
+    operation: Operation,
+) -> None:
+    """Emit fails closed after strip, while pre-strip estimation counts zero."""
+    assert static_controlled_batch_profile(operation) == ControlBatchProfile(
+        weight=1,
+        selects_exact_two=True,
+    )
+    assert (
+        static_clean_ancilla_batch_profile(operation)
+        == StaticCleanAncillaBatchProfile()
+    )
+
+
+def test_static_batch_profile_classifies_gate_and_contextual_work() -> None:
     """Engine policy distinguishes direct, shared, and contextual work."""
-    assert static_controlled_batch_profile(ReturnOperation()) == ControlBatchProfile()
-    assert static_controlled_batch_profile(QInitOperation()) == ControlBatchProfile()
     assert static_controlled_batch_profile(
         _gate(GateOperationType.H)
     ) == ControlBatchProfile(weight=1, selects_exact_two=True)

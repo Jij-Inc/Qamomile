@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import AbstractSet, Any, cast
 
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import (
@@ -25,6 +25,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CondOp,
     NotOp,
+    UnaryMathOp,
 )
 from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.control_flow import (
@@ -75,7 +76,7 @@ from .value_mapping import ValueSubstitutor
 # tuple may have observable effects even when none of their SSA results remain
 # live (measurement is the canonical example), so only the scalar expression
 # nodes whose evaluation is known to be pure may be removed here.
-_PURE_CLASSICAL_EXPRESSION_TYPES = (BinOp, CompOp, CondOp, NotOp)
+_PURE_CLASSICAL_EXPRESSION_TYPES = (BinOp, CompOp, CondOp, NotOp, UnaryMathOp)
 
 
 def _is_identity_region_arg(region_arg: RegionArg) -> bool:
@@ -149,6 +150,8 @@ def evaluate_classical_op_concrete(
     - ``CondOp``  — logical connective (and, or)
     - ``NotOp``   — logical negation
     - ``BinOp``   — arithmetic (+, -, *, /, //, %)
+    - ``UnaryMathOp`` — unary mathematical functions such as ``ceil`` and
+      ``log2``
 
     Delegates the actual fold to ``fold_classical_op`` under the
     ``COMPILE_TIME`` policy, which bypasses the runtime-parameter
@@ -165,7 +168,7 @@ def evaluate_classical_op_concrete(
         bindings (dict[str, Any]): Compile-time parameter bindings used
             to resolve operands.
     """
-    if not isinstance(op, (CompOp, CondOp, NotOp, BinOp)):
+    if not isinstance(op, (CompOp, CondOp, NotOp, BinOp, UnaryMathOp)):
         return
     if not op.results:
         return
@@ -227,7 +230,8 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
     This pass:
 
     1. Evaluates conditions including expression-derived ones
-       (``CompOp``, ``CondOp``, ``NotOp`` chains).
+       (``CompOp``, ``CondOp``, ``NotOp``, ``BinOp``, and ``UnaryMathOp``
+       chains).
     2. Replaces resolved ``IfOperation``s with selected-branch operations.
     3. Substitutes merge output UUIDs with selected-branch values in all
        subsequent operations and block outputs.
@@ -237,6 +241,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         self,
         bindings: dict[str, Any] | None = None,
         *,
+        preserved_condition_uuids: AbstractSet[str] | None = None,
         _under_controlled_unitary: bool = False,
         _active_block_ids: frozenset[int] | None = None,
     ):
@@ -245,6 +250,9 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         Args:
             bindings (dict[str, Any] | None): Compile-time bindings visible in
                 the current block. Defaults to no bindings.
+            preserved_condition_uuids (AbstractSet[str] | None): Conditions
+                that must remain unresolved so a later validation pass can
+                inspect their dataflow. Defaults to an empty set.
             _under_controlled_unitary (bool): Internal context flag indicating
                 that boxed callables encountered here will be decomposed by the
                 controlled emission walker and therefore need their owned
@@ -253,6 +261,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 guard for operation-owned blocks. Defaults to an empty set.
         """
         self._bindings = bindings or {}
+        self._preserved_condition_uuids = frozenset(preserved_condition_uuids or ())
         self._under_controlled_unitary = _under_controlled_unitary
         self._active_block_ids = _active_block_ids or frozenset()
         self._static_replay_remaining = MAX_STATIC_REPLAY_TRIPS
@@ -356,6 +365,8 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             bool | None: The compile-time truth value, or ``None`` when
                 the condition is runtime.
         """
+        if getattr(condition, "uuid", None) in self._preserved_condition_uuids:
+            return None
         return resolve_compile_time_condition(
             condition, concrete_values, self._bindings
         )
@@ -827,6 +838,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             inner_bindings[inner_iv.uuid] = resolved
         return CompileTimeIfLoweringPass(
             inner_bindings,
+            preserved_condition_uuids=self._preserved_condition_uuids,
             _under_controlled_unitary=True,
             _active_block_ids=self._active_block_ids | {block_id},
         ).run(block)

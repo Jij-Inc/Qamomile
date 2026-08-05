@@ -72,6 +72,8 @@ class ArrayRuntimeMetadata:
     array's ``QubitAddress(root_uuid, index)`` key even when the element's own
     UUID was never registered. The sentinel ``("", -1)`` marks an element with
     no array parent (a standalone qubit), for which a flat UUID lookup is used.
+    ``(root_uuid, -1)`` preserves a known root owner when the scalar index is
+    symbolic and therefore cannot be resolved at trace time.
     """
 
     const_array: typing.Any = None
@@ -206,8 +208,9 @@ def remap_value_metadata_references(
                 remap_indexed_identifier(logical_id, remap_logical_id)
                 for logical_id in new_array_rt.element_logical_ids
             ),
-            # Empty parent UUID is a sentinel for standalone or unresolved
-            # elements, not a Value UUID, so keep it unchanged.
+            # Empty parent UUID is the standalone-element sentinel, not a
+            # Value UUID, so keep it unchanged. A nonempty UUID paired with
+            # index -1 denotes a known root with an unresolved scalar index.
             element_parent_uuids=tuple(
                 remap_uuid(uuid_ref) if uuid_ref else uuid_ref
                 for uuid_ref in new_array_rt.element_parent_uuids
@@ -434,10 +437,12 @@ class _MetadataValueMixin:
                 callers can index by element position without a length check.
                 Each entry is the element's root ``(array_uuid, index)``
                 address, or ``None`` for a standalone qubit (recorded with the
-                ``("", -1)`` sentinel), for an element whose root could not be
-                resolved at trace time, or for any element whose parent address
-                was never recorded (e.g. metadata that only set
-                ``element_uuids``).
+                ``("", -1)`` sentinel), an element whose scalar index could
+                not be resolved at trace time (recorded as
+                ``(root_uuid, -1)``), or any element whose parent address was
+                never recorded. Consumers that only need the owner can inspect
+                the raw parallel metadata even when this method returns
+                ``None``.
         """
         if self.metadata.array_runtime is None:
             return ()
@@ -467,10 +472,10 @@ class _MetadataValueMixin:
                 continue
             parent_uuid = rt.element_parent_uuids[i]
             parent_idx = rt.element_parent_indices[i]
-            # ``("", -1)`` is the sentinel written by ``expval()`` for a
-            # standalone qubit (no array parent) or an element whose root could
-            # not be resolved at trace time; decode it back to ``None`` so the
-            # caller skips the root-address fallback for that position.
+            # A negative index never identifies one exact scalar address.
+            # ``("", -1)`` denotes a standalone qubit, while
+            # ``(root_uuid, -1)`` retains only a known root owner. Decode both
+            # to ``None`` here; owner-aware consumers inspect the raw metadata.
             if parent_uuid == "" or parent_idx < 0:
                 result.append(None)
             else:
@@ -984,6 +989,29 @@ def resolve_root_qubit_address(value: "Value") -> tuple[str, int] | None:
         return None
     root, root_idx = resolved
     return (root.uuid, root_idx)
+
+
+def resolve_root_qubit_array(value: Value) -> ArrayValue | None:
+    """Return the root array that owns one quantum scalar value.
+
+    Unlike :func:`resolve_root_qubit_address`, this helper does not require a
+    concrete scalar index or concrete slice bounds. It is used when dependency
+    analysis can identify the allocation owner but must conservatively treat
+    the selected scalar as unresolved.
+
+    Args:
+        value (Value): Candidate scalar quantum array element.
+
+    Returns:
+        ArrayValue | None: Root array reached through ``parent_array`` and
+            ``slice_of`` links, or ``None`` for an independent scalar.
+    """
+    current = value.parent_array
+    if current is None:
+        return None
+    while current.slice_of is not None:
+        current = current.slice_of
+    return current
 
 
 @dataclasses.dataclass(frozen=True)

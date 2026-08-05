@@ -101,6 +101,35 @@ def test_oracle_rejects_negative_target_count() -> None:
         qmc.opaque("negative_target_count", num_qubits=-1)
 
 
+def test_oracle_uses_identity_equality_and_hashing() -> None:
+    """Mutable Oracle definitions remain distinct, hashable identities."""
+    first = qmc.opaque("same_fields", num_qubits=1)
+    second = qmc.opaque("same_fields", num_qubits=1)
+
+    assert first == first
+    assert first != second
+    indexed = {first: "first", second: "second"}
+    assert len(indexed) == 2
+    assert indexed[first] == "first"
+    assert indexed[second] == "second"
+
+
+def test_transformed_oracle_retains_structural_equality_and_hashing() -> None:
+    """Frozen transforms compare structurally over one Oracle identity."""
+    oracle = qmc.opaque("transform_identity", num_qubits=1)
+    equivalent = qmc.control(oracle, num_controls=2)
+    repeated = qmc.control(oracle, num_controls=2)
+    distinct = qmc.control(
+        qmc.opaque("transform_identity", num_qubits=1),
+        num_controls=2,
+    )
+
+    assert equivalent == repeated
+    assert hash(equivalent) == hash(repeated)
+    assert equivalent != distinct
+    assert {equivalent: "value"}[repeated] == "value"
+
+
 @pytest.mark.parametrize("inverse", [False, True])
 def test_vector_signature_oracle_rejects_control_at_compose_time(
     inverse: bool,

@@ -5,33 +5,16 @@ from __future__ import annotations
 import dataclasses
 
 from qamomile.circuit.ir.operation import Operation
-from qamomile.circuit.ir.operation.callable import InvokeOperation
-from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.classical_ops import (
-    ReturnQuantumArrayElementOperation,
+from qamomile.circuit.ir.operation.control_work import (
+    ControlWorkKind,
+    classify_control_work,
 )
-from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
-from qamomile.circuit.ir.operation.gate import (
-    ControlledUOperation,
-    GateOperation,
+from qamomile.circuit.ir.operation.slice_array import (
+    ReleaseSliceViewOperation,
+    SliceArrayOperation,
 )
-from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
-from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
-from qamomile.circuit.ir.operation.operation import OperationKind, QInitOperation
-from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
-from qamomile.circuit.ir.operation.select import SelectOperation
 
 CLEAN_ANCILLA_BATCH_MIN_WORK = 2
-
-_CONTEXT_DEPENDENT_OPERATION_TYPES = (
-    ControlledUOperation,
-    ForOperation,
-    GlobalPhaseOperation,
-    IfOperation,
-    InvokeOperation,
-    InverseBlockOperation,
-    PauliEvolveOp,
-)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -76,20 +59,19 @@ def static_clean_ancilla_batch_profile(
         StaticCleanAncillaBatchProfile | None: Context-free fixed-model profile,
             or ``None`` when estimator-specific resolution is required.
     """
-    if operation.operation_kind is OperationKind.CLASSICAL or isinstance(
-        operation,
-        (
-            CastOperation,
-            QInitOperation,
-            ReturnQuantumArrayElementOperation,
-        ),
-    ):
+    # Resource estimation consumes the semantic IR before the transpiler's
+    # slice-marker stripping pass. These two lifetime markers are therefore
+    # valid zero-work structure here, while an emitter correctly treats either
+    # marker as unsupported if it survives to the later emission stage.
+    if isinstance(operation, (SliceArrayOperation, ReleaseSliceViewOperation)):
         return StaticCleanAncillaBatchProfile()
-    if isinstance(operation, GateOperation):
+
+    work_kind = classify_control_work(operation)
+    if work_kind is ControlWorkKind.BOOKKEEPING:
+        return StaticCleanAncillaBatchProfile()
+    if work_kind is ControlWorkKind.QUANTUM_LEAF:
         return StaticCleanAncillaBatchProfile(work=1)
-    if isinstance(operation, SelectOperation):
-        return None
-    if isinstance(operation, _CONTEXT_DEPENDENT_OPERATION_TYPES):
+    if work_kind is ControlWorkKind.CONTEXT_DEPENDENT:
         return None
     return StaticCleanAncillaBatchProfile(work=1)
 

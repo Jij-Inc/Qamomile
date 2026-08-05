@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+import sympy as sp
 
 if TYPE_CHECKING:
     from qiskit.circuit import QuantumCircuit
@@ -664,16 +665,17 @@ class TestNormalizeControlIndices:
 class TestControlledPowerValidation:
     """Tests for power parameter validation in ControlledGate."""
 
-    def test_power_zero_raises(self):
+    def test_power_zero_emits_an_identity_call(self):
+        """A concrete zero power is represented for identity lowering."""
         cg = ControlledGate(_mock_qkernel(), num_controls=1)
-        with trace():
-            with pytest.raises(ValueError, match="strictly positive"):
-                cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=0)
+        with trace() as tracer:
+            cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=0)
+        assert tracer.operations[0].power == 0
 
     def test_power_negative_raises(self):
         cg = ControlledGate(_mock_qkernel(), num_controls=1)
         with trace():
-            with pytest.raises(ValueError, match="strictly positive"):
+            with pytest.raises(ValueError, match="nonnegative"):
                 cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=-3)
 
     def test_power_bool_true_raises(self):
@@ -688,11 +690,36 @@ class TestControlledPowerValidation:
             with pytest.raises(TypeError, match="bool"):
                 cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=False)
 
-    def test_power_float_raises(self):
+    def test_power_fractional_float_raises(self):
         cg = ControlledGate(_mock_qkernel(), num_controls=1)
         with trace():
-            with pytest.raises(TypeError, match="int or UInt"):
+            with pytest.raises(TypeError, match="non-integer"):
                 cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=1.5)
+
+    @pytest.mark.parametrize(
+        "power",
+        [
+            0.0,
+            2.0,
+            np.int64(2),
+            np.float64(2.0),
+            sp.Float(0.0),
+            sp.Float(2.0),
+        ],
+    )
+    def test_power_accepts_integer_valued_real_scalars(self, power: object):
+        """Frontend power validation matches analysis and emission."""
+        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        with trace() as tracer:
+            cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=power)
+        assert tracer.operations[0].power == int(power)
+
+    def test_power_rejects_fractional_sympy_float(self):
+        """A non-integral SymPy real does not truncate into gate power."""
+        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        with trace():
+            with pytest.raises(TypeError, match="non-integer"):
+                cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=sp.Float(1.5))
 
     def test_power_uint_normalizes_to_value(self):
         from qamomile.circuit.frontend.handle.primitives import UInt as UIntHandle

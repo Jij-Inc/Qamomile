@@ -3543,7 +3543,7 @@ def _resolve_transformed_power(
     if not isinstance(operation, ControlledUOperation):
         return 1
     power = operation.power
-    if isinstance(power, (bool, int, float)):
+    if not isinstance(power, Value):
         resolved: Any = power
     elif power.is_constant():
         resolved = power.get_const()
@@ -3760,18 +3760,29 @@ def _validate_pauli_evolution_hamiltonian(hamiltonian: Any) -> None:
         hamiltonian (Any): Bound Qamomile Hamiltonian.
 
     Raises:
-        EmitError: If the identity or a Pauli coefficient has a material
-            imaginary component.
+        EmitError: If the identity or a Pauli coefficient is non-finite or has
+            a material imaginary component.
     """
     from qamomile.observable.hamiltonian import HERMITIAN_IMAG_ATOL
 
-    if abs(hamiltonian.constant.imag) > HERMITIAN_IMAG_ATOL:
+    constant = complex(hamiltonian.constant)
+    if not math.isfinite(constant.real) or not math.isfinite(constant.imag):
+        raise EmitError("HUGR Pauli evolution requires finite Hamiltonian coefficients")
+    if abs(constant.imag) > HERMITIAN_IMAG_ATOL:
         raise EmitError(
             "HUGR Pauli evolution requires a Hermitian Hamiltonian; "
             "the identity coefficient is non-real"
         )
     for operators, coefficient in hamiltonian:
-        if abs(coefficient.imag) > HERMITIAN_IMAG_ATOL:
+        numeric_coefficient = complex(coefficient)
+        if not math.isfinite(numeric_coefficient.real) or not math.isfinite(
+            numeric_coefficient.imag
+        ):
+            raise EmitError(
+                "HUGR Pauli evolution requires finite Hamiltonian coefficients; "
+                f"found {coefficient} on term {operators}"
+            )
+        if abs(numeric_coefficient.imag) > HERMITIAN_IMAG_ATOL:
             raise EmitError(
                 "HUGR Pauli evolution requires a Hermitian Hamiltonian; "
                 f"coefficient {coefficient} on term {operators} is non-real"

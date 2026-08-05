@@ -30,6 +30,19 @@ def _reverse_array_use_kernel(angles: qmc.Vector[qmc.Float]) -> qmc.Bit:
     return qmc.measure(qubit)
 
 
+class _ScalarShapeArray(np.ndarray):
+    """Expose a malformed scalar ``shape`` through the ndarray protocol."""
+
+    @property
+    def shape(self) -> int:
+        """Return an invalid non-iterable array shape.
+
+        Returns:
+            int: Deliberately malformed scalar shape.
+        """
+        return 2
+
+
 @pytest.mark.parametrize(
     "binding",
     [
@@ -111,6 +124,26 @@ def test_ragged_runtime_parameter_binding_is_rejected() -> None:
             transpiler.executor(),
             shots=1,
             bindings={"angles": [[0.0], [0.25, 0.5]]},
+        )
+
+
+def test_noniterable_runtime_parameter_shape_is_rejected() -> None:
+    """Runtime bindings translate a malformed scalar shape into ValueError."""
+    pytest.importorskip("qiskit")
+    from qamomile.qiskit import QiskitTranspiler
+
+    transpiler = QiskitTranspiler()
+    executable = transpiler.transpile(
+        _reverse_array_use_kernel,
+        parameters=["angles"],
+    )
+    malformed = np.asarray([0.0, 0.0]).view(_ScalarShapeArray)
+
+    with pytest.raises(ValueError, match="shape must be an iterable"):
+        executable.sample(
+            transpiler.executor(),
+            shots=1,
+            bindings={"angles": malformed},
         )
 
 

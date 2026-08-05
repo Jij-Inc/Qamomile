@@ -882,7 +882,8 @@ class ArrayBoundsValidationPass(Pass[Block, Block]):
                 the active recursion path.
 
         Raises:
-            ValidationError: If a reachable owned-body access is out of bounds.
+            ValidationError: If a reachable owned-body access is out of bounds,
+                or scalar quantum broadcasting receives a rank>1 target array.
         """
         owned_blocks: list[tuple[Block, Sequence[ValueBase]]] = []
         if isinstance(operation, SelectOperation):
@@ -904,8 +905,17 @@ class ArrayBoundsValidationPass(Pass[Block, Block]):
             broadcast_pair = _scalar_quantum_broadcast_pair(block, actuals)
             if broadcast_pair is not None:
                 _formal, actual = broadcast_pair
-                if actual.shape and constant_integer(actual.shape[0]) == 0:
-                    # No scalar-template lane is reachable.
+                if len(actual.shape) != 1:
+                    raise ValidationError(
+                        f"Scalar quantum broadcasting received a "
+                        f"rank-{len(actual.shape)} target array {actual.name!r}; "
+                        "the quantum addressing path supports rank-1 arrays "
+                        "only. Flatten the register and compute indices "
+                        "explicitly."
+                    )
+                if constant_integer(actual.shape[0]) == 0:
+                    # A supported rank-1 vector with no lanes never enters the
+                    # scalar body, so its element accesses are unreachable.
                     continue
             mapping: dict[str, ValueBase] = {}
             for formal, actual in pair_block_operands(block, actuals):

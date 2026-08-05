@@ -10,13 +10,16 @@ Two-mode API:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Any
+import dataclasses
+from collections.abc import Mapping, Sequence
+from typing import Any, cast
 
 import sympy as sp
 from sympy.logic.boolalg import Boolean
 
+from qamomile.circuit.estimator._metrics import _activation_over_range
 from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.dataflow import walk_operations
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     BinOp,
     BinOpKind,
@@ -29,12 +32,180 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     UnaryMathOpKind,
 )
 from qamomile.circuit.ir.operation.callable import CallTransform
+from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
+from qamomile.circuit.ir.operation.control_flow import IfOperation
 from qamomile.circuit.ir.operation.operation import Operation
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.block_parameter_binding import pair_block_operands
 
 from ._utils import BINOP_TO_SYMPY, UNARY_MATH_TO_SYMPY
+
+
+@dataclasses.dataclass(frozen=True)
+class _ResolvedClassicalFact:
+    """Carry one resolved value and guarded scheduler dependencies.
+
+    Dependencies are stored as a deterministic immutable tuple so facts can be
+    compared structurally. Each pair maps one source token to the condition
+    under which the resolved value depends on that source. Most tokens denote
+    runtime observations; loop-array summaries also use internal readiness
+    tokens that must not be mistaken for measurement feed-forward.
+
+    Args:
+        value (sp.Basic): Resolved symbolic or concrete classical value.
+        source_guards (tuple[tuple[str, Boolean], ...]): Sorted source-token
+            guards. False guards are omitted.
+    """
+
+    value: sp.Basic
+    source_guards: tuple[tuple[str, Boolean], ...] = ()
+
+    @classmethod
+    def create(
+        cls,
+        value: sp.Basic | int | float | bool,
+        source_guards: Mapping[str, sp.Basic] | None = None,
+    ) -> _ResolvedClassicalFact:
+        """Create a normalized immutable classical fact.
+
+        Args:
+            value (sp.Basic | int | float | bool): Resolved classical value.
+            source_guards (Mapping[str, sp.Basic] | None): Optional source
+                tokens and their activation guards. Defaults to ``None``.
+
+        Returns:
+            _ResolvedClassicalFact: Fact with deterministic nonfalse guards.
+        """
+        return cls(
+            sp.sympify(value),
+            _normalized_source_guards(source_guards or {}),
+        )
+
+    @property
+    def dependencies(self) -> dict[str, Boolean]:
+        """Return a mutable copy of the source-token guards.
+
+        Returns:
+            dict[str, Boolean]: Source tokens mapped to activation guards.
+        """
+        return dict(self.source_guards)
+
+
+class _ArrayState:
+    """Marker base for immutable classical-array estimator state."""
+
+
+@dataclasses.dataclass(frozen=True)
+class _ArrayReferenceState(_ArrayState):
+    """Reference an IR array whose provenance remains in the current scope.
+
+    Args:
+        array (ArrayValue): IR array projected when an element is requested.
+    """
+
+    array: ArrayValue
+
+
+@dataclasses.dataclass(frozen=True)
+class _ArrayConstantState(_ArrayState):
+    """Hold immutable nested constant-array contents.
+
+    Args:
+        contents (Any): Frozen nested array payload.
+    """
+
+    contents: Any
+
+
+@dataclasses.dataclass(frozen=True)
+class _ArrayStoreState(_ArrayState):
+    """Represent one immutable element update.
+
+    Args:
+        previous (_ArrayState): State before the update.
+        stored (_ResolvedClassicalFact): Call-scoped stored scalar fact.
+        indices (tuple[_ResolvedClassicalFact, ...]): Call-scoped store-index
+            facts.
+    """
+
+    previous: _ArrayState
+    stored: _ResolvedClassicalFact
+    indices: tuple[_ResolvedClassicalFact, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class _ArraySliceState(_ArrayState):
+    """Represent a one-dimensional affine array view.
+
+    Args:
+        source (_ArrayState): State viewed by the slice.
+        start (_ResolvedClassicalFact): Source-space first-index fact.
+        step (_ResolvedClassicalFact): Source-space stride fact.
+    """
+
+    source: _ArrayState
+    start: _ResolvedClassicalFact
+    step: _ResolvedClassicalFact
+
+
+@dataclasses.dataclass(frozen=True)
+class _ArrayChoiceState(_ArrayState):
+    """Represent a predicate-selected immutable array state.
+
+    Args:
+        when_true (_ArrayState): State selected when the predicate is true.
+        when_false (_ArrayState): State selected when the predicate is false.
+        condition (_ResolvedClassicalFact): Selection-predicate fact.
+    """
+
+    when_true: _ArrayState
+    when_false: _ArrayState
+    condition: _ResolvedClassicalFact
+
+
+@dataclasses.dataclass(frozen=True)
+class _ArrayLoopSummaryState(_ArrayState):
+    """Summarize one traced array update over a symbolic iteration range.
+
+    Args:
+        initial (_ArrayState): State before the loop executes.
+        iteration (_ArrayState): State after one symbolic body execution.
+        loop_symbol (sp.Symbol): Symbol used by the traced body index.
+        start (sp.Expr): First Python-range value.
+        step (sp.Expr): Python-range stride.
+        iterations (sp.Expr): Number of reachable iterations.
+        fallback (sp.Symbol): Internal value used only when the final element
+            value cannot be represented without a loop-local symbol.
+        uncertainty_token (str): Boundary readiness token used for that
+            conservative fallback.
+    """
+
+    initial: _ArrayState
+    iteration: _ArrayState
+    loop_symbol: sp.Symbol
+    start: sp.Expr
+    step: sp.Expr
+    iterations: sp.Expr
+    fallback: sp.Symbol
+    uncertainty_token: str
+
+
+@dataclasses.dataclass(frozen=True)
+class _ArrayUnknownLoopSummaryState(_ArrayState):
+    """Summarize an array after iterations with unknown keys or values.
+
+    Args:
+        initial (_ArrayState): State selected when the loop is empty.
+        iterations (sp.Expr): Number of loop iterations.
+        fallback (sp.Symbol): Internal unresolved element value.
+        uncertainty_token (str): Loop-boundary readiness token.
+    """
+
+    initial: _ArrayState
+    iterations: sp.Expr
+    fallback: sp.Symbol
+    uncertainty_token: str
 
 
 def input_shape_dimension_aliases(block: Block) -> dict[str, str]:
@@ -99,7 +270,9 @@ class ExprResolver:
     """
 
     __slots__ = (
+        "_array_context",
         "_block",
+        "_classical_fact_context",
         "_context",
         "_input_shape_alias_maps",
         "_loop_var_names",
@@ -117,6 +290,8 @@ class ExprResolver:
         producer_maps: dict[int, tuple[Any, dict[str, Operation]]] | None = None,
         input_shape_alias_maps: (dict[int, tuple[Block, dict[str, str]]] | None) = None,
         structural_scope: tuple[tuple[int, int], ...] | None = None,
+        array_context: dict[str, _ArrayState] | None = None,
+        classical_fact_context: dict[str, _ResolvedClassicalFact] | None = None,
     ):
         """Initialise an ExprResolver.
 
@@ -144,8 +319,17 @@ class ExprResolver:
                 call-site path used by structural resource symbols. Each item
                 contains the invocation and selected-body identities. Defaults
                 to ``None`` for a root scope.
+            array_context (dict[str, _ArrayState] | None): Array-result UUID to
+                immutable element-wise state. Ordinary child regions share the
+                mapping, while callable scopes copy and explicitly publish
+                output snapshots. Defaults to ``None``.
+            classical_fact_context (dict[str, _ResolvedClassicalFact] | None):
+                Scalar or whole-array UUID to its resolved value and guarded
+                scheduler dependencies. Defaults to ``None``.
         """
+        self._array_context = array_context if array_context is not None else {}
         self._block = block
+        self._classical_fact_context = dict(classical_fact_context or {})
         self._context: dict[str, sp.Expr] = dict(context or {})
         self._loop_var_names: dict[str, sp.Expr] = dict(loop_var_names or {})
         self._parent_blocks: list[Any] = list(parent_blocks or [])
@@ -193,6 +377,109 @@ class ExprResolver:
             getattr(v, "uuid", "?"),
             f"Expected concrete int, got {expr}",
         )
+
+    def resolve_classical_fact(self, value: Any) -> _ResolvedClassicalFact:
+        """Resolve a classical value together with scheduler dependencies.
+
+        Precise array-element state takes precedence over a conservative
+        whole-array fact. The whole-array dependency is used only when the
+        persistent state cannot project the requested element.
+
+        Args:
+            value (Any): IR value, primitive Python value, or SymPy value to
+                resolve.
+
+        Returns:
+            _ResolvedClassicalFact: Resolved value and guarded source tokens.
+        """
+        return self._resolve_classical_fact(value, concrete=False)
+
+    def bind_classical_fact(
+        self,
+        value: Value,
+        fact: _ResolvedClassicalFact,
+    ) -> None:
+        """Bind one scalar or whole-array provenance fact by SSA identity.
+
+        Args:
+            value (Value): IR value receiving the fact.
+            fact (_ResolvedClassicalFact): Resolved value and dependencies.
+        """
+        self._classical_fact_context[value.uuid] = fact
+        self._context[value.uuid] = cast(sp.Expr, fact.value)
+
+    def bind_classical_selection(
+        self,
+        result: Value,
+        when_true: _ResolvedClassicalFact,
+        when_false: _ResolvedClassicalFact,
+        selector: _ResolvedClassicalFact,
+        value_override: sp.Basic | int | float | bool | None = None,
+    ) -> None:
+        """Bind a branch-selected scalar fact to one SSA result.
+
+        Branch dependencies use the same guarded choice semantics as array
+        element projection. A caller may supply a separately derived value
+        expression without changing those dependency guards.
+
+        Args:
+            result (Value): Scalar SSA result receiving the selected fact.
+            when_true (_ResolvedClassicalFact): True-branch value and sources.
+            when_false (_ResolvedClassicalFact): False-branch value and
+                sources.
+            selector (_ResolvedClassicalFact): Branch selector and its source
+                dependencies.
+            value_override (sp.Basic | int | float | bool | None): Optional
+                result expression to use instead of the selected Piecewise
+                value. Defaults to ``None``.
+        """
+        selected = _choice_classical_fact(when_true, when_false, selector)
+        if value_override is not None:
+            selected = _ResolvedClassicalFact.create(
+                value_override,
+                selected.dependencies,
+            )
+        self.bind_classical_fact(result, selected)
+
+    def unresolved_fallback_symbol(self, value: Value) -> sp.Symbol | None:
+        """Return the private fallback symbol used for an unresolved value.
+
+        A resolved expression can contain both runtime-derived state and
+        ordinary public inputs.  Callers that classify the former must not
+        infer provenance from every free symbol in the expression.  This
+        method distinguishes the one identity-qualified symbol introduced by
+        the resolver itself when no binding, constant, parameter, supported
+        producer, or public input-shape alias can explain ``value``.
+
+        Args:
+            value (Value): IR scalar value to classify.
+
+        Returns:
+            sp.Symbol | None: The resolver-owned fallback symbol, or ``None``
+                when ``value`` has an ordinary symbolic resolution.
+        """
+        if value.uuid in self._context or value.is_constant() or value.is_parameter():
+            return None
+        if (
+            value.is_array_element()
+            and self._resolve_array_element(
+                value,
+                concrete=False,
+            )
+            is not None
+        ):
+            return None
+        if self._block is not None:
+            traced = self._trace(value, self._block, set(), concrete=False)
+            if traced is not None:
+                return None
+        for parent_block in reversed(self._parent_blocks):
+            traced = self._trace(value, parent_block, set(), concrete=False)
+            if traced is not None:
+                return None
+        if self._input_shape_dimension_alias(value) is not None:
+            return None
+        return _fallback_symbol(value)
 
     @property
     def structural_scope(self) -> tuple[tuple[int, int], ...]:
@@ -262,6 +549,8 @@ class ExprResolver:
             producer_maps=self._producer_maps,
             input_shape_alias_maps=self._input_shape_alias_maps,
             structural_scope=self._structural_scope,
+            array_context=self._array_context,
+            classical_fact_context=self._classical_fact_context,
         )
 
     def isolated_scope(
@@ -288,9 +577,7 @@ class ExprResolver:
             ExprResolver: Resolver with no parent blocks and shared block
                 indexes.
         """
-        context = self._context.copy()
-        if extra_context:
-            context.update(extra_context)
+        context = dict(extra_context or {})
         return ExprResolver(
             block=inner_block,
             context=context,
@@ -301,6 +588,8 @@ class ExprResolver:
             structural_scope=(
                 self._structural_scope if structural_scope is None else structural_scope
             ),
+            array_context={},
+            classical_fact_context={},
         )
 
     def call_child_scope(
@@ -367,19 +656,43 @@ class ExprResolver:
                 actual_operands = actual_operands[control_count:]
 
         extra: dict[str, sp.Expr] = {}
+        array_inputs: list[tuple[ArrayValue, ArrayValue]] = []
+        classical_inputs: list[tuple[Value, Value]] = []
         for formal, actual in pair_block_operands(called_block, actual_operands):
             extra[formal.uuid] = self.resolve(actual)
+            if (
+                isinstance(formal, Value)
+                and isinstance(actual, Value)
+                and not isinstance(formal, ArrayValue)
+                and not isinstance(actual, ArrayValue)
+                and not formal.type.is_quantum()
+            ):
+                classical_inputs.append((formal, actual))
             # Map array shape dimension UUIDs
             if isinstance(actual, ArrayValue) and isinstance(formal, ArrayValue):
+                if not formal.type.is_quantum():
+                    array_inputs.append((formal, actual))
                 for df, da in zip(formal.shape, actual.shape):
                     extra[df.uuid] = self.resolve(da)
 
         # Callee gets fresh scope — no parent blocks from caller.
-        return self.isolated_scope(
+        child = self.isolated_scope(
             called_block,
             extra,
             structural_scope=self.call_structural_scope(call_op, called_block),
         )
+        for formal, actual in classical_inputs:
+            child.bind_classical_fact(
+                formal,
+                self.resolve_classical_fact(actual),
+            )
+        for formal, actual in array_inputs:
+            child.bind_call_array_input(
+                called_block,
+                formal,
+                self.snapshot_array_state(actual),
+            )
+        return child
 
     def bind(self, value: Value, expression: sp.Expr) -> None:
         """Bind an IR value to an expression in this resolver scope.
@@ -395,6 +708,705 @@ class ExprResolver:
                 the value.
         """
         self._context[value.uuid] = expression
+        self._classical_fact_context[value.uuid] = _ResolvedClassicalFact.create(
+            expression
+        )
+
+    def bind_array_selection(
+        self,
+        result: ArrayValue,
+        when_true: ArrayValue,
+        when_false: ArrayValue,
+        condition: sp.Basic | _ResolvedClassicalFact,
+    ) -> None:
+        """Bind an array result to branch-selected source array states.
+
+        Array contents are not scalar SymPy expressions. Keeping the selected
+        source arrays structurally lets a later element read project the same
+        index from the selected state without inventing a public array symbol.
+
+        Args:
+            result (ArrayValue): Array SSA version visible after selection.
+            when_true (ArrayValue): Source array selected when ``condition``
+                is true.
+            when_false (ArrayValue): Source array selected when ``condition``
+                is false.
+            condition (sp.Basic | _ResolvedClassicalFact): Predicate selecting
+                the source array, optionally with source-token provenance.
+        """
+        self._array_context[result.uuid] = _ArrayChoiceState(
+            self.snapshot_array_state(
+                when_true,
+                ignore_binding=result.uuid if when_true.uuid == result.uuid else None,
+            ),
+            self.snapshot_array_state(
+                when_false,
+                ignore_binding=result.uuid if when_false.uuid == result.uuid else None,
+            ),
+            _coerce_classical_fact(condition),
+        )
+
+    def bind_array_state(self, result: ArrayValue, state: _ArrayState) -> None:
+        """Bind a caller-visible array result to an immutable state snapshot.
+
+        Args:
+            result (ArrayValue): Array SSA value receiving the snapshot.
+            state (_ArrayState): Frozen state resolved in the producing scope.
+        """
+        self._array_context[result.uuid] = state
+
+    def bind_array_state_selection(
+        self,
+        result: ArrayValue,
+        when_true: _ArrayState,
+        when_false: _ArrayState,
+        selector: _ResolvedClassicalFact,
+    ) -> None:
+        """Bind detached branch snapshots to one selected array result.
+
+        The snapshots may come from independently forked branch resolvers.
+        Keeping the choice structural lets each later element projection drop
+        selector dependencies when that element's two facts are identical.
+
+        Args:
+            result (ArrayValue): Array SSA result receiving the selected state.
+            when_true (_ArrayState): Detached true-branch snapshot.
+            when_false (_ArrayState): Detached false-branch snapshot.
+            selector (_ResolvedClassicalFact): Branch selector and its source
+                dependencies.
+        """
+        state = (
+            when_true
+            if when_true == when_false
+            else _ArrayChoiceState(when_true, when_false, selector)
+        )
+        self.bind_array_state(result, state)
+
+    def bind_loop_array_summary(
+        self,
+        result: ArrayValue,
+        *,
+        initial: _ArrayState,
+        iteration: _ArrayState,
+        loop_symbol: sp.Symbol,
+        start: sp.Expr,
+        step: sp.Expr,
+        iterations: sp.Expr,
+        fallback: sp.Symbol,
+        uncertainty_token: str,
+    ) -> None:
+        """Bind one range-quantified loop-exit array state.
+
+        Args:
+            result (ArrayValue): Caller-visible array SSA result.
+            initial (_ArrayState): State selected by a zero-trip loop.
+            iteration (_ArrayState): State after one symbolic body execution.
+            loop_symbol (sp.Symbol): Body-local induction symbol.
+            start (sp.Expr): First range value.
+            step (sp.Expr): Range stride.
+            iterations (sp.Expr): Number of loop iterations.
+            fallback (sp.Symbol): Internal unresolved element placeholder.
+            uncertainty_token (str): Boundary token for conservative element
+                projection.
+        """
+        self.bind_array_state(
+            result,
+            self.loop_array_summary_state(
+                initial=initial,
+                iteration=iteration,
+                loop_symbol=loop_symbol,
+                start=start,
+                step=step,
+                iterations=iterations,
+                fallback=fallback,
+                uncertainty_token=uncertainty_token,
+            ),
+        )
+
+    def loop_array_summary_state(
+        self,
+        *,
+        initial: _ArrayState,
+        iteration: _ArrayState,
+        loop_symbol: sp.Symbol,
+        start: sp.Expr,
+        step: sp.Expr,
+        iterations: sp.Expr,
+        fallback: sp.Symbol,
+        uncertainty_token: str,
+    ) -> _ArrayState:
+        """Create one range-quantified array state without binding it.
+
+        Args:
+            initial (_ArrayState): State before the loop executes.
+            iteration (_ArrayState): One symbolic body transition.
+            loop_symbol (sp.Symbol): Body-local induction symbol.
+            start (sp.Expr): First range value.
+            step (sp.Expr): Range stride.
+            iterations (sp.Expr): Number of loop iterations.
+            fallback (sp.Symbol): Internal unresolved element placeholder.
+            uncertainty_token (str): Boundary token for conservative element
+                projection.
+
+        Returns:
+            _ArrayState: Immutable symbolic loop summary.
+        """
+        return _ArrayLoopSummaryState(
+            initial,
+            iteration,
+            loop_symbol,
+            start,
+            step,
+            iterations,
+            fallback,
+            uncertainty_token,
+        )
+
+    def unknown_loop_array_summary_state(
+        self,
+        *,
+        initial: _ArrayState,
+        iterations: sp.Expr,
+        fallback: sp.Symbol,
+        uncertainty_token: str,
+    ) -> _ArrayState:
+        """Create a conservative loop-exit state for unknown item updates.
+
+        Args:
+            initial (_ArrayState): State selected when the loop is empty.
+            iterations (sp.Expr): Number of loop iterations.
+            fallback (sp.Symbol): Internal unresolved element value.
+            uncertainty_token (str): Loop-boundary readiness token.
+
+        Returns:
+            _ArrayState: Immutable unknown loop summary.
+        """
+        return _ArrayUnknownLoopSummaryState(
+            initial,
+            iterations,
+            fallback,
+            uncertainty_token,
+        )
+
+    def copy_array_context(self) -> None:
+        """Detach this resolver from a shared mutable array-context mapping."""
+        self._array_context = dict(self._array_context)
+
+    def fork_array_context(self) -> dict[str, _ArrayState]:
+        """Return a detached shallow copy for a child resolver scope.
+
+        The state nodes are immutable, so copying only the UUID map is enough
+        to isolate later bindings while retaining structural sharing.
+
+        Returns:
+            dict[str, _ArrayState]: Detached array-state mapping.
+        """
+        return dict(self._array_context)
+
+    def export_array_context(
+        self,
+        arrays: Sequence[ArrayValue] | None = None,
+    ) -> dict[str, _ArrayState]:
+        """Export all or selected persistent array-state bindings.
+
+        Args:
+            arrays (Sequence[ArrayValue] | None): Optional array SSA values to
+                export. Defaults to ``None``, which exports every binding.
+
+        Returns:
+            dict[str, _ArrayState]: Detached mapping safe to import elsewhere.
+        """
+        if arrays is None:
+            return self.fork_array_context()
+        return {
+            array.uuid: self._array_context[array.uuid]
+            for array in arrays
+            if array.uuid in self._array_context
+        }
+
+    def import_array_context(
+        self,
+        context: Mapping[str, _ArrayState],
+        *,
+        replace: bool = False,
+    ) -> None:
+        """Import persistent array-state bindings into this resolver.
+
+        Args:
+            context (Mapping[str, _ArrayState]): Exported UUID-to-state map.
+            replace (bool): Whether to replace every existing binding before
+                importing. Defaults to ``False``, which overlays the supplied
+                bindings.
+        """
+        imported = dict(context)
+        if replace:
+            self._array_context = imported
+            return
+        self._array_context = {**self._array_context, **imported}
+
+    def bind_call_array_input(
+        self,
+        block: Block,
+        formal: ArrayValue,
+        state: _ArrayState,
+    ) -> None:
+        """Bind the entry lineage of one callable array formal.
+
+        Callable tracing mutates ``Block.input_values`` to the latest SSA
+        version. A helper that stores into an input can therefore expose its
+        produced output version as the formal interface value. The formal is
+        nevertheless the value visible at call entry, so bind it before body
+        evaluation; also bind unproduced aliases in the same lineage without
+        overwriting produced intermediate versions.
+
+        Args:
+            block (Block): Selected callable body.
+            formal (ArrayValue): Array value paired with the call operand.
+            state (_ArrayState): Caller state captured at invocation time.
+        """
+        produced = {
+            result.uuid
+            for operation in walk_operations(block.operations)
+            for result in operation.results
+            if isinstance(result, ArrayValue)
+        }
+        self._array_context[formal.uuid] = state
+        candidates: list[ArrayValue] = []
+        for operation in walk_operations(block.operations):
+            candidates.extend(
+                operand
+                for operand in operation.operands
+                if isinstance(operand, ArrayValue)
+                and operand.logical_id == formal.logical_id
+            )
+        for candidate in candidates:
+            if candidate.uuid != formal.uuid and candidate.uuid not in produced:
+                self._array_context[candidate.uuid] = state
+
+    def bind_loop_array_input(
+        self,
+        operations: Sequence[Operation],
+        entry: ArrayValue,
+        state: _ArrayState,
+    ) -> None:
+        """Bind one carried array snapshot to a loop body's entry SSA values.
+
+        A traced loop body reuses the same SSA graph for every iteration. The
+        explicit entry always receives the previous iteration's snapshot,
+        even when tracing reused its UUID for a later result. Other aliases are
+        rebound only when unproduced, so within-iteration updates stay intact.
+
+        Args:
+            operations (Sequence[Operation]): Loop-body operations.
+            entry (ArrayValue): Pre-loop array value naming the carried lineage.
+            state (_ArrayState): Snapshot produced by the previous iteration.
+        """
+        produced = {
+            result.uuid
+            for operation in walk_operations(operations)
+            for result in operation.results
+            if isinstance(result, ArrayValue)
+        }
+        self._array_context[entry.uuid] = state
+        candidates: list[ArrayValue] = []
+        for operation in walk_operations(operations):
+            candidates.extend(
+                operand
+                for operand in operation.operands
+                if isinstance(operand, ArrayValue)
+                and operand.logical_id == entry.logical_id
+            )
+        for candidate in candidates:
+            if candidate.uuid != entry.uuid and candidate.uuid not in produced:
+                self._array_context[candidate.uuid] = state
+
+    def instantiate_array_state(
+        self,
+        state: _ArrayState,
+        *,
+        state_replacements: Sequence[tuple[_ArrayState, _ArrayState]] = (),
+        substitutions: Mapping[sp.Basic, sp.Basic] | None = None,
+    ) -> _ArrayState:
+        """Instantiate one persistent array transition without reevaluating IR.
+
+        Identity-based state replacements splice a previous iteration's exit
+        snapshot into the traced transition. Scalar substitutions then bind
+        the loop index in stored values, indices, and source guards.
+
+        Args:
+            state (_ArrayState): Persistent transition state to instantiate.
+            state_replacements (Sequence[tuple[_ArrayState, _ArrayState]]):
+                Identity anchors and their replacement snapshots. Defaults to
+                an empty sequence.
+            substitutions (Mapping[sp.Basic, sp.Basic] | None): Simultaneous
+                scalar substitutions. Defaults to ``None``.
+
+        Returns:
+            _ArrayState: Instantiated immutable state tree.
+        """
+        for anchor, replacement in state_replacements:
+            if state is anchor:
+                return replacement
+        scalar_substitutions = dict(substitutions or {})
+
+        def fact(value: _ResolvedClassicalFact) -> _ResolvedClassicalFact:
+            """Instantiate one scalar fact.
+
+            Args:
+                value (_ResolvedClassicalFact): Fact to specialize.
+
+            Returns:
+                _ResolvedClassicalFact: Specialized value and source guards.
+            """
+            if not scalar_substitutions:
+                return value
+            return _ResolvedClassicalFact.create(
+                value.value.subs(
+                    cast(Any, scalar_substitutions),
+                    simultaneous=True,
+                ),
+                {
+                    source: guard.subs(
+                        cast(Any, scalar_substitutions),
+                        simultaneous=True,
+                    )
+                    for source, guard in value.dependencies.items()
+                },
+            )
+
+        if isinstance(state, (_ArrayReferenceState, _ArrayConstantState)):
+            return state
+        if isinstance(state, _ArrayStoreState):
+            return _ArrayStoreState(
+                self.instantiate_array_state(
+                    state.previous,
+                    state_replacements=state_replacements,
+                    substitutions=scalar_substitutions,
+                ),
+                fact(state.stored),
+                tuple(fact(index) for index in state.indices),
+            )
+        if isinstance(state, _ArraySliceState):
+            return _ArraySliceState(
+                self.instantiate_array_state(
+                    state.source,
+                    state_replacements=state_replacements,
+                    substitutions=scalar_substitutions,
+                ),
+                fact(state.start),
+                fact(state.step),
+            )
+        if isinstance(state, _ArrayChoiceState):
+            condition = fact(state.condition)
+            predicate = _as_boolean(condition.value)
+            when_true = self.instantiate_array_state(
+                state.when_true,
+                state_replacements=state_replacements,
+                substitutions=scalar_substitutions,
+            )
+            when_false = self.instantiate_array_state(
+                state.when_false,
+                state_replacements=state_replacements,
+                substitutions=scalar_substitutions,
+            )
+            if predicate is sp.true:
+                return when_true
+            if predicate is sp.false:
+                return when_false
+            return _ArrayChoiceState(when_true, when_false, condition)
+        if isinstance(state, _ArrayLoopSummaryState):
+            return _ArrayLoopSummaryState(
+                self.instantiate_array_state(
+                    state.initial,
+                    state_replacements=state_replacements,
+                    substitutions=scalar_substitutions,
+                ),
+                self.instantiate_array_state(
+                    state.iteration,
+                    state_replacements=state_replacements,
+                    substitutions=scalar_substitutions,
+                ),
+                state.loop_symbol,
+                cast(
+                    sp.Expr,
+                    state.start.subs(
+                        cast(Any, scalar_substitutions),
+                        simultaneous=True,
+                    ),
+                ),
+                cast(
+                    sp.Expr,
+                    state.step.subs(
+                        cast(Any, scalar_substitutions),
+                        simultaneous=True,
+                    ),
+                ),
+                cast(
+                    sp.Expr,
+                    state.iterations.subs(
+                        cast(Any, scalar_substitutions),
+                        simultaneous=True,
+                    ),
+                ),
+                state.fallback,
+                state.uncertainty_token,
+            )
+        if isinstance(state, _ArrayUnknownLoopSummaryState):
+            return _ArrayUnknownLoopSummaryState(
+                self.instantiate_array_state(
+                    state.initial,
+                    state_replacements=state_replacements,
+                    substitutions=scalar_substitutions,
+                ),
+                cast(
+                    sp.Expr,
+                    state.iterations.subs(
+                        cast(Any, scalar_substitutions),
+                        simultaneous=True,
+                    ),
+                ),
+                state.fallback,
+                state.uncertainty_token,
+            )
+        return state
+
+    def snapshot_array_state(
+        self,
+        array: ArrayValue,
+        *,
+        ignore_binding: str | None = None,
+        visited: set[str] | None = None,
+    ) -> _ArrayState:
+        """Capture call-scoped immutable state for an array SSA value.
+
+        Scalar store operands, indices, and selection predicates are resolved
+        immediately, so a later invocation reusing the callee's formal UUIDs
+        cannot change an earlier caller result.
+
+        Args:
+            array (ArrayValue): Array whose current state is captured.
+            ignore_binding (str | None): Array binding bypassed for one raw
+                producer lookup. Defaults to ``None``.
+            visited (set[str] | None): Array UUIDs already visited on this
+                capture path. Defaults to ``None``.
+
+        Returns:
+            _ArrayState: Immutable state tree rooted at ``array``.
+        """
+        if visited is None:
+            visited = set()
+        binding = self._array_context.get(array.uuid)
+        if binding is not None and ignore_binding != array.uuid:
+            return binding
+        if array.uuid in visited:
+            return _ArrayReferenceState(array)
+        visited.add(array.uuid)
+
+        if array.is_slice() and array.slice_of is not None:
+            if array.slice_start is not None and array.slice_step is not None:
+                return _ArraySliceState(
+                    self.snapshot_array_state(
+                        array.slice_of,
+                        visited=set(visited),
+                    ),
+                    self.resolve_classical_fact(array.slice_start),
+                    self.resolve_classical_fact(array.slice_step),
+                )
+        producer = self._array_producer(array)
+        if isinstance(producer, StoreArrayElementOperation):
+            return _ArrayStoreState(
+                self.snapshot_array_state(
+                    producer.array,
+                    visited=set(visited),
+                ),
+                self.resolve_classical_fact(producer.stored_value),
+                tuple(
+                    self.resolve_classical_fact(index)
+                    for index in producer.index_values
+                ),
+            )
+        if isinstance(producer, IfOperation):
+            merge = next(
+                (
+                    candidate
+                    for candidate in producer.iter_merges()
+                    if candidate.result.uuid == array.uuid
+                    and isinstance(candidate.true_value, ArrayValue)
+                    and isinstance(candidate.false_value, ArrayValue)
+                ),
+                None,
+            )
+            if merge is not None:
+                return _ArrayChoiceState(
+                    self.snapshot_array_state(
+                        cast(ArrayValue, merge.true_value),
+                        visited=set(visited),
+                    ),
+                    self.snapshot_array_state(
+                        cast(ArrayValue, merge.false_value),
+                        visited=set(visited),
+                    ),
+                    self.resolve_classical_fact(producer.condition),
+                )
+        constant = array.get_const_array()
+        if constant is not None:
+            return _ArrayConstantState(constant)
+        return _ArrayReferenceState(array)
+
+    def array_state_dependencies(self, array: ArrayValue) -> dict[str, Boolean]:
+        """Return every guarded observation source retained by an array state.
+
+        This whole-state summary is used only at aggregate boundaries such as
+        loops and calls. Element reads remain precise through
+        :meth:`resolve_classical_fact`; publishing the union here ensures each
+        retained element token becomes ready no earlier than the boundary.
+
+        Args:
+            array (ArrayValue): Array whose immutable state is summarized.
+
+        Returns:
+            dict[str, Boolean]: Retained source tokens and activation guards.
+        """
+
+        def visit(state: _ArrayState) -> dict[str, Boolean]:
+            """Collect dependencies from one persistent state node.
+
+            Args:
+                state (_ArrayState): State node to inspect.
+
+            Returns:
+                dict[str, Boolean]: Source guards reachable from the node.
+            """
+            if isinstance(state, (_ArrayReferenceState, _ArrayConstantState)):
+                return {}
+            if isinstance(state, _ArrayStoreState):
+                return _merge_source_guard_maps(
+                    visit(state.previous),
+                    state.stored.dependencies,
+                    *(index.dependencies for index in state.indices),
+                )
+            if isinstance(state, _ArraySliceState):
+                return _merge_source_guard_maps(
+                    visit(state.source),
+                    state.start.dependencies,
+                    state.step.dependencies,
+                )
+            if isinstance(state, _ArrayChoiceState):
+                predicate = _as_boolean(state.condition.value)
+                return _merge_source_guard_maps(
+                    state.condition.dependencies,
+                    _guard_source_guards(visit(state.when_true), predicate),
+                    _guard_source_guards(
+                        visit(state.when_false),
+                        sp.Not(predicate),
+                    ),
+                )
+            if isinstance(state, _ArrayLoopSummaryState):
+                active = _as_boolean(sp.Gt(state.iterations, 0))
+                iteration_dependencies = visit(state.iteration)
+                summarized = {
+                    source: _as_boolean(
+                        _activation_over_range(
+                            guard,
+                            state.loop_symbol,
+                            state.start,
+                            state.step,
+                            state.iterations,
+                        )
+                    )
+                    for source, guard in iteration_dependencies.items()
+                }
+                return _merge_source_guard_maps(
+                    _guard_source_guards(visit(state.initial), sp.Not(active)),
+                    summarized,
+                    {state.uncertainty_token: active},
+                )
+            if isinstance(state, _ArrayUnknownLoopSummaryState):
+                active = _as_boolean(sp.Gt(state.iterations, 0))
+                return _merge_source_guard_maps(
+                    _guard_source_guards(visit(state.initial), sp.Not(active)),
+                    {state.uncertainty_token: active},
+                )
+            return {}
+
+        return visit(self.snapshot_array_state(array))
+
+    def guard_array_update(
+        self,
+        result: ArrayValue,
+        previous: ArrayValue,
+        condition: sp.Basic | _ResolvedClassicalFact,
+    ) -> None:
+        """Guard one body-local array update by an enclosing execution path.
+
+        Nested loops encounter the same Store result from the inside out. When
+        an inner loop already guarded that result, conjoin the outer reachability
+        condition instead of replacing the more specific inner condition.
+
+        Args:
+            result (ArrayValue): Array SSA version produced by the store.
+            previous (ArrayValue): Array version read by the store.
+            condition (sp.Basic | _ResolvedClassicalFact): Predicate that the
+                enclosing region executes, optionally with provenance.
+        """
+        current = self._array_context.get(result.uuid)
+        if current is None:
+            current = self.snapshot_array_state(
+                result,
+                ignore_binding=result.uuid,
+            )
+        self._array_context[result.uuid] = _ArrayChoiceState(
+            current,
+            self.snapshot_array_state(previous),
+            _coerce_classical_fact(condition),
+        )
+
+    def record_array_store(self, operation: StoreArrayElementOperation) -> None:
+        """Record one Store result in program order.
+
+        Inlining can intentionally reuse the actual operand UUID for a
+        callee's returned array. A block-wide producer index then cannot
+        distinguish the pre-call and post-call state. Recording each Store as
+        it executes preserves the earlier snapshot for untouched slots.
+
+        Args:
+            operation (StoreArrayElementOperation): Store just encountered by
+                the estimator's sequential interpreter.
+        """
+        result = operation.results[0]
+        if not isinstance(result, ArrayValue):
+            return
+        previous = self._array_context.get(operation.array.uuid)
+        if previous is None:
+            # InlinePass can retain the callee formal as the Store operand
+            # while substituting the returned result UUID with the caller's
+            # current array version. The result binding is then the precise
+            # pre-call state that untouched slots must retain.
+            previous = self._array_context.get(result.uuid)
+        if previous is None and result.is_slice():
+            # An inlined Store result can itself retain the caller view's
+            # affine lineage even when no prior binding was materialized.
+            previous = self.snapshot_array_state(
+                result,
+                ignore_binding=result.uuid,
+            )
+        if previous is None:
+            if operation.array.uuid == result.uuid:
+                constant = operation.array.get_const_array()
+                previous = (
+                    _ArrayConstantState(constant)
+                    if constant is not None
+                    else _ArrayReferenceState(operation.array)
+                )
+            else:
+                previous = self.snapshot_array_state(operation.array)
+        self._array_context[result.uuid] = _ArrayStoreState(
+            previous,
+            self.resolve_classical_fact(operation.stored_value),
+            tuple(
+                self.resolve_classical_fact(index) for index in operation.index_values
+            ),
+        )
 
     # Read-only accessors for engine / accumulator use
 
@@ -417,6 +1429,60 @@ class ExprResolver:
     #  Internal resolution                                                #
     # ------------------------------------------------------------------ #
 
+    def _resolve_classical_fact(
+        self,
+        value: Any,
+        *,
+        concrete: bool,
+    ) -> _ResolvedClassicalFact:
+        """Resolve one value and its guarded observation dependencies.
+
+        Args:
+            value (Any): IR, Python, or SymPy value to resolve.
+            concrete (bool): Whether unresolved symbolic values are rejected.
+
+        Returns:
+            _ResolvedClassicalFact: Resolved value and source-token guards.
+
+        Raises:
+            UnresolvedValueError: If ``concrete`` is true and the value cannot
+                be resolved concretely.
+        """
+        if isinstance(value, Value):
+            direct = self._classical_fact_context.get(value.uuid)
+            if direct is not None:
+                return direct
+            if value.is_array_element():
+                projected = self._resolve_array_element_fact(
+                    value,
+                    concrete=concrete,
+                )
+                if projected is not None:
+                    # A proven element state is strictly more precise than an
+                    # aggregate array fallback. In particular, a strong Store
+                    # overwrites old dependencies instead of unioning them.
+                    return projected
+                fallback = _ResolvedClassicalFact.create(
+                    self._resolve(value, concrete),
+                )
+                parent = value.parent_array
+                inherited: dict[str, Boolean] = {}
+                if parent is not None:
+                    parent_fact = self._classical_fact_context.get(parent.uuid)
+                    if parent_fact is not None:
+                        inherited.update(parent_fact.dependencies)
+                for index in value.element_indices:
+                    index_fact = self._resolve_classical_fact(
+                        index,
+                        concrete=concrete,
+                    )
+                    inherited = _merge_source_guard_maps(
+                        inherited,
+                        index_fact.dependencies,
+                    )
+                return _fact_with_dependencies(fallback, inherited)
+        return _ResolvedClassicalFact.create(self._resolve(value, concrete))
+
     def _resolve(self, v: Any, concrete: bool) -> sp.Expr:
         """Core resolution dispatcher (9-step priority chain).
 
@@ -434,7 +1500,7 @@ class ExprResolver:
         """
         # 1. Already SymPy
         if isinstance(v, sp.Basic):
-            return v  # type: ignore[return-value]
+            return cast(sp.Expr, v)
 
         # 2. Primitive Python types
         if not isinstance(v, Value):
@@ -443,7 +1509,7 @@ class ExprResolver:
             if isinstance(v, int):
                 return sp.Integer(v)
             if isinstance(v, float):
-                return sp.Float(v)
+                return cast(sp.Expr, sp.Float(v))
             if concrete:
                 raise UnresolvedValueError("?", f"Non-Value type: {type(v).__name__}")
             return sp.Symbol(str(v), integer=True, positive=True)
@@ -459,8 +1525,17 @@ class ExprResolver:
                 if isinstance(c, bool):
                     return sp.Integer(1 if c else 0)
                 if isinstance(c, float):
-                    return sp.Float(c)
+                    return cast(sp.Expr, sp.Float(c))
                 return sp.Integer(int(c))
+
+        # Array element loads are encoded as Value provenance rather than a
+        # dedicated operation. Try the parent array state before accepting an
+        # element-shaped parameter label: inlining can retain the callee's
+        # parameter metadata after substituting a concrete caller array.
+        if v.is_array_element():
+            element = self._resolve_array_element(v, concrete=concrete)
+            if element is not None:
+                return element
 
         # 5. Unbound parameter
         if v.is_parameter():
@@ -490,12 +1565,619 @@ class ExprResolver:
         shape_alias = self._input_shape_dimension_alias(v)
         if shape_alias is not None:
             return sp.Symbol(shape_alias, integer=True, nonnegative=True)
-        fallback_name = f"{v.name}_{v.uuid}"
-        if isinstance(v.type, FloatType):
-            return sp.Symbol(fallback_name, real=True)
-        if isinstance(v.type, (BitType, UIntType)):
-            return sp.Symbol(fallback_name, integer=True, nonnegative=True)
-        return sp.Symbol(fallback_name)
+        return _fallback_symbol(v)
+
+    def _resolve_array_element(
+        self,
+        value: Value,
+        *,
+        concrete: bool,
+    ) -> sp.Expr | None:
+        """Resolve one scalar element from its parent array state.
+
+        Args:
+            value (Value): Scalar value carrying ``parent_array`` and
+                ``element_indices`` provenance.
+            concrete (bool): Whether index/value resolution requires concrete
+                expressions.
+
+        Returns:
+            sp.Expr | None: Stored or initialized element expression, or
+                ``None`` when the array state cannot be proven.
+        """
+        fact = self._resolve_array_element_fact(value, concrete=concrete)
+        return cast(sp.Expr, fact.value) if fact is not None else None
+
+    def _resolve_array_element_fact(
+        self,
+        value: Value,
+        *,
+        concrete: bool,
+    ) -> _ResolvedClassicalFact | None:
+        """Resolve one scalar array element as a provenance fact.
+
+        Args:
+            value (Value): Scalar value carrying parent-array provenance.
+            concrete (bool): Whether index and value resolution is concrete.
+
+        Returns:
+            _ResolvedClassicalFact | None: Precise projected fact, or ``None``
+                when the persistent array state cannot explain the element.
+        """
+        parent = value.parent_array
+        if parent is None or not value.element_indices:
+            return None
+        indices = tuple(
+            self._resolve_classical_fact(index, concrete=concrete)
+            for index in value.element_indices
+        )
+        return self._resolve_array_state_element_fact(
+            parent,
+            indices,
+            concrete=concrete,
+            visited=set(),
+        )
+
+    def _resolve_array_state_element(
+        self,
+        array: ArrayValue,
+        indices: tuple[sp.Expr, ...],
+        *,
+        concrete: bool,
+        visited: set[str],
+        ignore_selection: str | None = None,
+    ) -> sp.Expr | None:
+        """Project one element from an immutable array SSA state.
+
+        Args:
+            array (ArrayValue): Array version whose contents are inspected.
+            indices (tuple[sp.Expr, ...]): Resolved local element indices.
+            concrete (bool): Whether nested scalar resolution is concrete.
+            visited (set[str]): Array UUIDs already followed on this path.
+            ignore_selection (str | None): Selection UUID to bypass once when
+                its true source is the result array itself. Defaults to
+                ``None``.
+
+        Returns:
+            sp.Expr | None: Proven element value, or ``None`` when no supported
+                immutable source explains it.
+        """
+        facts = tuple(_ResolvedClassicalFact.create(index) for index in indices)
+        fact = self._resolve_array_state_element_fact(
+            array,
+            facts,
+            concrete=concrete,
+            visited=visited,
+            ignore_selection=ignore_selection,
+        )
+        return cast(sp.Expr, fact.value) if fact is not None else None
+
+    def _resolve_array_state_element_fact(
+        self,
+        array: ArrayValue,
+        indices: tuple[_ResolvedClassicalFact, ...],
+        *,
+        concrete: bool,
+        visited: set[str],
+        ignore_selection: str | None = None,
+    ) -> _ResolvedClassicalFact | None:
+        """Project one provenance fact from an immutable array SSA state.
+
+        Args:
+            array (ArrayValue): Array version whose contents are inspected.
+            indices (tuple[_ResolvedClassicalFact, ...]): Local element-index
+                facts.
+            concrete (bool): Whether nested scalar resolution is concrete.
+            visited (set[str]): Array UUIDs already followed on this path.
+            ignore_selection (str | None): Binding UUID to bypass once for a
+                raw reference. Defaults to ``None``.
+
+        Returns:
+            _ResolvedClassicalFact | None: Projected fact, or ``None`` when no
+                supported immutable source explains the element.
+        """
+        state = self._array_context.get(array.uuid)
+        if state is not None and ignore_selection != array.uuid:
+            return self._project_array_state_fact(
+                state,
+                indices,
+                concrete=concrete,
+                visited=visited,
+            )
+
+        if array.uuid in visited:
+            return None
+        visited.add(array.uuid)
+
+        if array.is_slice():
+            if (
+                len(indices) != 1
+                or array.slice_of is None
+                or array.slice_start is None
+                or array.slice_step is None
+            ):
+                return None
+            start = self._resolve_classical_fact(
+                array.slice_start,
+                concrete=concrete,
+            )
+            step = self._resolve_classical_fact(
+                array.slice_step,
+                concrete=concrete,
+            )
+            root_index = _fact_from_expression(
+                cast(sp.Expr, start.value)
+                + cast(sp.Expr, step.value) * cast(sp.Expr, indices[0].value),
+                start,
+                step,
+                indices[0],
+            )
+            return self._resolve_array_state_element_fact(
+                array.slice_of,
+                (root_index,),
+                concrete=concrete,
+                visited=visited,
+            )
+
+        producer = self._array_producer(array)
+        if isinstance(producer, IfOperation):
+            merge = next(
+                (
+                    candidate
+                    for candidate in producer.iter_merges()
+                    if candidate.result.uuid == array.uuid
+                    and isinstance(candidate.true_value, ArrayValue)
+                    and isinstance(candidate.false_value, ArrayValue)
+                ),
+                None,
+            )
+            if merge is None:
+                return None
+            predicate = self._resolve_classical_fact(
+                producer.condition,
+                concrete=concrete,
+            )
+            true_value = self._resolve_array_state_element_fact(
+                cast(ArrayValue, merge.true_value),
+                indices,
+                concrete=concrete,
+                visited=set(visited),
+            )
+            false_value = self._resolve_array_state_element_fact(
+                cast(ArrayValue, merge.false_value),
+                indices,
+                concrete=concrete,
+                visited=set(visited),
+            )
+            if true_value is None or false_value is None:
+                return None
+            return _choice_classical_fact(true_value, false_value, predicate)
+        if isinstance(producer, StoreArrayElementOperation):
+            return self._project_array_state_fact(
+                _ArrayStoreState(
+                    _ArrayReferenceState(producer.array),
+                    self._resolve_classical_fact(
+                        producer.stored_value,
+                        concrete=concrete,
+                    ),
+                    tuple(
+                        self._resolve_classical_fact(index, concrete=concrete)
+                        for index in producer.index_values
+                    ),
+                ),
+                indices,
+                concrete=concrete,
+                visited=visited,
+            )
+
+        constant = array.get_const_array()
+        if constant is None:
+            return None
+        constant_element = self._constant_array_element(
+            constant,
+            tuple(cast(sp.Expr, index.value) for index in indices),
+        )
+        if constant_element is None:
+            return None
+        return self._resolve_classical_fact(
+            constant_element,
+            concrete=concrete,
+        )
+
+    def _project_array_state(
+        self,
+        state: _ArrayState,
+        indices: tuple[sp.Expr, ...],
+        *,
+        concrete: bool,
+        visited: set[str],
+    ) -> sp.Expr | None:
+        """Project one scalar element from an immutable array state tree.
+
+        Args:
+            state (_ArrayState): Frozen state captured in its producing scope.
+            indices (tuple[sp.Expr, ...]): Local element indices to project.
+            concrete (bool): Whether nested scalar resolution is concrete.
+            visited (set[str]): IR reference UUIDs already followed.
+
+        Returns:
+            sp.Expr | None: Projected scalar expression, or ``None`` when the
+                reference state cannot prove a value.
+        """
+        facts = tuple(_ResolvedClassicalFact.create(index) for index in indices)
+        fact = self._project_array_state_fact(
+            state,
+            facts,
+            concrete=concrete,
+            visited=visited,
+        )
+        return cast(sp.Expr, fact.value) if fact is not None else None
+
+    def _project_array_state_fact(
+        self,
+        state: _ArrayState,
+        indices: tuple[_ResolvedClassicalFact, ...],
+        *,
+        concrete: bool,
+        visited: set[str],
+    ) -> _ResolvedClassicalFact | None:
+        """Project one scalar provenance fact from a persistent array state.
+
+        Args:
+            state (_ArrayState): Frozen state captured in its producing scope.
+            indices (tuple[_ResolvedClassicalFact, ...]): Local element-index
+                facts.
+            concrete (bool): Whether nested scalar resolution is concrete.
+            visited (set[str]): IR reference UUIDs already followed.
+
+        Returns:
+            _ResolvedClassicalFact | None: Projected fact, or ``None`` when a
+                reference state cannot prove a value.
+        """
+        if isinstance(state, _ArrayReferenceState):
+            return self._resolve_array_state_element_fact(
+                state.array,
+                indices,
+                concrete=concrete,
+                visited=visited,
+                ignore_selection=state.array.uuid,
+            )
+        if isinstance(state, _ArrayConstantState):
+            element = self._constant_array_element(
+                state.contents,
+                tuple(cast(sp.Expr, index.value) for index in indices),
+            )
+            if element is None:
+                return None
+            return self._resolve_classical_fact(element, concrete=concrete)
+        if isinstance(state, _ArraySliceState):
+            if len(indices) != 1:
+                return None
+            source_index = _fact_from_expression(
+                cast(sp.Expr, state.start.value)
+                + cast(sp.Expr, state.step.value) * cast(sp.Expr, indices[0].value),
+                state.start,
+                state.step,
+                indices[0],
+            )
+            return self._project_array_state_fact(
+                state.source,
+                (source_index,),
+                concrete=concrete,
+                visited=visited,
+            )
+        if isinstance(state, _ArrayChoiceState):
+            predicate = _as_boolean(state.condition.value)
+            if predicate is sp.true:
+                return self._project_array_state_fact(
+                    state.when_true,
+                    indices,
+                    concrete=concrete,
+                    visited=visited,
+                )
+            if predicate is sp.false:
+                return self._project_array_state_fact(
+                    state.when_false,
+                    indices,
+                    concrete=concrete,
+                    visited=visited,
+                )
+            true_value = self._project_array_state_fact(
+                state.when_true,
+                indices,
+                concrete=concrete,
+                visited=set(visited),
+            )
+            false_value = self._project_array_state_fact(
+                state.when_false,
+                indices,
+                concrete=concrete,
+                visited=set(visited),
+            )
+            if true_value is None or false_value is None:
+                return None
+            return _choice_classical_fact(
+                true_value,
+                false_value,
+                state.condition,
+            )
+        if isinstance(state, _ArrayLoopSummaryState):
+            initial = self._project_array_state_fact(
+                state.initial,
+                indices,
+                concrete=concrete,
+                visited=set(visited),
+            )
+            update = self._array_state_update_fact(
+                state.iteration,
+                indices,
+                concrete=concrete,
+                visited=set(visited),
+            )
+            active_value = _as_boolean(
+                _activation_over_range(
+                    update.value,
+                    state.loop_symbol,
+                    state.start,
+                    state.step,
+                    state.iterations,
+                )
+            )
+            if active_value is sp.false:
+                return initial
+            per_iteration = self._project_array_state_fact(
+                state.iteration,
+                indices,
+                concrete=concrete,
+                visited=set(visited),
+            )
+            summarized_sources = {
+                source: _as_boolean(
+                    _activation_over_range(
+                        guard,
+                        state.loop_symbol,
+                        state.start,
+                        state.step,
+                        state.iterations,
+                    )
+                )
+                for source, guard in (
+                    per_iteration.dependencies.items()
+                    if per_iteration is not None
+                    else ()
+                )
+            }
+            update_sources = {
+                source: _as_boolean(
+                    _activation_over_range(
+                        guard,
+                        state.loop_symbol,
+                        state.start,
+                        state.step,
+                        state.iterations,
+                    )
+                )
+                for source, guard in update.dependencies.items()
+            }
+            selector = _ResolvedClassicalFact.create(
+                active_value,
+                update_sources,
+            )
+            active_fact = _ResolvedClassicalFact.create(
+                state.fallback,
+                _merge_source_guard_maps(
+                    summarized_sources,
+                    update_sources,
+                    {state.uncertainty_token: active_value},
+                ),
+            )
+            if initial is None:
+                return active_fact
+            return _choice_classical_fact(active_fact, initial, selector)
+        if isinstance(state, _ArrayUnknownLoopSummaryState):
+            active = _as_boolean(sp.Gt(state.iterations, 0))
+            initial = self._project_array_state_fact(
+                state.initial,
+                indices,
+                concrete=concrete,
+                visited=set(visited),
+            )
+            active_fact = _ResolvedClassicalFact.create(
+                state.fallback,
+                {state.uncertainty_token: active},
+            )
+            if initial is None:
+                return active_fact
+            return _choice_classical_fact(
+                active_fact,
+                initial,
+                _ResolvedClassicalFact.create(active),
+            )
+        if not isinstance(state, _ArrayStoreState):
+            return None
+        if len(state.indices) != len(indices):
+            return None
+        guard = sp.And(
+            *(
+                sp.Eq(load_index.value, store_index.value)
+                for load_index, store_index in zip(
+                    indices,
+                    state.indices,
+                    strict=True,
+                )
+            )
+        )
+        if guard is sp.true:
+            return state.stored
+        previous = self._project_array_state_fact(
+            state.previous,
+            indices,
+            concrete=concrete,
+            visited=visited,
+        )
+        if guard is sp.false:
+            return previous
+        if previous is None:
+            return None
+        selector = _fact_from_expression(
+            guard,
+            *indices,
+            *state.indices,
+        )
+        return _choice_classical_fact(state.stored, previous, selector)
+
+    def _array_state_update_fact(
+        self,
+        state: _ArrayState,
+        indices: tuple[_ResolvedClassicalFact, ...],
+        *,
+        concrete: bool,
+        visited: set[str],
+    ) -> _ResolvedClassicalFact:
+        """Return when one body transition may update a projected element.
+
+        Args:
+            state (_ArrayState): One-iteration persistent state tree.
+            indices (tuple[_ResolvedClassicalFact, ...]): Projected indices.
+            concrete (bool): Whether nested resolution requires concrete data.
+            visited (set[str]): Reference UUIDs already followed.
+
+        Returns:
+            _ResolvedClassicalFact: Boolean update guard and its observation
+            dependencies.
+        """
+        if isinstance(state, (_ArrayReferenceState, _ArrayConstantState)):
+            return _ResolvedClassicalFact.create(sp.false)
+        if isinstance(state, _ArraySliceState):
+            if len(indices) != 1:
+                return _ResolvedClassicalFact.create(sp.true)
+            source_index = _fact_from_expression(
+                cast(sp.Expr, state.start.value)
+                + cast(sp.Expr, state.step.value) * cast(sp.Expr, indices[0].value),
+                state.start,
+                state.step,
+                indices[0],
+            )
+            return self._array_state_update_fact(
+                state.source,
+                (source_index,),
+                concrete=concrete,
+                visited=visited,
+            )
+        if isinstance(state, _ArrayChoiceState):
+            predicate = _as_boolean(state.condition.value)
+            true_update = self._array_state_update_fact(
+                state.when_true,
+                indices,
+                concrete=concrete,
+                visited=set(visited),
+            )
+            false_update = self._array_state_update_fact(
+                state.when_false,
+                indices,
+                concrete=concrete,
+                visited=set(visited),
+            )
+            return _fact_from_expression(
+                sp.Or(
+                    sp.And(predicate, _as_boolean(true_update.value)),
+                    sp.And(sp.Not(predicate), _as_boolean(false_update.value)),
+                ),
+                state.condition,
+                true_update,
+                false_update,
+            )
+        if isinstance(state, _ArrayLoopSummaryState):
+            return _ResolvedClassicalFact.create(
+                sp.Gt(state.iterations, 0),
+                {state.uncertainty_token: sp.Gt(state.iterations, 0)},
+            )
+        if isinstance(state, _ArrayUnknownLoopSummaryState):
+            active = sp.Gt(state.iterations, 0)
+            return _ResolvedClassicalFact.create(
+                active,
+                {state.uncertainty_token: active},
+            )
+        if not isinstance(state, _ArrayStoreState):
+            return _ResolvedClassicalFact.create(sp.true)
+        previous = self._array_state_update_fact(
+            state.previous,
+            indices,
+            concrete=concrete,
+            visited=visited,
+        )
+        if len(state.indices) != len(indices):
+            return _fact_from_expression(sp.true, previous, *state.indices, *indices)
+        alias = sp.And(
+            *(
+                sp.Eq(load.value, store.value)
+                for load, store in zip(indices, state.indices, strict=True)
+            )
+        )
+        return _fact_from_expression(
+            sp.Or(alias, _as_boolean(previous.value)),
+            previous,
+            *state.indices,
+            *indices,
+        )
+
+    def _constant_array_element(
+        self,
+        contents: Any,
+        indices: tuple[sp.Expr, ...],
+    ) -> Any | None:
+        """Return a proven element from immutable constant-array contents.
+
+        A symbolic index is accepted only when every candidate at that axis is
+        equal. This proves the result without choosing or guessing an index.
+
+        Args:
+            contents (Any): Frozen nested array payload.
+            indices (tuple[sp.Expr, ...]): Resolved local indices.
+
+        Returns:
+            Any | None: Proven scalar element, or ``None`` when a symbolic
+                index can select distinct values or the payload is malformed.
+        """
+        current = contents
+        for index in indices:
+            if not isinstance(current, Sequence) or isinstance(current, (str, bytes)):
+                return None
+            if isinstance(index, sp.Integer):
+                position = int(index)
+                if position < 0 or position >= len(current):
+                    return None
+                current = current[position]
+                continue
+            if not current:
+                return None
+            first = current[0]
+            if any(candidate != first for candidate in current[1:]):
+                return None
+            current = first
+        return current
+
+    def _array_producer(self, array: ArrayValue) -> Operation | None:
+        """Return the operation producing one array SSA version.
+
+        Args:
+            array (ArrayValue): Array value whose producer is requested.
+
+        Returns:
+            Operation | None: Producing operation in the current or an
+                enclosing block, or ``None`` when the array is an input or
+                initializer.
+        """
+        for block in (self._block, *reversed(self._parent_blocks)):
+            if block is None:
+                continue
+            producer = self._producer_map(block).get(array.uuid)
+            if producer is not None:
+                return producer
+            for nested in walk_operations(block.operations):
+                if any(result.uuid == array.uuid for result in nested.results):
+                    return nested
+        return None
 
     def _input_shape_dimension_alias(self, value: Value) -> str | None:
         """Return the collision-free alias for an input-array dimension.
@@ -635,6 +2317,188 @@ def _parameter_symbol(value: Value, name: str) -> sp.Symbol:
         # later substitution can recover them.
         return sp.Symbol(name, integer=True, nonnegative=True)
     return sp.Symbol(name)
+
+
+def _normalized_source_guards(
+    source_guards: Mapping[str, sp.Basic],
+) -> tuple[tuple[str, Boolean], ...]:
+    """Normalize source guards into deterministic immutable storage.
+
+    Args:
+        source_guards (Mapping[str, sp.Basic]): Source-token activation guards.
+
+    Returns:
+        tuple[tuple[str, Boolean], ...]: Sorted nonfalse source guards.
+    """
+    normalized: list[tuple[str, Boolean]] = []
+    for source, raw_guard in source_guards.items():
+        guard = _as_boolean(raw_guard)
+        if guard is not sp.false:
+            normalized.append((source, guard))
+    return tuple(sorted(normalized, key=lambda item: item[0]))
+
+
+def _merge_source_guard_maps(
+    *source_maps: Mapping[str, sp.Basic],
+) -> dict[str, Boolean]:
+    """Union guarded source dependencies by source-token identity.
+
+    Args:
+        *source_maps (Mapping[str, sp.Basic]): Source-token maps to combine.
+
+    Returns:
+        dict[str, Boolean]: Combined source guards using logical OR.
+    """
+    combined: dict[str, Boolean] = {}
+    for source_map in source_maps:
+        for source, raw_guard in source_map.items():
+            guard = _as_boolean(raw_guard)
+            combined[source] = _as_boolean(sp.Or(combined.get(source, sp.false), guard))
+    return {
+        source: guard for source, guard in combined.items() if guard is not sp.false
+    }
+
+
+def _guard_source_guards(
+    source_guards: Mapping[str, sp.Basic],
+    condition: sp.Basic,
+) -> dict[str, Boolean]:
+    """Conjoin one path condition with every source dependency.
+
+    Args:
+        source_guards (Mapping[str, sp.Basic]): Dependencies to guard.
+        condition (sp.Basic): Path condition selecting those dependencies.
+
+    Returns:
+        dict[str, Boolean]: Dependencies active only under ``condition``.
+    """
+    predicate = _as_boolean(condition)
+    return {
+        source: _as_boolean(sp.And(predicate, _as_boolean(guard)))
+        for source, guard in source_guards.items()
+        if sp.And(predicate, _as_boolean(guard)) is not sp.false
+    }
+
+
+def _fact_with_dependencies(
+    fact: _ResolvedClassicalFact,
+    additions: Mapping[str, sp.Basic],
+) -> _ResolvedClassicalFact:
+    """Return one fact with additional source dependencies.
+
+    Args:
+        fact (_ResolvedClassicalFact): Existing resolved fact.
+        additions (Mapping[str, sp.Basic]): Additional guarded sources.
+
+    Returns:
+        _ResolvedClassicalFact: Fact with merged immutable dependencies.
+    """
+    return _ResolvedClassicalFact.create(
+        fact.value,
+        _merge_source_guard_maps(fact.dependencies, additions),
+    )
+
+
+def _fact_from_expression(
+    expression: sp.Basic,
+    *sources: _ResolvedClassicalFact,
+) -> _ResolvedClassicalFact:
+    """Create a fact from sources that remain in the simplified expression.
+
+    SymPy eagerly applies identities such as ``x & False == False`` and
+    ``x * 0 == 0``. A source eliminated by such an identity no longer delays
+    the result at runtime, so its readiness token must be removed as well.
+
+    Args:
+        expression (sp.Basic): Derived symbolic value.
+        *sources (_ResolvedClassicalFact): Input facts used by the expression.
+
+    Returns:
+        _ResolvedClassicalFact: Expression with dependencies from inputs that
+            still affect it.
+    """
+    expression_symbols = expression.free_symbols
+    relevant_sources = (
+        source
+        for source in sources
+        if source.value == expression
+        or bool(source.value.free_symbols & expression_symbols)
+    )
+    return _ResolvedClassicalFact.create(
+        expression,
+        _merge_source_guard_maps(*(source.dependencies for source in relevant_sources)),
+    )
+
+
+def _coerce_classical_fact(
+    value: sp.Basic | _ResolvedClassicalFact,
+) -> _ResolvedClassicalFact:
+    """Return an existing fact or wrap a dependency-free value.
+
+    Args:
+        value (sp.Basic | _ResolvedClassicalFact): Value or fact to normalize.
+
+    Returns:
+        _ResolvedClassicalFact: Normalized fact.
+    """
+    if isinstance(value, _ResolvedClassicalFact):
+        return value
+    return _ResolvedClassicalFact.create(value)
+
+
+def _choice_classical_fact(
+    when_true: _ResolvedClassicalFact,
+    when_false: _ResolvedClassicalFact,
+    selector: _ResolvedClassicalFact,
+) -> _ResolvedClassicalFact:
+    """Select between facts while preserving exact guarded dependencies.
+
+    A selector does not affect the result when both projected facts are
+    structurally identical. Otherwise branch dependencies are guarded by the
+    selector and its negation, and the selector's own dependencies remain.
+
+    Args:
+        when_true (_ResolvedClassicalFact): Fact selected on a true predicate.
+        when_false (_ResolvedClassicalFact): Fact selected on a false predicate.
+        selector (_ResolvedClassicalFact): Predicate value and its sources.
+
+    Returns:
+        _ResolvedClassicalFact: Selected value with guarded dependencies.
+    """
+    if when_true == when_false:
+        return when_true
+    predicate = _as_boolean(selector.value)
+    if predicate is sp.true:
+        return _fact_with_dependencies(when_true, selector.dependencies)
+    if predicate is sp.false:
+        return _fact_with_dependencies(when_false, selector.dependencies)
+    dependencies = _merge_source_guard_maps(
+        _guard_source_guards(when_true.dependencies, predicate),
+        _guard_source_guards(when_false.dependencies, sp.Not(predicate)),
+        selector.dependencies,
+    )
+    value = sp.Piecewise(
+        (when_true.value, predicate),
+        (when_false.value, True),
+    )
+    return _ResolvedClassicalFact.create(value, dependencies)
+
+
+def _fallback_symbol(value: Value) -> sp.Symbol:
+    """Create the identity-qualified symbol for one unresolved IR value.
+
+    Args:
+        value (Value): Unresolved scalar IR value.
+
+    Returns:
+        sp.Symbol: Typed private symbol whose spelling includes the value UUID.
+    """
+    fallback_name = f"{value.name}_{value.uuid}"
+    if isinstance(value.type, FloatType):
+        return sp.Symbol(fallback_name, real=True)
+    if isinstance(value.type, (BitType, UIntType)):
+        return sp.Symbol(fallback_name, integer=True, nonnegative=True)
+    return sp.Symbol(fallback_name)
 
 
 _COMPOP_MAP = {

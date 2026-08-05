@@ -55,7 +55,7 @@ def _normalize_nonnegative_integer(
     return normalized
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(eq=False)
 class Oracle:
     """Represent an opaque oracle callable.
 

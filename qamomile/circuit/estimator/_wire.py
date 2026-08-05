@@ -310,6 +310,7 @@ def resource_estimate_to_wire(
         "requirements": [
             {
                 "expression": expression(constraint.expression),
+                "active_when": expression(constraint.active_when),
                 "minimum": constraint.minimum,
                 "label": constraint.label,
                 "unit": constraint.unit,
@@ -1013,6 +1014,15 @@ def _requirement_from_wire(
             else None
         ),
         ranges=tuple(ranges),
+        active_when=(
+            _boolean_expression_from_wire(
+                record.get("active_when"),
+                "resource requirement activation",
+                decoder,
+            )
+            if record.get("active_when") is not None
+            else sp.true
+        ),
     )
     requirement.validate()
     return requirement
@@ -1190,6 +1200,7 @@ def _validate_sympy_expression_for_wire(expression: sp.Basic) -> None:
             "_CanonicalPhaseClass",
             "_ConditionIndicator",
             "_RangeAny",
+            "_RangeAtLeastTwo",
             "_CappedRangeSum",
         }:
             raise ValueError(f"unsupported symbolic constructor {constructor_name!r}")
@@ -1516,6 +1527,10 @@ def _sympy_name(name: str) -> Any:
         from qamomile.circuit.estimator._metrics import _RangeAny
 
         return _RangeAny
+    if name == "_RangeAtLeastTwo":
+        from qamomile.circuit.estimator._metrics import _RangeAtLeastTwo
+
+        return _RangeAtLeastTwo
     if name == "_CappedRangeSum":
         from qamomile.circuit.estimator.resource_estimator import (
             _CappedRangeSum,

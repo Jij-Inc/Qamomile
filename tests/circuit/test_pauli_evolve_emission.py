@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+from fractions import Fraction
+
 import numpy as np
 import pytest
+import sympy as sp
 
+from qamomile.circuit.transpiler.passes.emit_support.global_phase_emission import (
+    is_identity_phase_angle,
+)
 from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission import (
     is_zero_evolution_time,
 )
@@ -18,6 +24,7 @@ from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission impor
         np.int64(0),
         np.float32(0.0),
         np.float64(0.0),
+        sp.Float(0.0),
     ],
 )
 def test_zero_evolution_time_accepts_real_numeric_scalars(gamma: object) -> None:
@@ -31,7 +38,10 @@ def test_zero_evolution_time_accepts_real_numeric_scalars(gamma: object) -> None
         True,
         False,
         np.bool_(False),
+        1e-300,
+        Fraction(1, 10**1000),
         np.float32(1.0),
+        sp.Symbol("gamma"),
         object(),
     ],
 )
@@ -40,3 +50,14 @@ def test_zero_evolution_time_rejects_nonzero_or_nonnumeric_values(
 ) -> None:
     """Booleans, nonzero numbers, and backend-like objects are not zero time."""
     assert not is_zero_evolution_time(gamma)
+
+
+@pytest.mark.parametrize(
+    "angle",
+    [1e-300, Fraction(1, 10**1000), sp.Symbol("phase"), object()],
+)
+def test_identity_phase_does_not_discard_tiny_or_symbolic_angles(
+    angle: object,
+) -> None:
+    """Tiny nonzero and unresolved phases remain observable operations."""
+    assert not is_identity_phase_angle(angle)

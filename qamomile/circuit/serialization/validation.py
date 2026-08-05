@@ -97,6 +97,7 @@ from qamomile.circuit.ir.value import (
     ValueLike,
     collect_value_like_uuids,
     resolve_root_qubit_address,
+    resolve_root_qubit_array,
 )
 from qamomile.circuit.transpiler.block_parameter_binding import pair_block_operands
 
@@ -606,12 +607,31 @@ def _is_valid_inline_expval_carrier(
                 not isinstance(parent, ArrayValue)
                 or parent.type != QubitType()
                 or parent.slice_of is not None
-                or parent_index < 0
-                or not _array_index_may_be_in_bounds(parent, parent_index)
             ):
                 return False
             known_element = all_produced_values.get(element_uuid)
-            if known_element is not None:
+            if parent_index == -1:
+                if (
+                    type(known_element) is not Value
+                    or element_uuid not in visible
+                    or known_element.type != QubitType()
+                    or known_element.logical_id != element_logical_id
+                ):
+                    return False
+                known_root = resolve_root_qubit_array(known_element)
+                if (
+                    known_root is None
+                    or known_root.uuid != parent_uuid
+                    or resolve_root_qubit_address(known_element) is not None
+                ):
+                    return False
+                logical_address = (element_logical_id, -1)
+            elif parent_index < -1 or not _array_index_may_be_in_bounds(
+                parent,
+                parent_index,
+            ):
+                return False
+            elif known_element is not None:
                 if (
                     element_uuid not in visible
                     or type(known_element) is not Value
@@ -621,9 +641,11 @@ def _is_valid_inline_expval_carrier(
                     != (parent_uuid, parent_index)
                 ):
                     return False
+                logical_address = (parent.logical_id, parent_index)
             elif element_logical_id in produced_logical_ids:
                 return False
-            logical_address = (parent.logical_id, parent_index)
+            else:
+                logical_address = (parent.logical_id, parent_index)
         else:
             element = visible.get(element_uuid)
             if (
