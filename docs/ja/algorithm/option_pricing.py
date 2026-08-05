@@ -27,7 +27,7 @@
 # そこで本記事では、量子振幅推定によるオプションおよびオプションポートフォリオプライシング手法{cite:p}`10.22331/q-2020-07-06-291`の理解と実装についてまとめました。オプションプライシングの例を通して、Qamomileの使い方を学びましょう。
 
 # %%
-# Install the latest Qamomile through pip!
+# Install the latest Qamomile through pip! 
 # #!pip install qamomile
 
 # %%
@@ -54,7 +54,7 @@ from qamomile.qiskit import QiskitTranspiler
 # 金融リスクの計算は、大きな需要があります。
 # モンテカルロ (MC) 計算はその中心的な計算手法であり、Value at Risk (VaR) の推定や店頭デリバティブの価格決定など、幅広く用いられています。
 # しかしその誤差は $\varepsilon = \mathcal{O} (M^{-1/2})$ で減衰するという欠点があります。
-# ここで $M$ はサンプル数です。
+# ここで $M$ はサンプル数です。  
 # 対象となる確率分布が量子状態として準備される場合、量子振幅推定 (QAE) により、期待値などの統計量を $\mathcal{O} (M^{-1})$ の誤差で推定できることが知られています。
 # これは先ほどの古典MCに対し、二次の高速化をもたらすことがわかります。
 #
@@ -63,7 +63,7 @@ from qamomile.qiskit import QiskitTranspiler
 # モンテカルロプライシングの量子アルゴリズムの理論的枠組みを示した先行研究として、{cite:p}`10.1103/PhysRevA.98.022321`があります。
 # この論文は、プライシング計算において、古典に対し2次高速化が得られることを理論的に示しました。
 # そして、特にヨーロピアンオプションとアジアンオプションに対して数値シミュレーションを行い、その有効性を示しました。
-# しかし、その成果は理論的な枠組みの提示と数値シミュレーションに留まり、実機での実行は示されていません。
+# しかし、その成果は理論的な枠組みの提示と数値シミュレーションに留まり、実機での実行は示されていません。  
 # もう一つの重要な先行研究として、{cite:p}`10.1038/s41534-019-0130-6`があります。
 # これはプライシングに対してではなく、VaR や Conditional Value at Risk (CVaR) に QAE を適用した研究です。
 # モンテカルロプライシングのペイオフ計算を改良し、必要量子ビット数・ゲート数の大幅な削減に成功しました{cite:p}`10.1103/PhysRevA.98.022321`。
@@ -80,7 +80,7 @@ from qamomile.qiskit import QiskitTranspiler
 # 演算子 $\mathcal{A}$ が
 #
 # $$
-# \mathcal{A} \vert 0 \rangle_{n+1}
+# \mathcal{A} \vert 0 \rangle_{n+1} 
 # = \sum_{i=0}^{2^n - 1} \sqrt{1-f(S_i)} \sqrt{p_i} \vert S_i \rangle \vert 0 \rangle + \sum_{i=0}^{2^n - 1} \sqrt{f(S_i)} \sqrt{p_i} \vert S_i \rangle \vert 1 \rangle \tag{1}
 # $$
 #
@@ -224,7 +224,7 @@ for gate in reversed(ucry_gates):
 
 print(f"UCR-Y ゲート数: {len(ucry_gates)} (Ry + CNOT)")
 
-# UCR-Y を @qkernel 内から呼ぶための関数
+# UCR-Y を @qkernel 内から呼ぶための関数 
 def _make_ucry_func(gate_list):
     """UCR-Y ゲートリストを順に適用する関数を返す。"""
     def apply_ucry(q_S, q_p):
@@ -334,8 +334,7 @@ def build_Ak_kernel(k: int):
 
             # S₀: |0…0⟩ のとき位相 -1
             # X で全反転 → MCZ(= H · MCX · H)→ X で戻す
-            # コントロール = q_S 全体、ターゲット = q_p。ここではアルゴリズム用の
-            # ancillaを別途確保しないが、選択した分解がworkspaceを追加する場合がある。
+            # コントロール = q_S 全体、ターゲット = q_p。アンシラ不要。
             q_S = qmc.x(q_S)
             q_p = qmc.x(q_p)
             q_p = qmc.h(q_p)
@@ -352,7 +351,7 @@ def build_Ak_kernel(k: int):
         return qmc.measure(q_p)
 
     return Ak
-
+    
 k_list      = [0, 1, 2, 4, 8, 16]
 shots_per_k = 2048
 
@@ -424,7 +423,7 @@ print(f"絶対誤差:          {abs(fair_hat - exact_fair):.6f}")
 #
 # $$
 # \mathbb{E}[f] = \frac{F_\mathrm{max}}{2} \left( \frac{P_1 - \frac{1}{2}}{c} + 1 \right)
-# $$
+# $$ 
 #
 # のように近似したことによるものです。
 # ここで $F_\mathrm{max} = S_\mathrm{max} - K$ です。
@@ -444,7 +443,7 @@ print(f"誤差の絶対値に占める近似誤差の割合: {approximation_shar
 # この例では、誤差の大半が近似によるものであることがわかります。
 # 残りの部分は統計誤差です。
 # これは量子振幅推定部分の測定回数を増やすことで、減少させることができます。
-# しかし測定回数を増やすと計算実行時間が増大するため、注意が必要です。
+# しかし測定回数を増やすと計算実行時間が増大するため、注意が必要です。  
 # 最後に、対数尤度関数 $\log \mathcal{L} (\sin^2 \theta)$と、$P_1^{(k)}$ をプロットしてみましょう。
 # 左図は対数尤度関数と、最尤推定値および厳密計算による理論値も示しています。
 # 右図は、推定した$\hat{\theta}$を代入した正弦二乗曲線 $P_1^{(k)} = \sin^2 ((2k+1) \hat{\theta})$ と測定値を重ねて描画しています。
