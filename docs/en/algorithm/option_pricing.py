@@ -333,8 +333,7 @@ def build_Ak_kernel(k: int):
 
             # S_0: apply phase -1 to |0...0>
             # Invert with X, apply MCZ (= H · MCX · H), then restore with X.
-            # Controls: all of q_S; target: q_p. The algorithm allocates no
-            # separate ancilla here, but the selected lowering may add workspace.
+            # Controls: all of q_S; target: q_p. No ancilla is required.
             q_S = qmc.x(q_S)
             q_p = qmc.x(q_p)
             q_p = qmc.h(q_p)
