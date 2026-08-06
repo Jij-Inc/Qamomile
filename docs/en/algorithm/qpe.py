@@ -21,10 +21,11 @@
 # # Quantum Phase Estimation (QPE)
 #
 # Quantum Phase Estimation (QPE) estimates the eigenphase $\phi$ of a unitary
-# $U$ from an eigenstate $|\psi\rangle$ satisfying
+# matrix $U$ from an eigenstate $|\psi\rangle$ satisfying
 # $U|\psi\rangle = e^{2\pi i \phi}|\psi\rangle$. It is a central primitive in
-# Shor's algorithm and other algorithms that use phases encoded by unitary
-# eigenvalues {cite:p}`10.48550/arXiv.quant-ph/9511026,10.1098/rspa.1998.0164`.
+# Shor's algorithm and other algorithms that use phases encoded by the
+# eigenvalues of unitary matrices
+# {cite:p}`10.48550/arXiv.quant-ph/9511026,10.1098/rspa.1998.0164`.
 #
 # This notebook implements the QPE procedure as a Qamomile qkernel and compares
 # it with the built-in `qmc.qpe` function. It then explores the relationship
@@ -162,8 +163,8 @@ transpiler = QiskitTranspiler()
 #
 # ### Step 2: Apply controlled-$U^{2^k}$ gates
 #
-# Use each counting qubit $k$ as the control of a controlled-$U^{2^k}$ gate. If
-# $r=\sum_{k=0}^{m-1} r_k2^k$, the target eigenstate picks up the phase
+# Use each counting qubit $k$ as the control qubit for a controlled-$U^{2^k}$
+# gate. If $r=\sum_{k=0}^{m-1} r_k2^k$, the target eigenstate picks up the phase
 # $e^{2\pi i\phi r}$:
 #
 # $$
@@ -239,7 +240,7 @@ transpiler = QiskitTranspiler()
 # %% [markdown]
 # ## Implementation with Qamomile
 #
-# We use a **diagonal** 4x4 unitary:
+# We use a diagonal 4x4 unitary matrix:
 #
 # $$
 # U =
@@ -261,9 +262,9 @@ transpiler = QiskitTranspiler()
 # Set the sampling settings and target eigenstate.
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 SHOTS = 512 if docs_test_mode else 4096
-SAMPLER_SEED = 321
+SAMPLER_SEED = 42
 
-# Set the diagonal-unitary phases and the target phase.
+# Set the phases of the diagonal unitary matrix and the target phase.
 TARGET_PHASE_FRACTION = 0.6
 phase_fractions = np.array([0.0, TARGET_PHASE_FRACTION, 0.23, 0.81])
 phase_angles = 2 * math.pi * phase_fractions
@@ -287,7 +288,7 @@ assert 0.0 <= TARGET_PHASE_FRACTION < 1.0
 # %% [markdown]
 # ### From-Scratch Implementation
 #
-# First, we define the 4x4 unitary whose phase we want to estimate. The
+# First, we define the 4x4 unitary matrix whose phase we want to estimate. The
 # `diagonal_4x4` qkernel implements this matrix directly. The phase gate
 # $P(\theta)$ multiplies the $|1\rangle$ component of a qubit by $e^{i\theta}$;
 # Qamomile expresses this gate as `qmc.p(q, theta)`. Applying
@@ -309,7 +310,7 @@ assert 0.0 <= TARGET_PHASE_FRACTION < 1.0
 
 
 # %%
-# Implement the diagonal 4x4 unitary with phase gates.
+# Implement the diagonal 4x4 unitary matrix with phase gates.
 @qmc.qkernel
 def diagonal_4x4(
     q: qmc.Vector[qmc.Qubit],
@@ -325,7 +326,7 @@ def diagonal_4x4(
     return q
 
 
-# Draw the target unitary with the concrete phase parameters.
+# Draw the target unitary matrix with the concrete phase parameters.
 diagonal_4x4.draw(
     q=2,
     phi01=PHI_01,
@@ -436,7 +437,7 @@ qpe_with_stdlib.draw(
 # built-in `qpe` function with the exact phase.
 
 # %%
-# Bind the diagonal-unitary phases at transpile time.
+# Bind the phases of the diagonal unitary matrix at transpile time.
 phase_bindings = {"phi01": PHI_01, "phi10": PHI_10, "phi11": PHI_11}
 
 
@@ -448,7 +449,7 @@ def phase_distance(a: float, b: float) -> float:
 
 # Transpile and sample a selected QPE qkernel.
 def run_qpe_experiment(qpe_kernel, counting_bits: int) -> float:
-    # Fix the qubit count and unitary phases at transpile time.
+    # Fix the qubit count and phase parameters at transpile time.
     bindings = {"counting_bits": counting_bits, **phase_bindings}
     executable = transpiler.transpile(qpe_kernel, bindings=bindings)
     # Seed the simulator deterministically for reproducible documentation output.
@@ -548,7 +549,7 @@ ax.plot(
     color="#DB4D3F",
     label=r"$O(2^m)$",
 )
-ax.set_xlabel(r"counting qubits ($m$)")
+ax.set_xlabel(r"counting qubits $m$")
 ax.set_ylabel("total gates")
 ax.set_yscale("log")
 ax.set_xticks(bits)
@@ -594,8 +595,8 @@ assert all(
 #
 # In this case, the gate count is $O(1/\epsilon)$ as shown above, making this
 # approach inefficient for high-precision QPE. More generally, let $G(V)$ be
-# the number of gates needed to implement a unitary $V$. The gate count for the
-# QPE body can then be written as
+# the number of gates needed to implement a unitary matrix $V$. The gate count
+# for the QPE body can then be written as
 #
 # $$
 # G_{\mathrm{QPE}}(m)

@@ -69,9 +69,9 @@ Sample bitstrings from a quantum state, build an effective Hamiltonian, and diag
 :::
 
 :::{card}
-:header: **Introduction to Quantum Phase Estimation (QPE)**
+:header: **Quantum Phase Estimation (QPE)**
 :link: qpe
-Apply the built-in `qpe` helper to a 4x4 unitary, sample the decoded phase, and compare precision as the counting register grows.
+This example implements quantum phase estimation with Qamomile. It introduces two approaches for a 4x4 unitary matrix: a from-scratch implementation and the built-in `qpe` helper. It also compares the precision and required gate count as the number of counting qubits increases.
 :::
 
 :::{card}

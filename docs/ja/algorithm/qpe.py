@@ -20,7 +20,7 @@
 #
 # # 量子位相推定（QPE）
 #
-# 量子位相推定（Quantum Phase Estimation; QPE）は、$U|\psi\rangle = e^{2\pi i \phi}|\psi\rangle$を満たすユニタリ$U$と固有状態$|\psi\rangle$から、固有位相$\phi$を推定するアルゴリズムです。Shorのアルゴリズムなど、ユニタリの固有値に埋め込まれた位相を使うアルゴリズムで中心的なプリミティブとして使われます{cite:p}`10.48550/arXiv.quant-ph/9511026,10.1098/rspa.1998.0164`。
+# 量子位相推定（Quantum Phase Estimation; QPE）は、$U|\psi\rangle = e^{2\pi i \phi}|\psi\rangle$を満たすユニタリ行列$U$と固有状態$|\psi\rangle$から、固有位相$\phi$を推定するアルゴリズムです。Shorのアルゴリズムなど、ユニタリ行列の固有値に埋め込まれた位相を使うアルゴリズムで中心的なプリミティブとして使われます{cite:p}`10.48550/arXiv.quant-ph/9511026,10.1098/rspa.1998.0164`。
 #
 # このノートブックでは、QPEの手順をQamomileの量子カーネルとして実装し、組み込みの`qmc.qpe`関数による実装と比較します。さらに、カウント用量子ビット数と推定精度、必要なゲート数の関係を確認します。
 
@@ -126,7 +126,7 @@ transpiler = QiskitTranspiler()
 #
 # ### ステップ2：制御$U^{2^k}$ゲートを適用する
 #
-# 各カウント用量子ビット$k$を制御として、制御$U^{2^k}$ゲートを適用します。$r=\sum_{k=0}^{m-1} r_k2^k$と書くと、対象の固有状態には位相$e^{2\pi i\phi r}$が乗ります。
+# 各カウント用量子ビット$k$を制御量子ビットとして、制御$U^{2^k}$ゲートを適用します。$r=\sum_{k=0}^{m-1} r_k2^k$と書くと、対象の固有状態には位相$e^{2\pi i\phi r}$が乗ります。
 #
 # $$
 # |\Psi_2\rangle =
@@ -192,7 +192,7 @@ transpiler = QiskitTranspiler()
 # %% [markdown]
 # ## Qamomileでの実装
 #
-# ここでは**対角**4x4ユニタリを使います。
+# ここでは対角な4x4ユニタリ行列を使います。
 #
 # $$
 # U =
@@ -210,9 +210,9 @@ transpiler = QiskitTranspiler()
 # サンプリング設定と対象固有状態を決めます。
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 SHOTS = 512 if docs_test_mode else 4096
-SAMPLER_SEED = 321
+SAMPLER_SEED = 42
 
-# 対角ユニタリの位相と対象位相を設定します。
+# 対角なユニタリ行列の位相と対象位相を設定します。
 TARGET_PHASE_FRACTION = 0.6
 phase_fractions = np.array([0.0, TARGET_PHASE_FRACTION, 0.23, 0.81])
 phase_angles = 2 * math.pi * phase_fractions
@@ -236,7 +236,7 @@ assert 0.0 <= TARGET_PHASE_FRACTION < 1.0
 # %% [markdown]
 # ### スクラッチ実装
 #
-# まず、位相を推定したい4x4ユニタリを定義します。位相ゲート$P(\theta)$は、量子ビットの$|1\rangle$成分に$e^{i\theta}$を掛けます。Qamomileでは、このゲートを`qmc.p(q, theta)`と記述します。そのため、`qmc.p(q[0], phi10)`は対象量子ビットの最初のビットが1であるすべての基底状態に位相$e^{i\theta_{10}}$を与え、`qmc.p(q[1], phi01)`は2つ目のビットが1であるすべての基底状態に位相$e^{i\theta_{01}}$を与えます。この時点で$|11\rangle$には$e^{i(\theta_{10}+\theta_{01})}$が乗っているため、制御位相シフトゲートでは補正分
+# まず、位相を推定したい4x4ユニタリ行列を定義します。位相ゲート$P(\theta)$は、量子ビットの$|1\rangle$成分に$e^{i\theta}$を掛けます。Qamomileでは、このゲートを`qmc.p(q, theta)`と記述します。そのため、`qmc.p(q[0], phi10)`は対象量子ビットの最初のビットが1であるすべての基底状態に位相$e^{i\theta_{10}}$を与え、`qmc.p(q[1], phi01)`は2つ目のビットが1であるすべての基底状態に位相$e^{i\theta_{01}}$を与えます。この時点で$|11\rangle$には$e^{i(\theta_{10}+\theta_{01})}$が乗っているため、制御位相シフトゲートでは補正分
 #
 # $$
 # \theta_{11} - \theta_{10} - \theta_{01}
@@ -246,7 +246,7 @@ assert 0.0 <= TARGET_PHASE_FRACTION < 1.0
 
 
 # %%
-# 位相ゲートで対角4x4ユニタリを実装します。
+# 位相ゲートで対角な4x4ユニタリ行列を実装します。
 @qmc.qkernel
 def diagonal_4x4(
     q: qmc.Vector[qmc.Qubit],
@@ -262,7 +262,7 @@ def diagonal_4x4(
     return q
 
 
-# 具体的な位相パラメータを使って対象ユニタリを描画します。
+# 具体的な位相パラメータを使って対象ユニタリ行列を描画します。
 diagonal_4x4.draw(
     q=2,
     phi01=PHI_01,
@@ -362,7 +362,7 @@ qpe_with_stdlib.draw(
 # 目標位相$0.6$は少ないビット数では正確に表現できないため、QPEは近い$m$ビット近似に対応する分布を返します。ここではカウント用量子ビット数を3から9まで変化させ、組み込みの`qpe`関数による推定値と厳密な位相値を比較します。
 
 # %%
-# 対角ユニタリの位相をトランスパイル時に固定します。
+# 対角なユニタリ行列の位相をトランスパイル時に固定します。
 phase_bindings = {"phi01": PHI_01, "phi10": PHI_10, "phi11": PHI_11}
 
 
@@ -471,7 +471,7 @@ ax.plot(
     color="#DB4D3F",
     label=r"$O(2^m)$",
 )
-ax.set_xlabel(r"counting qubits ($m$)")
+ax.set_xlabel(r"counting qubits $m$")
 ax.set_ylabel("total gates")
 ax.set_yscale("log")
 ax.set_xticks(bits)
@@ -511,7 +511,7 @@ assert all(
 #
 # です。つまり、カウント用量子ビット数は$1/\epsilon$に対して対数的ですが、$U$の適用回数は$O(1/\epsilon)$で増えます{cite:p}`10.1017/CBO9780511976667`。
 #
-# このような場合、ゲート数は先ほど見た通り$O(1/\epsilon)$となり，高精度なQPEを実行するには効率的ではありません。より一般には、あるユニタリ$V$を実行するために必要なゲート数を$G(V)$とすると、QPE本体に必要なゲート数は次のように書けます。
+# このような場合、ゲート数は先ほど見た通り$O(1/\epsilon)$となり，高精度なQPEを実行するには効率的ではありません。より一般には、あるユニタリ行列$V$を実行するために必要なゲート数を$G(V)$とすると、QPE本体に必要なゲート数は次のように書けます。
 #
 # $$
 # G_{\mathrm{QPE}}(m)
