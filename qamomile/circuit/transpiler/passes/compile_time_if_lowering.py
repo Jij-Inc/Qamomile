@@ -15,6 +15,7 @@ from collections.abc import Sequence
 from typing import AbstractSet, Any, cast
 
 from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.dataflow import find_loop_carried_condition_uuids
 from qamomile.circuit.ir.operation import (
     Operation,
     ReleaseSliceViewOperation,
@@ -2323,3 +2324,27 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             )
             if param_name and param_name in self._bindings:
                 concrete_values[value.uuid] = self._bindings[param_name]
+
+
+def lower_compile_time_ifs_preserving_loop_conditions(
+    block: Block,
+    bindings: dict[str, Any] | None = None,
+) -> Block:
+    """Specialize compile-time branches without erasing loop conditions.
+
+    Args:
+        block (Block): Block whose resolvable compile-time branches should be
+            lowered.
+        bindings (dict[str, Any] | None): Compile-time input bindings used for
+            condition resolution. Defaults to ``None``.
+
+    Returns:
+        Block: Specialized block with loop-carried conditions preserved.
+
+    Raises:
+        ValidationError: If specialization encounters invalid IR.
+    """
+    return CompileTimeIfLoweringPass(
+        bindings,
+        preserved_condition_uuids=find_loop_carried_condition_uuids(block.operations),
+    ).run(block)

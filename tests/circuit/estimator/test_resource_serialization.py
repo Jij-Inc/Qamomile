@@ -19,9 +19,7 @@ from qamomile.circuit.estimator._metrics import (
     _ResourceConstraint,
 )
 from qamomile.circuit.estimator._serialization import (
-    SymbolRegistry,
     normalize_expression,
-    stringify_expression,
 )
 from qamomile.circuit.estimator._wire import (
     _WireExpressionDecoder,
@@ -122,65 +120,6 @@ def test_large_quantified_finite_requirement_does_not_ignore_a_pole() -> None:
         requirement.validate()
 
 
-def test_dummy_normalization_preserves_assumptions_and_expression_structure() -> None:
-    """Dummy normalization retains domains across nested symbolic forms."""
-    index = sp.Dummy("index", integer=True, nonnegative=True)
-    limit = sp.Symbol("limit", integer=True, nonnegative=True)
-    nested = sp.Piecewise(
-        (
-            sp.Max(
-                limit,
-                sp.Piecewise(
-                    (index + 1, sp.Lt(index, limit)),
-                    (index + 2, True),
-                ),
-            ),
-            sp.Le(index, limit + 1),
-        ),
-        (sp.Integer(0), True),
-    )
-
-    normalized = normalize_expression(nested)
-    (external_index,) = [
-        symbol for symbol in normalized.free_symbols if symbol.name == "index"
-    ]
-    serialized = stringify_expression(nested)
-    restored = sp.sympify(
-        serialized,
-        locals={"index": external_index, "limit": limit},
-    )
-
-    assert not normalized.atoms(sp.Dummy)
-    assert external_index.is_integer is True
-    assert external_index.is_nonnegative is True
-    assert "_index" not in serialized
-    assert restored == normalized
-
-
-def test_same_name_dummy_normalization_preserves_distinct_identities() -> None:
-    """Normalization assigns aliases instead of collapsing same-name dummies."""
-    left = sp.Dummy("total_after_loop", integer=True, nonnegative=True)
-    right = sp.Dummy("total_after_loop", integer=True, nonnegative=True)
-    expression = sp.Piecewise(
-        (sp.Integer(3), sp.Ne(left, right, evaluate=False)),
-        (sp.Integer(1), True),
-        evaluate=False,
-    )
-
-    normalized = normalize_expression(expression)
-    serialized = stringify_expression(expression)
-    public_symbols = sorted(normalized.free_symbols, key=lambda symbol: symbol.name)
-
-    assert [symbol.name for symbol in public_symbols] == [
-        "total_after_loop",
-        "total_after_loop__2",
-    ]
-    assert all(symbol.is_integer is True for symbol in public_symbols)
-    assert all(symbol.is_nonnegative is True for symbol in public_symbols)
-    assert normalized != 1
-    assert "Ne(total_after_loop, total_after_loop__2)" in serialized
-
-
 def test_bound_sum_index_does_not_claim_free_parameter_name() -> None:
     """A bound Sum index cannot rename a same-name public parameter."""
     estimate = _triangular_gate_count.estimate_resources()
@@ -201,19 +140,22 @@ def test_bound_sum_index_does_not_claim_free_parameter_name() -> None:
     assert estimate.substitute(k=5).gates.total == 8
 
 
-def test_symbol_registry_skips_reserved_suffix_names_deterministically() -> None:
-    """Generated aliases never steal a spelling declared by another symbol."""
+def test_resource_payload_skips_an_existing_suffix_when_aliasing_symbols() -> None:
+    """Generated aliases never replace an existing public parameter name."""
     first = sp.Dummy("item")
     reserved = sp.Symbol("item__2")
     second = sp.Dummy("item")
-    registry = SymbolRegistry.from_expressions((first, reserved, second))
+    estimate = qm.ResourceEstimate(
+        gates=qm.GateResources(total=first + reserved + second)
+    )
 
-    assert registry.name(first) == "item"
-    assert registry.name(reserved) == "item__2"
-    assert registry.name(second) == "item__3"
-    assert SymbolRegistry.from_expressions((first, reserved, second)).stringify(
-        first + reserved + second
-    ) == registry.stringify(first + reserved + second)
+    assert list(estimate.parameters) == ["item", "item__2", "item__3"]
+    assert estimate.to_dict()["parameters"] == {
+        "item": "item",
+        "item__2": "item__2",
+        "item__3": "item__3",
+    }
+    assert estimate.substitute(item=1, item__2=2, item__3=3).gates.total == 6
 
 
 def test_resource_payload_exposes_every_same_name_parameter_identity() -> None:

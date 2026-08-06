@@ -81,6 +81,9 @@ from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import 
     evaluate_classical_predicate,
     handle_cast,
 )
+from qamomile.circuit.transpiler.passes.emit_support.clean_ancilla_toffoli import (
+    clean_ancilla_toffoli_ladder,
+)
 from qamomile.circuit.transpiler.passes.emit_support.composite_gate_emission import (
     emit_invoke_operation,
 )
@@ -1565,12 +1568,13 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 operation="ControlledGate",
             )
 
-        ancillas = self._mc_ancilla_pool.take(len(control_indices) - 1)
+        recipe = clean_ancilla_toffoli_ladder(len(control_indices))
+        ancillas = self._mc_ancilla_pool.take(recipe.clean_ancillas)
         if ancillas is None:
             raise EmitError(
                 f"Multi-controlled {gate_type.name} over "
                 f"{len(control_indices)} controls needs "
-                f"{len(control_indices) - 1} clean ancilla qubit(s), but "
+                f"{recipe.clean_ancillas} clean ancilla qubit(s), but "
                 f"only {self._mc_ancilla_pool.count} were reserved for this "
                 f"segment. This means the count-only demand walk "
                 f"(``_count_multi_control_ancilla_demand``) under-measured "

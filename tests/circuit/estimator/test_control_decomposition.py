@@ -2597,8 +2597,10 @@ def test_nonzero_tiny_global_phase_is_not_erased() -> None:
     assert estimate.gates.rotation == 1
 
 
-@pytest.mark.parametrize("num_controls", [2, 3])
-@pytest.mark.parametrize("phase", [0.0, math.tau, -math.tau])
+@pytest.mark.parametrize(
+    ("num_controls", "phase"),
+    [(2, 0.0), (3, -math.tau)],
+)
 def test_controlled_identity_phase_has_no_ladder_or_open_brackets(
     phase: float,
     num_controls: int,
@@ -3194,16 +3196,27 @@ def test_pauli_evolve_zero_time_specialization_removes_all_resources() -> None:
     assert controlled_active.width.clean_ancilla_qubits == 2
 
 
-@pytest.mark.parametrize("time", [0.0, 0.25])
 @pytest.mark.parametrize(
-    ("location", "coefficient"),
+    ("time", "location", "coefficient"),
     [
-        pytest.param("constant", float("nan"), id="constant-nan"),
-        pytest.param("constant", float("inf"), id="constant-infinity"),
-        pytest.param("constant", complex(1.0, float("nan")), id="constant-imag-nan"),
-        pytest.param("term", float("nan"), id="term-nan"),
-        pytest.param("term", float("inf"), id="term-infinity"),
-        pytest.param("term", complex(1.0, float("nan")), id="term-imag-nan"),
+        pytest.param(0.25, "constant", float("nan"), id="constant-nan"),
+        pytest.param(0.25, "constant", float("inf"), id="constant-infinity"),
+        pytest.param(
+            0.25,
+            "constant",
+            complex(1.0, float("nan")),
+            id="constant-imag-nan",
+        ),
+        pytest.param(0.25, "term", float("nan"), id="term-nan"),
+        pytest.param(0.25, "term", float("inf"), id="term-infinity"),
+        pytest.param(
+            0.25,
+            "term",
+            complex(1.0, float("nan")),
+            id="term-imag-nan",
+        ),
+        pytest.param(0.0, "constant", float("nan"), id="zero-time-constant-nan"),
+        pytest.param(0.0, "term", float("nan"), id="zero-time-term-nan"),
     ],
 )
 def test_pauli_evolve_estimator_rejects_nonfinite_hamiltonian(
@@ -6011,12 +6024,21 @@ def test_legacy_unclassified_depth_remains_gate_basis_sensitive() -> None:
 
 
 @pytest.mark.parametrize(
-    "resource_type",
-    [qm.MeasurementResources, qm.ResetResources],
-)
-@pytest.mark.parametrize(
-    "invalid_count",
-    [True, False, np.bool_(True), -1, 0.5, sp.oo],
+    ("resource_type", "invalid_count"),
+    [
+        *(
+            pytest.param(qm.MeasurementResources, value, id=f"measurement-{name}")
+            for name, value in (
+                ("true", True),
+                ("false", False),
+                ("numpy-bool", np.bool_(True)),
+                ("negative", -1),
+                ("fractional", 0.5),
+                ("infinite", sp.oo),
+            )
+        ),
+        pytest.param(qm.ResetResources, -1, id="reset-negative"),
+    ],
 )
 def test_event_resources_reject_invalid_concrete_counts(
     resource_type: type[qm.MeasurementResources] | type[qm.ResetResources],

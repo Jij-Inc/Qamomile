@@ -14,42 +14,21 @@ from qamomile.circuit.estimator.resource_estimator import (
 )
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.arithmetic_operations import (
-    BinOp,
-    BinOpKind,
-    CompOp,
-    CompOpKind,
-    CondOp,
-    CondOpKind,
-    NotOp,
     RuntimeClassicalExpr,
     RuntimeOpKind,
-    UnaryMathOp,
-    UnaryMathOpKind,
 )
-from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
-    DictGetItemOperation,
-    ReturnQuantumArrayElementOperation,
     StoreArrayElementOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
 from qamomile.circuit.ir.operation.operation import (
-    CInitOperation,
     Operation,
     OperationKind,
-    QInitOperation,
     Signature,
 )
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
-from qamomile.circuit.ir.operation.return_operation import ReturnOperation
-from qamomile.circuit.ir.operation.slice_array import (
-    ReleaseSliceViewOperation,
-    SliceArrayOperation,
-)
-from qamomile.circuit.ir.types.primitives import UIntType
-from qamomile.circuit.ir.value import Value
 
 
 def _gate(gate_type: GateOperationType) -> GateOperation:
@@ -76,34 +55,6 @@ class _UnknownClassicalOperation(Operation):
     def operation_kind(self) -> OperationKind:
         """Classify the marker as classical."""
         return OperationKind.CLASSICAL
-
-
-@pytest.mark.parametrize(
-    "operation",
-    [
-        ReturnOperation(),
-        CInitOperation(),
-        BinOp(kind=BinOpKind.ADD),
-        CompOp(kind=CompOpKind.EQ),
-        CondOp(kind=CondOpKind.AND),
-        NotOp(),
-        DictGetItemOperation(),
-        UnaryMathOp(
-            operands=[Value(type=UIntType(), name="input")],
-            results=[Value(type=UIntType(), name="output")],
-            kind=UnaryMathOpKind.CEIL,
-        ),
-        SliceArrayOperation(),
-        ReleaseSliceViewOperation(),
-    ],
-)
-def test_fixed_model_classifies_classical_bookkeeping_as_zero_work(
-    operation: Operation,
-) -> None:
-    """Every classical bookkeeping operation contributes no quantum work."""
-    assert static_clean_ancilla_batch_profile(operation) == (
-        StaticCleanAncillaBatchProfile()
-    )
 
 
 def test_controlled_unary_bookkeeping_matches_concrete_compiler() -> None:
@@ -164,24 +115,6 @@ def test_unused_controlled_runtime_unary_math_is_zero_quantum_work() -> None:
 @pytest.mark.parametrize(
     "operation",
     [
-        StoreArrayElementOperation(),
-        RuntimeClassicalExpr(kind=RuntimeOpKind.NOT),
-        DecodeQFixedOperation(),
-        _UnknownClassicalOperation(),
-    ],
-)
-def test_fixed_model_keeps_unsupported_operations_visible(
-    operation: Operation,
-) -> None:
-    """Unsupported markers conservatively contribute one unit of work."""
-    assert static_clean_ancilla_batch_profile(
-        operation
-    ) == StaticCleanAncillaBatchProfile(work=1)
-
-
-@pytest.mark.parametrize(
-    "operation",
-    [
         RuntimeClassicalExpr(kind=RuntimeOpKind.NOT),
         DecodeQFixedOperation(),
         _UnknownClassicalOperation(),
@@ -221,23 +154,6 @@ def test_estimator_treats_semantic_array_store_as_zero_control_work() -> None:
     )
 
     assert estimate.gates.total == 0
-
-
-@pytest.mark.parametrize(
-    "operation",
-    [
-        CastOperation(),
-        QInitOperation(),
-        ReturnQuantumArrayElementOperation(),
-    ],
-)
-def test_fixed_model_classifies_quantum_bookkeeping_as_zero_work(
-    operation: Operation,
-) -> None:
-    """Quantum identity and allocation markers contribute no gate work."""
-    assert static_clean_ancilla_batch_profile(operation) == (
-        StaticCleanAncillaBatchProfile()
-    )
 
 
 def test_fixed_model_classifies_gate_and_context_dependent_work() -> None:

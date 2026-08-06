@@ -12,7 +12,6 @@ from qamomile.circuit.frontend.param_validation import (
 from qamomile.circuit.frontend.qkernel_like import QKernelLike
 from qamomile.circuit.frontend.static_binding import without_static_bindings
 from qamomile.circuit.ir.block import Block, BlockKind
-from qamomile.circuit.ir.dataflow import find_loop_carried_condition_uuids
 from qamomile.circuit.transpiler.compiler import QamomileCompiler
 from qamomile.circuit.transpiler.config import TranspilerConfig
 from qamomile.circuit.transpiler.errors import (
@@ -27,6 +26,7 @@ from qamomile.circuit.transpiler.passes.array_bounds_validation import (
 )
 from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
     CompileTimeIfLoweringPass,
+    lower_compile_time_ifs_preserving_loop_conditions,
 )
 from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
 from qamomile.circuit.transpiler.passes.emit import EmitPass
@@ -256,12 +256,10 @@ class Transpiler(ABC, Generic[T]):
 
         for _ in range(self.MAX_UNROLL_DEPTH):
             block = self.inline(block)
-            block = CompileTimeIfLoweringPass(
+            block = lower_compile_time_ifs_preserving_loop_conditions(
+                block,
                 bindings,
-                preserved_condition_uuids=find_loop_carried_condition_uuids(
-                    block.operations
-                ),
-            ).run(block)
+            )
             if count_inline_invokes(block.operations) == 0:
                 # Compile-time if lowering keeps ``block.kind`` from the input,
                 # which stays HIERARCHICAL even after the last

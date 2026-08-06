@@ -237,7 +237,10 @@ def test_runtime_uint_merge_if_uses_fieldwise_worst_case() -> None:
 
 def test_runtime_uint_merge_range_fails_without_fake_parameter() -> None:
     """A runtime range bound fails instead of becoming a public parameter."""
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(
+        NotImplementedError,
+        match="runtime-derived or unresolved loop-carried value",
+    ):
         _runtime_uint_merge_to_range.estimate_resources()
 
 
@@ -324,7 +327,10 @@ def test_unsupported_symbolic_carry_fails_without_fake_parameter(
     kernel: Any,
 ) -> None:
     """An unresolved loop carry fails before public parameter discovery."""
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(
+        NotImplementedError,
+        match="runtime-derived or unresolved loop-carried value",
+    ):
         kernel.estimate_resources()
 
 
@@ -346,11 +352,15 @@ def test_while_trip_count_remains_a_semantic_parameter() -> None:
 def test_runtime_expression_does_not_internalize_compile_time_input() -> None:
     """A public input remains substitutable when mixed with runtime state."""
     symbolic = _mixed_runtime_and_compile_input.estimate_resources()
+    direct = _mixed_runtime_and_compile_input.estimate_resources(inputs={"n": 3})
 
     assert set(symbolic.parameters) == {"n"}
-    concrete = symbolic.substitute(n=3)
-    assert concrete.gates.total == 3
-    assert concrete.parameters == {}
+    assert symbolic.gates.total == symbolic.parameters["n"]
+    substituted = symbolic.substitute(n=3)
+    assert substituted.gates.total == 3
+    assert substituted.parameters == {}
+    assert direct.gates.total == 3
+    assert direct.parameters == {}
 
 
 def test_internal_carry_cannot_escape_only_through_trace_guard() -> None:

@@ -1567,10 +1567,7 @@ def _validate_concrete_controlled(
     """
     if operation.num_controls < 1 or operation.num_controls > len(operation.operands):
         raise ValueError(f"{location} has an invalid num_controls")
-    if not all(
-        operand.type.is_quantum()
-        for operand in operation.operands[: operation.num_controls]
-    ):
+    if not all(operand.type.is_quantum() for operand in operation.control_operands):
         raise ValueError(f"{location} controls must be quantum values")
     _validate_control_activation(
         operation.control_value,
@@ -1629,10 +1626,7 @@ def _validate_symbolic_controlled(
         operation.operands
     ):
         raise ValueError(f"{location} has an invalid num_control_args")
-    if not all(
-        operand.type.is_quantum()
-        for operand in operation.operands[: operation.num_control_args]
-    ):
+    if not all(operand.type.is_quantum() for operand in operation.control_operands):
         raise ValueError(f"{location} control arguments must be quantum values")
     if operation.control_indices is not None:
         _require_types(

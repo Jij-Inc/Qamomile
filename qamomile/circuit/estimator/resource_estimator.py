@@ -7,7 +7,7 @@ import enum
 import itertools
 import math
 import numbers
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import partial
@@ -178,7 +178,6 @@ from qamomile.circuit.ir._resource_contract import quantum_operand_widths
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.dataflow import (
     build_dependency_graph,
-    find_loop_carried_condition_uuids,
     find_measurement_derived_values,
     find_measurement_results,
     has_legacy_scalar_bit_rebinds,
@@ -255,7 +254,14 @@ from qamomile.circuit.transpiler.passes.analyze import (
     reject_loop_carried_classical_rebinds,
 )
 from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
-    CompileTimeIfLoweringPass,
+    lower_compile_time_ifs_preserving_loop_conditions,
+)
+from qamomile.circuit.transpiler.passes.control_flow_reachability import (
+    static_for_items_entries,
+)
+from qamomile.circuit.transpiler.passes.emit_support.clean_ancilla_toffoli import (
+    clean_ancilla_toffoli_ladder,
+    clean_ancilla_toffoli_ladder_or_empty,
 )
 from qamomile.circuit.transpiler.passes.inline import (
     InlinePass,
@@ -4668,7 +4674,7 @@ class ResourceInterpreter:
     def _guarded_constraint_scope(
         self,
         active_when: sp.Basic,
-    ) -> Iterator[None]:
+    ) -> Generator[None, None, None]:
         """Conjoin one activation guard while nested constraints are built.
 
         Args:
@@ -4689,7 +4695,7 @@ class ResourceInterpreter:
     def _measurement_taint_scope(
         self,
         additions: Mapping[str, Boolean],
-    ) -> Iterator[None]:
+    ) -> Generator[None, None, None]:
         """Expose temporary guarded observation provenance in a nested scope.
 
         Args:
@@ -4715,7 +4721,7 @@ class ResourceInterpreter:
         kind: str,
         operation: Operation,
         ordinal: int,
-    ) -> Iterator[None]:
+    ) -> Generator[None, None, None]:
         """Qualify direct observation tokens within one repeated body visit.
 
         Args:
@@ -4772,7 +4778,7 @@ class ResourceInterpreter:
         return f"{_OBSERVATION_SOURCE_PREFIX}:{identity}"
 
     @contextmanager
-    def _isolated_loop_taint_probe_state(self) -> Iterator[None]:
+    def _isolated_loop_taint_probe_state(self) -> Generator[None, None, None]:
         """Prevent discarded loop probes from mutating interpretation results.
 
         Definition-cost and observation-summary caches remain shared because
@@ -5648,11 +5654,10 @@ class ResourceInterpreter:
             view = inline.run(view)
             if view.kind is not BlockKind.HIERARCHICAL:
                 return view
-            preserved_conditions = find_loop_carried_condition_uuids(view.operations)
-            view = CompileTimeIfLoweringPass(
+            view = lower_compile_time_ifs_preserving_loop_conditions(
+                view,
                 bindings,
-                preserved_condition_uuids=preserved_conditions,
-            ).run(view)
+            )
             if count_inline_invokes(view.operations) == 0:
                 # Lowering the final base-case branch can remove the last
                 # invocation while the copied block still carries its stale
@@ -5981,7 +5986,7 @@ class ResourceInterpreter:
             active = _boolean_condition(sp.Gt(power, _ZERO))
             if not isinstance(operation.block, Block):
                 return _EstimatorControlBatchProfile()
-            body_operands = _controlled_u_body_operands(operation)
+            body_operands = operation.body_operands
             broadcast = self._apply_condition_values(
                 _scalar_target_broadcast_factor(
                     operation.block,
@@ -6496,7 +6501,8 @@ class ResourceInterpreter:
             ResourceEstimate: Clean-ancilla Toffoli cost with concurrently
             held clean ancillas.
         """
-        outer_clean_ancillas = controls - _ONE
+        recipe = clean_ancilla_toffoli_ladder(controls)
+        outer_clean_ancillas = recipe.clean_ancillas
         toffoli = _estimate_named_gate_in_basis(
             "toffoli",
             _ZERO,
@@ -6504,8 +6510,8 @@ class ResourceInterpreter:
             control_decomposition=self.config.control_decomposition,
             precision=self.config.precision,
         )
-        ladder = toffoli.repeat(2 * outer_clean_ancillas)
-        compute_depth = outer_clean_ancillas * toffoli.depth.depth
+        ladder = toffoli.repeat(recipe.total_toffolis)
+        compute_depth = recipe.compute_toffolis * toffoli.depth.depth
         estimate = ladder.seq(body)
         trace_children = tuple(
             node
@@ -6526,7 +6532,7 @@ class ResourceInterpreter:
                     name=f"shared_control_ladder({controls})",
                     source_kind="clean_ancilla_toffoli",
                     summary=(
-                        f"toffoli_steps={2 * outer_clean_ancillas}, "
+                        f"toffoli_steps={recipe.total_toffolis}, "
                         f"clean_ancillas={outer_clean_ancillas}"
                     ),
                     children=trace_children,
@@ -12016,11 +12022,7 @@ class ResourceInterpreter:
         bound = self.bindings.get(parameter_name) if parameter_name else None
         if isinstance(bound, Mapping):
             return tuple(bound.items())
-        metadata = getattr(operand, "metadata", None)
-        dict_runtime = getattr(metadata, "dict_runtime", None)
-        if dict_runtime is not None:
-            return tuple(dict_runtime.bound_data)
-        return None
+        return static_for_items_entries(operation)
 
     def _symbolic_for_items_context(
         self,
@@ -12498,7 +12500,7 @@ class ResourceInterpreter:
         structural_constraints = [
             *_quantum_operand_width_constraints(
                 operation.callable_attrs,
-                _controlled_u_body_operands(operation),
+                operation.body_operands,
                 resolver,
                 source=callable_name,
             ),
@@ -12563,7 +12565,7 @@ class ResourceInterpreter:
                 *structural_constraints,
             )
         if isinstance(operation.block, Block):
-            actual_operands = _controlled_u_body_operands(operation)
+            actual_operands = operation.body_operands
             broadcast = self._apply_condition_values(
                 _scalar_target_broadcast_factor(
                     operation.block,
@@ -15411,16 +15413,16 @@ def _clean_ancilla_generic_multi_control_estimate(
     Returns:
         ResourceEstimate: Clean-ancilla Toffoli estimate.
     """
-    ladder_steps = sp.Integer(2) * (controls - _ONE)
+    recipe = clean_ancilla_toffoli_ladder(controls)
     ladder = _scale_gates(
         _classify_uncontrolled_gate("toffoli"),
-        ladder_steps,
+        recipe.total_toffolis,
     )
     central = _clean_ancilla_single_control_estimate(name).gates
     return _clean_ancilla_sequence_estimate(
         f"mc-{name}",
         _add_gates(ladder, central),
-        clean_ancillas=controls - _ONE,
+        clean_ancillas=recipe.clean_ancillas,
         quality=EstimateQuality.CONSERVATIVE,
     )
 
@@ -16243,10 +16245,11 @@ def _clean_ancilla_shared_aggregate_control_ladder(
         ResourceEstimate: Body-wide clean-ancilla control projection with one
         compute/uncompute ladder and concurrently held clean ancillas.
     """
-    outer_clean_ancillas = controls - _ONE
+    recipe = clean_ancilla_toffoli_ladder(controls)
+    outer_clean_ancillas = recipe.clean_ancillas
     toffoli = _clean_ancilla_primitive_estimate("toffoli")
-    compute = toffoli.repeat(outer_clean_ancillas)
-    ladder = toffoli.repeat(2 * outer_clean_ancillas)
+    compute = toffoli.repeat(recipe.compute_toffolis)
+    ladder = toffoli.repeat(recipe.total_toffolis)
     estimate = ladder.seq(body)
     trace_children = tuple(
         node for node in (compute.trace, body.trace, compute.trace) if node is not None
@@ -16264,7 +16267,7 @@ def _clean_ancilla_shared_aggregate_control_ladder(
             name=f"shared_control_ladder({controls})",
             source_kind="clean_ancilla_toffoli",
             summary=(
-                f"toffoli_steps={2 * outer_clean_ancillas}, "
+                f"toffoli_steps={recipe.total_toffolis}, "
                 f"clean_ancillas={outer_clean_ancillas}"
             ),
             children=trace_children,
@@ -16773,18 +16776,25 @@ def _clifford_t_clean_ancillas_for_name(
     if name == "swap":
         return _clifford_t_mcx_clean_ancillas(surrounding_controls + _ONE)
     if name == "p":
-        return sp.Max(_ZERO, surrounding_controls - _ONE)
+        return clean_ancilla_toffoli_ladder_or_empty(
+            surrounding_controls
+        ).clean_ancillas
     if name == "cp":
+        recipe = clean_ancilla_toffoli_ladder_or_empty(surrounding_controls + _ONE)
         return _piecewise(
             _ZERO,
-            surrounding_controls,
+            recipe.clean_ancillas,
             sp.Eq(surrounding_controls, _ZERO),
         )
     if name in {"s", "sdg"}:
-        return sp.Max(_ZERO, surrounding_controls - _ONE)
+        return clean_ancilla_toffoli_ladder_or_empty(
+            surrounding_controls
+        ).clean_ancillas
     if name in {"t", "tdg"}:
-        return surrounding_controls
-    return sp.Max(_ZERO, surrounding_controls - _ONE)
+        return clean_ancilla_toffoli_ladder_or_empty(
+            surrounding_controls + _ONE
+        ).clean_ancillas
+    return clean_ancilla_toffoli_ladder_or_empty(surrounding_controls).clean_ancillas
 
 
 def _clifford_t_mcx_clean_ancillas(controls: ResourceExpr) -> ResourceExpr:
@@ -16797,10 +16807,11 @@ def _clifford_t_mcx_clean_ancillas(controls: ResourceExpr) -> ResourceExpr:
         ResourceExpr: Clean ancillas required by the logical control recipe
             after lowering its Toffoli gates to Clifford+T.
     """
+    recipe = clean_ancilla_toffoli_ladder(controls)
     return _resource_expr(
         sp.Piecewise(
             (_ZERO, controls <= 2),
-            (controls - _ONE, True),
+            (recipe.clean_ancillas, True),
         )
     )
 
@@ -16814,11 +16825,12 @@ def _clifford_t_mcx_toffoli_count(controls: ResourceExpr) -> ResourceExpr:
     Returns:
         ResourceExpr: Toffoli gates in the selected logical control recipe.
     """
+    recipe = clean_ancilla_toffoli_ladder(controls)
     return _resource_expr(
         sp.Piecewise(
             (_ZERO, controls <= 1),
             (_ONE, sp.Eq(controls, 2)),
-            (2 * (controls - _ONE), True),
+            (recipe.total_toffolis, True),
         )
     )
 
@@ -16892,7 +16904,9 @@ def _named_clifford_t_depth(
         )
     if name in {"p", "cp"}:
         effective_controls = surrounding_controls + (_ONE if name == "cp" else _ZERO)
-        ladder_steps = 2 * sp.Max(_ZERO, effective_controls - _ONE)
+        ladder_steps = clean_ancilla_toffoli_ladder_or_empty(
+            effective_controls
+        ).total_toffolis
         rotation_t = _classify_uncontrolled_clifford_t_gate("p", precision).t
         controlled = _clifford_t_cp_depth(
             ladder_steps,
@@ -16915,7 +16929,9 @@ def _named_clifford_t_depth(
     if name in {"s", "sdg"}:
         if surrounding_controls == _ZERO:
             return _serial_depth_from_gate_resources(gates)
-        ladder_steps = 2 * sp.Max(_ZERO, surrounding_controls - _ONE)
+        ladder_steps = clean_ancilla_toffoli_ladder_or_empty(
+            surrounding_controls
+        ).total_toffolis
         controlled = DepthResources(
             depth=15 * ladder_steps + 4,
             clifford_depth=8 * ladder_steps + 2,
@@ -16935,7 +16951,9 @@ def _named_clifford_t_depth(
             sp.Eq(surrounding_controls, _ZERO),
         )
     if name in {"t", "tdg"}:
-        ladder_steps = 2 * surrounding_controls
+        ladder_steps = clean_ancilla_toffoli_ladder_or_empty(
+            surrounding_controls + _ONE
+        ).total_toffolis
         return DepthResources(
             depth=15 * ladder_steps + 1,
             clifford_depth=8 * ladder_steps,
@@ -17216,7 +17234,9 @@ def _classify_controlled_clifford_t_gate(
         )
     if gate_name in {"p", "cp"}:
         effective_controls = num_controls + (_ONE if gate_name == "cp" else _ZERO)
-        ladder_steps = 2 * sp.Max(_ZERO, effective_controls - _ONE)
+        ladder_steps = clean_ancilla_toffoli_ladder_or_empty(
+            effective_controls
+        ).total_toffolis
         ladder = _scale_gates(
             _multi_controlled_x_clifford_t(sp.Integer(2)),
             ladder_steps,
@@ -17227,7 +17247,9 @@ def _classify_controlled_clifford_t_gate(
         # CS = (T x T) - CX - Tdg(target) - CX. The first two T gates
         # share a layer, so this exact phase-polynomial circuit uses three
         # T gates at T-depth two and needs no clean carrier.
-        effective_ladder_steps = 2 * sp.Max(_ZERO, num_controls - _ONE)
+        effective_ladder_steps = clean_ancilla_toffoli_ladder_or_empty(
+            num_controls
+        ).total_toffolis
         ladder = _scale_gates(
             _multi_controlled_x_clifford_t(sp.Integer(2)),
             effective_ladder_steps,
@@ -17247,7 +17269,7 @@ def _classify_controlled_clifford_t_gate(
         # controlled-T primitive is itself a Clifford+T gate.
         ladder = _scale_gates(
             _multi_controlled_x_clifford_t(sp.Integer(2)),
-            2 * num_controls,
+            clean_ancilla_toffoli_ladder_or_empty(num_controls + _ONE).total_toffolis,
         )
         return _add_gates(ladder, _classify_uncontrolled_gate(gate_name))
     raise ValueError(
@@ -18717,27 +18739,6 @@ def _opaque_cost_target_shapes(
     return shapes
 
 
-def _controlled_u_body_operands(
-    operation: ControlledUOperation,
-) -> list[Value]:
-    """Return wrapped-body actuals after the external control prefix.
-
-    The operation stores controls followed by the wrapped qkernel's complete
-    argument list. Slicing that layout directly is the canonical arity
-    contract; reconstructing it from ``target_operands`` and
-    ``param_operands`` can duplicate classical values because historical
-    target accessors include every post-control operand.
-
-    Args:
-        operation (ControlledUOperation): Controlled call to inspect.
-
-    Returns:
-        list[Value]: Quantum and classical/object body operands in call-site
-            storage order.
-    """
-    return list(operation.operands[len(operation.control_operands) :])
-
-
 def _controlled_u_child_resolver(
     operation: ControlledUOperation,
     resolver: ExprResolver,
@@ -18758,7 +18759,7 @@ def _controlled_u_child_resolver(
     extra: dict[str, ResourceExpr] = {}
     classical_inputs: list[tuple[Value, Value]] = []
     array_inputs: list[tuple[ArrayValue, ArrayValue]] = []
-    actual_operands = _controlled_u_body_operands(operation)
+    actual_operands = operation.body_operands
     for formal, actual in pair_block_operands(block, actual_operands):
         extra[formal.uuid] = resolver.resolve(actual)
         if (

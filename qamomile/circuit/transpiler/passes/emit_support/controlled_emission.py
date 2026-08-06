@@ -77,6 +77,9 @@ from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import 
     evaluate_unary_math,
     handle_cast,
 )
+from qamomile.circuit.transpiler.passes.emit_support.clean_ancilla_toffoli import (
+    clean_ancilla_toffoli_ladder,
+)
 from qamomile.circuit.transpiler.passes.emit_support.condition_resolution import (
     remap_static_merge_outputs,
     resolve_if_condition,
@@ -832,7 +835,7 @@ def _batch_op_profile(
             return ControlBatchProfile()
         if op.block is None:
             return ControlBatchProfile(weight=1, selects_exact_two=True)
-        body_operands = list(op.operands[len(op.control_operands) :])
+        body_operands = op.body_operands
         target_operands = [
             operand for operand in op.target_operands if operand.type.is_quantum()
         ]
@@ -1480,7 +1483,8 @@ def try_emit_batched_controlled_operations(
         profile=profile,
     ):
         return False
-    with pool.try_hold(num_controls - 1) as ancillas:
+    recipe = clean_ancilla_toffoli_ladder(num_controls)
+    with pool.try_hold(recipe.clean_ancillas) as ancillas:
         if ancillas is None:
             # The demand estimate legitimately reserved fewer ancillas than
             # a batch would want (e.g. a sibling whose demand dominates);
@@ -1492,7 +1496,7 @@ def try_emit_batched_controlled_operations(
             emit_pass,
             circuit,
             operations,
-            [ancillas[num_controls - 2]],
+            [ancillas[recipe.clean_ancillas - 1]],
             qubit_map,
             bindings,
         )
@@ -2102,7 +2106,7 @@ def resolve_controlled_u_call(
         nc = op.num_controls
         num_control_args = nc
 
-    control_operands = list(op.operands[:num_control_args])
+    control_operands = op.control_operands
     control_operand_groups = [
         _expand_quantum_operands_to_phys(emit_pass, operand, qubit_map, bindings)
         for operand in control_operands
@@ -3094,7 +3098,7 @@ def emit_controlled_u_multi_arg(
     # Expand the control prefix one operand at a time.  Each operand
     # may be a scalar Value (one physical qubit) or an ArrayValue
     # (one physical qubit per element).
-    control_operands = op.operands[: op.num_control_args]
+    control_operands = op.control_operands
     control_index_groups = [
         _expand_quantum_operands_to_phys(emit_pass, q, qubit_map, bindings)
         for q in control_operands

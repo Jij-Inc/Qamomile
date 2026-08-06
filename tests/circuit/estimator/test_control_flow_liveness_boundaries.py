@@ -258,23 +258,15 @@ def test_compile_time_if_retains_only_the_selected_local_owner() -> None:
         assert direct.width.peak_qubits == expected_width
 
 
-@pytest.mark.parametrize("iterations", [0, 1, 3])
-def test_range_retains_local_owner_after_nonempty_loop(iterations: int) -> None:
-    """A range allocation survives once while one static site is reused."""
-    estimate = _range_retains_local_owner.estimate_resources(
-        inputs={"iterations": iterations}
-    )
-    expected_width = 3 if iterations == 0 else 5
-
-    assert estimate.width.allocated_qubits == expected_width
-    assert estimate.width.peak_qubits == expected_width
-
-
-@pytest.mark.parametrize("iterations", [0, 1, 3])
-def test_symbolic_range_substitution_preserves_boundary_liveness(
+@pytest.mark.parametrize(
+    ("iterations", "expected_width"),
+    [(0, 3), (1, 5), (3, 5)],
+)
+def test_range_retains_local_owner_and_specializes_symbolically(
     iterations: int,
+    expected_width: int,
 ) -> None:
-    """Post-hoc range specialization matches estimation with bound inputs."""
+    """Range liveness and post-hoc specialization agree at loop boundaries."""
     symbolic = _range_retains_local_owner.estimate_resources()
     substituted = symbolic.substitute(iterations=iterations)
     direct = _range_retains_local_owner.estimate_resources(
@@ -282,6 +274,8 @@ def test_symbolic_range_substitution_preserves_boundary_liveness(
     )
 
     assert substituted.width == direct.width
+    assert direct.width.allocated_qubits == expected_width
+    assert direct.width.peak_qubits == expected_width
 
 
 @pytest.mark.parametrize(("iterations", "expected_width"), [(1, 4), (3, 6)])
@@ -299,8 +293,6 @@ def test_range_projects_live_width_to_final_iteration(
     assert direct.parameters == {}
     assert direct.width.peak_qubits == expected_width
     assert substituted.width == direct.width
-    assert direct.quality is qm.EstimateQuality.EXACT
-    assert substituted.quality is qm.EstimateQuality.EXACT
     assert direct.quality is qm.EstimateQuality.EXACT
     assert substituted.quality is qm.EstimateQuality.EXACT
 
@@ -353,31 +345,24 @@ def test_items_retains_local_owner_after_nonempty_loop(
 
 
 @pytest.mark.parametrize(
-    "data",
+    ("data", "expected_quality"),
     [
-        {3: 0.1, 1: 0.2},
-        {1: 0.1, 3: 0.2},
+        ({3: 0.1, 1: 0.2}, qm.EstimateQuality.CONSERVATIVE),
+        ({1: 0.1, 3: 0.2}, qm.EstimateQuality.EXACT),
     ],
 )
 def test_items_retained_width_is_independent_of_entry_order(
     data: dict[int, float],
+    expected_quality: qm.EstimateQuality,
 ) -> None:
-    """Every insertion order retains the widest items-loop allocation."""
+    """Entry order preserves width and reports conservative earlier maxima."""
     estimate = _items_retains_key_sized_local_owner.estimate_resources(
         inputs={"data": data}
     )
 
     assert estimate.width.allocated_qubits == 6
     assert estimate.width.peak_qubits == 6
-
-
-def test_items_marks_earlier_wider_owner_as_conservative() -> None:
-    """Owner-wise maxima report when they may exceed final-state liveness."""
-    estimate = _items_retains_key_sized_local_owner.estimate_resources(
-        inputs={"data": {3: 0.1, 1: 0.2}}
-    )
-
-    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
+    assert estimate.quality is expected_quality
 
 
 @pytest.mark.parametrize(

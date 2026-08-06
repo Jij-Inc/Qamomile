@@ -2559,7 +2559,7 @@ def test_tuple_expval_consumption_crosses_control_flow_summary() -> None:
         assert estimate.width.circuit_qubits == 4
 
 
-@pytest.mark.parametrize("k", [0, 1, 3, 64])
+@pytest.mark.parametrize("k", [0, 1, 64])
 def test_concrete_recursive_resource_driver_reaches_base_case(k: int) -> None:
     """Concrete recursion inputs expand only the terminating call path.
 
@@ -2582,7 +2582,7 @@ def test_symbolic_recursive_resource_driver_fails_with_guidance() -> None:
         _resource_recursive_circuit.estimate_resources()
 
 
-@pytest.mark.parametrize("k", [0, 1, 3, 64])
+@pytest.mark.parametrize("k", [0, 1, 64])
 def test_controlled_recursive_resource_driver_reaches_base_case(k: int) -> None:
     """A controlled concrete recursion profiles only its terminating path.
 

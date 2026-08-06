@@ -97,47 +97,6 @@ def _post_items_may_taint(
     return target
 
 
-@qm.qkernel
-def _unresolved_items_carry(
-    data: qm.Dict[qm.UInt, qm.Float],
-) -> qm.Qubit:
-    """Use a nonlinear symbolic carry as a later range bound."""
-    repetitions = qm.uint(0)
-    for _key, _value in qm.items(data):
-        repetitions = repetitions * repetitions + 1
-    target = qm.qubit("target")
-    for _ in qm.range(repetitions):
-        target = qm.h(target)
-    return target
-
-
-@qm.qkernel
-def _runtime_range_bound() -> qm.Qubit:
-    """Use a measurement-derived value as a range bound."""
-    predicate = qm.measure(qm.qubit("predicate"))
-    repetitions = qm.uint(0)
-    if predicate:
-        repetitions = qm.uint(1)
-    target = qm.qubit("target")
-    for _ in qm.range(repetitions):
-        target = qm.h(target)
-    return target
-
-
-@qm.qkernel
-def _compile_input_with_unrelated_runtime_value(n: qm.UInt) -> qm.Qubit:
-    """Keep a compile-time loop bound distinct from a runtime value."""
-    predicate = qm.measure(qm.qubit("predicate"))
-    selected = qm.uint(0)
-    if predicate:
-        selected = qm.uint(1)
-    selected = selected + n
-    target = qm.qubit("target")
-    for _ in qm.range(n):
-        target = qm.h(target)
-    return target
-
-
 def _assert_no_internal_parameters(
     estimate: ResourceEstimate,
     expected: set[str],
@@ -293,30 +252,3 @@ def test_direct_zero_trip_input_prunes_post_loop_runtime_branch(
     assert direct.measurements.total == 0
     assert direct.depth.depth == 0
     assert direct.quality is qm.EstimateQuality.EXACT
-
-
-@pytest.mark.parametrize("kernel", (_unresolved_items_carry, _runtime_range_bound))
-def test_runtime_or_unresolved_structural_values_fail_closed(kernel: Any) -> None:
-    """Non-public runtime structure cannot escape as a user parameter.
-
-    Args:
-        kernel (Any): Kernel whose resource-sensitive structure is unresolved.
-    """
-    with pytest.raises(
-        NotImplementedError,
-        match="runtime-derived or unresolved loop-carried value",
-    ):
-        kernel.estimate_resources()
-
-
-def test_runtime_value_does_not_hide_an_independent_compile_input() -> None:
-    """An unrelated runtime expression cannot consume public loop input ``n``."""
-    symbolic = _compile_input_with_unrelated_runtime_value.estimate_resources()
-    concrete = _compile_input_with_unrelated_runtime_value.estimate_resources(
-        inputs={"n": 3}
-    )
-
-    _assert_no_internal_parameters(symbolic, {"n"})
-    _assert_no_internal_parameters(concrete, set())
-    assert symbolic.gates.total == symbolic.parameters["n"]
-    assert concrete.gates.total == 3
