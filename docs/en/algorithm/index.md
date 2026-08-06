@@ -15,7 +15,7 @@ Trotter–Suzuki product formulas on the Rabi model with empirical convergence o
 :::
 
 :::{card}
-:header: **Grover Search**
+:header: **Grover search algorithm**
 :link: grover_search
 Implement Grover search from scratch and with `qmc.grover_search`, then compare probability amplification and oracle-query scaling.
 :::

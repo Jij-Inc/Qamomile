@@ -20,9 +20,9 @@
 #
 # # Groverの探索アルゴリズム
 #
-# Grover探索は、確率振幅を増幅することで、構造を持たない探索空間から探したい状態を見つけるアルゴリズムです{cite:p}`10.1145/237814.237866`。サイズ$N$の探索空間に探したい状態が1つある場合、古典的な全探索では$O(N)$回の問い合わせが必要ですが、Grover探索では$O(\sqrt{N})$回のオラクル問い合わせで探索でき、古典計算に対して2次的な計算速度の加速を示すことが知られています。
+# Groverの探索アルゴリズムは、確率振幅を増幅することで、構造を持たない探索空間から探したい状態を見つけるアルゴリズムです{cite:p}`10.1145/237814.237866`。サイズ$N$の探索空間に探したい状態が1つある場合、古典的な全探索では$O(N)$回の問い合わせが必要ですが、Groverの探索アルゴリズムでは$O(\sqrt{N})$回のオラクル問い合わせで探索でき、古典計算に対して2次的な計算速度の加速を示すことが知られています。
 #
-# このノートブックでは、Groverの探索アルゴリズムをスクラッチ実装とQamomileの組み込み関数`grover_search`による実装の2通りで紹介します。どちらも4つの検索量子ビットから探したい状態$|0101\rangle$を見つけます。振幅増幅の前後で測定確率を比較し、オラクル問い合わせ回数のスケーリングも確認します。
+# このノートブックでは、Groverの探索アルゴリズムをスクラッチ実装とQamomileの組み込み関数`grover_search`による実装の2通りで紹介します。`qmc.grover_iteration_count`を使って最適な反復回数を計算し、組み込み実装で探したい状態$|0101\rangle$を探索します。さらに、振幅増幅の前後で測定確率を比較し、オラクル問い合わせ回数のスケーリングも確認します。
 
 # %%
 # 最新のQamomileと、このノートブックで使う追加機能をインストールします。
@@ -59,12 +59,12 @@ transpiler = QiskitTranspiler()
 # O_f|x\rangle = (-1)^{f(x)}|x\rangle.
 # $$
 #
-# オラクル$O_f$は$|x_\star\rangle$を$-|x_\star\rangle$へ変化させ、ほかの基底状態は変化させません。以下では、このように探したい状態の符号を反転することを「探したい状態をマークする」と呼びます。この符号反転だけでは測定確率は変化しません。Grover探索では、オラクル$O_f$と後述する拡散演算子を1組として繰り返し、探したい状態の確率振幅を増幅します。
+# オラクル$O_f$は$|x_\star\rangle$を$-|x_\star\rangle$へ変化させ、ほかの基底状態は変化させません。以下では、このように探したい状態の符号を反転することを「探したい状態をマークする」と呼びます。この符号反転だけでは測定確率は変化しません。Groverの探索アルゴリズムでは、オラクル$O_f$と後述する拡散演算子を1組として繰り返し、探したい状態の確率振幅を増幅します。
 #
 # :::{note}
 # **オラクルとは？**
 #
-# 量子アルゴリズムにおけるオラクルとは、アルゴリズムが内部実装に依存せず呼び出す、問題固有の操作です。Grover探索では、その役割をオラクル$O_f$として与え、探したい状態の符号を反転します。オラクルを1回適用することを1回のオラクル問い合わせと数え、ゲート数とは別の計算量指標として扱います。実際に量子回路として実行するには、探索問題ごとにオラクルの内部回路を構成する必要があります。
+# 量子アルゴリズムにおけるオラクルとは、アルゴリズムが内部実装に依存せず呼び出す、問題固有の操作です。Groverの探索アルゴリズムでは、その役割をオラクル$O_f$として与え、探したい状態の符号を反転します。オラクルを1回適用することを1回のオラクル問い合わせと数え、ゲート数とは別の計算量指標として扱います。実際に量子回路として実行するには、探索問題ごとにオラクルの内部回路を構成する必要があります。
 # :::
 #
 # ### ステップ1：一様重ね合わせ状態を準備する
@@ -105,7 +105,7 @@ transpiler = QiskitTranspiler()
 # - \sin\theta|\mathrm{good}\rangle.
 # $$
 #
-# ここでは、$O_f$を探したい状態の符号を反転する抽象的な演算として扱います。補助量子ビットを使う回路は$O_f$を実現する方法の1つであり、Grover探索の数学的な手順自体には含まれません。このノートブックでは、後の「位相オラクル」節で、補助量子ビットを$|-\rangle$に準備し、位相キックバックを利用して$O_f$を実装します。
+# ここでは、$O_f$を探したい状態の符号を反転する抽象的な演算として扱います。補助量子ビットを使う回路は$O_f$を実現する方法の1つであり、Groverの探索アルゴリズムの数学的な手順自体には含まれません。このノートブックでは、後の「位相オラクル」節で、補助量子ビットを$|-\rangle=(|0\rangle-|1\rangle)/\sqrt{2}$に準備し、位相キックバックを利用して$O_f$を実装します。
 #
 # ### ステップ3：一様重ね合わせ状態に関して反転する
 #
@@ -141,11 +141,7 @@ transpiler = QiskitTranspiler()
 # P_r=\sin^2((2r+1)\theta)
 # $$
 #
-# です。$P_r$が最初に最大になるのは、累積した角度$(2r+1)\theta$が最適な角度$\pi/2$に最も近づくときです。それ以上反復すると、探したい状態から確率振幅が離れることがあります。
-#
-# ### ステップ5：検索量子ビットを測定する
-#
-# 適切な回数だけ反復した後に検索量子ビットを測定すると、高い確率で$x_\star$が得られます。
+# です。$P_r$が最初に最大になるのは、累積した角度$(2r+1)\theta$が最適な角度$\pi/2$に最も近づくときです。それ以上反復すると、探したい状態から確率振幅が離れることがあります。適切な回数だけ反復した後に検索量子ビットを測定すると、高い確率で$x_\star$が得られます。
 
 # %% [markdown]
 # ## Qamomileでの実装
@@ -155,31 +151,23 @@ transpiler = QiskitTranspiler()
 # この例では、4つの検索量子ビットを使って、$N=2^4=16$個の状態から探したい状態$|0101\rangle$を見つけます。
 
 # %%
-# 具体的な探索問題とサンプリング設定を定義し、`grover_iteration_count`で反復回数を計算します。
+# 具体的な探索問題とサンプリング設定を定義します。
 SEARCH_QUBITS = 4
 NUM_MARKED = 1
 MARKED_STATE = "0101"
-ITERATIONS = qmc.grover_iteration_count(SEARCH_QUBITS, NUM_MARKED)
 
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 SHOTS = 512 if docs_test_mode else 4096
 SAMPLER_SEED = 42
 
-theta = math.asin(math.sqrt(NUM_MARKED / 2**SEARCH_QUBITS))
-ideal_marked_probability = math.sin((2 * ITERATIONS + 1) * theta) ** 2
-
 print("search qubits:", SEARCH_QUBITS)
 print("marked state:", MARKED_STATE)
-print("Grover iterations:", ITERATIONS)
-print("ideal marked-state probability:", f"{ideal_marked_probability:.6f}")
-
-assert ITERATIONS == 3
-assert ideal_marked_probability > 0.96
 
 # %% [markdown]
 # ### 位相オラクル
 #
 # 以下のオラクルでは、Xゲートによって$|0101\rangle$を$|1111\rangle$へ写し、専用の補助量子ビットを$|-\rangle$に準備してマルチCNOTゲートを適用します。最後に、検索量子ビットと補助量子ビットへの前処理を逆順に戻します。補助量子ビットはオラクルを適用する前後で$|0\rangle$となるため、Grover反復ごとに同じ物理量子ビットを再利用できます。
+
 
 # %%
 # |0101>をマークするオラクルを実装します。
@@ -217,9 +205,30 @@ def oracle_operator(
 oracle_operator.draw(search=SEARCH_QUBITS, fold_loops=False)
 
 # %% [markdown]
+# ### Grover反復回数の計算
+#
+# 最適なGrover反復回数は、検索量子ビット数と探したい状態の数によって決まります。`qmc.grover_iteration_count(num_qubits, num_marked)`を使うと、この反復回数を計算できます。この例では、4つの検索量子ビットと1つの探したい状態を指定すると、反復回数は3になります。以下の2つの実装では、この値を使います。
+
+# %%
+ITERATIONS = qmc.grover_iteration_count(
+    num_qubits=SEARCH_QUBITS,
+    num_marked=NUM_MARKED,
+)
+
+theta = math.asin(math.sqrt(NUM_MARKED / 2**SEARCH_QUBITS))
+ideal_marked_probability = math.sin((2 * ITERATIONS + 1) * theta) ** 2
+
+print("Grover iterations:", ITERATIONS)
+print("ideal marked-state probability:", f"{ideal_marked_probability:.6f}")
+
+assert ITERATIONS == 3
+assert ideal_marked_probability > 0.96
+
+# %% [markdown]
 # ### スクラッチ実装
 #
 # 拡散演算子は、マルチ制御ZゲートをアダマールゲートとXゲートで挟むことで実装できます。以下の`diffusion_operator`量子カーネルでは、この分解を直接記述します。`grover_search_from_scratch`では一様重ね合わせを準備し、位相オラクルと拡散演算子を順に繰り返します。
+
 
 # %%
 # 拡散演算子とGrover反復全体をスクラッチ実装します。
@@ -233,9 +242,7 @@ def diffusion_operator(
     top = search.shape[0] - 1
     search[top] = qmc.h(search[top])
     multi_controlled_x = qmc.control(qmc.x, num_controls=top)
-    search[0:top], search[top] = multi_controlled_x(
-        search[0:top], search[top]
-    )
+    search[0:top], search[top] = multi_controlled_x(search[0:top], search[top])
     search[top] = qmc.h(search[top])
 
     search = qmc.x(search)
@@ -263,6 +270,7 @@ grover_search_from_scratch.draw(iterations=ITERATIONS, fold_loops=False)
 # ### 組み込み関数：`qmc.grover_search`
 #
 # 組み込み関数は、同じ一様重ね合わせの準備と、位相オラクル・拡散演算子の反復を実行します。呼び出し側では、検索量子ビット、位相オラクル、反復回数を渡します。
+
 
 # %%
 # Qamomileの組み込み関数で同じ探索を実装します。
@@ -293,9 +301,10 @@ assert stdlib_resources.qubits == SEARCH_QUBITS + 1
 # %% [markdown]
 # ## 実行結果
 #
-# 一様重ね合わせと2つのGrover実装をQiskitへトランスパイルし、同じショット数でサンプリングします。1つ目のヒストグラムはほぼ一様になるはずです。どちらのGrover実装でも、3回反復した後は`|0101>`の確率が最も高くなるはずです。
+# スクラッチ実装は回路構成を説明するために示し、ここでは組み込み実装だけを実行します。一様重ね合わせと組み込み実装をQiskitへトランスパイルし、同じショット数でサンプリングします。1つ目のヒストグラムはほぼ一様になり、2つ目では3回反復した後に`|0101>`の確率が最も高くなるはずです。
 #
 # ### 量子回路の実行
+
 
 # %%
 # 最初のオラクル問い合わせ前の一様分布を取得します。
@@ -320,11 +329,6 @@ def sample_kernel(kernel, *, bindings: dict[str, int] | None = None, seed: int):
 
 
 before_result = sample_kernel(uniform_superposition, seed=SAMPLER_SEED)
-scratch_result = sample_kernel(
-    grover_search_from_scratch,
-    bindings={"iterations": ITERATIONS},
-    seed=SAMPLER_SEED,
-)
 stdlib_result = sample_kernel(
     grover_search_with_stdlib,
     bindings={"iterations": ITERATIONS},
@@ -334,7 +338,8 @@ stdlib_result = sample_kernel(
 # %% [markdown]
 # ### 結果のプロットと確認
 #
-# サンプリング結果を確率へ変換し、振幅増幅前の分布と2つの実装による振幅増幅後の分布を比較します。
+# サンプリング結果を確率へ変換し、振幅増幅前の分布と組み込み実装による振幅増幅後の分布を比較します。
+
 
 # %%
 # `search[0]`を右端の最下位ビット（LSB）として扱い、LSB-firstの測定タプルを通常の$|q_3q_2q_1q_0\rangle$表記の確率へ変換します。
@@ -346,7 +351,6 @@ def state_probabilities(sample_result) -> dict[str, float]:
 
 
 before_probabilities = state_probabilities(before_result)
-scratch_probabilities = state_probabilities(scratch_result)
 stdlib_probabilities = state_probabilities(stdlib_result)
 
 # q0が右端の最下位ビットになるように基底状態を表示します。
@@ -354,11 +358,10 @@ basis_states = [
     format(index, f"0{SEARCH_QUBITS}b") for index in range(2**SEARCH_QUBITS)
 ]
 before_values = [before_probabilities.get(state, 0.0) for state in basis_states]
-scratch_values = [scratch_probabilities.get(state, 0.0) for state in basis_states]
 stdlib_values = [stdlib_probabilities.get(state, 0.0) for state in basis_states]
 
-# Grover探索前の確率と、それぞれの実装による探索後の確率を比較します。
-fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True, sharey=True)
+# Groverの探索アルゴリズムの実行前と、組み込み実装による実行後の確率を比較します。
+fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True, sharey=True)
 axes[0].bar(basis_states, before_values, color="#8DBFE6")
 axes[0].axhline(
     1 / 2**SEARCH_QUBITS,
@@ -370,15 +373,14 @@ axes[0].set_title("Before Grover search")
 axes[0].set_ylabel("probability")
 axes[0].legend()
 
-bar_colors = ["#DB4D3F" if state == MARKED_STATE else "#8DBFE6" for state in basis_states]
-axes[1].bar(basis_states, scratch_values, color=bar_colors)
-axes[1].set_title(f"From scratch ({ITERATIONS} iterations)")
+bar_colors = [
+    "#DB4D3F" if state == MARKED_STATE else "#8DBFE6" for state in basis_states
+]
+axes[1].bar(basis_states, stdlib_values, color=bar_colors)
+axes[1].set_title(f"With qmc.grover_search ({ITERATIONS} iterations)")
+axes[1].set_xlabel("search state")
 axes[1].set_ylabel("probability")
-axes[2].bar(basis_states, stdlib_values, color=bar_colors)
-axes[2].set_title(f"With qmc.grover_search ({ITERATIONS} iterations)")
-axes[2].set_xlabel("search state")
-axes[2].set_ylabel("probability")
-axes[2].tick_params(axis="x", rotation=45)
+axes[1].tick_params(axis="x", rotation=45)
 
 for ax in axes:
     ax.set_ylim(0.0, 1.0)
@@ -390,15 +392,9 @@ plt.show()
 # 一様な入力と、増幅された探したい状態を検証します。
 uniform_probability = 1 / 2**SEARCH_QUBITS
 assert all(abs(value - uniform_probability) < 0.06 for value in before_values)
-assert max(scratch_probabilities, key=scratch_probabilities.get) == MARKED_STATE
 assert max(stdlib_probabilities, key=stdlib_probabilities.get) == MARKED_STATE
-assert scratch_probabilities[MARKED_STATE] > 0.85
 assert stdlib_probabilities[MARKED_STATE] > 0.85
 
-print(
-    "from-scratch marked-state probability:",
-    f"{scratch_probabilities[MARKED_STATE]:.6f}",
-)
 print(
     "built-in marked-state probability:",
     f"{stdlib_probabilities[MARKED_STATE]:.6f}",
@@ -406,7 +402,7 @@ print(
 print("ideal marked-state probability:", f"{ideal_marked_probability:.6f}")
 
 # %% [markdown]
-# 1つ目のヒストグラムでは、各状態の確率が一様分布の$1/16$に近くなっています。オラクルと拡散演算子を3回繰り返すと、どちらの実装でもほぼすべての確率が`|0101>`に集中し、$\sin^2((2r+1)\theta)$から予測される理想値に近づきます。サンプリングによって、厳密な確率から小さなずれが生じます。
+# 1つ目のヒストグラムでは、各状態の確率が一様分布の$1/16$に近くなっています。組み込み実装でオラクルと拡散演算子を3回繰り返すと、ほぼすべての確率が`|0101>`に集中し、$\sin^2((2r+1)\theta)$から予測される理想値に近づきます。サンプリングによって、厳密な確率から小さなずれが生じます。
 
 # %% [markdown]
 # ## リソース推定
@@ -421,8 +417,7 @@ grover_query_counts = [
 ]
 
 grover_scaling_reference = [
-    grover_query_counts[0]
-    * 2 ** ((num_search_qubits - RESOURCE_SEARCH_QUBITS[0]) // 2)
+    grover_query_counts[0] * 2 ** ((num_search_qubits - RESOURCE_SEARCH_QUBITS[0]) // 2)
     for num_search_qubits in RESOURCE_SEARCH_QUBITS
 ]
 exhaustive_search_reference = [
@@ -480,7 +475,7 @@ assert all(
 # =\Theta(2^{n/2})
 # $$
 #
-# です。探したい状態が1つの場合、$\theta=\arcsin(1/\sqrt{2^n})\approx1/\sqrt{2^n}$です。係数$\pi/4$は、最適な角度$\pi/2$をGrover反復1回あたりの回転角$2\theta$で割ることから得られます。対数プロットでは、関数が選んだ問い合わせ回数を$O(\sqrt{N})$と$O(N)$の参照曲線と比較しています。この2本の参照曲線は、Grover探索と古典的な全探索のオラクル問い合わせ回数に2次の差があることを表します。
+# です。探したい状態が1つの場合、$\theta=\arcsin(1/\sqrt{2^n})\approx1/\sqrt{2^n}$です。係数$\pi/4$は、最適な角度$\pi/2$をGrover反復1回あたりの回転角$2\theta$で割ることから得られます。対数プロットでは、関数が選んだ問い合わせ回数を$O(\sqrt{N})$と$O(N)$の参照曲線と比較しています。この2本の参照曲線は、Groverの探索アルゴリズムと古典的な全探索のオラクル問い合わせ回数に2次の差があることを表します。
 #
 # :::{note}
 # この比較では、位相オラクルを1回適用することを1回の問い合わせとして数え、オラクルの内部回路は考慮していません。具体的な位相オラクルでは、1回の適用に複数のゲートや補助量子ビットが必要になることがあります。そのため、実際のリソースを評価するときは、問題に応じたオラクルのゲート数と補助量子ビット数も考慮する必要があります。
@@ -493,4 +488,4 @@ assert all(
 #
 # - 位相オラクルと拡散演算子を使うと、探したい状態の確率振幅を増幅できます。
 # - Grover反復はスクラッチ実装でき、`qmc.grover_search`を使うと同じ処理を簡潔に記述できます。
-# - Grover探索のオラクル問い合わせ回数は$O(\sqrt{N})$、古典的な全探索では$O(N)$です。この比較には、問題に依存するオラクル内部のゲート数は含まれません。
+# - Groverの探索アルゴリズムのオラクル問い合わせ回数は$O(\sqrt{N})$、古典的な全探索では$O(N)$です。この比較には、問題に依存するオラクル内部のゲート数は含まれません。
