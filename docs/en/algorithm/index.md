@@ -15,9 +15,9 @@ Trotter–Suzuki product formulas on the Rabi model with empirical convergence o
 :::
 
 :::{card}
-:header: **Introduction to Grover search**
+:header: **Grover Search**
 :link: grover_search
-Use a five-qubit phase-oracle example to compare search-state probabilities before and after amplitude amplification.
+Implement Grover search from scratch and with `qmc.grover_search`, then compare probability amplification and oracle-query scaling.
 :::
 
 :::{card}

@@ -18,22 +18,22 @@
 # tags: [algorithm, oracle-based]
 # ---
 #
-# # Introduction to Grover search
+# # Grover Search
 #
 # Grover search finds a marked item in an unstructured search space by
 # amplifying its probability amplitude {cite:p}`10.1145/237814.237866`. For a
 # search space of size $N$ with one marked item, it needs $O(\sqrt{N})$ oracle
 # queries instead of the $O(N)$ queries required by exhaustive classical search.
 #
-# This notebook uses Qamomile's built-in `grover_search` and
-# `grover_iteration_count` functions. We search a four-qubit register for the
-# marked state $|0101\rangle$ and use one additional qubit inside the phase
-# oracle, giving a five-qubit circuit. Finally, we compare histograms of the
-# search-register probabilities before and after amplitude amplification.
+# This notebook implements Grover search both from scratch and with Qamomile's
+# built-in `grover_search` function. Both implementations search four qubits for
+# the marked state $|0101\rangle$ and use one auxiliary qubit in the phase
+# oracle. We compare the resulting probabilities before and after amplitude
+# amplification, then inspect the oracle-query scaling.
 
 # %%
-# Install the latest Qamomile through pip!
-# # !pip install qamomile
+# Install the latest Qamomile and the features used in this notebook.
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %%
 # Import numerical, plotting, simulator, and Qamomile utilities.
@@ -158,11 +158,8 @@ transpiler = QiskitTranspiler()
 #
 # ### Step 5: Measure the Search Register
 #
-# Measuring after the chosen number of iterations returns $x_\star$ with high
-# probability. The built-in `qmc.grover_search` function performs the
-# uniform-state preparation and the requested oracle-and-diffusion iterations.
-# The caller supplies the problem-dependent phase oracle and measures the
-# returned search register.
+# Measuring the search qubits after a suitable number of iterations returns
+# $x_\star$ with high probability.
 #
 # In summary, Grover search follows these steps:
 #
@@ -175,7 +172,7 @@ transpiler = QiskitTranspiler()
 # 6. Measure the search register.
 
 # %% [markdown]
-# ## Implementation: `grover_search`
+# ## Implementation
 #
 # ### Problem Settings
 #
@@ -259,21 +256,73 @@ def oracle_operator(
 oracle_operator.draw(search=SEARCH_QUBITS, fold_loops=False)
 
 # %% [markdown]
-# ### Search Kernels
+# ### From-Scratch Implementation
 #
-# `uniform_superposition` captures the distribution immediately before the
-# first oracle query. It allocates the same four search qubits and one auxiliary
-# qubit as the full example, but only the search register is placed in uniform
-# superposition and measured.
-#
-# `grover_search_example` passes `oracle_operator` and the iteration-count handle
-# to `qmc.grover_search`. We keep `iterations` as a `qmc.UInt` structural input
-# and bind it while transpiling. This keeps one oracle body inside the loop, so
-# its auxiliary qubit is reused across all three iterations instead of allocating
-# a separate auxiliary qubit for each unrolled Python call.
+# The diffusion operator can be written as Hadamard and X gates around a
+# multi-controlled Z gate. The `diffusion_operator` qkernel below implements
+# that decomposition directly. `grover_search_from_scratch` then prepares the
+# uniform superposition and repeats the phase oracle followed by diffusion.
 
 # %%
-# Measure the uniform search-register distribution before amplitude amplification.
+# Implement the diffusion operator and the complete Grover loop from scratch.
+@qmc.qkernel
+def diffusion_operator(
+    search: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    search = qmc.h(search)
+    search = qmc.x(search)
+
+    top = search.shape[0] - 1
+    search[top] = qmc.h(search[top])
+    multi_controlled_x = qmc.control(qmc.x, num_controls=top)
+    search[0:top], search[top] = multi_controlled_x(
+        search[0:top], search[top]
+    )
+    search[top] = qmc.h(search[top])
+
+    search = qmc.x(search)
+    search = qmc.h(search)
+    return search
+
+
+@qmc.qkernel
+def grover_search_from_scratch(
+    iterations: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    search = qmc.qubit_array(SEARCH_QUBITS, name="search")
+    search = qmc.h(search)
+
+    for _ in qmc.range(iterations):
+        search = oracle_operator(search)
+        search = diffusion_operator(search)
+
+    return qmc.measure(search)
+
+
+grover_search_from_scratch.draw(iterations=ITERATIONS, fold_loops=False)
+
+# %% [markdown]
+# ### Built-in Function: `qmc.grover_search`
+#
+# The built-in function performs the same uniform-state preparation and
+# oracle-and-diffusion loop. The caller supplies the search qubits, phase
+# oracle, and iteration count.
+
+# %%
+# Implement the same search with Qamomile's built-in function.
+@qmc.qkernel
+def grover_search_with_stdlib(
+    iterations: qmc.UInt,
+) -> qmc.Vector[qmc.Bit]:
+    search = qmc.qubit_array(SEARCH_QUBITS, name="search")
+    search = qmc.grover_search(search, oracle_operator, iterations)
+    return qmc.measure(search)
+
+
+grover_search_with_stdlib.draw(iterations=ITERATIONS, fold_loops=False)
+
+# %%
+# Capture the uniform distribution before the first oracle query.
 @qmc.qkernel
 def uniform_superposition() -> qmc.Vector[qmc.Bit]:
     search = qmc.qubit_array(SEARCH_QUBITS, name="search")
@@ -282,32 +331,25 @@ def uniform_superposition() -> qmc.Vector[qmc.Bit]:
     return qmc.measure(search)
 
 
-# Repeat the Grover iterations using the precomputed iteration count.
-@qmc.qkernel
-def grover_search_example(
-    iterations: qmc.UInt,
-) -> qmc.Vector[qmc.Bit]:
-    search = qmc.qubit_array(SEARCH_QUBITS, name="search")
-    search = qmc.grover_search(search, oracle_operator, iterations)
-    return qmc.measure(search)
-
-
-grover_search_example.draw(iterations=ITERATIONS, fold_loops=False)
-
-# %%
-# Confirm that the search register and oracle auxiliary use five qubits in total.
-search_resources = grover_search_example.estimate_resources(
+# Confirm that both implementations use four search qubits and one auxiliary.
+scratch_resources = grover_search_from_scratch.estimate_resources(
     inputs={"iterations": ITERATIONS}
 ).simplify()
-print("total circuit qubits:", search_resources.qubits)
-assert search_resources.qubits == SEARCH_QUBITS + 1
+stdlib_resources = grover_search_with_stdlib.estimate_resources(
+    inputs={"iterations": ITERATIONS}
+).simplify()
+print("scratch implementation qubits:", scratch_resources.qubits)
+print("built-in implementation qubits:", stdlib_resources.qubits)
+assert scratch_resources.qubits == SEARCH_QUBITS + 1
+assert stdlib_resources.qubits == SEARCH_QUBITS + 1
 
 # %% [markdown]
 # ## Execution Result
 #
-# We transpile both kernels to Qiskit and sample them with identical shot counts.
-# The first histogram should be nearly uniform. In the second histogram,
-# `|0101>` should dominate after three Grover iterations.
+# We transpile the uniform state and both Grover implementations to Qiskit and
+# sample them with identical shot counts. The first histogram should be nearly
+# uniform. In both Grover results, `|0101>` should dominate after three
+# iterations.
 #
 # ### Run the Quantum Circuits
 
@@ -325,17 +367,22 @@ def sample_kernel(kernel, *, bindings: dict[str, int] | None = None, seed: int):
 
 
 before_result = sample_kernel(uniform_superposition, seed=SAMPLER_SEED)
-after_result = sample_kernel(
-    grover_search_example,
+scratch_result = sample_kernel(
+    grover_search_from_scratch,
     bindings={"iterations": ITERATIONS},
-    seed=SAMPLER_SEED + 1,
+    seed=SAMPLER_SEED,
+)
+stdlib_result = sample_kernel(
+    grover_search_with_stdlib,
+    bindings={"iterations": ITERATIONS},
+    seed=SAMPLER_SEED,
 )
 
 # %% [markdown]
 # ### Plot and Inspect the Results
 #
-# We convert both sample results to search-register probabilities, then compare
-# the distributions before and after amplitude amplification.
+# We convert the sample results to probabilities, then compare the distribution
+# before amplification with both implementations after amplification.
 
 # %%
 # Convert LSB-first measurement tuples to conventional |q3 q2 q1 q0> labels.
@@ -347,17 +394,19 @@ def state_probabilities(sample_result) -> dict[str, float]:
 
 
 before_probabilities = state_probabilities(before_result)
-after_probabilities = state_probabilities(after_result)
+scratch_probabilities = state_probabilities(scratch_result)
+stdlib_probabilities = state_probabilities(stdlib_result)
 
 # Display basis states with q0 as the rightmost, least-significant bit.
 basis_states = [
     format(index, f"0{SEARCH_QUBITS}b") for index in range(2**SEARCH_QUBITS)
 ]
 before_values = [before_probabilities.get(state, 0.0) for state in basis_states]
-after_values = [after_probabilities.get(state, 0.0) for state in basis_states]
+scratch_values = [scratch_probabilities.get(state, 0.0) for state in basis_states]
+stdlib_values = [stdlib_probabilities.get(state, 0.0) for state in basis_states]
 
-# Compare search-register probabilities before and after Grover search.
-fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True, sharey=True)
+# Compare probabilities before Grover search and after each implementation.
+fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True, sharey=True)
 axes[0].bar(basis_states, before_values, color="#8DBFE6")
 axes[0].axhline(
     1 / 2**SEARCH_QUBITS,
@@ -370,11 +419,14 @@ axes[0].set_ylabel("probability")
 axes[0].legend()
 
 bar_colors = ["#DB4D3F" if state == MARKED_STATE else "#8DBFE6" for state in basis_states]
-axes[1].bar(basis_states, after_values, color=bar_colors)
-axes[1].set_title(f"After Grover search ({ITERATIONS} iterations)")
-axes[1].set_xlabel("search-register state")
+axes[1].bar(basis_states, scratch_values, color=bar_colors)
+axes[1].set_title(f"From scratch ({ITERATIONS} iterations)")
 axes[1].set_ylabel("probability")
-axes[1].tick_params(axis="x", rotation=45)
+axes[2].bar(basis_states, stdlib_values, color=bar_colors)
+axes[2].set_title(f"With qmc.grover_search ({ITERATIONS} iterations)")
+axes[2].set_xlabel("search state")
+axes[2].set_ylabel("probability")
+axes[2].tick_params(axis="x", rotation=45)
 
 for ax in axes:
     ax.set_ylim(0.0, 1.0)
@@ -386,16 +438,25 @@ plt.show()
 # Verify the uniform input and the amplified marked state.
 uniform_probability = 1 / 2**SEARCH_QUBITS
 assert all(abs(value - uniform_probability) < 0.06 for value in before_values)
-assert max(after_probabilities, key=after_probabilities.get) == MARKED_STATE
-assert after_probabilities[MARKED_STATE] > 0.85
+assert max(scratch_probabilities, key=scratch_probabilities.get) == MARKED_STATE
+assert max(stdlib_probabilities, key=stdlib_probabilities.get) == MARKED_STATE
+assert scratch_probabilities[MARKED_STATE] > 0.85
+assert stdlib_probabilities[MARKED_STATE] > 0.85
 
-print("sampled marked-state probability:", f"{after_probabilities[MARKED_STATE]:.6f}")
+print(
+    "from-scratch marked-state probability:",
+    f"{scratch_probabilities[MARKED_STATE]:.6f}",
+)
+print(
+    "built-in marked-state probability:",
+    f"{stdlib_probabilities[MARKED_STATE]:.6f}",
+)
 print("ideal marked-state probability:", f"{ideal_marked_probability:.6f}")
 
 # %% [markdown]
 # The first histogram is close to the uniform value $1/16$ for every state.
-# After three oracle-and-diffusion rounds, almost all probability is concentrated
-# on `|0101>`, close to the ideal value predicted by
+# After three oracle-and-diffusion rounds, both implementations concentrate
+# almost all probability on `|0101>`, close to the ideal value predicted by
 # $\sin^2((2r+1)\theta)$. Sampling introduces small deviations from that exact
 # probability.
 #
@@ -406,11 +467,11 @@ print("ideal marked-state probability:", f"{ideal_marked_probability:.6f}")
 # %% [markdown]
 # ## Resource Estimation
 #
-# Each Grover iteration calls the phase oracle exactly once. Therefore, the
-# number of phase-oracle queries is the iteration count returned by
-# `grover_iteration_count`. To visualize the quadratic speedup, we can evaluate
-# this function directly for several search-register widths; no circuit-level
-# resource estimate is needed.
+# Each Grover iteration calls the phase oracle exactly once. In this example,
+# we use `grover_iteration_count` to choose the iteration count, so its return
+# value is also the number of phase-oracle queries. We evaluate the helper for
+# several numbers of search qubits and compare the results with reference
+# scaling curves.
 
 # %%
 # Calculate one phase-oracle query count for each search-register width.
@@ -442,16 +503,16 @@ ax.plot(
     grover_scaling_reference,
     linestyle="--",
     color="#FF6B6B",
-    label=r"theory: Grover $O(\sqrt{N})$",
+    label=r"$O(\sqrt{N})$",
 )
 ax.plot(
     RESOURCE_SEARCH_QUBITS,
     exhaustive_search_reference,
     linestyle=":",
     color="#4ECDC4",
-    label=r"theory: Classical (Brute-force) $O(N)$",
+    label=r"$O(N)$",
 )
-ax.set_xlabel("search qubits")
+ax.set_xlabel(r"search qubits $n$")
 ax.set_ylabel("oracle queries")
 ax.set_xticks(RESOURCE_SEARCH_QUBITS)
 ax.set_yscale("log", base=10)
@@ -481,12 +542,12 @@ assert all(
 # $$
 #
 # queries. For one marked state,
-# $\theta=\arcsin(1/\sqrt{2^n})\approx1/\sqrt{2^n}$. The leading factor
-# $\pi/4$ comes from dividing the optimal angle $\pi/2$ by the $2\theta$
-# rotation per Grover iteration. The logarithmic plot compares Grover search's
-# $\Theta(2^{n/2})$ queries with the $\Theta(2^n)$ queries of classical
-# exhaustive search. It therefore demonstrates the quadratic speedup over
-# classical exhaustive search in terms of oracle-query complexity.
+# $\theta=\arcsin(1/\sqrt{2^n})\approx1/\sqrt{2^n}$. The coefficient $\pi/4$
+# follows from dividing the optimal angle $\pi/2$ by the $2\theta$ rotation per
+# Grover iteration. The logarithmic plot compares the query counts selected by
+# the helper with the $O(\sqrt{N})$ and $O(N)$ reference curves. The reference
+# curves show the quadratic difference between Grover and exhaustive-search
+# oracle-query scaling.
 #
 # :::{note}
 # This comparison treats each application of the phase oracle as one query and does not account for the oracle's internal circuit. A concrete phase oracle can require multiple gates and auxiliary qubits per application. Therefore, designing an oracle appropriate to the problem is important in Grover search.
@@ -495,15 +556,12 @@ assert all(
 # %% [markdown]
 # ## Summary
 #
-# In this notebook, we implemented Grover search with Qamomile's
-# `qmc.grover_search` and found one marked state in a 16-element search space.
+# In this notebook, we:
 #
-# - Grover search is a quantum algorithm that finds a target state by using a
-#   phase oracle and diffusion operator to amplify the marked state's
-#   probability amplitude.
-# - `qmc.grover_iteration_count()` can calculate the optimal number of Grover
-#   iterations when one state is marked.
-# - `qmc.grover_search` prepares the uniform superposition and applies the phase
-#   oracle followed by the diffusion operator in every iteration.
-# - The oracle is problem-dependent: a different predicate or marked bit string
-#   requires a corresponding phase-oracle implementation.
+# - Used a phase oracle and diffusion operator to amplify the probability
+#   amplitude of a target state.
+# - Implemented the Grover loop from scratch and expressed the same computation
+#   with `qmc.grover_search`.
+# - Compared Grover's $O(\sqrt{N})$ oracle-query scaling with exhaustive
+#   search's $O(N)$ scaling, excluding the problem-dependent oracle's internal
+#   gate cost.

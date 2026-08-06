@@ -15,9 +15,9 @@ RabiモデルでのTrotter–Suzuki積公式と収束次数の実験です。
 :::
 
 :::{card}
-:header: **Grover探索入門**
+:header: **Groverの探索アルゴリズム**
 :link: grover_search
-5量子ビットの位相オラクルを使い、振幅増幅前後の探索状態確率を比較します。
+Groverの探索アルゴリズムをスクラッチ実装と`qmc.grover_search`の2通りで実装し、確率振幅の増幅とオラクル問い合わせ回数を比較します。
 :::
 
 :::{card}
