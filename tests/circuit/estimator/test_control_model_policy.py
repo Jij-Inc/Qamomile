@@ -3,15 +3,13 @@
 import pytest
 
 import qamomile.circuit as qmc
+from qamomile.circuit.estimator._config import _ResourceEstimatorConfig
 from qamomile.circuit.estimator._control_decomposition import (
     StaticCleanAncillaBatchProfile,
     static_clean_ancilla_batch_profile,
 )
 from qamomile.circuit.estimator._resolver import ExprResolver
-from qamomile.circuit.estimator.resource_estimator import (
-    ResourceInterpreter,
-    _ResourceEstimatorConfig,
-)
+from qamomile.circuit.estimator.resource_estimator import ResourceInterpreter
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.arithmetic_operations import (
     RuntimeClassicalExpr,

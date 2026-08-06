@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING
 import sympy as sp
 
 if TYPE_CHECKING:
-    from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
+    from qamomile.circuit.estimator._estimate import ResourceEstimate
 
 ResourceExpr = sp.Expr
 

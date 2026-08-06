@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sympy as sp
 
-from qamomile.circuit.estimator._scheduling import (
+from qamomile.circuit.estimator._dependency_footprints import (
     _classical_dependency_footprint,
     _classical_dependency_key,
 )

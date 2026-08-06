@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import pytest
 import sympy as sp
 
-import qamomile.circuit.estimator._metrics as metrics_module
+import qamomile.circuit.estimator._resource_expressions as expressions_module
 
 
 def test_boolean_condition_expands_ordered_piecewise_branches() -> None:
@@ -17,7 +17,7 @@ def test_boolean_condition_expands_ordered_piecewise_branches() -> None:
         (value > 0, True),
     )
 
-    normalized = metrics_module._boolean_condition(condition)
+    normalized = expressions_module._boolean_condition(condition)
 
     assert sp.simplify_logic(normalized ^ (sp.Ne(count, 0) & (value > 0))) is sp.false
     assert normalized.subs(count, 0) is sp.false
@@ -40,7 +40,7 @@ def test_sum_expr_closes_large_constant_piecewise_without_generic_evaluation(
     )
     monkeypatch.setattr(sp.Sum, "doit", generic_evaluation)
 
-    result = metrics_module._sum_expr(
+    result = expressions_module._sum_expr(
         summand,
         index,
         sp.Integer(0),
@@ -63,7 +63,7 @@ def test_sum_expr_retains_unsupported_large_piecewise_without_generic_evaluation
     )
     monkeypatch.setattr(sp.Sum, "doit", generic_evaluation)
 
-    result = metrics_module._sum_expr(
+    result = expressions_module._sum_expr(
         summand,
         index,
         sp.Integer(0),
@@ -72,7 +72,7 @@ def test_sum_expr_retains_unsupported_large_piecewise_without_generic_evaluation
     )
 
     assert isinstance(result, sp.Sum)
-    assert metrics_module._has_large_concrete_sum(result)
+    assert expressions_module._has_large_concrete_sum(result)
     generic_evaluation.assert_not_called()
 
 
@@ -93,7 +93,7 @@ def test_constant_piecewise_sum_substitution_closes_exactly(
     )
     monkeypatch.setattr(sp.Sum, "doit", generic_evaluation)
 
-    result = metrics_module._substitute_resource_expr(
+    result = expressions_module._substitute_resource_expr(
         expression,
         {bound: sp.Integer(upper)},
     )
@@ -133,7 +133,7 @@ def test_unsupported_huge_piecewise_sum_inside_max_stays_unevaluated(
     )
     monkeypatch.setattr(sp.Sum, "doit", generic_evaluation)
 
-    result = metrics_module._substitute_resource_expr(
+    result = expressions_module._substitute_resource_expr(
         expression,
         {bound: upper},
     )
@@ -159,7 +159,7 @@ def test_piecewise_sum_without_terminal_branch_falls_back(
     )
     monkeypatch.setattr(sp.Sum, "doit", generic_evaluation)
 
-    result = metrics_module._substitute_resource_expr(
+    result = expressions_module._substitute_resource_expr(
         expression,
         {bound: upper},
     )
@@ -187,7 +187,7 @@ def test_nonaffine_piecewise_sum_guard_skips_set_solver(
     monkeypatch.setattr(sp.logic.boolalg.Boolean, "as_set", set_solver)
     monkeypatch.setattr(sp.Sum, "doit", generic_evaluation)
 
-    result = metrics_module._substitute_resource_expr(
+    result = expressions_module._substitute_resource_expr(
         expression,
         {bound: upper},
     )
@@ -220,12 +220,12 @@ def test_multilimit_sum_over_budget_stays_unevaluated(
     )
     monkeypatch.setattr(sp.Sum, "doit", generic_evaluation)
 
-    result = metrics_module._substitute_resource_expr(
+    result = expressions_module._substitute_resource_expr(
         expression,
         {bound: upper},
     )
 
-    assert metrics_module._has_large_concrete_sum(expected)
+    assert expressions_module._has_large_concrete_sum(expected)
     assert result == expected
     generic_evaluation.assert_not_called()
 
@@ -245,12 +245,12 @@ def test_reversed_huge_sum_limit_gets_lazy_nonnegative_clamp(
     )
     monkeypatch.setattr(sp.Sum, "doit", generic_evaluation)
 
-    result = metrics_module._substitute_resource_expr(
+    result = expressions_module._substitute_resource_expr(
         expression,
         {bound: lower},
     )
 
-    assert metrics_module._has_large_concrete_sum(substituted_sum)
+    assert expressions_module._has_large_concrete_sum(substituted_sum)
     assert result == expected
     generic_evaluation.assert_not_called()
 
@@ -286,7 +286,7 @@ def test_explicitly_negative_huge_sum_wrapper_gets_lazy_nonnegative_clamp(
     )
     monkeypatch.setattr(sp.Sum, "doit", generic_evaluation)
 
-    result = metrics_module._substitute_resource_expr(
+    result = expressions_module._substitute_resource_expr(
         expression,
         {bound: upper},
     )
@@ -313,7 +313,7 @@ def test_additive_huge_sum_gets_lazy_nonnegative_clamp(
     )
     monkeypatch.setattr(sp.Sum, "doit", generic_evaluation)
 
-    result = metrics_module._substitute_resource_expr(
+    result = expressions_module._substitute_resource_expr(
         expression,
         {bound: upper},
     )

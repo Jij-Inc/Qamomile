@@ -2,18 +2,31 @@
 
 from __future__ import annotations
 
+import inspect
+import pickle
+from typing import get_type_hints
 from unittest.mock import Mock
 
 import pytest
 import sympy as sp
 
 import qamomile.circuit as qmc
-import qamomile.circuit.estimator._metrics as metrics_module
+import qamomile.circuit.estimator._config as config_module
+import qamomile.circuit.estimator._gate_catalog as gate_catalog_module
+import qamomile.circuit.estimator._interpreter_loop_support as loop_support_module
+import qamomile.circuit.estimator._interpreter_region_analysis as region_analysis_module
+import qamomile.circuit.estimator._loop_scheduling as loop_scheduling_module
+import qamomile.circuit.estimator._resource_bounds as resource_bounds_module
+import qamomile.circuit.estimator._resource_expressions as resource_expressions_module
+import qamomile.circuit.estimator._resource_types as resource_types_module
+import qamomile.circuit.estimator._runtime_observation as runtime_observation_module
 import qamomile.circuit.estimator._scheduling as scheduling_module
+import qamomile.circuit.estimator._symbolic as symbolic_module
 import qamomile.observable as qm_o
 import qamomile.observable.hamiltonian as hamiltonian_module
 from qamomile.circuit.estimator import resource_estimator as estimator_module
 from qamomile.circuit.estimator._resolver import ExprResolver
+from qamomile.circuit.estimator._resource_constraints import _ResourceConstraint
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.circuit.ir.operation.gate import GateOperationType
 from tests.circuit.qkernel_catalog import grover_network_decomposition
@@ -72,20 +85,96 @@ def _trace_leaf_names(
     return [node.name]
 
 
+def test_public_resource_types_retain_owner_introspection() -> None:
+    """Moved public types remain introspectable through their owner modules."""
+    for resource_type in (
+        qmc.GateBasis,
+        qmc.GateResources,
+        resource_types_module.ResourceTraceNode,
+        qmc.WidthResources,
+        estimator_module.OpaqueCostContext,
+        estimator_module.ResourceEstimate,
+        estimator_module.ResourceInterpreter,
+        estimator_module.UnknownResourcePolicy,
+    ):
+        assert inspect.getsource(resource_type)
+
+    assert "gates" in get_type_hints(estimator_module.ResourceEstimate)
+    assert "definition_control_qubits" in get_type_hints(
+        estimator_module.OpaqueCostContext
+    )
+    assert "total" in get_type_hints(qmc.GateResources)
+    resource = qmc.GateResources(total=1)
+    restored = pickle.loads(pickle.dumps(resource))
+    assert restored == resource
+    assert type(restored) is qmc.GateResources
+
+
+def test_legacy_resource_pickle_globals_resolve_after_split() -> None:
+    """Legacy module globals still resolve to the relocated class objects."""
+    legacy_globals = {
+        "qamomile.circuit.estimator._metrics": (
+            "GateBasis",
+            "ControlDecomposition",
+            "EstimateDerivation",
+            "EstimateQuality",
+            "ApproximationStatus",
+            "ResourceAssumption",
+            "_GuardedAssumption",
+            "_GuardedDerivation",
+            "_GuardedQuality",
+            "_GuardedApproximation",
+            "WidthResources",
+            "GateResources",
+            "MeasurementResources",
+            "ResetResources",
+            "DepthResources",
+            "CallResources",
+            "ResourceTraceNode",
+            "_ConstraintRange",
+            "_ResourceConstraint",
+            "_ConditionIndicator",
+            "_RangeAny",
+            "_RangeAtLeastTwo",
+        ),
+        "qamomile.circuit.estimator.resource_estimator": (
+            "_ResourceInlineBoundaryOperation",
+            "_CappedRangeSum",
+            "_EstimatorControlBatchProfile",
+            "_CanonicalPhaseClass",
+            "_SequentialEstimateComposer",
+            "_OpaqueInvocationTransform",
+            "_ResourceEstimatorConfig",
+            "_LoopMayTaint",
+            "ResourceEstimate",
+            "OpaqueCostContext",
+            "UnknownResourcePolicy",
+            "ResourceInterpreter",
+        ),
+    }
+
+    for module_name, class_names in legacy_globals.items():
+        for class_name in class_names:
+            payload = f"c{module_name}\n{class_name}\n.".encode()
+            restored = pickle.loads(payload)
+            assert inspect.isclass(restored)
+            assert restored.__name__ == class_name
+
+
 def test_ir_gate_arity_profile_is_exhaustive_and_disjoint() -> None:
     """Every IR gate has one explicit arity without synthetic-name fallback."""
-    assert set(estimator_module._GATE_OPERATION_ARITY) == set(GateOperationType)
-    assert set(estimator_module._GATE_OPERATION_ARITY.values()) <= {1, 2, 3}
-    assert estimator_module._CLEAN_ANCILLA_EXPLICIT_MULTI_TARGET_GATE_TYPES == {
+    assert set(gate_catalog_module._GATE_OPERATION_ARITY) == set(GateOperationType)
+    assert set(gate_catalog_module._GATE_OPERATION_ARITY.values()) <= {1, 2, 3}
+    assert gate_catalog_module._CLEAN_ANCILLA_EXPLICIT_MULTI_TARGET_GATE_TYPES == {
         gate_type
-        for gate_type, arity in estimator_module._GATE_OPERATION_ARITY.items()
+        for gate_type, arity in gate_catalog_module._GATE_OPERATION_ARITY.items()
         if arity > 1
     }
 
     ir_names = {gate_type.name.lower() for gate_type in GateOperationType}
     synthetic_names = (
-        estimator_module._SYNTHETIC_SINGLE_QUBIT_GATE_NAMES
-        | estimator_module._SYNTHETIC_MULTI_QUBIT_GATE_NAMES
+        gate_catalog_module._SYNTHETIC_SINGLE_QUBIT_GATE_NAMES
+        | gate_catalog_module._SYNTHETIC_MULTI_QUBIT_GATE_NAMES
     )
     assert ir_names.isdisjoint(synthetic_names)
 
@@ -95,7 +184,7 @@ def test_runtime_observation_analysis_is_cached_by_block_identity(
 ) -> None:
     """Repeated observation summaries reuse analysis for the same block."""
     block = _taint_cache_body.build()
-    original = estimator_module.build_dependency_graph
+    original = runtime_observation_module.build_dependency_graph
     analyzed: list[list[estimator_module.Operation]] = []
 
     def record_analysis(
@@ -106,29 +195,77 @@ def test_runtime_observation_analysis_is_cached_by_block_identity(
         return original(candidate)
 
     monkeypatch.setattr(
-        estimator_module,
+        runtime_observation_module,
         "build_dependency_graph",
         record_analysis,
     )
     interpreter = estimator_module.ResourceInterpreter(
-        config=estimator_module._ResourceEstimatorConfig(),
+        config=config_module._ResourceEstimatorConfig(),
         bindings={},
     )
 
-    interpreter._block_runtime_observation_summary(block)
+    runtime_observation_module._block_runtime_observation_summary(
+        block,
+        strategy_for=interpreter._strategy_for,
+        cache=interpreter._runtime_observation_cache,
+    )
     first_analysis_count = len(analyzed)
     assert first_analysis_count > 0
 
-    interpreter._block_runtime_observation_summary(block)
+    runtime_observation_module._block_runtime_observation_summary(
+        block,
+        strategy_for=interpreter._strategy_for,
+        cache=interpreter._runtime_observation_cache,
+    )
     assert len(analyzed) == first_analysis_count
     assert interpreter._runtime_observation_cache[id(block)][0] is block
 
     distinct_block = _taint_cache_body.build()
-    interpreter._block_runtime_observation_summary(distinct_block)
+    runtime_observation_module._block_runtime_observation_summary(
+        distinct_block,
+        strategy_for=interpreter._strategy_for,
+        cache=interpreter._runtime_observation_cache,
+    )
     assert len(analyzed) > first_analysis_count
     assert interpreter._runtime_observation_cache[id(distinct_block)][0] is (
         distinct_block
     )
+
+
+def test_interpreter_reuse_restores_root_condition_values() -> None:
+    """Each estimate starts with the interpreter's original condition values."""
+
+    @qmc.qkernel
+    def first_block(first_flag: qmc.UInt) -> qmc.Qubit:
+        """Conditionally apply a gate using the first root parameter."""
+        target = qmc.qubit("target")
+        if first_flag:
+            target = qmc.h(target)
+        return target
+
+    @qmc.qkernel
+    def second_block(second_flag: qmc.UInt) -> qmc.Qubit:
+        """Conditionally apply a gate using the second root parameter."""
+        target = qmc.qubit("target")
+        if second_flag:
+            target = qmc.x(target)
+        return target
+
+    interpreter = estimator_module.ResourceInterpreter(
+        config=config_module._ResourceEstimatorConfig(basis=qmc.GateBasis.LOGICAL),
+        bindings={},
+        condition_values={
+            "first_flag": sp.Integer(0),
+            "second_flag": sp.Integer(1),
+        },
+    )
+
+    first_estimate = interpreter.estimate(first_block.build())
+    second_estimate = interpreter.estimate(second_block.build())
+
+    assert first_estimate.gates.total == 0
+    assert second_estimate.gates.total == 1
+    assert interpreter.branch_condition_names == {"second_flag"}
 
 
 def test_eval_operations_reuses_precomputed_wire_footprints(
@@ -136,10 +273,10 @@ def test_eval_operations_reuses_precomputed_wire_footprints(
 ) -> None:
     """Dependency aggregation and scheduling share one resolved footprint."""
     block = _taint_cache_body.build()
-    wire_keys = Mock(wraps=estimator_module._quantum_wire_keys)
-    monkeypatch.setattr(estimator_module, "_quantum_wire_keys", wire_keys)
+    wire_keys = Mock(wraps=region_analysis_module._quantum_wire_keys)
+    monkeypatch.setattr(region_analysis_module, "_quantum_wire_keys", wire_keys)
     interpreter = estimator_module.ResourceInterpreter(
-        config=estimator_module._ResourceEstimatorConfig(basis=qmc.GateBasis.LOGICAL),
+        config=config_module._ResourceEstimatorConfig(basis=qmc.GateBasis.LOGICAL),
         bindings={},
     )
 
@@ -162,7 +299,7 @@ def test_affine_loop_uses_symbolic_disjointness_before_enumeration(
         )
     )
     monkeypatch.setattr(
-        estimator_module,
+        loop_support_module,
         "_disjoint_concrete_loop_depth",
         concrete,
     )
@@ -182,9 +319,9 @@ def test_nonlinear_loop_falls_back_to_concrete_disjointness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A concrete nonlinear footprint retains exact parallel loop depth."""
-    concrete = Mock(wraps=estimator_module._disjoint_concrete_loop_depth)
+    concrete = Mock(wraps=loop_support_module._disjoint_concrete_loop_depth)
     monkeypatch.setattr(
-        estimator_module,
+        loop_support_module,
         "_disjoint_concrete_loop_depth",
         concrete,
     )
@@ -211,10 +348,10 @@ def test_concrete_loop_simplifies_constant_depth_fields_once(
         field: sp.Symbol(f"invariant_{field}", positive=True)
         for field in qmc.DepthResources.__dataclass_fields__
     }
-    simplify = Mock(wraps=scheduling_module._safe_simplify)
-    monkeypatch.setattr(scheduling_module, "_safe_simplify", simplify)
+    simplify = Mock(wraps=loop_scheduling_module._safe_simplify)
+    monkeypatch.setattr(loop_scheduling_module, "_safe_simplify", simplify)
 
-    depth = scheduling_module._disjoint_concrete_loop_depth(
+    depth = loop_scheduling_module._disjoint_concrete_loop_depth(
         operation,
         ExprResolver(block=block),
         qmc.DepthResources(**invariants),
@@ -239,7 +376,7 @@ def test_public_simplification_skips_branching_resource_expression(
     """Deep width summaries bypass SymPy's global simplifier."""
     parameter = sp.Symbol("n", integer=True, nonnegative=True)
     expression = parameter
-    for offset in range(estimator_module._PUBLIC_RESOURCE_SIMPLIFY_NODE_LIMIT):
+    for offset in range(symbolic_module._PUBLIC_RESOURCE_SIMPLIFY_NODE_LIMIT):
         expression = sp.Max(
             expression,
             sp.Piecewise(
@@ -253,10 +390,10 @@ def test_public_simplification_skips_branching_resource_expression(
             "branching resource expressions must stay structurally normalized"
         )
     )
-    monkeypatch.setattr(estimator_module, "_safe_simplify", simplify)
+    monkeypatch.setattr(symbolic_module, "_safe_simplify", simplify)
 
     assert (
-        estimator_module._simplify_public_resource_expression(expression) == expression
+        symbolic_module._simplify_public_resource_expression(expression) == expression
     )
     simplify.assert_not_called()
 
@@ -265,9 +402,9 @@ def test_resource_max_bounds_conditionally_active_work() -> None:
     """A zero-or-one activity guard cannot exceed its nonnegative work."""
     parameter = sp.Symbol("n", integer=True, nonnegative=True)
     work = 5 * sp.Max(0, parameter - 3) + 5
-    active = metrics_module._ConditionIndicator(sp.Gt(parameter, 0))
+    active = resource_expressions_module._ConditionIndicator(sp.Gt(parameter, 0))
 
-    assert metrics_module._resource_max(work, work * active) == work
+    assert resource_bounds_module._resource_max(work, work * active) == work
 
 
 def test_resource_max_recovers_activity_guarded_extension() -> None:
@@ -275,12 +412,12 @@ def test_resource_max_recovers_activity_guarded_extension() -> None:
     parameter = sp.Symbol("n", integer=True, nonnegative=True)
     base = sp.Integer(5)
     extension = sp.Max(0, parameter - 3)
-    active = metrics_module._ConditionIndicator(
-        metrics_module._resource_activity_condition(extension)
+    active = resource_expressions_module._ConditionIndicator(
+        resource_expressions_module._resource_activity_condition(extension)
     )
 
     assert (
-        metrics_module._resource_max(
+        resource_bounds_module._resource_max(
             base,
             (base + extension) * active,
         )
@@ -304,7 +441,7 @@ def test_resource_max_fallback_avoids_sympy_relation_proofs(
         staticmethod(reject_relation_proof),
     )
 
-    maximum = metrics_module._resource_max(left, right)
+    maximum = resource_bounds_module._resource_max(left, right)
 
     assert isinstance(maximum, sp.Max)
     assert set(maximum.args) == {left, right}
@@ -330,8 +467,8 @@ def test_structural_nonnegativity_translates_single_nested_extremum() -> None:
         - 2
     )
 
-    assert metrics_module._is_structurally_nonnegative(expression)
-    assert not metrics_module._is_structurally_nonnegative(
+    assert resource_bounds_module._is_structurally_nonnegative(expression)
+    assert not resource_bounds_module._is_structurally_nonnegative(
         sp.Min(2, sp.Max(0, parameter)) - 2
     )
 
@@ -400,7 +537,7 @@ def test_seq_all_matches_left_fold_and_preserves_trace_order() -> None:
                     f"site_{index}": value,
                 },
                 _constraints=(
-                    estimator_module._ResourceConstraint(
+                    _ResourceConstraint(
                         expression=value,
                         minimum=0,
                         label=f"constraint_{index}",
@@ -500,7 +637,7 @@ def test_completion_uniformity_avoids_general_symbolic_simplification(
             "completion uniformity must not run general simplification"
         )
     )
-    monkeypatch.setattr(scheduling_module, "_safe_simplify", simplify)
+    monkeypatch.setattr(scheduling_module.sp, "simplify", simplify)
 
     assert scheduling_module._expressions_proven_equal_without_simplify(
         expression,

@@ -12,21 +12,21 @@ import pytest
 import sympy as sp
 
 import qamomile.circuit as qm
-from qamomile.circuit.estimator._metrics import (
-    ResourceTraceNode,
-    _ConditionIndicator,
+from qamomile.circuit.estimator._resource_constraints import (
     _ConstraintRange,
     _ResourceConstraint,
 )
+from qamomile.circuit.estimator._resource_expressions import _ConditionIndicator
+from qamomile.circuit.estimator._resource_types import ResourceTraceNode
 from qamomile.circuit.estimator._serialization import (
     normalize_expression,
 )
+from qamomile.circuit.estimator._symbolic import _CappedRangeSum
 from qamomile.circuit.estimator._wire import (
-    _WireExpressionDecoder,
     resource_estimate_from_wire,
     resource_estimate_to_wire,
 )
-from qamomile.circuit.estimator.resource_estimator import _CappedRangeSum
+from qamomile.circuit.estimator._wire_expression import _WireExpressionDecoder
 
 
 @qm.qkernel

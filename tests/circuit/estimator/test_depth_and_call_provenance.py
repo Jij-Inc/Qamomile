@@ -10,21 +10,31 @@ import sympy as sp
 
 import qamomile.circuit as qm
 import qamomile.observable as qm_o
-from qamomile.circuit.estimator._resolver import ExprResolver
-from qamomile.circuit.estimator._scheduling import (
-    _array_wire_key_at_index,
-    _dependency_depth,
+from qamomile.circuit.estimator._config import _ResourceEstimatorConfig
+from qamomile.circuit.estimator._dependency_footprints import (
+    _quantum_value_wire_keys,
+)
+from qamomile.circuit.estimator._dependency_indices import (
     _normalize_wire_index,
     _OwnerWireIndices,
-    _quantum_element_index_expression,
-    _quantum_element_wire_index,
-    _quantum_value_wire_keys,
+)
+from qamomile.circuit.estimator._loop_scheduling import (
     _record_disjoint_wire_footprint,
 )
-from qamomile.circuit.estimator.resource_estimator import (
-    ResourceInterpreter,
-    _ResourceEstimatorConfig,
+from qamomile.circuit.estimator._quantum_values import (
+    _array_wire_key_at_index,
+    _quantum_element_index_expression,
+    _quantum_element_wire_index,
 )
+from qamomile.circuit.estimator._resolver import ExprResolver
+from qamomile.circuit.estimator._runtime_observation import (
+    _block_runtime_observation_summary,
+    _invoke_runtime_observation_summary,
+)
+from qamomile.circuit.estimator._scheduling import (
+    _dependency_depth,
+)
+from qamomile.circuit.estimator.resource_estimator import ResourceInterpreter
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.callable import (
     CallableDef,
@@ -2292,7 +2302,11 @@ def test_nested_invoke_uses_selected_measurement_provenance() -> None:
 
     assert leaf.measurement_result_indices == frozenset({0})
     assert leaf.measurement_result_indices_for(strategy="portable") == frozenset()
-    assert interpreter._invoke_runtime_observation_summary(outer) == (
+    assert _invoke_runtime_observation_summary(
+        outer,
+        strategy_for=interpreter._strategy_for,
+        cache=interpreter._runtime_observation_cache,
+    ) == (
         frozenset(),
         False,
     )
@@ -2454,11 +2468,19 @@ def test_recursive_runtime_observations_reach_an_order_independent_fixed_point(
     )
 
     first, second = (block_b, block_a) if query_b_first else (block_a, block_b)
-    assert interpreter._block_runtime_observation_summary(first) == (
+    assert _block_runtime_observation_summary(
+        first,
+        strategy_for=interpreter._strategy_for,
+        cache=interpreter._runtime_observation_cache,
+    ) == (
         frozenset({0}),
         True,
     )
-    assert interpreter._block_runtime_observation_summary(second) == (
+    assert _block_runtime_observation_summary(
+        second,
+        strategy_for=interpreter._strategy_for,
+        cache=interpreter._runtime_observation_cache,
+    ) == (
         frozenset({0}),
         True,
     )

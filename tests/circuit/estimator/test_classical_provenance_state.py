@@ -2,7 +2,7 @@
 
 import sympy as sp
 
-from qamomile.circuit.estimator import _resolver
+from qamomile.circuit.estimator import _array_state, _classical_facts, _resolver
 from qamomile.circuit.ir.types.primitives import BitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 
@@ -57,7 +57,7 @@ def _element(array: ArrayValue, index: int) -> Value:
 def _fact(
     value: sp.Basic | int | bool,
     token: str | None = None,
-) -> _resolver._ResolvedClassicalFact:
+) -> _classical_facts._ResolvedClassicalFact:
     """Return a resolved fact with an optional unconditional dependency.
 
     Args:
@@ -65,10 +65,10 @@ def _fact(
         token (str | None): Optional source token. Defaults to ``None``.
 
     Returns:
-        _resolver._ResolvedClassicalFact: Normalized test fact.
+        _ResolvedClassicalFact: Normalized test fact.
     """
     dependencies = {} if token is None else {token: sp.true}
-    return _resolver._ResolvedClassicalFact.create(value, dependencies)
+    return _classical_facts._ResolvedClassicalFact.create(value, dependencies)
 
 
 def test_strong_store_overwrite_kills_previous_dependencies() -> None:
@@ -77,9 +77,9 @@ def test_strong_store_overwrite_kills_previous_dependencies() -> None:
     resolver = _resolver.ExprResolver()
     resolver.bind_array_state(
         array,
-        _resolver._ArrayStoreState(
-            _resolver._ArrayStoreState(
-                _resolver._ArrayConstantState((False,)),
+        _array_state._ArrayStoreState(
+            _array_state._ArrayStoreState(
+                _array_state._ArrayConstantState((False,)),
                 _fact(True, "old"),
                 (_fact(0),),
             ),
@@ -101,8 +101,8 @@ def test_precise_element_projection_replaces_whole_array_fallback() -> None:
     resolver.bind_classical_fact(array, _fact(sp.Symbol("bits"), "broad"))
     resolver.bind_array_state(
         array,
-        _resolver._ArrayStoreState(
-            _resolver._ArrayConstantState((False, False)),
+        _array_state._ArrayStoreState(
+            _array_state._ArrayConstantState((False, False)),
             _fact(True, "updated"),
             (_fact(0),),
         ),
@@ -121,15 +121,15 @@ def test_symbolic_store_alias_guards_old_and_new_dependencies() -> None:
     resolver = _resolver.ExprResolver()
     resolver.bind_array_state(
         array,
-        _resolver._ArrayStoreState(
-            _resolver._ArrayStoreState(
-                _resolver._ArrayConstantState((False,)),
+        _array_state._ArrayStoreState(
+            _array_state._ArrayStoreState(
+                _array_state._ArrayConstantState((False,)),
                 _fact(True, "old"),
                 (_fact(0),),
             ),
             _fact(False, "new"),
             (
-                _resolver._ResolvedClassicalFact.create(
+                _classical_facts._ResolvedClassicalFact.create(
                     store_index,
                     {"index_source": sp.true},
                 ),
@@ -150,14 +150,14 @@ def test_symbolic_store_alias_guards_old_and_new_dependencies() -> None:
 
 def test_choice_drops_selector_only_for_structurally_identical_facts() -> None:
     """Only an observationally identical branch pair ignores its selector."""
-    selector = _resolver._ResolvedClassicalFact.create(
+    selector = _classical_facts._ResolvedClassicalFact.create(
         sp.Symbol("measured", integer=True, nonnegative=True),
         {"measurement": sp.true},
     )
     identical = _fact(True, "shared")
 
-    collapsed = _resolver._choice_classical_fact(identical, identical, selector)
-    distinct = _resolver._choice_classical_fact(
+    collapsed = _classical_facts._choice_classical_fact(identical, identical, selector)
+    distinct = _classical_facts._choice_classical_fact(
         identical,
         _fact(True, "other"),
         selector,
@@ -172,7 +172,7 @@ def test_choice_drops_selector_only_for_structurally_identical_facts() -> None:
 def test_bind_classical_selection_preserves_guards_with_value_override() -> None:
     """A separately derived merge value keeps selected branch dependencies."""
     result = Value(type=BitType(), name="merged")
-    selector = _resolver._ResolvedClassicalFact.create(
+    selector = _classical_facts._ResolvedClassicalFact.create(
         sp.Symbol("condition", integer=True, nonnegative=True),
         {"selector": sp.true},
     )
@@ -202,7 +202,7 @@ def test_bind_classical_selection_preserves_guards_with_value_override() -> None
 def test_bind_classical_selection_drops_irrelevant_selector() -> None:
     """Identical branch facts remain independent of their selector token."""
     result = Value(type=BitType(), name="merged")
-    selector = _resolver._ResolvedClassicalFact.create(
+    selector = _classical_facts._ResolvedClassicalFact.create(
         sp.Symbol("condition", integer=True, nonnegative=True),
         {"selector": sp.true},
     )
@@ -222,12 +222,12 @@ def test_bind_classical_selection_drops_irrelevant_selector() -> None:
 def test_bind_array_state_selection_projects_each_element_independently() -> None:
     """Detached array branches retain selectors only for differing elements."""
     result = _bit_array("merged", (False, False))
-    selector = _resolver._ResolvedClassicalFact.create(
+    selector = _classical_facts._ResolvedClassicalFact.create(
         sp.Symbol("condition", integer=True, nonnegative=True),
         {"selector": sp.true},
     )
-    false_state = _resolver._ArrayConstantState((False, False))
-    true_state = _resolver._ArrayStoreState(
+    false_state = _array_state._ArrayConstantState((False, False))
+    true_state = _array_state._ArrayStoreState(
         false_state,
         _fact(True, "updated"),
         (_fact(0),),
@@ -255,8 +255,8 @@ def test_array_context_fork_export_and_import_are_isolated() -> None:
     left = _bit_array("left", (False,))
     right = _bit_array("right", (True,))
     parent = _resolver.ExprResolver()
-    parent.bind_array_state(left, _resolver._ArrayConstantState((False,)))
-    parent.bind_array_state(right, _resolver._ArrayConstantState((True,)))
+    parent.bind_array_state(left, _array_state._ArrayConstantState((False,)))
+    parent.bind_array_state(right, _array_state._ArrayConstantState((True,)))
 
     forked = parent.fork_array_context()
     forked.pop(left.uuid)

@@ -16,7 +16,7 @@ import sympy as sp
 
 import qamomile.circuit as qmc
 from qamomile.circuit.estimator import ResourceTraceNode
-from qamomile.circuit.estimator._metrics import (
+from qamomile.circuit.estimator._resource_constraints import (
     _ConstraintRange,
     _ResourceConstraint,
 )

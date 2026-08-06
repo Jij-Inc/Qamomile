@@ -1644,11 +1644,9 @@ def test_query_only_opaque_call_does_not_trigger_control_batching() -> None:
     with_query_estimate = query_circuit.estimate_resources()
     gate_only_estimate = gate_circuit.estimate_resources()
 
+    from qamomile.circuit.estimator._config import _ResourceEstimatorConfig
     from qamomile.circuit.estimator._resolver import ExprResolver
-    from qamomile.circuit.estimator.resource_estimator import (
-        ResourceInterpreter,
-        _ResourceEstimatorConfig,
-    )
+    from qamomile.circuit.estimator.resource_estimator import ResourceInterpreter
 
     body = with_query.block
     profile = ResourceInterpreter(
@@ -2658,11 +2656,9 @@ def test_symbolic_open_controlled_phase_specializes_before_batching() -> None:
 
 def test_bodyless_controlled_calls_do_not_create_a_shared_ladder() -> None:
     """OPAQUE_CALL records unknown calls without inventing control gates."""
+    from qamomile.circuit.estimator._config import _ResourceEstimatorConfig
     from qamomile.circuit.estimator._resolver import ExprResolver
-    from qamomile.circuit.estimator.resource_estimator import (
-        ResourceInterpreter,
-        _ResourceEstimatorConfig,
-    )
+    from qamomile.circuit.estimator.resource_estimator import ResourceInterpreter
 
     control = Value(type=QubitType(), name="control")
     target = Value(type=QubitType(), name="target")
@@ -2739,11 +2735,9 @@ def test_bodyless_transforms_honor_fail_closed_and_warning_policies(
     callable_kind: str,
 ) -> None:
     """Bodyless transforms fail by default and honor the warning policy."""
+    from qamomile.circuit.estimator._config import _ResourceEstimatorConfig
     from qamomile.circuit.estimator._resolver import ExprResolver
-    from qamomile.circuit.estimator.resource_estimator import (
-        ResourceInterpreter,
-        _ResourceEstimatorConfig,
-    )
+    from qamomile.circuit.estimator.resource_estimator import ResourceInterpreter
 
     block = Block(operations=[operation])
     with pytest.raises(ValueError, match=rf"resources for {callable_kind}"):
@@ -2775,11 +2769,9 @@ def test_unsupported_controlled_loops_fail_closed(
     operation: Operation,
 ) -> None:
     """Unsupported loop forms fail instead of selecting a control recipe."""
+    from qamomile.circuit.estimator._config import _ResourceEstimatorConfig
     from qamomile.circuit.estimator._resolver import ExprResolver
-    from qamomile.circuit.estimator.resource_estimator import (
-        ResourceInterpreter,
-        _ResourceEstimatorConfig,
-    )
+    from qamomile.circuit.estimator.resource_estimator import ResourceInterpreter
 
     block = Block(operations=[operation])
     interpreter = ResourceInterpreter(

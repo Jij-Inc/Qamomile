@@ -7,8 +7,8 @@ import sympy as sp
 from sympy.logic.boolalg import Boolean
 
 import qamomile.circuit as qmc
-import qamomile.circuit.estimator.resource_estimator as resource_estimator_module
-from qamomile.circuit.estimator._metrics import _RangeAny
+import qamomile.circuit.estimator._estimate_rewrite as estimate_rewrite_module
+from qamomile.circuit.estimator._resource_expressions import _RangeAny
 
 _RANGE_GUARD_SYMBOL = sp.Symbol("range_guard", integer=True)
 
@@ -73,7 +73,7 @@ def test_substitute_keeps_boolean_guards_out_of_numeric_rewriter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Metadata guards use the non-clamping structural substitution path."""
-    original = resource_estimator_module._substitute_resource_expr
+    original = estimate_rewrite_module._substitute_resource_expr
 
     def reject_boolean(
         expression: sp.Basic,
@@ -92,7 +92,7 @@ def test_substitute_keeps_boolean_guards_out_of_numeric_rewriter(
         return original(expression, substitutions)
 
     monkeypatch.setattr(
-        resource_estimator_module,
+        estimate_rewrite_module,
         "_substitute_resource_expr",
         reject_boolean,
     )

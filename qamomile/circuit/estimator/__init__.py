@@ -12,14 +12,16 @@ Measurements and resets are reported independently from gates, while depth
 retains both the complete critical path and per-operation-class layers.
 """
 
-from qamomile.circuit.estimator._metrics import (
+from qamomile.circuit.estimator._resource_base import (
     ApproximationStatus,
-    CallResources,
     ControlDecomposition,
-    DepthResources,
     EstimateDerivation,
     EstimateQuality,
     GateBasis,
+)
+from qamomile.circuit.estimator._resource_types import (
+    CallResources,
+    DepthResources,
     GateResources,
     MeasurementResources,
     ResetResources,

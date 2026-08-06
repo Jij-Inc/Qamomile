@@ -9,6 +9,11 @@ import pytest
 import sympy as sp
 
 import qamomile.circuit as qm
+import qamomile.circuit.estimator._clifford_t_decomposition as decomposition_module
+import qamomile.circuit.estimator._clifford_t_depth as depth_module
+import qamomile.circuit.estimator._estimate_provenance as estimate_provenance_module
+import qamomile.circuit.estimator._estimate_reporting as estimate_reporting_module
+import qamomile.circuit.estimator._gate_models as gate_models_module
 from qamomile.circuit.estimator import (
     resource_estimator as resource_estimator_module,
 )
@@ -91,16 +96,23 @@ def test_estimation_derives_public_symbol_metadata_once(
             target = qm.x(target)
         return target
 
-    registry_spy = Mock(wraps=resource_estimator_module._serialization_registry)
+    registry_spy = Mock(wraps=estimate_provenance_module._serialization_registry)
+    report_registry_spy = Mock(wraps=estimate_reporting_module._serialization_registry)
     monkeypatch.setattr(
-        resource_estimator_module,
+        estimate_provenance_module,
         "_serialization_registry",
         registry_spy,
+    )
+    monkeypatch.setattr(
+        estimate_reporting_module,
+        "_serialization_registry",
+        report_registry_spy,
     )
 
     estimate = repeated_body.estimate_resources(basis=qm.GateBasis.LOGICAL)
 
     assert registry_spy.call_count == 1
+    assert report_registry_spy.call_count == 0
     assert estimate.parameters == {}
     assert registry_spy.call_count == 1
     assert estimate.width.peak_qubits == 1
@@ -110,7 +122,8 @@ def test_estimation_derives_public_symbol_metadata_once(
 
     payload = estimate.to_dict()
 
-    assert registry_spy.call_count == 2
+    assert registry_spy.call_count == 1
+    assert report_registry_spy.call_count == 1
     assert payload["parameters"] == {}
 
 
@@ -475,7 +488,7 @@ def test_controlled_clifford_t_depth_tracks_canonical_schedule(
     expected: tuple[int, int, int, int, int, int, qm.EstimateQuality],
 ) -> None:
     """Named Clifford+T recipes expose their schedule and quality."""
-    estimate = resource_estimator_module._estimate_named_gate_in_basis(
+    estimate = gate_models_module._estimate_named_gate_in_basis(
         name,
         sp.Integer(controls),
         basis=qm.GateBasis.CLIFFORD_T,
@@ -507,7 +520,7 @@ def test_symbolic_clifford_t_named_depth_matches_direct_specialization(
 ) -> None:
     """Symbolic control guards retain every recipe and quality branch."""
     controls = sp.Symbol("controls", integer=True, nonnegative=True)
-    symbolic = resource_estimator_module._estimate_named_gate_in_basis(
+    symbolic = gate_models_module._estimate_named_gate_in_basis(
         name,
         controls,
         basis=qm.GateBasis.CLIFFORD_T,
@@ -517,7 +530,7 @@ def test_symbolic_clifford_t_named_depth_matches_direct_specialization(
 
     for value in range(4):
         specialized = symbolic.substitute(controls=value)
-        direct = resource_estimator_module._estimate_named_gate_in_basis(
+        direct = gate_models_module._estimate_named_gate_in_basis(
             name,
             sp.Integer(value),
             basis=qm.GateBasis.CLIFFORD_T,
@@ -537,13 +550,13 @@ def test_symbolic_clifford_t_named_depth_matches_direct_specialization(
 @pytest.mark.parametrize("name", ["y", "z", "s", "sdg"])
 def test_uncontrolled_fixed_gate_keeps_single_layer_depth(name: str) -> None:
     """Controlled-depth special cases preserve their uncontrolled branch."""
-    gates = resource_estimator_module._classify_clifford_t_gate(
+    gates = decomposition_module._classify_clifford_t_gate(
         name,
         sp.Integer(0),
         1 / 8,
     )
 
-    depth = resource_estimator_module._named_clifford_t_depth(
+    depth = depth_module._named_clifford_t_depth(
         name,
         sp.Integer(0),
         gates,
@@ -1646,12 +1659,10 @@ def test_runtime_resource_value_crossing_qkernel_call_fails_closed() -> None:
 
 def test_runtime_if_bit_merge_symbol_keeps_ir_domain() -> None:
     """An undecidable Bit merge remains a nonnegative integer."""
+    from qamomile.circuit.estimator._config import _ResourceEstimatorConfig
     from qamomile.circuit.estimator._resolver import ExprResolver
-    from qamomile.circuit.estimator.resource_estimator import (
-        ResourceInterpreter,
-        _ResourceEstimatorConfig,
-        build_if_scopes,
-    )
+    from qamomile.circuit.estimator._scopes import build_if_scopes
+    from qamomile.circuit.estimator.resource_estimator import ResourceInterpreter
     from qamomile.circuit.ir.operation.control_flow import IfOperation
     from qamomile.circuit.ir.types.primitives import BitType
     from qamomile.circuit.ir.value import Value
@@ -1688,10 +1699,8 @@ def test_runtime_if_bit_merge_symbol_keeps_ir_domain() -> None:
 
 def test_condition_values_never_capture_identity_fresh_fallbacks() -> None:
     """Public condition inputs specialize symbols but not same-named dummies."""
-    from qamomile.circuit.estimator.resource_estimator import (
-        ResourceInterpreter,
-        _ResourceEstimatorConfig,
-    )
+    from qamomile.circuit.estimator._config import _ResourceEstimatorConfig
+    from qamomile.circuit.estimator.resource_estimator import ResourceInterpreter
 
     public = sp.Symbol("flag", integer=True, nonnegative=True)
     internal = sp.Dummy("flag", integer=True, nonnegative=True)
@@ -2324,7 +2333,7 @@ def test_expr_resolver_caches_input_shape_aliases_across_scopes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One resolver tree indexes each block's input-shape aliases once."""
-    from qamomile.circuit.estimator import _resolver as resolver_module
+    from qamomile.circuit.estimator import _resolver_indices as resolver_indices
     from qamomile.circuit.estimator._resolver import ExprResolver
     from qamomile.circuit.ir.block import Block
     from qamomile.circuit.ir.types.primitives import FloatType, UIntType
@@ -2342,10 +2351,10 @@ def test_expr_resolver_caches_input_shape_aliases_across_scopes(
         input_values=[values],
     )
     child = Block(name="child")
-    alias_spy = Mock(wraps=resolver_module.input_shape_dimension_aliases)
+    alias_spy = Mock(wraps=resolver_indices._compute_input_shape_dimension_aliases)
     monkeypatch.setattr(
-        resolver_module,
-        "input_shape_dimension_aliases",
+        resolver_indices,
+        "_compute_input_shape_dimension_aliases",
         alias_spy,
     )
     resolver = ExprResolver(root)
