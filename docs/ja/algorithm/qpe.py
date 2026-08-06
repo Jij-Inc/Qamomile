@@ -18,15 +18,15 @@
 # tags: [algorithm, primitive, resource-estimation]
 # ---
 #
-# # 量子位相推定（QPE）入門
+# # 量子位相推定（QPE）
 #
 # 量子位相推定（Quantum Phase Estimation; QPE）は、$U|\psi\rangle = e^{2\pi i \phi}|\psi\rangle$を満たすユニタリ$U$と固有状態$|\psi\rangle$から、固有位相$\phi$を推定するアルゴリズムです。Shorのアルゴリズムなど、ユニタリの固有値に埋め込まれた位相を使うアルゴリズムで中心的なプリミティブとして使われます{cite:p}`10.48550/arXiv.quant-ph/9511026,10.1098/rspa.1998.0164`。
 #
-# このノートブックでは、組み込みの`qpe`ヘルパーを4x4ユニタリに適用します。既知の固有状態を準備し、ローカルのQiskitシミュレータで回路を実行して、復号された位相を既知の固有位相と比較します。さらに、カウント用量子ビットを増やすと精度が上がることを確認し、リソース推定を使って、必要な精度に対する計算量の増え方を見ます。
+# このノートブックでは、QPEの手順をQamomileの量子カーネルとして実装し、組み込みの`qmc.qpe`関数による実装と比較します。さらに、カウント用量子ビット数と推定精度、必要なゲート数の関係を確認します。
 
 # %%
-# 最新のQamomileをpipからインストールします！
-# # !pip install qamomile
+# 最新のQamomileと、このノートブックで使う追加機能をインストールします。
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %%
 # 数値計算、プロット、シミュレータ、Qamomileのユーティリティを読み込みます。
@@ -40,29 +40,28 @@ from qiskit_aer import AerSimulator
 import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
 
-# QPEの回路構造が見えるように、複合ゲートを分解して扱います。
-transpiler = QiskitTranspiler(use_native_composite=False)
+transpiler = QiskitTranspiler()
 
 # %% [markdown]
 # ## 背景: 位相キックバックと量子フーリエ変換
 #
-# QPEは、制御ユニタリーゲートによる位相キックバック{cite:p}`10.1098/rspa.1998.0164`と、量子フーリエ変換{cite:p}`10.48550/arXiv.quant-ph/0201067`を組み合わせます。
+# QPEは、制御$U$ゲートによる位相キックバック{cite:p}`10.1098/rspa.1998.0164`と、量子フーリエ変換{cite:p}`10.48550/arXiv.quant-ph/0201067`を組み合わせます。
 #
 # ### 位相キックバック
 #
-# 位相キックバックは、対象レジスタの固有位相を制御レジスタへ移します。次を仮定します。
+# 位相キックバックは、ユニタリ行列$U$の固有状態$|\psi\rangle$に制御$U$ゲートを適用したとき、$U$の固有位相が制御量子ビットの相対位相として現れる仕組みです。次を仮定します。
 #
 # $$
 # U|\psi\rangle = e^{2\pi i\phi}|\psi\rangle.
 # $$
 #
-# 1つの制御量子ビットを重ね合わせにし、対象レジスタを$|\psi\rangle$のままにします。
+# 1つの制御量子ビットを重ね合わせ状態にし、対象となる量子状態を$|\psi\rangle$に準備します。
 #
 # $$
 # \frac{|0\rangle + |1\rangle}{\sqrt{2}}|\psi\rangle.
 # $$
 #
-# $U$に対応する制御ユニタリーゲートは、制御量子ビットが$|1\rangle$の枝にだけ$U$を適用します。対象レジスタは固有状態なので、その枝に固有位相が乗ります。
+# 制御$U$ゲートは、制御量子ビットが$|1\rangle$である成分にだけ$U$を適用します。$|\psi\rangle$は$U$の固有状態なので、その成分に固有位相が現れます。
 #
 # $$
 # \frac{|0\rangle|\psi\rangle + |1\rangle U|\psi\rangle}{\sqrt{2}}
@@ -70,11 +69,11 @@ transpiler = QiskitTranspiler(use_native_composite=False)
 # \frac{|0\rangle + e^{2\pi i\phi}|1\rangle}{\sqrt{2}}|\psi\rangle.
 # $$
 #
-# 対象レジスタは同じ固有状態に戻り、制御量子ビットが位相を持ちます。QPEはこの仕組みを制御ユニタリーゲートで繰り返します。制御ユニタリーゲート（$U^{2^k}$）は位相$e^{2\pi i 2^k\phi}$をキックバックするため、異なる制御量子ビットが同じ固有位相の異なる2進重みを受け取ります。QPEでは、それぞれの制御量子ビットを個別に測定せず、キックバックされた位相を測定前まで保ちます。
+# この変換では、対象となる量子状態は$|\psi\rangle$のまま保たれ、固有位相は制御量子ビットの相対位相に符号化されます。QPEでは、複数の制御量子ビットに対してこの仕組みを意図的に利用します。具体的な符号化方法は「アルゴリズム」節で説明します。
 #
 # ### 量子フーリエ変換
 #
-# $M=2^m$個の基底状態に対するQFTは
+# 量子フーリエ変換（QFT）は、計算基底状態を、その値に応じた相対位相を持つ重ね合わせへ写す変換です。$M=2^m$個の基底状態に対するQFTは次のように定義されます。
 #
 # $$
 # \mathrm{QFT}_M|x\rangle
@@ -82,7 +81,7 @@ transpiler = QiskitTranspiler(use_native_composite=False)
 #   \sum_{y=0}^{M-1} e^{2\pi i xy/M}|y\rangle.
 # $$
 #
-# これは整数$x$を、計算基底全体にわたる規則的な位相パターンへ写します。詳しい説明はQFTチュートリアルをご覧ください。逆QFTはその逆の操作です。$\phi=a/M$が$m$ビットで正確に表せる場合、制御ユニタリーゲート（$U^{2^0}, U^{2^1}, \ldots, U^{2^{m-1}}$）によってカウント用レジスタは
+# これは整数$x$を、計算基底全体にわたる規則的な位相パターンへ写します。このように、値を各計算基底の相対位相として保持した状態を、ここでは「フーリエ符号化された状態」と呼びます。詳しい説明はQFTチュートリアルをご覧ください。逆QFT $\mathrm{QFT}_M^{-1}$は、この変換の逆操作です。$\phi=a/M$が$m$ビットで正確に表せる場合、制御$U^{2^0}, U^{2^1}, \ldots, U^{2^{m-1}}$ゲートによってカウント用量子ビットは
 #
 # $$
 # \frac{1}{\sqrt{M}}\sum_{k=0}^{M-1} e^{2\pi i a k/M}|k\rangle
@@ -108,17 +107,15 @@ transpiler = QiskitTranspiler(use_native_composite=False)
 # %% [markdown]
 # ## アルゴリズム
 #
-# QPEは、1つの制御量子ビットで見た位相キックバックを、レジスタ全体の手順へ拡張します。カウント用レジスタはまず、すべての2進重みを重ね合わせとして保持します。そこへ$U$の制御ユニタリーゲートを適用すると、対応する重み付きの固有位相がカウント用レジスタへキックバックされます。最後に逆QFTを使い、このフーリエ符号化された位相パターンを通常の2進整数として読み出すことで、$\phi$の推定値を得ます。
-#
-# 対象レジスタへの入力は、$U|\psi\rangle = e^{2\pi i\phi}|\psi\rangle$を満たす$U$のある固有状態$|\psi\rangle$であるとします。$m$ビットの精度で推定したいとし、カウント用レジスタは$|0\rangle^{\otimes m}$から始めます。ここで$M=2^m$とおきます。
+# QPEは、位相を読み出すための$m$個のカウント用量子ビットと、$U$の固有状態$|\psi\rangle$を保持する対象量子ビットから構成されます。カウント用量子ビットとは、位相を$m$ビットの2進小数として読み出すための補助量子ビットです。対象量子ビットへの入力は、$U|\psi\rangle = e^{2\pi i\phi}|\psi\rangle$を満たす固有状態$|\psi\rangle$とし、カウント用量子ビットは$|0\rangle^{\otimes m}$から始めます。ここで$M=2^m$とおきます。
 #
 # :::{note} 固有状態の重ね合わせ
-# より一般には、対象レジスタへの入力は1つの固有状態に限られません。固有状態の重ね合わせを入力した場合、QPEは入力状態に含まれる各固有状態の重みに応じた確率で、対応する固有位相を測定します。このチュートリアルでは、位相キックバックの式とサンプリング結果を読みやすくするため、既知の固有状態を使います。
+# より一般には、対象量子ビットへの入力は1つの固有状態に限られません。固有状態の重ね合わせを入力した場合、QPEは入力状態に含まれる各固有状態の重みに応じた確率で、対応する固有位相を測定します。このチュートリアルでは、位相キックバックの式とサンプリング結果を読みやすくするため、既知の固有状態を使います。
 # :::
 #
-# ### ステップ1：カウント用レジスタを重ね合わせにする
+# ### ステップ1：カウント用量子ビットを重ね合わせにする
 #
-# カウント用レジスタにアダマールゲートを適用します。これにより、$M$個のカウント用レジスタの値の一様重ね合わせが作られます。
+# カウント用量子ビットにアダマールゲートを適用します。これにより、$M$個の値の一様重ね合わせが作られます。
 #
 # $$
 # |\Psi_1\rangle =
@@ -127,9 +124,9 @@ transpiler = QiskitTranspiler(use_native_composite=False)
 # \frac{1}{\sqrt{M}}\sum_{r=0}^{M-1}|r\rangle|\psi\rangle.
 # $$
 #
-# ### ステップ2：制御ユニタリーゲートを適用する
+# ### ステップ2：制御$U^{2^k}$ゲートを適用する
 #
-# 各カウント用量子ビット$k$に対して、制御ユニタリーゲート（$U^{2^k}$）を適用します。$r=\sum_{k=0}^{m-1} r_k2^k$と書くと、対象の固有状態には位相$e^{2\pi i\phi r}$が乗ります。
+# 各カウント用量子ビット$k$を制御として、制御$U^{2^k}$ゲートを適用します。$r=\sum_{k=0}^{m-1} r_k2^k$と書くと、対象の固有状態には位相$e^{2\pi i\phi r}$が乗ります。
 #
 # $$
 # |\Psi_2\rangle =
@@ -137,9 +134,9 @@ transpiler = QiskitTranspiler(use_native_composite=False)
 # e^{2\pi i \phi r}|r\rangle|\psi\rangle.
 # $$
 #
-# ### ステップ3：逆QFTで復号する
+# ### ステップ3：逆QFTで位相情報をビット列へ変換する
 #
-# $\phi=a/M$が正確に表せる場合、カウント用レジスタは$\mathrm{QFT}_M|a\rangle$になります。逆QFTを適用すると$|a\rangle$が返ります。
+# $\phi=a/M$が正確に表せる場合、カウント用量子ビットは$\mathrm{QFT}_M|a\rangle$になります。逆QFTを適用すると$|a\rangle$が返ります。
 #
 # $$
 # |\Psi_2\rangle =
@@ -157,15 +154,15 @@ transpiler = QiskitTranspiler(use_native_composite=False)
 # |a\rangle|\psi\rangle.
 # $$
 #
-# ### ステップ4：位相を測定する
+# ### ステップ4：ビット列を測定し、位相を復号する
 #
-# カウント用レジスタを測定します。正確に表せる場合、測定結果は$a$となり、位相の推定値は次のようになります。
+# カウント用量子ビットを測定します。正確に表せる場合、測定結果は$a$となり、このビット列を復号した位相の推定値は次のようになります。
 #
 # $$
 # \tilde{\phi} = \frac{a}{M}.
 # $$
 #
-# $\phi$が$m$ビットで正確に表せない場合、分布は最も近い$m$ビット近似の周辺に集中します。$m$を増やすと位相の格子間隔$1/2^m$が小さくなるため、表現可能な位相を真の固有位相へ近づけられます。
+# $\phi$が$m$ビットで正確に表せない場合、分布は最も近い$m$ビット近似の周辺に集中します。$m$を増やすと表現できる位相の間隔$1/2^m$が小さくなるため、推定値を真の固有位相へ近づけられます。
 #
 # :::{note} **2進小数と精度**
 # 2進小数では、小数部に使えるビット数が位相推定値の精度を左右します。たとえば$\phi=0.6$は2進小数では正確に表せません。2ビットで表すと、最も近い2進小数は
@@ -174,7 +171,7 @@ transpiler = QiskitTranspiler(use_native_composite=False)
 # 0.10_2 = \frac{1}{2^1} + \frac{0}{2^2} = 0.5
 # $$
 #
-# です。一方、3ビットまで使うと格子が細かくなり、
+# です。一方、3ビットまで使うと表現できる値の間隔が小さくなり、
 #
 # $$
 # 0.101_2
@@ -186,18 +183,14 @@ transpiler = QiskitTranspiler(use_native_composite=False)
 # :::
 #
 # ```{figure} assets/qpe_circuit.png
-# :alt: カウント用レジスタ、制御ユニタリーゲート、逆QFT、測定からなる量子位相推定回路。
+# :alt: カウント用量子ビット、制御Uゲート、逆QFT、測定からなる量子位相推定回路。
 # :width: 720px
 #
-# QPE回路の模式図です。カウント用レジスタが制御ユニタリーゲートを通じて位相を蓄積し、逆QFTが蓄積された位相パターンを測定ビット列に変換します。
+# QPE回路の模式図です。カウント用量子ビットが制御$U$ゲートを通じて位相を蓄積し、逆QFTが蓄積された位相パターンを測定ビット列に変換します。
 # ```
 
 # %% [markdown]
-# ## Qamomileでの実装：`qpe`関数
-#
-# `qmc.qpe`関数は、QPEのパターン全体を適用します。アダマールゲート、渡したユニタリ量子カーネルに対応する制御ユニタリーゲート、逆QFT、固定小数点の位相復号をまとめて扱えます。
-#
-# ### 問題例
+# ## Qamomileでの実装
 #
 # ここでは**対角**4x4ユニタリを使います。
 #
@@ -211,22 +204,17 @@ transpiler = QiskitTranspiler(use_native_composite=False)
 # \end{pmatrix}.
 # $$
 #
-# この行列では、すべての計算基底状態が固有状態です。対象状態$|01\rangle$を準備し、推定したい位相$\theta_{01} / 2\pi$を$0.6$に設定します。$0.6$は2進格子上で正確には表現できないため、カウント用量子ビットを増やす効果が見えやすくなります。
+# この行列では、すべての計算基底状態が固有状態です。対象状態$|01\rangle$を準備し、推定したい位相$\theta_{01} / 2\pi$を$0.6$に設定します。$0.6$は有限の2進小数では正確に表せないため、カウント用量子ビットを増やす効果が見えやすくなります。
 
 # %%
-# カウント用レジスタのサイズ、サンプリング設定、対象固有状態を決めます。
+# サンプリング設定と対象固有状態を決めます。
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-COUNTING_BIT_OPTIONS = tuple(range(3, 6)) if docs_test_mode else tuple(range(3, 10))
-DRAW_COUNTING_BITS = 3
-EXAMPLE_COUNTING_BITS = 3
 SHOTS = 512 if docs_test_mode else 4096
 SAMPLER_SEED = 321
-TARGET_BASIS = 1  # |01>
 
 # 対角ユニタリの位相と対象位相を設定します。
 TARGET_PHASE_FRACTION = 0.6
 phase_fractions = np.array([0.0, TARGET_PHASE_FRACTION, 0.23, 0.81])
-phase_fractions[TARGET_BASIS] = TARGET_PHASE_FRACTION
 phase_angles = 2 * math.pi * phase_fractions
 
 # 位相をユニタリ行列に変換し、ユニタリ性を確認します。
@@ -246,9 +234,9 @@ print(np.round(unitary, 3))
 assert 0.0 <= TARGET_PHASE_FRACTION < 1.0
 
 # %% [markdown]
-# ### `qpe`による量子カーネルの実装
+# ### スクラッチ実装
 #
-# まず、位相を推定したい4x4ユニタリを定義します。下の`diagonal_4x4`量子カーネルは、この行列を直接実装します。Qamomileでは、`qmc.p(q, theta)`は`q`の$|1\rangle$成分に$e^{i\theta}$を掛けます。そのため、`qmc.p(q[0], phi10)`は対象レジスタの最初のビットが1であるすべての基底状態に位相$e^{i\theta_{10}}$を与え、`qmc.p(q[1], phi01)`は対象レジスタの2つ目のビットが1であるすべての基底状態に位相$e^{i\theta_{01}}$を与えます。この時点で$|11\rangle$には$e^{i(\theta_{10}+\theta_{01})}$が乗っているため、制御位相シフトゲートでは補正分
+# まず、位相を推定したい4x4ユニタリを定義します。位相ゲート$P(\theta)$は、量子ビットの$|1\rangle$成分に$e^{i\theta}$を掛けます。Qamomileでは、このゲートを`qmc.p(q, theta)`と記述します。そのため、`qmc.p(q[0], phi10)`は対象量子ビットの最初のビットが1であるすべての基底状態に位相$e^{i\theta_{10}}$を与え、`qmc.p(q[1], phi01)`は2つ目のビットが1であるすべての基底状態に位相$e^{i\theta_{01}}$を与えます。この時点で$|11\rangle$には$e^{i(\theta_{10}+\theta_{01})}$が乗っているため、制御位相シフトゲートでは補正分
 #
 # $$
 # \theta_{11} - \theta_{10} - \theta_{01}
@@ -284,41 +272,84 @@ diagonal_4x4.draw(
 )
 
 # %% [markdown]
-# `qmc.qpe`関数は`QFixed`の位相レジスタを返します。`QFixed`は、量子レジスタで固定小数点数を表すQamomileの型です。ここでは位相を$[0,1)$の小数として保持し、測定すると浮動小数点の位相推定値を直接取得できます。下の量子カーネルでは、固有状態$|01\rangle$を準備し、`diagonal_4x4`にQPEを適用して、復号済みの位相を測定します。ここでは小さなファクトリを使い、同じ問題ユニタリに対してカウント用量子ビット数を変えられるようにします。
+# QPEの4つのステップをQamomileの基本操作で実装します。`qmc.control(diagonal_4x4)`で制御$U$ゲートを作り、`power=2**k`で制御$U^{2^k}$ゲートを適用します。逆QFTの後、量子ビット列を小数部だけを持つ`QFixed`へ変換します。`qmc.measure`は、この量子ビット列を測定し、得られたビット列を浮動小数点の位相推定値へ復号します。
 
 
 # %%
-# カウント用レジスタサイズを変えられるQPE量子カーネルを作ります。
-def make_qpe_kernel(counting_bits: int):
-    @qmc.qkernel
-    def qpe_with_stdlib(
-        phi01: qmc.Float,
-        phi10: qmc.Float,
-        phi11: qmc.Float,
-    ) -> qmc.Float:
-        # カウント用レジスタと2量子ビットの対象レジスタを確保します。
-        counting = qmc.qubit_array(counting_bits, name="counting")
-        target = qmc.qubit_array(2, name="target")
-        # 対象固有状態として|01>を準備します。
-        target[1] = qmc.x(target[1])
+# QPEを基本操作から実装します。
+controlled_diagonal_4x4 = qmc.control(diagonal_4x4)
 
-        # 標準ライブラリのQPEを適用し、復号された固定小数点位相を測定します。
-        phase = qmc.qpe(
+
+@qmc.qkernel
+def qpe_from_scratch(
+    counting_bits: qmc.UInt,
+    phi01: qmc.Float,
+    phi10: qmc.Float,
+    phi11: qmc.Float,
+) -> qmc.Float:
+    counting = qmc.qubit_array(counting_bits, name="counting")
+    target = qmc.qubit_array(2, name="target")
+    target[1] = qmc.x(target[1])
+
+    for k in qmc.range(counting_bits):
+        counting[k] = qmc.h(counting[k])
+    for k in qmc.range(counting_bits):
+        counting[k], target = controlled_diagonal_4x4(
+            counting[k],
             target,
-            counting,
-            diagonal_4x4,
             phi01=phi01,
             phi10=phi10,
             phi11=phi11,
+            power=2**k,
         )
-        return qmc.measure(phase)
 
-    return qpe_with_stdlib
+    counting = qmc.iqft(counting)
+    phase = qmc.cast(counting, qmc.QFixed, int_bits=0)
+    return qmc.measure(phase)
 
 
-# 回路図で使う小さなQPEインスタンスを描画します。
-qpe_to_draw = make_qpe_kernel(DRAW_COUNTING_BITS)
-qpe_to_draw.draw(
+# 3個のカウント用量子ビットを持つスクラッチ実装を描画します。
+qpe_from_scratch.draw(
+    counting_bits=3,
+    phi01=PHI_01,
+    phi10=PHI_10,
+    phi11=PHI_11,
+    fold_loops=False,
+)
+
+# %% [markdown]
+# ### 組み込み関数: `qpe`
+#
+# `qmc.qpe`関数は、スクラッチ実装で記述したアダマールゲート、制御$U^{2^k}$ゲート、逆QFT、`QFixed`への変換をまとめて適用します。`qmc.qpe`が返す`QFixed`値を`qmc.measure`に渡すと、量子ビット列の測定と固定小数点値への復号が行われ、浮動小数点の位相推定値が得られます。
+
+
+# %%
+# 組み込みのqpe関数を使って同じQPEを実装します。
+@qmc.qkernel
+def qpe_with_stdlib(
+    counting_bits: qmc.UInt,
+    phi01: qmc.Float,
+    phi10: qmc.Float,
+    phi11: qmc.Float,
+) -> qmc.Float:
+    counting = qmc.qubit_array(counting_bits, name="counting")
+    target = qmc.qubit_array(2, name="target")
+    target[1] = qmc.x(target[1])
+
+    phase = qmc.qpe(
+        target,
+        counting,
+        diagonal_4x4,
+        phi01=phi01,
+        phi10=phi10,
+        phi11=phi11,
+    )
+    return qmc.measure(phase)
+
+
+# 3個のカウント用量子ビットを持つ組み込み実装を描画します。
+qpe_with_stdlib.draw(
+    counting_bits=3,
     phi01=PHI_01,
     phi10=PHI_10,
     phi11=PHI_11,
@@ -328,13 +359,11 @@ qpe_to_draw.draw(
 # %% [markdown]
 # ## 実行結果
 #
-# ### 回路のトランスパイルと実行
-#
-# 測定された`QFixed`値は浮動小数点の位相推定値として返るため、ビット列を手動で復号する必要はありません。最初の実行では、回路図と同じ3個のカウント用量子ビットを使います。実験では、`sample_result.results`のうち測定回数が最も多い要素をそのまま表示し、後続セルで使う推定位相だけを返します。
+# 目標位相$0.6$は少ないビット数では正確に表現できないため、QPEは近い$m$ビット近似に対応する分布を返します。ここではカウント用量子ビット数を3から9まで変化させ、組み込みの`qpe`関数による推定値と厳密な位相値を比較します。
 
 # %%
 # 対角ユニタリの位相をトランスパイル時に固定します。
-bindings = {"phi01": PHI_01, "phi10": PHI_10, "phi11": PHI_11}
+phase_bindings = {"phi01": PHI_01, "phi10": PHI_10, "phi11": PHI_11}
 
 
 # 2つの位相小数の循環距離を計算します。
@@ -343,10 +372,10 @@ def phase_distance(a: float, b: float) -> float:
     return min(raw_distance, 1.0 - raw_distance)
 
 
-# 指定したカウント用レジスタサイズでQPE回路をトランスパイルし、サンプリングします。
-def run_qpe_experiment(counting_bits: int) -> float:
-    # 位相を固定したQPE量子カーネルを作り、トランスパイルします。
-    qpe_kernel = make_qpe_kernel(counting_bits)
+# 指定したQPE量子カーネルをトランスパイルし、サンプリングします。
+def run_qpe_experiment(qpe_kernel, counting_bits: int) -> float:
+    # 量子ビット数と位相をトランスパイル時に固定します。
+    bindings = {"counting_bits": counting_bits, **phase_bindings}
     executable = transpiler.transpile(qpe_kernel, bindings=bindings)
     # ドキュメント出力が再現可能になるようシミュレータのseedを固定します。
     executor = transpiler.executor(
@@ -370,22 +399,14 @@ def run_qpe_experiment(counting_bits: int) -> float:
     assert 0 < most_observed_shots <= SHOTS
     return qpe_output
 
-
-# 3個のカウント用量子ビットの例を実行し、期待される格子精度を確認します。
-example_phase = run_qpe_experiment(EXAMPLE_COUNTING_BITS)
-assert phase_distance(example_phase, TARGET_PHASE_FRACTION) <= (
-    1 / 2**EXAMPLE_COUNTING_BITS
-)
-
-# %% [markdown]
-# ### カウントレジスタの数と精度
-#
-# 目標位相$0.6$は少ないビット数では正確に表現できないため、QPEは近くの格子点にまたがる分布を返します。ここではカウント用量子ビット数を3から9まで変化させ、`qpe`の最終出力と厳密な位相値を比較します。標準出力には、各カウント用レジスタサイズで測定回数が最も多い`sample_result.results`の要素を表示します。
-
-# %%
-# すべてのカウント用レジスタサイズでQPEを実行します。
-bits = list(COUNTING_BIT_OPTIONS)
-estimated_phases = [run_qpe_experiment(counting_bits) for counting_bits in bits]
+# すべてのカウント用量子ビット数でQPEを実行します。
+bits = list(range(3, 6) if docs_test_mode else range(3, 10))
+estimated_phases = [
+    run_qpe_experiment(qpe_with_stdlib, counting_bits) for counting_bits in bits
+]
+# スクラッチ実装と組み込み関数が同じ位相推定値を返すことを確認します。
+scratch_phase = run_qpe_experiment(qpe_from_scratch, bits[0])
+assert np.isclose(scratch_phase, estimated_phases[0])
 # 推定値を厳密な位相と比較し、循環距離で誤差を計算します。
 exact_phases = [TARGET_PHASE_FRACTION for _ in bits]
 phase_errors = [
@@ -418,14 +439,14 @@ for counting_bits, phase_error in zip(bits, phase_errors):
 # %% [markdown]
 # ## リソース推定
 #
-# 前のサブセクションでは、カウント用量子ビットを増やすと精度が上がることを確認しました。ここでは、上の`run_qpe_experiment()`で使ったものと同じQPE量子カーネルに、`estimate_resources()`を直接適用します。この推定には、アダマールゲート、`qmc.qpe`による制御ユニタリー、逆QFT、最後の固定小数点測定が含まれます。
+# 前のセクションでは、カウント用量子ビットを増やすと精度が上がることを確認しました。ここでは、上の`run_qpe_experiment()`で使ったものと同じQPE量子カーネルに、`estimate_resources()`を直接適用します。この推定には、アダマールゲート、`qmc.qpe`による制御$U^{2^k}$ゲート、逆QFT、最後の固定小数点測定が含まれます。
 
 # %%
 # 具体的なカウント用量子ビット数を代入し、総ゲート数を集めます。
 resource_gate_counts: list[int] = []
 for counting_bits in bits:
-    qpe_kernel = make_qpe_kernel(counting_bits)
-    concrete_estimate = qpe_kernel.estimate_resources(inputs=bindings).simplify()
+    bindings = {"counting_bits": counting_bits, **phase_bindings}
+    concrete_estimate = qpe_with_stdlib.estimate_resources(inputs=bindings).simplify()
     resource_gate_counts.append(int(concrete_estimate.gates.total))
 
 # 最初の推定点に合わせて2^mの参照曲線を作ります。
@@ -448,9 +469,9 @@ ax.plot(
     scaling_reference,
     linestyle="--",
     color="#DB4D3F",
-    label=r"theory: QPE O$(2^m)$",
+    label=r"$O(2^m)$",
 )
-ax.set_xlabel("counting qubits")
+ax.set_xlabel(r"counting qubits ($m$)")
 ax.set_ylabel("total gates")
 ax.set_yscale("log")
 ax.set_xticks(bits)
@@ -466,7 +487,7 @@ assert all(
 )
 
 # %% [markdown]
-# プロットは、位相の格子を細かくするためのコストを、$2^m$に比例する参照線とともに示しています。目標とする加法誤差を$\epsilon$とすると、格子幅はおおよそ
+# プロットは、QPEの精度を上げるために必要なカウント用量子ビット数$m$と、そのときの総ゲート数を、$2^m$に比例する参照線とともに示しています。目標とする加法誤差を$\epsilon$とすると、表現できる位相の間隔はおおよそ
 #
 # $$
 # 2^{-m} \lesssim \epsilon
@@ -480,7 +501,7 @@ assert all(
 #
 # です。
 #
-# 制御ユニタリーを繰り返しモデルで考える場合、QPEは重み$1,2,\ldots,2^{m-1}$に対応する制御ユニタリーゲートを適用します。したがって、制御ユニタリーゲートの適用回数は
+# 今回の実装では、制御$U^{2^k}$ゲートを$U$の反復として構成します。したがって、$m$個のカウント用量子ビットに対する$U$の適用回数は
 #
 # $$
 # \sum_{k=0}^{m-1} 2^k = 2^m - 1
@@ -488,13 +509,9 @@ assert all(
 # O\!\left(\frac{1}{\epsilon}\right)
 # $$
 #
-# です。つまり、カウント用量子ビット数は$1/\epsilon$に対して対数的ですが、繰り返しによる制御ユニタリーゲートの回数は$O(1/\epsilon)$で増えます{cite:p}`10.1017/CBO9780511976667`。
+# です。つまり、カウント用量子ビット数は$1/\epsilon$に対して対数的ですが、$U$の適用回数は$O(1/\epsilon)$で増えます{cite:p}`10.1017/CBO9780511976667`。
 #
-# 最後に、このスケーリングは実装方法に依存します。QPEでは
-# $\mathrm{controlled}\text{-}U^{2^0}, \ldots,
-# \mathrm{controlled}\text{-}U^{2^{m-1}}$という制御ユニタリーが必要です。
-# これらを$U$の繰り返しで実装する場合、コストは$O(2^m)=O(1/\epsilon)$となり、
-# 高精度では通常効率的ではありません。より一般には、コストは
+# このような場合、ゲート数は先ほど見た通り$O(1/\epsilon)$となり，高精度なQPEを実行するには効率的ではありません。より一般には、あるユニタリ$V$を実行するために必要なゲート数を$G(V)$とすると、QPE本体に必要なゲート数は次のように書けます。
 #
 # $$
 # G_{\mathrm{QPE}}(m)
@@ -503,38 +520,25 @@ assert all(
 # + O(m^2)
 # $$
 #
-# と書けます。ここで$G(V)$は、操作$V$を実装するための論理ゲートコストを表します。
-# このページでは、コストの単位がゲート数であることを明示するために$G$を使います。
-#
 # :::{note}
 # $m$個の量子ビットに対する逆QFTは、$O(m^2)$個のゲートに分解できます。詳しくはQFTのチュートリアルを参照してください。
 # :::
 #
-# しかし、実際には以下の要因によってこの見積もりは大きく変わる可能性があります。
+# しかし、実際にはこの見積もりは大きく変わる可能性があります。上式はQPE本体のゲート数を表しており、初期状態の準備コストは含みません。また、各制御$U^{2^k}$ゲートのゲート数は、その実装方法に依存します。以下では、この2点を分けて説明します。
 #
-# 1. **制御ユニタリーの実装コスト**
+# 1. **制御$U$ゲートの実装コスト**
 #
-#    多くの場合、主なコストは各制御ユニタリーをどう実装するかで決まります。
-#    Shorのアルゴリズムでは、モジュラー乗算に対応する制御ユニタリーを問題構造から構成できるため、
-#    $U$を指数回反復する必要はありません。量子系のハミルトニアンシミュレーションでも、
-#    ハミルトニアンの形やシミュレーション手法によっては、制御された時間発展を多項式程度のリソースで実装できる場合があります。
-#    そのため、QPEのリソースを見積もるときは、制御ユニタリーを$U$の反復として数えるのか、
-#    直接合成した回路として数えるのか、あるいは問題固有の算術回路やシミュレーション回路として与えるのかを明示する必要があります。
+#    QPEは、Shorのアルゴリズムでは位数発見に、量子系のシミュレーションでは時間発展演算子の固有位相からエネルギーを推定するために使われます。Shorのアルゴリズムでは、モジュラー乗算に対応する制御$U^{2^k}$ゲートを問題構造から構成できるため、$U$を指数回反復する必要はありません。ハミルトニアンシミュレーションでも、ハミルトニアンの形やシミュレーション手法によっては、制御された時間発展を多項式程度のリソースで実装できる場合があります。そのため、QPEのリソースを見積もるときは、制御$U^{2^k}$ゲートを$U$の反復として数えるのか、直接合成した回路として数えるのか、あるいは問題固有の算術回路やシミュレーション回路として与えるのかを明示する必要があります。
 #
 # 2. **初期状態の準備コスト**
 #
-#    上の見積もりには、対象レジスタの初期状態を準備するコストも含まれていません。
-#    QPEを有効に使うには、入力状態が$U$の固有状態であるか、少なくとも固有状態に十分近い状態である必要があります。
-#    そのような固有状態または近似固有状態を準備する量子回路は非自明なコストを持つ場合があり、
-#    実際の応用で全体のリソースを評価するときは、この準備コストを別途数える必要があります。
+#    QPEで特定の固有位相が得られる確率は、準備した状態と対応する固有状態との重なりの二乗で決まります。十分な重なりを持つ近似状態の準備には非自明な量子回路が必要になる場合があるため、実際の応用ではそのゲート数も別途見積もる必要があります。
 #
 # %% [markdown]
 # ## まとめ
 #
-# このノートブックでは、対角4x4ユニタリでQPEを実装し、復号された位相をサンプリングして、カウント用レジスタを大きくしたときの精度とリソースの変化を確認しました。
+# このノートブックでは、次のことを学びました。
 #
-# - `qmc.qpe`は、渡したユニタリ量子カーネルに対して、アダマールゲート、制御ユニタリーゲート、逆QFT、固定小数点の位相復号を適用します。
-# - この例では固有状態$|01\rangle$を準備し、目標位相$0.6$を浮動小数点の`QFixed`測定結果として直接推定します。
-# - カウント用量子ビットを増やすと2進位相の格子が細かくなるため、サンプリングされた推定値が目標位相に近づきます。
-# - `estimate_resources()`を直接呼び出すことで、単純な繰り返し実装では$m=O(\log(1/\epsilon))$個のカウント用量子ビットに対して、$O(1/\epsilon)$回の制御ユニタリーゲートが必要になることを確認できます。
-# - 実際の応用では、制御ユニタリーの実装方法と初期状態の準備コストを含めるかどうかを明示することが重要です。
+# - QPEは、制御$U^{2^k}$ゲートによる位相キックバックと逆QFTを使って、ユニタリ行列の固有位相を2進数として読み出します。
+# - Qamomileでは、`qmc.control`、`qmc.iqft`、`qmc.cast`を使ってQPEを構成でき、組み込みの`qmc.qpe`で同じ処理を簡潔に記述できます。
+# - $m$個のカウント用量子ビットによる位相分解能は$O(2^{-m})$ですが、必要なゲート数は制御$U^{2^k}$ゲートの実装方法と初期状態の準備方法に依存します。
