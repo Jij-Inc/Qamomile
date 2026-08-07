@@ -69,6 +69,12 @@ QAOA回路をゼロから構築してMaxCutを解き、組み込みの`qaoa_stat
 :::
 
 :::{card}
+:header: **量子特異値変換（QSVT）**
+:link: qsvt
+非エルミート行列をブロックエンコーディングし、2次の特異値多項式を適用して、射影後の行列と論理リソースを検証します。
+:::
+
+:::{card}
 :header: **量子誤り訂正入門**
 :link: quantum_error_correction
 3量子ビットbit-flip/phase-flip符号からShor 9量子ビット符号、スタビライザー形式までを扱います。

@@ -69,6 +69,12 @@ Sample bitstrings from a quantum state, build an effective Hamiltonian, and diag
 :::
 
 :::{card}
+:header: **Quantum Singular Value Transformation (QSVT)**
+:link: qsvt
+Block encode a non-Hermitian matrix, apply a degree-two singular-value polynomial, verify the projected matrix, and estimate logical resources.
+:::
+
+:::{card}
 :header: **Introduction to Quantum Error Correction**
 :link: quantum_error_correction
 3-qubit bit-flip/phase-flip codes, Shor's 9-qubit code, and stabilizers.
