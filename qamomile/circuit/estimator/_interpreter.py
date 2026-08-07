@@ -30,6 +30,9 @@ from qamomile.circuit.estimator._quantum_values import _qubit_value_size
 from qamomile.circuit.estimator._resolver import (
     ExprResolver,
 )
+from qamomile.circuit.estimator._resolver_indices import (
+    _resolve_concrete_array_payload,
+)
 from qamomile.circuit.estimator._resource_algebra import (
     _wrap_trace,
 )
@@ -52,6 +55,10 @@ from qamomile.circuit.estimator._resource_types import (
     ResourceTraceNode,
 )
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
+    ValueResolver,
+)
 from qamomile.observable.hamiltonian import (
     HERMITIAN_IMAG_ATOL,
     PAULI_TERM_ZERO_ATOL,
@@ -269,8 +276,75 @@ class ResourceInterpreter(_TransformedCallInterpreter):
 
         Returns:
             Any: Bound Hamiltonian value, or ``None`` when no binding matches.
+
+        Raises:
+            ValueError: If a concrete Hamiltonian array element has a negative
+                or out-of-range index, or malformed bound data.
         """
         observable = operation.observable
+        if observable.is_array_element():
+            resolved_indices: list[int] = []
+            for index in observable.element_indices:
+                resolved_index = self._apply_condition_values(
+                    resolver.resolve(index),
+                    record_usage=False,
+                )
+                if not (resolved_index.is_number and resolved_index.is_integer is True):
+                    break
+                concrete_index = int(resolved_index)
+                if concrete_index < 0:
+                    raise ValueError(
+                        "PauliEvolveOp Hamiltonian element index must be "
+                        f"non-negative, got {concrete_index}."
+                    )
+                resolved_indices.append(concrete_index)
+            else:
+                parent = observable.parent_array
+                if parent is not None:
+                    payload = _resolve_concrete_array_payload(
+                        parent,
+                        {
+                            **self.bindings,
+                            **self._run_state.condition_values,
+                        },
+                        resolve_expression=resolver.resolve,
+                        specialize=lambda expression: self._apply_condition_values(
+                            expression,
+                            record_usage=False,
+                        ),
+                        source="PauliEvolveOp Hamiltonian",
+                    )
+                    if payload is not None:
+                        try:
+                            resolved_element = payload
+                            for index in resolved_indices:
+                                resolved_element = resolved_element[index]
+                        except (IndexError, KeyError, TypeError) as error:
+                            raise ValueError(
+                                "PauliEvolveOp Hamiltonian element exceeds its "
+                                "bound component array."
+                            ) from error
+                        if isinstance(resolved_element, qm_o.Hamiltonian):
+                            return resolved_element
+            element_bindings = dict(self.bindings)
+            for index in observable.element_indices:
+                resolved_index = self._apply_condition_values(
+                    resolver.resolve(index),
+                    record_usage=False,
+                )
+                if resolved_index.is_number and resolved_index.is_integer is True:
+                    element_bindings[index.uuid] = int(resolved_index)
+            try:
+                resolved_element = ValueResolver().resolve_bound_value(
+                    observable,
+                    element_bindings,
+                )
+            except EmitError as error:
+                raise ValueError(
+                    f"Cannot resolve PauliEvolveOp Hamiltonian array element: {error}"
+                ) from error
+            if isinstance(resolved_element, qm_o.Hamiltonian):
+                return resolved_element
         candidates = [observable.name, observable.uuid]
         resolved = resolver.resolve(observable)
         if isinstance(resolved, sp.Symbol):

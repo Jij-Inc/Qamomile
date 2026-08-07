@@ -54,6 +54,10 @@ from qamomile.circuit.estimator._interpreter_dataflow import (
 from qamomile.circuit.estimator._liveness import (
     _liveness_width,
 )
+from qamomile.circuit.estimator._product_formula import (
+    _apply_product_formula_contract,
+    _require_concrete_product_formula_structure,
+)
 from qamomile.circuit.estimator._resolver import (
     ExprResolver,
 )
@@ -593,7 +597,21 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
         match operation:
             case _ResourceInlineBoundaryOperation():
                 self._bind_resource_inline_array_states(operation, resolver)
-                return _with_constraints(
+                _require_concrete_product_formula_structure(
+                    operation.callable_attrs,
+                    operation.resource_operands,
+                    bindings={
+                        **self.bindings,
+                        **self._run_state.condition_values,
+                    },
+                    resolver=resolver,
+                    specialize=lambda expression: self._apply_condition_values(
+                        expression,
+                        record_usage=False,
+                    ),
+                    source=operation.source,
+                )
+                boundary = _with_constraints(
                     ResourceEstimate.zero(),
                     *_quantum_operand_width_constraints(
                         operation.callable_attrs,
@@ -601,6 +619,18 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
                         resolver,
                         source=operation.source,
                     ),
+                )
+                return _apply_product_formula_contract(
+                    boundary,
+                    operation.callable_attrs,
+                    operation.resource_operands,
+                    resolver,
+                    bindings=self.bindings,
+                    specialize=lambda expression: self._apply_condition_values(
+                        expression,
+                        record_usage=False,
+                    ),
+                    source=operation.source,
                 )
             case GateOperation():
                 return self.eval_gate(operation, controls=controls)

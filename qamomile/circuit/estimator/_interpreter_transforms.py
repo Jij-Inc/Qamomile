@@ -47,6 +47,9 @@ from qamomile.circuit.estimator._interpreter_dataflow import (
 from qamomile.circuit.estimator._opaque import (
     _zero_control_count,
 )
+from qamomile.circuit.estimator._product_formula import (
+    _apply_product_formula_contract,
+)
 from qamomile.circuit.estimator._quantum_values import _qubit_value_size
 from qamomile.circuit.estimator._resolver import (
     ExprResolver,
@@ -161,6 +164,30 @@ class _TransformedCallInterpreter(_CallInterpreter):
             if operation.callable_ref is not None
             else "controlled_u"
         )
+
+        def apply_product_formula(estimate: ResourceEstimate) -> ResourceEstimate:
+            """Apply callable-level product-formula metadata before repetition.
+
+            Args:
+                estimate (ResourceEstimate): One target-body application.
+
+            Returns:
+                ResourceEstimate: Estimate with callable-level approximation
+                and validity metadata.
+            """
+            return _apply_product_formula_contract(
+                estimate,
+                operation.callable_attrs,
+                operation.body_operands,
+                resolver,
+                bindings=self.bindings,
+                specialize=lambda expression: self._apply_condition_values(
+                    expression,
+                    record_usage=False,
+                ),
+                source=callable_name,
+            )
+
         structural_constraints = [
             *_quantum_operand_width_constraints(
                 operation.callable_attrs,
@@ -253,7 +280,12 @@ class _TransformedCallInterpreter(_CallInterpreter):
                 child,
                 actual_operands,
                 controls=total_controls,
+                callable_attrs=operation.callable_attrs,
+                contract_operands=operation.body_operands,
+                contract_resolver=resolver,
+                source=callable_name,
             )
+            body = apply_product_formula(body)
             body_dependency_estimate = body
             repetitions = power * broadcast
             estimate = body.repeat(repetitions)
@@ -353,6 +385,7 @@ class _TransformedCallInterpreter(_CallInterpreter):
                     ),
                     active_when=power,
                 )
+            estimate = apply_product_formula(estimate)
             return _with_constraints(estimate, *structural_constraints)
         gates = GateResources(
             total=_ZERO,
@@ -383,6 +416,7 @@ class _TransformedCallInterpreter(_CallInterpreter):
                 ),
                 active_when=power,
             )
+        estimate = apply_product_formula(estimate)
         return _with_constraints(estimate, *structural_constraints)
 
     def eval_select(
@@ -479,6 +513,11 @@ class _TransformedCallInterpreter(_CallInterpreter):
             constraint.validate()
         case_estimates: list[ResourceEstimate] = []
         for case_index, case_block in enumerate(operation.case_blocks):
+            case_attrs = (
+                operation.case_callable_attrs[case_index]
+                if operation.case_callable_attrs
+                else {}
+            )
             child = _select_case_child_resolver(operation, case_block, resolver)
             actual_operands = [
                 *operation.target_operands,
@@ -497,6 +536,22 @@ class _TransformedCallInterpreter(_CallInterpreter):
                 child,
                 actual_operands,
                 controls=total_controls,
+                callable_attrs=case_attrs,
+                contract_operands=actual_operands,
+                contract_resolver=resolver,
+                source=f"SELECT case {case_index}",
+            )
+            case_body = _apply_product_formula_contract(
+                case_body,
+                case_attrs,
+                actual_operands,
+                resolver,
+                bindings=self.bindings,
+                specialize=lambda expression: self._apply_condition_values(
+                    expression,
+                    record_usage=False,
+                ),
+                source=f"SELECT case {case_index}",
             )
             case_estimate = case_body.repeat(broadcast)
             activity = _estimate_activity(case_estimate)
@@ -666,6 +721,22 @@ class _TransformedCallInterpreter(_CallInterpreter):
             child,
             actual_operands,
             controls=_expr(controls) + operation.num_control_qubits,
+            callable_attrs=operation.callable_attrs,
+            contract_operands=actual_operands,
+            contract_resolver=resolver,
+            source=name,
+        )
+        body_estimate = _apply_product_formula_contract(
+            body_estimate,
+            operation.callable_attrs,
+            actual_operands,
+            resolver,
+            bindings=self.bindings,
+            specialize=lambda expression: self._apply_condition_values(
+                expression,
+                record_usage=False,
+            ),
+            source=name,
         )
         _publish_invoke_classical_results(
             operation.implementation_block.output_values,

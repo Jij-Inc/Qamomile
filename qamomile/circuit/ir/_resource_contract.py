@@ -22,6 +22,150 @@ class QuantumOperandWidth:
     width: int
 
 
+@dataclasses.dataclass(frozen=True)
+class ProductFormulaContract:
+    """Describe one product-formula algorithm's semantic operands.
+
+    Operand positions use the callable's untransformed input ABI. Coherent
+    controls added by a later call transform are therefore not included.
+
+    Args:
+        kind (str): Product-formula family. Currently ``"suzuki_trotter"``.
+        hamiltonian_operand (int): Hamiltonian-vector operand position.
+        order_operand (int): Formula-order operand position.
+        time_operand (int): Total evolution-time operand position.
+        steps_operand (int): Finite step-count operand position.
+    """
+
+    kind: str
+    hamiltonian_operand: int
+    order_operand: int
+    time_operand: int
+    steps_operand: int
+
+
+def product_formula_contract(
+    attrs: Mapping[str, Any],
+    *,
+    source: str,
+    operand_count: int | None = None,
+) -> ProductFormulaContract | None:
+    """Decode product-formula metadata from callable resource attributes.
+
+    Args:
+        attrs (Mapping[str, Any]): Callable definition or invocation attrs.
+        source (str): Callable name used in malformed-contract diagnostics.
+        operand_count (int | None): Optional untransformed input count used to
+            reject out-of-range positions. Defaults to ``None``.
+
+    Returns:
+        ProductFormulaContract | None: Validated contract, or ``None`` when no
+        product formula is declared.
+
+    Raises:
+        ValueError: If the resource contract is malformed, uses an unsupported
+            formula family, repeats an operand position, or references an
+            operand outside ``operand_count``.
+    """
+    resource_contract = attrs.get("resource_contract")
+    if resource_contract is None:
+        return None
+    if not isinstance(resource_contract, Mapping):
+        raise ValueError(f"{source} resource_contract must be a mapping.")
+    raw_formula = resource_contract.get("product_formula")
+    if raw_formula is None:
+        return None
+    if not isinstance(raw_formula, Mapping):
+        raise ValueError(
+            f"{source} product_formula resource contract must be a mapping."
+        )
+
+    kind = raw_formula.get("kind")
+    if kind != "suzuki_trotter":
+        raise ValueError(
+            f"{source} product_formula kind must be 'suzuki_trotter', got {kind!r}."
+        )
+    field_names = (
+        "hamiltonian_operand",
+        "order_operand",
+        "time_operand",
+        "steps_operand",
+    )
+    positions: dict[str, int] = {}
+    for field_name in field_names:
+        position = raw_formula.get(field_name)
+        if type(position) is not int or position < 0:
+            raise ValueError(
+                f"{source} product_formula {field_name} must be a nonnegative integer."
+            )
+        if operand_count is not None and position >= operand_count:
+            raise ValueError(
+                f"{source} product_formula {field_name} references operand "
+                f"{position}, but the callable has only {operand_count} input(s)."
+            )
+        positions[field_name] = position
+    if len(set(positions.values())) != len(positions):
+        raise ValueError(
+            f"{source} product_formula operand positions must be distinct."
+        )
+    return ProductFormulaContract(kind=kind, **positions)
+
+
+def merge_product_formula_contract(
+    attrs: Mapping[str, Any],
+    formula: ProductFormulaContract,
+    *,
+    source: str,
+    operand_count: int | None = None,
+) -> dict[str, Any]:
+    """Merge one product-formula declaration into callable attrs.
+
+    Args:
+        attrs (Mapping[str, Any]): Existing callable attributes.
+        formula (ProductFormulaContract): Product formula to declare.
+        source (str): Callable name used in conflict diagnostics.
+        operand_count (int | None): Optional untransformed input count used to
+            validate operand positions. Defaults to ``None``.
+
+    Returns:
+        dict[str, Any]: Copied attributes with the product-formula contract.
+
+    Raises:
+        ValueError: If existing resource metadata is malformed or conflicts
+            with ``formula``.
+    """
+    payload = {
+        "resource_contract": {
+            "product_formula": dataclasses.asdict(formula),
+        }
+    }
+    requested = product_formula_contract(
+        payload,
+        source=source,
+        operand_count=operand_count,
+    )
+    assert requested is not None
+
+    merged_attrs = dict(attrs)
+    existing_contract = merged_attrs.get("resource_contract")
+    if existing_contract is None:
+        contract: dict[str, Any] = {}
+    elif isinstance(existing_contract, Mapping):
+        contract = dict(existing_contract)
+    else:
+        raise ValueError(f"{source} resource_contract must be a mapping.")
+    existing = product_formula_contract(
+        {"resource_contract": contract},
+        source=source,
+        operand_count=operand_count,
+    )
+    if existing is not None and existing != requested:
+        raise ValueError(f"{source} product_formula resource contract conflicts.")
+    contract["product_formula"] = dataclasses.asdict(requested)
+    merged_attrs["resource_contract"] = contract
+    return merged_attrs
+
+
 def quantum_operand_widths(
     attrs: Mapping[str, Any],
     *,
@@ -190,7 +334,10 @@ def merge_quantum_operand_widths(
 
 
 __all__ = [
+    "ProductFormulaContract",
     "QuantumOperandWidth",
+    "merge_product_formula_contract",
     "merge_quantum_operand_widths",
+    "product_formula_contract",
     "quantum_operand_widths",
 ]

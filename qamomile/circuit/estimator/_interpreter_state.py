@@ -118,6 +118,7 @@ class _InterpreterRunState:
         tuple[tuple[tuple[int, int], ...], int],
         Operation,
     ] = field(default_factory=dict)
+    loop_validation_pruned_blocks: dict[int, Block] = field(default_factory=dict)
 
 
 class _InterpreterState(_InterpreterContract):

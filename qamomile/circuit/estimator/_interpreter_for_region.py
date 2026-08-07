@@ -40,7 +40,10 @@ from qamomile.circuit.estimator._interpreter_core import (
 from qamomile.circuit.estimator._interpreter_dataflow import (
     _with_conservative_loop_output_liveness,
 )
-from qamomile.circuit.estimator._interpreter_loop_support import _LoopSupportInterpreter
+from qamomile.circuit.estimator._interpreter_loop_support import (
+    _loop_requires_hamiltonian_element_replay,
+    _LoopSupportInterpreter,
+)
 from qamomile.circuit.estimator._liveness import (
     _maximum_live_owner_sizes,
     _maximum_live_owner_sizes_over_range,
@@ -138,7 +141,8 @@ class _ForRegionInterpreter(_LoopSupportInterpreter):
                 concrete_step,
             )
             if (
-                len(concrete_range[: _CONCRETE_REGION_REPLAY_LIMIT + 1])
+                _loop_requires_hamiltonian_element_replay(operation)
+                or len(concrete_range[: _CONCRETE_REGION_REPLAY_LIMIT + 1])
                 <= _CONCRETE_REGION_REPLAY_LIMIT
             ):
                 return self._eval_concrete_region_for(

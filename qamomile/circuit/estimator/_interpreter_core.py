@@ -52,6 +52,7 @@ from qamomile.circuit.estimator._symbol_discovery import (
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.dataflow import (
     has_legacy_scalar_bit_rebinds,
+    walk_operations,
 )
 from qamomile.circuit.ir.operation.callable import (
     InvokeOperation,
@@ -68,8 +69,10 @@ from qamomile.circuit.ir.operation.operation import (
     Operation,
 )
 from qamomile.circuit.ir.operation.select import SelectOperation
+from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import (
     ArrayValue,
+    ValueBase,
     ValueLike,
 )
 from qamomile.circuit.transpiler.errors import ValidationError
@@ -81,7 +84,7 @@ from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
 )
 from qamomile.circuit.transpiler.passes.inline import (
     InlinePass,
-    count_inline_invokes,
+    _has_any_inline_call,
 )
 
 # Circuit transpilation performs one initial inline pass before its 64-round
@@ -177,7 +180,8 @@ class _InterpreterCore(_InterpreterState):
         self._validate_legacy_scalar_bit_rebinds(sequence_block)
         sequence_view = self._resource_estimation_view(sequence_block)
         resolver = ExprResolver(
-            context=_root_input_binding_context(block_or_ops, self.bindings)
+            block=sequence_view,
+            context=_root_input_binding_context(block_or_ops, self.bindings),
         )
         return self.eval_operations(sequence_view.operations, resolver)
 
@@ -225,7 +229,7 @@ class _InterpreterCore(_InterpreterState):
         Raises:
             ValueError: If the selected body violates the invocation contract.
         """
-        return self._loop_validation_inline_body(operation)
+        return operation.select_body(strategy=self._strategy_for(operation)).body
 
     def _resource_estimation_inline_prefix(
         self,
@@ -258,6 +262,9 @@ class _InterpreterCore(_InterpreterState):
         return (
             _ResourceInlineBoundaryOperation(
                 constraint_operands=tuple(operation.target_qubits),
+                resource_operands=tuple(
+                    operation.operands[operation.num_body_external_control_qubits :]
+                ),
                 callable_attrs=callable_attrs,
                 source=operation.custom_name,
                 array_state_bindings=array_state_bindings,
@@ -417,6 +424,8 @@ class _InterpreterCore(_InterpreterState):
             if isinstance(block_or_operations, Block)
             else block_or_operations
         )
+        if not self._has_reachable_legacy_scalar_bit_rebinds(operations):
+            return
         validation_bindings = {
             name: self._compiler_validation_binding(value)
             for name, value in self.bindings.items()
@@ -455,6 +464,79 @@ class _InterpreterCore(_InterpreterState):
         except ValidationError as exc:
             raise NotImplementedError(str(exc)) from exc
 
+    def _has_reachable_legacy_scalar_bit_rebinds(
+        self,
+        operations: Sequence[Operation],
+        *,
+        visited_blocks: set[int] | None = None,
+    ) -> bool:
+        """Return whether selected callable bodies need loop-state validation.
+
+        The compiler-equivalent validation view performs fixed-point inlining
+        so it can distinguish used and unused scalar Bit inputs. Building that
+        view is unnecessary for the overwhelmingly common case with no legacy
+        Bit rebinds, and can expand an unrelated recursive algorithm before
+        resource interpretation reaches its callable boundary. This cheap,
+        cycle-safe scan follows only the bodies selected by estimator policy.
+
+        Args:
+            operations (Sequence[Operation]): Operations in the current scope.
+            visited_blocks (set[int] | None): Callable block identities already
+                scanned on this path. Defaults to ``None``.
+
+        Returns:
+            bool: Whether compiler loop-state validation is required.
+
+        Raises:
+            ValueError: If a strategy-selected body violates the invocation
+                contract.
+        """
+        if has_legacy_scalar_bit_rebinds(operations):
+            return True
+        visited = visited_blocks if visited_blocks is not None else set()
+
+        def body_has_rebind(block: Block | None) -> bool:
+            """Scan one callable block without following recursive cycles.
+
+            Args:
+                block (Block | None): Selected callable body, when available.
+
+            Returns:
+                bool: Whether the body graph contains a legacy Bit rebind.
+
+            Raises:
+                ValueError: If a nested strategy-selected body violates its
+                    invocation contract.
+            """
+            if not isinstance(block, Block):
+                return False
+            identity = id(block)
+            if identity in visited:
+                return False
+            visited.add(identity)
+            return self._has_reachable_legacy_scalar_bit_rebinds(
+                block.operations,
+                visited_blocks=visited,
+            )
+
+        for operation in walk_operations(operations):
+            if isinstance(operation, InvokeOperation):
+                selection = operation.select_body(
+                    strategy=self._strategy_for(operation)
+                )
+                if body_has_rebind(selection.body):
+                    return True
+            elif isinstance(operation, ControlledUOperation):
+                if body_has_rebind(operation.block):
+                    return True
+            elif isinstance(operation, InverseBlockOperation):
+                if body_has_rebind(operation.implementation_block):
+                    return True
+            elif isinstance(operation, SelectOperation):
+                if any(body_has_rebind(block) for block in operation.case_blocks):
+                    return True
+        return False
+
     def _loop_validation_view(
         self,
         block: Block,
@@ -468,7 +550,9 @@ class _InterpreterCore(_InterpreterState):
         and compile-time specialization rules without changing the Block that
         resource evaluation traverses. Repeating inline then specialization
         also handles concrete self-recursion up to the compiler's supported
-        unroll depth.
+        unroll depth. Callable bodies without a scalar Bit interface or legacy
+        Bit carry stay boxed because their internal structure cannot affect
+        this validation.
 
         Args:
             block (Block): Hierarchical semantic body to validate.
@@ -488,7 +572,8 @@ class _InterpreterCore(_InterpreterState):
                 IR.
         """
         inline = InlinePass(body_selector=self._loop_validation_inline_body)
-        view = block
+        view = self._loop_validation_pruned_block(block)
+        view = lower_compile_time_ifs_preserving_loop_conditions(view, bindings)
         for _ in range(_MAX_LOOP_VALIDATION_INLINE_DEPTH):
             view = inline.run(view)
             if view.kind is not BlockKind.HIERARCHICAL:
@@ -497,7 +582,10 @@ class _InterpreterCore(_InterpreterState):
                 view,
                 bindings,
             )
-            if count_inline_invokes(view.operations) == 0:
+            if not _has_any_inline_call(
+                view.operations,
+                self._loop_validation_inline_body,
+            ):
                 # Lowering the final base-case branch can remove the last
                 # invocation while the copied block still carries its stale
                 # HIERARCHICAL kind. Refresh it exactly as recursion unrolling
@@ -511,20 +599,191 @@ class _InterpreterCore(_InterpreterState):
             "recursion with a bounded loop."
         )
 
-    def _loop_validation_inline_body(self, operation: InvokeOperation) -> Block | None:
-        """Select the body that resource interpretation would evaluate.
+    def _loop_validation_inline_body(
+        self,
+        operation: InvokeOperation,
+    ) -> Block | None:
+        """Select a body relevant to legacy scalar Bit validation.
+
+        Callables without scalar Bit inputs, outputs, or internal legacy
+        carries are opaque to this validation-only view. Their internal
+        quantum and classical structure cannot change whether a caller's
+        legacy scalar Bit crosses a loop back edge.
 
         Args:
             operation (InvokeOperation): Inline-policy invocation being copied
                 into the validation view.
 
         Returns:
-            Block | None: Strategy-selected body, or None when unavailable.
+            Block | None: Strategy-selected body, or ``None`` when unavailable
+                or irrelevant to legacy scalar Bit validation.
 
         Raises:
             ValueError: If the selected body violates the invocation contract.
         """
-        return operation.select_body(strategy=self._strategy_for(operation)).body
+        selection = operation.select_body(strategy=self._strategy_for(operation))
+        body = selection.body
+        if not isinstance(body, Block):
+            return None
+        if not self._loop_validation_body_is_relevant(
+            body,
+            (*selection.operands, *operation.results),
+        ):
+            return None
+        return self._loop_validation_pruned_block(body)
+
+    def _loop_validation_body_is_relevant(
+        self,
+        body: Block | None,
+        interface_values: Sequence[ValueBase],
+    ) -> bool:
+        """Return whether a callable body can affect scalar Bit validation.
+
+        Args:
+            body (Block | None): Callable implementation body, when available.
+            interface_values (Sequence[ValueBase]): Call-site operands and
+                results visible to the surrounding validation scope.
+
+        Returns:
+            bool: Whether the body must be expanded for validation.
+
+        Raises:
+            ValueError: If a nested strategy-selected body violates its
+                invocation contract.
+        """
+        if not isinstance(body, Block):
+            return False
+        return any(
+            isinstance(value.type, BitType) for value in interface_values
+        ) or self._has_reachable_legacy_scalar_bit_rebinds(body.operations)
+
+    def _loop_validation_pruned_block(self, block: Block) -> Block:
+        """Build a validation-only block with irrelevant bodies opaque.
+
+        Args:
+            block (Block): Semantic block whose operation-owned callable
+                bodies should be projected.
+
+        Returns:
+            Block: Copy containing only callable internals relevant to legacy
+            scalar Bit validation.
+
+        Raises:
+            ValueError: If a nested strategy-selected body violates its
+                invocation contract.
+        """
+        identity = id(block)
+        cached = self._run_state.loop_validation_pruned_blocks.get(identity)
+        if cached is not None:
+            return cached
+        projected = dataclasses.replace(
+            block,
+            operations=self._loop_validation_pruned_operations(block.operations),
+        )
+        self._run_state.loop_validation_pruned_blocks[identity] = projected
+        return projected
+
+    def _loop_validation_pruned_operations(
+        self,
+        operations: Sequence[Operation],
+    ) -> list[Operation]:
+        """Project operation-owned bodies for scalar Bit validation.
+
+        Args:
+            operations (Sequence[Operation]): Operations in one lexical scope.
+
+        Returns:
+            list[Operation]: Non-mutating validation projection.
+
+        Raises:
+            ValueError: If a nested strategy-selected body violates its
+                invocation contract.
+        """
+
+        def project_owned_body(
+            body: Block | None,
+            interface_values: Sequence[ValueBase],
+        ) -> Block | None:
+            """Keep a relevant operation-owned body or replace it with a stub.
+
+            Args:
+                body (Block | None): Controlled, inverse, or SELECT body.
+                interface_values (Sequence[ValueBase]): Owner operands and
+                    results visible to the surrounding validation scope.
+
+            Returns:
+                Block | None: Recursively projected body or an affine stub.
+
+            Raises:
+                ValueError: If a nested strategy-selected body violates its
+                    invocation contract.
+            """
+            if not isinstance(body, Block):
+                return None
+            if self._loop_validation_body_is_relevant(body, interface_values):
+                return self._loop_validation_pruned_block(body)
+            return dataclasses.replace(
+                body,
+                operations=[],
+                kind=BlockKind.AFFINE,
+            )
+
+        projected: list[Operation] = []
+        for operation in operations:
+            interface_values = (*operation.operands, *operation.results)
+            if isinstance(operation, ControlledUOperation):
+                projected.append(
+                    dataclasses.replace(
+                        operation,
+                        block=project_owned_body(
+                            operation.block,
+                            interface_values,
+                        ),
+                    )
+                )
+            elif isinstance(operation, InverseBlockOperation):
+                projected.append(
+                    dataclasses.replace(
+                        operation,
+                        source_block=project_owned_body(
+                            operation.source_block,
+                            interface_values,
+                        ),
+                        implementation_block=project_owned_body(
+                            operation.implementation_block,
+                            interface_values,
+                        ),
+                    )
+                )
+            elif isinstance(operation, SelectOperation):
+                projected.append(
+                    dataclasses.replace(
+                        operation,
+                        case_blocks=[
+                            cast(
+                                Block,
+                                project_owned_body(case, interface_values),
+                            )
+                            for case in operation.case_blocks
+                        ],
+                    )
+                )
+            elif isinstance(operation, HasNestedOps):
+                regions = tuple(
+                    dataclasses.replace(
+                        region,
+                        operations=tuple(
+                            self._loop_validation_pruned_operations(
+                                region.operations,
+                            )
+                        ),
+                    )
+                    for region in operation.nested_regions()
+                )
+                projected.append(operation.rebuild_regions(regions))
+            else:
+                projected.append(operation)
+        return projected
 
     @staticmethod
     def _compiler_validation_binding(value: Any) -> Any:

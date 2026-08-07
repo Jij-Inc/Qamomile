@@ -70,7 +70,7 @@ from qamomile.circuit.estimator._scheduling import (
 from qamomile.circuit.estimator._scopes import (
     _typed_value_symbol,
 )
-from qamomile.circuit.ir.dataflow import walk_operations
+from qamomile.circuit.ir.dataflow import build_dependency_graph, walk_operations
 from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
@@ -79,12 +79,53 @@ from qamomile.circuit.ir.operation.control_flow import (
     WhileOperation,
 )
 from qamomile.circuit.ir.operation.operation import Operation
+from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.types.primitives import BitType
 from qamomile.circuit.ir.value import (
     ArrayValue,
     Value,
     ValueBase,
 )
+
+
+def _loop_requires_hamiltonian_element_replay(operation: ForOperation) -> bool:
+    """Return whether a concrete loop selects Hamiltonians by loop index.
+
+    A Hamiltonian is an opaque Python object rather than a symbolic scalar.
+    When an array-element access depends on the loop variable, one symbolic
+    body evaluation cannot recover the different object selected by each
+    iteration. Such a loop must inspect each concrete element, even when its
+    iteration count exceeds the ordinary scalar-recurrence replay budget.
+
+    Args:
+        operation (ForOperation): Range loop to classify.
+
+    Returns:
+        bool: Whether a Pauli-evolution Hamiltonian index transitively depends
+        on this loop's induction value.
+    """
+    loop_value = operation.loop_var_value
+    if loop_value is None:
+        return False
+    graph = build_dependency_graph(operation.operations)
+    for nested in walk_operations(operation.operations):
+        if not isinstance(nested, PauliEvolveOp):
+            continue
+        observable = nested.observable
+        if not observable.is_array_element():
+            continue
+        for index_value in observable.element_indices:
+            pending = [index_value.uuid]
+            visited: set[str] = set()
+            while pending:
+                current = pending.pop()
+                if current == loop_value.uuid:
+                    return True
+                if current in visited:
+                    continue
+                visited.add(current)
+                pending.extend(graph.get(current, ()))
+    return False
 
 
 class _LoopSupportInterpreter(_PrimitiveInterpreter):

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 import sympy as sp
@@ -126,17 +126,18 @@ def _classify_gate(
 
 
 def _pauli_terms_share_local_basis(
-    terms: Sequence[Sequence[Any]],
+    terms: Iterable[Sequence[Any]],
 ) -> bool:
     """Return whether every qubit uses at most one Pauli basis across terms.
 
     Terms drawn from one local tensor-product basis commute pairwise. This
     linear fast path covers diagonal Ising/QUBO Hamiltonians without scanning
-    every term pair; mixed-basis commuting sets fall back to the exact
-    pairwise anticommutation test.
+    every term pair. Callers that need an exact mixed-basis answer must use a
+    fuller test, such as component-Hamiltonian commutators that retain
+    cancellation between Pauli-pair contributions.
 
     Args:
-        terms (Sequence[Sequence[Any]]): Active non-identity Pauli strings.
+        terms (Iterable[Sequence[Any]]): Active non-identity Pauli strings.
 
     Returns:
         bool: Whether one consistent Pauli basis exists at every qubit index.

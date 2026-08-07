@@ -78,6 +78,10 @@ from qamomile.circuit.estimator._opaque import (
     OpaqueCostContext,
     _OpaqueInvocationTransform as _OpaqueInvocationTransform,
 )
+from qamomile.circuit.estimator._product_formula import (
+    _apply_product_formula_contract,
+    _require_concrete_product_formula_structure,
+)
 from qamomile.circuit.estimator._symbolic import (
     _CappedRangeSum as _CappedRangeSum,
 )
@@ -250,11 +254,30 @@ class ResourceEstimator:
             self.config,
             strategies={**self.config.strategies, **dict(strategies or {})},
         )
+        condition_values = _scalar_values({**build_inputs, **estimation_inputs})
         interpreter = ResourceInterpreter(
             config=config,
             bindings=build_inputs,
-            condition_values=_scalar_values({**build_inputs, **estimation_inputs}),
+            condition_values=condition_values,
         )
+        if isinstance(block_or_ops, Block):
+            _require_concrete_product_formula_structure(
+                root_callable_attrs,
+                block_or_ops.input_values,
+                bindings={**build_inputs, **condition_values},
+                resolver=ExprResolver(
+                    block=block_or_ops,
+                    context=_root_input_binding_context(
+                        block_or_ops,
+                        build_inputs,
+                    ),
+                ),
+                specialize=lambda expression: interpreter._apply_condition_values(
+                    expression,
+                    record_usage=False,
+                ),
+                source=getattr(kernel, "name", None) or block_or_ops.name or "qkernel",
+            )
         estimate = interpreter.estimate(block_or_ops)
         # Boundary liveness is interpreter-local metadata. A root estimate can
         # later be reused as an opaque definition cost, where caller owner
@@ -271,18 +294,31 @@ class ResourceEstimator:
             block_or_ops.name if isinstance(block_or_ops, Block) else "qkernel"
         )
         if isinstance(block_or_ops, Block):
+            root_resolver = ExprResolver(
+                block=block_or_ops,
+                context=_root_input_binding_context(
+                    block_or_ops,
+                    build_inputs,
+                ),
+            )
+            estimate = _apply_product_formula_contract(
+                estimate,
+                root_callable_attrs,
+                block_or_ops.input_values,
+                root_resolver,
+                bindings=build_inputs,
+                specialize=lambda expression: interpreter._apply_condition_values(
+                    expression,
+                    record_usage=False,
+                ),
+                source=root_source,
+            )
             estimate = _with_constraints(
                 estimate,
                 *_quantum_operand_width_constraints(
                     root_callable_attrs,
                     block_or_ops.input_values,
-                    ExprResolver(
-                        block=block_or_ops,
-                        context=_root_input_binding_context(
-                            block_or_ops,
-                            build_inputs,
-                        ),
-                    ),
+                    root_resolver,
                     source=root_source,
                 ),
             )

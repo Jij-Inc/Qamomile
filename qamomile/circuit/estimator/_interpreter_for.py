@@ -30,6 +30,9 @@ from qamomile.circuit.estimator._interpreter_dataflow import (
     _with_conservative_loop_output_liveness,
 )
 from qamomile.circuit.estimator._interpreter_for_region import _ForRegionInterpreter
+from qamomile.circuit.estimator._interpreter_loop_support import (
+    _loop_requires_hamiltonian_element_replay,
+)
 from qamomile.circuit.estimator._liveness import (
     _maximum_live_owner_sizes_over_range,
 )
@@ -176,20 +179,28 @@ class _ForInterpreter(_ForRegionInterpreter):
             replayed_concrete_body = True
         else:
             inner: ResourceEstimate | None = None
+            requires_hamiltonian_replay = (
+                concrete_iteration_range is not None
+                and _loop_requires_hamiltonian_element_replay(operation)
+            )
             if specialized_iterations.is_zero is True:
                 estimate = ResourceEstimate.zero("empty_for")
                 loop_exit_array_states = dict(initial_array_states)
-            elif (
-                concrete_iteration_range is not None
-                and (
-                    bool(operation.loop_carried_rebinds)
-                    or any(
-                        isinstance(nested, StoreArrayElementOperation)
-                        for nested in walk_operations(operation.operations)
+            elif concrete_iteration_range is not None and (
+                requires_hamiltonian_replay
+                or (
+                    (
+                        bool(operation.loop_carried_rebinds)
+                        or any(
+                            isinstance(nested, StoreArrayElementOperation)
+                            for nested in walk_operations(operation.operations)
+                        )
                     )
+                    and len(
+                        concrete_iteration_range[: _CONCRETE_REGION_REPLAY_LIMIT + 1]
+                    )
+                    <= _CONCRETE_REGION_REPLAY_LIMIT
                 )
-                and len(concrete_iteration_range[: _CONCRETE_REGION_REPLAY_LIMIT + 1])
-                <= _CONCRETE_REGION_REPLAY_LIMIT
             ):
                 with self._guarded_constraint_scope(sp.Gt(iterations, _ZERO)):
                     estimate = self._eval_concrete_region_for(

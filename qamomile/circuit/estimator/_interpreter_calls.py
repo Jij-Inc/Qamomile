@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 import sympy as sp
@@ -71,8 +71,15 @@ from qamomile.circuit.estimator._opaque import (
     _validate_opaque_cost_provenance,
     _zero_control_count,
 )
+from qamomile.circuit.estimator._product_formula import (
+    _apply_product_formula_contract,
+    _require_concrete_product_formula_structure,
+)
 from qamomile.circuit.estimator._resolver import (
     ExprResolver,
+)
+from qamomile.circuit.estimator._resolver_indices import (
+    _resolve_concrete_array_payload,
 )
 from qamomile.circuit.estimator._resource_algebra import (
     _wrap_trace,
@@ -105,9 +112,13 @@ from qamomile.circuit.ir.operation.callable import (
     InvokeOperation,
 )
 from qamomile.circuit.ir.value import (
+    ArrayValue,
     ValueBase,
 )
 from qamomile.circuit.transpiler.block_parameter_binding import pair_block_operands
+from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
+    ValueResolver,
+)
 
 
 class _CallInterpreter(_ForItemsInterpreter):
@@ -120,6 +131,10 @@ class _CallInterpreter(_ForItemsInterpreter):
         actual_operands: Sequence[ValueBase],
         *,
         controls: ResourceExpr | int,
+        callable_attrs: Mapping[str, Any] | None = None,
+        contract_operands: Sequence[ValueBase] | None = None,
+        contract_resolver: ExprResolver | None = None,
+        source: str | None = None,
     ) -> ResourceEstimate:
         """Evaluate a body after remapping caller measurement provenance.
 
@@ -137,6 +152,15 @@ class _CallInterpreter(_ForItemsInterpreter):
                 quantum operands followed by classical/object operands.
             controls (ResourceExpr | int): Coherent controls surrounding every
                 quantum operation in the body.
+            callable_attrs (Mapping[str, Any] | None): Resource metadata for
+                the callable boundary. Defaults to ``None``.
+            contract_operands (Sequence[ValueBase] | None): Caller-scope ABI
+                operands referenced by ``callable_attrs``. Defaults to the
+                body operands.
+            contract_resolver (ExprResolver | None): Caller-scope resolver for
+                computed structural operands. Defaults to ``None``.
+            source (str | None): Callable name used in contract diagnostics.
+                Defaults to the block name.
 
         Returns:
             ResourceEstimate: Body estimate with measurement provenance
@@ -144,11 +168,31 @@ class _CallInterpreter(_ForItemsInterpreter):
 
         Raises:
             ValueError: If recursive expansion repeats a resolved call state,
-                changes only symbolically, or exhausts Python's call stack
-                before reaching a base case.
+                changes only symbolically, exhausts Python's call stack before
+                reaching a base case, or a product-formula structure operand
+                remains unresolved.
             NotImplementedError: If the selected body contains legacy scalar
                 Bit state that cannot flow between loop iterations.
         """
+        active_attrs = callable_attrs or {}
+        active_contract_operands = (
+            contract_operands if contract_operands is not None else actual_operands
+        )
+        if active_attrs:
+            _require_concrete_product_formula_structure(
+                active_attrs,
+                active_contract_operands,
+                bindings={
+                    **self.bindings,
+                    **self._run_state.condition_values,
+                },
+                resolver=contract_resolver,
+                specialize=lambda expression: self._apply_condition_values(
+                    expression,
+                    record_usage=False,
+                ),
+                source=source or block.name or "qkernel",
+            )
         block_identity = id(block)
         resolved_classical_inputs = tuple(
             (
@@ -164,9 +208,9 @@ class _CallInterpreter(_ForItemsInterpreter):
         call_state = tuple(
             [value for _formal, value in resolved_classical_inputs] + [_expr(controls)]
         )
-        local_bindings: dict[str, sp.Expr] = {}
+        local_bindings: dict[str, Any] = {}
         for formal, value in resolved_classical_inputs:
-            if not value.is_number:
+            if value not in (sp.true, sp.false) and not value.is_number:
                 continue
             local_bindings[formal.name] = value
             parameter_name = formal.parameter_name()
@@ -208,6 +252,38 @@ class _CallInterpreter(_ForItemsInterpreter):
             is not sp.false
         }
         previous_taint = self._run_state.measurement_taint_conditions
+        previous_bindings = self.bindings
+        parameter_operands: list[Any] = []
+        for operand in actual_operands:
+            if not (operand.type.is_classical() or operand.type.is_object()):
+                continue
+            resolved_operand: Any = operand
+            if isinstance(operand, ArrayValue):
+                payload = _resolve_concrete_array_payload(
+                    operand,
+                    {
+                        **previous_bindings,
+                        **self._run_state.condition_values,
+                    },
+                    resolve_expression=(
+                        contract_resolver.resolve
+                        if contract_resolver is not None
+                        else None
+                    ),
+                    specialize=lambda expression: self._apply_condition_values(
+                        expression,
+                        record_usage=False,
+                    ),
+                    source=source or block.name or "qkernel call",
+                )
+                if payload is not None:
+                    resolved_operand = payload
+            parameter_operands.append(resolved_operand)
+        self.bindings = ValueResolver().bind_block_params(
+            block,
+            parameter_operands,
+            dict(previous_bindings),
+        )
         self._run_state.measurement_taint_conditions = (
             _merge_measurement_taint_conditions(
                 previous_taint,
@@ -239,6 +315,7 @@ class _CallInterpreter(_ForItemsInterpreter):
                 "recursion with a bounded loop."
             ) from error
         finally:
+            self.bindings = previous_bindings
             self._run_state.measurement_taint_conditions = previous_taint
             active_states.pop()
             if not active_states:
@@ -612,11 +689,33 @@ class _CallInterpreter(_ForItemsInterpreter):
         body_added_controls = len(operation.operands) - len(selection.operands)
         total_controls = _expr(controls) + body_added_controls
         actual_operands = selection.operands
+        callable_attrs = {
+            **(operation.definition.attrs if operation.definition is not None else {}),
+            **operation.attrs,
+        }
         body_estimate = self._eval_call_body(
             body,
             child,
             actual_operands,
             controls=total_controls,
+            callable_attrs=callable_attrs,
+            contract_operands=operation.operands[
+                operation.num_body_external_control_qubits :
+            ],
+            contract_resolver=resolver,
+            source=operation.custom_name,
+        )
+        body_estimate = _apply_product_formula_contract(
+            body_estimate,
+            callable_attrs,
+            operation.operands[operation.num_body_external_control_qubits :],
+            resolver,
+            bindings=self.bindings,
+            specialize=lambda expression: self._apply_condition_values(
+                expression,
+                record_usage=False,
+            ),
+            source=operation.custom_name,
         )
         _publish_invoke_classical_results(
             body.output_values,

@@ -352,8 +352,8 @@ def _loop_array_state_rebinds(
         for rebind in operation.loop_carried_rebinds
         if isinstance(rebind.before, ArrayValue)
         and isinstance(rebind.after, ArrayValue)
-        and not rebind.before.type.is_quantum()
-        and not rebind.after.type.is_quantum()
+        and rebind.before.type.is_classical()
+        and rebind.after.type.is_classical()
     )
     covered_lineages = {
         cast(ArrayValue, rebind.before).logical_id for rebind in explicit
@@ -371,12 +371,12 @@ def _loop_array_state_rebinds(
         for operand in nested_operation.operands:
             if (
                 isinstance(operand, ArrayValue)
-                and not operand.type.is_quantum()
+                and operand.type.is_classical()
                 and operand.uuid not in produced
             ):
                 entries.setdefault(operand.logical_id, operand)
         for result in nested_operation.results:
-            if isinstance(result, ArrayValue) and not result.type.is_quantum():
+            if isinstance(result, ArrayValue) and result.type.is_classical():
                 exits[result.logical_id] = result
     inferred = tuple(
         LoopCarriedRebind(

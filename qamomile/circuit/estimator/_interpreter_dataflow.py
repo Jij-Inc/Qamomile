@@ -64,8 +64,11 @@ class _ResourceInlineBoundaryOperation(Operation):
     Args:
         constraint_operands (tuple[Value, ...]): Caller-scoped quantum target
             operands whose widths must satisfy the callable contract.
+        resource_operands (tuple[ValueBase, ...]): Caller-scoped operands in
+            the callable's untransformed ABI order. They remain outside
+            :attr:`Operation.operands` because the marker performs no work.
         callable_attrs (Mapping[str, Any]): Merged callable definition and
-            invocation attributes that carry the width declaration.
+            invocation attributes that carry resource declarations.
         source (str): Callable name used in diagnostics.
         array_state_bindings (tuple[tuple[ArrayValue, tuple[ArrayValue, ...]],
             ...]): Caller arrays paired with cloned callee entry values that
@@ -73,6 +76,7 @@ class _ResourceInlineBoundaryOperation(Operation):
     """
 
     constraint_operands: tuple[Value, ...] = ()
+    resource_operands: tuple[ValueBase, ...] = ()
     callable_attrs: Mapping[str, Any] = dataclasses.field(default_factory=dict)
     source: str = "callable"
     array_state_bindings: tuple[
