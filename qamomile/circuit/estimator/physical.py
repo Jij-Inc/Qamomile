@@ -9,8 +9,10 @@ its API may change.
 
 The logical :class:`ResourceEstimate` produced by
 :mod:`qamomile.circuit.estimator.resource_estimator` counts logical qubits and
-(non-Clifford) gates. Turning those into *physical* qubit counts and wall-clock
-runtime requires a fault-tolerance model. This module implements the toy
+logical gate families; it does not synthesize rotations or Toffoli gates into
+magic-state operations. Turning those values into *physical* qubit counts and
+wall-clock runtime therefore requires an additional modeling assumption. This
+module implements the toy
 surface-code / lattice-surgery back-of-the-envelope model used for high-level
 resource estimates such as the RSA-2048 factoring numbers in the literature:
 
@@ -162,12 +164,16 @@ def estimate_physical_resources(
     alpha: float = 0.05,
     syndrome_cycle_seconds: float = 1e-6,
 ) -> PhysicalResourceEstimate:
-    """Estimate physical resources directly from a logical resource estimate.
+    """Estimate physical resources heuristically from a logical estimate.
 
     Reads the logical qubit count and non-Clifford gate count from a
     :class:`ResourceEstimate` and feeds them into :func:`surface_code_estimate`.
     The non-Clifford count falls back to ``t + toffoli`` when the estimate does
-    not populate ``gates.non_clifford`` explicitly.
+    not populate ``gates.non_clifford`` explicitly. This automatic mapping
+    treats each logical non-Clifford-family entry as one magic-state event; it
+    is not a synthesis-aware conversion and does not account for the different
+    costs of arbitrary rotations, T gates, and Toffoli gates. Pass an explicit
+    ``non_clifford_gates`` value when a separate synthesis model is available.
 
     Args:
         estimate (ResourceEstimate): Logical resource estimate to convert.
@@ -175,8 +181,8 @@ def estimate_physical_resources(
             logical qubit count ``N``. Defaults to ``None``, meaning
             ``estimate.qubits`` is used.
         non_clifford_gates (ResourceExpr | float | int | None): Override for the
-            non-Clifford gate count ``M``. Defaults to ``None``, meaning the
-            value is read from ``estimate.gates``.
+            magic-state event count ``M``. Defaults to ``None``, meaning a
+            heuristic value is read from the logical gate-family fields.
         physical_error_rate (float): Physical gate error rate ``p``. Defaults to
             ``1e-3``.
         threshold (float): Surface-code threshold ``p_th``. Defaults to

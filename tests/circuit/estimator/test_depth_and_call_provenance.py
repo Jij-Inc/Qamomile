@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-import math
 
 import pytest
 import sympy as sp
@@ -313,7 +312,7 @@ def test_disjoint_concrete_array_view_does_not_alias_the_whole_root() -> None:
         register[0] = qm.h(register[0])
         return qm.measure(register[2:4])
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.depth.depth == 1
     assert estimate.quality is qm.EstimateQuality.EXACT
@@ -332,13 +331,11 @@ def test_supplied_array_index_sharpens_depth_dependencies() -> None:
 
     disjoint = circuit.estimate_resources(
         inputs={"index": 1},
-        basis=qm.GateBasis.LOGICAL,
     )
     overlapping = circuit.estimate_resources(
         inputs={"index": 0},
-        basis=qm.GateBasis.LOGICAL,
     )
-    symbolic = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    symbolic = circuit.estimate_resources()
     substituted = symbolic.substitute(index=1)
 
     assert disjoint.depth.depth == 1
@@ -365,7 +362,7 @@ def test_equivalent_symbolic_array_indices_share_one_wire() -> None:
         register[scaled] = qm.z(register[scaled])
         return register
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.gates.total == 3
     assert estimate.depth.depth == 3
@@ -383,7 +380,7 @@ def test_disjoint_symbolic_array_indices_share_one_layer() -> None:
         register[index + 1] = qm.x(register[index + 1])
         return register
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.gates.total == 2
     assert estimate.depth.depth == 1
@@ -413,7 +410,7 @@ def test_potentially_aliasing_symbolic_indices_remain_conservative() -> None:
         register[index * 2] = qm.x(register[index * 2])
         return register
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.gates.total == 2
     assert estimate.depth.depth == 2
@@ -432,7 +429,7 @@ def test_possible_alias_keeps_exact_guarantee_when_shared_wire_serializes() -> N
         control, register[index * 2] = qm.cx(control, register[index * 2])
         return register
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.gates.total == 2
     assert estimate.depth.depth == 2
@@ -500,7 +497,7 @@ def test_symbolic_indices_on_distinct_arrays_share_one_layer() -> None:
         right[index] = qm.x(right[index])
         return left, right
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.gates.total == 2
     assert estimate.depth.depth == 1
@@ -519,7 +516,7 @@ def test_affine_view_index_matches_equivalent_root_index() -> None:
         register[index * 2 + 1] = qm.x(register[index * 2 + 1])
         return register
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.gates.total == 2
     assert estimate.depth.depth == 2
@@ -539,7 +536,7 @@ def test_even_and_odd_symbolic_views_share_one_layer() -> None:
         odd[index] = qm.x(odd[index])
         return register
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.gates.total == 2
     assert estimate.depth.depth == 1
@@ -557,7 +554,7 @@ def test_large_concrete_disjoint_views_preserve_parallel_depth() -> None:
         odd = register[1::2]
         return qm.measure(even), qm.measure(odd)
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.measurements.total == 600
     assert estimate.depth.depth == 1
@@ -577,18 +574,15 @@ def test_loop_range_projection_preserves_concrete_wire_dependencies() -> None:
         register[7] = qm.x(register[7])
         return register
 
-    symbolic = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    symbolic = circuit.estimate_resources()
     empty = circuit.estimate_resources(
         inputs={"iterations": 0},
-        basis=qm.GateBasis.LOGICAL,
     )
     disjoint = circuit.estimate_resources(
         inputs={"iterations": 1},
-        basis=qm.GateBasis.LOGICAL,
     )
     overlapping = circuit.estimate_resources(
         inputs={"iterations": 8},
-        basis=qm.GateBasis.LOGICAL,
     )
 
     assert symbolic.quality is qm.EstimateQuality.CONSERVATIVE
@@ -617,14 +611,12 @@ def test_nested_loop_range_projection_binds_every_local_index() -> None:
         register[7] = qm.x(register[7])
         return register
 
-    symbolic = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    symbolic = circuit.estimate_resources()
     disjoint = circuit.estimate_resources(
         inputs={"outer": 1, "inner": 1},
-        basis=qm.GateBasis.LOGICAL,
     )
     overlapping = circuit.estimate_resources(
         inputs={"outer": 2, "inner": 4},
-        basis=qm.GateBasis.LOGICAL,
     )
 
     assert symbolic.quality is qm.EstimateQuality.CONSERVATIVE
@@ -666,8 +658,8 @@ def test_nested_call_preserves_symbolic_index_alias_relations() -> None:
         register[index + 0] = qm.x(register[index + 0])
         return register
 
-    disjoint_estimate = disjoint.estimate_resources(basis=qm.GateBasis.LOGICAL)
-    overlapping_estimate = overlapping.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    disjoint_estimate = disjoint.estimate_resources()
+    overlapping_estimate = overlapping.estimate_resources()
 
     assert disjoint_estimate.gates.total == 2
     assert disjoint_estimate.depth.depth == 1
@@ -697,7 +689,6 @@ def test_symbolic_control_pool_index_is_disjoint_from_adjacent_slot() -> None:
 
     estimate = circuit.estimate_resources(
         inputs={"width": 1},
-        basis=qm.GateBasis.LOGICAL,
         control_decomposition=qm.ControlDecomposition.ABSTRACT,
     )
 
@@ -710,14 +701,12 @@ def test_symbolic_vector_broadcast_has_layer_depth_not_element_depth() -> None:
     """Injective affine broadcast loops parallelize across vector slots."""
     width = sp.Symbol("width", integer=True, nonnegative=True)
 
-    symbolic = _vector_hx_measure.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    symbolic = _vector_hx_measure.estimate_resources()
     concrete = _vector_hx_measure.estimate_resources(
         inputs={"width": 3},
-        basis=qm.GateBasis.LOGICAL,
     )
     empty = _vector_hx_measure.estimate_resources(
         inputs={"width": 0},
-        basis=qm.GateBasis.LOGICAL,
     )
 
     assert symbolic.gates.total == 2 * width
@@ -798,11 +787,10 @@ def test_region_carry_does_not_serialize_disjoint_loop_depth() -> None:
             total = total + 1
         return targets, total
 
-    symbolic = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    symbolic = circuit.estimate_resources()
     repetitions = symbolic.parameters["repetitions"]
     large = circuit.estimate_resources(
         inputs={"repetitions": 65},
-        basis=qm.GateBasis.LOGICAL,
     )
 
     expected_depth = sp.Piecewise((1, repetitions > 0), (0, True))
@@ -831,7 +819,7 @@ def test_parallel_loop_reports_stale_completion_as_an_upper_bound() -> None:
         right[0] = qm.h(right[0])
         return left, right
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.depth.depth == 3
     assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
@@ -851,7 +839,7 @@ def test_large_uniform_parallel_loop_keeps_compact_exact_completion() -> None:
             right[index] = qm.x(right[index])
         return left, right
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.gates.total == 600
     assert estimate.depth.depth == 1
@@ -872,7 +860,7 @@ def test_large_nonaffine_disjoint_loop_preserves_exact_parallel_depth() -> None:
             register[offset] = qm.h(register[offset])
         return register
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.gates.total == 300
     assert estimate.depth.depth == 1
@@ -1026,7 +1014,7 @@ def test_ordinary_call_uses_only_body_touched_arguments_for_depth() -> None:
         right = qm.x(right)
         return left, right
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.depth.depth == 1
     assert estimate.quality is qm.EstimateQuality.EXACT
@@ -1057,8 +1045,8 @@ def test_nonunitary_calls_preserve_touched_wire_depth() -> None:
         right_result = qm.measure(right)
         return left_result, right_result
 
-    nested_estimate = nested.estimate_resources(basis=qm.GateBasis.LOGICAL)
-    inline_estimate = inline.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    nested_estimate = nested.estimate_resources()
+    inline_estimate = inline.estimate_resources()
 
     assert inline_estimate.depth.depth == 2
     assert inline_estimate.quality is qm.EstimateQuality.EXACT
@@ -1168,7 +1156,7 @@ def test_inverse_call_uses_only_body_touched_arguments_for_depth() -> None:
         right = qm.x(right)
         return left, right
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.depth.depth == 1
     assert estimate.quality is qm.EstimateQuality.EXACT
@@ -1187,7 +1175,7 @@ def test_controlled_call_uses_only_control_and_body_touched_arguments() -> None:
         right = qm.x(right)
         return control, left, right
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.depth.depth == 1
     assert estimate.quality is qm.EstimateQuality.EXACT
@@ -1202,7 +1190,7 @@ def test_returned_callee_allocation_blocks_its_caller_consumer() -> None:
         target = _fresh_hadamard()
         return qm.z(target)
 
-    assert circuit.estimate_resources(basis=qm.GateBasis.LOGICAL).depth.depth == 2
+    assert circuit.estimate_resources().depth.depth == 2
 
 
 def test_multi_wire_inline_call_preserves_per_wire_depth() -> None:
@@ -1217,7 +1205,7 @@ def test_multi_wire_inline_call_preserves_per_wire_depth() -> None:
         right = qm.h(right)
         return left, right
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.depth.depth == 2
     assert estimate.quality is qm.EstimateQuality.EXACT
@@ -1260,8 +1248,8 @@ def test_inline_call_preserves_specialized_depth_completion() -> None:
         right = qm.t(right)
         return left, right
 
-    nested_estimate = nested.estimate_resources(basis=qm.GateBasis.LOGICAL)
-    inline_estimate = inline.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    nested_estimate = nested.estimate_resources()
+    inline_estimate = inline.estimate_resources()
 
     assert inline_estimate.depth.t_depth == 1
     assert inline_estimate.quality is qm.EstimateQuality.EXACT
@@ -1289,7 +1277,7 @@ def test_inline_call_schedules_hidden_work_on_its_own_wire() -> None:
         target = body(target)
         return qm.t(target)
 
-    estimate = nested.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = nested.estimate_resources()
 
     assert estimate.depth.depth == 2
     assert estimate.depth.t_depth == 1
@@ -1327,7 +1315,7 @@ def test_legacy_inverse_invoke_invalidates_forward_completion() -> None:
     )
     invoke.transform = CallTransform.INVERSE
 
-    estimate = qm.ResourceEstimator(basis=qm.GateBasis.LOGICAL).estimate(block)
+    estimate = qm.ResourceEstimator().estimate(block)
 
     assert estimate.depth.depth == 3
     assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
@@ -1347,103 +1335,12 @@ def test_pauli_evolve_aggregate_boundary_is_not_exact() -> None:
 
     estimate = circuit.estimate_resources(
         inputs={"hamiltonian": qm_o.X(0)},
-        basis=qm.GateBasis.LOGICAL,
     )
 
     assert estimate.depth.depth == 4
     assert estimate.depth.rotation_depth == 2
     assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
     assert any("aggregate latency" in note.message for note in estimate.assumptions)
-
-
-def test_controlled_z_lowering_is_not_uniform() -> None:
-    """A multi-layer controlled-Z summary has unequal wire exit layers."""
-
-    @qm.qkernel
-    def z_body(target: qm.Qubit) -> qm.Qubit:
-        """Apply one Z gate."""
-        return qm.z(target)
-
-    @qm.qkernel
-    def circuit() -> tuple[qm.Qubit, qm.Qubit]:
-        """Gate the control after a lowered controlled-Z."""
-        control = qm.qubit("control")
-        target = qm.qubit("target")
-        control, target = qm.control(z_body)(control, target)
-        control = qm.h(control)
-        return control, target
-
-    estimate = circuit.estimate_resources(
-        basis=qm.GateBasis.CLIFFORD_T,
-        precision=1e-4,
-    )
-
-    assert estimate.depth.depth == 4
-    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
-
-
-def test_controlled_swap_lowering_is_not_uniform() -> None:
-    """A lowered controlled-SWAP does not finish every operand together."""
-
-    @qm.qkernel
-    def swap_body(
-        left: qm.Qubit,
-        right: qm.Qubit,
-    ) -> tuple[qm.Qubit, qm.Qubit]:
-        """Swap two target qubits."""
-        return qm.swap(left, right)
-
-    @qm.qkernel
-    def circuit() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
-        """Gate the control after a lowered controlled-SWAP."""
-        control = qm.qubit("control")
-        left = qm.qubit("left")
-        right = qm.qubit("right")
-        control, left, right = qm.control(swap_body)(control, left, right)
-        control = qm.h(control)
-        return control, left, right
-
-    estimate = circuit.estimate_resources(
-        basis=qm.GateBasis.CLIFFORD_T,
-        precision=1e-4,
-    )
-
-    assert estimate.depth.depth == 18
-    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
-
-
-def test_multi_controlled_global_phase_completion_is_not_uniform() -> None:
-    """A lowered relative phase may finish its controls on different layers."""
-
-    @qm.qkernel
-    def identity(target: qm.Qubit) -> qm.Qubit:
-        """Leave the target unchanged."""
-        return target
-
-    @qm.qkernel
-    def circuit() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit, qm.Qubit]:
-        """Gate one control after a three-control relative phase."""
-        c0 = qm.qubit("c0")
-        c1 = qm.qubit("c1")
-        c2 = qm.qubit("c2")
-        target = qm.qubit("target")
-        c0, c1, c2, target = qm.control(identity, num_controls=3)(
-            c0,
-            c1,
-            c2,
-            target,
-            global_phase=qm.float_(math.pi),
-        )
-        c0 = qm.h(c0)
-        return c0, c1, c2, target
-
-    estimate = circuit.estimate_resources(
-        basis=qm.GateBasis.CLIFFORD_T,
-        precision=1e-4,
-    )
-
-    assert estimate.depth.depth == 18
-    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
 
 
 def test_multi_wire_if_boundary_reports_conservative_depth_guarantee() -> None:
@@ -1463,7 +1360,6 @@ def test_multi_wire_if_boundary_reports_conservative_depth_guarantee() -> None:
 
     estimate = circuit.estimate_resources(
         inputs={"flag": 1},
-        basis=qm.GateBasis.LOGICAL,
     )
 
     assert estimate.depth.depth == 3
@@ -1486,7 +1382,7 @@ def test_multi_wire_for_boundary_reports_conservative_depth_guarantee() -> None:
         right = qm.h(right)
         return left, right
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.depth.depth == 3
     assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
@@ -1510,7 +1406,7 @@ def test_select_does_not_block_an_unused_pass_through_target() -> None:
         right = qm.x(right)
         return index, left, right
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.depth.depth == 3
     assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
@@ -1578,11 +1474,8 @@ def test_zero_power_body_does_not_join_independent_wire_timelines() -> None:
 
     estimate = circuit.estimate_resources(
         inputs={"width": 1, "power": 0},
-        basis=qm.GateBasis.LOGICAL,
     )
-    substituted = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL).substitute(
-        width=1, power=0
-    )
+    substituted = circuit.estimate_resources().substitute(width=1, power=0)
 
     assert estimate.depth.depth == 1
     assert substituted.depth.depth == 1
@@ -1606,11 +1499,8 @@ def test_zero_iteration_loop_preserves_independent_wire_timelines() -> None:
 
     direct = circuit.estimate_resources(
         inputs={"iterations": 0},
-        basis=qm.GateBasis.LOGICAL,
     )
-    substituted = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL).substitute(
-        iterations=0
-    )
+    substituted = circuit.estimate_resources().substitute(iterations=0)
 
     assert direct.depth.depth == 1
     assert substituted.depth.depth == 1
@@ -1629,7 +1519,7 @@ def test_zero_depth_classical_operation_does_not_disable_wire_scheduling() -> No
         right = qm.x(qm.qubit("right"))
         return left, right
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.depth.depth == 1
 
@@ -1638,13 +1528,9 @@ def test_serialized_return_operation_is_depth_neutral() -> None:
     """A restored trailing ReturnOperation keeps dependency scheduling enabled."""
     from qamomile.circuit.serialization import deserialize, serialize
 
-    original = _left_call_with_sibling_gate.estimate_resources(
-        basis=qm.GateBasis.LOGICAL
-    )
+    original = _left_call_with_sibling_gate.estimate_resources()
     restored = deserialize(serialize(_left_call_with_sibling_gate))
-    restored_estimate = qm.ResourceEstimator(basis=qm.GateBasis.LOGICAL).estimate(
-        restored.block
-    )
+    restored_estimate = qm.ResourceEstimator().estimate(restored.block)
 
     assert original.depth.depth == 1
     assert restored_estimate.depth.depth == 1
@@ -1665,7 +1551,7 @@ def test_open_control_boundary_discloses_aggregate_depth_bound() -> None:
         target = qm.z(target)
         return control, target
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.depth.depth == 4
     assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
@@ -1684,7 +1570,7 @@ def test_controlled_global_phase_does_not_block_pass_through_target() -> None:
         target = qm.x(target)
         return control, target
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.depth.depth == 1
     assert estimate.quality is qm.EstimateQuality.EXACT
@@ -1715,7 +1601,7 @@ def test_feed_forward_orders_only_dependent_specialized_depth_fields() -> None:
         after_t = qm.t(qm.qubit("after_t"))
         return before_t, branch_target, after_t
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.depth.depth == 2
     assert estimate.depth.measurement_depth == 1
@@ -1755,8 +1641,8 @@ def test_feed_forward_range_loop_matches_unrolled_depth_fields() -> None:
             targets[2] = qm.t(targets[2])
         return targets, bits
 
-    loop_estimate = loop.estimate_resources(basis=qm.GateBasis.LOGICAL)
-    unrolled_estimate = unrolled.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    loop_estimate = loop.estimate_resources()
+    unrolled_estimate = unrolled.estimate_resources()
 
     assert loop_estimate.depth == unrolled_estimate.depth
     assert loop_estimate.depth.depth == 2
@@ -1785,10 +1671,9 @@ def test_symbolic_feed_forward_loop_preserves_per_wire_dependencies() -> None:
             targets[index] = measured_call(controls[index], targets[index])
         return targets
 
-    symbolic = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    symbolic = circuit.estimate_resources()
     concrete = circuit.estimate_resources(
         inputs={"width": 3},
-        basis=qm.GateBasis.LOGICAL,
     )
     substituted = symbolic.substitute(width=3)
 
@@ -1839,8 +1724,8 @@ def test_derived_measurement_condition_keeps_callee_runtime_provenance() -> None
         measured = qm.measure(qm.qubit("source"))
         return derived_callee(measured, qm.qubit("left"), qm.qubit("right"))
 
-    direct_estimate = direct.estimate_resources(basis=qm.GateBasis.LOGICAL)
-    derived_estimate = derived.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    direct_estimate = direct.estimate_resources()
+    derived_estimate = derived.estimate_resources()
 
     assert derived_estimate.depth == direct_estimate.depth
     assert derived_estimate.depth.depth == 2
@@ -1874,8 +1759,8 @@ def test_measurement_result_taint_crosses_nested_call_boundary() -> None:
             target = qm.t(target)
         return target
 
-    nested_estimate = nested.estimate_resources(basis=qm.GateBasis.LOGICAL)
-    inline_estimate = inline.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    nested_estimate = nested.estimate_resources()
+    inline_estimate = inline.estimate_resources()
 
     assert nested_estimate.gates == inline_estimate.gates
     assert nested_estimate.depth == inline_estimate.depth
@@ -1943,8 +1828,8 @@ def test_unrelated_classical_loop_carry_does_not_serialize_disjoint_gates() -> N
             total += 1
         return targets, total
 
-    plain = without_carry.estimate_resources(basis=qm.GateBasis.LOGICAL)
-    carried = with_carry.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    plain = without_carry.estimate_resources()
+    carried = with_carry.estimate_resources()
 
     assert carried.gates == plain.gates
     assert carried.depth == plain.depth
@@ -2655,7 +2540,7 @@ def test_while_orders_only_its_predicate_and_touched_target() -> None:
         result = qm.measure(qm.qubit("result"))
         return before, after, result
 
-    symbolic = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    symbolic = circuit.estimate_resources()
     zero_trip = symbolic.substitute(**{"|while|": 0})
     three_trips = symbolic.substitute(**{"|while|": 3})
 

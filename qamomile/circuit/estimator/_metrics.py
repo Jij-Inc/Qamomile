@@ -12,7 +12,6 @@ from qamomile.circuit.estimator._resource_base import (
     ControlDecomposition as ControlDecomposition,
     EstimateDerivation as EstimateDerivation,
     EstimateQuality as EstimateQuality,
-    GateBasis as GateBasis,
 )
 from qamomile.circuit.estimator._resource_conditions import (
     _ConditionIndicator as _ConditionIndicator,

@@ -51,9 +51,7 @@ class _QueryCost:
                 calls_by_name={"query_oracle": sp.Integer(1)},
                 queries_by_name={"query_oracle": sp.Integer(1)},
             ),
-            basis=ctx.basis,
             control_decomposition=ctx.control_decomposition,
-            precision=ctx.precision,
         )
 
 

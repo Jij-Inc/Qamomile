@@ -19,7 +19,6 @@ from qamomile.circuit.ir.block import Block
 if TYPE_CHECKING:
     from qamomile.circuit.estimator import (
         ControlDecomposition,
-        GateBasis,
         ResourceEstimate,
         UnknownResourcePolicy,
     )
@@ -36,9 +35,7 @@ class QKernelBuildMixin:
         strategies: dict[str, str] | None = None,
         trace: bool = False,
         unknown_policy: str | UnknownResourcePolicy | None = None,
-        basis: str | GateBasis | None = None,
         control_decomposition: str | ControlDecomposition | None = None,
-        precision: float | None = None,
     ) -> ResourceEstimate:
         """Estimate all resources for this kernel's circuit.
 
@@ -57,18 +54,13 @@ class QKernelBuildMixin:
             unknown_policy (str | UnknownResourcePolicy | None): Policy for
                 bodyless callables without explicit costs. Defaults to
                 ``None``, which uses the estimator default.
-            basis (str | GateBasis | None): Gate-basis override. Defaults to
-                ``None``, which uses the logical algorithmic basis.
             control_decomposition (str | ControlDecomposition | None):
                 Coherent-control model override. Defaults to ``None``, which
                 uses the clean-ancilla Toffoli model.
-            precision (float | None): Rotation-synthesis precision for a
-                lowered basis. Defaults to ``None``, which uses the estimator
-                default.
 
         Returns:
-            ResourceEstimate: Algorithmic resource estimate in the requested
-                gate basis and control-decomposition model.
+            ResourceEstimate: Algorithmic resource estimate using the requested
+                control-decomposition model.
 
         Raises:
             ValueError: If an input, estimation configuration, callable
@@ -94,9 +86,7 @@ class QKernelBuildMixin:
             strategies=strategies,
             trace=trace,
             unknown_policy=unknown_policy,
-            basis=basis,
             control_decomposition=control_decomposition,
-            precision=precision,
         )
 
     def build(

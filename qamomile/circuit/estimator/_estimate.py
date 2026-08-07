@@ -9,10 +9,7 @@ from typing import Any
 import sympy as sp
 from sympy.logic.boolalg import Boolean
 
-from qamomile.circuit.estimator._config import (
-    _DEFAULT_CONTROL_DECOMPOSITION,
-    _DEFAULT_GATE_BASIS,
-)
+from qamomile.circuit.estimator._config import _DEFAULT_CONTROL_DECOMPOSITION
 from qamomile.circuit.estimator._constants import (
     _ONE,
 )
@@ -50,7 +47,6 @@ from qamomile.circuit.estimator._resource_base import (
     ControlDecomposition,
     EstimateDerivation,
     EstimateQuality,
-    GateBasis,
     ResourceExpr,
 )
 from qamomile.circuit.estimator._resource_constraints import (
@@ -97,13 +93,9 @@ class ResourceEstimate:
         approximation (ApproximationStatus): Whether the selected circuit
             approximates an ideal mathematical operation. Defaults to
             ``EXACT``.
-        basis (GateBasis): Gate basis used for the estimate. Defaults to the
-            logical algorithmic basis.
         control_decomposition (ControlDecomposition): Coherent-control
             decomposition used for the estimate. Defaults to the clean-ancilla
             Toffoli model.
-        precision (float | None): Rotation-synthesis precision when the basis
-            uses approximate synthesis. Defaults to ``None``.
         _allocation_sites (dict[str, ResourceExpr]): Internal QInit-site sizes
             keyed by stable operation-result UUID. Concrete loop evaluation
             uses this identity map to count one static allocation site once
@@ -170,9 +162,7 @@ class ResourceEstimate:
     derivation: EstimateDerivation = EstimateDerivation.STRUCTURAL
     quality: EstimateQuality = EstimateQuality.EXACT
     approximation: ApproximationStatus = ApproximationStatus.EXACT
-    basis: GateBasis = _DEFAULT_GATE_BASIS
     control_decomposition: ControlDecomposition = _DEFAULT_CONTROL_DECOMPOSITION
-    precision: float | None = None
     measurements: MeasurementResources = dataclasses.field(
         default_factory=MeasurementResources.zero
     )
@@ -421,7 +411,7 @@ class ResourceEstimate:
             estimate for an empty sequence.
 
         Raises:
-            ValueError: If the estimates use incompatible basis or precision
+            ValueError: If the estimates use incompatible control-decomposition
                 provenance.
         """
         composer = _SequentialEstimateComposer(ResourceEstimate.zero())
@@ -502,9 +492,8 @@ class ResourceEstimate:
         hidden global-phase overhead. Angle-specific phase classification
         requires a body-backed global-phase operation; a declared one-qubit
         phase entry is an upper-bound representative for a target-free phase.
-        Unsupported gate bases and aggregate measurement or reset costs fail
-        closed. Body-backed qkernels are controlled by the estimator
-        interpreter instead.
+        Aggregate measurement or reset costs fail closed. Body-backed qkernels
+        are controlled by the estimator interpreter instead.
 
         Args:
             num_controls (ResourceExpr | int): Number of active controls.
@@ -513,9 +502,8 @@ class ResourceEstimate:
             ResourceEstimate: Estimate with a recorded controlled assumption.
 
         Raises:
-            ValueError: If a concrete control count or projected gate count
-                is negative or non-integral, if the selected gate basis has no
-                aggregate controlled projection, or if the estimate contains
+            ValueError: If a concrete control count or projected gate count is
+                negative or non-integral, or if the estimate contains
                 measurement or reset resources.
         """
         return _control_estimate(self, num_controls)

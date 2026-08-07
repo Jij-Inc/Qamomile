@@ -19,10 +19,6 @@ from qamomile.circuit.estimator._classical_provenance import (
     _classical_fact_uncertainty_condition,
     _loop_array_state_rebinds,
 )
-from qamomile.circuit.estimator._clifford_t_decomposition import (
-    _PHASE_CLASS_CODES,
-    _CanonicalPhaseClass,
-)
 from qamomile.circuit.estimator._constants import (
     _ONE,
     _ZERO,
@@ -38,7 +34,7 @@ from qamomile.circuit.estimator._estimate import (
     ResourceEstimate,
 )
 from qamomile.circuit.estimator._gate_models import (
-    _estimate_named_gate_in_basis,
+    _estimate_named_gate,
 )
 from qamomile.circuit.estimator._interpreter_core import (
     _CONCRETE_REGION_REPLAY_LIMIT,
@@ -58,6 +54,7 @@ from qamomile.circuit.estimator._resource_base import (
     ResourceExpr,
     _symbol_display_name,
 )
+from qamomile.circuit.estimator._resource_conditions import _PhaseIdentity
 from qamomile.circuit.estimator._resource_expressions import (
     _boolean_condition,
     _ConditionIndicator,
@@ -228,10 +225,7 @@ class _ControlBatchingInterpreter(_InterpreterCore):
                 record_usage=False,
             )
             return _EstimatorControlBatchProfile(work=1).when(
-                sp.Ne(
-                    _CanonicalPhaseClass(phase),
-                    _PHASE_CLASS_CODES[None],
-                )
+                sp.Eq(_PhaseIdentity(phase), _ZERO)
             )
         if isinstance(operation, PauliEvolveOp):
             gamma = self._apply_condition_values(
@@ -766,12 +760,10 @@ class _ControlBatchingInterpreter(_InterpreterCore):
         """
         recipe = clean_ancilla_toffoli_ladder(controls)
         outer_clean_ancillas = recipe.clean_ancillas
-        toffoli = _estimate_named_gate_in_basis(
+        toffoli = _estimate_named_gate(
             "toffoli",
             _ZERO,
-            basis=self.config.basis,
             control_decomposition=self.config.control_decomposition,
-            precision=self.config.precision,
         )
         ladder = toffoli.repeat(recipe.total_toffolis)
         compute_depth = recipe.compute_toffolis * toffoli.depth.depth

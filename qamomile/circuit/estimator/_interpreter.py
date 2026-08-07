@@ -20,7 +20,7 @@ from qamomile.circuit.estimator._estimate import ResourceEstimate
 from qamomile.circuit.estimator._estimate_validation import _with_constraints
 from qamomile.circuit.estimator._gate_models import (
     _classify_pauli_evolve_depth,
-    _estimate_named_gate_in_basis,
+    _estimate_named_gate,
     _pauli_terms_share_local_basis,
 )
 from qamomile.circuit.estimator._interpreter_transforms import (
@@ -174,36 +174,28 @@ class ResourceInterpreter(_TransformedCallInterpreter):
             active_pauli_terms.append(operators)
             x_count = sum(operator.pauli == qm_o.Pauli.X for operator in operators)
             y_count = sum(operator.pauli == qm_o.Pauli.Y for operator in operators)
-            basis_h_gate = _estimate_named_gate_in_basis(
+            basis_h_gate = _estimate_named_gate(
                 "h",
                 _ZERO,
-                basis=self.config.basis,
                 control_decomposition=self.config.control_decomposition,
-                precision=self.config.precision,
             )
             basis_h = basis_h_gate.repeat(2 * (x_count + y_count))
-            basis_s_gate = _estimate_named_gate_in_basis(
+            basis_s_gate = _estimate_named_gate(
                 "s",
                 _ZERO,
-                basis=self.config.basis,
                 control_decomposition=self.config.control_decomposition,
-                precision=self.config.precision,
             )
             basis_s = basis_s_gate.repeat(2 * y_count)
-            parity_gate = _estimate_named_gate_in_basis(
+            parity_gate = _estimate_named_gate(
                 "cx",
                 _ZERO,
-                basis=self.config.basis,
                 control_decomposition=self.config.control_decomposition,
-                precision=self.config.precision,
             )
             parity = parity_gate.repeat(2 * max(0, len(operators) - 1))
-            rotation = _estimate_named_gate_in_basis(
+            rotation = _estimate_named_gate(
                 "rz",
                 _expr(controls),
-                basis=self.config.basis,
                 control_decomposition=self.config.control_decomposition,
-                precision=self.config.precision,
             )
             term = basis_h.seq(basis_s).seq(parity).seq(rotation)
             term = dataclasses.replace(

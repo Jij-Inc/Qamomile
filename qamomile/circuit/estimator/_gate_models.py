@@ -1,4 +1,4 @@
-"""Route logical gate estimation to the selected resource model."""
+"""Estimate gates in Qamomile's logical resource model."""
 
 from __future__ import annotations
 
@@ -12,24 +12,11 @@ import qamomile.observable as qm_o
 from qamomile.circuit.estimator._clean_ancilla_projection import (
     _estimate_clean_ancilla_named_gate,
 )
-from qamomile.circuit.estimator._clifford_t_decomposition import (
-    _classify_clifford_t_gate,
-    _clifford_t_conservative_condition,
-    _named_clifford_t_clean_ancillas,
-)
-from qamomile.circuit.estimator._clifford_t_depth import _named_clifford_t_depth
-from qamomile.circuit.estimator._config import (
-    _DEFAULT_GATE_BASIS,
-    _DEFAULT_ROTATION_SYNTHESIS_PRECISION,
-)
 from qamomile.circuit.estimator._constants import (
     _ZERO,
 )
 from qamomile.circuit.estimator._estimate import (
     ResourceEstimate,
-)
-from qamomile.circuit.estimator._gate_catalog import (
-    _ROTATION_GATES,
 )
 from qamomile.circuit.estimator._gate_classification import (
     _classify_controlled_gate,
@@ -40,10 +27,7 @@ from qamomile.circuit.estimator._resource_algebra import (
     _scale_depth,
 )
 from qamomile.circuit.estimator._resource_base import (
-    ApproximationStatus,
     ControlDecomposition,
-    EstimateQuality,
-    GateBasis,
     ResourceExpr,
 )
 from qamomile.circuit.estimator._resource_expressions import (
@@ -52,8 +36,6 @@ from qamomile.circuit.estimator._resource_expressions import (
 from qamomile.circuit.estimator._resource_types import (
     DepthResources,
     GateResources,
-    ResourceTraceNode,
-    WidthResources,
 )
 from qamomile.circuit.ir.operation.gate import (
     GateOperation,
@@ -79,38 +61,29 @@ def _sympify_resource_value(value: Any, fallback_name: str) -> sp.Expr:
     return sp.Symbol(fallback_name)
 
 
-def _estimate_named_gate_in_basis(
+def _estimate_named_gate(
     name: str,
     controls: ResourceExpr,
     *,
-    basis: GateBasis,
     control_decomposition: ControlDecomposition,
-    precision: float,
 ) -> ResourceEstimate:
-    """Estimate a named primitive in one public gate model.
+    """Estimate a named primitive under one logical control model.
 
     This helper is used for decomposition gates introduced by the estimator
-    itself, such as control-value brackets and Pauli-gadget basis changes.
+    itself, such as control-value brackets and Pauli-gadget basis changes. Its
+    gate-family metrics describe the resulting logical circuit after applying
+    ``control_decomposition``.
 
     Args:
         name (str): Lowercase gate name.
         controls (ResourceExpr): Number of additional coherent controls.
-        basis (GateBasis): Requested output basis.
         control_decomposition (ControlDecomposition): Requested coherent-control
             representation.
-        precision (float): Rotation-synthesis precision for ``CLIFFORD_T``.
 
     Returns:
         ResourceEstimate: Gate, depth, and decomposition-ancilla resources.
-
-    Raises:
-        ValueError: If the Clifford+T basis is asked to preserve a controlled
-            primitive abstractly or lacks a lowering for the named gate.
     """
-    if (
-        basis is GateBasis.LOGICAL
-        and control_decomposition is ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
-    ):
+    if control_decomposition is ControlDecomposition.CLEAN_ANCILLA_TOFFOLI:
         return _estimate_clean_ancilla_named_gate(
             ResourceEstimate.zero(),
             name,
@@ -118,62 +91,6 @@ def _estimate_named_gate_in_basis(
         )
 
     normalized_name = "toffoli" if name == "ccx" else name
-    if basis is GateBasis.CLIFFORD_T:
-        if control_decomposition is ControlDecomposition.ABSTRACT and controls != _ZERO:
-            raise ValueError(
-                "Clifford+T estimation cannot preserve a controlled primitive "
-                "as abstract. Select the clean-ancilla Toffoli control "
-                "decomposition."
-            )
-        gates = _classify_clifford_t_gate(
-            normalized_name,
-            controls,
-            precision,
-        )
-        clean_ancillas = _named_clifford_t_clean_ancillas(
-            normalized_name,
-            controls,
-        )
-        estimate = ResourceEstimate(
-            width=WidthResources(
-                clean_ancilla_qubits=clean_ancillas,
-                peak_qubits=clean_ancillas,
-            ),
-            gates=gates,
-            depth=_named_clifford_t_depth(
-                normalized_name,
-                controls,
-                gates,
-                precision,
-            ),
-            trace=ResourceTraceNode(
-                normalized_name,
-                "clifford_t_decomposition",
-                summary=f"gates={gates.total}",
-            ),
-        )
-        estimate = dataclasses.replace(
-            estimate,
-            basis=basis,
-            control_decomposition=control_decomposition,
-            precision=precision,
-        )
-        conservative_when = _clifford_t_conservative_condition(
-            normalized_name,
-            controls,
-        )
-        if conservative_when is not sp.false:
-            estimate = estimate._with_metadata(
-                quality=EstimateQuality.CONSERVATIVE,
-                active_when=conservative_when,
-            )
-        if normalized_name in _ROTATION_GATES:
-            estimate = estimate._with_metadata(
-                quality=EstimateQuality.UNKNOWN,
-                approximation=ApproximationStatus.APPROXIMATE,
-            )
-        return estimate
-
     gates = (
         _classify_uncontrolled_gate(normalized_name)
         if controls == _ZERO
@@ -181,9 +98,7 @@ def _estimate_named_gate_in_basis(
     )
     return dataclasses.replace(
         ResourceEstimate.primitive(normalized_name, gates),
-        basis=basis,
         control_decomposition=control_decomposition,
-        precision=None,
     )
 
 
@@ -191,8 +106,6 @@ def _classify_gate(
     operation: GateOperation,
     *,
     num_controls: ResourceExpr | int = 0,
-    basis: GateBasis = _DEFAULT_GATE_BASIS,
-    precision: float = _DEFAULT_ROTATION_SYNTHESIS_PRECISION,
 ) -> GateResources:
     """Classify one primitive gate into logical gate resources.
 
@@ -200,9 +113,6 @@ def _classify_gate(
         operation (GateOperation): Primitive gate operation.
         num_controls (ResourceExpr | int): Surrounding controls. Defaults to
             zero.
-        basis (GateBasis): Gate basis to report. Defaults to ``LOGICAL``.
-        precision (float): Rotation-synthesis precision in ``CLIFFORD_T``
-            basis. Defaults to ``1e-10``.
 
     Returns:
         GateResources: Resource contribution of the primitive gate.
@@ -210,28 +120,9 @@ def _classify_gate(
     gate_name = operation.gate_type.name.lower() if operation.gate_type else "unknown"
     if gate_name == "ccx":
         gate_name = "toffoli"
-    if basis is GateBasis.CLIFFORD_T:
-        return _classify_clifford_t_gate(
-            gate_name,
-            _expr(num_controls),
-            precision,
-        )
     if _expr(num_controls) == 0:
         return _classify_uncontrolled_gate(gate_name)
     return _classify_controlled_gate(gate_name, _expr(num_controls))
-
-
-def _gate_has_rotation(operation: GateOperation) -> bool:
-    """Return whether a primitive gate carries an arbitrary rotation.
-
-    Args:
-        operation (GateOperation): Primitive gate operation.
-
-    Returns:
-        bool: Whether the gate requires approximate Clifford+T synthesis.
-    """
-    name = operation.gate_type.name.lower() if operation.gate_type else "unknown"
-    return name in _ROTATION_GATES
 
 
 def _pauli_terms_share_local_basis(

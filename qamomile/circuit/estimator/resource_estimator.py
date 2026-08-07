@@ -21,7 +21,6 @@ from qamomile.circuit.estimator._resource_base import (
     ControlDecomposition,
     EstimateDerivation,
     EstimateQuality,
-    GateBasis,
 )
 from qamomile.circuit.estimator._resource_types import (
     CallResources,
@@ -44,13 +43,8 @@ if TYPE_CHECKING:
 from qamomile.circuit.estimator._classical_provenance import (
     _LoopMayTaint as _LoopMayTaint,
 )
-from qamomile.circuit.estimator._clifford_t_decomposition import (
-    _CanonicalPhaseClass as _CanonicalPhaseClass,
-)
 from qamomile.circuit.estimator._config import (
     _DEFAULT_CONTROL_DECOMPOSITION,
-    _DEFAULT_GATE_BASIS,
-    _DEFAULT_ROTATION_SYNTHESIS_PRECISION,
     UnknownResourcePolicy,
     _ResourceEstimatorConfig,
 )
@@ -95,7 +89,6 @@ __all__ = [
     "DepthResources",
     "EstimateDerivation",
     "EstimateQuality",
-    "GateBasis",
     "GateResources",
     "OpaqueCostContext",
     "MeasurementResources",
@@ -121,10 +114,8 @@ class ResourceEstimator:
         trace: bool = False,
         simplify: bool = True,
         unknown_policy: str | UnknownResourcePolicy = UnknownResourcePolicy.ERROR,
-        basis: str | GateBasis = _DEFAULT_GATE_BASIS,
         control_decomposition: str
         | ControlDecomposition = _DEFAULT_CONTROL_DECOMPOSITION,
-        precision: float = _DEFAULT_ROTATION_SYNTHESIS_PRECISION,
     ) -> None:
         """Initialize a resource estimator.
 
@@ -137,34 +128,20 @@ class ResourceEstimator:
                 to ``True``.
             unknown_policy (str | UnknownResourcePolicy): Handling for unknown
                 bodyless callables. Defaults to ``ERROR``.
-            basis (str | GateBasis): Output gate basis. Defaults to
-                ``LOGICAL``.
             control_decomposition (str | ControlDecomposition):
                 Coherent-control decomposition. Defaults to
                 ``CLEAN_ANCILLA_TOFFOLI``.
-            precision (float): Rotation-synthesis precision for
-                ``CLIFFORD_T`` basis. Defaults to ``1e-10``.
 
         Raises:
-            ValueError: If ``unknown_policy``, ``basis``, or
-                ``control_decomposition`` is unknown, or ``precision`` is
-                outside ``(0, 1)``.
+            ValueError: If ``unknown_policy`` or ``control_decomposition`` is
+                unknown.
         """
-        if not 0 < precision < 1:
-            raise ValueError("precision must satisfy 0 < precision < 1.")
         try:
             normalized_unknown_policy = UnknownResourcePolicy(unknown_policy)
         except ValueError as error:
             valid = ", ".join(member.value for member in UnknownResourcePolicy)
             raise ValueError(
                 f"unknown resource policy {unknown_policy!r}; expected one of: {valid}"
-            ) from error
-        try:
-            normalized_basis = GateBasis(basis)
-        except ValueError as error:
-            valid = ", ".join(member.value for member in GateBasis)
-            raise ValueError(
-                f"unknown gate basis {basis!r}; expected one of: {valid}"
             ) from error
         try:
             normalized_control_decomposition = ControlDecomposition(
@@ -181,9 +158,7 @@ class ResourceEstimator:
             trace=trace,
             simplify=simplify,
             unknown_policy=normalized_unknown_policy,
-            basis=normalized_basis,
             control_decomposition=normalized_control_decomposition,
-            precision=precision,
         )
 
     def estimate(
@@ -351,11 +326,7 @@ class ResourceEstimator:
             estimate = estimate.simplify()
         estimate = dataclasses.replace(
             estimate,
-            basis=config.basis,
             control_decomposition=config.control_decomposition,
-            precision=(
-                config.precision if config.basis is GateBasis.CLIFFORD_T else None
-            ),
         )
         interpreter.validate_no_internal_resource_symbols(estimate)
         return estimate
@@ -407,9 +378,7 @@ def estimate_resources(
     strategies: dict[str, str] | None = None,
     trace: bool = False,
     unknown_policy: str | UnknownResourcePolicy = UnknownResourcePolicy.ERROR,
-    basis: str | GateBasis = _DEFAULT_GATE_BASIS,
     control_decomposition: str | ControlDecomposition = _DEFAULT_CONTROL_DECOMPOSITION,
-    precision: float = _DEFAULT_ROTATION_SYNTHESIS_PRECISION,
 ) -> ResourceEstimate:
     """Estimate algorithmic resources using the default estimator facade.
 
@@ -427,18 +396,15 @@ def estimate_resources(
             ``False``.
         unknown_policy (str | UnknownResourcePolicy): Unknown callable
             handling. Defaults to ``ERROR``.
-        basis (str | GateBasis): Output gate basis. Defaults to ``LOGICAL``.
         control_decomposition (str | ControlDecomposition): Coherent-control
             decomposition. Defaults to ``CLEAN_ANCILLA_TOFFOLI``.
-        precision (float): Rotation-synthesis precision for ``CLIFFORD_T``.
-            Defaults to ``1e-10``.
 
     Returns:
         ResourceEstimate: Algorithmic resource estimate.
 
     Raises:
-        ValueError: If the basis, precision, input specialization, callable
-            resource contract, or structural requirements are invalid.
+        ValueError: If the input specialization, estimator configuration,
+            callable resource contract, or structural requirements are invalid.
         TypeError: If ``kernel`` is not a supported estimator input.
         NotImplementedError: If the input IR contains a construct not
             supported by resource estimation.
@@ -461,9 +427,7 @@ def estimate_resources(
         strategies=strategies,
         trace=trace,
         unknown_policy=unknown_policy,
-        basis=basis,
         control_decomposition=control_decomposition,
-        precision=precision,
     )
     return estimator.estimate(
         kernel,

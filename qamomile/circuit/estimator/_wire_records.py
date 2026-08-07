@@ -602,22 +602,3 @@ def _enum_from_wire(
         if member.value == payload:
             return member
     raise ValueError(f"{label} has unknown value {payload!r}")
-
-
-def _precision_from_wire(payload: Any) -> float | None:
-    """Decode optional rotation-synthesis precision.
-
-    Args:
-        payload (Any): Serialized precision.
-
-    Returns:
-        float | None: Reconstructed precision.
-
-    Raises:
-        ValueError: If the value is not a numeric scalar or ``None``.
-    """
-    if payload is None:
-        return None
-    if isinstance(payload, bool) or not isinstance(payload, (int, float)):
-        raise ValueError("opaque ResourceEstimate precision must be numeric or None")
-    return float(payload)

@@ -149,7 +149,6 @@ def test_resource_metric_types_keep_one_canonical_identity() -> None:
         "DepthResources",
         "EstimateDerivation",
         "EstimateQuality",
-        "GateBasis",
         "GateResources",
         "MeasurementResources",
         "ResetResources",
@@ -165,7 +164,6 @@ def test_resource_metric_types_keep_one_canonical_identity() -> None:
                 "ControlDecomposition",
                 "EstimateDerivation",
                 "EstimateQuality",
-                "GateBasis",
             }
             else resource_types_module
         )

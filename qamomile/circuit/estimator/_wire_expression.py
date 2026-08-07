@@ -11,9 +11,7 @@ from sympy.core.function import AppliedUndef, FunctionClass
 from sympy.functions.elementary.piecewise import ExprCondPair
 from sympy.logic.boolalg import Boolean
 
-from qamomile.circuit.estimator._clifford_t_decomposition import (
-    _CanonicalPhaseClass,
-)
+from qamomile.circuit.estimator._resource_conditions import _PhaseIdentity
 from qamomile.circuit.estimator._resource_expressions import (
     _ConditionIndicator,
     _RangeAny,
@@ -230,8 +228,8 @@ def _validate_sympy_expression_for_wire(expression: sp.Basic) -> None:
             )
         constructor_name = _wire_constructor_name(node)
         if constructor_name not in _SAFE_SYMPY_NAMES and constructor_name not in {
-            "_CanonicalPhaseClass",
             "_ConditionIndicator",
+            "_PhaseIdentity",
             "_RangeAny",
             "_RangeAtLeastTwo",
             "_CappedRangeSum",
@@ -546,10 +544,10 @@ def _sympy_name(name: str) -> Any:
     """
     if name == "ExprCondPair":
         return ExprCondPair
-    if name == "_CanonicalPhaseClass":
-        return _CanonicalPhaseClass
     if name == "_ConditionIndicator":
         return _ConditionIndicator
+    if name == "_PhaseIdentity":
+        return _PhaseIdentity
     if name == "_RangeAny":
         return _RangeAny
     if name == "_RangeAtLeastTwo":

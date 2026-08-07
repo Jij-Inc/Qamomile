@@ -129,9 +129,7 @@ def _sum_estimate_over_range(
             if estimate.trace is not None
             else None,
         ),
-        basis=estimate.basis,
         control_decomposition=estimate.control_decomposition,
-        precision=estimate.precision,
         _allocation_sites=allocation_sites,
         _constraints=(
             step_constraint,

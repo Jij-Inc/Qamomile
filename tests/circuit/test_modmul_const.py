@@ -106,7 +106,6 @@ def test_modmul_const_body_growth_is_quadratic_at_fixed_window() -> None:
 
         estimate = mul.estimate_resources()
         allocated = 3 * width + 2 + 7
-        assert estimate.basis is qmc.GateBasis.LOGICAL
         assert (
             estimate.control_decomposition
             is qmc.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI

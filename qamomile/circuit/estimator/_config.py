@@ -5,18 +5,9 @@ from __future__ import annotations
 import dataclasses
 import enum
 
-from qamomile.circuit.estimator._resource_base import (
-    ControlDecomposition,
-    GateBasis,
-)
-
-_DEFAULT_GATE_BASIS = GateBasis.LOGICAL
-
+from qamomile.circuit.estimator._resource_base import ControlDecomposition
 
 _DEFAULT_CONTROL_DECOMPOSITION = ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
-
-
-_DEFAULT_ROTATION_SYNTHESIS_PRECISION = 1e-10
 
 
 class UnknownResourcePolicy(enum.StrEnum):
@@ -43,17 +34,12 @@ class _ResourceEstimatorConfig:
         simplify (bool): Whether to simplify the final estimate.
         unknown_policy (UnknownResourcePolicy): Handling for unknown opaque
             callables.
-        basis (GateBasis): Output gate basis. Defaults to ``LOGICAL``.
         control_decomposition (ControlDecomposition): Coherent-control
             decomposition. Defaults to ``CLEAN_ANCILLA_TOFFOLI``.
-        precision (float): Approximation precision for rotation synthesis in
-            ``CLIFFORD_T`` basis. Defaults to ``1e-10``.
     """
 
     strategies: dict[str, str] = dataclasses.field(default_factory=dict)
     trace: bool = False
     simplify: bool = True
     unknown_policy: UnknownResourcePolicy = UnknownResourcePolicy.ERROR
-    basis: GateBasis = _DEFAULT_GATE_BASIS
     control_decomposition: ControlDecomposition = _DEFAULT_CONTROL_DECOMPOSITION
-    precision: float = _DEFAULT_ROTATION_SYNTHESIS_PRECISION

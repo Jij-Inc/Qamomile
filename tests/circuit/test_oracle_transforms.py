@@ -284,9 +284,7 @@ def test_opaque_callback_sees_only_definition_controls_after_composition() -> No
             calls=qmc.CallResources(
                 queries_by_name={"callback_transform": 1},
             ),
-            basis=ctx.basis,
             control_decomposition=ctx.control_decomposition,
-            precision=ctx.precision,
         )
 
     oracle = qmc.opaque(

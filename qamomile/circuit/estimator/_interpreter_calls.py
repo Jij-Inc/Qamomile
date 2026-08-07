@@ -80,7 +80,6 @@ from qamomile.circuit.estimator._resource_algebra import (
 from qamomile.circuit.estimator._resource_base import (
     EstimateDerivation,
     EstimateQuality,
-    GateBasis,
     ResourceExpr,
 )
 from qamomile.circuit.estimator._resource_expressions import (
@@ -373,13 +372,7 @@ class _CallInterpreter(_ForItemsInterpreter):
             ),
             definition_control_qubits=declared_controls,
             strategy=strategy,
-            basis=self.config.basis,
             control_decomposition=self.config.control_decomposition,
-            precision=(
-                self.config.precision
-                if self.config.basis is GateBasis.CLIFFORD_T
-                else None
-            ),
         )
         invocation_transform = _OpaqueInvocationTransform(
             declared_controls=declared_controls,
@@ -422,10 +415,9 @@ class _CallInterpreter(_ForItemsInterpreter):
         Raises:
             TypeError: If ``cost`` is neither a ``ResourceEstimate`` nor a
                 callable returning one.
-            ValueError: If the opaque cost reports gate-model-sensitive
-                resources for a different basis, control decomposition, or
-                synthesis precision, or if a non-unitary cost is controlled or
-                inverted.
+            ValueError: If the opaque cost reports control-sensitive resources
+                for a different control decomposition, or if a non-unitary
+                cost is controlled or inverted.
         """
         estimate = self._resolve_opaque_definition_cost(
             operation,
@@ -535,9 +527,7 @@ class _CallInterpreter(_ForItemsInterpreter):
             tuple(context.target_shapes.items()),
             context.definition_control_qubits,
             context.strategy,
-            context.basis,
             context.control_decomposition,
-            context.precision,
         )
         cached = self._run_state.opaque_definition_cost_cache.get(cache_key)
         if cached is not None and cached[0] is operation:
@@ -563,9 +553,7 @@ class _CallInterpreter(_ForItemsInterpreter):
         _validate_opaque_cost_provenance(
             estimate,
             name=operation.custom_name,
-            basis=self.config.basis,
             control_decomposition=self.config.control_decomposition,
-            precision=self.config.precision,
         )
         # Public resource dataclasses accept ordinary Python numeric values.
         # Compose one base application through the resource algebra so every

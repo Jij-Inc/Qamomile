@@ -9,22 +9,17 @@ from typing import Any
 
 import sympy as sp
 
-from qamomile.circuit.estimator._config import (
-    _DEFAULT_CONTROL_DECOMPOSITION,
-    _DEFAULT_GATE_BASIS,
-)
+from qamomile.circuit.estimator._config import _DEFAULT_CONTROL_DECOMPOSITION
 from qamomile.circuit.estimator._constants import (
     _ONE,
     _ZERO,
 )
 from qamomile.circuit.estimator._estimate import ResourceEstimate
 from qamomile.circuit.estimator._estimate_provenance import (
-    _estimate_has_basis_sensitive_resources,
-    _precisions_match,
+    _estimate_has_control_sensitive_resources,
 )
 from qamomile.circuit.estimator._resource_base import (
     ControlDecomposition,
-    GateBasis,
     ResourceExpr,
 )
 from qamomile.circuit.estimator._resource_expressions import (
@@ -70,45 +65,27 @@ def _validate_opaque_cost_provenance(
     estimate: ResourceEstimate,
     *,
     name: str,
-    basis: GateBasis,
     control_decomposition: ControlDecomposition,
-    precision: float,
 ) -> None:
     """Validate a fixed or callback-produced opaque cost model.
 
     Args:
         estimate (ResourceEstimate): Opaque cost result to validate.
         name (str): User-facing callable name for diagnostics.
-        basis (GateBasis): Basis requested by the active estimator.
         control_decomposition (ControlDecomposition): Coherent-control
             decomposition requested by the active estimator.
-        precision (float): Clifford+T synthesis precision requested by the
-            active estimator.
 
     Raises:
-        ValueError: If basis-sensitive cost metrics use incompatible basis or
-            precision provenance.
+        ValueError: If control-sensitive cost metrics use incompatible
+            control-decomposition provenance.
     """
-    if not _estimate_has_basis_sensitive_resources(estimate):
+    if not _estimate_has_control_sensitive_resources(estimate):
         return
-    if estimate.basis is not basis:
-        raise ValueError(
-            f"Opaque cost for '{name}' uses basis {estimate.basis.value!r}, "
-            f"but the estimator uses {basis.value!r}."
-        )
     if estimate.control_decomposition is not control_decomposition:
         raise ValueError(
             f"Opaque cost for '{name}' uses control decomposition "
             f"{estimate.control_decomposition.value!r}, but the estimator "
             f"uses {control_decomposition.value!r}."
-        )
-    if basis is GateBasis.CLIFFORD_T and not _precisions_match(
-        estimate.precision,
-        precision,
-    ):
-        raise ValueError(
-            f"Opaque cost for '{name}' uses precision "
-            f"{estimate.precision!r}, but the estimator uses {precision!r}."
         )
 
 
@@ -133,21 +110,15 @@ class OpaqueCostContext:
             definition and already included in the callback's base cost.
         strategy (str | None): Selected base resource strategy. Defaults to
             ``None``.
-        basis (GateBasis): Requested output gate basis. Defaults to
-            ``LOGICAL``.
         control_decomposition (ControlDecomposition): Requested coherent
             control model. Defaults to ``CLEAN_ANCILLA_TOFFOLI``.
-        precision (float | None): Clifford+T synthesis precision, or ``None``
-            for other bases. Defaults to ``None``.
     """
 
     callable_name: str
     target_shapes: Mapping[str, tuple[ResourceExpr, ...]]
     definition_control_qubits: int
     strategy: str | None = None
-    basis: GateBasis = _DEFAULT_GATE_BASIS
     control_decomposition: ControlDecomposition = _DEFAULT_CONTROL_DECOMPOSITION
-    precision: float | None = None
 
     def __post_init__(self) -> None:
         """Validate and freeze definition-level callback inputs.

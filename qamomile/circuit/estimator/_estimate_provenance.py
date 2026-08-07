@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-import math
 from collections.abc import Sequence
 from contextvars import ContextVar
 from typing import TYPE_CHECKING
@@ -16,7 +15,6 @@ from qamomile.circuit.estimator._resource_base import (
     ControlDecomposition,
     EstimateDerivation,
     EstimateQuality,
-    GateBasis,
     _combine_approximation,
     _combine_derivation,
     _combine_quality,
@@ -222,8 +220,8 @@ def _with_estimate_metadata(
     )
 
 
-def _estimate_has_basis_sensitive_resources(estimate: ResourceEstimate) -> bool:
-    """Return whether an estimate contains basis-dependent metrics.
+def _estimate_has_control_sensitive_resources(estimate: ResourceEstimate) -> bool:
+    """Return whether an estimate contains control-model-dependent metrics.
 
     Args:
         estimate (ResourceEstimate): Estimate to inspect.
@@ -231,7 +229,7 @@ def _estimate_has_basis_sensitive_resources(estimate: ResourceEstimate) -> bool:
     Returns:
         bool: Whether gates, decomposition ancillas, or gate depth are not
             structurally zero. Symbolic and unevaluated expressions are treated
-            as basis-sensitive conservatively.
+            as control-sensitive conservatively.
     """
     expressions = [
         *(
@@ -260,47 +258,26 @@ def _estimate_has_basis_sensitive_resources(estimate: ResourceEstimate) -> bool:
     return any(expression != _ZERO for expression in expressions)
 
 
-def _precisions_match(left: float | None, right: float | None) -> bool:
-    """Compare optional synthesis precisions without direct float equality.
-
-    Args:
-        left (float | None): First precision value.
-        right (float | None): Second precision value.
-
-    Returns:
-        bool: Whether both values are absent or exactly the same finite float.
-    """
-    if left is None or right is None:
-        return left is right
-    return math.isclose(left, right, rel_tol=0.0, abs_tol=0.0)
-
-
 def _merge_estimate_provenance(
     left: ResourceEstimate,
     right: ResourceEstimate,
-) -> tuple[GateBasis, ControlDecomposition, float | None]:
-    """Merge compatible gate-model provenance for resource algebra.
+) -> ControlDecomposition:
+    """Merge compatible control-model provenance for resource algebra.
 
     Args:
         left (ResourceEstimate): Left operand.
         right (ResourceEstimate): Right operand.
 
     Returns:
-        tuple[GateBasis, ControlDecomposition, float | None]: Basis, control
-            decomposition, and precision for the result.
+        ControlDecomposition: Control decomposition for the result.
 
     Raises:
-        ValueError: If gate-model-sensitive estimates use incompatible
+        ValueError: If control-model-sensitive estimates use incompatible
             provenance.
     """
-    left_sensitive = _estimate_has_basis_sensitive_resources(left)
-    right_sensitive = _estimate_has_basis_sensitive_resources(right)
+    left_sensitive = _estimate_has_control_sensitive_resources(left)
+    right_sensitive = _estimate_has_control_sensitive_resources(right)
     if left_sensitive and right_sensitive:
-        if left.basis is not right.basis:
-            raise ValueError(
-                "Cannot compose resource estimates from different gate "
-                f"bases: {left.basis.value!r} and {right.basis.value!r}."
-            )
         if left.control_decomposition is not right.control_decomposition:
             raise ValueError(
                 "Cannot compose resource estimates from different control "
@@ -308,20 +285,12 @@ def _merge_estimate_provenance(
                 f"{left.control_decomposition.value!r} and "
                 f"{right.control_decomposition.value!r}."
             )
-        if left.basis is GateBasis.CLIFFORD_T and not _precisions_match(
-            left.precision,
-            right.precision,
-        ):
-            raise ValueError(
-                "Cannot compose Clifford+T estimates with different "
-                f"precisions: {left.precision!r} and {right.precision!r}."
-            )
-        return left.basis, left.control_decomposition, left.precision
+        return left.control_decomposition
     if left_sensitive:
-        return left.basis, left.control_decomposition, left.precision
+        return left.control_decomposition
     if right_sensitive:
-        return right.basis, right.control_decomposition, right.precision
-    return left.basis, left.control_decomposition, left.precision
+        return right.control_decomposition
+    return left.control_decomposition
 
 
 def _merge_symbol_aliases(

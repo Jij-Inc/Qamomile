@@ -16,7 +16,6 @@ from qamomile.circuit.estimator._resource_base import (
     ControlDecomposition,
     EstimateDerivation,
     EstimateQuality,
-    GateBasis,
     ResourceExpr,
 )
 from qamomile.circuit.estimator._resource_expressions import (
@@ -136,12 +135,6 @@ def _project_abstract_aggregate_controlled_cost(
             empty reason, or ``None`` with the reason the profile cannot be
             transformed safely.
     """
-    if estimate.basis is not GateBasis.LOGICAL:
-        return (
-            None,
-            "abstract controlled primitives are available only in the logical "
-            f"basis, not {estimate.basis.value}",
-        )
     if estimate.control_decomposition is not ControlDecomposition.ABSTRACT:
         return (
             None,
@@ -417,9 +410,7 @@ def _project_clean_ancilla_aggregate_controlled_cost(
             summary=f"gates={unresolved_count}",
         ),
         derivation=EstimateDerivation.MODELED,
-        basis=estimate.basis,
         control_decomposition=estimate.control_decomposition,
-        precision=estimate.precision,
     )
     projected_body = single.seq(two).seq(unresolved)
     shared_projection = _clean_ancilla_shared_aggregate_control_ladder(

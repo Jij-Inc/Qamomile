@@ -59,7 +59,6 @@ from qamomile.circuit.estimator._resolver import (
 )
 from qamomile.circuit.estimator._resource_base import (
     EstimateQuality,
-    GateBasis,
     ResourceExpr,
 )
 from qamomile.circuit.estimator._resource_constraints import (
@@ -312,13 +311,7 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
                 )
                 operation_estimate = dataclasses.replace(
                     operation_estimate,
-                    basis=self.config.basis,
                     control_decomposition=self.config.control_decomposition,
-                    precision=(
-                        self.config.precision
-                        if self.config.basis is GateBasis.CLIFFORD_T
-                        else None
-                    ),
                 )
                 scheduled.append((operation, operation_estimate))
                 scheduled_classical_sources.append(

@@ -86,7 +86,7 @@ def _compose_sequential(
     Returns:
         ResourceEstimate: Sequential composition.
     """
-    basis, control_decomposition, precision = _merge_estimate_provenance(left, right)
+    control_decomposition = _merge_estimate_provenance(left, right)
     return dataclasses.replace(
         left.zero(),
         width=_seq_width(left.width, right.width),
@@ -103,9 +103,7 @@ def _compose_sequential(
             left.approximation,
             right.approximation,
         ),
-        basis=basis,
         control_decomposition=control_decomposition,
-        precision=precision,
         _allocation_sites=_merge_allocation_sites(
             left._allocation_sites,
             right._allocation_sites,
@@ -164,7 +162,7 @@ def _compose_parallel(
     Returns:
         ResourceEstimate: Parallel composition.
     """
-    basis, control_decomposition, precision = _merge_estimate_provenance(left, right)
+    control_decomposition = _merge_estimate_provenance(left, right)
     return dataclasses.replace(
         left.zero(),
         width=_parallel_width(left.width, right.width),
@@ -181,9 +179,7 @@ def _compose_parallel(
             left.approximation,
             right.approximation,
         ),
-        basis=basis,
         control_decomposition=control_decomposition,
-        precision=precision,
         _allocation_sites=_merge_allocation_sites(
             left._allocation_sites,
             right._allocation_sites,
@@ -242,7 +238,7 @@ def _compose_choice(
     Returns:
         ResourceEstimate: Conservative choice composition.
     """
-    basis, control_decomposition, precision = _merge_estimate_provenance(left, right)
+    control_decomposition = _merge_estimate_provenance(left, right)
     allocation_sites = _merge_allocation_sites(
         left._allocation_sites,
         right._allocation_sites,
@@ -273,9 +269,7 @@ def _compose_choice(
             left.approximation,
             right.approximation,
         ),
-        basis=basis,
         control_decomposition=control_decomposition,
-        precision=precision,
         _allocation_sites=allocation_sites,
         _constraints=(*left._constraints, *right._constraints),
         _dependency_keys=_merge_dependency_keys(left, right),
@@ -339,7 +333,7 @@ def _compose_conditional(
         return when_true
     if predicate is sp.false:
         return when_false
-    basis, control_decomposition, precision = _merge_estimate_provenance(
+    control_decomposition = _merge_estimate_provenance(
         when_true,
         when_false,
     )
@@ -398,9 +392,7 @@ def _compose_conditional(
             when_true.approximation,
             when_false.approximation,
         ),
-        basis=basis,
         control_decomposition=control_decomposition,
-        precision=precision,
         _allocation_sites=allocation_sites,
         _constraints=(
             *(constraint.when(predicate) for constraint in when_true._constraints),
@@ -504,8 +496,8 @@ class _SequentialEstimateComposer:
             estimate (ResourceEstimate): Next estimate in execution order.
 
         Raises:
-            ValueError: If composition encounters incompatible basis or
-                precision provenance.
+            ValueError: If composition encounters incompatible
+                control-decomposition provenance.
         """
         carry = estimate
         level = 0
@@ -528,8 +520,8 @@ class _SequentialEstimateComposer:
                 estimate was appended.
 
         Raises:
-            ValueError: If composition encounters incompatible basis or
-                precision provenance.
+            ValueError: If composition encounters incompatible
+                control-decomposition provenance.
         """
         result: ResourceEstimate | None = None
         for estimate in reversed(self._levels):

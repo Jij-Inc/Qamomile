@@ -35,7 +35,6 @@ def test_shor_factory_returns_one_executable_qkernel() -> None:
     assert isinstance(kernel, QKernel)
     estimate = _shor_estimate(2, 15)
     assert estimate.parameters == {}
-    assert estimate.basis is qmc.GateBasis.LOGICAL
     assert (
         estimate.control_decomposition is qmc.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
     )
@@ -79,14 +78,12 @@ def test_shor_skips_identity_modular_multiplication_rounds() -> None:
         modulus=15,
         precision=2,
     ).estimate_resources(
-        basis=qmc.GateBasis.LOGICAL,
         control_decomposition=qmc.ControlDecomposition.ABSTRACT,
     )
     full_schedule = qmc.shor_order_finding(
         base=2,
         modulus=15,
     ).estimate_resources(
-        basis=qmc.GateBasis.LOGICAL,
         control_decomposition=qmc.ControlDecomposition.ABSTRACT,
     )
 
@@ -194,7 +191,6 @@ def test_ekera_hastad_uses_two_short_exponent_registers() -> None:
     estimate = kernel.estimate_resources()
 
     assert isinstance(kernel, QKernel)
-    assert estimate.basis is qmc.GateBasis.LOGICAL
     assert (
         estimate.control_decomposition is qmc.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
     )

@@ -12,6 +12,7 @@ import pytest
 import sympy as sp
 
 import qamomile.circuit as qm
+from qamomile.circuit.estimator._resource_conditions import _PhaseIdentity
 from qamomile.circuit.estimator._resource_constraints import (
     _ConstraintRange,
     _ResourceConstraint,
@@ -312,6 +313,31 @@ def test_resource_wire_rejects_unsupported_expression_before_encoding() -> None:
         resource_estimate_to_wire(estimate)
 
 
+def test_resource_wire_version_five_round_trips() -> None:
+    """The current basis-free wire format preserves estimator provenance."""
+    estimate = qm.ResourceEstimate(
+        gates=qm.GateResources(total=2, two_qubit=2),
+        control_decomposition=qm.ControlDecomposition.ABSTRACT,
+        derivation=qm.EstimateDerivation.MODELED,
+    )
+
+    wire = resource_estimate_to_wire(estimate)
+    restored = resource_estimate_from_wire(wire)
+
+    assert wire["version"] == 5
+    assert restored == estimate
+
+
+@pytest.mark.parametrize("version", [1, 2, 3, 4])
+def test_resource_wire_rejects_versions_before_five(version: int) -> None:
+    """Older payloads cannot be decoded after removing basis provenance."""
+    wire = resource_estimate_to_wire(qm.ResourceEstimate())
+    wire["version"] = version
+
+    with pytest.raises(ValueError, match="wire versions before 5 are not supported"):
+        resource_estimate_from_wire(wire)
+
+
 def test_resource_wire_round_trips_large_substituted_capped_range_sum() -> None:
     """A specialized large loop remains serializable without eager replay."""
     index = sp.Dummy("index", integer=True, nonnegative=True)
@@ -343,19 +369,23 @@ def test_resource_wire_round_trips_large_substituted_capped_range_sum() -> None:
 
 
 def test_resource_wire_round_trips_supported_symbolic_constructors() -> None:
-    """Sum, E, and loop-carry functions survive the closed wire format."""
+    """Supported estimator functions survive the closed wire format."""
     index = sp.Dummy("index", integer=True, nonnegative=True)
     iterations = sp.Symbol("iterations", integer=True, nonnegative=True)
+    phase = sp.Symbol("phase", real=True)
     loop_carry = sp.Function("loop_carry")
-    expression = sp.Sum(loop_carry(index), (index, 0, iterations)) + sp.E
+    expression = (
+        sp.Sum(loop_carry(index), (index, 0, iterations)) + sp.E + _PhaseIdentity(phase)
+    )
     estimate = qm.ResourceEstimate(gates=qm.GateResources(total=expression))
 
     restored = resource_estimate_from_wire(resource_estimate_to_wire(estimate))
 
     assert restored.gates.total.has(sp.Sum)
     assert restored.gates.total.has(sp.E)
+    assert restored.gates.total.has(_PhaseIdentity)
     assert "loop_carry" in str(restored.gates.total)
-    assert set(restored.parameters) == {"iterations"}
+    assert set(restored.parameters) == {"iterations", "phase"}
 
 
 def test_resource_wire_round_trips_extreme_finite_float() -> None:

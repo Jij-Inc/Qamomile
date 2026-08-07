@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from qamomile.circuit.estimator import (
         ControlDecomposition,
-        GateBasis,
         ResourceEstimate,
         UnknownResourcePolicy,
     )
@@ -76,9 +75,7 @@ def estimate_qkernel_resources(
     strategies: dict[str, str] | None = None,
     trace: bool = False,
     unknown_policy: str | UnknownResourcePolicy | None = None,
-    basis: str | GateBasis | None = None,
     control_decomposition: str | ControlDecomposition | None = None,
-    precision: float | None = None,
 ) -> "ResourceEstimate":
     """Estimate resources for a kernel.
 
@@ -95,13 +92,9 @@ def estimate_qkernel_resources(
         unknown_policy (str | UnknownResourcePolicy | None): Policy for
             bodyless callables without explicit costs. Defaults to ``None``,
             which uses the estimator default.
-        basis (str | GateBasis | None): Gate-basis override. Defaults to
-            ``None``, which uses the logical algorithmic basis.
         control_decomposition (str | ControlDecomposition | None):
             Coherent-control model override. Defaults to ``None``, which uses
             the clean-ancilla Toffoli model.
-        precision (float | None): Rotation-synthesis precision. Defaults to
-            ``None``, which uses the estimator default.
 
     Returns:
         ResourceEstimate: Estimated width, gate, measurement, reset, depth,
@@ -119,12 +112,8 @@ def estimate_qkernel_resources(
     estimator_options: dict[str, Any] = {}
     if unknown_policy is not None:
         estimator_options["unknown_policy"] = unknown_policy
-    if basis is not None:
-        estimator_options["basis"] = basis
     if control_decomposition is not None:
         estimator_options["control_decomposition"] = control_decomposition
-    if precision is not None:
-        estimator_options["precision"] = precision
 
     return estimate_resources(
         kernel,

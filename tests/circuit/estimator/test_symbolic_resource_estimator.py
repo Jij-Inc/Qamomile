@@ -9,19 +9,13 @@ import pytest
 import sympy as sp
 
 import qamomile.circuit as qm
-import qamomile.circuit.estimator._clifford_t_decomposition as decomposition_module
-import qamomile.circuit.estimator._clifford_t_depth as depth_module
 import qamomile.circuit.estimator._estimate_provenance as estimate_provenance_module
 import qamomile.circuit.estimator._estimate_reporting as estimate_reporting_module
-import qamomile.circuit.estimator._gate_models as gate_models_module
-from qamomile.circuit.estimator import (
-    resource_estimator as resource_estimator_module,
-)
 
 
 @qm.qkernel
-def _basis_probe(theta: qm.Float) -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
-    """Apply one exact Toffoli and one approximate axial rotation."""
+def _estimator_probe(theta: qm.Float) -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
+    """Apply one Toffoli and one axial rotation."""
     left = qm.qubit("left")
     right = qm.qubit("right")
     target = qm.qubit("target")
@@ -63,25 +57,6 @@ def _repeated_helper_callsite() -> tuple[qm.Bit, qm.UInt]:
     return qm.measure(q), total
 
 
-def test_clifford_t_basis_lowers_body_gates_and_reports_metadata() -> None:
-    """Basis lowering reports aggregate Clifford+T counts and approximation."""
-    logical = _basis_probe.estimate_resources()
-    lowered = _basis_probe.estimate_resources(
-        basis=qm.GateBasis.CLIFFORD_T,
-        precision=1 / 8,
-    )
-
-    assert logical.gates.total == 2
-    assert logical.quality is qm.EstimateQuality.EXACT
-    assert lowered.gates.total == 26
-    assert lowered.gates.single_qubit == 20
-    assert lowered.gates.two_qubit == 6
-    assert lowered.gates.t == 16
-    assert lowered.gates.rotation == 0
-    assert lowered.quality is qm.EstimateQuality.UNKNOWN
-    assert lowered.approximation is qm.ApproximationStatus.APPROXIMATE
-
-
 def test_estimation_derives_public_symbol_metadata_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -109,7 +84,7 @@ def test_estimation_derives_public_symbol_metadata_once(
         report_registry_spy,
     )
 
-    estimate = repeated_body.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = repeated_body.estimate_resources()
 
     assert registry_spy.call_count == 1
     assert report_registry_spy.call_count == 0
@@ -170,9 +145,7 @@ def test_concurrent_estimates_keep_symbol_metadata_scoped() -> None:
     with ThreadPoolExecutor(max_workers=2) as pool:
         estimates = list(
             pool.map(
-                lambda _index: qm.ResourceEstimator(
-                    basis=qm.GateBasis.LOGICAL
-                ).estimate(block),
+                lambda _index: qm.ResourceEstimator().estimate(block),
                 range(2),
             )
         )
@@ -226,28 +199,6 @@ def test_pauli_evolve_parallelizes_basis_changes_within_a_term() -> None:
     assert estimate.depth.rotation_depth == 1
 
 
-def test_gate_basis_accepts_string_values() -> None:
-    """The public basis option accepts notebook-friendly strings safely."""
-    estimate = _basis_probe.estimate_resources(basis="logical")
-    assert estimate.gates.total == 2
-
-
-def test_qkernel_wrapper_defers_precision_default_to_core(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The qkernel facade does not pin a second synthesis-precision default."""
-    estimate_resources = Mock(return_value=qm.ResourceEstimate())
-    monkeypatch.setattr(
-        resource_estimator_module,
-        "estimate_resources",
-        estimate_resources,
-    )
-
-    _basis_probe.estimate_resources()
-
-    assert "precision" not in estimate_resources.call_args.kwargs
-
-
 def test_unknown_resource_policy_accepts_string_values() -> None:
     """All public estimator entry points normalize resource-policy strings."""
     oracle = qm.opaque("string_policy_oracle", num_qubits=1)
@@ -274,7 +225,7 @@ def test_unknown_resource_policy_accepts_string_values() -> None:
 
 def test_control_decomposition_accepts_string_values() -> None:
     """The control model accepts stable string identifiers."""
-    estimate = _basis_probe.estimate_resources(
+    estimate = _estimator_probe.estimate_resources(
         control_decomposition="abstract",
     )
 
@@ -288,17 +239,7 @@ def test_unknown_resource_policy_rejects_unknown_strings(policy: str) -> None:
         ValueError,
         match="expected one of: error, opaque_call, zero_with_warning",
     ):
-        _basis_probe.estimate_resources(unknown_policy=policy)
-
-
-@pytest.mark.parametrize("basis", ["unknown", "surface_code", ""])
-def test_gate_basis_rejects_unknown_string_values(basis: str) -> None:
-    """Unknown and empty strings are not replaced by the default basis."""
-    with pytest.raises(
-        ValueError,
-        match="expected one of: logical, clifford_t",
-    ):
-        _basis_probe.estimate_resources(basis=basis)
+        _estimator_probe.estimate_resources(unknown_policy=policy)
 
 
 @pytest.mark.parametrize("decomposition", ["ancilla_free", ""])
@@ -310,302 +251,50 @@ def test_control_decomposition_rejects_unknown_strings(
         ValueError,
         match="expected one of: abstract, clean_ancilla_toffoli",
     ):
-        _basis_probe.estimate_resources(
+        _estimator_probe.estimate_resources(
             control_decomposition=decomposition,
         )
 
 
-def test_clifford_t_basis_lowers_controlled_toffoli_with_clean_ancilla() -> None:
-    """An added control uses the declared clean-ancilla Toffoli ladder."""
-
-    @qm.composite_gate
-    def toffoli(
-        left: qm.Qubit,
-        right: qm.Qubit,
-        target: qm.Qubit,
-    ) -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
-        """Apply one Toffoli gate."""
-        return qm.ccx(left, right, target)
-
-    @qm.qkernel
-    def circuit() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit, qm.Qubit]:
-        """Apply a Toffoli under one additional control."""
-        control = qm.qubit("control")
-        left = qm.qubit("left")
-        right = qm.qubit("right")
-        target = qm.qubit("target")
-        controlled_toffoli = qm.control(toffoli)
-        return controlled_toffoli(control, left, right, target)
-
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
-
-    assert estimate.gates.t == 28
-    assert estimate.gates.total == 61
-    assert estimate.depth.depth == 61
-    assert estimate.depth.clifford_depth == 33
-    assert estimate.depth.t_depth == 12
-    assert estimate.depth.non_clifford_depth == 12
-    assert estimate.depth.gate_depth == 61
-    assert estimate.width.clean_ancilla_qubits == 2
-    assert estimate.qubits == 6
-    assert estimate.quality is qm.EstimateQuality.CONSERVATIVE
-
-
 @pytest.mark.parametrize(
-    ("name", "controls", "expected"),
+    (
+        "control_decomposition",
+        "expected_total",
+        "expected_two_qubit",
+        "expected_multi_qubit",
+        "expected_toffoli",
+        "expected_ancillas",
+    ),
     [
         pytest.param(
-            "z",
-            2,
-            (17, 7, 17, 10, 3, 0, qm.EstimateQuality.EXACT),
-            id="ccz-exact-boundary",
-        ),
-        pytest.param(
-            "z",
-            3,
-            (63, 28, 63, 35, 12, 2, qm.EstimateQuality.CONSERVATIVE),
-            id="controlled-z-upper-bound",
-        ),
-        pytest.param(
-            "y",
-            2,
-            (17, 7, 17, 10, 3, 0, qm.EstimateQuality.EXACT),
-            id="ccy-exact-boundary",
-        ),
-        pytest.param(
-            "y",
-            3,
-            (63, 28, 63, 35, 12, 2, qm.EstimateQuality.CONSERVATIVE),
-            id="controlled-y-upper-bound",
-        ),
-        pytest.param(
-            "cz",
+            qm.ControlDecomposition.ABSTRACT,
             1,
-            (17, 7, 17, 10, 3, 0, qm.EstimateQuality.EXACT),
-            id="ccz-from-cz-exact-boundary",
-        ),
-        pytest.param(
-            "cz",
-            2,
-            (63, 28, 63, 35, 12, 2, qm.EstimateQuality.CONSERVATIVE),
-            id="controlled-cz-upper-bound",
-        ),
-        pytest.param(
-            "swap",
-            1,
-            (17, 7, 17, 10, 3, 0, qm.EstimateQuality.EXACT),
-            id="fredkin-exact-boundary",
-        ),
-        pytest.param(
-            "swap",
-            2,
-            (63, 28, 63, 35, 12, 2, qm.EstimateQuality.CONSERVATIVE),
-            id="controlled-swap-upper-bound",
-        ),
-        pytest.param(
-            "p",
             0,
-            (9, 9, 9, 0, 9, 0, qm.EstimateQuality.UNKNOWN),
-            id="phase-rotation",
-        ),
-        pytest.param(
-            "p",
             1,
-            (29, 27, 20, 2, 18, 0, qm.EstimateQuality.UNKNOWN),
-            id="controlled-phase-parallel-rotations",
-        ),
-        pytest.param(
-            "p",
-            2,
-            (59, 41, 50, 18, 24, 1, qm.EstimateQuality.UNKNOWN),
-            id="multi-controlled-phase",
-        ),
-        pytest.param(
-            "cp",
             0,
-            (29, 27, 20, 2, 18, 0, qm.EstimateQuality.UNKNOWN),
-            id="cp-parallel-rotations",
+            0,
+            id="abstract",
         ),
         pytest.param(
-            "cp",
+            qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+            7,
             1,
-            (59, 41, 50, 18, 24, 1, qm.EstimateQuality.UNKNOWN),
-            id="controlled-cp",
-        ),
-        pytest.param(
-            "s",
-            1,
-            (5, 3, 4, 2, 2, 0, qm.EstimateQuality.EXACT),
-            id="controlled-s",
-        ),
-        pytest.param(
-            "s",
-            2,
-            (35, 17, 34, 18, 8, 1, qm.EstimateQuality.CONSERVATIVE),
-            id="multi-controlled-s",
-        ),
-        pytest.param(
-            "sdg",
-            1,
-            (5, 3, 4, 2, 2, 0, qm.EstimateQuality.EXACT),
-            id="controlled-sdg",
-        ),
-        pytest.param(
-            "sdg",
-            2,
-            (35, 17, 34, 18, 8, 1, qm.EstimateQuality.CONSERVATIVE),
-            id="multi-controlled-sdg",
-        ),
-        pytest.param(
-            "t",
-            1,
-            (31, 15, 31, 16, 7, 1, qm.EstimateQuality.EXACT),
-            id="controlled-t",
-        ),
-        pytest.param(
-            "t",
-            2,
-            (61, 29, 61, 32, 13, 2, qm.EstimateQuality.EXACT),
-            id="multi-controlled-t",
-        ),
-        pytest.param(
-            "tdg",
-            1,
-            (31, 15, 31, 16, 7, 1, qm.EstimateQuality.EXACT),
-            id="controlled-tdg",
-        ),
-        pytest.param(
-            "tdg",
-            2,
-            (61, 29, 61, 32, 13, 2, qm.EstimateQuality.EXACT),
-            id="multi-controlled-tdg",
+            6,
+            6,
+            3,
+            id="clean-ancilla-toffoli",
         ),
     ],
 )
-def test_controlled_clifford_t_depth_tracks_canonical_schedule(
-    name: str,
-    controls: int,
-    expected: tuple[int, int, int, int, int, int, qm.EstimateQuality],
+def test_control_decomposition_selects_multi_controlled_x_recipe(
+    control_decomposition: qm.ControlDecomposition,
+    expected_total: int,
+    expected_two_qubit: int,
+    expected_multi_qubit: int,
+    expected_toffoli: int,
+    expected_ancillas: int,
 ) -> None:
-    """Named Clifford+T recipes expose their schedule and quality."""
-    estimate = gate_models_module._estimate_named_gate_in_basis(
-        name,
-        sp.Integer(controls),
-        basis=qm.GateBasis.CLIFFORD_T,
-        control_decomposition=qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
-        precision=1 / 8,
-    )
-    total, t_count, depth, clifford_depth, t_depth, ancillas, quality = expected
-
-    assert estimate.gates.total == total
-    assert estimate.gates.t == t_count
-    assert estimate.depth.depth == depth
-    assert estimate.depth.clifford_depth == clifford_depth
-    assert estimate.depth.t_depth == t_depth
-    assert estimate.depth.non_clifford_depth == t_depth
-    assert estimate.depth.gate_depth == depth
-    assert estimate.width.clean_ancilla_qubits == ancillas
-    assert estimate.quality is quality
-    expected_approximation = (
-        qm.ApproximationStatus.APPROXIMATE
-        if name in {"p", "cp"}
-        else qm.ApproximationStatus.EXACT
-    )
-    assert estimate.approximation is expected_approximation
-
-
-@pytest.mark.parametrize("name", ["z", "p", "s"])
-def test_symbolic_clifford_t_named_depth_matches_direct_specialization(
-    name: str,
-) -> None:
-    """Symbolic control guards retain every recipe and quality branch."""
-    controls = sp.Symbol("controls", integer=True, nonnegative=True)
-    symbolic = gate_models_module._estimate_named_gate_in_basis(
-        name,
-        controls,
-        basis=qm.GateBasis.CLIFFORD_T,
-        control_decomposition=qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
-        precision=1 / 8,
-    )
-
-    for value in range(4):
-        specialized = symbolic.substitute(controls=value)
-        direct = gate_models_module._estimate_named_gate_in_basis(
-            name,
-            sp.Integer(value),
-            basis=qm.GateBasis.CLIFFORD_T,
-            control_decomposition=qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
-            precision=1 / 8,
-        )
-
-        assert specialized.gates == direct.gates
-        assert specialized.depth == direct.depth
-        assert specialized.width == direct.width
-        assert specialized.derivation is direct.derivation
-        assert specialized.quality is direct.quality
-        assert specialized.approximation is direct.approximation
-        assert specialized.parameters == {}
-
-
-@pytest.mark.parametrize("name", ["y", "z", "s", "sdg"])
-def test_uncontrolled_fixed_gate_keeps_single_layer_depth(name: str) -> None:
-    """Controlled-depth special cases preserve their uncontrolled branch."""
-    gates = decomposition_module._classify_clifford_t_gate(
-        name,
-        sp.Integer(0),
-        1 / 8,
-    )
-
-    depth = depth_module._named_clifford_t_depth(
-        name,
-        sp.Integer(0),
-        gates,
-        1 / 8,
-    )
-
-    assert depth.depth == 1
-    assert depth.gate_depth == 1
-
-
-def test_clifford_t_controlled_s_uses_exact_three_t_phase_polynomial() -> None:
-    """Controlled S and Sdg use their ancilla-free exact 3T circuits."""
-
-    @qm.composite_gate
-    def one_s(target: qm.Qubit) -> qm.Qubit:
-        """Apply one S gate."""
-        return qm.s(target)
-
-    @qm.composite_gate
-    def one_sdg(target: qm.Qubit) -> qm.Qubit:
-        """Apply one Sdg gate."""
-        return qm.sdg(target)
-
-    @qm.qkernel
-    def s_circuit() -> tuple[qm.Qubit, qm.Qubit]:
-        """Control one S gate with one qubit."""
-        control = qm.qubit("control")
-        target = qm.qubit("target")
-        return qm.control(one_s)(control, target)
-
-    @qm.qkernel
-    def sdg_circuit() -> tuple[qm.Qubit, qm.Qubit]:
-        """Control one Sdg gate with one qubit."""
-        control = qm.qubit("control")
-        target = qm.qubit("target")
-        return qm.control(one_sdg)(control, target)
-
-    for circuit in (s_circuit, sdg_circuit):
-        estimate = circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
-
-        assert estimate.gates.t == 3
-        assert estimate.gates.total == 5
-        assert estimate.depth.t_depth == 2
-        assert estimate.width.clean_ancilla_qubits == 0
-        assert estimate.quality is qm.EstimateQuality.EXACT
-
-
-def test_clean_ancilla_mcx_recipe_is_consistent_across_gate_bases() -> None:
-    """Logical and Clifford+T MCX use the same four-control ladder."""
+    """Each control model reports its logical multi-controlled-X recipe."""
 
     @qm.composite_gate
     def one_x(target: qm.Qubit) -> qm.Qubit:
@@ -620,123 +309,16 @@ def test_clean_ancilla_mcx_recipe_is_consistent_across_gate_bases() -> None:
         *_, target = qm.control(one_x, num_controls=4)(controls, target)
         return target
 
-    logical = circuit.estimate_resources()
-    clifford_t = circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
-
-    assert logical.gates.total == 7
-    assert logical.gates.toffoli == 6
-    assert logical.width.clean_ancilla_qubits == 3
-    assert logical.quality is qm.EstimateQuality.CONSERVATIVE
-    assert clifford_t.gates.total == 91
-    assert clifford_t.gates.t == 42
-    assert clifford_t.depth.t_depth == 18
-    assert clifford_t.width.clean_ancilla_qubits == 3
-    assert clifford_t.quality is qm.EstimateQuality.CONSERVATIVE
-
-
-@pytest.mark.parametrize(
-    ("basis", "control_decomposition", "should_fail"),
-    [
-        pytest.param(
-            qm.GateBasis.LOGICAL,
-            qm.ControlDecomposition.ABSTRACT,
-            False,
-            id="logical-abstract",
-        ),
-        pytest.param(
-            qm.GateBasis.LOGICAL,
-            qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
-            False,
-            id="logical-clean-ancilla",
-        ),
-        pytest.param(
-            qm.GateBasis.CLIFFORD_T,
-            qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
-            False,
-            id="clifford-t-clean-ancilla",
-        ),
-        pytest.param(
-            qm.GateBasis.CLIFFORD_T,
-            qm.ControlDecomposition.ABSTRACT,
-            True,
-            id="clifford-t-abstract",
-        ),
-    ],
-)
-def test_gate_basis_and_control_decomposition_cross_product(
-    basis: qm.GateBasis,
-    control_decomposition: qm.ControlDecomposition,
-    should_fail: bool,
-) -> None:
-    """Basis and control axes compose except for an undecomposable abstract control."""
-
-    @qm.qkernel
-    def circuit() -> tuple[qm.Qubit, qm.Qubit]:
-        """Apply one controlled X."""
-        control = qm.qubit("control")
-        target = qm.qubit("target")
-        return qm.control(qm.x)(control, target)
-
-    if should_fail:
-        with pytest.raises(ValueError, match="cannot preserve a controlled primitive"):
-            circuit.estimate_resources(
-                basis=basis,
-                control_decomposition=control_decomposition,
-            )
-        return
-
     estimate = circuit.estimate_resources(
-        basis=basis,
         control_decomposition=control_decomposition,
     )
 
-    assert estimate.basis is basis
     assert estimate.control_decomposition is control_decomposition
-    assert estimate.gates.total == 1
-    assert estimate.gates.two_qubit == 1
-    assert estimate.gates.clifford == 1
-    assert estimate.width.clean_ancilla_qubits == 0
-    assert estimate.quality is qm.EstimateQuality.EXACT
-
-
-def test_clifford_t_basis_rejects_missing_controlled_gate_lowering() -> None:
-    """Unsupported controlled gates fail instead of reporting guessed counts."""
-
-    @qm.composite_gate
-    def hadamard(target: qm.Qubit) -> qm.Qubit:
-        """Apply one Hadamard gate."""
-        return qm.h(target)
-
-    @qm.qkernel
-    def circuit() -> tuple[qm.Qubit, qm.Qubit]:
-        """Apply a controlled Hadamard through a body-backed callable."""
-        control = qm.qubit("control")
-        target = qm.qubit("target")
-        controlled_hadamard = qm.control(hadamard)
-        return controlled_hadamard(control, target)
-
-    with pytest.raises(ValueError, match="controlled gate 'h'"):
-        circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
-
-
-def test_clifford_t_basis_rejects_controlled_rotation_lowering() -> None:
-    """Controlled rotations fail when no decomposition contract is defined."""
-
-    @qm.composite_gate
-    def rotate(target: qm.Qubit, theta: qm.Float) -> qm.Qubit:
-        """Apply one arbitrary Y rotation."""
-        return qm.ry(target, theta)
-
-    @qm.qkernel
-    def circuit(theta: qm.Float) -> tuple[qm.Qubit, qm.Qubit]:
-        """Apply an arbitrary rotation under one control."""
-        control = qm.qubit("control")
-        target = qm.qubit("target")
-        controlled_rotate = qm.control(rotate)
-        return controlled_rotate(control, target, theta)
-
-    with pytest.raises(ValueError, match="controlled gate 'ry'"):
-        circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
+    assert estimate.gates.total == expected_total
+    assert estimate.gates.two_qubit == expected_two_qubit
+    assert estimate.gates.multi_qubit == expected_multi_qubit
+    assert estimate.gates.toffoli == expected_toffoli
+    assert estimate.width.clean_ancilla_qubits == expected_ancillas
 
 
 @qm.qkernel
@@ -2440,16 +2022,6 @@ def test_controlled_swap_uses_clean_ancilla_fredkin_decomposition() -> None:
     assert estimate.gates.multi_qubit == 1
     assert estimate.gates.toffoli == 1
 
-    clifford_t = circuit.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
-
-    assert clifford_t.gates.total == 17
-    assert clifford_t.gates.t == 7
-    assert clifford_t.depth.depth == 17
-    assert clifford_t.depth.clifford_depth == 10
-    assert clifford_t.depth.t_depth == 3
-    assert clifford_t.depth.non_clifford_depth == 3
-    assert clifford_t.depth.gate_depth == 17
-
 
 def test_for_items_width_reuses_wires_across_entries() -> None:
     """A bound items loop's width is the per-entry max, not the entry sum.
@@ -2761,20 +2333,17 @@ def test_branch_allocations_specialize_or_union_by_condition_kind() -> None:
 
 def test_constant_conditional_ignores_unreachable_provenance() -> None:
     """A decided condition never merges the unreachable branch metadata."""
-    logical = qm.ResourceEstimate(
+    structural = qm.ResourceEstimate(
         gates=qm.GateResources(total=1),
-        basis=qm.GateBasis.LOGICAL,
     )
-    clifford_t = qm.ResourceEstimate(
+    modeled = qm.ResourceEstimate(
         gates=qm.GateResources(total=100),
         assumptions=(qm.ResourceAssumption("unreachable"),),
         derivation=qm.EstimateDerivation.MODELED,
-        basis=qm.GateBasis.CLIFFORD_T,
-        precision=1e-3,
     )
 
-    assert logical.conditional(clifford_t, sp.true) is logical
-    assert logical.conditional(clifford_t, sp.false) is clifford_t
+    assert structural.conditional(modeled, sp.true) is structural
+    assert structural.conditional(modeled, sp.false) is modeled
 
 
 def test_quantum_block_input_width_requires_an_integer() -> None:

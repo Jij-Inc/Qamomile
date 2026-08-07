@@ -36,7 +36,7 @@ def test_surface_code_estimate_is_symbolic_in_n() -> None:
 
 
 def test_estimate_physical_resources_reads_logical_estimate() -> None:
-    """estimate_physical_resources pulls N and M from a ResourceEstimate."""
+    """The helper applies its documented logical-family heuristic."""
     n = sp.Symbol("n", positive=True)
     logical = ResourceEstimate(
         width=WidthResources(peak_qubits=3 * n),
@@ -50,7 +50,7 @@ def test_estimate_physical_resources_reads_logical_estimate() -> None:
 
 
 def test_estimate_physical_resources_falls_back_to_t_plus_toffoli() -> None:
-    """Missing non_clifford falls back to t + toffoli for the magic-state count."""
+    """The heuristic falls back to literal T plus Toffoli family counts."""
     logical = ResourceEstimate(
         width=WidthResources(peak_qubits=sp.Integer(10)),
         gates=GateResources(t=sp.Integer(100), toffoli=sp.Integer(50)),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, cast
 
 import sympy as sp
@@ -107,6 +108,49 @@ class _ConditionIndicator(sp.Function):
         if condition is sp.false:
             return _ZERO
         return None
+
+
+class _PhaseIdentity(sp.Function):
+    """Classify a phase as identity or nonidentity after substitution.
+
+    Args:
+        phase (sp.Expr): Phase angle in radians.
+    """
+
+    nargs = 1
+
+    @classmethod
+    def eval(cls, phase: sp.Expr) -> sp.Integer | None:
+        """Evaluate a concrete phase modulo one full turn.
+
+        Args:
+            phase (sp.Expr): Phase angle in radians.
+
+        Returns:
+            sp.Integer | None: One for an identity phase, zero for a concrete
+            nonidentity phase, or ``None`` to retain a symbolic application.
+        """
+        normalized = cast(sp.Expr, sp.sympify(phase))
+        if not normalized.is_number:
+            return None
+        if normalized.is_real is False:
+            return _ZERO
+        turns = sp.simplify(normalized / (2 * sp.pi))
+        if turns.is_integer is True:
+            return _ONE
+        try:
+            numeric_value = float(sp.N(normalized))
+        except (TypeError, ValueError):
+            return _ZERO
+        if not math.isfinite(numeric_value):
+            return _ZERO
+
+        if numeric_value == 0.0:
+            # A nonzero exact value can underflow when converted to ``float``.
+            # Only the exact zero recognized above is an identity phase.
+            return _ZERO
+        remainder = math.fmod(numeric_value, math.tau)
+        return sp.Integer(int(remainder == 0.0))
 
 
 class _RangeAny(sp.Function):

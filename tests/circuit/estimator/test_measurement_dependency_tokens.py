@@ -34,7 +34,7 @@ def test_classical_negation_forwards_measurement_token() -> None:
             target = qm.x(target)
         return target
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.gates.total == 2
     assert estimate.depth.depth == 3
@@ -59,7 +59,7 @@ def test_disjoint_ifs_reading_same_bit_overlap() -> None:
             right = qm.x(right)
         return left, right
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.gates.total == 2
     assert estimate.depth.depth == 2
@@ -83,7 +83,7 @@ def test_post_if_disjoint_work_does_not_wait_for_branch() -> None:
         independent = qm.x(independent)
         return branch_target, independent
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.gates.total == 2
     assert estimate.depth.depth == 2
@@ -103,7 +103,7 @@ def test_post_if_target_work_waits_for_runtime_branch() -> None:
             target = qm.h(target)
         return qm.z(target)
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.gates.total == 2
     assert estimate.depth.depth == 3
@@ -127,11 +127,10 @@ def test_inactive_compile_branch_drops_nested_measurement_read() -> None:
             target = qm.x(target)
         return measured, target
 
-    symbolic = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    symbolic = circuit.estimate_resources()
     projected = symbolic.substitute(flag=0)
     direct = circuit.estimate_resources(
         inputs={"flag": 0},
-        basis=qm.GateBasis.LOGICAL,
     )
 
     for estimate in (projected, direct):
@@ -160,11 +159,10 @@ def test_range_preserves_nested_compile_branch_read_guard() -> None:
                 target = qm.x(target)
         return measured, target
 
-    symbolic = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    symbolic = circuit.estimate_resources()
     projected = symbolic.substitute(flag=0)
     direct = circuit.estimate_resources(
         inputs={"flag": 0},
-        basis=qm.GateBasis.LOGICAL,
     )
 
     for estimate in (projected, direct):
@@ -191,11 +189,10 @@ def test_zero_trip_range_drops_body_measurement_read() -> None:
         target = qm.x(target)
         return measured, target
 
-    symbolic = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    symbolic = circuit.estimate_resources()
     projected = symbolic.substitute(repetitions=0)
     direct = circuit.estimate_resources(
         inputs={"repetitions": 0},
-        basis=qm.GateBasis.LOGICAL,
     )
 
     for estimate in (projected, direct):
@@ -225,11 +222,10 @@ def test_range_projects_dead_induction_branch_measurement_read() -> None:
                 target = qm.h(target)
         return measured, target
 
-    symbolic = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    symbolic = circuit.estimate_resources()
     projected = symbolic.substitute(repetitions=2, cutoff=0)
     direct = circuit.estimate_resources(
         inputs={"repetitions": 2, "cutoff": 0},
-        basis=qm.GateBasis.LOGICAL,
     )
 
     for estimate in (projected, direct):
@@ -257,7 +253,7 @@ def test_nested_zero_range_does_not_leak_induction_symbol() -> None:
         target = qm.h(target)
         return measured, target
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.gates.total == 1
     assert estimate.measurements.total == 1
@@ -290,7 +286,6 @@ def test_items_preserves_nested_compile_branch_read_guard() -> None:
 
     estimate = circuit.estimate_resources(
         inputs={"data": {0: 1.0}, "flag": 0},
-        basis=qm.GateBasis.LOGICAL,
     )
 
     assert estimate.gates.total == 2
@@ -315,7 +310,7 @@ def test_measurement_token_crosses_helper_call() -> None:
         independent = qm.x(qm.qubit("independent"))
         return branch_target, independent
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.gates.total == 2
     assert estimate.depth.depth == 2
@@ -342,7 +337,7 @@ def test_measurement_array_element_token_crosses_helper_call() -> None:
         measured = qm.measure(qm.qubit_array(2, "source"))
         return helper(measured[0], qm.qubit("target"))
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.gates.total == 2
     assert estimate.depth.depth == 3
@@ -390,8 +385,8 @@ def test_inline_helper_preserves_measurement_input_readiness() -> None:
         independent = qm.x(independent)
         return dependent, independent
 
-    nested_estimate = nested.estimate_resources(basis=qm.GateBasis.LOGICAL)
-    inline_estimate = inline.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    nested_estimate = nested.estimate_resources()
+    inline_estimate = inline.estimate_resources()
 
     assert nested_estimate.gates == inline_estimate.gates
     assert nested_estimate.measurements == inline_estimate.measurements
@@ -450,12 +445,11 @@ def test_valid_width_contract_does_not_restore_call_boundary_depth() -> None:
         independent = qm.x(independent)
         return dependent, independent
 
-    nested_estimate = nested.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    nested_estimate = nested.estimate_resources()
     sequence_estimate = qm.estimate_resources(
         nested.block.operations,
-        basis=qm.GateBasis.LOGICAL,
     )
-    inline_estimate = inline.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    inline_estimate = inline.estimate_resources()
 
     assert nested_estimate.gates == inline_estimate.gates
     assert nested_estimate.measurements == inline_estimate.measurements
@@ -503,8 +497,8 @@ def test_inline_helper_preserves_measurement_output_readiness() -> None:
             dependent = qm.z(dependent)
         return dependent, independent
 
-    nested_estimate = nested.estimate_resources(basis=qm.GateBasis.LOGICAL)
-    inline_estimate = inline.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    nested_estimate = nested.estimate_resources()
+    inline_estimate = inline.estimate_resources()
 
     assert nested_estimate.gates == inline_estimate.gates
     assert nested_estimate.measurements == inline_estimate.measurements
@@ -544,8 +538,8 @@ def test_inline_helper_preserves_reusable_workspace_liveness() -> None:
         qm.measure(second_workspace)
         return target
 
-    nested_estimate = nested.estimate_resources(basis=qm.GateBasis.LOGICAL)
-    inline_estimate = inline.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    nested_estimate = nested.estimate_resources()
+    inline_estimate = inline.estimate_resources()
 
     assert nested_estimate.gates == inline_estimate.gates
     assert nested_estimate.measurements == inline_estimate.measurements
@@ -576,7 +570,7 @@ def test_inline_helper_retains_quantum_width_contract_boundary() -> None:
         return contracted(qm.qubit_array(3, "register"))
 
     with pytest.raises(ValueError, match="register width must equal 2"):
-        circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+        circuit.estimate_resources()
 
 
 def test_tuple_expval_dynamic_index_waits_for_whole_root_owner() -> None:
@@ -621,7 +615,7 @@ def test_range_publishes_measurement_array_readiness_after_loop() -> None:
             target = qm.h(target)
         return target
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.depth.depth == 2
     assert estimate.depth.measurement_depth == 1
@@ -647,7 +641,6 @@ def test_items_publishes_measurement_array_readiness_after_loop() -> None:
 
     estimate = circuit.estimate_resources(
         inputs={"data": {0: 0.5}},
-        basis=qm.GateBasis.LOGICAL,
     )
 
     assert estimate.depth.depth == 2
@@ -679,7 +672,6 @@ def test_compile_time_merge_preserves_measurement_element_token(
 
     estimate = circuit.estimate_resources(
         inputs={"selected_source": selector},
-        basis=qm.GateBasis.LOGICAL,
     )
 
     assert estimate.gates.total == 3
@@ -713,7 +705,6 @@ def test_compile_time_merge_does_not_delay_independent_branch_work() -> None:
 
     estimate = circuit.estimate_resources(
         inputs={"selector": 1},
-        basis=qm.GateBasis.LOGICAL,
     )
 
     assert estimate.gates.total == 3
@@ -741,7 +732,7 @@ def test_measurement_derived_index_waits_for_token_and_whole_owner() -> None:
         register[index] = qm.z(register[index])
         return register
 
-    estimate = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    estimate = circuit.estimate_resources()
 
     assert estimate.gates.total == 3
     assert estimate.depth.depth == 3
@@ -780,8 +771,8 @@ def test_opaque_depth_occupies_only_actual_operand() -> None:
         independent = qm.z(independent)
         return opaque_target, independent
 
-    same_estimate = same_operand.estimate_resources(basis=qm.GateBasis.LOGICAL)
-    disjoint_estimate = disjoint_operand.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    same_estimate = same_operand.estimate_resources()
+    disjoint_estimate = disjoint_operand.estimate_resources()
 
     assert same_estimate.depth.depth == 3
     assert same_estimate.depth.gate_depth == 3
@@ -805,7 +796,7 @@ def test_zero_operand_opaque_with_nonzero_depth_is_rejected() -> None:
         oracle()
 
     with pytest.raises(ValueError, match=r"nonzero-depth opaque.*operand"):
-        circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+        circuit.estimate_resources()
 
 
 def test_zero_operand_opaque_workspace_cannot_replace_external_endpoint() -> None:
@@ -825,7 +816,7 @@ def test_zero_operand_opaque_workspace_cannot_replace_external_endpoint() -> Non
         oracle()
 
     with pytest.raises(ValueError, match=r"nonzero-depth opaque.*operand"):
-        circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+        circuit.estimate_resources()
 
 
 def test_concrete_loops_preserve_cross_iteration_observation_dependencies() -> None:
@@ -873,11 +864,9 @@ def test_concrete_loops_preserve_cross_iteration_observation_dependencies() -> N
 
     range_estimate = range_circuit.estimate_resources(
         inputs={"repetitions": 3},
-        basis=qm.GateBasis.LOGICAL,
     )
     items_estimate = items_circuit.estimate_resources(
         inputs={"data": {0: 0.0, 1: 1.0, 2: 2.0}},
-        basis=qm.GateBasis.LOGICAL,
     )
 
     for estimate in (range_estimate, items_estimate):
@@ -907,11 +896,10 @@ def test_symbolic_loop_preserves_carried_measurement_dependency() -> None:
                 state = qm.uint(1)
         return targets
 
-    symbolic = circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    symbolic = circuit.estimate_resources()
     projected = symbolic.substitute(repetitions=3)
     direct = circuit.estimate_resources(
         inputs={"repetitions": 3},
-        basis=qm.GateBasis.LOGICAL,
     )
 
     assert projected.gates.total >= direct.gates.total

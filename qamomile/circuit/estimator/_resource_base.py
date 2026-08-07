@@ -139,27 +139,12 @@ def _validate_event_count(value: ResourceExpr, *, label: str) -> None:
         raise ValueError(f"{label} must be a nonnegative integer, got {value!r}.")
 
 
-class GateBasis(enum.StrEnum):
-    """Select the gate basis reported by resource estimation.
-
-    Values:
-        LOGICAL: Report gates in Qamomile's logical algorithmic vocabulary.
-        CLIFFORD_T: Lower the supported logical operations to aggregate
-            Clifford+T resources at the requested synthesis precision.
-    """
-
-    LOGICAL = "logical"
-    CLIFFORD_T = "clifford_t"
-
-
 class ControlDecomposition(enum.StrEnum):
     """Select how coherent controls are represented in resource estimates.
 
     Values:
         ABSTRACT: Keep each controlled primitive as one abstract logical
-            operation, independently of its control arity. A nonzero abstract
-            control cannot be expressed in the ``CLIFFORD_T`` basis, so that
-            combination fails instead of inventing a decomposition.
+            operation, independently of its control arity.
         CLEAN_ANCILLA_TOFFOLI: Use the fixed clean-ancilla Toffoli-ladder
             resource model, including its body-wide sharing rule. This
             algorithmic model is independent of any engine's native or

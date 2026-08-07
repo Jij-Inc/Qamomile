@@ -24,7 +24,7 @@ from qamomile.circuit.estimator._allocation_width import (
 )
 from qamomile.circuit.estimator._constants import _ONE, _ZERO
 from qamomile.circuit.estimator._estimate_provenance import (
-    _estimate_has_basis_sensitive_resources,
+    _estimate_has_control_sensitive_resources,
     _with_estimate_metadata,
 )
 from qamomile.circuit.estimator._estimate_validation import (
@@ -48,7 +48,6 @@ from qamomile.circuit.estimator._resource_base import (
     ControlDecomposition,
     EstimateDerivation,
     EstimateQuality,
-    GateBasis,
     ResourceExpr,
 )
 from qamomile.circuit.estimator._resource_constraints import _ResourceConstraint
@@ -116,9 +115,7 @@ def _repeat_estimate(
         derivation=EstimateDerivation.STRUCTURAL,
         quality=EstimateQuality.EXACT,
         approximation=ApproximationStatus.EXACT,
-        basis=estimate.basis,
         control_decomposition=estimate.control_decomposition,
-        precision=estimate.precision,
         _allocation_sites=active_sites,
         _constraints=tuple(
             constraint.when(active_when) for constraint in estimate._constraints
@@ -211,9 +208,8 @@ def _control_estimate(
 
     Raises:
         ValueError: If a concrete control count or projected gate count is
-            negative or non-integral, if the selected gate basis has no
-            aggregate controlled projection, or if the estimate contains
-            measurement or reset resources.
+            negative or non-integral, or if the estimate contains measurement
+            or reset resources.
     """
     controls = _expr(num_controls)
     control_constraint = _ResourceConstraint(
@@ -239,7 +235,7 @@ def _control_estimate(
     )
     if _safe_simplify(
         _estimate_activity(estimate)
-    ) == _ZERO and not _estimate_has_basis_sensitive_resources(estimate):
+    ) == _ZERO and not _estimate_has_control_sensitive_resources(estimate):
         if controls.is_number:
             return estimate
         return dataclasses.replace(
@@ -250,22 +246,12 @@ def _control_estimate(
                 control_constraint,
             ),
         )
-    if not _estimate_has_basis_sensitive_resources(estimate):
+    if not _estimate_has_control_sensitive_resources(estimate):
         projected = None
         reason = _aggregate_arity_profile_reason(estimate) or (
-            "the aggregate has no gate-model-sensitive resource profile"
+            "the aggregate has no control-sensitive resource profile"
         )
-    elif estimate.basis is not GateBasis.LOGICAL:
-        raise ValueError(
-            "Controlled aggregate resource projection is not defined for "
-            f"gate basis {estimate.basis.value!r} with control decomposition "
-            f"{estimate.control_decomposition.value!r}. Use the logical basis "
-            "or a body-backed callable with a defined controlled lowering."
-        )
-    elif (
-        estimate.basis is GateBasis.LOGICAL
-        and estimate.control_decomposition is ControlDecomposition.ABSTRACT
-    ):
+    elif estimate.control_decomposition is ControlDecomposition.ABSTRACT:
         projected, reason = _project_abstract_aggregate_controlled_cost(
             estimate,
             controls,

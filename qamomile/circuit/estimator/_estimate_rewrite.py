@@ -235,9 +235,7 @@ def _map_estimate_expressions(
             if estimate.trace is not None
             else None
         ),
-        basis=estimate.basis,
         control_decomposition=estimate.control_decomposition,
-        precision=estimate.precision,
         _allocation_sites={
             site: fn(size) for site, size in estimate._allocation_sites.items()
         },

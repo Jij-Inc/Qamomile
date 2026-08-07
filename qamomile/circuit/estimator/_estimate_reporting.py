@@ -101,9 +101,7 @@ def _estimate_to_dict(
         "derivation": estimate.derivation.value,
         "quality": estimate.quality.value,
         "approximation": estimate.approximation.value,
-        "basis": estimate.basis.value,
         "control_decomposition": estimate.control_decomposition.value,
-        "precision": estimate.precision,
         "requirements": [
             {
                 "expression": serialize(constraint.expression),

@@ -12,6 +12,7 @@ import sympy as sp
 
 import qamomile.circuit as qm
 import qamomile.observable as qm_o
+from qamomile.circuit.estimator._resource_conditions import _PhaseIdentity
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.callable import (
     CallableDef,
@@ -269,16 +270,16 @@ def _recursive_lcu_resource_encoding() -> qm.LCUBlockEncoding:
 
 
 class _ContextAwareOpaqueCost:
-    """Return one symbolically constructed gate in the requested basis."""
+    """Return one gate using the requested control decomposition."""
 
     def __call__(self, ctx: qm.OpaqueCostContext) -> qm.ResourceEstimate:
-        """Build a basis-compatible callback cost.
+        """Build a control-model-compatible callback cost.
 
         Args:
             ctx (qm.OpaqueCostContext): Definition-level cost context.
 
         Returns:
-            qm.ResourceEstimate: One basis-sensitive modeled gate.
+            qm.ResourceEstimate: One modeled gate with matching provenance.
         """
         callback_work = sp.Symbol(
             "callback_work",
@@ -290,9 +291,7 @@ class _ContextAwareOpaqueCost:
                 total=callback_work,
                 non_clifford=callback_work,
             ),
-            basis=ctx.basis,
             control_decomposition=ctx.control_decomposition,
-            precision=ctx.precision,
         )
         assert symbolic.parameters == {"callback_work": callback_work}
         return symbolic.substitute(callback_work=1)
@@ -353,8 +352,8 @@ class _BaseArityProfileOpaqueCost:
         )
 
 
-class _BasisNeutralOpaqueCost:
-    """Return a call-only cost that is independent of gate basis."""
+class _ModelNeutralOpaqueCost:
+    """Return a call-only cost independent of the control model."""
 
     def __call__(self, ctx: qm.OpaqueCostContext) -> qm.ResourceEstimate:
         """Return one explicitly modeled opaque call.
@@ -363,7 +362,7 @@ class _BasisNeutralOpaqueCost:
             ctx (qm.OpaqueCostContext): Definition-level cost context.
 
         Returns:
-            qm.ResourceEstimate: Basis-neutral call resources.
+            qm.ResourceEstimate: Control-model-neutral call resources.
         """
         del ctx
         return qm.ResourceEstimate(
@@ -624,9 +623,7 @@ def test_abstract_opaque_costs_apply_external_controls_after_base_cost() -> None
                 single_qubit=2,
                 two_qubit=1,
             ),
-            basis=ctx.basis,
             control_decomposition=ctx.control_decomposition,
-            precision=ctx.precision,
         )
 
     callback_oracle = qm.opaque(
@@ -679,37 +676,6 @@ def test_abstract_opaque_costs_apply_external_controls_after_base_cost() -> None
     assert callback.derivation is qm.EstimateDerivation.MODELED
     assert callback.quality is qm.EstimateQuality.CONSERVATIVE
     assert callback.approximation is qm.ApproximationStatus.EXACT
-
-
-@pytest.mark.parametrize(
-    "control_decomposition",
-    [
-        qm.ControlDecomposition.ABSTRACT,
-        qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
-    ],
-)
-def test_clifford_t_aggregate_control_fails_without_gate_names(
-    control_decomposition: qm.ControlDecomposition,
-) -> None:
-    """Clifford+T aggregate costs fail closed for every nonzero control."""
-    base = qm.ResourceEstimate(
-        gates=qm.GateResources(
-            total=1,
-            single_qubit=1,
-            t=1,
-            non_clifford=1,
-        ),
-        basis=qm.GateBasis.CLIFFORD_T,
-        control_decomposition=control_decomposition,
-        precision=1e-10,
-    )
-
-    assert base.controlled(0) is base
-    with pytest.raises(
-        ValueError,
-        match="aggregate resource projection is not defined.*clifford_t",
-    ):
-        base.controlled(1)
 
 
 def test_controlled_logical_predicates_honor_concrete_inputs() -> None:
@@ -1966,12 +1932,6 @@ def test_symbolic_control_count_is_validated_and_zero_power_is_identity() -> Non
 
     assert zero_power.gates.total == 0
     assert circuit.estimate_resources(inputs={"width": 2, "power": 0}).gates.total == 0
-    clifford_t_zero = circuit.estimate_resources(
-        inputs={"width": 2, "power": 0},
-        basis=qm.GateBasis.CLIFFORD_T,
-    )
-    assert clifford_t_zero.gates.total == 0
-    assert clifford_t_zero.width.clean_ancilla_qubits == 0
     with pytest.raises(ValueError, match="at least 1 control qubit"):
         symbolic.substitute(width=0, power=1)
     with pytest.raises(ValueError, match="at least 1 control qubit"):
@@ -2517,11 +2477,9 @@ def _controlled_phase_estimate(
     *,
     num_controls: int = 3,
     control_value: int | None = None,
-    basis: qm.GateBasis = qm.GateBasis.LOGICAL,
     control_decomposition: qm.ControlDecomposition = (
         qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
     ),
-    precision: float = 1e-10,
 ) -> qm.ResourceEstimate:
     """Return the estimate for a pure phase under three controls.
 
@@ -2530,11 +2488,8 @@ def _controlled_phase_estimate(
         num_controls (int): Number of coherent controls. Defaults to three.
         control_value (int | None): Optional activation pattern for the
             controls. Defaults to the all-ones pattern.
-        basis (qm.GateBasis): Requested resource basis. Defaults to logical.
         control_decomposition (qm.ControlDecomposition): Coherent-control
             resource model. Defaults to clean-ancilla Toffoli.
-        precision (float): Clifford+T rotation precision. Defaults to
-            ``1e-10``.
 
     Returns:
         qm.ResourceEstimate: Controlled phase estimate.
@@ -2558,9 +2513,7 @@ def _controlled_phase_estimate(
         return target
 
     return circuit.estimate_resources(
-        basis=basis,
         control_decomposition=control_decomposition,
-        precision=precision,
     )
 
 
@@ -2587,12 +2540,22 @@ def test_controlled_global_phase_uses_clean_ancilla_phase_lowering() -> None:
     assert arbitrary.width.clean_ancilla_qubits == 1
 
 
-def test_nonzero_tiny_global_phase_is_not_erased() -> None:
-    """Clean-ancilla estimation preserves phases below the old fixed tolerance."""
-    estimate = _controlled_phase_estimate(5e-13)
+@pytest.mark.parametrize(
+    "phase",
+    [5e-13, math.nextafter(math.tau, math.inf), 11 * math.tau],
+)
+def test_nonidentity_global_phase_is_not_erased(phase: float) -> None:
+    """Clean-ancilla estimation preserves every nonidentity phase."""
+    estimate = _controlled_phase_estimate(phase)
 
     assert estimate.gates.total > 0
     assert estimate.gates.rotation == 1
+
+
+def test_phase_identity_preserves_underflowing_nonzero_values() -> None:
+    """Numeric conversion never erases an exact nonzero phase."""
+    for phase in (sp.Rational(1, 10**1000), sp.Float("1e-1300")):
+        assert _PhaseIdentity(phase) == 0
 
 
 @pytest.mark.parametrize(
@@ -2790,69 +2753,6 @@ def test_unsupported_controlled_loops_fail_closed(
         )
 
 
-def test_clifford_t_cz_matches_controlled_z_lowering() -> None:
-    """Equivalent CZ and CCZ constructions use the same canonical counts."""
-
-    @qm.qkernel
-    def z_body(target: qm.Qubit) -> qm.Qubit:
-        """Apply one Pauli-Z gate."""
-        return qm.z(target)
-
-    @qm.qkernel
-    def cz_body(left: qm.Qubit, right: qm.Qubit) -> tuple[qm.Qubit, qm.Qubit]:
-        """Apply one controlled-Z gate."""
-        return qm.cz(left, right)
-
-    @qm.qkernel
-    def direct_cz() -> tuple[qm.Qubit, qm.Qubit]:
-        """Apply CZ as a direct two-qubit primitive."""
-        return qm.cz(qm.qubit("left"), qm.qubit("right"))
-
-    @qm.qkernel
-    def controlled_z() -> tuple[qm.Qubit, qm.Qubit]:
-        """Construct CZ by controlling a one-gate Z body."""
-        control = qm.qubit("control")
-        target = qm.qubit("target")
-        return qm.control(z_body)(control, target)
-
-    @qm.qkernel
-    def controlled_cz() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
-        """Construct CCZ by controlling a CZ body."""
-        control = qm.qubit("control")
-        left = qm.qubit("left")
-        right = qm.qubit("right")
-        return qm.control(cz_body)(control, left, right)
-
-    @qm.qkernel
-    def doubly_controlled_z() -> qm.Qubit:
-        """Construct CCZ by controlling Z with two qubits."""
-        controls = qm.qubit_array(2, "controls")
-        target = qm.qubit("target")
-        *_, target = qm.control(z_body, num_controls=2)(controls, target)
-        return target
-
-    direct = direct_cz.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
-    equivalent = controlled_z.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
-    direct_ccz = controlled_cz.estimate_resources(basis=qm.GateBasis.CLIFFORD_T)
-    equivalent_ccz = doubly_controlled_z.estimate_resources(
-        basis=qm.GateBasis.CLIFFORD_T
-    )
-
-    assert (
-        direct.gates
-        == equivalent.gates
-        == qm.GateResources(
-            total=3,
-            single_qubit=2,
-            two_qubit=1,
-            clifford=3,
-        )
-    )
-    assert direct.depth.depth == equivalent.depth.depth == 3
-    assert direct_ccz.gates == equivalent_ccz.gates
-    assert direct_ccz.gates.total == 17
-
-
 def test_logical_exact_control_wrappers_preserve_recipe_guarantee() -> None:
     """Exact Y, Z, SWAP, and RZZ wrappers stay exact without clean ancillas."""
 
@@ -2917,9 +2817,6 @@ def test_logical_exact_control_wrappers_preserve_recipe_guarantee() -> None:
         return left, right
 
     logical_y = doubly_controlled_y.estimate_resources()
-    clifford_t_y = doubly_controlled_y.estimate_resources(
-        basis=qm.GateBasis.CLIFFORD_T,
-    )
     logical_z = doubly_controlled_z.estimate_resources()
     logical_swap = controlled_swap.estimate_resources()
     logical_rzz = controlled_rzz.estimate_resources()
@@ -2928,37 +2825,13 @@ def test_logical_exact_control_wrappers_preserve_recipe_guarantee() -> None:
     assert logical_y.gates.toffoli == 1
     assert logical_y.width.clean_ancilla_qubits == 0
     assert logical_y.quality is qm.EstimateQuality.EXACT
-    assert clifford_t_y.width.clean_ancilla_qubits == 0
-    assert clifford_t_y.quality is qm.EstimateQuality.EXACT
     for estimate in (logical_z, logical_swap, logical_rzz):
         assert estimate.width.clean_ancilla_qubits == 0
         assert estimate.quality is qm.EstimateQuality.EXACT
 
 
-def test_clifford_t_supports_multi_controlled_global_phase() -> None:
-    """Fixed and arbitrary phases use defined multi-control lowerings."""
-    fixed = _controlled_phase_estimate(
-        math.pi,
-        basis=qm.GateBasis.CLIFFORD_T,
-        precision=1e-3,
-    )
-    arbitrary = _controlled_phase_estimate(
-        0.3,
-        basis=qm.GateBasis.CLIFFORD_T,
-        precision=1e-3,
-    )
-
-    assert fixed.gates.t > 0
-    assert fixed.quality is qm.EstimateQuality.EXACT
-    assert fixed.approximation is qm.ApproximationStatus.EXACT
-    assert arbitrary.gates.t > fixed.gates.t
-    assert arbitrary.width.clean_ancilla_qubits == 1
-    assert arbitrary.quality is qm.EstimateQuality.UNKNOWN
-    assert arbitrary.approximation is qm.ApproximationStatus.APPROXIMATE
-
-
 def test_symbolic_controlled_global_phase_retains_angle_classification() -> None:
-    """Later phase substitution selects identity and Clifford+T resources."""
+    """Later phase substitution distinguishes identity from nonidentity."""
 
     @qm.qkernel
     def circuit(theta: qm.Float) -> qm.Qubit:
@@ -2972,36 +2845,23 @@ def test_symbolic_controlled_global_phase_retains_angle_classification() -> None
         )
         return target
 
-    clean_estimate = circuit.estimate_resources()
-    assert set(clean_estimate.parameters) == {"theta"}
-    assert clean_estimate.substitute(theta=0).gates.total == 0
-    assert clean_estimate.substitute(theta=math.pi).gates.rotation == 1
+    estimate = circuit.estimate_resources()
+    identity = estimate.substitute(theta=0)
+    pauli_z = estimate.substitute(theta=math.pi)
+    arbitrary = estimate.substitute(theta=0.3)
 
-    clifford_t = circuit.estimate_resources(
-        basis=qm.GateBasis.CLIFFORD_T,
-        precision=1e-3,
-    )
-    identity = clifford_t.substitute(theta=0)
-    pauli_z = clifford_t.substitute(theta=math.pi)
-    phase_s = clifford_t.substitute(theta=math.pi / 2)
-    phase_t = clifford_t.substitute(theta=math.pi / 4)
-    arbitrary = clifford_t.substitute(theta=0.3)
-
+    assert set(estimate.parameters) == {"theta"}
     assert identity.gates.total == 0
-    assert pauli_z.gates.clifford == 1
-    assert phase_s.gates.clifford == 1
-    assert phase_t.gates.t == 1
-    assert arbitrary.gates.t > 1
+    assert pauli_z.gates.total == 1
+    assert pauli_z.gates.rotation == 1
+    assert arbitrary.gates.total == 1
+    assert arbitrary.gates.rotation == 1
     assert identity.quality is qm.EstimateQuality.EXACT
     assert pauli_z.quality is qm.EstimateQuality.EXACT
-    assert phase_s.quality is qm.EstimateQuality.EXACT
-    assert phase_t.quality is qm.EstimateQuality.EXACT
-    assert arbitrary.quality is qm.EstimateQuality.UNKNOWN
+    assert arbitrary.quality is qm.EstimateQuality.EXACT
     assert identity.approximation is qm.ApproximationStatus.EXACT
     assert pauli_z.approximation is qm.ApproximationStatus.EXACT
-    assert phase_s.approximation is qm.ApproximationStatus.EXACT
-    assert phase_t.approximation is qm.ApproximationStatus.EXACT
-    assert arbitrary.approximation is qm.ApproximationStatus.APPROXIMATE
+    assert arbitrary.approximation is qm.ApproximationStatus.EXACT
 
 
 def _controlled_pauli_estimate(num_controls: int) -> qm.ResourceEstimate:
@@ -4909,9 +4769,7 @@ def test_opaque_cost_context_hides_call_site_transforms() -> None:
         observed.append(ctx)
         return qm.ResourceEstimate(
             gates=qm.GateResources(total=1, two_qubit=1),
-            basis=ctx.basis,
             control_decomposition=ctx.control_decomposition,
-            precision=ctx.precision,
         )
 
     oracle = qm.opaque(
@@ -4949,7 +4807,9 @@ def test_opaque_cost_context_hides_call_site_transforms() -> None:
             qm.qubit("target"),
         )
 
-    circuit.estimate_resources()
+    circuit.estimate_resources(
+        control_decomposition=qm.ControlDecomposition.ABSTRACT,
+    )
 
     assert len(observed) == 1
     context = observed[0]
@@ -4957,7 +4817,10 @@ def test_opaque_cost_context_hides_call_site_transforms() -> None:
     assert context.definition_control_qubits == 1
     assert context.target_shapes == {"target_0": ()}
     assert context.target_qubits == 1
+    assert context.control_decomposition is qm.ControlDecomposition.ABSTRACT
     for call_site_field in (
+        "basis",
+        "precision",
         "added_controls",
         "inherited_controls",
         "external_controls",
@@ -5641,7 +5504,6 @@ def test_opaque_callback_nested_estimate_restores_manual_parameter_metadata() ->
             qm.ResourceEstimate: Three concrete one-qubit gates.
         """
         nested = symbolic_body.estimate_resources(
-            basis=ctx.basis,
             control_decomposition=ctx.control_decomposition,
         )
         assert set(nested.parameters) == {"iterations"}
@@ -5656,9 +5518,7 @@ def test_opaque_callback_nested_estimate_restores_manual_parameter_metadata() ->
                 total=callback_work,
                 single_qubit=callback_work,
             ),
-            basis=ctx.basis,
             control_decomposition=ctx.control_decomposition,
-            precision=ctx.precision,
         )
         assert manual.parameters == {"callback_work": callback_work}
         return nested.substitute(iterations=2).seq(manual.substitute(callback_work=1))
@@ -5683,8 +5543,8 @@ def test_opaque_callback_nested_estimate_restores_manual_parameter_metadata() ->
     assert estimate.gates.single_qubit == 3
 
 
-def test_opaque_callback_uses_requested_provenance_and_allows_neutral_cost() -> None:
-    """Callbacks can return matching provenance or basis-neutral resources."""
+def test_opaque_callback_uses_requested_control_provenance() -> None:
+    """Callbacks can return matching or control-model-neutral resources."""
     compatible = qm.opaque(
         "compatible_oracle",
         num_qubits=1,
@@ -5693,7 +5553,7 @@ def test_opaque_callback_uses_requested_provenance_and_allows_neutral_cost() -> 
     neutral = qm.opaque(
         "neutral_oracle",
         num_qubits=1,
-        cost=_BasisNeutralOpaqueCost(),
+        cost=_ModelNeutralOpaqueCost(),
     )
 
     @qm.qkernel
@@ -5704,20 +5564,18 @@ def test_opaque_callback_uses_requested_provenance_and_allows_neutral_cost() -> 
 
     @qm.qkernel
     def neutral_circuit() -> qm.Qubit:
-        """Invoke the basis-neutral opaque callable."""
+        """Invoke the control-model-neutral opaque callable."""
         (target,) = neutral(qm.qubit("target"))
         return target
 
-    lowered = compatible_circuit.estimate_resources(
-        basis=qm.GateBasis.CLIFFORD_T,
-        precision=1e-4,
+    abstract = compatible_circuit.estimate_resources(
+        control_decomposition=qm.ControlDecomposition.ABSTRACT,
     )
-    neutral_logical = neutral_circuit.estimate_resources(basis=qm.GateBasis.LOGICAL)
+    neutral_estimate = neutral_circuit.estimate_resources()
 
-    assert lowered.basis is qm.GateBasis.CLIFFORD_T
-    assert lowered.precision == 1e-4
-    assert neutral_logical.basis is qm.GateBasis.LOGICAL
-    assert neutral_logical.calls.calls_by_name == {"neutral_oracle": 1}
+    assert abstract.control_decomposition is qm.ControlDecomposition.ABSTRACT
+    assert abstract.gates.total == 1
+    assert neutral_estimate.calls.calls_by_name == {"neutral_oracle": 1}
 
 
 @pytest.mark.parametrize("use_callback", [False, True], ids=["fixed", "callback"])
@@ -5726,11 +5584,11 @@ def test_opaque_callback_uses_requested_provenance_and_allows_neutral_cost() -> 
     [False, True],
     ids=["default-neutral", "requested-model-neutral"],
 )
-def test_controlled_basis_neutral_opaque_cost_has_fixed_callback_parity(
+def test_controlled_model_neutral_opaque_cost_has_fixed_callback_parity(
     use_callback: bool,
     label_with_requested_model: bool,
 ) -> None:
-    """Calls-only costs need no gate projection under Clifford+T controls."""
+    """Calls-only costs need no gate projection under coherent controls."""
 
     def callback(ctx: qm.OpaqueCostContext) -> qm.ResourceEstimate:
         """Return one call-only definition cost.
@@ -5739,14 +5597,10 @@ def test_controlled_basis_neutral_opaque_cost_has_fixed_callback_parity(
             ctx (qm.OpaqueCostContext): Definition-level cost context.
 
         Returns:
-            qm.ResourceEstimate: Basis-neutral call resource.
+            qm.ResourceEstimate: Control-model-neutral call resource.
         """
         options = (
-            {
-                "basis": ctx.basis,
-                "control_decomposition": ctx.control_decomposition,
-                "precision": ctx.precision,
-            }
+            {"control_decomposition": ctx.control_decomposition}
             if label_with_requested_model
             else {}
         )
@@ -5756,11 +5610,7 @@ def test_controlled_basis_neutral_opaque_cost_has_fixed_callback_parity(
         )
 
     fixed_options = (
-        {
-            "basis": qm.GateBasis.CLIFFORD_T,
-            "control_decomposition": (qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI),
-            "precision": 1e-4,
-        }
+        {"control_decomposition": qm.ControlDecomposition.ABSTRACT}
         if label_with_requested_model
         else {}
     )
@@ -5782,64 +5632,24 @@ def test_controlled_basis_neutral_opaque_cost_has_fixed_callback_parity(
         return qm.control(oracle)(control, target)
 
     estimate = circuit.estimate_resources(
-        basis=qm.GateBasis.CLIFFORD_T,
-        precision=1e-4,
+        control_decomposition=qm.ControlDecomposition.ABSTRACT,
     )
 
-    assert estimate.basis is qm.GateBasis.CLIFFORD_T
+    assert estimate.control_decomposition is qm.ControlDecomposition.ABSTRACT
     assert estimate.calls.calls_by_name == {"neutral_controlled": 1}
     assert estimate.gates.total == 0
     assert estimate.derivation is qm.EstimateDerivation.MODELED
-    assert any(
-        "zero gate profile has no declared primitive arity" in assumption.message
-        for assumption in estimate.assumptions
-    )
 
 
 @pytest.mark.parametrize("use_callback", [False, True], ids=["fixed", "callback"])
-@pytest.mark.parametrize(
-    ("cost_estimate", "estimator_options", "error_match"),
-    [
-        pytest.param(
-            qm.ResourceEstimate(
-                gates=qm.GateResources(total=1, single_qubit=1),
-                basis=qm.GateBasis.LOGICAL,
-            ),
-            {"basis": qm.GateBasis.CLIFFORD_T},
-            "uses basis 'logical'",
-            id="basis",
-        ),
-        pytest.param(
-            qm.ResourceEstimate(
-                gates=qm.GateResources(total=1, single_qubit=1),
-                control_decomposition=qm.ControlDecomposition.ABSTRACT,
-            ),
-            {"control_decomposition": (qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI)},
-            "uses control decomposition 'abstract'",
-            id="control-decomposition",
-        ),
-        pytest.param(
-            qm.ResourceEstimate(
-                gates=qm.GateResources(total=1, t=1),
-                basis=qm.GateBasis.CLIFFORD_T,
-                precision=1e-3,
-            ),
-            {
-                "basis": qm.GateBasis.CLIFFORD_T,
-                "precision": 1e-4,
-            },
-            "uses precision",
-            id="precision",
-        ),
-    ],
-)
-def test_opaque_cost_rejects_mismatched_provenance(
+def test_opaque_cost_rejects_mismatched_control_decomposition(
     use_callback: bool,
-    cost_estimate: qm.ResourceEstimate,
-    estimator_options: dict[str, object],
-    error_match: str,
 ) -> None:
-    """Fixed and callback costs reject incompatible estimator provenance."""
+    """Fixed and callback costs reject incompatible control provenance."""
+    cost_estimate = qm.ResourceEstimate(
+        gates=qm.GateResources(total=1, single_qubit=1),
+        control_decomposition=qm.ControlDecomposition.ABSTRACT,
+    )
 
     def callback(ctx: qm.OpaqueCostContext) -> qm.ResourceEstimate:
         """Return the deliberately incompatible definition-level cost.
@@ -5865,8 +5675,10 @@ def test_opaque_cost_rejects_mismatched_provenance(
         (target,) = oracle(qm.qubit("target"))
         return target
 
-    with pytest.raises(ValueError, match=error_match):
-        circuit.estimate_resources(**estimator_options)
+    with pytest.raises(ValueError, match="uses control decomposition 'abstract'"):
+        circuit.estimate_resources(
+            control_decomposition=qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+        )
 
 
 def test_formal_quantum_input_is_not_counted_as_body_allocation() -> None:
@@ -5897,24 +5709,17 @@ def test_metadata_axes_and_model_settings_survive_resource_algebra() -> None:
     assert transformed.derivation is qm.EstimateDerivation.MODELED
     assert transformed.approximation is qm.ApproximationStatus.APPROXIMATE
 
-    default = _four_h_body.estimate_resources()
-    lowered = _four_h_body.estimate_resources(
-        basis=qm.GateBasis.CLIFFORD_T,
-        precision=1e-4,
+    clean = _four_h_body.estimate_resources()
+    abstract = _four_h_body.estimate_resources(
+        control_decomposition=qm.ControlDecomposition.ABSTRACT,
     )
-    assert default.basis is qm.GateBasis.LOGICAL
-    assert (
-        default.control_decomposition is qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
-    )
-    assert default.precision is None
-    assert default.to_dict()["basis"] == "logical"
-    assert default.to_dict()["control_decomposition"] == "clean_ancilla_toffoli"
-    assert default.to_dict()["approximation"] == "exact"
-    assert default.to_dict()["width"]["circuit_qubits"] == "1"
-    assert lowered.basis is qm.GateBasis.CLIFFORD_T
-    assert lowered.precision == 1e-4
-    assert lowered.to_dict()["precision"] == 1e-4
-    assert lowered.approximation is qm.ApproximationStatus.EXACT
+    assert clean.control_decomposition is qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
+    assert clean.to_dict()["control_decomposition"] == "clean_ancilla_toffoli"
+    assert clean.to_dict()["approximation"] == "exact"
+    assert clean.to_dict()["width"]["circuit_qubits"] == "1"
+    assert abstract.control_decomposition is qm.ControlDecomposition.ABSTRACT
+    assert abstract.to_dict()["control_decomposition"] == "abstract"
+    assert abstract.approximation is qm.ApproximationStatus.EXACT
 
 
 def test_nonunitary_resources_compose_substitute_and_serialize() -> None:
@@ -5969,22 +5774,6 @@ def test_nonunitary_resources_compose_substitute_and_serialize() -> None:
     assert serialized["depth"]["reset_depth"] == "events"
 
 
-def test_resource_algebra_rejects_mixed_gate_bases() -> None:
-    """Basis-sensitive estimates cannot be silently combined and relabeled."""
-    clifford_t = qm.ResourceEstimate(
-        gates=qm.GateResources(total=1, single_qubit=1),
-        basis=qm.GateBasis.CLIFFORD_T,
-        precision=1e-3,
-    )
-    logical = qm.ResourceEstimate(
-        gates=qm.GateResources(total=1, single_qubit=1),
-        basis=qm.GateBasis.LOGICAL,
-    )
-
-    with pytest.raises(ValueError, match="different gate bases"):
-        clifford_t.seq(logical)
-
-
 def test_resource_algebra_rejects_mixed_control_decompositions() -> None:
     """Gate-sensitive estimates cannot hide different control recipes."""
     clean = qm.ResourceEstimate(
@@ -5997,22 +5786,6 @@ def test_resource_algebra_rejects_mixed_control_decompositions() -> None:
 
     with pytest.raises(ValueError, match="different control decompositions"):
         clean.seq(abstract)
-
-
-def test_legacy_unclassified_depth_remains_gate_basis_sensitive() -> None:
-    """A pre-gate-depth opaque cost cannot be silently relabeled."""
-    clifford_t = qm.ResourceEstimate(
-        gates=qm.GateResources(total=1, single_qubit=1),
-        basis=qm.GateBasis.CLIFFORD_T,
-        precision=1e-3,
-    )
-    legacy = qm.ResourceEstimate(
-        depth=qm.DepthResources(depth=1),
-        basis=qm.GateBasis.LOGICAL,
-    )
-
-    with pytest.raises(ValueError, match="different gate bases"):
-        clifford_t.seq(legacy)
 
 
 @pytest.mark.parametrize(
@@ -6063,7 +5836,7 @@ def test_event_resources_accept_nonnegative_symbols_and_validate_substitution(
         estimate.substitute(events=-1)
 
 
-def test_basis_provenance_does_not_simplify_accumulated_metrics(
+def test_control_provenance_does_not_simplify_accumulated_metrics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A resource-algebra fold does not simplify its full symbolic history."""
@@ -6074,7 +5847,6 @@ def test_basis_provenance_does_not_simplify_accumulated_metrics(
     )
     neutral = qm.ResourceEstimate(
         depth=qm.DepthResources(depth=1, measurement_depth=1),
-        basis=qm.GateBasis.LOGICAL,
         control_decomposition=qm.ControlDecomposition.ABSTRACT,
     )
 
@@ -6094,7 +5866,6 @@ def test_basis_provenance_does_not_simplify_accumulated_metrics(
 
     combined = decomposed.seq(neutral)
 
-    assert combined.basis is qm.GateBasis.LOGICAL
     assert (
         combined.control_decomposition is qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
     )
@@ -6102,11 +5873,11 @@ def test_basis_provenance_does_not_simplify_accumulated_metrics(
     assert combined.depth.measurement_depth == 1
 
 
-def test_measurement_only_resources_are_gate_basis_neutral() -> None:
-    """Measurement depth composes with a gate estimate from any basis."""
+def test_measurement_only_resources_are_control_model_neutral() -> None:
+    """Measurement depth composes with a gate estimate from any control model."""
     measurement = qm.ResourceEstimate(
         depth=qm.DepthResources(depth=1, measurement_depth=1),
-        basis=qm.GateBasis.LOGICAL,
+        control_decomposition=qm.ControlDecomposition.ABSTRACT,
     )
     decomposed = qm.ResourceEstimate(
         gates=qm.GateResources(total=1, single_qubit=1),
@@ -6115,7 +5886,9 @@ def test_measurement_only_resources_are_gate_basis_neutral() -> None:
 
     combined = measurement.seq(decomposed)
 
-    assert combined.basis is qm.GateBasis.LOGICAL
+    assert (
+        combined.control_decomposition is qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
+    )
     assert combined.depth.depth == 2
     assert combined.depth.measurement_depth == 1
 

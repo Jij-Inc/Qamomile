@@ -9,14 +9,6 @@ import sympy as sp
 from qamomile.circuit.estimator._clean_ancilla_projection import (
     _estimate_clean_ancilla_gate,
 )
-from qamomile.circuit.estimator._clifford_t_decomposition import (
-    _PHASE_CLASS_CODES,
-    _canonical_phase_gate_name,
-    _CanonicalPhaseClass,
-    _clifford_t_clean_ancillas,
-    _clifford_t_conservative_condition,
-)
-from qamomile.circuit.estimator._clifford_t_depth import _clifford_t_gate_depth
 from qamomile.circuit.estimator._constants import (
     _ONE,
     _ZERO,
@@ -25,8 +17,7 @@ from qamomile.circuit.estimator._estimate import ResourceEstimate
 from qamomile.circuit.estimator._estimate_validation import _with_constraints
 from qamomile.circuit.estimator._gate_models import (
     _classify_gate,
-    _estimate_named_gate_in_basis,
-    _gate_has_rotation,
+    _estimate_named_gate,
 )
 from qamomile.circuit.estimator._interpreter_region_analysis import (
     _RegionAnalysisInterpreter,
@@ -43,13 +34,12 @@ from qamomile.circuit.estimator._resource_algebra import (
     _wrap_trace,
 )
 from qamomile.circuit.estimator._resource_base import (
-    ApproximationStatus,
     ControlDecomposition,
     EstimateDerivation,
     EstimateQuality,
-    GateBasis,
     ResourceExpr,
 )
+from qamomile.circuit.estimator._resource_conditions import _PhaseIdentity
 from qamomile.circuit.estimator._resource_constraints import (
     _ResourceConstraint,
 )
@@ -106,14 +96,11 @@ class _PrimitiveInterpreter(_RegionAnalysisInterpreter):
             ResourceEstimate: Primitive gate resources.
 
         Raises:
-            ValueError: If abstract controls are requested in the Clifford+T
-                basis or the selected basis lacks a controlled lowering.
             NotImplementedError: If the clean-ancilla model has no registered
                 lowering for the primitive.
         """
         if (
-            self.config.basis is GateBasis.LOGICAL
-            and self.config.control_decomposition
+            self.config.control_decomposition
             is ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
         ):
             return _estimate_clean_ancilla_gate(
@@ -121,66 +108,16 @@ class _PrimitiveInterpreter(_RegionAnalysisInterpreter):
                 operation,
                 _expr(controls),
             )
-        if (
-            self.config.basis is GateBasis.CLIFFORD_T
-            and self.config.control_decomposition is ControlDecomposition.ABSTRACT
-            and _expr(controls) != _ZERO
-        ):
-            raise ValueError(
-                "Clifford+T estimation cannot preserve a controlled primitive "
-                "as abstract. Select the clean-ancilla Toffoli control "
-                "decomposition."
-            )
 
         gates = _classify_gate(
             operation,
             num_controls=controls,
-            basis=self.config.basis,
-            precision=self.config.precision,
         )
         name = operation.gate_type.name.lower() if operation.gate_type else "gate"
-        depth = (
-            _clifford_t_gate_depth(operation, _expr(controls), self.config.precision)
-            if self.config.basis is GateBasis.CLIFFORD_T
-            else None
-        )
-        estimate = ResourceEstimate.primitive(name, gates, depth=depth)
-        estimate = dataclasses.replace(
-            estimate,
-            basis=self.config.basis,
+        return dataclasses.replace(
+            ResourceEstimate.primitive(name, gates),
             control_decomposition=self.config.control_decomposition,
-            precision=(
-                self.config.precision
-                if self.config.basis is GateBasis.CLIFFORD_T
-                else None
-            ),
         )
-        if self.config.basis is GateBasis.CLIFFORD_T:
-            clean_ancillas = _clifford_t_clean_ancillas(operation, _expr(controls))
-            if clean_ancillas != _ZERO:
-                estimate = dataclasses.replace(
-                    estimate,
-                    width=WidthResources(
-                        clean_ancilla_qubits=clean_ancillas,
-                        peak_qubits=clean_ancillas,
-                    ),
-                )
-        if self.config.basis is GateBasis.CLIFFORD_T:
-            conservative_when = _clifford_t_conservative_condition(
-                name,
-                _expr(controls),
-            )
-            if conservative_when is not sp.false:
-                estimate = estimate._with_metadata(
-                    quality=EstimateQuality.CONSERVATIVE,
-                    active_when=conservative_when,
-                )
-            if _gate_has_rotation(operation):
-                estimate = estimate._with_metadata(
-                    quality=EstimateQuality.UNKNOWN,
-                    approximation=ApproximationStatus.APPROXIMATE,
-                )
-        return estimate
 
     def eval_global_phase(
         self,
@@ -229,24 +166,19 @@ class _PrimitiveInterpreter(_RegionAnalysisInterpreter):
         control_count = _expr(controls)
         if control_count == _ZERO:
             return ResourceEstimate.zero("global_phase")
-        phase_class = _CanonicalPhaseClass(phase)
+        phase_identity = _PhaseIdentity(phase)
         zero = ResourceEstimate.zero("global_phase")
 
-        def gate_estimate(gate_name: str) -> ResourceEstimate:
-            """Estimate one canonical relative-phase gate.
-
-            Args:
-                gate_name (str): Canonical phase gate name.
+        def gate_estimate() -> ResourceEstimate:
+            """Estimate one logical relative-phase gate.
 
             Returns:
                 ResourceEstimate: Gate estimate under all but one control.
             """
-            estimate = _estimate_named_gate_in_basis(
-                gate_name,
+            estimate = _estimate_named_gate(
+                "p",
                 control_count - _ONE,
-                basis=self.config.basis,
                 control_decomposition=self.config.control_decomposition,
-                precision=self.config.precision,
             )
             return dataclasses.replace(
                 estimate,
@@ -257,31 +189,14 @@ class _PrimitiveInterpreter(_RegionAnalysisInterpreter):
                 ),
             )
 
-        if phase.is_number:
-            gate_name = _canonical_phase_gate_name(phase)
-            if gate_name is None:
-                phase_estimate = zero
-            else:
-                if self.config.basis is not GateBasis.CLIFFORD_T:
-                    # The shared control implementation preserves every nontrivial
-                    # angle as P(theta), including special Clifford angles.
-                    gate_name = "p"
-                phase_estimate = gate_estimate(gate_name)
-        elif self.config.basis is not GateBasis.CLIFFORD_T:
-            phase_estimate = zero.conditional(
-                gate_estimate("p"),
-                sp.Eq(phase_class, _PHASE_CLASS_CODES[None]),
-            )
+        if phase_identity == _ONE:
+            phase_estimate = zero
+        elif phase_identity == _ZERO:
+            phase_estimate = gate_estimate()
         else:
-            phase_estimate = gate_estimate("p")
-            for gate_name in ("tdg", "sdg", "t", "s", "z"):
-                phase_estimate = gate_estimate(gate_name).conditional(
-                    phase_estimate,
-                    sp.Eq(phase_class, _PHASE_CLASS_CODES[gate_name]),
-                )
             phase_estimate = zero.conditional(
-                phase_estimate,
-                sp.Eq(phase_class, _PHASE_CLASS_CODES[None]),
+                gate_estimate(),
+                sp.Eq(phase_identity, _ONE),
             )
 
         if control_count.is_number and control_count.is_integer:
@@ -322,12 +237,10 @@ class _PrimitiveInterpreter(_RegionAnalysisInterpreter):
         zeros = _expr(zero_controls)
         if zeros == _ZERO:
             return estimate
-        bracket_gate = _estimate_named_gate_in_basis(
+        bracket_gate = _estimate_named_gate(
             "x",
             _expr(surrounding_controls),
-            basis=self.config.basis,
             control_decomposition=self.config.control_decomposition,
-            precision=self.config.precision,
         )
         side = bracket_gate.repeat(zeros)
         if _expr(surrounding_controls) == _ZERO:
@@ -530,23 +443,19 @@ class _PrimitiveInterpreter(_RegionAnalysisInterpreter):
         estimate = ResourceEstimate.zero()
         for gate_name in before:
             estimate = estimate.seq(
-                _estimate_named_gate_in_basis(
+                _estimate_named_gate(
                     gate_name,
                     _ZERO,
-                    basis=self.config.basis,
                     control_decomposition=self.config.control_decomposition,
-                    precision=self.config.precision,
                 )
             )
         estimate = estimate.seq(measurement)
         for gate_name in after:
             estimate = estimate.seq(
-                _estimate_named_gate_in_basis(
+                _estimate_named_gate(
                     gate_name,
                     _ZERO,
-                    basis=self.config.basis,
                     control_decomposition=self.config.control_decomposition,
-                    precision=self.config.precision,
                 )
             )
         return dataclasses.replace(

@@ -19,7 +19,6 @@ from qamomile.circuit.estimator._resource_base import (
     ControlDecomposition,
     EstimateDerivation,
     EstimateQuality,
-    GateBasis,
 )
 from qamomile.circuit.estimator._resource_types import (
     CallResources,
@@ -47,14 +46,13 @@ from qamomile.circuit.estimator._wire_records import (
     _mapping,
     _metric_from_wire,
     _metric_to_wire,
-    _precision_from_wire,
     _requirement_from_wire,
     _sequence,
     _trace_from_wire,
     _trace_to_wire,
 )
 
-_RESOURCE_ESTIMATE_WIRE_VERSION = 4
+_RESOURCE_ESTIMATE_WIRE_VERSION = 5
 
 
 def resource_estimate_to_wire(
@@ -131,9 +129,7 @@ def resource_estimate_to_wire(
         "derivation": estimate.derivation.value,
         "quality": estimate.quality.value,
         "approximation": estimate.approximation.value,
-        "basis": estimate.basis.value,
         "control_decomposition": estimate.control_decomposition.value,
-        "precision": estimate.precision,
         "requirements": [
             {
                 "expression": expression(constraint.expression),
@@ -217,10 +213,19 @@ def resource_estimate_from_wire(
     record = _mapping(payload, "opaque ResourceEstimate")
     if record.get("$type") != "ResourceEstimate":
         raise ValueError("opaque cost payload is not a ResourceEstimate")
-    if record.get("version") != _RESOURCE_ESTIMATE_WIRE_VERSION:
+    version = record.get("version")
+    if (
+        isinstance(version, int)
+        and not isinstance(version, bool)
+        and version < _RESOURCE_ESTIMATE_WIRE_VERSION
+    ):
         raise ValueError(
-            "unsupported opaque ResourceEstimate wire version "
-            f"{record.get('version')!r}"
+            "opaque ResourceEstimate wire versions before 5 are not supported; "
+            f"got {version!r}"
+        )
+    if version != _RESOURCE_ESTIMATE_WIRE_VERSION:
+        raise ValueError(
+            f"unsupported opaque ResourceEstimate wire version {version!r}"
         )
 
     decoder = _WireExpressionDecoder() if decoder is None else decoder
@@ -331,17 +336,11 @@ def resource_estimate_from_wire(
             record.get("approximation"),
             "opaque ResourceEstimate approximation",
         ),
-        basis=_enum_from_wire(
-            GateBasis,
-            record.get("basis"),
-            "opaque ResourceEstimate basis",
-        ),
         control_decomposition=_enum_from_wire(
             ControlDecomposition,
             record.get("control_decomposition"),
             "opaque ResourceEstimate control decomposition",
         ),
-        precision=_precision_from_wire(record.get("precision")),
         _constraints=requirements,
         _guarded_assumptions=guarded_assumptions,
         _guarded_derivations=guarded_derivations,

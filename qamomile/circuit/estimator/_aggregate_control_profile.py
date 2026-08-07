@@ -13,7 +13,6 @@ from qamomile.circuit.estimator._control_decomposition import (
 )
 from qamomile.circuit.estimator._resource_base import (
     ControlDecomposition,
-    GateBasis,
     ResourceExpr,
 )
 from qamomile.circuit.estimator._resource_constraints import (
@@ -281,11 +280,6 @@ def _aggregate_arity_projection_reason(
         str | None: Ineligibility reason, or ``None`` when at least one
             one- or two-qubit gate can use the selected control recipe.
     """
-    if estimate.basis is not GateBasis.LOGICAL:
-        return (
-            "automatic arity projection is available only in the logical "
-            f"basis, not {estimate.basis.value}"
-        )
     if estimate.control_decomposition is not ControlDecomposition.CLEAN_ANCILLA_TOFFOLI:
         return (
             "automatic arity projection is available only with the "

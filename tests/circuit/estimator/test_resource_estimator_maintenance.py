@@ -88,7 +88,6 @@ def _trace_leaf_names(
 def test_public_resource_types_retain_owner_introspection() -> None:
     """Moved public types remain introspectable through their owner modules."""
     for resource_type in (
-        qmc.GateBasis,
         qmc.GateResources,
         resource_types_module.ResourceTraceNode,
         qmc.WidthResources,
@@ -114,7 +113,6 @@ def test_legacy_resource_pickle_globals_resolve_after_split() -> None:
     """Legacy module globals still resolve to the relocated class objects."""
     legacy_globals = {
         "qamomile.circuit.estimator._metrics": (
-            "GateBasis",
             "ControlDecomposition",
             "EstimateDerivation",
             "EstimateQuality",
@@ -141,7 +139,6 @@ def test_legacy_resource_pickle_globals_resolve_after_split() -> None:
             "_ResourceInlineBoundaryOperation",
             "_CappedRangeSum",
             "_EstimatorControlBatchProfile",
-            "_CanonicalPhaseClass",
             "_SequentialEstimateComposer",
             "_OpaqueInvocationTransform",
             "_ResourceEstimatorConfig",
@@ -252,7 +249,7 @@ def test_interpreter_reuse_restores_root_condition_values() -> None:
         return target
 
     interpreter = estimator_module.ResourceInterpreter(
-        config=config_module._ResourceEstimatorConfig(basis=qmc.GateBasis.LOGICAL),
+        config=config_module._ResourceEstimatorConfig(),
         bindings={},
         condition_values={
             "first_flag": sp.Integer(0),
@@ -276,7 +273,7 @@ def test_eval_operations_reuses_precomputed_wire_footprints(
     wire_keys = Mock(wraps=region_analysis_module._quantum_wire_keys)
     monkeypatch.setattr(region_analysis_module, "_quantum_wire_keys", wire_keys)
     interpreter = estimator_module.ResourceInterpreter(
-        config=config_module._ResourceEstimatorConfig(basis=qmc.GateBasis.LOGICAL),
+        config=config_module._ResourceEstimatorConfig(),
         bindings={},
     )
 
@@ -306,7 +303,6 @@ def test_affine_loop_uses_symbolic_disjointness_before_enumeration(
 
     estimate = _affine_disjoint_loop.estimate_resources(
         inputs={"width": 64},
-        basis=qmc.GateBasis.LOGICAL,
     )
 
     concrete.assert_not_called()
@@ -326,7 +322,7 @@ def test_nonlinear_loop_falls_back_to_concrete_disjointness(
         concrete,
     )
 
-    estimate = _nonlinear_disjoint_loop.estimate_resources(basis=qmc.GateBasis.LOGICAL)
+    estimate = _nonlinear_disjoint_loop.estimate_resources()
 
     assert concrete.call_count == 1
     assert estimate.gates.total == 3

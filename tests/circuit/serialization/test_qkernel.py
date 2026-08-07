@@ -841,9 +841,7 @@ _FIXED_OPAQUE_COST = qmc.ResourceEstimate(
     derivation=qmc.EstimateDerivation.MODELED,
     quality=qmc.EstimateQuality.CONSERVATIVE,
     approximation=qmc.ApproximationStatus.APPROXIMATE,
-    basis=qmc.GateBasis.CLIFFORD_T,
     control_decomposition=qmc.ControlDecomposition.ABSTRACT,
-    precision=1e-3,
     _constraints=(
         _ResourceConstraint(
             expression=_OPAQUE_COST_INDEX + 1,
