@@ -27,9 +27,9 @@ Learn how to use Möttönen amplitude encoding in Qamomile to prepare arbitrary 
 :::
 
 :::{card}
-:header: **Introduction to Quantum Fourier Transform (QFT)**
+:header: **Quantum Fourier Transform (QFT)**
 :link: qft
-QFT circuit steps, stdlib implementation, execution, and resource estimation.
+Implement QFT from scratch and with the built-in `qft`, then compare their frequency estimates and examine the required gate count.
 :::
 
 :::{card}

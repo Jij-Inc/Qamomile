@@ -17,26 +17,25 @@
 # tags: [algorithm, primitive, resource-estimation]
 # ---
 #
-# # 量子フーリエ変換（QFT）入門
+# # 量子フーリエ変換（QFT）
 #
 # 量子フーリエ変換（Quantum Fourier Transformation; QFT）は、離散フーリエ変換の量子版です。量子位相推定やShorのアルゴリズム{cite:p}`10.1109/SFCS.1994.365700`など、量子振幅に埋め込まれた位相情報を使うアルゴリズムで、重要なサブルーチンとして使われます{cite:p}`10.48550/arXiv.quant-ph/0201067`。
 #
-# このノートブックでは、古典のフーリエ変換から始めてQFT回路を説明し、4量子ビットの周波数推定の例をQamomileで実装します。QFT回路の描画、ローカルのQiskitシミュレータでの実行、ヒストグラムからの周波数推定、計算量のスケーリングの確認までを扱います。
+# このノートブックでは、古典のフーリエ変換から始めてQFT回路を説明し、4量子ビットの周波数推定をQamomileで実装します。スクラッチ実装と組み込みの`qft`関数を比較し、サンプリング結果から主要な周波数を推定して、必要なゲート数を確認します。
 
 # %%
-# 最新のQamomileをpipからインストールします！
-# # !pip install qamomile
+# 最新のQamomileと、このノートブックで使う追加機能をインストールします。
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %%
 import math
 
 import matplotlib.pyplot as plt
 import numpy as np
+from qiskit_aer import AerSimulator
 
 import qamomile.circuit as qmc
-from qamomile.circuit.stdlib.qft import qft
 from qamomile.qiskit import QiskitTranspiler
-from qiskit_aer import AerSimulator
 
 transpiler = QiskitTranspiler()
 
@@ -68,7 +67,7 @@ transpiler = QiskitTranspiler()
 #
 # 古典のDFTでは、出力ベクトル全体を得られます。一方で、QFTは量子状態の振幅を変換し、変換後の量子状態を返します。このため、QFTの直後に測定しても、得られるのは変換後の確率分布に従う計算基底の測定結果だけです。ただし、位相推定のようにサブルーチンとして使用する場合は、変換後の位相情報をそのまま利用することができます。
 #
-# 標準的なQFT回路は、アダマールゲート、制御付き位相回転、最後のスワップで構成されます。$n$量子ビットのレジスタでは、$O(n^2)$個のゲートで実装できます。位相を表すために、次の2進小数表記を使います。
+# 標準的なQFT回路は、アダマールゲート、制御付き位相回転、最後のスワップで構成されます。$n$個の量子ビットに対して、$O(n^2)$個のゲートで実装できます。位相を表すために、次の2進小数表記を使います。
 #
 # $$
 # [0.x_jx_{j+1}\ldots x_n] =
@@ -82,7 +81,7 @@ transpiler = QiskitTranspiler()
 #
 # ### ステップ1：対象量子ビットを1つ選ぶ
 #
-# レジスタを対象量子ビットごとに処理します。最後の量子ビットにアダマールゲートを適用すると、QFTの出力に現れる最初の因子が得られます。
+# 対象量子ビットを1つずつ処理します。最後の量子ビットにアダマールゲートを適用すると、QFTの出力に現れる最初の因子が得られます。
 #
 # $x_n=0$なら$H\lvert0\rangle = (\lvert0\rangle + \lvert1\rangle)/\sqrt{2}$です。一方、$x_n=1$なら$H\lvert1\rangle = (\lvert0\rangle - \lvert1\rangle)/\sqrt{2}$であり、これは$e^{2\pi i[0.1]} = e^{\pi i} = -1$を使って同じ形にまとめられます。
 #
@@ -120,7 +119,7 @@ transpiler = QiskitTranspiler()
 # \theta = \frac{2\pi}{2^{d+1}} = \frac{\pi}{2^d}.
 # $$
 #
-# ### ステップ3：レジスタ全体で繰り返す
+# ### ステップ3：すべての量子ビットで繰り返す
 #
 # アダマールゲートと制御付き位相回転のパターンを繰り返すと、QFTは次の積の形で書けます。
 #
@@ -147,7 +146,7 @@ transpiler = QiskitTranspiler()
 #
 # ### ステップ4：出力順序を反転する
 #
-# 標準的なQFT回路では、出力量子ビットの順序が逆になります。最後にスワップ層を置くことで、レジスタの順序を戻します。一部のアルゴリズムではこのスワップを省き、逆順であることを古典側で管理します。
+# 標準的なQFT回路では、出力量子ビットの順序が逆になります。最後にスワップ層を置くことで、量子ビットを元の順序に戻します。一部のアルゴリズムではこのスワップを省き、逆順であることを古典側で管理します。
 #
 # ```{figure} assets/qft_circuit.png
 # :alt: 標準QFT回路
@@ -157,11 +156,11 @@ transpiler = QiskitTranspiler()
 # ```
 
 # %% [markdown]
-# ## Qamomileでの実装：`qft`関数
+# ## Qamomileでの実装
 #
-# `qamomile.circuit.stdlib.qft.qft`関数は、上で説明した回路を適用します。アダマールゲート、制御付き位相回転、最後のスワップをまとめて扱えます。
+# はじめにQamomileのゲートを使ってQFT回路をスクラッチ実装し、その後、この実装を組み込みの`qmc.qft`関数へ置き換えます。
 #
-# ### 問題例
+# ### 問題設定
 #
 # $N=16$個のサンプルを使うので、4量子ビットで表せます。この例では、計算基底状態$\lvert j\rangle$の振幅を$s_j$とする量子状態を準備します。ここで、$n=4$、$N=16$、$\omega = e^{2\pi i/16}$です。
 #
@@ -185,90 +184,178 @@ transpiler = QiskitTranspiler()
 # したがって、$f=5$のとき、出力は周波数インデックス$k=5$に集中するはずです。実際に古典DFTを実行して確かめてみましょう。NumPyの`np.fft.ifft`を利用して計算します。
 
 # %%
-num_qubits = 4
-dimension = 2**num_qubits
-frequency = 5
+EXAMPLE_INPUTS = {"num_qubits": 4, "frequency": 5}
+dimension = 2 ** EXAMPLE_INPUTS["num_qubits"]
 positions = np.arange(dimension)
 
-signal = np.exp(-2j * np.pi * frequency * positions / dimension) / np.sqrt(dimension)
+signal = np.exp(
+    -2j * np.pi * EXAMPLE_INPUTS["frequency"] * positions / dimension
+) / np.sqrt(dimension)
 spectrum = np.fft.ifft(signal, norm="ortho")
 expected_spectrum = np.zeros(dimension, dtype=complex)
-expected_spectrum[frequency] = 1.0
+expected_spectrum[EXAMPLE_INPUTS["frequency"]] = 1.0
 
 print(np.round(np.abs(spectrum), 3))
-assert np.allclose(spectrum, expected_spectrum)
+assert np.allclose(spectrum, expected_spectrum, rtol=1e-10, atol=1e-10)
 
 # %% [markdown]
-# ### `qft`による量子カーネルの実装
+# ### スクラッチ実装
 #
-# Qamomileでは、標準ライブラリ関数`qamomile.circuit.stdlib.qft.qft`としてQFTを使えます。この関数は`Vector[Qubit]`を受け取り、レジスタ全体にQFTを適用して、変換後のベクトルを返します。
-#
-# 次の状態準備では、振幅に直接位相パターンを作ります。`q[0]`をサンプルインデックス$j$の最下位ビットとして扱うため、各量子ビットに加える位相は左から右へ2倍ずつ大きくなります。
+# 次の量子カーネルは、前節で説明した4つのステップをQamomileのゲートで直接実装します。制御付き位相回転は`qmc.cp(control, target, angle)`と記述します。外側のループでは右から順に対象量子ビットを選び、内側のループでは左側の量子ビットから必要な位相回転を適用します。最後のループでスワップを適用し、量子ビットを元の順序に戻します。
+
 
 # %%
 @qmc.qkernel
-def qft_frequency_estimator() -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(num_qubits, name="q")
-
-    # すべてのサンプルインデックスの一様重ね合わせを作ります。
-    q = qmc.h(q)
-
-    # 位相パターン exp(-2πi f j / N) を振幅に埋め込みます。
-    q[0] = qmc.p(q[0], -2 * math.pi * frequency / dimension)
-    q[1] = qmc.p(q[1], -2 * math.pi * frequency * 2 / dimension)
-    q[2] = qmc.p(q[2], -2 * math.pi * frequency * 4 / dimension)
-    q[3] = qmc.p(q[3], -2 * math.pi * frequency * 8 / dimension)
-
-    # QFTを適用し、周波数インデックスを測定します。
-    q = qft(q)
-    return qmc.measure(q)
+def qft_from_scratch(
+    qubits: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    num_qubits = qubits.shape[0]
+    for offset in qmc.range(num_qubits):
+        target = num_qubits - 1 - offset
+        qubits[target] = qmc.h(qubits[target])
+        for delta in qmc.range(target):
+            control = target - 1 - delta
+            angle = math.pi / (2 ** (target - control))
+            qubits[control], qubits[target] = qmc.cp(
+                qubits[control], qubits[target], angle
+            )
+    for index in qmc.range(num_qubits // 2):
+        mirror = num_qubits - index - 1
+        qubits[index], qubits[mirror] = qmc.swap(qubits[index], qubits[mirror])
+    return qubits
 
 
 # %%
-qft_frequency_estimator.draw()
+qft_from_scratch.draw(qubits=4)
 
 # %% [markdown]
-# `draw()`では、QFTが1つの演算として表示されます。トランスパイル後のQiskit回路を見たい場合は、`to_circuit`で変換します。
+# 次の状態準備用量子カーネルは、振幅に$e^{-2\pi i f j/N}$を符号化します。`qubits[0]`をサンプルインデックス$j$の最下位ビットとして扱うため、量子ビットが1つ進むごとに位相角を2倍します。2つの周波数推定用量子カーネルは、量子ビット数と周波数を明示的な引数として受け取り、この例の具体的な値はコンパイル時の`bindings`で与えます。
+
 
 # %%
-qiskit_circuit = transpiler.to_circuit(qft_frequency_estimator)
+@qmc.qkernel
+def prepare_frequency_state(
+    qubits: qmc.Vector[qmc.Qubit], frequency: qmc.UInt
+) -> qmc.Vector[qmc.Qubit]:
+    num_qubits = qubits.shape[0]
+    dimension = 2**num_qubits
+    qubits = qmc.h(qubits)
+    for index in qmc.range(num_qubits):
+        angle = -2 * math.pi * frequency * (2**index) / dimension
+        qubits[index] = qmc.p(qubits[index], angle)
+    return qubits
+
+
+@qmc.qkernel
+def qft_frequency_estimator_from_scratch(
+    num_qubits: qmc.UInt, frequency: qmc.UInt
+) -> qmc.Vector[qmc.Bit]:
+    qubits = qmc.qubit_array(num_qubits, name="qubits")
+    qubits = prepare_frequency_state(qubits, frequency)
+    qubits = qft_from_scratch(qubits)
+    return qmc.measure(qubits)
+
+
+# %% [markdown]
+# ### 組み込み関数：`qft`
+#
+# Qamomileでは、同じ変換を組み込みの量子カーネル`qmc.qft`で利用できます。`Vector[Qubit]`を受け取り、アダマールゲート、制御付き位相回転、スワップを適用して、変換後の量子ビット列を返します。周波数推定用量子カーネルでは、`qft_from_scratch`の呼び出しを`qmc.qft`へ置き換えるだけです。
+
+
+# %%
+@qmc.qkernel
+def qft_frequency_estimator_with_stdlib(
+    num_qubits: qmc.UInt, frequency: qmc.UInt
+) -> qmc.Vector[qmc.Bit]:
+    qubits = qmc.qubit_array(num_qubits, name="qubits")
+    qubits = prepare_frequency_state(qubits, frequency)
+    qubits = qmc.qft(qubits)
+    return qmc.measure(qubits)
+
+
+# %%
+qft_frequency_estimator_with_stdlib.draw(**EXAMPLE_INPUTS)
+
+# %% [markdown]
+# `draw()`では、組み込みQFTが1つの演算として表示されます。Qiskit向けに出力された回路を確認するには、同じコンパイル時の`bindings`を指定して`to_circuit`で変換します。
+
+# %%
+qiskit_circuit = transpiler.to_circuit(
+    qft_frequency_estimator_with_stdlib,
+    bindings=EXAMPLE_INPUTS,
+)
 print(qiskit_circuit.draw())
 
 # %% [markdown]
 # ### 実行結果
 #
-# 次に、量子カーネルをローカルで実行し、測定された周波数インデックスのヒストグラムを描きます。下の変換では、上の状態準備に合わせて`q[0]`を最下位ビットとして扱います。
+# 2つの量子カーネルを同じ`bindings`で実行し、測定された周波数分布を比較します。下の変換では、上の状態準備に合わせて`qubits[0]`を最下位ビットとして扱います。
 
 # %%
-backend = AerSimulator(seed_simulator=1234, max_parallel_threads=1)
+backend = AerSimulator(seed_simulator=42, max_parallel_threads=1)
 shots = 512
-executable = transpiler.transpile(qft_frequency_estimator)
-result = executable.sample(transpiler.executor(backend), shots=shots).result()
+results = {}
+for implementation, kernel in {
+    "スクラッチ実装": qft_frequency_estimator_from_scratch,
+    "組み込みqft": qft_frequency_estimator_with_stdlib,
+}.items():
+    executable = transpiler.transpile(kernel, bindings=EXAMPLE_INPUTS)
+    results[implementation] = executable.sample(
+        transpiler.executor(backend), shots=shots
+    ).result()
 
-probabilities = np.zeros(dimension)
-for outcome, count in result.results:
-    frequency_index = sum(bit << idx for idx, bit in enumerate(outcome))
-    probabilities[frequency_index] = count / shots
+probabilities_by_implementation = {}
+for implementation, result in results.items():
+    probabilities = np.zeros(dimension)
+    for outcome, count in result.results:
+        frequency_index = sum(bit << index for index, bit in enumerate(outcome))
+        probabilities[frequency_index] = count / shots
+    probabilities_by_implementation[implementation] = probabilities
 
 fig, ax = plt.subplots(figsize=(7, 3))
-ax.bar(range(dimension), probabilities, color="#2696EB")
+indices = np.arange(dimension)
+bar_width = 0.4
+ax.bar(
+    indices - bar_width / 2,
+    probabilities_by_implementation["スクラッチ実装"],
+    width=bar_width,
+    color="#2696EB",
+    label="from scratch",
+)
+ax.bar(
+    indices + bar_width / 2,
+    probabilities_by_implementation["組み込みqft"],
+    width=bar_width,
+    color="#FF6B6B",
+    label="built-in qft",
+)
 ax.set_xlabel("frequency index")
 ax.set_ylabel("probability")
-ax.set_xticks(range(dimension))
+ax.set_xticks(indices)
 ax.set_ylim(0, 1.05)
 ax.grid(axis="y", alpha=0.3)
+ax.legend()
 plt.show()
 
-estimated_frequency = int(np.argmax(probabilities))
-print(f"estimated frequency: {estimated_frequency}")
+for implementation, probabilities in probabilities_by_implementation.items():
+    estimated_frequency = int(np.argmax(probabilities))
+    print(f"{implementation}: estimated frequency = {estimated_frequency}")
+    assert estimated_frequency == EXAMPLE_INPUTS["frequency"]
+    assert probabilities[EXAMPLE_INPUTS["frequency"]] > 0.95
 
-assert result.shots == shots
-assert sum(count for _, count in result.results) == shots
-assert estimated_frequency == frequency
-assert probabilities[frequency] > 0.95
+for result in results.values():
+    assert result.shots == shots
+    assert sum(count for _, count in result.results) == shots
 assert all(
-    isinstance(outcome, tuple) and len(outcome) == num_qubits
+    isinstance(outcome, tuple) and len(outcome) == EXAMPLE_INPUTS["num_qubits"]
+    for result in results.values()
     for outcome, _ in result.results
+)
+assert np.allclose(
+    probabilities_by_implementation["スクラッチ実装"],
+    probabilities_by_implementation["組み込みqft"],
+    rtol=0.0,
+    atol=0.0,
 )
 
 # %% [markdown]
@@ -282,22 +369,19 @@ assert all(
 #
 # したがって総ゲート数は$n + \frac{n(n - 1)}{2} + \left\lfloor n / 2 \right\rfloor$であり、$O(n^2)$で増えます。
 #
-# それでは、Qamomileのリソース推定機能を使って、QFT回路のゲート数を確認してみましょう。
-
-# %%
-# n量子ビットのレジスタにQFTだけを適用する量子カーネルを作ります。
-def make_qft_resource_kernel(n: int) -> qmc.QKernel:
-    @qmc.qkernel
-    def qft_resource_kernel() -> qmc.Vector[qmc.Qubit]:
-        q = qmc.qubit_array(n, name="q")
-        q = qft(q)
-        return q
-
-    return qft_resource_kernel
+# 量子ビット数は回路構造を決めるため、リソース推定用量子カーネルの明示的な引数にします。これにより、量子カーネルをサイズごとに生成するファクトリ関数を使わず、1つのシンボリックな推定へ`inputs`で具体的な値を代入できます。
 
 
 # %%
-estimate_4 = make_qft_resource_kernel(4).estimate_resources().simplify()
+@qmc.qkernel
+def qft_resource_kernel(num_qubits: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
+    qubits = qmc.qubit_array(num_qubits, name="qubits")
+    qubits = qmc.qft(qubits)
+    return qubits
+
+
+# %%
+estimate_4 = qft_resource_kernel.estimate_resources(inputs={"num_qubits": 4}).simplify()
 print("量子ビット数:", estimate_4.qubits)
 print("総ゲート数:", estimate_4.gates.total)
 print("単一量子ビットゲート数:", estimate_4.gates.single_qubit)
@@ -315,18 +399,21 @@ assert estimate_4.gates.clifford_gates == 6
 # %% [markdown]
 # 長さ$N$のベクトルを古典DFTで直接計算すると、$O(N^2)$回の演算が必要です。高速フーリエ変換（FFT）を使うと、これを$O(N\log N)$まで減らせます。一方、$N = 2^n$と書くと、厳密QFTは$O(n^2)=O((\log N)^2)$個のゲートで実装できます。したがって、直接計算する古典DFTと比べると、$N$に対して指数的に少ないゲートで同じ変換を状態に適用できます。ただし、測定だけで$N$個すべてのフーリエ係数を読み出せるわけではありません。QFTの利点は、変換後の振幅を後続の量子演算でそのまま使える場合に現れます。
 #
-# Qamomileの`.estimate_resources()`を利用して、`qft`のゲート数と、QFTおよびDFTの計算量スケーリングを比較します。プロットは量子ビット数と`qft`および理論的な計算量がどのようにスケールするかを示しています。
+# 次のプロットでは、`.estimate_resources()`が返す`qmc.qft`のゲート数を上の厳密式と比較します。また、2つの増加率の違いを示すため、$n=3$でQFTのゲート数と一致するように正規化した古典FFTの$O(N\log N)$参照線も表示します。
 
 # %%
 qft_qubit_counts = np.arange(3, 10)
 qft_total_gates = []
 
-for n in qft_qubit_counts:
-    estimate_n = make_qft_resource_kernel(int(n)).estimate_resources().simplify()
+for num_qubits in qft_qubit_counts:
+    estimate_n = qft_resource_kernel.estimate_resources(
+        inputs={"num_qubits": int(num_qubits)}
+    ).simplify()
     qft_total_gates.append(int(estimate_n.gates.total))
 
 theoretical_qft_gate_counts = [
-    n + n * (n - 1) // 2 + n // 2 for n in qft_qubit_counts
+    num_qubits + num_qubits * (num_qubits - 1) // 2 + num_qubits // 2
+    for num_qubits in qft_qubit_counts
 ]
 
 dimension_counts = 2**qft_qubit_counts
@@ -339,23 +426,23 @@ ax.plot(
     qft_total_gates,
     marker="o",
     color="#2696EB",
-    label="QFT gate count",
+    label="Qamomile qft",
 )
 ax.plot(
     qft_qubit_counts,
     theoretical_qft_gate_counts,
     linestyle="--",
     color="#FF6B6B",
-    label="theory: exact QFT gate count",
+    label="exact QFT formula",
 )
 ax.plot(
     qft_qubit_counts,
     nlogn_reference,
     linestyle="--",
     color="#4ECDC4",
-    label=r"theory: DFT $O(N\log N)$",
+    label=r"FFT $O(N\log N)$ (scaled)",
 )
-ax.set_xlabel("number of qubits")
+ax.set_xlabel(r"number of qubits $n$")
 ax.set_ylabel("total gates")
 ax.set_yscale("log")
 ax.set_xticks(qft_qubit_counts)
@@ -370,9 +457,8 @@ assert len(nlogn_reference) == len(qft_total_gates)
 # %% [markdown]
 # ## まとめ
 #
-# このノートブックでは、古典DFTからQFTを導入し、4量子ビットの周波数推定の例を実装して、出力のサンプリングと計算量のスケーリングを確認しました。
+# このノートブックでは、次のことを学びました。
 #
-# - DFTは有限ベクトルを周波数に分解します。QFTは同じ変換を量子振幅に適用します。
-# - 4量子ビットの例では、単一周波数の位相パターンを準備し、QFTを適用して、サンプルされたヒストグラムから主要な周波数を推定します。
-# - Qamomileでは、`qamomile.circuit.stdlib.qft.qft`で`Vector[Qubit]`に直接QFTを適用できます。
-# - `draw()`、バックエンド実行、`estimate_resources()`により、同じQFT構造の回路表示、サンプル出力、計算量のスケーリングを確認できます。
+# - QFTは量子振幅にDFTを適用して変換後の量子状態を返します。この状態を測定して得られるのは、フーリエ係数のベクトル全体ではなくサンプルです。
+# - QFT回路はアダマールゲート、制御付き位相回転、スワップから構成でき、Qamomileでは同じ変換を組み込みの`qmc.qft`で簡潔に記述できます。
+# - $n$量子ビットの厳密QFT回路には$n + n(n-1)/2 + \lfloor n/2\rfloor=O(n^2)$個のゲートが必要であり、Qamomileの`.estimate_resources()`でこの増加を直接評価できます。
