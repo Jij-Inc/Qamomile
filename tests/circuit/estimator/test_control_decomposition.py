@@ -5358,29 +5358,124 @@ def test_opaque_callback_arity_profile_uses_fixed_cost_projection() -> None:
 
 @pytest.mark.parametrize("uses_callback", [False, True], ids=["fixed", "callback"])
 @pytest.mark.parametrize(
-    "control_decomposition",
-    [
-        qm.ControlDecomposition.ABSTRACT,
-        qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
-    ],
-)
-@pytest.mark.parametrize(
-    ("gates", "expected_quality"),
+    (
+        "control_decomposition",
+        "gates",
+        "expected_gates",
+        "expected_depth",
+        "expected_clean_ancillas",
+        "expected_quality",
+    ),
     [
         pytest.param(
+            qm.ControlDecomposition.ABSTRACT,
             qm.GateResources(),
+            qm.GateResources(),
+            qm.DepthResources(),
+            0,
             qm.EstimateQuality.EXACT,
-            id="empty",
+            id="abstract-empty",
         ),
         pytest.param(
+            qm.ControlDecomposition.ABSTRACT,
             qm.GateResources(total=1, single_qubit=1, rotation=1),
+            qm.GateResources(
+                total=1,
+                multi_qubit=1,
+                rotation=1,
+                toffoli=1,
+                non_clifford=1,
+            ),
+            qm.DepthResources(
+                depth=1,
+                rotation_depth=1,
+                toffoli_depth=1,
+                non_clifford_depth=1,
+                gate_depth=1,
+            ),
+            0,
             qm.EstimateQuality.CONSERVATIVE,
-            id="complete-phase-representative",
+            id="abstract-complete-phase-representative",
         ),
         pytest.param(
+            qm.ControlDecomposition.ABSTRACT,
             qm.GateResources(total=3, single_qubit=1, two_qubit=1),
+            qm.GateResources(
+                total=3,
+                multi_qubit=2,
+                rotation=3,
+                toffoli=2,
+                non_clifford=3,
+            ),
+            qm.DepthResources(
+                depth=3,
+                rotation_depth=3,
+                toffoli_depth=2,
+                non_clifford_depth=3,
+                gate_depth=3,
+            ),
+            0,
             qm.EstimateQuality.UNKNOWN,
-            id="partial",
+            id="abstract-partial",
+        ),
+        pytest.param(
+            qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+            qm.GateResources(),
+            qm.GateResources(),
+            qm.DepthResources(),
+            0,
+            qm.EstimateQuality.EXACT,
+            id="clean-ancilla-empty",
+        ),
+        pytest.param(
+            qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+            qm.GateResources(total=1, single_qubit=1, rotation=1),
+            qm.GateResources(
+                total=3,
+                single_qubit=2,
+                two_qubit=1,
+                multi_qubit=2,
+                clifford=2,
+                rotation=1,
+                toffoli=2,
+                non_clifford=3,
+            ),
+            qm.DepthResources(
+                depth=3,
+                clifford_depth=2,
+                rotation_depth=1,
+                toffoli_depth=2,
+                non_clifford_depth=3,
+                gate_depth=3,
+            ),
+            1,
+            qm.EstimateQuality.CONSERVATIVE,
+            id="clean-ancilla-complete-phase-representative",
+        ),
+        pytest.param(
+            qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+            qm.GateResources(total=3, single_qubit=1, two_qubit=1),
+            qm.GateResources(
+                total=7,
+                single_qubit=2,
+                two_qubit=4,
+                multi_qubit=4,
+                clifford=3,
+                rotation=2,
+                toffoli=4,
+                non_clifford=6,
+            ),
+            qm.DepthResources(
+                depth=7,
+                clifford_depth=3,
+                rotation_depth=2,
+                toffoli_depth=4,
+                non_clifford_depth=6,
+                gate_depth=7,
+            ),
+            2,
+            qm.EstimateQuality.UNKNOWN,
+            id="clean-ancilla-partial",
         ),
     ],
 )
@@ -5388,9 +5483,12 @@ def test_fixed_and_callback_opaque_costs_share_aggregate_transform_contract(
     uses_callback: bool,
     control_decomposition: qm.ControlDecomposition,
     gates: qm.GateResources,
+    expected_gates: qm.GateResources,
+    expected_depth: qm.DepthResources,
+    expected_clean_ancillas: int,
     expected_quality: qm.EstimateQuality,
 ) -> None:
-    """Fixed and callback costs use identical aggregate transform rules."""
+    """Fixed and callback costs match literal aggregate transform results."""
     base_cost = qm.ResourceEstimate(
         gates=gates,
         control_decomposition=control_decomposition,
@@ -5426,11 +5524,9 @@ def test_fixed_and_callback_opaque_costs_share_aggregate_transform_contract(
     estimate = circuit.estimate_resources(
         control_decomposition=control_decomposition,
     )
-    expected = base_cost.controlled(2)
-
-    assert estimate.gates == expected.gates
-    assert estimate.depth == expected.depth
-    assert estimate.width.clean_ancilla_qubits == expected.width.clean_ancilla_qubits
+    assert estimate.gates == expected_gates
+    assert estimate.depth == expected_depth
+    assert estimate.width.clean_ancilla_qubits == expected_clean_ancillas
     assert estimate.derivation is qm.EstimateDerivation.MODELED
     assert estimate.quality is expected_quality
     assert estimate.approximation is qm.ApproximationStatus.EXACT
@@ -6214,6 +6310,14 @@ def test_root_width_aliases_must_agree_when_both_are_supplied() -> None:
         encoding.unitary.estimate_resources(inputs={"signal": 2, "signal_dim0": None})
     with pytest.raises(ValueError, match="bool is not a dimension"):
         encoding.unitary.estimate_resources(inputs={"signal_dim0": True})
+
+
+def test_root_width_alias_rejects_string_even_with_matching_port_width() -> None:
+    """A matching array width must not make a string dimension numeric."""
+    encoding = _recursive_lcu_resource_encoding()
+
+    with pytest.raises(TypeError, match="signal_dim0.*numeric integer"):
+        encoding.unitary.estimate_resources(inputs={"signal": 2, "signal_dim0": "2"})
 
 
 def test_shape_alias_collision_keeps_classical_and_width_inputs_independent() -> None:

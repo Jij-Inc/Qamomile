@@ -338,6 +338,11 @@ class ConcreteControlledU(ControlledUOperation):
 
     @property
     def target_operands(self) -> list[Value]:
+        """Return the wrapped callable's target and parameter operands.
+
+        Returns:
+            list[Value]: Complete body operands after the concrete controls.
+        """
         return self.body_operands
 
     @property
@@ -356,6 +361,11 @@ class ConcreteControlledU(ControlledUOperation):
 
     @property
     def signature(self) -> Signature:
+        """Build the concrete controlled call signature.
+
+        Returns:
+            Signature: Control-prefixed operand and result contract.
+        """
         nc = self.num_controls
         return Signature(
             operands=[
@@ -438,6 +448,12 @@ class SymbolicControlledU(ControlledUOperation):
 
     @property
     def target_operands(self) -> list[Value]:
+        """Return the wrapped callable's target and parameter operands.
+
+        Returns:
+            list[Value]: Complete body operands after the symbolic control
+                arguments.
+        """
         return self.body_operands
 
     @property

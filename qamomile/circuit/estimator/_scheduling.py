@@ -702,9 +702,8 @@ def _dependency_depth(
             peaks[field] = _resource_max(peaks[field], finish)
             if barrier_condition is not sp.false:
                 previous_barrier = barrier_availability[field]
-                barrier_availability[field] = _completion_after_conditional_duration(
+                barrier_availability[field] = _conditional_completion(
                     finish,
-                    start,
                     previous_barrier,
                     barrier_condition,
                 )

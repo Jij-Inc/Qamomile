@@ -103,6 +103,9 @@ _GATE_OPERATION_ARITY: dict[GateOperationType, int] = {
 }
 
 
+_validate_ir_gate_arity_profiles()
+
+
 _CLIFFORD_GATE_TYPES = frozenset(
     {
         GateOperationType.H,

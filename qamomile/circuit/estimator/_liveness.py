@@ -209,10 +209,18 @@ def _liveness_width(
                             _ZERO,
                             previous - consumed,
                         )
+                        fallback_capacity = sp.Max(
+                            previous,
+                            consumed,
+                            returned,
+                        )
                         updated = (
                             remaining + returned
                             if estimate._has_output_summary
-                            else sp.Min(capacities[owner], remaining + returned)
+                            else sp.Min(
+                                capacities.get(owner, fallback_capacity),
+                                remaining + returned,
+                            )
                         )
                     current += updated - previous
                     if updated == _ZERO:

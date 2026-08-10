@@ -13,6 +13,7 @@ from qamomile.circuit.algorithm.trotter import (
     trotterized_time_evolution,
 )
 from qamomile.circuit.estimator import estimate_resources
+from qamomile.circuit.estimator._product_formula import _suzuki_trotter_contract
 from qamomile.circuit.serialization import deserialize, serialize
 
 
@@ -557,6 +558,66 @@ def test_trotter_resource_contract_validates_algorithm_inputs(
                 "gamma": 1.0,
                 "step": step,
             }
+        )
+
+
+def test_suzuki_contract_validation_belongs_to_estimator() -> None:
+    """Generic IR roles become mandatory only for the recognized family."""
+    incomplete = {
+        "resource_contract": {
+            "product_formula": {
+                "kind": "suzuki_trotter",
+                "hamiltonian_operand": 1,
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="order_operand must be"):
+        _suzuki_trotter_contract(
+            incomplete,
+            source="incomplete_trotter",
+            operand_count=5,
+        )
+
+
+def test_estimator_rejects_unrecognized_product_formula_family() -> None:
+    """Unknown families cannot silently report exact Suzuki semantics."""
+    attrs = {
+        "resource_contract": {
+            "product_formula": {
+                "kind": "custom_formula",
+                "generator_operand": 0,
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="kind must be 'suzuki_trotter'"):
+        _suzuki_trotter_contract(
+            attrs,
+            source="custom_formula",
+            operand_count=1,
+        )
+
+
+def test_suzuki_contract_rejects_duplicate_operand_roles() -> None:
+    """Suzuki-specific roles must address distinct callable operands."""
+    attrs = {
+        "resource_contract": {
+            "product_formula": {
+                "kind": "suzuki_trotter",
+                "hamiltonian_operand": 1,
+                "order_operand": 2,
+                "time_operand": 3,
+                "steps_operand": 3,
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="operand positions must be distinct"):
+        _suzuki_trotter_contract(
+            attrs,
+            source="invalid_trotter",
+            operand_count=5,
         )
 
 

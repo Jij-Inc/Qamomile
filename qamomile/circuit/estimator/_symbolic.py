@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numbers
+from decimal import Decimal
 from typing import cast
 
 import sympy as sp
@@ -67,7 +68,12 @@ class _CappedRangeSum(sp.Function):
             return _ZERO
         loop_symbol = summand.variables[0]
         expression = cast(sp.Expr, summand.expr)
-        if loop_symbol not in expression.free_symbols and expression.is_number:
+        if (
+            loop_symbol not in expression.free_symbols
+            and expression.is_number
+            and expression.is_integer is True
+            and expression.is_nonnegative is True
+        ):
             return cast(sp.Expr, sp.Min(2, expression * iterations))
         if not all(
             value.is_number and _is_concrete_integer(value)
@@ -104,8 +110,12 @@ class _CappedRangeSum(sp.Function):
             sp.Expr,
             sp.Sum(transformed, (offset, 0, count - 1)).doit(),
         )
-        if evaluated.is_integer is True and evaluated.is_number:
-            return sp.Integer(min(2, max(0, int(evaluated))))
+        if evaluated.is_number:
+            if evaluated.is_integer is not True or evaluated.is_nonnegative is not True:
+                raise ValueError(
+                    "capped range sums require a nonnegative integer total"
+                )
+            return sp.Integer(min(2, int(evaluated)))
         return None
 
 
@@ -171,7 +181,10 @@ def _capped_nonnegative_integer_sum(
     if count <= 0 or expression == _ZERO:
         return 0
     if symbol not in expression.free_symbols and expression.is_number:
-        return min(2, max(0, int(expression) * count))
+        total = expression * count
+        if total.is_integer is not True or total.is_nonnegative is not True:
+            return None
+        return min(2, int(total))
     if isinstance(expression, _ConditionIndicator):
         return _capped_integer_condition_count(
             cast(sp.Basic, expression.args[0]),
@@ -324,7 +337,7 @@ def _normalize_resource_scalar(
             return sp.Integer(int(value))
         raise TypeError(f"{label} requires {expected}, got bool ({value!r}).")
     if isinstance(value, (str, bytes)) or not (
-        isinstance(value, numbers.Complex) or isinstance(value, sp.Expr)
+        isinstance(value, (numbers.Complex, Decimal)) or isinstance(value, sp.Expr)
     ):
         raise TypeError(
             f"{label} requires {expected}, got {type(value).__name__} ({value!r})."

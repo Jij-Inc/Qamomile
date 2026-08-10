@@ -31,6 +31,7 @@ from qamomile.circuit.estimator._resource_types import (
 from qamomile.circuit.estimator._serialization import SymbolRegistry
 from qamomile.circuit.estimator._symbol_discovery import _serialization_expressions
 from qamomile.circuit.estimator._wire_expression import (
+    _boolean_expression_from_wire,
     _WireExpressionDecoder,
     _WireExpressionEncoder,
 )
@@ -130,6 +131,7 @@ def resource_estimate_to_wire(
         "quality": estimate.quality.value,
         "approximation": estimate.approximation.value,
         "control_decomposition": estimate.control_decomposition.value,
+        "global_barrier_condition": expression(estimate._global_barrier_condition),
         "requirements": [
             {
                 "expression": expression(constraint.expression),
@@ -340,6 +342,11 @@ def resource_estimate_from_wire(
             ControlDecomposition,
             record.get("control_decomposition"),
             "opaque ResourceEstimate control decomposition",
+        ),
+        _global_barrier_condition=_boolean_expression_from_wire(
+            record.get("global_barrier_condition"),
+            "opaque ResourceEstimate global barrier condition",
+            decoder,
         ),
         _constraints=requirements,
         _guarded_assumptions=guarded_assumptions,

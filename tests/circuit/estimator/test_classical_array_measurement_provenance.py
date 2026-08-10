@@ -724,6 +724,66 @@ def test_region_loop_array_recurrence_is_safe_inside_body(
 
 
 @pytest.mark.parametrize("loop_kind", ["range", "items"])
+def test_array_dependent_scalar_carry_fails_closed(loop_kind: str) -> None:
+    """A scalar recurrence cannot reuse only the loop-entry array value.
+
+    Args:
+        loop_kind (str): Symbolic loop form to exercise.
+    """
+
+    @qm.qkernel
+    def range_circuit(repetitions: qm.UInt, flag: qm.Bit) -> qm.Qubit:
+        """Count prior true array values across a symbolic range."""
+        bits = qm.bit_array(1)
+        count = qm.uint(0)
+        target = qm.qubit("target")
+        for _ in qm.range(repetitions):
+            if bits[0]:
+                count = count + 1
+            bits[0] = flag
+        for _ in qm.range(count):
+            target = qm.x(target)
+        return target
+
+    @qm.qkernel
+    def items_circuit(
+        data: qm.Dict[qm.UInt, qm.Float],
+        flag: qm.Bit,
+    ) -> qm.Qubit:
+        """Count prior true array values across symbolic dictionary items."""
+        bits = qm.bit_array(1)
+        count = qm.uint(0)
+        target = qm.qubit("target")
+        for _key, _value in qm.items(data):
+            if bits[0]:
+                count = count + 1
+            bits[0] = flag
+        for _ in qm.range(count):
+            target = qm.x(target)
+        return target
+
+    if loop_kind == "range":
+        kernel = range_circuit
+        symbolic_inputs = {"flag": True}
+        concrete = range_circuit.estimate_resources(
+            inputs={"repetitions": 5, "flag": True}
+        )
+    else:
+        kernel = items_circuit
+        symbolic_inputs = {"flag": True}
+        concrete = items_circuit.estimate_resources(
+            inputs={
+                "data": {index: float(index) for index in range(5)},
+                "flag": True,
+            }
+        )
+
+    assert concrete.gates.total == 4
+    with pytest.raises(NotImplementedError, match="unresolved loop-carried value"):
+        kernel.estimate_resources(inputs=symbolic_inputs)
+
+
+@pytest.mark.parametrize("loop_kind", ["range", "items"])
 def test_inlined_helper_preserves_array_loop_lineage(loop_kind: str) -> None:
     """Inlining a helper cannot disconnect its loop-updated array result.
 

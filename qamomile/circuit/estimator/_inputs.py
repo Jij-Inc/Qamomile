@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numbers
 from collections.abc import Mapping, Sequence
+from decimal import Decimal
 from typing import Any, cast
 
 import sympy as sp
@@ -29,8 +30,12 @@ from qamomile.circuit.estimator._symbolic import (
     _normalize_resource_scalar,
 )
 from qamomile.circuit.frontend.func_to_block import is_array_type
-from qamomile.circuit.frontend.handle.primitives import Qubit
-from qamomile.circuit.frontend.qkernel_inputs import is_parameterizable_type
+from qamomile.circuit.frontend.handle import Observable
+from qamomile.circuit.frontend.handle.primitives import Bit, Qubit
+from qamomile.circuit.frontend.qkernel_inputs import (
+    is_parameterizable_type,
+    validate_bound_input_value,
+)
 from qamomile.circuit.frontend.qkernel_utils import get_array_element_type
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.dataflow import (
@@ -48,6 +53,163 @@ from qamomile.circuit.ir.value import (
     ArrayValue,
     ValueBase,
 )
+from qamomile.observable import Hamiltonian
+
+
+def _validate_explicit_estimation_inputs(
+    kernel: Any,
+    inputs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate qkernel inputs once before build/estimation partitioning.
+
+    Structural values must not bypass validation merely because they are
+    consumed while tracing, while scalar and numeric-array inputs keep their
+    existing post-interpretation symbolic specialization semantics. Raw IR
+    targets do not expose frontend annotations and therefore continue through
+    the IR contract validation path.
+
+    Args:
+        kernel (Any): QKernel, block, or operation sequence being estimated.
+        inputs (Mapping[str, Any]): Explicit user inputs.
+
+    Returns:
+        dict[str, Any]: A defensive copy of the validated input mapping.
+
+    Raises:
+        TypeError: If a structural input has the wrong Python type or contains
+            a value incompatible with its qkernel annotation.
+        ValueError: If a structural value violates a finite-domain or
+            container-shape contract.
+    """
+    values = dict(inputs)
+    input_types = getattr(kernel, "input_types", None)
+    if not isinstance(input_types, dict):
+        _validate_raw_estimation_inputs(kernel, values)
+        return values
+
+    for name, value in values.items():
+        if name not in input_types:
+            # Generated array-dimension aliases are only known after tracing;
+            # preserve them for the existing strict post-build contract.
+            continue
+        input_type = input_types[name]
+        if input_type is Qubit or (
+            is_array_type(input_type) and get_array_element_type(input_type) is Qubit
+        ):
+            # Quantum vectors accept estimator-only integer widths and
+            # shape-only providers, neither of which is a frontend binding.
+            # Their dedicated contract runs after the symbolic block exists.
+            continue
+        if is_parameterizable_type(input_type):
+            # Scalar/numeric-array values deliberately remain symbolic until
+            # after interpretation and use _apply_inputs plus shape expansion.
+            continue
+        if input_type is Observable:
+            if not isinstance(value, Hamiltonian):
+                raise TypeError(
+                    f"resource input '{name}' expects a Hamiltonian, got "
+                    f"{type(value).__name__} ({value!r})."
+                )
+            continue
+        if (
+            is_array_type(input_type)
+            and get_array_element_type(input_type) is Observable
+        ):
+            if (
+                isinstance(value, (str, bytes))
+                or not isinstance(value, Sequence)
+                and getattr(value, "shape", None) is None
+            ):
+                raise TypeError(
+                    f"resource input '{name}' expects a sequence of "
+                    f"Hamiltonians, got {type(value).__name__} ({value!r})."
+                )
+            for index, item in enumerate(value):
+                if not isinstance(item, Hamiltonian):
+                    raise TypeError(
+                        f"resource input '{name}' element {index} expects a "
+                        f"Hamiltonian, got {type(item).__name__} ({item!r})."
+                    )
+            continue
+        validate_bound_input_value(input_type, name, value)
+    return values
+
+
+def _validate_raw_estimation_inputs(
+    kernel: Any,
+    inputs: Mapping[str, Any],
+) -> None:
+    """Validate structural inputs recoverable from a raw IR target.
+
+    Raw blocks do not preserve frontend annotations, but their input values
+    still expose enough IR type and shape information to reject invalid Bit
+    bindings and malformed quantum-array widths before input partitioning can
+    remove those values from the later specialization path.
+
+    Args:
+        kernel (Any): Raw block or operation sequence being estimated.
+        inputs (Mapping[str, Any]): Explicit user inputs.
+
+    Raises:
+        TypeError: If a raw Bit input is not boolean or integral.
+        ValueError: If a raw Bit is outside ``0..1`` or a quantum-array input
+            has an invalid width, shape, or rank.
+    """
+    declared_inputs = _input_contract._declared_ir_inputs(kernel)
+    for name, value in inputs.items():
+        declared = declared_inputs.get(name)
+        if declared is None:
+            continue
+        if isinstance(declared, ArrayValue) and declared.type.is_quantum():
+            _validate_raw_quantum_array_input(name, declared, value)
+            continue
+        if isinstance(declared.type, BitType):
+            validate_bound_input_value(Bit, name, value)
+
+
+def _validate_raw_quantum_array_input(
+    name: str,
+    declared: ArrayValue,
+    value: Any,
+) -> None:
+    """Validate one raw quantum-array width or concrete shape provider.
+
+    Args:
+        name (str): Public raw-IR input name used in diagnostics.
+        declared (ArrayValue): Declared quantum-array IR input.
+        value (Any): Integer width or array-like shape provider.
+
+    Raises:
+        ValueError: If ``value`` is not a valid width or has the wrong rank.
+    """
+    if (
+        len(declared.shape) == 1
+        and not isinstance(value, bool)
+        and isinstance(value, numbers.Integral)
+    ):
+        width = int(value)
+        if width < 0:
+            raise ValueError(
+                f"quantum array input '{name}' requires a non-negative integer "
+                f"width, got {width}."
+            )
+        return
+    if len(declared.shape) == 1 and isinstance(value, (bool, numbers.Real)):
+        raise ValueError(
+            f"quantum array input '{name}' requires an integer width or an "
+            "array-like value."
+        )
+    shape = _input_contract._concrete_input_shape(value)
+    if not shape and not _input_contract._is_array_like_input(value):
+        raise ValueError(
+            f"quantum array input '{name}' requires an integer width or an "
+            f"array-like value; got {type(value).__name__} ({value!r})."
+        )
+    if len(shape) != len(declared.shape):
+        raise ValueError(
+            f"array input '{name}' has rank {len(shape)}, but the qkernel "
+            f"declares rank {len(declared.shape)}."
+        )
 
 
 def _substitute_bindings(
@@ -295,14 +457,13 @@ def _estimator_parameters(
 def _scalar_values(values: Mapping[str, Any]) -> dict[str, sp.Expr]:
     """Keep numeric scalars for branches and physical dependency resolution.
 
-    Accepts Python and NumPy numeric scalars (anything registered as
-    ``numbers.Real``, normalized via ``.item()`` when present so a ``np.int64``
-    from a notebook works) and SymPy numbers. Dicts, Hamiltonians, and
-    symbolic-expression substitution values are dropped: only concrete numbers
-    can decide a branch or select one physical array/control index during the
-    initial scheduling pass. Integer-valued numbers are represented as exact
-    SymPy integers so accepted float bounds follow the same scheduling path as
-    Python integers.
+    Accepts Python and NumPy numeric scalars (values registered as
+    ``numbers.Real`` plus ``decimal.Decimal``; NumPy scalars are normalized via
+    ``.item()``) and SymPy numbers. Dicts, Hamiltonians, and symbolic-expression
+    substitution values are dropped: only concrete numbers can decide a branch
+    or select one physical array/control index during the initial scheduling
+    pass. Integer-valued numbers are represented as exact SymPy integers so
+    accepted float bounds follow the same scheduling path as Python integers.
 
     Args:
         values (Mapping[str, Any]): Concrete input values.
@@ -314,7 +475,7 @@ def _scalar_values(values: Mapping[str, Any]) -> dict[str, sp.Expr]:
     for name, value in values.items():
         if isinstance(value, bool):
             out[name] = sp.Integer(int(value))
-        elif isinstance(value, numbers.Real):
+        elif isinstance(value, (numbers.Real, Decimal)):
             # Normalize NumPy scalars (np.int64, np.float64, ...) to a Python
             # scalar before sympifying.
             scalar = value.item() if hasattr(value, "item") else value
@@ -498,6 +659,8 @@ def _validate_finite_source_domain_input(
         ValueError: If a concrete value violates a retained finite-domain
             constraint.
     """
+    if isinstance(value, (str, bytes)):
+        return
     scalar = value.item() if hasattr(value, "item") else value
     try:
         normalized = sp.sympify(scalar)

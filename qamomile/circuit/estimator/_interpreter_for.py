@@ -13,6 +13,7 @@ from qamomile.circuit.estimator._array_state import (
 )
 from qamomile.circuit.estimator._call_liveness import (
     _captured_quantum_allocations,
+    _loop_body_has_destructive_observation,
     _loop_captured_observation_consumption,
     _with_operation_output_summary,
 )
@@ -122,11 +123,17 @@ class _ForInterpreter(_ForRegionInterpreter):
                 tuple[int, int, int],
                 concrete_specialized_bounds,
             )
-            concrete_range = range(concrete_start, concrete_stop, concrete_step)
-            concrete_iteration_range = concrete_range
+            concrete_iteration_range = range(
+                concrete_start,
+                concrete_stop,
+                concrete_step,
+            )
+        if not _loop_body_has_destructive_observation(operation.operations):
+            consumption_resolvers = ()
+        elif concrete_iteration_range is not None:
             if (
                 operation.loop_var_value is not None
-                and len(concrete_range[: _MAX_EXACT_LOOP_WIRE_EXPANSION + 1])
+                and len(concrete_iteration_range[: _MAX_EXACT_LOOP_WIRE_EXPANSION + 1])
                 <= _MAX_EXACT_LOOP_WIRE_EXPANSION
             ):
                 consumption_resolvers = tuple(
@@ -137,10 +144,10 @@ class _ForInterpreter(_ForRegionInterpreter):
                         },
                         extra_loop_vars={operation.loop_var: sp.Integer(iteration)},
                     )
-                    for iteration in concrete_range
+                    for iteration in concrete_iteration_range
                 )
                 consumption_iterations_are_definite = True
-            elif not concrete_range:
+            elif not concrete_iteration_range:
                 consumption_resolvers = ()
                 consumption_iterations_are_definite = True
             else:

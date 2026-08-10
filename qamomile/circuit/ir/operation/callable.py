@@ -1772,15 +1772,14 @@ class InvokeOperation(Operation):
             operands = operands[offset:]
             results = results[offset:]
         if body is not None:
-            if self.transform.is_controlled and not realized_transform.is_controlled:
-                operands = _align_grouped_call_values_to_body(
-                    body.input_values,
-                    operands,
-                )
-                results = _align_grouped_call_values_to_body(
-                    body.output_values,
-                    results,
-                )
+            operands = _align_grouped_call_values_to_body(
+                body.input_values,
+                operands,
+            )
+            results = _align_grouped_call_values_to_body(
+                body.output_values,
+                results,
+            )
             _validate_selected_body_contract(
                 body,
                 operands,

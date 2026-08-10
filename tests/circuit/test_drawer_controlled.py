@@ -11,7 +11,13 @@ import pytest
 
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.operation.callable import CallTransform, InvokeOperation
+from qamomile.circuit.ir.operation.callable import (
+    CallableDef,
+    CallableImplementation,
+    CallableRef,
+    CallTransform,
+    InvokeOperation,
+)
 from qamomile.circuit.ir.operation.gate import GateOperationType
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.types.primitives import QubitType
@@ -175,6 +181,41 @@ def _powered_controlled_swap_kernel() -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
 def _drawer_patterned_x(q: qmc.Qubit) -> qmc.Qubit:
     """Apply X inside a preserved visual callable."""
     return qmc.x(q)
+
+
+@qmc.qkernel
+def _drawer_inverse_phase_body(q: qmc.Qubit) -> qmc.Qubit:
+    """Implement S-dagger as Z followed by S."""
+    q = qmc.z(q)
+    return qmc.s(q)
+
+
+@qmc.composite_gate(
+    name="drawer_inverse_implemented_phase",
+    implementations=[
+        CallableImplementation(
+            transform=CallTransform.INVERSE,
+            body=_drawer_inverse_phase_body.block,
+        )
+    ],
+)
+def _drawer_inverse_implemented_phase(q: qmc.Qubit) -> qmc.Qubit:
+    """Apply the forward S body of an inverse-aware composite."""
+    return qmc.s(q)
+
+
+@qmc.qkernel
+def _drawer_controlled_inverse_implemented_kernel() -> tuple[
+    qmc.Qubit,
+    qmc.Qubit,
+]:
+    """Apply an explicitly implemented inverse under one control."""
+    control = qmc.qubit("control")
+    target = qmc.qubit("target")
+    return qmc.control(qmc.inverse(_drawer_inverse_implemented_phase))(
+        control,
+        target,
+    )
 
 
 @qmc.qkernel
@@ -484,6 +525,60 @@ def test_patterned_control_inline_blocks_keep_control_pattern(kernel, options):
     assert len(blocks) == 1
     assert blocks[0].control_qubit_indices == [0, 1]
     assert blocks[0].control_pattern == (0, 1)
+
+
+def test_controlled_inverse_expansion_uses_selected_inverse_body() -> None:
+    """Expanded controlled-inverse calls draw their registered inverse body."""
+    graph = (
+        _drawer_controlled_inverse_implemented_kernel._build_graph_for_visualization()
+    )
+    analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, expand_composite=True)
+    qubit_map, qubit_names, num_qubits = analyzer.build_qubit_map(graph)
+    visual = analyzer.build_visual_ir(graph, qubit_map, qubit_names, num_qubits)
+    [block] = [node for node in visual.children if isinstance(node, VInlineBlock)]
+
+    assert [node.label for node in block.children if isinstance(node, VGate)] == [
+        "$Z$",
+        "$S$",
+    ]
+    assert block.control_qubit_indices == [0]
+
+
+def test_inverse_direct_fallback_stays_boxed_when_expansion_is_requested() -> None:
+    """An inverse call never expands its forward-only fallback body."""
+    formal = Value(type=QubitType(), name="formal")
+    body = Block(input_values=[formal], output_values=[formal])
+    target = Value(type=QubitType(), name="target")
+    result = target.next_version()
+    ref = CallableRef(namespace="test.drawer", name="forward_only")
+    operation = InvokeOperation(
+        operands=[target],
+        results=[result],
+        target=ref,
+        transform=CallTransform.INVERSE,
+        attrs={
+            "kind": "composite",
+            "num_control_qubits": 0,
+            "num_target_qubits": 1,
+            "default_policy": "PRESERVE_BOX",
+        },
+        definition=CallableDef(ref=ref, body=body),
+    )
+    graph = Block(
+        input_values=[target],
+        output_values=[result],
+        operations=[operation],
+    )
+    analyzer = CircuitAnalyzer(graph, DEFAULT_STYLE, expand_composite=True)
+    visual = analyzer.build_visual_ir(
+        graph,
+        {target.logical_id: 0},
+        {0: "target"},
+        1,
+    )
+
+    assert not any(isinstance(node, VInlineBlock) for node in visual.children)
+    assert any(isinstance(node, VGate) for node in visual.children)
 
 
 def test_patterned_inverse_inline_block_draws_open_and_filled_controls():

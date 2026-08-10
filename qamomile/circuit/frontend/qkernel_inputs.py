@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import inspect
 import numbers
+from collections.abc import Mapping, Sequence
+from decimal import Decimal
 from typing import Any
 
 import numpy as np
 
+from qamomile.circuit._array_shape import _rectangular_array_shape
 from qamomile.circuit.frontend.func_to_block import (
+    _get_ndim,
     create_dummy_input,
     is_array_type,
     is_dict_type,
@@ -16,7 +20,7 @@ from qamomile.circuit.frontend.func_to_block import (
 )
 from qamomile.circuit.frontend.handle import Observable
 from qamomile.circuit.frontend.handle.array import Vector
-from qamomile.circuit.frontend.handle.containers import Dict
+from qamomile.circuit.frontend.handle.containers import Dict, Tuple
 from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, Qubit, UInt
 from qamomile.circuit.frontend.qkernel_utils import get_array_element_type
 from qamomile.circuit.frontend.static_binding import (
@@ -24,7 +28,7 @@ from qamomile.circuit.frontend.static_binding import (
     validate_static_binding,
 )
 from qamomile.circuit.ir.types import BitType, FloatType, ObservableType, UIntType
-from qamomile.circuit.ir.value import ArrayValue, DictValue, Value
+from qamomile.circuit.ir.value import ArrayValue, DictValue, TupleValue, Value
 
 
 def is_parameterizable_type(param_type: Any) -> bool:
@@ -272,10 +276,14 @@ def _array_binding_payload(
         serializer-friendly constant payload.
 
     Raises:
-        TypeError: If the array element type or rank is unsupported.
+        TypeError: If the array element type or a concrete element is
+            incompatible with the annotation.
+        ValueError: If the payload is ragged, has the wrong rank, or contains
+            an out-of-domain integer or Bit element.
     """
     element_type = get_array_element_type(param_type)
     if element_type in (Bit, bool):
+        _validate_array_binding_rank(param_type, name, value)
         arr = np.asarray(value, dtype=object)
         normalized_bits = [
             _coerce_bit_binding(name, item, index=index)
@@ -284,9 +292,18 @@ def _array_binding_payload(
         payload = np.asarray(normalized_bits, dtype=object).reshape(arr.shape).tolist()
         return BitType(), arr.shape, payload
     if element_type in (Float, float):
-        arr = np.asarray(value)
-        return FloatType(), arr.shape, arr.tolist()
+        _validate_array_binding_rank(param_type, name, value)
+        arr = np.asarray(value, dtype=object)
+        normalized_floats = [
+            _coerce_float_binding(name, item, index=index)
+            for index, item in enumerate(arr.flat)
+        ]
+        payload = (
+            np.asarray(normalized_floats, dtype=object).reshape(arr.shape).tolist()
+        )
+        return FloatType(), arr.shape, payload
     if element_type in (UInt, int):
+        _validate_array_binding_rank(param_type, name, value)
         arr = np.asarray(value, dtype=object)
         normalized = [
             _coerce_uint_binding(name, item, index=index)
@@ -316,6 +333,60 @@ def _array_binding_payload(
     raise TypeError(f"Unsupported element type for array binding: {element_type}")
 
 
+def _validate_array_binding_rank(
+    param_type: Any,
+    name: str,
+    value: Any,
+) -> None:
+    """Validate a concrete array binding's rectangular rank.
+
+    Args:
+        param_type (Any): Declared Vector, Matrix, or Tensor annotation.
+        name (str): QKernel parameter name used in diagnostics.
+        value (Any): Concrete array-like binding.
+
+    Raises:
+        ValueError: If the binding is ragged or its rank differs from the
+            declared array annotation.
+    """
+    shape = _rectangular_array_shape(value)
+    expected_rank = _get_ndim(param_type)
+    if len(shape) != expected_rank:
+        raise ValueError(
+            f"Array binding '{name}' requires rank {expected_rank}, got "
+            f"rank {len(shape)} with shape {shape}."
+        )
+
+
+def _coerce_float_binding(
+    name: str,
+    value: Any,
+    *,
+    index: int | None = None,
+) -> float:
+    """Validate and normalize one compile-time Float binding.
+
+    Args:
+        name (str): QKernel parameter name used in diagnostics.
+        value (Any): Candidate scalar binding.
+        index (int | None): Optional flattened array index. Defaults to
+            ``None`` for a scalar binding.
+
+    Returns:
+        float: Normalized floating-point value.
+
+    Raises:
+        TypeError: If ``value`` is boolean or not a real number.
+    """
+    location = f" at flattened index {index}" if index is not None else ""
+    if isinstance(value, bool) or not isinstance(value, (numbers.Real, Decimal)):
+        raise TypeError(
+            f"Float binding '{name}'{location} must be a real number, got "
+            f"{type(value).__name__} ({value!r})."
+        )
+    return float(value)
+
+
 def _coerce_bit_binding(name: str, value: Any, *, index: int | None = None) -> bool:
     """Validate and normalize one compile-time Bit binding.
 
@@ -343,7 +414,8 @@ def _coerce_bit_binding(name: str, value: Any, *, index: int | None = None) -> b
     normalized = int(value)
     if normalized not in (0, 1):
         raise ValueError(
-            f"Bit binding '{name}'{location} must be 0 or 1, got {normalized}."
+            f"Bit binding '{name}'{location} must be 0 or 1 (upper bound 1), "
+            f"got {normalized}."
         )
     return bool(normalized)
 
@@ -361,17 +433,21 @@ def create_bound_input(param_type: Any, name: str, value: Any) -> Handle:
 
     Raises:
         TypeError: If ``param_type`` cannot be bound from ``value``.
+        ValueError: If a scalar domain, array element, or container entry is
+            invalid for ``param_type``.
     """
     if param_type in (float, Float):
+        normalized = _coerce_float_binding(name, value)
         return Float(
-            value=Value(type=FloatType(), name=name).with_const(float(value)),
-            init_value=float(value),
+            value=Value(type=FloatType(), name=name).with_const(normalized),
+            init_value=normalized,
         )
 
     if param_type in (bool, Bit):
+        normalized = _coerce_bit_binding(name, value)
         return Bit(
-            value=Value(type=BitType(), name=name).with_const(bool(value)),
-            init_value=bool(value),
+            value=Value(type=BitType(), name=name).with_const(normalized),
+            init_value=normalized,
         )
 
     if param_type in (int, UInt):
@@ -410,7 +486,29 @@ def create_bound_input(param_type: Any, name: str, value: Any) -> Handle:
         instance.element_type = get_array_element_type(param_type)
         return instance
 
+    if is_tuple_type(param_type):
+        validate_bound_input_value(param_type, name, value)
+        arguments = getattr(param_type, "__args__", ())
+        element_handles = tuple(
+            create_bound_input(annotation, f"{name}_{index}", item)
+            for index, (annotation, item) in enumerate(zip(arguments, value))
+        )
+        tuple_value = TupleValue(
+            name=name,
+            elements=tuple(handle.value for handle in element_handles),
+        ).with_parameter(name)
+        tuple_handle = object.__new__(Tuple)
+        tuple_handle.value = tuple_value
+        tuple_handle._elements = element_handles
+        tuple_handle.parent = None
+        tuple_handle.indices = ()
+        tuple_handle.name = name
+        tuple_handle.id = str(id(tuple_handle))
+        tuple_handle._consumed = False
+        return tuple_handle
+
     if is_dict_type(param_type):
+        validate_bound_input_value(param_type, name, value)
         dict_value = (
             DictValue(name=name, entries=())
             .with_parameter(name)
@@ -424,6 +522,111 @@ def create_bound_input(param_type: Any, name: str, value: Any) -> Handle:
         return dict_handle
 
     raise TypeError(f"Cannot create bound value for type {param_type}")
+
+
+def validate_bound_input_value(param_type: Any, name: str, value: Any) -> None:
+    """Validate one concrete qkernel binding without constructing a handle.
+
+    This validation is intentionally side-effect free so entry points that
+    partition inputs before tracing, such as resource estimation, can apply
+    the same scalar and container contract as :func:`create_bound_input`
+    before selecting a later processing path.
+
+    Args:
+        param_type (Any): Resolved qkernel input annotation.
+        name (str): Public qkernel input name used in diagnostics.
+        value (Any): Concrete Python value to validate.
+
+    Raises:
+        TypeError: If a Float, Bit, array, Dict value, Tuple, or nested
+            container element has the wrong Python kind.
+        ValueError: If an array has the wrong shape, a UInt or Bit value is
+            outside its supported domain, or a Tuple binding has the wrong
+            arity.
+    """
+    if param_type in (bool, Bit):
+        _coerce_bit_binding(name, value)
+        return
+    if param_type in (int, UInt):
+        _coerce_uint_binding(name, value)
+        return
+    if param_type in (float, Float):
+        _coerce_float_binding(name, value)
+        return
+    if is_array_type(param_type):
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+            # Array-like objects such as NumPy arrays are validated by the
+            # existing binding payload path, which also checks rank and
+            # element domains. Plain scalar objects must fail here instead of
+            # being treated as one iterable element later.
+            if getattr(value, "shape", None) is None:
+                raise TypeError(
+                    f"Array binding '{name}' must be array-like, got "
+                    f"{type(value).__name__} ({value!r})."
+                )
+        _array_binding_payload(param_type, name, value)
+        return
+    if is_dict_type(param_type):
+        if not isinstance(value, Mapping):
+            raise TypeError(
+                f"Dict binding '{name}' must be a mapping, got "
+                f"{type(value).__name__} ({value!r})."
+            )
+        arguments = getattr(param_type, "__args__", ())
+        if len(arguments) >= 2:
+            value_type = arguments[1]
+            for key, item in value.items():
+                _validate_container_binding_value(
+                    value_type,
+                    item,
+                    location=f"Dict binding '{name}' value for key {key!r}",
+                )
+        return
+    if is_tuple_type(param_type):
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+            raise TypeError(
+                f"Tuple binding '{name}' must be a sequence, got "
+                f"{type(value).__name__} ({value!r})."
+            )
+        arguments = getattr(param_type, "__args__", ())
+        if arguments and len(value) != len(arguments):
+            raise ValueError(
+                f"Tuple binding '{name}' expects {len(arguments)} element(s), "
+                f"got {len(value)}."
+            )
+        for index, (annotation, item) in enumerate(zip(arguments, value)):
+            _validate_container_binding_value(
+                annotation,
+                item,
+                location=f"Tuple binding '{name}' element {index}",
+            )
+
+
+def _validate_container_binding_value(
+    annotation: Any,
+    value: Any,
+    *,
+    location: str,
+) -> None:
+    """Validate one recursively nested Dict or Tuple binding element.
+
+    Args:
+        annotation (Any): Declared element annotation.
+        value (Any): Concrete element value.
+        location (str): Complete user-facing location for diagnostics.
+
+    Raises:
+        TypeError: If the element has the wrong Python kind.
+        ValueError: If an integer/bit domain or nested container arity is
+            invalid.
+    """
+    try:
+        validate_bound_input_value(annotation, location, value)
+    except (TypeError, ValueError) as error:
+        message = str(error)
+        if location in message:
+            raise
+        raise type(error)(f"{location} is invalid: {message}") from error
 
 
 def _coerce_uint_binding(name: str, value: Any, *, index: int | None = None) -> int:

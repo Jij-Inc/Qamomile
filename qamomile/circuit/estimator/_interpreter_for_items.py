@@ -14,6 +14,7 @@ from qamomile.circuit.estimator._allocation_width import (
 )
 from qamomile.circuit.estimator._call_liveness import (
     _captured_quantum_allocations,
+    _loop_body_has_destructive_observation,
     _loop_captured_observation_consumption,
     _with_operation_output_summary,
 )
@@ -115,8 +116,11 @@ class _ForItemsInterpreter(_ForItemsRegionInterpreter):
             symbolic_item_resolver,
             self._run_state.allocation_owners_by_uuid,
         )
+        consumption_resolvers: tuple[ExprResolver, ...]
         consumption_iterations_are_definite = False
-        if entries is not None and len(entries) <= _MAX_EXACT_LOOP_WIRE_EXPANSION:
+        if not _loop_body_has_destructive_observation(operation.operations):
+            consumption_resolvers = ()
+        elif entries is not None and len(entries) <= _MAX_EXACT_LOOP_WIRE_EXPANSION:
             consumption_resolvers = tuple(
                 resolver.child_scope(
                     inner_block=_LocalBlock(operation.operations),
@@ -128,9 +132,6 @@ class _ForItemsInterpreter(_ForItemsRegionInterpreter):
                 )
                 for key, value in entries
             )
-            consumption_iterations_are_definite = True
-        elif entries == ():
-            consumption_resolvers = ()
             consumption_iterations_are_definite = True
         else:
             consumption_resolvers = (symbolic_item_resolver,)

@@ -19,7 +19,10 @@ from qamomile.circuit.estimator._resource_conditions import (
     _RangeAtLeastTwo,
     _resource_activity_condition,
 )
-from qamomile.circuit.estimator._resource_scalars import _safe_simplify
+from qamomile.circuit.estimator._resource_scalars import (
+    _safe_piecewise_fold,
+    _safe_simplify,
+)
 from qamomile.circuit.estimator._resource_sums import _sum_expr
 
 
@@ -130,7 +133,10 @@ def _is_structurally_less_equal(
     left_coefficient, left_remainder = left.as_coeff_Mul()
     right_coefficient, right_remainder = right.as_coeff_Mul()
     if left_remainder == right_remainder and _is_structurally_nonnegative(
-        cast(ResourceExpr, right_coefficient - left_coefficient)
+        cast(
+            ResourceExpr,
+            (right_coefficient - left_coefficient) * left_remainder,
+        )
     ):
         return True
     if isinstance(left, _ConditionIndicator):
@@ -328,7 +334,7 @@ def _maximum_expr_over_range(
             )
 
     if not isinstance(expr, sp.Piecewise) and expr.has(sp.Piecewise):
-        folded = cast(ResourceExpr, sp.piecewise_fold(expr))
+        folded = cast(ResourceExpr, _safe_piecewise_fold(expr))
         if folded != expr:
             return _maximum_expr_over_range(
                 folded,
@@ -423,7 +429,7 @@ def _maximum_piecewise_over_range(
         condition under which its conservative fallback may overestimate.
     """
     index = sp.Dummy("piecewise_index", integer=True, nonnegative=True)
-    folded = cast(sp.Piecewise, sp.piecewise_fold(expression))
+    folded = cast(sp.Piecewise, _safe_piecewise_fold(expression))
     transformed = cast(
         sp.Piecewise,
         folded.subs(loop_symbol, start + step * index),
@@ -509,10 +515,7 @@ def _conservative_maximum_sum_bound(
         cast(ResourceExpr, expression - baseline),
     )
     if excess.has(sp.Piecewise):
-        try:
-            excess = cast(ResourceExpr, sp.piecewise_fold(excess))
-        except (RecursionError, TypeError, ValueError):
-            pass
+        excess = cast(ResourceExpr, _safe_piecewise_fold(excess))
     upper_bound = cast(
         ResourceExpr,
         baseline

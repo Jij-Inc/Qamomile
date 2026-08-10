@@ -31,6 +31,83 @@ from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
 from qamomile.observable.hamiltonian import PAULI_TERM_ZERO_ATOL
 
 
+@dataclasses.dataclass(frozen=True)
+class _SuzukiTrotterContract:
+    """Describe the operand roles required by Suzuki-Trotter estimation.
+
+    Args:
+        hamiltonian_operand (int): Hamiltonian-vector operand position.
+        order_operand (int): Formula-order operand position.
+        time_operand (int): Total evolution-time operand position.
+        steps_operand (int): Finite step-count operand position.
+    """
+
+    hamiltonian_operand: int
+    order_operand: int
+    time_operand: int
+    steps_operand: int
+
+
+def _suzuki_trotter_contract(
+    attrs: Mapping[str, Any],
+    *,
+    source: str,
+    operand_count: int,
+) -> _SuzukiTrotterContract | None:
+    """Decode estimator-specific Suzuki-Trotter operand roles.
+
+    Other product-formula families remain valid generic IR metadata but are
+    rejected by this estimator until their approximation semantics are
+    modeled explicitly.
+
+    Args:
+        attrs (Mapping[str, Any]): Merged callable resource attributes.
+        source (str): Callable name used in malformed-contract diagnostics.
+        operand_count (int): Number of untransformed callable operands.
+
+    Returns:
+        _SuzukiTrotterContract | None: Validated Suzuki-Trotter roles, or
+            ``None`` when no product-formula contract is declared.
+
+    Raises:
+        ValueError: If the generic contract is malformed, the product-formula
+            family is unsupported, or a Suzuki-Trotter declaration omits a
+            required operand role.
+    """
+    contract = product_formula_contract(
+        attrs,
+        source=source,
+        operand_count=operand_count,
+    )
+    if contract is None:
+        return None
+    if contract.kind != "suzuki_trotter":
+        raise ValueError(
+            f"{source} product_formula kind must be 'suzuki_trotter', "
+            f"got {contract.kind!r}."
+        )
+
+    role_names = (
+        "hamiltonian_operand",
+        "order_operand",
+        "time_operand",
+        "steps_operand",
+    )
+    positions: dict[str, int] = {}
+    for role_name in role_names:
+        position = contract.operands.get(role_name)
+        if position is None:
+            raise ValueError(
+                f"{source} product_formula {role_name} must be a nonnegative integer."
+            )
+        positions[role_name] = position
+    if len(set(positions.values())) != len(positions):
+        raise ValueError(
+            f"{source} product_formula operand positions must be distinct."
+        )
+    return _SuzukiTrotterContract(**positions)
+
+
 def _bound_hamiltonian_components(
     operand: ValueBase,
     bindings: Mapping[str, Any],
@@ -212,10 +289,11 @@ def _require_concrete_product_formula_structure(
         bool: Whether a product-formula contract was present.
 
     Raises:
-        ValueError: If the declared Suzuki order is not a compile-time
+        ValueError: If the product-formula contract is malformed or
+            unsupported, or the declared Suzuki order is not a compile-time
             constant on the current call site.
     """
-    contract = product_formula_contract(
+    contract = _suzuki_trotter_contract(
         attrs,
         source=source,
         operand_count=len(operands),
@@ -285,7 +363,7 @@ def _apply_product_formula_contract(
         ValueError: If the contract is malformed, its operands are invalid, or
             concrete order/step values violate Suzuki–Trotter requirements.
     """
-    contract = product_formula_contract(
+    contract = _suzuki_trotter_contract(
         attrs,
         source=source,
         operand_count=len(operands),

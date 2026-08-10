@@ -76,6 +76,30 @@ def _classify_uncontrolled_gate(gate_name: str) -> GateResources:
     )
 
 
+def _select_zero_control_resource(
+    uncontrolled: ResourceExpr,
+    controlled: ResourceExpr,
+    num_controls: ResourceExpr,
+) -> ResourceExpr:
+    """Select an uncontrolled field when a symbolic control count is zero.
+
+    Args:
+        uncontrolled (ResourceExpr): Resource field for the base primitive.
+        controlled (ResourceExpr): Resource field for positive control counts.
+        num_controls (ResourceExpr): Possibly symbolic control count.
+
+    Returns:
+        ResourceExpr: Field that specializes consistently for zero controls.
+    """
+    return cast(
+        ResourceExpr,
+        sp.Piecewise(
+            (uncontrolled, sp.Eq(num_controls, _ZERO)),
+            (controlled, True),
+        ),
+    )
+
+
 def _classify_controlled_gate(
     gate_name: str,
     num_controls: ResourceExpr,
@@ -122,14 +146,62 @@ def _classify_controlled_gate(
         if is_x_family
         else _ZERO
     )
-    return GateResources(
+    controlled = GateResources(
         total=_ONE,
         single_qubit=_ZERO,
         two_qubit=two,
         multi_qubit=multi,
         clifford=clifford,
         rotation=rotation,
-        t=_ZERO,
+        t=_ONE if gate_name in _T_GATES else _ZERO,
         toffoli=toffoli,
         non_clifford=_ONE - clifford,
+    )
+    uncontrolled = _classify_uncontrolled_gate(gate_name)
+    return GateResources(
+        total=_select_zero_control_resource(
+            uncontrolled.total,
+            controlled.total,
+            num_controls,
+        ),
+        single_qubit=_select_zero_control_resource(
+            uncontrolled.single_qubit,
+            controlled.single_qubit,
+            num_controls,
+        ),
+        two_qubit=_select_zero_control_resource(
+            uncontrolled.two_qubit,
+            controlled.two_qubit,
+            num_controls,
+        ),
+        multi_qubit=_select_zero_control_resource(
+            uncontrolled.multi_qubit,
+            controlled.multi_qubit,
+            num_controls,
+        ),
+        clifford=_select_zero_control_resource(
+            uncontrolled.clifford,
+            controlled.clifford,
+            num_controls,
+        ),
+        rotation=_select_zero_control_resource(
+            uncontrolled.rotation,
+            controlled.rotation,
+            num_controls,
+        ),
+        t=_select_zero_control_resource(
+            uncontrolled.t,
+            controlled.t,
+            num_controls,
+        ),
+        toffoli=_select_zero_control_resource(
+            uncontrolled.toffoli,
+            controlled.toffoli,
+            num_controls,
+        ),
+        non_clifford=_select_zero_control_resource(
+            uncontrolled.non_clifford,
+            controlled.non_clifford,
+            num_controls,
+        ),
     )

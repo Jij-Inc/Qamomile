@@ -90,8 +90,10 @@ from qamomile.circuit.estimator._resource_base import (
     ResourceExpr,
 )
 from qamomile.circuit.estimator._resource_expressions import (
+    _boolean_condition,
     _ConditionIndicator,
     _expr,
+    _resource_activity_condition,
     _safe_simplify,
 )
 from qamomile.circuit.estimator._resource_types import (
@@ -239,58 +241,58 @@ class _CallInterpreter(_ForItemsInterpreter):
                 "a base case. Supply a concrete recursion-driving value in "
                 "inputs, or replace the recursion with a bounded loop."
             )
-        active_states.append(call_state)
-        tainted_formals = {
-            formal.uuid: condition
-            for formal, actual in pair_block_operands(block, actual_operands)
-            if (
-                condition := _value_taint_condition(
-                    actual,
-                    self._run_state.measurement_taint_conditions,
-                )
-            )
-            is not sp.false
-        }
         previous_taint = self._run_state.measurement_taint_conditions
         previous_bindings = self.bindings
-        parameter_operands: list[Any] = []
-        for operand in actual_operands:
-            if not (operand.type.is_classical() or operand.type.is_object()):
-                continue
-            resolved_operand: Any = operand
-            if isinstance(operand, ArrayValue):
-                payload = _resolve_concrete_array_payload(
-                    operand,
-                    {
-                        **previous_bindings,
-                        **self._run_state.condition_values,
-                    },
-                    resolve_expression=(
-                        contract_resolver.resolve
-                        if contract_resolver is not None
-                        else None
-                    ),
-                    specialize=lambda expression: self._apply_condition_values(
-                        expression,
-                        record_usage=False,
-                    ),
-                    source=source or block.name or "qkernel call",
-                )
-                if payload is not None:
-                    resolved_operand = payload
-            parameter_operands.append(resolved_operand)
-        self.bindings = ValueResolver().bind_block_params(
-            block,
-            parameter_operands,
-            dict(previous_bindings),
-        )
-        self._run_state.measurement_taint_conditions = (
-            _merge_measurement_taint_conditions(
-                previous_taint,
-                tainted_formals,
-            )
-        )
+        active_states.append(call_state)
         try:
+            tainted_formals = {
+                formal.uuid: condition
+                for formal, actual in pair_block_operands(block, actual_operands)
+                if (
+                    condition := _value_taint_condition(
+                        actual,
+                        self._run_state.measurement_taint_conditions,
+                    )
+                )
+                is not sp.false
+            }
+            parameter_operands: list[Any] = []
+            for operand in actual_operands:
+                if not (operand.type.is_classical() or operand.type.is_object()):
+                    continue
+                resolved_operand: Any = operand
+                if isinstance(operand, ArrayValue):
+                    payload = _resolve_concrete_array_payload(
+                        operand,
+                        {
+                            **previous_bindings,
+                            **self._run_state.condition_values,
+                        },
+                        resolve_expression=(
+                            contract_resolver.resolve
+                            if contract_resolver is not None
+                            else None
+                        ),
+                        specialize=lambda expression: self._apply_condition_values(
+                            expression,
+                            record_usage=False,
+                        ),
+                        source=source or block.name or "qkernel call",
+                    )
+                    if payload is not None:
+                        resolved_operand = payload
+                parameter_operands.append(resolved_operand)
+            self.bindings = ValueResolver().bind_block_params(
+                block,
+                parameter_operands,
+                dict(previous_bindings),
+            )
+            self._run_state.measurement_taint_conditions = (
+                _merge_measurement_taint_conditions(
+                    previous_taint,
+                    tainted_formals,
+                )
+            )
             estimate = self.eval_operations(
                 block.operations,
                 child,
@@ -501,10 +503,10 @@ class _CallInterpreter(_ForItemsInterpreter):
             cost,
             context,
         )
-        # Root input width and caller-scoped dependency/liveness maps belong to
-        # the qkernel that produced an aggregate cost, not to this opaque call
-        # site. The caller scheduler derives that boundary information from
-        # this InvokeOperation instead.
+        # Root input width and caller-scoped dependency, liveness, and
+        # observation maps belong to the qkernel that produced an aggregate
+        # cost, not to this opaque call site. The caller derives that boundary
+        # information from this InvokeOperation instead.
         relative_width, anonymous_workspace = _opaque_call_relative_width(
             estimate.width
         )
@@ -518,6 +520,7 @@ class _CallInterpreter(_ForItemsInterpreter):
                 _dependency_keys=None,
                 _dependency_reads=None,
                 _dependency_writes=None,
+                _measurement_taint_conditions={},
             ),
             operation,
         )
@@ -555,6 +558,24 @@ class _CallInterpreter(_ForItemsInterpreter):
                 zero_controls=transform.zero_controls,
                 active_when=bracket_activity,
             )
+        measurement_condition = _boolean_condition(
+            sp.Or(
+                _resource_activity_condition(estimate.measurements.total),
+                _resource_activity_condition(estimate.depth.measurement_depth),
+            )
+        )
+        # An aggregate cost cannot say which classical result carries an
+        # observed value. Conservatively taint every classical result while
+        # retaining the call's ordinary operand-local depth footprint.
+        measurement_outputs = {
+            result.uuid: measurement_condition
+            for result in operation.results
+            if not result.type.is_quantum() and measurement_condition is not sp.false
+        }
+        estimate = dataclasses.replace(
+            estimate,
+            _measurement_taint_conditions=measurement_outputs,
+        )
         has_quantum_endpoint = any(
             isinstance(value, ValueBase) and value.type.is_quantum()
             for value in (*operation.all_input_values(), *operation.results)

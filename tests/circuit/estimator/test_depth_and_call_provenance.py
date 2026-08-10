@@ -483,6 +483,38 @@ def test_possible_alias_in_specialized_depth_marks_estimate_conservative() -> No
     assert possible_alias_active is not sp.false
 
 
+def test_conditional_global_barrier_advances_only_when_active() -> None:
+    """An inactive symbolic barrier leaves disjoint work on the same layer."""
+    flag = sp.Symbol("flag", integer=True, nonnegative=True)
+    one = sp.Integer(1)
+    operations = [
+        GateOperation(gate_type=GateOperationType.H),
+        GateOperation(gate_type=GateOperationType.X),
+    ]
+    estimates = [
+        qm.ResourceEstimate(
+            depth=qm.DepthResources(depth=one, gate_depth=one),
+            _global_barrier_condition=sp.Eq(flag, 1),
+        ),
+        qm.ResourceEstimate(
+            depth=qm.DepthResources(depth=one, gate_depth=one),
+        ),
+    ]
+    footprints = [
+        (frozenset({("left", None)}),) * 2,
+        (frozenset({("right", None)}),) * 2,
+    ]
+
+    depth, _completion, possible_alias_active, _uniform = _dependency_depth(
+        list(zip(operations, estimates, strict=True)),
+        footprints,
+    )
+
+    assert depth.depth.subs(flag, 0) == 1
+    assert depth.depth.subs(flag, 1) == 2
+    assert possible_alias_active is sp.false
+
+
 def test_symbolic_indices_on_distinct_arrays_share_one_layer() -> None:
     """Allocation identity proves symbolic elements of two arrays disjoint."""
 

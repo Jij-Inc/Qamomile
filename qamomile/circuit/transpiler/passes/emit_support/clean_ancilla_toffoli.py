@@ -28,13 +28,32 @@ class CleanAncillaToffoliLadder(Generic[_CountT]):
 @overload
 def clean_ancilla_toffoli_ladder(
     num_controls: int,
-) -> CleanAncillaToffoliLadder[int]: ...
+) -> CleanAncillaToffoliLadder[int]:
+    """Return active ladder arithmetic for a concrete control count.
+
+    Args:
+        num_controls (int): Concrete control count on the active recipe branch.
+
+    Returns:
+        CleanAncillaToffoliLadder[int]: Concrete ladder requirements.
+    """
+    ...
 
 
 @overload
 def clean_ancilla_toffoli_ladder(
     num_controls: sp.Expr,
-) -> CleanAncillaToffoliLadder[sp.Expr]: ...
+) -> CleanAncillaToffoliLadder[sp.Expr]:
+    """Return active ladder arithmetic for a symbolic control count.
+
+    Args:
+        num_controls (sp.Expr): Symbolic control count on the active recipe
+            branch.
+
+    Returns:
+        CleanAncillaToffoliLadder[sp.Expr]: Symbolic ladder requirements.
+    """
+    ...
 
 
 def clean_ancilla_toffoli_ladder(
@@ -60,13 +79,33 @@ def clean_ancilla_toffoli_ladder(
 @overload
 def clean_ancilla_toffoli_ladder_or_empty(
     num_controls: int,
-) -> CleanAncillaToffoliLadder[int]: ...
+) -> CleanAncillaToffoliLadder[int]:
+    """Return nonnegative ladder arithmetic for a concrete control count.
+
+    Args:
+        num_controls (int): Concrete nonnegative control count.
+
+    Returns:
+        CleanAncillaToffoliLadder[int]: Concrete ladder requirements, including
+            the empty cases.
+    """
+    ...
 
 
 @overload
 def clean_ancilla_toffoli_ladder_or_empty(
     num_controls: sp.Expr,
-) -> CleanAncillaToffoliLadder[sp.Expr]: ...
+) -> CleanAncillaToffoliLadder[sp.Expr]:
+    """Return nonnegative ladder arithmetic for a symbolic control count.
+
+    Args:
+        num_controls (sp.Expr): Symbolic nonnegative control count.
+
+    Returns:
+        CleanAncillaToffoliLadder[sp.Expr]: Symbolic ladder requirements,
+            including the empty cases.
+    """
+    ...
 
 
 def clean_ancilla_toffoli_ladder_or_empty(
@@ -99,13 +138,32 @@ def clean_ancilla_toffoli_ladder_or_empty(
 @overload
 def _clean_ancilla_toffoli_ladder_from_compute(
     compute_toffolis: int,
-) -> CleanAncillaToffoliLadder[int]: ...
+) -> CleanAncillaToffoliLadder[int]:
+    """Build concrete ladder arithmetic from its compute-half count.
+
+    Args:
+        compute_toffolis (int): Concrete compute-half Toffoli count.
+
+    Returns:
+        CleanAncillaToffoliLadder[int]: Complete concrete ladder requirements.
+    """
+    ...
 
 
 @overload
 def _clean_ancilla_toffoli_ladder_from_compute(
     compute_toffolis: sp.Expr,
-) -> CleanAncillaToffoliLadder[sp.Expr]: ...
+) -> CleanAncillaToffoliLadder[sp.Expr]:
+    """Build symbolic ladder arithmetic from its compute-half count.
+
+    Args:
+        compute_toffolis (sp.Expr): Symbolic compute-half Toffoli count.
+
+    Returns:
+        CleanAncillaToffoliLadder[sp.Expr]: Complete symbolic ladder
+            requirements.
+    """
+    ...
 
 
 def _clean_ancilla_toffoli_ladder_from_compute(

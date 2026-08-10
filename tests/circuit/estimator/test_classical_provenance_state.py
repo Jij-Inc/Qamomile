@@ -3,6 +3,9 @@
 import sympy as sp
 
 from qamomile.circuit.estimator import _array_state, _classical_facts, _resolver
+from qamomile.circuit.estimator._interpreter_dataflow import (
+    _refine_boolean_under_assumption,
+)
 from qamomile.circuit.ir.types.primitives import BitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 
@@ -69,6 +72,25 @@ def _fact(
     """
     dependencies = {} if token is None else {token: sp.true}
     return _classical_facts._ResolvedClassicalFact.create(value, dependencies)
+
+
+def test_boolean_refinement_respects_assumption_polarity() -> None:
+    """Negated equalities cannot be treated as positive zero facts."""
+    value = sp.Symbol("value", integer=True)
+    sibling = sp.Symbol("sibling", integer=True)
+    condition = sp.Ne(value, 1)
+    negative_assumption = sp.Not(
+        sp.Or(
+            sp.Eq(value, 0),
+            sp.Eq(sibling, 0),
+        )
+    )
+
+    refined = _refine_boolean_under_assumption(condition, negative_assumption)
+
+    assert sp.simplify_logic(sp.Xor(refined, condition)) is sp.false
+    count = sp.Symbol("count", integer=True, nonnegative=True)
+    assert _refine_boolean_under_assumption(sp.Eq(count, 0), count <= 0) is sp.true
 
 
 def test_strong_store_overwrite_kills_previous_dependencies() -> None:

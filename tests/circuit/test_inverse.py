@@ -233,6 +233,24 @@ def _inverse_layer(q: qmc.Qubit, rotation_angle: qmc.Float) -> qmc.Qubit:
     return q
 
 
+@qmc.composite_gate(name="mixed_order_phase_for_inverse")
+def _mixed_order_phase_for_inverse(
+    rotation_angle: qmc.Float,
+    q: qmc.Qubit,
+) -> qmc.Qubit:
+    """Apply a phase through a classical-first composite signature."""
+    return qmc.p(q, rotation_angle)
+
+
+@qmc.qkernel
+def _inverse_mixed_order_phase_layer(
+    rotation_angle: qmc.Float,
+    q: qmc.Qubit,
+) -> qmc.Qubit:
+    """Apply the inverse of a classical-first composite."""
+    return qmc.inverse(_mixed_order_phase_for_inverse)(rotation_angle, q)
+
+
 @qmc.qkernel
 def _inverse_vector_layer(
     qs: qmc.Vector[qmc.Qubit],
@@ -1211,6 +1229,28 @@ def test_inverse_of_inverse_restores_source_operations() -> None:
         GateOperationType.H,
         GateOperationType.RZ,
     ]
+
+
+@pytest.mark.parametrize("transpiler_factory", BACKENDS)
+def test_inverse_of_inverse_mixed_order_composite_cross_backend(
+    transpiler_factory,
+) -> None:
+    """Double inverse reorders a composite's grouped ABI on every backend."""
+
+    @qmc.qkernel
+    def circuit() -> qmc.Bit:
+        q = qmc.qubit("q")
+        q = qmc.h(q)
+        q = qmc.inverse(_inverse_mixed_order_phase_layer)(0.37, q)
+        q = qmc.inverse(_mixed_order_phase_for_inverse)(0.37, q)
+        q = qmc.h(q)
+        return qmc.measure(q)
+
+    transpiler = transpiler_factory()
+    executable = transpiler.transpile(circuit)
+    sample_result = executable.sample(transpiler.executor(), shots=32).result()
+
+    _assert_all_zero_samples(sample_result, 1, 32)
 
 
 def test_inverse_of_controlled_inverse_restores_controlled_source() -> None:

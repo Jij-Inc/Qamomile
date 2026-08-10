@@ -24,24 +24,19 @@ class QuantumOperandWidth:
 
 @dataclasses.dataclass(frozen=True)
 class ProductFormulaContract:
-    """Describe one product-formula algorithm's semantic operands.
+    """Describe one product-formula family and its semantic operand roles.
 
     Operand positions use the callable's untransformed input ABI. Coherent
     controls added by a later call transform are therefore not included.
 
     Args:
-        kind (str): Product-formula family. Currently ``"suzuki_trotter"``.
-        hamiltonian_operand (int): Hamiltonian-vector operand position.
-        order_operand (int): Formula-order operand position.
-        time_operand (int): Total evolution-time operand position.
-        steps_operand (int): Finite step-count operand position.
+        kind (str): Product-formula family identifier.
+        operands (Mapping[str, int]): Semantic role to callable operand
+            position.
     """
 
     kind: str
-    hamiltonian_operand: int
-    order_operand: int
-    time_operand: int
-    steps_operand: int
+    operands: Mapping[str, int]
 
 
 def product_formula_contract(
@@ -63,8 +58,7 @@ def product_formula_contract(
         product formula is declared.
 
     Raises:
-        ValueError: If the resource contract is malformed, uses an unsupported
-            formula family, repeats an operand position, or references an
+        ValueError: If the resource contract is malformed or references an
             operand outside ``operand_count``.
     """
     resource_contract = attrs.get("resource_contract")
@@ -81,34 +75,28 @@ def product_formula_contract(
         )
 
     kind = raw_formula.get("kind")
-    if kind != "suzuki_trotter":
-        raise ValueError(
-            f"{source} product_formula kind must be 'suzuki_trotter', got {kind!r}."
-        )
-    field_names = (
-        "hamiltonian_operand",
-        "order_operand",
-        "time_operand",
-        "steps_operand",
-    )
+    if not isinstance(kind, str) or not kind:
+        raise ValueError(f"{source} product_formula kind must be a nonempty string.")
+
     positions: dict[str, int] = {}
-    for field_name in field_names:
-        position = raw_formula.get(field_name)
+    for role, position in raw_formula.items():
+        if role == "kind":
+            continue
+        if not isinstance(role, str) or not role:
+            raise ValueError(
+                f"{source} product_formula operand roles must be nonempty strings."
+            )
         if type(position) is not int or position < 0:
             raise ValueError(
-                f"{source} product_formula {field_name} must be a nonnegative integer."
+                f"{source} product_formula {role} must be a nonnegative integer."
             )
         if operand_count is not None and position >= operand_count:
             raise ValueError(
-                f"{source} product_formula {field_name} references operand "
+                f"{source} product_formula {role} references operand "
                 f"{position}, but the callable has only {operand_count} input(s)."
             )
-        positions[field_name] = position
-    if len(set(positions.values())) != len(positions):
-        raise ValueError(
-            f"{source} product_formula operand positions must be distinct."
-        )
-    return ProductFormulaContract(kind=kind, **positions)
+        positions[role] = position
+    return ProductFormulaContract(kind=kind, operands=positions)
 
 
 def merge_product_formula_contract(
@@ -134,9 +122,13 @@ def merge_product_formula_contract(
         ValueError: If existing resource metadata is malformed or conflicts
             with ``formula``.
     """
+    if "kind" in formula.operands:
+        raise ValueError(f"{source} product_formula operand role 'kind' is reserved.")
+    formula_payload: dict[str, Any] = {"kind": formula.kind}
+    formula_payload.update(formula.operands)
     payload = {
         "resource_contract": {
-            "product_formula": dataclasses.asdict(formula),
+            "product_formula": formula_payload,
         }
     }
     requested = product_formula_contract(
@@ -161,7 +153,10 @@ def merge_product_formula_contract(
     )
     if existing is not None and existing != requested:
         raise ValueError(f"{source} product_formula resource contract conflicts.")
-    contract["product_formula"] = dataclasses.asdict(requested)
+    contract["product_formula"] = {
+        "kind": requested.kind,
+        **requested.operands,
+    }
     merged_attrs["resource_contract"] = contract
     return merged_attrs
 

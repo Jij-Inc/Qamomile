@@ -175,6 +175,30 @@ def _substitute_basic_lazily(
     return cast(sp.Basic, expression.func(*rewritten_args))
 
 
+def _safe_piecewise_fold(expression: sp.Basic) -> sp.Basic:
+    """Fold Piecewise nodes without releasing bound symbols.
+
+    SymPy may lift a ``Piecewise`` out of an unevaluated ``Sum`` while leaving
+    the sum's dummy index in the lifted condition. Rejecting any rewrite that
+    introduces a new free symbol keeps internal binders out of public resource
+    formulas.
+
+    Args:
+        expression (sp.Basic): Symbolic expression to fold.
+
+    Returns:
+        sp.Basic: Folded expression when its free-symbol provenance is
+        preserved, otherwise the original expression.
+    """
+    try:
+        folded = cast(sp.Basic, sp.piecewise_fold(expression))
+    except _SYMPY_SIMPLIFICATION_ERRORS:
+        return expression
+    if folded.free_symbols <= expression.free_symbols:
+        return folded
+    return expression
+
+
 @lru_cache(maxsize=4096)
 def _safe_simplify(expression: ResourceExpr) -> ResourceExpr:
     """Simplify an expression without releasing internal bound symbols.

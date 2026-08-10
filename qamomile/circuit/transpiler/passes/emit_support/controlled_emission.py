@@ -1096,10 +1096,37 @@ def _for_batch_profile(
         # reaches its normal EmitError instead of mistaking the whole call for
         # an identity. One unit avoids selecting a shared ladder by itself.
         return ControlBatchProfile(weight=1)
+    indexset = validated_loop_indexset(start, stop, step)
+    iteration_count = len(indexset)
+    if (
+        iteration_count > 0
+        and not op.region_args
+        and not op.loop_carried_rebinds
+        and all(
+            static_controlled_batch_profile(body_op) is not None
+            for body_op in op.operations
+        )
+    ):
+        loop_bindings = bindings.copy()
+        _bind_loop_var(loop_bindings, op, indexset[0])
+        iteration_profile = combine_control_batch_profiles(
+            _batch_op_profile(emit_pass, body_op, loop_bindings)
+            for body_op in op.operations
+        )
+        repeated_weight = min(
+            CONTROL_BATCH_MIN_WEIGHT,
+            iteration_profile.weight * iteration_count,
+        )
+        _bind_loop_var(bindings, op, indexset[-1])
+        return ControlBatchProfile(
+            weight=repeated_weight,
+            selects_exact_two=iteration_profile.selects_exact_two,
+        )
+
     profile = ControlBatchProfile()
     carried = _seed_region_args(emit_pass, op, bindings)
     last_index: int | None = None
-    for index in validated_loop_indexset(start, stop, step):
+    for index in indexset:
         last_index = index
         loop_bindings = bindings.copy()
         for value_uuid, carried_value in carried.items():

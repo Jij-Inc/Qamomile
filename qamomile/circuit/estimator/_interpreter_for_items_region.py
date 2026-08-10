@@ -128,6 +128,13 @@ class _ForItemsRegionInterpreter(_ForItemsContextInterpreter):
             for arg in operation.region_args
         }
         initial_array_states = self._initial_loop_array_states(operation, resolver)
+        body_array_states, body_array_source_tokens = (
+            self._conservative_loop_body_array_states(
+                operation,
+                initial_array_states,
+                completed_iterations=item_symbol,
+            )
+        )
         initial_carry_taint = {
             arg.block_arg.uuid: condition
             for arg in operation.region_args
@@ -148,7 +155,7 @@ class _ForItemsRegionInterpreter(_ForItemsContextInterpreter):
         self._bind_loop_array_states(
             operation,
             probe,
-            initial_array_states,
+            body_array_states,
         )
         for arg in operation.region_args:
             initial_fact = initial_carry_facts[arg.block_arg.uuid]
@@ -275,13 +282,6 @@ class _ForItemsRegionInterpreter(_ForItemsContextInterpreter):
             extra_context=body_context,
         )
         child.copy_array_context()
-        body_array_states, body_array_source_tokens = (
-            self._conservative_loop_body_array_states(
-                operation,
-                initial_array_states,
-                completed_iterations=item_symbol,
-            )
-        )
         self._bind_loop_array_states(
             operation,
             child,

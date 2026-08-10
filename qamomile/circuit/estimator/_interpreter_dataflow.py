@@ -30,8 +30,8 @@ from qamomile.circuit.estimator._resource_expressions import (
     _boolean_condition,
     _expr,
     _piecewise,
-    _resource_activity_condition,
 )
+from qamomile.circuit.estimator._resource_scalars import _safe_piecewise_fold
 from qamomile.circuit.estimator._resource_types import (
     ResourceAssumption,
 )
@@ -130,6 +130,53 @@ def _conditional_resource_map(
     }
 
 
+def _zero_symbols_implied_by_assumption(
+    assumption: Boolean,
+) -> set[sp.Symbol]:
+    """Return symbols that a Boolean assumption proves equal to zero.
+
+    Equalities in a conjunction are positive facts, while an equality below a
+    negation is not. For a disjunction, a zero value is implied only when every
+    alternative proves it. This structural proof deliberately ignores other
+    Boolean forms instead of guessing their polarity.
+
+    Args:
+        assumption (Boolean): Branch fact whose positive implications should
+            be inspected.
+
+    Returns:
+        set[sp.Symbol]: Symbols proven to equal zero throughout the assumed
+        branch.
+    """
+    if isinstance(assumption, sp.And):
+        implied: set[sp.Symbol] = set()
+        for argument in assumption.args:
+            implied.update(_zero_symbols_implied_by_assumption(cast(Boolean, argument)))
+        return implied
+    if isinstance(assumption, sp.Or):
+        alternatives = [
+            _zero_symbols_implied_by_assumption(cast(Boolean, argument))
+            for argument in assumption.args
+        ]
+        if not alternatives:
+            return set()
+        return set.intersection(*alternatives)
+    if isinstance(assumption, sp.Equality):
+        if isinstance(assumption.lhs, sp.Symbol) and assumption.rhs == _ZERO:
+            return {assumption.lhs}
+        if isinstance(assumption.rhs, sp.Symbol) and assumption.lhs == _ZERO:
+            return {assumption.rhs}
+        return set()
+    if (
+        isinstance(assumption, sp.LessThan)
+        and isinstance(assumption.lhs, sp.Symbol)
+        and assumption.lhs.is_nonnegative is True
+        and assumption.rhs == _ZERO
+    ):
+        return {assumption.lhs}
+    return set()
+
+
 def _refine_boolean_under_assumption(
     condition: Boolean,
     assumption: Boolean,
@@ -149,35 +196,11 @@ def _refine_boolean_under_assumption(
         Boolean: Refined predicate, or the original condition if SymPy cannot
         safely refine it.
     """
-    free_assumption_symbols = assumption.free_symbols
-    zero_substitutions: dict[sp.Symbol, sp.Integer] = {}
-    for atom in sp.preorder_traversal(assumption):
-        if isinstance(atom, sp.Equality):
-            if (
-                isinstance(atom.lhs, sp.Symbol)
-                and atom.lhs in free_assumption_symbols
-                and atom.rhs == _ZERO
-            ):
-                zero_substitutions[atom.lhs] = _ZERO
-            elif (
-                isinstance(atom.rhs, sp.Symbol)
-                and atom.rhs in free_assumption_symbols
-                and atom.lhs == _ZERO
-            ):
-                zero_substitutions[atom.rhs] = _ZERO
-        elif isinstance(atom, sp.LessThan):
-            if (
-                isinstance(atom.lhs, sp.Symbol)
-                and atom.lhs in free_assumption_symbols
-                and atom.lhs.is_nonnegative is True
-                and atom.rhs == _ZERO
-            ):
-                zero_substitutions[atom.lhs] = _ZERO
+    zero_substitutions = {
+        symbol: _ZERO for symbol in _zero_symbols_implied_by_assumption(assumption)
+    }
     narrowed = cast(Boolean, condition.xreplace(zero_substitutions))
-    try:
-        folded = cast(Boolean, sp.piecewise_fold(narrowed))
-    except (RecursionError, TypeError, ValueError):
-        folded = narrowed
+    folded = cast(Boolean, _safe_piecewise_fold(narrowed))
 
     # ``assumption`` identifies the domain where this projection is used.
     # Its complement is therefore a genuine don't-care set.  In particular,
@@ -436,31 +459,3 @@ def _require_uncontrolled_operation(
             "shared controlled decomposition does not support this operation inside a "
             "controlled unitary."
         )
-
-
-def _estimate_nonunitary_boundary_condition(
-    estimate: ResourceEstimate,
-) -> Boolean:
-    """Return when an estimate declares measurement or reset work.
-
-    Bodyless opaque calls cannot expose output-level observation provenance,
-    but their explicit resource contract can still prove that the call is a
-    non-unitary scheduling boundary.
-
-    Args:
-        estimate (ResourceEstimate): Aggregate invocation estimate to inspect.
-
-    Returns:
-        Boolean: Condition under which a measurement/reset count or
-            corresponding depth may be nonzero.
-    """
-    conditions = tuple(
-        _resource_activity_condition(value)
-        for value in (
-            estimate.measurements.total,
-            estimate.resets.total,
-            estimate.depth.measurement_depth,
-            estimate.depth.reset_depth,
-        )
-    )
-    return _boolean_condition(sp.Or(*conditions))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from types import SimpleNamespace
 
 import numpy as np
@@ -1244,3 +1245,157 @@ def test_output_only_array_index_is_validated_across_call_boundaries() -> None:
         assert valid.width.peak_qubits == 2
         with pytest.raises(ValueError, match="in-bounds margin"):
             kernel.estimate_resources(inputs={"index": 2})
+
+
+def test_structural_bit_inputs_are_validated_before_tracing() -> None:
+    """Bit inputs reject truthy objects before they reach frontend handles."""
+
+    @qmc.qkernel
+    def bit_probe(flag: qmc.Bit) -> qmc.Qubit:
+        """Apply one gate only when the supplied bit is true."""
+        target = qmc.qubit("target")
+        if flag:
+            target = qmc.x(target)
+        return target
+
+    assert bit_probe.estimate_resources(inputs={"flag": 0}).gates.total == 0
+    assert bit_probe.estimate_resources(inputs={"flag": 1}).gates.total == 1
+    with pytest.raises(TypeError, match="Bit binding 'flag'"):
+        bit_probe.estimate_resources(inputs={"flag": "false"})
+    with pytest.raises(TypeError, match="Bit binding 'flag'"):
+        bit_probe.estimate_resources(inputs={"flag": None})
+    with pytest.raises(ValueError, match="must be 0 or 1"):
+        bit_probe.estimate_resources(inputs={"flag": 2})
+
+
+def test_float_inputs_preserve_decimal_scalar_and_array_bindings() -> None:
+    """Float validation retains Decimal support before input partitioning."""
+
+    @qmc.qkernel
+    def decimal_probe(
+        theta: qmc.Float,
+        values: qmc.Vector[qmc.Float],
+    ) -> qmc.Qubit:
+        """Apply rotations using a Decimal scalar and vector binding."""
+        target = qmc.qubit("target")
+        target = qmc.rx(target, theta)
+        target = qmc.ry(target, values[0])
+        return target
+
+    estimate = decimal_probe.estimate_resources(
+        inputs={"theta": Decimal("0.5"), "values": [Decimal("0.25")]}
+    )
+
+    assert estimate.gates.total == 2
+    assert estimate.parameters == {}
+
+
+def test_decimal_input_specializes_a_symbolic_resource_expression() -> None:
+    """Decimal values specialize Float-dependent loop resources exactly."""
+
+    @qmc.qkernel
+    def decimal_loop(repetitions: qmc.Float) -> qmc.Qubit:
+        """Repeat X according to the ceiling of a concrete Float input."""
+        target = qmc.qubit("target")
+        count = qmc.ceil(repetitions)
+        for _index in qmc.range(count):
+            target = qmc.x(target)
+        return target
+
+    estimate = decimal_loop.estimate_resources(inputs={"repetitions": Decimal("2.25")})
+
+    assert estimate.gates.total == 3
+    assert estimate.parameters == {}
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        pytest.param([(0, 0.5)], id="not-a-mapping"),
+        pytest.param({0: "0.5"}, id="string-value"),
+        pytest.param({0: None}, id="none-value"),
+    ],
+)
+def test_structural_dict_inputs_validate_container_entries(data: object) -> None:
+    """Dict inputs validate the mapping and every declared key/value type."""
+
+    @qmc.qkernel
+    def dict_probe(values: qmc.Dict[qmc.UInt, qmc.Float]) -> qmc.Qubit:
+        """Return one qubit while retaining a structural Dict input."""
+        return qmc.qubit("target")
+
+    with pytest.raises((TypeError, ValueError), match="Dict binding 'values'"):
+        dict_probe.estimate_resources(inputs={"values": data})
+
+
+def test_structural_tuple_input_is_bound_after_validation() -> None:
+    """A valid Tuple input remains usable while malformed entries fail early."""
+
+    @qmc.qkernel
+    def tuple_probe(
+        pair: qmc.Tuple[qmc.UInt, qmc.Float],
+    ) -> qmc.Qubit:
+        """Apply one gate for each unit in the Tuple's integer component."""
+        target = qmc.qubit("target")
+        for _index in qmc.range(pair[0]):
+            target = qmc.x(target)
+        return target
+
+    assert tuple_probe.estimate_resources(inputs={"pair": (2, 0.5)}).gates.total == 2
+    with pytest.raises(ValueError, match="expects 2 element"):
+        tuple_probe.estimate_resources(inputs={"pair": (2,)})
+    with pytest.raises(TypeError, match="Tuple binding 'pair'.*sequence"):
+        tuple_probe.estimate_resources(inputs={"pair": "2,0.5"})
+
+
+def test_observable_vector_input_validates_each_hamiltonian() -> None:
+    """A qkernel Observable vector rejects non-Hamiltonian elements early."""
+
+    @qmc.qkernel
+    def observable_probe(
+        observables: qmc.Vector[qmc.Observable],
+    ) -> qmc.Float:
+        """Evaluate the first supplied observable on one qubit."""
+        return qmc.expval(qmc.qubit("target"), observables[0])
+
+    valid = observable_probe.estimate_resources(inputs={"observables": [qm_o.Z(0)]})
+    assert valid.calls.calls_by_name == {"expval": 1}
+    with pytest.raises(TypeError, match="element 0 expects a Hamiltonian"):
+        observable_probe.estimate_resources(inputs={"observables": [object()]})
+
+
+@pytest.mark.parametrize("invalid", ["3", None])
+def test_raw_block_quantum_width_rejects_non_array_values(invalid: object) -> None:
+    """Raw Blocks reject invalid quantum widths before partitioning."""
+
+    @qmc.qkernel
+    def vector_probe(
+        targets: qmc.Vector[qmc.Qubit],
+    ) -> qmc.Vector[qmc.Qubit]:
+        """Apply one gate to each input qubit."""
+        return qmc.x(targets)
+
+    with pytest.raises(ValueError, match="quantum array input 'targets'"):
+        qmc.ResourceEstimator().estimate(
+            vector_probe.block,
+            inputs={"targets": invalid},
+        )
+
+
+@pytest.mark.parametrize("invalid", ["false", None])
+def test_raw_block_bit_rejects_non_integral_values(invalid: object) -> None:
+    """Raw Blocks apply the Bit domain before structural inputs are consumed."""
+
+    @qmc.qkernel
+    def bit_probe(flag: qmc.Bit) -> qmc.Qubit:
+        """Apply a gate when the supplied bit is true."""
+        target = qmc.qubit("target")
+        if flag:
+            target = qmc.x(target)
+        return target
+
+    with pytest.raises(TypeError, match="Bit binding 'flag'"):
+        qmc.ResourceEstimator().estimate(
+            bit_probe.block,
+            inputs={"flag": invalid},
+        )

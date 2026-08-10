@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import numbers
 from collections.abc import Mapping, Sequence
+from decimal import Decimal
 from typing import Any, cast
 
 import sympy as sp
@@ -28,6 +30,7 @@ from qamomile.circuit.estimator._resolver_indices import (
     _compute_input_shape_dimension_aliases,
     _ResolverBlockIndex,
 )
+from qamomile.circuit.estimator._symbolic import _normalize_resource_scalar
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.callable import CallTransform
 from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
@@ -724,17 +727,29 @@ class ExprResolver:
 
     @property
     def context(self) -> dict[str, sp.Expr]:
-        """Copy of the UUID → expression context mapping."""
+        """Return a copy of the UUID-to-expression context mapping.
+
+        Returns:
+            dict[str, sp.Expr]: Copied resolver context keyed by value UUID.
+        """
         return self._context.copy()
 
     @property
     def loop_var_names(self) -> dict[str, sp.Expr]:
-        """Copy of the loop variable name → expression mapping."""
+        """Return a copy of the loop-variable expression mapping.
+
+        Returns:
+            dict[str, sp.Expr]: Copied loop-variable expressions keyed by name.
+        """
         return self._loop_var_names.copy()
 
     @property
     def block(self) -> Any:
-        """The current block being resolved against."""
+        """Return the current block being resolved against.
+
+        Returns:
+            Any: Current resolver block or operation container.
+        """
         return self._block
 
     # ------------------------------------------------------------------ #
@@ -818,10 +833,13 @@ class ExprResolver:
         if not isinstance(v, Value):
             if isinstance(v, bool):
                 return sp.Integer(1 if v else 0)
-            if isinstance(v, int):
-                return sp.Integer(v)
-            if isinstance(v, float):
-                return cast(sp.Expr, sp.Float(v))
+            if isinstance(v, (numbers.Number, Decimal)):
+                return _normalize_resource_scalar(
+                    v,
+                    label="resolver value",
+                    allow_symbolic=False,
+                    allow_bool=True,
+                )
             if concrete:
                 raise UnresolvedValueError("?", f"Non-Value type: {type(v).__name__}")
             return sp.Symbol(str(v), integer=True, positive=True)

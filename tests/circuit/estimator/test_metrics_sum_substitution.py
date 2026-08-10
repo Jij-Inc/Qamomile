@@ -6,6 +6,10 @@ import pytest
 import sympy as sp
 
 import qamomile.circuit.estimator._resource_expressions as expressions_module
+from qamomile.circuit.estimator._resource_bounds import (
+    _conservative_maximum_sum_bound,
+    _maximum_expr_over_range,
+)
 
 
 def test_boolean_condition_expands_ordered_piecewise_branches() -> None:
@@ -21,6 +25,51 @@ def test_boolean_condition_expands_ordered_piecewise_branches() -> None:
 
     assert sp.simplify_logic(normalized ^ (sp.Ne(count, 0) & (value > 0))) is sp.false
     assert normalized.subs(count, 0) is sp.false
+
+
+def test_loop_maximum_folding_keeps_nested_sum_index_bound() -> None:
+    """Piecewise folding cannot release a nested Sum's dummy index."""
+    outer = sp.Symbol("outer", integer=True, nonnegative=True)
+    inner = sp.Symbol("inner", integer=True, nonnegative=True)
+    outer_count = sp.Symbol("outer_count", integer=True, nonnegative=True)
+    inner_count = sp.Symbol("inner_count", integer=True, nonnegative=True)
+    cutoff = sp.Symbol("cutoff", integer=True, nonnegative=True)
+    nested_sum = expressions_module._sum_expr(
+        sp.Piecewise((1, inner < cutoff), (0, True)),
+        inner,
+        sp.Integer(0),
+        sp.Integer(1),
+        inner_count,
+    )
+    expression = nested_sum + sp.Piecewise((outer, outer < 2), (0, True))
+
+    maximum, _guard = _maximum_expr_over_range(
+        expression,
+        outer,
+        sp.Integer(0),
+        sp.Integer(1),
+        outer_count,
+    )
+    upper_bound, _upper_guard = _conservative_maximum_sum_bound(
+        nested_sum + sp.Piecewise((outer**2, outer < cutoff), (0, True)),
+        outer,
+        sp.Integer(0),
+        sp.Integer(1),
+        outer_count,
+    )
+
+    public_symbols = {outer_count, inner_count, cutoff}
+    assert maximum.free_symbols <= public_symbols
+    assert upper_bound.free_symbols <= public_symbols
+    specialized = expressions_module._substitute_resource_expr(
+        maximum,
+        {
+            outer_count: sp.Integer(3),
+            inner_count: sp.Integer(4),
+            cutoff: sp.Integer(2),
+        },
+    )
+    assert specialized == 3
 
 
 @pytest.mark.parametrize(

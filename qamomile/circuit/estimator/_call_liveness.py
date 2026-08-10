@@ -50,6 +50,40 @@ if TYPE_CHECKING:
     from qamomile.circuit.estimator._estimate import ResourceEstimate
 
 
+_DESTRUCTIVE_LOOP_OBSERVATION_TYPES = (
+    MeasureOperation,
+    MeasureVectorOperation,
+    MeasureQFixedOperation,
+    ExpvalOp,
+)
+
+
+def _loop_body_has_destructive_observation(
+    operations: Sequence[Operation],
+) -> bool:
+    """Return whether a loop body contains a tracked destructive observation.
+
+    Operation-owned nested control-flow regions are inspected recursively.
+    Callable definitions remain opaque because loop captured-consumption
+    analysis does not expand ``InvokeOperation`` bodies.
+
+    Args:
+        operations (Sequence[Operation]): Loop-body operations to inspect.
+
+    Returns:
+        bool: Whether a direct or nested tracked observation is present.
+    """
+    for operation in operations:
+        if isinstance(operation, _DESTRUCTIVE_LOOP_OBSERVATION_TYPES):
+            return True
+        if isinstance(operation, HasNestedOps) and any(
+            _loop_body_has_destructive_observation(nested)
+            for nested in operation.nested_op_lists()
+        ):
+            return True
+    return False
+
+
 def _block_input_allocations(
     block: Block,
     resolver: ExprResolver,
@@ -312,12 +346,6 @@ def _loop_captured_observation_consumption(
     fully_consumed: set[str] = set()
     covered_indices: dict[str, set[int]] = {}
     uncertain_owners: set[str] = set()
-    destructive_types = (
-        MeasureOperation,
-        MeasureVectorOperation,
-        MeasureQFixedOperation,
-        ExpvalOp,
-    )
 
     def record_observation(
         operation: Operation,
@@ -391,7 +419,7 @@ def _loop_captured_observation_consumption(
                 the unconditional loop path.
         """
         for operation in body:
-            if isinstance(operation, destructive_types):
+            if isinstance(operation, _DESTRUCTIVE_LOOP_OBSERVATION_TYPES):
                 record_observation(
                     operation,
                     resolver,

@@ -391,6 +391,17 @@ class _ForRegionInterpreter(_LoopSupportInterpreter):
             for arg in operation.region_args
         }
         initial_array_states = self._initial_loop_array_states(operation, resolver)
+        completed_iterations = cast(
+            sp.Expr,
+            sp.simplify((loop_symbol - start) / step),
+        )
+        body_array_states, body_array_source_tokens = (
+            self._conservative_loop_body_array_states(
+                operation,
+                initial_array_states,
+                completed_iterations=completed_iterations,
+            )
+        )
         context: dict[str, sp.Expr] = dict(carry_symbols)
         if operation.loop_var_value is not None:
             context[operation.loop_var_value.uuid] = loop_symbol
@@ -411,7 +422,7 @@ class _ForRegionInterpreter(_LoopSupportInterpreter):
             extra_loop_vars={operation.loop_var: loop_symbol},
         )
         probe.copy_array_context()
-        self._bind_loop_array_states(operation, probe, initial_array_states)
+        self._bind_loop_array_states(operation, probe, body_array_states)
         for arg in operation.region_args:
             initial_fact = initial_carry_facts[arg.block_arg.uuid]
             probe.bind_classical_fact(
@@ -567,17 +578,6 @@ class _ForRegionInterpreter(_LoopSupportInterpreter):
             extra_loop_vars={operation.loop_var: loop_symbol},
         )
         child.copy_array_context()
-        completed_iterations = cast(
-            sp.Expr,
-            sp.simplify((loop_symbol - start) / step),
-        )
-        body_array_states, body_array_source_tokens = (
-            self._conservative_loop_body_array_states(
-                operation,
-                initial_array_states,
-                completed_iterations=completed_iterations,
-            )
-        )
         self._bind_loop_array_states(operation, child, body_array_states)
         for arg in operation.region_args:
             sources = (

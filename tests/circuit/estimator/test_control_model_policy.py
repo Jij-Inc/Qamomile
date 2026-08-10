@@ -1,12 +1,17 @@
 """Tests for the fixed clean-ancilla coherent-control resource model."""
 
 import pytest
+import sympy as sp
 
 import qamomile.circuit as qmc
 from qamomile.circuit.estimator._config import _ResourceEstimatorConfig
 from qamomile.circuit.estimator._control_decomposition import (
     StaticCleanAncillaBatchProfile,
     static_clean_ancilla_batch_profile,
+)
+from qamomile.circuit.estimator._gate_models import (
+    _classify_gate,
+    _estimate_named_gate,
 )
 from qamomile.circuit.estimator._resolver import ExprResolver
 from qamomile.circuit.estimator.resource_estimator import ResourceInterpreter
@@ -167,3 +172,85 @@ def test_fixed_model_classifies_gate_and_context_dependent_work() -> None:
     ) == StaticCleanAncillaBatchProfile(work=1)
     assert static_clean_ancilla_batch_profile(PauliEvolveOp()) is None
     assert static_clean_ancilla_batch_profile(ForOperation()) is None
+
+
+@pytest.mark.parametrize(
+    "gate_type",
+    [
+        GateOperationType.X,
+        GateOperationType.CX,
+        GateOperationType.RY,
+        GateOperationType.T,
+        GateOperationType.TOFFOLI,
+    ],
+)
+def test_symbolic_zero_control_classification_matches_uncontrolled_gate(
+    gate_type: GateOperationType,
+) -> None:
+    """Every logical gate field matches early zero-control classification."""
+    controls = sp.Symbol("controls", integer=True, nonnegative=True)
+    operation = _gate(gate_type)
+    symbolic = _classify_gate(operation, num_controls=controls)
+    late = qmc.GateResources(
+        **{
+            name: sp.sympify(value).subs(controls, 0)
+            for name, value in vars(symbolic).items()
+        }
+    )
+
+    assert late == _classify_gate(operation, num_controls=0)
+
+
+def test_symbolic_zero_named_gate_estimate_matches_early_binding() -> None:
+    """Estimator-introduced abstract gates preserve zero-control semantics."""
+    controls = sp.Symbol("controls", integer=True, nonnegative=True)
+    symbolic = _estimate_named_gate(
+        "x",
+        controls,
+        control_decomposition=qmc.ControlDecomposition.ABSTRACT,
+    )
+
+    late = symbolic.substitute(controls=0)
+    early = _estimate_named_gate(
+        "x",
+        sp.Integer(0),
+        control_decomposition=qmc.ControlDecomposition.ABSTRACT,
+    )
+
+    assert late.gates == early.gates
+    assert late.depth == early.depth
+
+
+@pytest.mark.parametrize(
+    ("gate_name", "gate_type"),
+    [("t", GateOperationType.T), ("tdg", GateOperationType.TDG)],
+)
+def test_abstract_controlled_t_family_preserves_count_and_depth(
+    gate_name: str,
+    gate_type: GateOperationType,
+) -> None:
+    """Abstract controlled T-family gates retain their family metrics."""
+    interpreter = ResourceInterpreter(
+        config=_ResourceEstimatorConfig(
+            control_decomposition=qmc.ControlDecomposition.ABSTRACT,
+        ),
+        bindings={},
+    )
+    estimates = (
+        interpreter.eval_gate(_gate(gate_type), controls=1),
+        _estimate_named_gate(
+            gate_name,
+            sp.Integer(1),
+            control_decomposition=qmc.ControlDecomposition.ABSTRACT,
+        ),
+    )
+
+    for estimate in estimates:
+        assert estimate.gates.total == 1
+        assert estimate.gates.t == 1
+        assert estimate.gates.rotation == 0
+        assert estimate.gates.non_clifford == 1
+        assert estimate.depth.depth == 1
+        assert estimate.depth.t_depth == 1
+        assert estimate.depth.rotation_depth == 0
+        assert estimate.depth.non_clifford_depth == 1

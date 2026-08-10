@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import subprocess
@@ -27,7 +28,10 @@ from qamomile.circuit.estimator._wire import (
     resource_estimate_from_wire,
     resource_estimate_to_wire,
 )
-from qamomile.circuit.estimator._wire_expression import _WireExpressionDecoder
+from qamomile.circuit.estimator.wire import (
+    ResourceEstimateWireDecoder,
+    ResourceEstimateWireEncoder,
+)
 
 
 @qm.qkernel
@@ -328,6 +332,64 @@ def test_resource_wire_version_five_round_trips() -> None:
     assert restored == estimate
 
 
+def test_resource_wire_round_trips_global_barrier_condition() -> None:
+    """Opaque scheduling barriers retain their condition and symbol identity."""
+    barrier = sp.Dummy("barrier", integer=True, nonnegative=True)
+    estimate = qm.ResourceEstimate(
+        _global_barrier_condition=sp.Gt(barrier, 0),
+    )
+
+    wire = resource_estimate_to_wire(estimate)
+    restored = resource_estimate_from_wire(wire)
+
+    (restored_barrier,) = restored._global_barrier_condition.free_symbols
+    assert "dummy_index=0" in wire["global_barrier_condition"]
+    assert restored_barrier is restored.parameters["barrier"]
+    assert restored._global_barrier_condition == sp.Gt(restored_barrier, 0)
+
+
+def test_resource_wire_schema_accounts_for_every_estimate_field() -> None:
+    """Every ResourceEstimate field is explicitly persisted or boundary-local."""
+    persisted_or_verified = {
+        "width",
+        "gates",
+        "depth",
+        "calls",
+        "assumptions",
+        "trace",
+        "parameters",
+        "derivation",
+        "quality",
+        "approximation",
+        "control_decomposition",
+        "measurements",
+        "resets",
+        "_constraints",
+        "_global_barrier_condition",
+        "_guarded_assumptions",
+        "_guarded_derivations",
+        "_guarded_qualities",
+        "_guarded_approximations",
+        "_symbol_aliases",
+    }
+    caller_or_interpreter_local = {
+        "_allocation_sites",
+        "_output_sizes",
+        "_input_sizes",
+        "_has_output_summary",
+        "_dependency_keys",
+        "_dependency_reads",
+        "_dependency_writes",
+        "_dependency_completion",
+        "_dependency_completion_uniform",
+        "_measurement_taint_conditions",
+    }
+
+    assert {field.name for field in dataclasses.fields(qm.ResourceEstimate)} == (
+        persisted_or_verified | caller_or_interpreter_local
+    )
+
+
 @pytest.mark.parametrize("version", [1, 2, 3, 4])
 def test_resource_wire_rejects_versions_before_five(version: int) -> None:
     """Older payloads cannot be decoded after removing basis provenance."""
@@ -366,6 +428,45 @@ def test_resource_wire_round_trips_large_substituted_capped_range_sum() -> None:
     assert set(restored.parameters) == {"work_per_iteration"}
     assert restored.substitute(work_per_iteration=0).gates.total == 0
     assert restored.substitute(work_per_iteration=1).gates.total == 2
+
+
+def test_resource_wire_capped_sum_preserves_exact_rational_contribution() -> None:
+    """A rational term is multiplied before an integral capped sum is cast."""
+    index = sp.Dummy("index", integer=True, nonnegative=True)
+    iterations = sp.Symbol("iterations", integer=True, nonnegative=True)
+    work = _CappedRangeSum(
+        sp.Lambda(
+            index,
+            sp.Rational(1, 2) + _ConditionIndicator(sp.Lt(index, 0, evaluate=False)),
+        ),
+        sp.Integer(0),
+        sp.Integer(1),
+        iterations,
+        evaluate=False,
+    )
+    estimate = qm.ResourceEstimate(gates=qm.GateResources(total=work))
+
+    restored = resource_estimate_from_wire(resource_estimate_to_wire(estimate))
+
+    assert restored.substitute(iterations=4).gates.total == 2
+
+
+def test_resource_wire_capped_sum_rejects_nonintegral_total() -> None:
+    """A fully resolved capped sum cannot silently truncate a rational total."""
+    index = sp.Dummy("index", integer=True, nonnegative=True)
+    iterations = sp.Symbol("iterations", integer=True, nonnegative=True)
+    work = _CappedRangeSum(
+        sp.Lambda(index, sp.Rational(1, 2)),
+        sp.Integer(0),
+        sp.Integer(1),
+        iterations,
+        evaluate=False,
+    )
+    estimate = qm.ResourceEstimate(gates=qm.GateResources(total=work))
+    restored = resource_estimate_from_wire(resource_estimate_to_wire(estimate))
+
+    with pytest.raises(ValueError, match="nonnegative integer total"):
+        restored.substitute(iterations=3)
 
 
 def test_resource_wire_round_trips_supported_symbolic_constructors() -> None:
@@ -539,17 +640,11 @@ def test_shared_wire_stream_preserves_shared_dummy_identity() -> None:
     shared_symbol = sp.Dummy("n", integer=True, nonnegative=True)
     left = qm.ResourceEstimate(gates=qm.GateResources(total=shared_symbol))
     right = qm.ResourceEstimate(gates=qm.GateResources(total=shared_symbol))
-    dummy_slots: dict[sp.Dummy, int] = {}
-    decoder = _WireExpressionDecoder()
+    encoder = ResourceEstimateWireEncoder()
+    decoder = ResourceEstimateWireDecoder()
 
-    restored_left = resource_estimate_from_wire(
-        resource_estimate_to_wire(left, dummy_slots=dummy_slots),
-        decoder=decoder,
-    )
-    restored_right = resource_estimate_from_wire(
-        resource_estimate_to_wire(right, dummy_slots=dummy_slots),
-        decoder=decoder,
-    )
+    restored_left = decoder(encoder(left))
+    restored_right = decoder(encoder(right))
     (left_symbol,) = restored_left.gates.total.free_symbols
     (right_symbol,) = restored_right.gates.total.free_symbols
     combined = restored_left.seq(restored_right)

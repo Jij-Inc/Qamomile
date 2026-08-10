@@ -1182,6 +1182,33 @@ def test_selected_direct_body_restores_interleaved_declaration_order() -> None:
     assert selection.results == tuple(operation.results[1:])
 
 
+def test_selected_direct_call_restores_interleaved_declaration_order() -> None:
+    """A direct call aligns grouped actuals to declaration-ordered formals."""
+    formal_selector = Value(type=UIntType(), name="formal_selector")
+    formal_target = Value(type=QubitType(), name="formal_target")
+    body = Block(
+        input_values=[formal_selector, formal_target],
+        output_values=[formal_selector, formal_target],
+    )
+    target = Value(type=QubitType(), name="target")
+    selector = Value(type=UIntType(), name="selector")
+    target_result = target.next_version()
+    selector_result = selector.next_version()
+    operation = InvokeOperation(
+        operands=[target, selector],
+        results=[target_result, selector_result],
+        definition=CallableDef(
+            ref=CallableRef(namespace="test", name="interleaved_direct_body"),
+            body=body,
+        ),
+    )
+
+    selection = operation.select_body()
+
+    assert selection.operands == (selector, target)
+    assert selection.results == (selector_result, target_result)
+
+
 def test_selected_body_width_uses_exact_resource_contract() -> None:
     """An exact width contract resolves statically bound symbolic arrays."""
     formal_signal_size = Value(type=UIntType(), name="formal_signal_size")
@@ -2040,6 +2067,55 @@ def test_batch_profile_stops_after_a_decisive_loop_iteration(
 
     assert profile.weight == 2
     assert profile.selects_exact_two
+    assert calls == 1
+
+
+def test_batch_profile_closes_context_free_direct_loop_without_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A large direct-only loop profiles its context-free body once."""
+    loop_var = Value(type=UIntType(), name="iteration")
+    operation = ForOperation(
+        operands=[
+            Value(type=UIntType(), name="start").with_const(0),
+            Value(type=UIntType(), name="stop").with_const(1_000_000),
+            Value(type=UIntType(), name="step").with_const(1),
+        ],
+        loop_var="iteration",
+        loop_var_value=loop_var,
+        operations=[_fixed_gate(GateOperationType.X, 1)],
+    )
+    calls = 0
+    original_profile = controlled_emission._batch_op_profile
+
+    def counting_profile(*args: Any, **kwargs: Any) -> Any:
+        """Count one body inspection while preserving real classification.
+
+        Args:
+            *args (Any): Positional arguments for the real profiler.
+            **kwargs (Any): Keyword arguments for the real profiler.
+
+        Returns:
+            Any: Profile returned by the real implementation.
+        """
+        nonlocal calls
+        calls += 1
+        return original_profile(*args, **kwargs)
+
+    monkeypatch.setattr(
+        controlled_emission,
+        "_batch_op_profile",
+        counting_profile,
+    )
+
+    profile = controlled_emission._for_batch_profile(
+        _ResolverOnlyEmitPass(),
+        operation,
+        {},
+    )
+
+    assert profile.weight == 2
+    assert not profile.selects_exact_two
     assert calls == 1
 
 

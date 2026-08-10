@@ -582,6 +582,27 @@ def _max_width(left: WidthResources, right: WidthResources) -> WidthResources:
     )
 
 
+def _active_gate_family_depth(
+    value: ResourceExpr,
+    *,
+    active: ResourceExpr,
+) -> ResourceExpr:
+    """Return one active layer when a gate-family count is positive.
+
+    Args:
+        value (ResourceExpr): Possibly symbolic gate-family count.
+        active (ResourceExpr): Overall primitive activation indicator.
+
+    Returns:
+        ResourceExpr: Overall activation guarded by a positive family count.
+    """
+    if value == _ZERO:
+        return _ZERO
+    if value == _ONE:
+        return active
+    return _piecewise(active, _ZERO, sp.Gt(value, _ZERO))
+
+
 def _depth_from_gate_resources(gates: GateResources) -> DepthResources:
     """Create a primitive depth estimate from gate resources.
 
@@ -597,11 +618,14 @@ def _depth_from_gate_resources(gates: GateResources) -> DepthResources:
     )
     return DepthResources(
         depth=active,
-        clifford_depth=active if gates.clifford != 0 else _ZERO,
-        rotation_depth=active if gates.rotation != 0 else _ZERO,
-        t_depth=active if gates.t != 0 else _ZERO,
-        toffoli_depth=active if gates.toffoli != 0 else _ZERO,
-        non_clifford_depth=active if gates.non_clifford != 0 else _ZERO,
+        clifford_depth=_active_gate_family_depth(gates.clifford, active=active),
+        rotation_depth=_active_gate_family_depth(gates.rotation, active=active),
+        t_depth=_active_gate_family_depth(gates.t, active=active),
+        toffoli_depth=_active_gate_family_depth(gates.toffoli, active=active),
+        non_clifford_depth=_active_gate_family_depth(
+            gates.non_clifford,
+            active=active,
+        ),
         gate_depth=active,
     )
 

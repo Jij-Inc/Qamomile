@@ -11,8 +11,12 @@ import pytest
 import sympy as sp
 
 import qamomile.circuit as qmc
+import qamomile.circuit.estimator._call_liveness as call_liveness_module
 import qamomile.circuit.estimator._config as config_module
 import qamomile.circuit.estimator._gate_catalog as gate_catalog_module
+import qamomile.circuit.estimator._interpreter_calls as interpreter_calls_module
+import qamomile.circuit.estimator._interpreter_for as interpreter_for_module
+import qamomile.circuit.estimator._interpreter_for_items as interpreter_for_items_module
 import qamomile.circuit.estimator._interpreter_loop_support as loop_support_module
 import qamomile.circuit.estimator._interpreter_region_analysis as region_analysis_module
 import qamomile.circuit.estimator._loop_scheduling as loop_scheduling_module
@@ -27,8 +31,18 @@ import qamomile.observable.hamiltonian as hamiltonian_module
 from qamomile.circuit.estimator import resource_estimator as estimator_module
 from qamomile.circuit.estimator._resolver import ExprResolver
 from qamomile.circuit.estimator._resource_constraints import _ResourceConstraint
-from qamomile.circuit.ir.operation.control_flow import ForOperation
-from qamomile.circuit.ir.operation.gate import GateOperationType
+from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.operation.callable import (
+    CallableDef,
+    CallableRef,
+    InvokeOperation,
+)
+from qamomile.circuit.ir.operation.control_flow import ForOperation, IfOperation
+from qamomile.circuit.ir.operation.expval import ExpvalOp
+from qamomile.circuit.ir.operation.gate import GateOperationType, MeasureOperation
+from qamomile.circuit.ir.types.hamiltonian import ObservableType
+from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType
+from qamomile.circuit.ir.value import Value
 from tests.circuit.qkernel_catalog import grover_network_decomposition
 
 
@@ -112,29 +126,6 @@ def test_public_resource_types_retain_owner_introspection() -> None:
 def test_legacy_resource_pickle_globals_resolve_after_split() -> None:
     """Legacy module globals still resolve to the relocated class objects."""
     legacy_globals = {
-        "qamomile.circuit.estimator._metrics": (
-            "ControlDecomposition",
-            "EstimateDerivation",
-            "EstimateQuality",
-            "ApproximationStatus",
-            "ResourceAssumption",
-            "_GuardedAssumption",
-            "_GuardedDerivation",
-            "_GuardedQuality",
-            "_GuardedApproximation",
-            "WidthResources",
-            "GateResources",
-            "MeasurementResources",
-            "ResetResources",
-            "DepthResources",
-            "CallResources",
-            "ResourceTraceNode",
-            "_ConstraintRange",
-            "_ResourceConstraint",
-            "_ConditionIndicator",
-            "_RangeAny",
-            "_RangeAtLeastTwo",
-        ),
         "qamomile.circuit.estimator.resource_estimator": (
             "_ResourceInlineBoundaryOperation",
             "_CappedRangeSum",
@@ -160,6 +151,7 @@ def test_legacy_resource_pickle_globals_resolve_after_split() -> None:
 
 def test_ir_gate_arity_profile_is_exhaustive_and_disjoint() -> None:
     """Every IR gate has one explicit arity without synthetic-name fallback."""
+    gate_catalog_module._validate_ir_gate_arity_profiles()
     assert set(gate_catalog_module._GATE_OPERATION_ARITY) == set(GateOperationType)
     assert set(gate_catalog_module._GATE_OPERATION_ARITY.values()) <= {1, 2, 3}
     assert gate_catalog_module._CLEAN_ANCILLA_EXPLICIT_MULTI_TARGET_GATE_TYPES == {
@@ -174,6 +166,20 @@ def test_ir_gate_arity_profile_is_exhaustive_and_disjoint() -> None:
         | gate_catalog_module._SYNTHETIC_MULTI_QUBIT_GATE_NAMES
     )
     assert ir_names.isdisjoint(synthetic_names)
+
+
+def test_ir_gate_arity_validator_rejects_overlapping_profiles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The source profiles expose overlap hidden by the merged arity mapping."""
+    monkeypatch.setattr(
+        gate_catalog_module,
+        "_IR_SINGLE_QUBIT_GATE_TYPES",
+        gate_catalog_module._IR_SINGLE_QUBIT_GATE_TYPES | {GateOperationType.CX},
+    )
+
+    with pytest.raises(RuntimeError, match=r"duplicated=\['CX'\]"):
+        gate_catalog_module._validate_ir_gate_arity_profiles()
 
 
 def test_runtime_observation_analysis_is_cached_by_block_identity(
@@ -265,6 +271,45 @@ def test_interpreter_reuse_restores_root_condition_values() -> None:
     assert interpreter.branch_condition_names == {"second_flag"}
 
 
+def test_call_body_restores_interpreter_state_when_preparation_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed call setup leaves the interpreter reusable."""
+    block = Block(name="callee")
+    interpreter = estimator_module.ResourceInterpreter(
+        config=config_module._ResourceEstimatorConfig(),
+        bindings={"sentinel": sp.Integer(7)},
+    )
+    original_bindings = interpreter.bindings
+    original_taint = interpreter._run_state.measurement_taint_conditions
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            interpreter_calls_module,
+            "_merge_measurement_taint_conditions",
+            Mock(side_effect=RuntimeError("taint merge failed")),
+        )
+        with pytest.raises(RuntimeError, match="taint merge failed"):
+            interpreter._eval_call_body(
+                block,
+                ExprResolver(block=block),
+                [],
+                controls=0,
+            )
+
+    assert interpreter.bindings is original_bindings
+    assert interpreter._run_state.measurement_taint_conditions is original_taint
+    assert interpreter._run_state.active_call_states == {}
+
+    estimate = interpreter._eval_call_body(
+        block,
+        ExprResolver(block=block),
+        [],
+        controls=0,
+    )
+    assert estimate.gates.total == 0
+
+
 def test_eval_operations_reuses_precomputed_wire_footprints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -309,6 +354,80 @@ def test_affine_loop_uses_symbolic_disjointness_before_enumeration(
     assert estimate.gates.total == 64
     assert estimate.depth.depth == 1
     assert estimate.quality is qmc.EstimateQuality.EXACT
+
+
+def test_observation_free_concrete_loop_skips_consumption_resolvers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A unitary loop does not construct per-iteration liveness resolvers."""
+
+    @qmc.qkernel
+    def circuit() -> qmc.Vector[qmc.Qubit]:
+        """Apply one gate to every slot without destructive observation."""
+        register = qmc.qubit_array(256, "register")
+        for index in qmc.range(256):
+            register[index] = qmc.h(register[index])
+        return register
+
+    local_block = Mock(wraps=interpreter_for_module._LocalBlock)
+    monkeypatch.setattr(interpreter_for_module, "_LocalBlock", local_block)
+
+    estimate = circuit.estimate_resources()
+
+    assert estimate.gates.total == 256
+    local_block.assert_not_called()
+
+
+def test_loop_observation_scan_keeps_invoke_definitions_opaque() -> None:
+    """The fast-path scan matches nested-region and invoke boundaries."""
+    source = Value(type=QubitType(), name="source")
+    result = Value(type=BitType(), name="result")
+    measurement = MeasureOperation(operands=[source], results=[result])
+    observable = Value(type=ObservableType(), name="observable")
+    expectation = Value(type=FloatType(), name="expectation")
+    expval = ExpvalOp(
+        operands=[source, observable],
+        results=[expectation],
+    )
+    nested = IfOperation(true_operations=[measurement])
+    nested_expval = IfOperation(false_operations=[expval])
+    invocation = InvokeOperation(
+        definition=CallableDef(
+            ref=CallableRef(namespace="test", name="measured_helper"),
+            body=Block(operations=[measurement]),
+        )
+    )
+
+    assert call_liveness_module._loop_body_has_destructive_observation([measurement])
+    assert call_liveness_module._loop_body_has_destructive_observation([expval])
+    assert call_liveness_module._loop_body_has_destructive_observation([nested])
+    assert call_liveness_module._loop_body_has_destructive_observation([nested_expval])
+    assert not call_liveness_module._loop_body_has_destructive_observation([invocation])
+
+
+def test_observation_free_concrete_items_skip_entry_consumption_resolvers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A unitary items loop builds no entry-specific liveness resolvers."""
+
+    @qmc.qkernel
+    def circuit(
+        data: qmc.Dict[qmc.UInt, qmc.Float],
+    ) -> qmc.Vector[qmc.Qubit]:
+        """Apply one gate to the register slot selected by each item key."""
+        register = qmc.qubit_array(256, "register")
+        for index, _value in qmc.items(data):
+            register[index] = qmc.h(register[index])
+        return register
+
+    local_block = Mock(wraps=interpreter_for_items_module._LocalBlock)
+    monkeypatch.setattr(interpreter_for_items_module, "_LocalBlock", local_block)
+
+    data = {index: 0.0 for index in range(256)}
+    estimate = circuit.estimate_resources(inputs={"data": data})
+
+    assert estimate.gates.total == 256
+    assert local_block.call_count == len(data) + 1
 
 
 def test_nonlinear_loop_falls_back_to_concrete_disjointness(
@@ -441,6 +560,21 @@ def test_resource_max_fallback_avoids_sympy_relation_proofs(
 
     assert isinstance(maximum, sp.Max)
     assert set(maximum.args) == {left, right}
+
+
+def test_resource_max_requires_a_nonnegative_shared_factor() -> None:
+    """Coefficient ordering cannot cancel an unproven-sign common factor."""
+    factor = sp.Symbol("factor")
+    maximum = resource_bounds_module._resource_max(-2 * factor, -factor)
+
+    assert isinstance(maximum, sp.Max)
+    assert maximum.subs(factor, -1) == 2
+
+    nonnegative = sp.Symbol("nonnegative", nonnegative=True)
+    assert (
+        resource_bounds_module._resource_max(nonnegative, 2 * nonnegative)
+        == 2 * nonnegative
+    )
 
 
 def test_structural_nonnegativity_translates_single_nested_extremum() -> None:

@@ -69,6 +69,7 @@ from qamomile.circuit.estimator._inputs import (
     _root_input_binding_context,
     _scalar_values,
     _substitute_bindings,
+    _validate_explicit_estimation_inputs,
 )
 from qamomile.circuit.estimator._interpreter import ResourceInterpreter
 from qamomile.circuit.estimator._interpreter_dataflow import (
@@ -239,7 +240,10 @@ class ResourceEstimator:
             NotImplementedError: If the input contains an unsupported
                 construct.
         """
-        explicit_inputs = dict(inputs or {})
+        explicit_inputs = _validate_explicit_estimation_inputs(
+            kernel,
+            inputs or {},
+        )
         root_callable_attrs = _root_callable_resource_attrs(kernel)
         build_inputs, estimation_inputs = _partition_estimation_inputs(
             kernel,
@@ -389,6 +393,12 @@ class ResourceEstimator:
 
         Returns:
             Block | Sequence[Operation]: IR object ready for interpretation.
+
+        Raises:
+            TypeError: If a concrete build-time input cannot be converted to
+                its declared qkernel type.
+            ValueError: If a concrete build-time input violates its declared
+                domain or structural contract.
         """
         if isinstance(kernel, Block):
             return kernel
@@ -397,7 +407,15 @@ class ResourceEstimator:
         build = getattr(kernel, "build", None)
         if callable(build):
             parameters = _estimator_parameters(kernel, build_inputs)
-            return build(parameters=parameters, **build_inputs)
+            try:
+                return build(parameters=parameters, **build_inputs)
+            except (TypeError, ValueError) as error:
+                names = ", ".join(repr(name) for name in sorted(build_inputs))
+                if not names:
+                    raise
+                raise type(error)(
+                    f"resource estimation could not bind input(s) {names}: {error}"
+                ) from error
         block = getattr(kernel, "block", None)
         if isinstance(block, Block):
             return block

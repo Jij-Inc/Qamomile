@@ -125,10 +125,12 @@ _trotter_evolve = _trotter_evolve._clone_with_callable_attrs(
         qkernel_callable_attrs(_trotter_evolve),
         ProductFormulaContract(
             kind="suzuki_trotter",
-            hamiltonian_operand=1,
-            order_operand=2,
-            time_operand=3,
-            steps_operand=4,
+            operands={
+                "hamiltonian_operand": 1,
+                "order_operand": 2,
+                "time_operand": 3,
+                "steps_operand": 4,
+            },
         ),
         source="_trotter_evolve",
         operand_count=5,

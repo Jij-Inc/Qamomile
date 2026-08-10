@@ -241,11 +241,19 @@ def _expand_array_shape_inputs(
         for dimension in value.shape
     }
     for dimension_uuid, dimension_name in shape_aliases.items():
-        if dimension_name in inputs and isinstance(inputs[dimension_name], bool):
-            raise ValueError(
-                f"array dimension input '{dimension_name}' requires a numeric "
-                "integer or symbolic expression; bool is not a dimension."
-            )
+        if dimension_name in inputs:
+            dimension_input = inputs[dimension_name]
+            if isinstance(dimension_input, bool):
+                raise ValueError(
+                    f"array dimension input '{dimension_name}' requires a numeric "
+                    "integer or symbolic expression; bool is not a dimension."
+                )
+            if isinstance(dimension_input, (str, bytes)):
+                raise TypeError(
+                    f"array dimension input '{dimension_name}' requires a numeric "
+                    f"integer or explicit SymPy expression, got "
+                    f"{type(dimension_input).__name__} ({dimension_input!r})."
+                )
         dimension = dimensions_by_uuid[dimension_uuid]
         if dimension_name in inputs and dimension.is_constant():
             expected = dimension.get_const()
@@ -325,8 +333,17 @@ def _input_values_equal(left: Any, right: Any) -> bool:
     """
     if isinstance(left, bool) or isinstance(right, bool):
         return left is right
+    if isinstance(left, (str, bytes)) or isinstance(right, (str, bytes)):
+        return False
+    if not isinstance(left, (numbers.Number, sp.Basic)) or not isinstance(
+        right,
+        (numbers.Number, sp.Basic),
+    ):
+        return False
     try:
-        difference = sp.sympify(left) - sp.sympify(right)
+        normalized_left = cast(ResourceExpr, sp.sympify(left))
+        normalized_right = cast(ResourceExpr, sp.sympify(right))
+        difference = normalized_left - normalized_right
     except (TypeError, ValueError, sp.SympifyError):
         return False
     return _safe_simplify(cast(ResourceExpr, difference)) == _ZERO
