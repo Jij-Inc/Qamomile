@@ -7,6 +7,7 @@ from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 import sympy as sp
+from sympy.logic.boolalg import Boolean
 
 from qamomile.circuit.estimator._dependency_indices import (
     _MAX_EXACT_LOOP_WIRE_EXPANSION,
@@ -21,6 +22,8 @@ from qamomile.circuit.estimator._resource_base import (
     _is_concrete_integer,
 )
 from qamomile.circuit.estimator._resource_expressions import (
+    _activation_over_range,
+    _boolean_condition,
     _ConditionIndicator,
     _expr,
     _resource_activity_condition,
@@ -103,6 +106,177 @@ def _merge_dependency_accesses(
     if left_accesses is None or right_accesses is None:
         return None
     return left_accesses | right_accesses
+
+
+def _merge_synchronized_entry_conditions(
+    *condition_maps: Mapping[WireKey, sp.Basic],
+) -> dict[WireKey, Boolean]:
+    """Merge guarded synchronized-entry requirements by physical wire.
+
+    Args:
+        *condition_maps (Mapping[WireKey, sp.Basic]): Requirement conditions
+            to combine.
+
+    Returns:
+        dict[WireKey, Boolean]: Conditions merged with logical OR for each
+        physical wire.
+    """
+    merged: dict[WireKey, Boolean] = {}
+    for conditions in condition_maps:
+        for key, condition in conditions.items():
+            active = _boolean_condition(condition)
+            if active is sp.false:
+                continue
+            merged[key] = _boolean_condition(sp.Or(merged.get(key, sp.false), active))
+    return merged
+
+
+def _synchronized_entry_activity_condition(
+    estimate: ResourceEstimate,
+) -> Boolean:
+    """Return when an estimate requires synchronized input-wire readiness.
+
+    Args:
+        estimate (ResourceEstimate): Estimate carrying guarded entry
+            requirements.
+
+    Returns:
+        Boolean: Logical union of every guarded entry requirement.
+    """
+    conditions = estimate._dependency_synchronized_entry_conditions.values()
+    return cast(
+        Boolean,
+        sp.Or(*conditions) if conditions else sp.false,
+    )
+
+
+def _synchronized_entry_condition_symbols(
+    estimate: ResourceEstimate,
+) -> set[sp.Symbol]:
+    """Return symbols used by synchronized-entry activation guards.
+
+    These guards are scheduler-local metadata rather than public resource
+    expressions. Loop aggregation still needs to see their bound induction
+    symbols so it does not choose a binder-independent repetition shortcut.
+
+    Args:
+        estimate (ResourceEstimate): Estimate carrying guarded entry
+            requirements.
+
+    Returns:
+        set[sp.Symbol]: Free symbols used by the requirement conditions.
+    """
+    return cast(
+        set[sp.Symbol],
+        {
+            symbol
+            for condition in estimate._dependency_synchronized_entry_conditions.values()
+            for symbol in condition.free_symbols
+        },
+    )
+
+
+def _dependency_completion_symbols(
+    estimate: ResourceEstimate,
+) -> set[sp.Symbol]:
+    """Return symbols used only by per-wire completion metadata.
+
+    Completion expressions are scheduler-local rather than public resource
+    fields, but a loop binder appearing only here still requires range-aware
+    aggregation so that it cannot escape its scope.
+
+    Args:
+        estimate (ResourceEstimate): Estimate carrying per-wire completion
+            metadata.
+
+    Returns:
+        set[sp.Symbol]: Free symbols used by completion expressions.
+    """
+    completion = estimate._dependency_completion or {}
+    return cast(
+        set[sp.Symbol],
+        {
+            symbol
+            for depth in completion.values()
+            for symbol in sp.sympify(depth).free_symbols
+        },
+    )
+
+
+def _dependency_metadata_symbols(
+    estimate: ResourceEstimate,
+) -> set[sp.Symbol]:
+    """Return symbols retained only by dependency-scheduling metadata.
+
+    Args:
+        estimate (ResourceEstimate): Estimate carrying dependency keys,
+            completion expressions, and synchronized-entry conditions.
+
+    Returns:
+        set[sp.Symbol]: Free symbols used by private dependency metadata.
+    """
+
+    def key_symbols(key: WireKey) -> set[sp.Symbol]:
+        """Return symbolic variables retained by one wire address.
+
+        Args:
+            key (WireKey): Allocation owner and scalar or range address.
+
+        Returns:
+            set[sp.Symbol]: Free symbols used by the wire address.
+        """
+        index = key[1]
+        if isinstance(index, _WireRangeIndex):
+            return cast(
+                set[sp.Symbol],
+                sp.sympify(index.index_at_offset).free_symbols
+                | sp.sympify(index.iterations).free_symbols,
+            )
+        if isinstance(index, sp.Expr):
+            return cast(set[sp.Symbol], index.free_symbols)
+        return set()
+
+    symbols = _dependency_completion_symbols(estimate)
+    symbols.update(_synchronized_entry_condition_symbols(estimate))
+    key_groups: tuple[Iterable[WireKey], ...] = (
+        estimate._dependency_keys or (),
+        estimate._dependency_reads or (),
+        estimate._dependency_writes or (),
+        (estimate._dependency_completion or {}).keys(),
+        estimate._dependency_synchronized_entry_conditions.keys(),
+    )
+    for keys in key_groups:
+        for key in keys:
+            symbols.update(key_symbols(key))
+    return symbols
+
+
+def _dependency_keys_depend_on_symbol(
+    keys: frozenset[WireKey] | None,
+    symbol: sp.Symbol,
+) -> bool:
+    """Return whether a dependency footprint retains one local symbol.
+
+    Args:
+        keys (frozenset[WireKey] | None): Evaluated dependency footprint, or
+            ``None`` when no precise footprint is available.
+        symbol (sp.Symbol): Loop-local symbol to find.
+
+    Returns:
+        bool: Whether a scalar address or symbolic range uses ``symbol``.
+    """
+    if keys is None:
+        return False
+    for _owner, index in keys:
+        if isinstance(index, _WireRangeIndex):
+            if symbol in (
+                sp.sympify(index.index_at_offset).free_symbols
+                | sp.sympify(index.iterations).free_symbols
+            ):
+                return True
+        elif isinstance(index, sp.Expr) and symbol in index.free_symbols:
+            return True
+    return False
 
 
 def _project_dependency_metadata_over_symbol(
@@ -217,6 +391,43 @@ def _project_dependency_metadata_over_symbol(
             for value in concrete_values
         )
 
+    def project_at_value(key: WireKey, value: sp.Integer) -> WireKey:
+        """Project one key for one concrete loop value.
+
+        Args:
+            key (WireKey): Body-scoped dependency address.
+            value (sp.Integer): Concrete induction value.
+
+        Returns:
+            WireKey: Address specialized to that one iteration.
+        """
+        owner, index = key
+        if isinstance(index, _WireRangeIndex):
+            symbols = index.index_at_offset.free_symbols | index.iterations.free_symbols
+            return (
+                owner,
+                index.mapped(
+                    lambda expression: expression.subs(
+                        symbol,
+                        value,
+                        simultaneous=True,
+                    )
+                )
+                if symbol in symbols
+                else index,
+            )
+        if isinstance(index, sp.Expr) and symbol in index.free_symbols:
+            return (
+                owner,
+                _normalize_wire_index(
+                    cast(
+                        ResourceExpr,
+                        index.subs(symbol, value, simultaneous=True),
+                    )
+                ),
+            )
+        return key
+
     keys = estimate._dependency_keys
     projected_keys = (
         frozenset(projected for key in keys for projected in project(key))
@@ -247,12 +458,48 @@ def _project_dependency_metadata_over_symbol(
                     projected_completion.get(projected, _ZERO),
                     depth,
                 )
+    projected_entry_conditions: dict[WireKey, Boolean] = {}
+    for key, condition in estimate._dependency_synchronized_entry_conditions.items():
+        if concrete_values is not None:
+            for value in concrete_values:
+                active = _boolean_condition(
+                    condition.subs(symbol, value, simultaneous=True)
+                )
+                if active is sp.false:
+                    continue
+                projected = project_at_value(key, value)
+                projected_entry_conditions[projected] = _boolean_condition(
+                    sp.Or(
+                        projected_entry_conditions.get(projected, sp.false),
+                        active,
+                    )
+                )
+            continue
+        active = _boolean_condition(
+            _activation_over_range(
+                condition,
+                symbol,
+                start_expr,
+                step_expr,
+                iterations_expr,
+            )
+        )
+        if active is sp.false:
+            continue
+        for projected in project(key):
+            projected_entry_conditions[projected] = _boolean_condition(
+                sp.Or(
+                    projected_entry_conditions.get(projected, sp.false),
+                    active,
+                )
+            )
     return dataclasses.replace(
         estimate,
         _dependency_keys=projected_keys,
         _dependency_reads=projected_reads,
         _dependency_writes=projected_writes,
         _dependency_completion=projected_completion,
+        _dependency_synchronized_entry_conditions=projected_entry_conditions,
     )
 
 
@@ -410,6 +657,34 @@ def _map_dependency_completion(
                 mapped.get(mapped_key, _ZERO),
                 rewritten,
             )
+    return mapped
+
+
+def _map_synchronized_entry_conditions(
+    conditions: Mapping[WireKey, sp.Basic],
+    key_fn: Any,
+    guard_fn: Any,
+) -> dict[WireKey, Boolean]:
+    """Rewrite guarded synchronized-entry addresses and conditions.
+
+    Args:
+        conditions (Mapping[WireKey, sp.Basic]): Requirements to rewrite.
+        key_fn (Any): Symbolic rewrite callable for wire indices.
+        guard_fn (Any): Symbolic rewrite callable for Boolean conditions.
+
+    Returns:
+        dict[WireKey, Boolean]: Rewritten nonfalse requirements with colliding
+        addresses merged by logical OR.
+    """
+    mapped: dict[WireKey, Boolean] = {}
+    for key, condition in conditions.items():
+        active = _boolean_condition(guard_fn(condition))
+        if active is sp.false:
+            continue
+        mapped_key = _map_dependency_key(key, key_fn)
+        mapped[mapped_key] = _boolean_condition(
+            sp.Or(mapped.get(mapped_key, sp.false), active)
+        )
     return mapped
 
 

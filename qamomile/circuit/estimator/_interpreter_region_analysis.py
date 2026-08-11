@@ -37,6 +37,7 @@ from qamomile.circuit.estimator._dependency_footprints import (
 )
 from qamomile.circuit.estimator._dependency_indices import WireKey
 from qamomile.circuit.estimator._dependency_metadata import (
+    _merge_synchronized_entry_conditions,
     _normalized_dependency_completion,
 )
 from qamomile.circuit.estimator._estimate import ResourceEstimate
@@ -84,6 +85,7 @@ from qamomile.circuit.estimator._scheduling import (
     _merge_dependency_keys,
     _operation_has_uniform_intrinsic_completion,
     _scheduled_depth_activity_conditions,
+    _synchronized_entry_overlap_condition,
 )
 from qamomile.circuit.estimator._scheduling_classical_sources import (
     _scheduling_classical_input_sources,
@@ -412,6 +414,23 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
                         footprint_keys,
                         surrounding_controls=_expr(control_count),
                     )
+                synchronized_entry_conditions: dict[WireKey, Boolean] = {}
+                for (
+                    key,
+                    condition,
+                ) in (
+                    operation_estimate._dependency_synchronized_entry_conditions.items()
+                ):
+                    expanded_keys = _expand_dependency_owner_aliases(
+                        {key},
+                        self._run_state.dependency_owner_aliases,
+                    )
+                    synchronized_entry_conditions = (
+                        _merge_synchronized_entry_conditions(
+                            synchronized_entry_conditions,
+                            {expanded_key: condition for expanded_key in expanded_keys},
+                        )
+                    )
                 wire_footprints.append(
                     (
                         frozenset((*reads, *classical_reads)),
@@ -446,6 +465,9 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
                     _dependency_keys=footprint_keys,
                     _dependency_completion=operation_completion,
                     _dependency_completion_uniform=completion_uniform,
+                    _dependency_synchronized_entry_conditions=(
+                        synchronized_entry_conditions
+                    ),
                 )
                 scheduled_with_dependencies.append((operation, operation_estimate))
             scheduled = scheduled_with_dependencies
@@ -493,12 +515,24 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
                 depth_footprints,
                 activity_conditions=depth_activity_conditions,
             )
+            synchronized_entry_active = _synchronized_entry_overlap_condition(
+                scheduled,
+                depth_footprints,
+                activity_conditions=depth_activity_conditions,
+            )
             liveness = _liveness_width(
                 scheduled,
                 initial_allocations or {},
                 resolver,
                 allocation_owners_by_uuid=self._run_state.allocation_owners_by_uuid,
             )
+            body_owned_allocation_owners = {
+                operation.results[0].logical_id
+                for operation in operations
+                if isinstance(operation, QInitOperation)
+                and operation.results
+                and operation.results[0].logical_id not in (initial_allocations or {})
+            }
             result = dataclasses.replace(
                 estimate,
                 depth=scheduled_depth,
@@ -537,6 +571,13 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
                     if key in dependency_keys
                 },
                 _dependency_completion_uniform=completion_is_uniform,
+                _dependency_synchronized_entry_conditions={
+                    key: condition
+                    for key, condition in (
+                        estimate._dependency_synchronized_entry_conditions.items()
+                    )
+                    if key[0] not in body_owned_allocation_owners
+                },
                 _output_sizes=liveness.final_live_by_owner,
                 _input_sizes=dict(initial_allocations or {}),
                 _has_output_summary=True,
@@ -565,6 +606,17 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
                     assumptions=(assumption,),
                     quality=EstimateQuality.CONSERVATIVE,
                     active_when=aggregate_completion_active,
+                )
+            if synchronized_entry_active is not sp.false:
+                assumption = ResourceAssumption(
+                    "aggregate loop depth assumes synchronized input wires, "
+                    "but prior overlapping work may desynchronize them",
+                    source="dependency scheduler",
+                )
+                result = result._with_metadata(
+                    assumptions=(assumption,),
+                    quality=EstimateQuality.CONSERVATIVE,
+                    active_when=synchronized_entry_active,
                 )
             return result
         finally:

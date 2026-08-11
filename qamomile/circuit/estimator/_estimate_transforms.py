@@ -23,6 +23,12 @@ from qamomile.circuit.estimator._allocation_width import (
     _activate_allocation_sites,
 )
 from qamomile.circuit.estimator._constants import _ONE, _ZERO
+from qamomile.circuit.estimator._dependency_exactness import (
+    _has_single_serializing_quantum_dependency,
+)
+from qamomile.circuit.estimator._dependency_metadata import (
+    _synchronized_entry_activity_condition,
+)
 from qamomile.circuit.estimator._estimate_provenance import (
     _estimate_has_control_sensitive_resources,
     _with_estimate_metadata,
@@ -52,6 +58,7 @@ from qamomile.circuit.estimator._resource_base import (
 )
 from qamomile.circuit.estimator._resource_constraints import _ResourceConstraint
 from qamomile.circuit.estimator._resource_expressions import (
+    _boolean_condition,
     _ConditionIndicator,
     _expr,
     _resource_activity_condition,
@@ -61,6 +68,9 @@ from qamomile.circuit.estimator._resource_types import (
     ResourceAssumption,
     WidthResources,
 )
+from qamomile.circuit.estimator._scheduling import (
+    _estimate_depth_activity_condition,
+)
 
 if TYPE_CHECKING:
     from qamomile.circuit.estimator._estimate import ResourceEstimate
@@ -69,12 +79,18 @@ if TYPE_CHECKING:
 def _repeat_estimate(
     estimate: ResourceEstimate,
     factor: ResourceExpr | int,
+    *,
+    conservative_nonuniform: bool = False,
+    nonuniform_source: str = "repeat",
 ) -> ResourceEstimate:
     """Repeat an estimate while reusing its width.
 
     Args:
         estimate (ResourceEstimate): Estimate to repeat.
         factor (ResourceExpr | int): Iteration or power factor.
+        conservative_nonuniform (bool): Whether to disclose that scalar depth
+            scaling may over-serialize a nonuniform per-wire completion map.
+        nonuniform_source (str): Source label for that disclosure.
 
     Returns:
         ResourceEstimate: Repeated estimate.
@@ -137,7 +153,7 @@ def _repeat_estimate(
                     _ConditionIndicator(
                         sp.And(
                             active_when,
-                            _resource_activity_condition(completion),
+                            _resource_activity_condition(_expr(completion)),
                         )
                     )
                     * ((factor_expr - _ONE) * estimate.depth.depth + completion),
@@ -148,6 +164,17 @@ def _repeat_estimate(
             else None
         ),
         _dependency_completion_uniform=estimate._dependency_completion_uniform,
+        _dependency_synchronized_entry_conditions=(
+            {
+                key: _boolean_condition(sp.And(active_when, condition))
+                for key, condition in (
+                    estimate._dependency_synchronized_entry_conditions.items()
+                )
+                if _boolean_condition(sp.And(active_when, condition)) is not sp.false
+            }
+            if factor_expr != _ZERO
+            else {}
+        ),
         _global_barrier_condition=sp.And(
             estimate._global_barrier_condition,
             active_when,
@@ -187,10 +214,80 @@ def _repeat_estimate(
             quality=EstimateQuality.CONSERVATIVE,
             active_when=sp.And(
                 active_when,
-                _resource_activity_condition(estimate.depth.depth),
+                _estimate_depth_activity_condition(estimate),
+            ),
+        )
+    if conservative_nonuniform:
+        repeated = _with_nonuniform_repetition_bound(
+            repeated,
+            estimate,
+            active_when=sp.And(
+                sp.Gt(factor_expr, _ONE),
+                _estimate_depth_activity_condition(estimate),
+            ),
+            source=nonuniform_source,
+        )
+    synchronized_entry_active = _synchronized_entry_activity_condition(estimate)
+    if (
+        not conservative_nonuniform
+        and synchronized_entry_active is not sp.false
+        and estimate._dependency_completion_uniform is not True
+    ):
+        assumption = ResourceAssumption(
+            "repeated aggregate depth may over-serialize a later invocation "
+            "when the previous invocation leaves input wires at different layers",
+            source="repeat",
+        )
+        repeated = _with_estimate_metadata(
+            repeated,
+            assumptions=(assumption,),
+            quality=EstimateQuality.CONSERVATIVE,
+            active_when=sp.And(
+                sp.Gt(factor_expr, _ONE),
+                synchronized_entry_active,
             ),
         )
     return repeated
+
+
+def _with_nonuniform_repetition_bound(
+    repeated: ResourceEstimate,
+    estimate: ResourceEstimate,
+    *,
+    active_when: sp.Basic,
+    source: str,
+) -> ResourceEstimate:
+    """Disclose scalar depth scaling over nonuniform wire completions.
+
+    Args:
+        repeated (ResourceEstimate): Already scaled or summed estimate.
+        estimate (ResourceEstimate): One-iteration estimate whose dependency
+            completion profile was scaled.
+        active_when (sp.Basic): Condition under which at least two active
+            iterations contribute.
+        source (str): Assumption source label.
+
+    Returns:
+        ResourceEstimate: Estimate marked conservative exactly when the scalar
+            depth may exceed a per-wire composition.
+    """
+    if (
+        estimate._dependency_keys is None
+        or estimate._dependency_completion_uniform is True
+        or _has_single_serializing_quantum_dependency(estimate)
+    ):
+        return repeated
+    assumption = ResourceAssumption(
+        "repeated aggregate depth is a conservative scalar sum because "
+        "per-wire completion layers cannot be composed exactly",
+        source=source,
+    )
+    return _with_estimate_metadata(
+        repeated,
+        assumptions=(assumption,),
+        quality=EstimateQuality.CONSERVATIVE,
+        active_when=active_when,
+    )
 
 
 def _control_estimate(

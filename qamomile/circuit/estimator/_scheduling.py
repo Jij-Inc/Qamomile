@@ -99,7 +99,7 @@ def _estimate_depth_activity_condition(estimate: ResourceEstimate) -> Boolean:
     active: Boolean = sp.false
     for field in dataclasses.fields(DepthResources):
         field_active = _resource_activity_condition(
-            cast(ResourceExpr, getattr(estimate.depth, field.name))
+            _expr(cast(ResourceExpr, getattr(estimate.depth, field.name)))
         )
         if field_active is sp.true:
             return sp.true
@@ -442,6 +442,94 @@ def _aggregate_completion_overlap_condition(
             uncertain_indices.setdefault(owner, _OwnerWireIndices()).add(index)
             previous = uncertain_activity.get(key, sp.false)
             uncertain_activity[key] = cast(Boolean, sp.Or(previous, active))
+    return cast(
+        Boolean,
+        sp.Or(*overlap_conditions) if overlap_conditions else sp.false,
+    )
+
+
+def _synchronized_entry_overlap_condition(
+    scheduled: Sequence[tuple[Operation, ResourceEstimate]],
+    wire_footprints: Sequence[_WireFootprint | None],
+    *,
+    activity_conditions: Sequence[Boolean] | None = None,
+) -> Boolean:
+    """Return when prior work may desynchronize an aggregate's input wires.
+
+    Some compact loop-depth formulas are exact only when all of their input
+    wires enter at one common dependency layer. A prior operation on any
+    possibly overlapping wire can violate that premise. This check is
+    deliberately conservative: it does not try to prove that prior work
+    advanced every required wire by the same amount.
+
+    Args:
+        scheduled (Sequence[tuple[Operation, ResourceEstimate]]): Operations
+            paired with their resource summaries in program order.
+        wire_footprints (Sequence[_WireFootprint | None]): Read/write
+            footprints aligned with ``scheduled``.
+        activity_conditions (Sequence[Boolean] | None): Optional operation
+            activity guards. Defaults to computing them once for this call.
+
+    Returns:
+        Boolean: Guard under which a synchronized-entry premise may be
+        violated by earlier nonzero-depth work.
+
+    Raises:
+        AssertionError: If the operation, footprint, and activity sequences
+            differ in length or a nonzero-depth operation lacks a footprint.
+    """
+    if activity_conditions is None:
+        activity_conditions = _scheduled_depth_activity_conditions(scheduled)
+    if not (len(scheduled) == len(wire_footprints) == len(activity_conditions)):
+        raise AssertionError(
+            "Scheduled operations, wire footprints, and activity conditions "
+            "must have equal lengths."
+        )
+    if not any(
+        estimate._dependency_synchronized_entry_conditions
+        for _operation, estimate in scheduled
+    ):
+        return sp.false
+    prior_indices: dict[str, _OwnerWireIndices] = {}
+    prior_activity: dict[WireKey, Boolean] = {}
+    overlap_conditions: set[Boolean] = set()
+    for (_operation, estimate), footprint, active in zip(
+        scheduled,
+        wire_footprints,
+        activity_conditions,
+        strict=True,
+    ):
+        for (
+            required,
+            requirement_active,
+        ) in estimate._dependency_synchronized_entry_conditions.items():
+            owner, index = required
+            owner_indices = prior_indices.get(owner)
+            if owner_indices is None:
+                continue
+            for candidate in owner_indices.candidates(index):
+                if _wire_index_relation(index, candidate) is _WireRelation.DISJOINT:
+                    continue
+                condition = _and_conditions(
+                    prior_activity[(owner, candidate)],
+                    _and_conditions(active, requirement_active),
+                )
+                if condition is not sp.false:
+                    overlap_conditions.add(condition)
+        if not _estimate_has_nonzero_depth(estimate):
+            continue
+        if footprint is None:
+            raise AssertionError(
+                "A nonzero-depth scheduled operation requires a wire footprint."
+            )
+        for key in set(footprint[0]) | set(footprint[1]):
+            if _is_classical_dependency_key(key):
+                continue
+            owner, index = key
+            prior_indices.setdefault(owner, _OwnerWireIndices()).add(index)
+            prior_activity[key] = _boolean_condition(
+                sp.Or(prior_activity.get(key, sp.false), active)
+            )
     return cast(
         Boolean,
         sp.Or(*overlap_conditions) if overlap_conditions else sp.false,

@@ -11,11 +11,20 @@ from qamomile.circuit.estimator._allocation_width import (
     _maximum_width_over_range,
 )
 from qamomile.circuit.estimator._constants import _ZERO
+from qamomile.circuit.estimator._dependency_exactness import (
+    _has_single_serializing_quantum_dependency,
+)
 from qamomile.circuit.estimator._dependency_metadata import (
+    _dependency_completion_symbols,
+    _dependency_keys_depend_on_symbol,
     _project_dependency_metadata_over_symbol,
+    _synchronized_entry_condition_symbols,
 )
 from qamomile.circuit.estimator._estimate_provenance import _with_estimate_metadata
-from qamomile.circuit.estimator._estimate_transforms import _repeat_estimate
+from qamomile.circuit.estimator._estimate_transforms import (
+    _repeat_estimate,
+    _with_nonuniform_repetition_bound,
+)
 from qamomile.circuit.estimator._estimate_validation import _with_constraints
 from qamomile.circuit.estimator._loop_executor import symbolic_iterations
 from qamomile.circuit.estimator._resource_algebra import _wrap_trace
@@ -23,8 +32,10 @@ from qamomile.circuit.estimator._resource_base import EstimateQuality, ResourceE
 from qamomile.circuit.estimator._resource_constraints import _ResourceConstraint
 from qamomile.circuit.estimator._resource_expressions import (
     _activation_over_range,
+    _at_least_two_activations_over_range,
     _boolean_condition,
     _ConditionIndicator,
+    _expr,
     _resource_activity_condition,
     _sum_expr,
 )
@@ -36,6 +47,9 @@ from qamomile.circuit.estimator._resource_loop_reductions import (
     _sum_resets,
 )
 from qamomile.circuit.estimator._resource_types import ResourceAssumption
+from qamomile.circuit.estimator._scheduling import (
+    _estimate_depth_activity_condition,
+)
 from qamomile.circuit.estimator._symbol_discovery import _free_symbols
 
 if TYPE_CHECKING:
@@ -52,6 +66,7 @@ def _sum_estimate_over_range(
     dependency_start: ResourceExpr,
     dependency_stop: ResourceExpr,
     dependency_step: ResourceExpr,
+    conservative_nonuniform: bool = False,
 ) -> ResourceEstimate:
     """Sum resources while specializing caller-visible wire projection.
 
@@ -67,6 +82,8 @@ def _sum_estimate_over_range(
             caller-visible wire projection.
         dependency_step (ResourceExpr): Step specialized only for
             caller-visible wire projection.
+        conservative_nonuniform (bool): Whether to disclose scalar depth
+            summation over a nonuniform per-wire completion profile.
 
     Returns:
         ResourceEstimate: Estimate with additive metrics summed over the loop
@@ -84,10 +101,23 @@ def _sum_estimate_over_range(
         dependency_stop,
         dependency_step,
     )
-    if loop_symbol not in _free_symbols(estimate):
+    dependency_key_varies = _dependency_keys_depend_on_symbol(
+        estimate._dependency_keys,
+        loop_symbol,
+    )
+    if loop_symbol not in (
+        _free_symbols(estimate)
+        | _dependency_completion_symbols(estimate)
+        | _synchronized_entry_condition_symbols(estimate)
+    ) and not (conservative_nonuniform and dependency_key_varies):
         return _project_dependency_metadata_over_symbol(
             _with_constraints(
-                _repeat_estimate(estimate, iterations),
+                _repeat_estimate(
+                    estimate,
+                    iterations,
+                    conservative_nonuniform=conservative_nonuniform,
+                    nonuniform_source="sum_over",
+                ),
                 step_constraint,
             ),
             loop_symbol,
@@ -152,7 +182,7 @@ def _sum_estimate_over_range(
                     ResourceExpr,
                     _ConditionIndicator(
                         _activation_over_range(
-                            _resource_activity_condition(completion),
+                            _resource_activity_condition(_expr(completion)),
                             loop_symbol,
                             start,
                             step,
@@ -171,6 +201,9 @@ def _sum_estimate_over_range(
             }
             if estimate._dependency_completion is not None
             else None
+        ),
+        _dependency_synchronized_entry_conditions=dict(
+            estimate._dependency_synchronized_entry_conditions
         ),
         _global_barrier_condition=_boolean_condition(
             _activation_over_range(
@@ -260,6 +293,36 @@ def _sum_estimate_over_range(
             quality=EstimateQuality.CONSERVATIVE,
             active_when=width_conservative_when,
         )
+    if conservative_nonuniform:
+        active_twice = _at_least_two_activations_over_range(
+            _estimate_depth_activity_condition(estimate),
+            loop_symbol,
+            start,
+            step,
+            iterations,
+        )
+        summed = _with_nonuniform_repetition_bound(
+            summed,
+            estimate,
+            active_when=active_twice,
+            source="sum_over",
+        )
+        if dependency_key_varies and (
+            estimate._dependency_completion_uniform is True
+            or _has_single_serializing_quantum_dependency(estimate)
+        ):
+            summed = _with_estimate_metadata(
+                summed,
+                assumptions=(
+                    ResourceAssumption(
+                        "summed depth is a conservative scalar bound because "
+                        "different iterations may use different quantum wires",
+                        source="sum_over",
+                    ),
+                ),
+                quality=EstimateQuality.CONSERVATIVE,
+                active_when=active_twice,
+            )
     return _project_dependency_metadata_over_symbol(
         summed,
         loop_symbol,

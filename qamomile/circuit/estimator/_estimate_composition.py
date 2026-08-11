@@ -18,6 +18,7 @@ from qamomile.circuit.estimator._dependency_metadata import (
     _conditional_dependency_completion,
     _max_dependency_completion,
     _merge_dependency_accesses,
+    _merge_synchronized_entry_conditions,
     _seq_dependency_completion,
 )
 from qamomile.circuit.estimator._estimate_provenance import (
@@ -121,6 +122,12 @@ def _compose_sequential(
             writes=True,
         ),
         _dependency_completion=_seq_dependency_completion(left, right),
+        _dependency_synchronized_entry_conditions=(
+            _merge_synchronized_entry_conditions(
+                left._dependency_synchronized_entry_conditions,
+                right._dependency_synchronized_entry_conditions,
+            )
+        ),
         _global_barrier_condition=sp.Or(
             left._global_barrier_condition,
             right._global_barrier_condition,
@@ -197,6 +204,12 @@ def _compose_parallel(
             writes=True,
         ),
         _dependency_completion=_max_dependency_completion(left, right),
+        _dependency_synchronized_entry_conditions=(
+            _merge_synchronized_entry_conditions(
+                left._dependency_synchronized_entry_conditions,
+                right._dependency_synchronized_entry_conditions,
+            )
+        ),
         _global_barrier_condition=sp.Or(
             left._global_barrier_condition,
             right._global_barrier_condition,
@@ -284,6 +297,12 @@ def _compose_choice(
             writes=True,
         ),
         _dependency_completion=_max_dependency_completion(left, right),
+        _dependency_synchronized_entry_conditions=(
+            _merge_synchronized_entry_conditions(
+                left._dependency_synchronized_entry_conditions,
+                right._dependency_synchronized_entry_conditions,
+            )
+        ),
         _global_barrier_condition=sp.Or(
             left._global_barrier_condition,
             right._global_barrier_condition,
@@ -416,6 +435,22 @@ def _compose_conditional(
             when_true,
             when_false,
             predicate,
+        ),
+        _dependency_synchronized_entry_conditions=(
+            _merge_synchronized_entry_conditions(
+                {
+                    key: sp.And(predicate, active)
+                    for key, active in (
+                        when_true._dependency_synchronized_entry_conditions.items()
+                    )
+                },
+                {
+                    key: sp.And(sp.Not(predicate), active)
+                    for key, active in (
+                        when_false._dependency_synchronized_entry_conditions.items()
+                    )
+                },
+            )
         ),
         _global_barrier_condition=sp.Or(
             sp.And(predicate, when_true._global_barrier_condition),

@@ -9,11 +9,13 @@ from collections.abc import (
 from typing import TYPE_CHECKING
 
 import sympy as sp
+from sympy.logic.boolalg import Boolean
 
 from qamomile.circuit.estimator._constants import _ZERO
 from qamomile.circuit.estimator._resolver import ExprResolver
 from qamomile.circuit.estimator._resource_base import ResourceExpr
 from qamomile.circuit.estimator._resource_expressions import (
+    _boolean_condition,
     _expr,
     _resource_max,
 )
@@ -274,4 +276,65 @@ def _map_body_dependency_completion(
                 and result.type.is_quantum()
             ):
                 map_value(output, result)
+    return mapped
+
+
+def _map_body_synchronized_entry_conditions(
+    block: Block,
+    body_estimate: ResourceEstimate,
+    actual_operands: Sequence[ValueBase],
+    resolver: ExprResolver,
+    *,
+    scalar_values: Mapping[str, sp.Expr] | None = None,
+    used_names: set[str] | None = None,
+) -> dict[WireKey, Boolean]:
+    """Translate callee entry requirements onto caller input operands.
+
+    Only formal quantum inputs participate. A returned callee-local
+    allocation is not an entry dependency and therefore must not be mapped
+    through the callable's output/result pairing.
+
+    Args:
+        block (Block): Evaluated callable implementation.
+        body_estimate (ResourceEstimate): Body estimate carrying guarded entry
+            requirements.
+        actual_operands (Sequence[ValueBase]): Caller operands aligned with
+            the block inputs.
+        resolver (ExprResolver): Caller-side value resolver.
+        scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
+            values. Defaults to ``None``.
+        used_names (set[str] | None): Optional set updated with used input
+            names. Defaults to ``None``.
+
+    Returns:
+        dict[WireKey, Boolean]: Caller-scoped guarded entry requirements.
+    """
+    conditions = body_estimate._dependency_synchronized_entry_conditions
+    if not conditions:
+        return {}
+    mapped: dict[WireKey, Boolean] = {}
+    for formal, actual in pair_block_operands(block, actual_operands):
+        if not (
+            isinstance(formal, Value)
+            and isinstance(actual, Value)
+            and formal.type.is_quantum()
+            and actual.type.is_quantum()
+        ):
+            continue
+        source_owner = _quantum_allocation_owner(formal)
+        for key, condition in conditions.items():
+            if key[0] != source_owner:
+                continue
+            caller_keys = _map_value_dependency_keys(
+                formal,
+                actual,
+                frozenset((key,)),
+                resolver,
+                scalar_values=scalar_values,
+                used_names=used_names,
+            )
+            for caller_key in caller_keys:
+                mapped[caller_key] = _boolean_condition(
+                    sp.Or(mapped.get(caller_key, sp.false), condition)
+                )
     return mapped

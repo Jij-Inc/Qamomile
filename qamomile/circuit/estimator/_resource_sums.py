@@ -331,6 +331,7 @@ def _sum_expr(
     Returns:
         ResourceExpr: Summed expression.
     """
+    expr = cast(ResourceExpr, sp.sympify(expr))
     if expr == _ZERO or iterations == _ZERO:
         return _ZERO
     if loop_symbol not in expr.free_symbols:

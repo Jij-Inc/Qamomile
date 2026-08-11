@@ -12,6 +12,7 @@ from qamomile.circuit.estimator._constants import _ZERO
 from qamomile.circuit.estimator._dependency_metadata import (
     _map_dependency_completion,
     _map_dependency_keys,
+    _map_synchronized_entry_conditions,
 )
 from qamomile.circuit.estimator._resource_base import _is_concrete_integer
 from qamomile.circuit.estimator._resource_expressions import (
@@ -262,6 +263,13 @@ def _map_estimate_expressions(
             rewrite_dependency,
         ),
         _dependency_completion_uniform=estimate._dependency_completion_uniform,
+        _dependency_synchronized_entry_conditions=(
+            _map_synchronized_entry_conditions(
+                estimate._dependency_synchronized_entry_conditions,
+                rewrite_dependency,
+                rewrite_guard,
+            )
+        ),
         _global_barrier_condition=_boolean_condition(
             rewrite_guard(estimate._global_barrier_condition)
         ),

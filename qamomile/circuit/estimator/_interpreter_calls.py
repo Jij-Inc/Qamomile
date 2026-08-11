@@ -36,6 +36,7 @@ from qamomile.circuit.estimator._constraints import (
 from qamomile.circuit.estimator._dependency_call_mapping import (
     _map_body_dependency_completion,
     _map_body_dependency_keys,
+    _map_body_synchronized_entry_conditions,
 )
 from qamomile.circuit.estimator._dependency_footprints import _wire_keys_for_values
 from qamomile.circuit.estimator._dependency_metadata import (
@@ -520,6 +521,7 @@ class _CallInterpreter(_ForItemsInterpreter):
                 _dependency_keys=None,
                 _dependency_reads=None,
                 _dependency_writes=None,
+                _dependency_synchronized_entry_conditions={},
                 _measurement_taint_conditions={},
             ),
             operation,
@@ -777,6 +779,14 @@ class _CallInterpreter(_ForItemsInterpreter):
             scalar_values=self._run_state.condition_values,
             used_names=self._run_state.branch_condition_names,
         )
+        synchronized_entry_conditions = _map_body_synchronized_entry_conditions(
+            body,
+            body_dependency_estimate,
+            actual_operands,
+            resolver,
+            scalar_values=self._run_state.condition_values,
+            used_names=self._run_state.branch_condition_names,
+        )
         if dependency_keys is not None:
             mapped_keys = set(dependency_keys)
             if local_controls and _estimate_has_nonzero_depth(body_estimate):
@@ -797,6 +807,9 @@ class _CallInterpreter(_ForItemsInterpreter):
                     dependency_completion,
                     mapped_keys,
                     fallback_depth=body_estimate.depth.depth,
+                ),
+                _dependency_synchronized_entry_conditions=(
+                    synchronized_entry_conditions
                 ),
             )
         input_sizes, output_sizes, has_output_summary = _invoke_quantum_output_sizes(

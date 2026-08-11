@@ -128,6 +128,11 @@ class ResourceEstimate:
             caller-visible wire is proven to complete at the aggregate peak
             of every depth field. ``None`` means that field-wise uniformity
             was not proven.
+        _dependency_synchronized_entry_conditions (dict[WireKey, Boolean]):
+            Conditions under which an aggregate depth formula assumes that
+            the listed caller-visible wires enter the operation at the same
+            dependency layer. The enclosing scheduler marks a result
+            conservative when prior work may violate that requirement.
         _global_barrier_condition (Boolean): Condition under which an opaque,
             nested non-unitary, or runtime-control boundary lacks enough
             wire-level provenance for exact dependency scheduling.
@@ -215,6 +220,13 @@ class ResourceEstimate:
         default=None,
         repr=False,
         compare=False,
+    )
+    _dependency_synchronized_entry_conditions: dict[WireKey, Boolean] = (
+        dataclasses.field(
+            default_factory=dict,
+            repr=False,
+            compare=False,
+        )
     )
     _global_barrier_condition: Boolean = dataclasses.field(
         default=sp.false,
@@ -470,7 +482,11 @@ class ResourceEstimate:
         Raises:
             ValueError: If a concrete factor is negative or non-integral.
         """
-        return _repeat_estimate(self, factor)
+        return _repeat_estimate(
+            self,
+            factor,
+            conservative_nonuniform=True,
+        )
 
     def controlled(self, num_controls: ResourceExpr | int) -> ResourceEstimate:
         """Estimate controls on an aggregate cost from its known arity profile.
@@ -547,6 +563,7 @@ class ResourceEstimate:
             dependency_start=start,
             dependency_stop=stop,
             dependency_step=step,
+            conservative_nonuniform=True,
         )
 
     def _sum_over(
@@ -559,6 +576,7 @@ class ResourceEstimate:
         dependency_start: ResourceExpr,
         dependency_stop: ResourceExpr,
         dependency_step: ResourceExpr,
+        conservative_nonuniform: bool = False,
     ) -> ResourceEstimate:
         """Sum resources while using specialized bounds for wire projection.
 
@@ -573,6 +591,8 @@ class ResourceEstimate:
                 caller-visible wire projection.
             dependency_step (ResourceExpr): Step specialized only for
                 caller-visible wire projection.
+            conservative_nonuniform (bool): Whether to disclose scalar depth
+                summation over a nonuniform per-wire completion profile.
 
         Returns:
             ResourceEstimate: Estimate with additive metrics summed over the
@@ -587,6 +607,7 @@ class ResourceEstimate:
             dependency_start=dependency_start,
             dependency_stop=dependency_stop,
             dependency_step=dependency_step,
+            conservative_nonuniform=conservative_nonuniform,
         )
 
     def substitute(self, **values: object) -> ResourceEstimate:

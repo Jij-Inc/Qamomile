@@ -382,6 +382,7 @@ def test_resource_wire_schema_accounts_for_every_estimate_field() -> None:
         "_dependency_writes",
         "_dependency_completion",
         "_dependency_completion_uniform",
+        "_dependency_synchronized_entry_conditions",
         "_measurement_taint_conditions",
     }
 

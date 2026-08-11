@@ -23,6 +23,7 @@ from qamomile.circuit.estimator._resource_conditions import (
     _RANGE_ANY_REPLAY_LIMIT as _RANGE_ANY_REPLAY_LIMIT,
     _activation_over_range as _activation_over_range,
     _and_conditions as _and_conditions,
+    _at_least_two_activations_over_range as _at_least_two_activations_over_range,
     _boolean_condition as _boolean_condition,
     _ConditionIndicator as _ConditionIndicator,
     _linear_condition_boundaries as _linear_condition_boundaries,

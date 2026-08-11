@@ -25,9 +25,15 @@ from qamomile.circuit.estimator._constraints import (
     _collect_array_value_constraints,
     _validated_unproven_array_constraints,
 )
+from qamomile.circuit.estimator._dependency_exactness import (
+    _has_single_serializing_quantum_dependency,
+)
 from qamomile.circuit.estimator._dependency_footprints import (
     _classical_dependency_key,
     _WireFootprint,
+)
+from qamomile.circuit.estimator._dependency_metadata import (
+    _dependency_keys_depend_on_symbol,
 )
 from qamomile.circuit.estimator._estimate import (
     ResourceEstimate,
@@ -35,10 +41,11 @@ from qamomile.circuit.estimator._estimate import (
 from qamomile.circuit.estimator._interpreter_primitives import _PrimitiveInterpreter
 from qamomile.circuit.estimator._loop_scheduling import (
     _concrete_loop_dependency_completion,
-    _dependency_keys_depend_on_symbol,
     _disjoint_concrete_loop_depth,
     _loop_body_has_symbolic_quantum_index,
     _symbolic_disjoint_loop_depth,
+    _symbolic_shared_anchor_loop_entry_keys,
+    _symbolic_triangular_pair_loop_depth,
     _uniform_parallel_loop_dependency_completion,
 )
 from qamomile.circuit.estimator._resolver import (
@@ -53,6 +60,7 @@ from qamomile.circuit.estimator._resource_constraints import (
 )
 from qamomile.circuit.estimator._resource_expressions import (
     _and_conditions,
+    _at_least_two_activations_over_range,
     _boolean_condition,
     _expr,
     _piecewise,
@@ -64,8 +72,10 @@ from qamomile.circuit.estimator._resource_types import (
 from qamomile.circuit.estimator._scheduling import (
     _aggregate_completion_overlap_condition,
     _dependency_depth,
+    _estimate_depth_activity_condition,
     _estimate_has_nonzero_depth,
     _scheduled_depth_activity_conditions,
+    _synchronized_entry_overlap_condition,
 )
 from qamomile.circuit.estimator._scopes import (
     _typed_value_symbol,
@@ -379,6 +389,62 @@ class _LoopSupportInterpreter(_PrimitiveInterpreter):
         if _expr(controls) != _ZERO or loop_barrier_condition is sp.true:
             return sequential
 
+        if loop_barrier_condition is sp.false:
+            triangular = _symbolic_triangular_pair_loop_depth(
+                operation,
+                body_resolver,
+                body.depth,
+                loop_symbol=loop_symbol,
+                start=start,
+                stop=stop,
+                step=step,
+                iterations=iterations,
+                allocated_qubits=body.width.allocated_qubits,
+                clean_ancillas=body.width.clean_ancilla_qubits,
+                dirty_ancillas=body.width.dirty_ancilla_qubits,
+                scalar_values=self._run_state.condition_values,
+                used_names=self._run_state.branch_condition_names,
+            )
+            if triangular is not None and sequential._dependency_keys is not None:
+                triangular_depth, entry_keys = triangular
+                entry_active = _boolean_condition(sp.Gt(iterations, 2))
+                return dataclasses.replace(
+                    sequential,
+                    depth=triangular_depth,
+                    _dependency_completion={
+                        key: triangular_depth.depth
+                        for key in sequential._dependency_keys
+                    },
+                    _dependency_completion_uniform=False,
+                    _dependency_synchronized_entry_conditions={
+                        key: entry_active for key in entry_keys
+                    },
+                    _global_barrier_condition=sp.false,
+                )
+
+            shared_anchor_keys = _symbolic_shared_anchor_loop_entry_keys(
+                operation,
+                body_resolver,
+                body.depth,
+                loop_symbol=loop_symbol,
+                start=start,
+                step=step,
+                iterations=iterations,
+                allocated_qubits=body.width.allocated_qubits,
+                clean_ancillas=body.width.clean_ancilla_qubits,
+                dirty_ancillas=body.width.dirty_ancilla_qubits,
+                scalar_values=self._run_state.condition_values,
+                used_names=self._run_state.branch_condition_names,
+            )
+            if shared_anchor_keys is not None:
+                entry_active = _boolean_condition(sp.Gt(iterations, _ONE))
+                return dataclasses.replace(
+                    sequential,
+                    _dependency_synchronized_entry_conditions={
+                        key: entry_active for key in shared_anchor_keys
+                    },
+                )
+
         parallel_depth = _symbolic_disjoint_loop_depth(
             operation,
             body_resolver,
@@ -430,6 +496,35 @@ class _LoopSupportInterpreter(_PrimitiveInterpreter):
                         sp.Not(loop_barrier_condition),
                         sp.Gt(iterations, _ONE),
                     ),
+                )
+            body_active_twice = _boolean_condition(
+                _at_least_two_activations_over_range(
+                    _estimate_depth_activity_condition(body),
+                    loop_symbol,
+                    start,
+                    step,
+                    iterations,
+                )
+            )
+            conservative_active = (
+                sp.false
+                if _has_single_serializing_quantum_dependency(body)
+                else body_active_twice
+            )
+            if (
+                conservative_active is not sp.false
+                and body._dependency_completion_uniform is not True
+            ):
+                assumption = ResourceAssumption(
+                    "sequential loop-body depth may over-serialize active "
+                    "iterations whose per-wire completion layers cannot be "
+                    "composed exactly",
+                    source="for",
+                )
+                return sequential._with_metadata(
+                    assumptions=(assumption,),
+                    quality=EstimateQuality.CONSERVATIVE,
+                    active_when=conservative_active,
                 )
             return sequential
 
@@ -592,6 +687,22 @@ class _LoopSupportInterpreter(_PrimitiveInterpreter):
                 assumptions=(assumption,),
                 quality=EstimateQuality.CONSERVATIVE,
                 active_when=aggregate_completion_active,
+            )
+        synchronized_entry_active = _synchronized_entry_overlap_condition(
+            scheduled,
+            footprints,
+            activity_conditions=depth_activity_conditions,
+        )
+        if synchronized_entry_active is not sp.false:
+            assumption = ResourceAssumption(
+                "aggregate loop-iteration depth assumes synchronized input "
+                "wires, but prior overlapping work may desynchronize them",
+                source="loop dependency scheduler",
+            )
+            result = result._with_metadata(
+                assumptions=(assumption,),
+                quality=EstimateQuality.CONSERVATIVE,
+                active_when=synchronized_entry_active,
             )
         return result
 

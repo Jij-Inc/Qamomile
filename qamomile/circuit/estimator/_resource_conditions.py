@@ -276,6 +276,10 @@ class _RangeAtLeastTwo(sp.Function):
         """
         if not isinstance(predicate, sp.Lambda) or len(predicate.variables) != 1:
             return None
+        loop_symbol = predicate.variables[0]
+        condition = _boolean_condition(cast(sp.Basic, predicate.expr))
+        if _condition_has_at_most_one_value(condition, loop_symbol):
+            return _ZERO
         if not (
             iterations.is_integer is True
             and iterations.is_number
@@ -288,8 +292,6 @@ class _RangeAtLeastTwo(sp.Function):
         count = int(iterations)
         if count <= 1:
             return _ZERO
-        loop_symbol = predicate.variables[0]
-        condition = _boolean_condition(cast(sp.Basic, predicate.expr))
         if loop_symbol not in condition.free_symbols:
             if condition is sp.true:
                 return _ONE
@@ -316,6 +318,38 @@ class _RangeAtLeastTwo(sp.Function):
             elif transformed is not sp.false:
                 unresolved = True
         return None if unresolved else _ZERO
+
+
+def _condition_has_at_most_one_value(
+    condition: Boolean,
+    symbol: sp.Symbol,
+) -> bool:
+    """Prove that a Boolean guard can hold for at most one symbol value.
+
+    Args:
+        condition (Boolean): Guard over one loop induction symbol.
+        symbol (sp.Symbol): Loop induction symbol.
+
+    Returns:
+        bool: Whether a nondegenerate affine equality in the guard proves a
+            unique possible value for ``symbol``.
+    """
+    if isinstance(condition, sp.logic.boolalg.And):
+        return any(
+            _condition_has_at_most_one_value(
+                _boolean_condition(cast(sp.Basic, argument)),
+                symbol,
+            )
+            for argument in condition.args
+        )
+    if not isinstance(condition, sp.Equality):
+        return False
+    difference = cast(sp.Expr, condition.lhs) - cast(sp.Expr, condition.rhs)
+    try:
+        polynomial = sp.Poly(difference, symbol)
+    except sp.PolynomialError:
+        return False
+    return polynomial.degree() == 1 and polynomial.LC().is_zero is False
 
 
 def _resolve_large_affine_range_any(
@@ -570,6 +604,38 @@ def _activation_over_range(
     if loop_symbol not in active.free_symbols:
         return _boolean_condition(sp.And(nonempty, active))
     active_iterations = _RangeAny(
+        sp.Lambda(loop_symbol, active),
+        start,
+        step,
+        iterations,
+    )
+    return _boolean_condition(sp.Ne(active_iterations, _ZERO))
+
+
+def _at_least_two_activations_over_range(
+    condition: sp.Basic,
+    loop_symbol: sp.Symbol,
+    start: ResourceExpr,
+    step: ResourceExpr,
+    iterations: ResourceExpr,
+) -> sp.Basic:
+    """Return whether a guarded fact is active in two loop iterations.
+
+    Args:
+        condition (sp.Basic): Per-iteration activation condition.
+        loop_symbol (sp.Symbol): Loop variable symbol.
+        start (ResourceExpr): First loop value.
+        step (ResourceExpr): Loop step.
+        iterations (ResourceExpr): Number of executed iterations.
+
+    Returns:
+        sp.Basic: Condition that is true exactly when at least two reachable
+        iterations activate the fact.
+    """
+    active = _boolean_condition(condition)
+    if loop_symbol not in active.free_symbols:
+        return _boolean_condition(sp.And(sp.Gt(iterations, _ONE), active))
+    active_iterations = _RangeAtLeastTwo(
         sp.Lambda(loop_symbol, active),
         start,
         step,

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 import sympy as sp
 
+from qamomile.circuit.estimator._dependency_metadata import (
+    _dependency_metadata_symbols,
+)
 from qamomile.circuit.estimator._estimate import (
     ResourceEstimate,
 )
@@ -18,7 +21,10 @@ from qamomile.circuit.estimator._resolver import (
 from qamomile.circuit.estimator._scopes import (
     _typed_value_symbol,
 )
-from qamomile.circuit.estimator._symbol_discovery import _free_symbols
+from qamomile.circuit.estimator._symbol_discovery import (
+    _free_symbols,
+    _trace_guard_free_symbols,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     HasNestedOps,
@@ -174,8 +180,8 @@ class _ForItemsContextInterpreter(_BranchInterpreter):
         walk(operation.operations)
         return context, frozenset(iteration_symbols)
 
+    @staticmethod
     def _ensure_for_items_resource_independent(
-        self,
         estimate: ResourceEstimate,
         iteration_symbols: frozenset[sp.Symbol],
     ) -> None:
@@ -191,7 +197,29 @@ class _ForItemsContextInterpreter(_BranchInterpreter):
             NotImplementedError: If any resource metric or structural
                 requirement depends on a current dictionary key or value.
         """
-        if _free_symbols(estimate) & iteration_symbols:
+        private_symbols = _dependency_metadata_symbols(estimate)
+        private_symbols.update(_trace_guard_free_symbols(estimate.trace))
+        private_symbols.update(
+            cast(
+                set[sp.Symbol],
+                {
+                    symbol
+                    for condition in estimate._measurement_taint_conditions.values()
+                    for symbol in condition.free_symbols
+                },
+            )
+        )
+        private_symbols.update(
+            cast(
+                set[sp.Symbol],
+                {
+                    symbol
+                    for size in estimate._allocation_sites.values()
+                    for symbol in sp.sympify(size).free_symbols
+                },
+            )
+        )
+        if (_free_symbols(estimate) | private_symbols) & iteration_symbols:
             raise NotImplementedError(
                 "Resource estimation does not support a symbolic "
                 "ForItemsOperation body whose resource use or structural "

@@ -8,7 +8,7 @@ from typing import cast
 
 import sympy as sp
 
-from qamomile.circuit.estimator._constants import _ZERO
+from qamomile.circuit.estimator._constants import _ONE, _ZERO
 from qamomile.circuit.estimator._dependency_footprints import _quantum_wire_keys
 from qamomile.circuit.estimator._dependency_indices import (
     _MAX_EXACT_LOOP_DISJOINTNESS_EXPANSION,
@@ -18,6 +18,7 @@ from qamomile.circuit.estimator._dependency_indices import (
     _normalize_wire_index,
     _OwnerWireIndices,
     _specialize_dependency_expression,
+    _symbolic_wire_range_index,
     _wire_index_relation,
     _WireRangeIndex,
     _WireRelation,
@@ -41,6 +42,7 @@ from qamomile.circuit.estimator._scheduling import (
     _expressions_proven_equal_without_simplify,
 )
 from qamomile.circuit.estimator._scopes import _LocalBlock
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
 from qamomile.circuit.ir.operation.classical_ops import (
     ReturnQuantumArrayElementOperation,
     StoreArrayElementOperation,
@@ -50,9 +52,387 @@ from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
     IfOperation,
 )
+from qamomile.circuit.ir.operation.gate import GateOperation
 from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.value import ArrayValue, Value
+
+
+def _scalar_quantum_address(
+    value: Value,
+    resolver: ExprResolver,
+    *,
+    scalar_values: Mapping[str, sp.Expr] | None = None,
+    used_names: set[str] | None = None,
+) -> WireKey | None:
+    """Resolve one scalar quantum value to its root physical address.
+
+    Args:
+        value (Value): Scalar quantum input or result value.
+        resolver (ExprResolver): Resolver scoped to the value's operations.
+        scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
+            values. Defaults to ``None``.
+        used_names (set[str] | None): Optional set updated with used input
+            names. Defaults to ``None``.
+
+    Returns:
+        WireKey | None: Root allocation owner and normalized scalar index, or
+        ``None`` when the value is not a resolvable array element.
+    """
+    if isinstance(value, ArrayValue) or value.parent_array is None:
+        return None
+    index = _quantum_element_index_expression(
+        value,
+        resolver,
+        scalar_values=scalar_values,
+        used_names=used_names,
+    )
+    if index is None:
+        return None
+    return _quantum_allocation_owner(value), _normalize_wire_index(index)
+
+
+def _single_two_qubit_gate_addresses(
+    operations: list[object],
+    resolver: ExprResolver,
+    *,
+    scalar_values: Mapping[str, sp.Expr] | None = None,
+    used_names: set[str] | None = None,
+) -> tuple[GateOperation, tuple[WireKey, WireKey]] | None:
+    """Return the physical addresses of one self-consistent two-qubit gate.
+
+    Args:
+        operations (list[object]): Candidate operation list.
+        resolver (ExprResolver): Resolver scoped to ``operations``.
+        scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
+            values. Defaults to ``None``.
+        used_names (set[str] | None): Optional set updated with used input
+            names. Defaults to ``None``.
+
+    Returns:
+        tuple[GateOperation, tuple[WireKey, WireKey]] | None: Gate and input
+        addresses when the list contains exactly one two-qubit gate whose
+        results preserve those addresses, otherwise ``None``.
+    """
+    if len(operations) != 1 or not isinstance(operations[0], GateOperation):
+        return None
+    gate = operations[0]
+    if len(gate.qubit_operands) != 2 or len(gate.results) != 2:
+        return None
+    input_addresses = tuple(
+        _scalar_quantum_address(
+            value,
+            resolver,
+            scalar_values=scalar_values,
+            used_names=used_names,
+        )
+        for value in gate.qubit_operands
+    )
+    result_addresses = tuple(
+        _scalar_quantum_address(
+            value,
+            resolver,
+            scalar_values=scalar_values,
+            used_names=used_names,
+        )
+        for value in gate.results
+    )
+    if any(address is None for address in (*input_addresses, *result_addresses)):
+        return None
+    inputs = cast(tuple[WireKey, WireKey], input_addresses)
+    results = cast(tuple[WireKey, WireKey], result_addresses)
+    if any(
+        input_owner != result_owner
+        or _wire_index_relation(input_index, result_index)
+        is not _WireRelation.DEFINITE_OVERLAP
+        for (input_owner, input_index), (result_owner, result_index) in zip(
+            inputs,
+            results,
+            strict=True,
+        )
+    ):
+        return None
+    return gate, inputs
+
+
+def _depth_is_one_gate_per_active_field(depth: DepthResources) -> bool:
+    """Return whether every active depth field represents one gate layer.
+
+    Args:
+        depth (DepthResources): Candidate one-iteration depth profile.
+
+    Returns:
+        bool: Whether every field is structurally zero or one and at least one
+        field is active.
+    """
+    values = tuple(
+        cast(ResourceExpr, getattr(depth, field.name))
+        for field in dataclasses.fields(DepthResources)
+    )
+    return any(value != _ZERO for value in values) and all(
+        value in (_ZERO, _ONE) for value in values
+    )
+
+
+def _symbolic_shared_anchor_loop_entry_keys(
+    operation: ForOperation,
+    resolver: ExprResolver,
+    body_depth: DepthResources,
+    *,
+    loop_symbol: sp.Symbol,
+    start: ResourceExpr,
+    step: ResourceExpr,
+    iterations: ResourceExpr,
+    allocated_qubits: ResourceExpr,
+    clean_ancillas: ResourceExpr,
+    dirty_ancillas: ResourceExpr,
+    scalar_values: Mapping[str, sp.Expr] | None = None,
+    used_names: set[str] | None = None,
+) -> frozenset[WireKey] | None:
+    """Prove exact sequential depth for a one-gate shared-anchor loop.
+
+    Every iteration must apply one two-qubit gate, preserve both physical
+    addresses, and reuse one loop-invariant scalar wire. That shared wire
+    totally orders all active iterations, so the ordinary sequential depth is
+    exact even though the second address remains symbolic.
+
+    Args:
+        operation (ForOperation): Candidate flat range loop.
+        resolver (ExprResolver): Resolver scoped to the loop body.
+        body_depth (DepthResources): One-iteration depth profile.
+        loop_symbol (sp.Symbol): Internal induction symbol.
+        start (ResourceExpr): Inclusive range start.
+        step (ResourceExpr): Python-range step.
+        iterations (ResourceExpr): Number of active iterations.
+        allocated_qubits (ResourceExpr): Body-local allocation demand.
+        clean_ancillas (ResourceExpr): Body clean-ancilla demand.
+        dirty_ancillas (ResourceExpr): Body dirty-ancilla demand.
+        scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
+            values. Defaults to ``None``.
+        used_names (set[str] | None): Optional set updated with used input
+            names. Defaults to ``None``.
+
+    Returns:
+        frozenset[WireKey] | None: Caller-independent input addresses whose
+        readiness must be synchronized, or ``None`` when the proof fails.
+    """
+    if (
+        len(operation.operands) not in (2, 3)
+        or operation.region_args
+        or operation.loop_carried_rebinds
+        or any(
+            demand != _ZERO
+            for demand in (allocated_qubits, clean_ancillas, dirty_ancillas)
+        )
+        or not _depth_is_one_gate_per_active_field(body_depth)
+    ):
+        return None
+    resolved = _single_two_qubit_gate_addresses(
+        cast(list[object], operation.operations),
+        resolver,
+        scalar_values=scalar_values,
+        used_names=used_names,
+    )
+    if resolved is None:
+        return None
+    _gate, addresses = resolved
+    candidates: list[tuple[WireKey, WireKey]] = []
+    for anchor, moving in (addresses, tuple(reversed(addresses))):
+        anchor_index = anchor[1]
+        moving_index = moving[1]
+        if (
+            isinstance(moving_index, sp.Expr)
+            and not isinstance(anchor_index, _WireRangeIndex)
+            and anchor_index is not None
+            and (
+                not isinstance(anchor_index, sp.Expr)
+                or loop_symbol not in anchor_index.free_symbols
+            )
+            and loop_symbol in moving_index.free_symbols
+        ):
+            candidates.append((anchor, moving))
+    if len(candidates) != 1:
+        return None
+    anchor, (moving_owner, moving_index) = candidates[0]
+    assert isinstance(moving_index, sp.Expr)
+    return frozenset(
+        {
+            anchor,
+            (
+                moving_owner,
+                _symbolic_wire_range_index(
+                    moving_index,
+                    loop_symbol,
+                    start=start,
+                    step=step,
+                    iterations=iterations,
+                ),
+            ),
+        }
+    )
+
+
+def _symbolic_triangular_pair_loop_depth(
+    operation: ForOperation,
+    resolver: ExprResolver,
+    body_depth: DepthResources,
+    *,
+    loop_symbol: sp.Symbol,
+    start: ResourceExpr,
+    stop: ResourceExpr,
+    step: ResourceExpr,
+    iterations: ResourceExpr,
+    allocated_qubits: ResourceExpr,
+    clean_ancillas: ResourceExpr,
+    dirty_ancillas: ResourceExpr,
+    scalar_values: Mapping[str, sp.Expr] | None = None,
+    used_names: set[str] | None = None,
+) -> tuple[DepthResources, frozenset[WireKey]] | None:
+    """Prove the source-order ASAP depth of a triangular all-pairs loop.
+
+    The accepted shape is ``for i in range(s, t): for j in range(i + 1, t)``
+    with one invariant two-qubit gate on ``q[f(i)]`` and ``q[f(j)]``. For
+    ``K`` outer iterations, the per-wire source dependencies place pair
+    ``(i, j)`` at relative layer ``i + j`` and the critical path has
+    ``Max(0, 2*K - 3)`` layers.
+
+    Args:
+        operation (ForOperation): Candidate outer range loop.
+        resolver (ExprResolver): Resolver scoped to the outer body.
+        body_depth (DepthResources): One outer iteration's depth profile.
+        loop_symbol (sp.Symbol): Internal outer induction symbol.
+        start (ResourceExpr): Inclusive outer start.
+        stop (ResourceExpr): Exclusive outer stop.
+        step (ResourceExpr): Outer step.
+        iterations (ResourceExpr): Exact outer trip count.
+        allocated_qubits (ResourceExpr): Body-local allocation demand.
+        clean_ancillas (ResourceExpr): Body clean-ancilla demand.
+        dirty_ancillas (ResourceExpr): Body dirty-ancilla demand.
+        scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
+            values. Defaults to ``None``.
+        used_names (set[str] | None): Optional set updated with used input
+            names. Defaults to ``None``.
+
+    Returns:
+        tuple[DepthResources, frozenset[WireKey]] | None: Exact aggregate depth
+        and synchronized-entry address range, or ``None`` when any proof
+        premise fails.
+    """
+    if (
+        len(operation.operands) not in (2, 3)
+        or operation.region_args
+        or operation.loop_carried_rebinds
+        or _safe_simplify(cast(ResourceExpr, step - _ONE)) != _ZERO
+        or any(
+            demand != _ZERO
+            for demand in (allocated_qubits, clean_ancillas, dirty_ancillas)
+        )
+    ):
+        return None
+    nested = [item for item in operation.operations if isinstance(item, ForOperation)]
+    if len(nested) != 1 or any(
+        item is not nested[0] and not isinstance(item, BinOp)
+        for item in operation.operations
+    ):
+        return None
+    inner = nested[0]
+    if inner.loop_var_value is None or inner.region_args or inner.loop_carried_rebinds:
+        return None
+    if len(inner.operands) not in (2, 3):
+        return None
+    inner_start = resolver.resolve(inner.operands[0])
+    inner_stop = resolver.resolve(inner.operands[1])
+    inner_step = (
+        resolver.resolve(inner.operands[2]) if len(inner.operands) >= 3 else _ONE
+    )
+    if any(
+        _safe_simplify(cast(ResourceExpr, difference)) != _ZERO
+        for difference in (
+            inner_start - (loop_symbol + _ONE),
+            inner_stop - stop,
+            inner_step - _ONE,
+        )
+    ):
+        return None
+    inner_symbol = sp.Dummy(
+        "triangular_inner",
+        integer=True,
+        nonnegative=True,
+    )
+    inner_resolver = resolver.child_scope(
+        inner_block=_LocalBlock(inner.operations),
+        extra_context={inner.loop_var_value.uuid: inner_symbol},
+        extra_loop_vars={inner.loop_var: inner_symbol},
+    )
+    resolved = _single_two_qubit_gate_addresses(
+        cast(list[object], inner.operations),
+        inner_resolver,
+        scalar_values=scalar_values,
+        used_names=used_names,
+    )
+    if resolved is None:
+        return None
+    _gate, addresses = resolved
+    if addresses[0][0] != addresses[1][0]:
+        return None
+    oriented: tuple[sp.Expr, sp.Expr] | None = None
+    for outer_address, inner_address in (addresses, tuple(reversed(addresses))):
+        outer_index = outer_address[1]
+        inner_index = inner_address[1]
+        if not isinstance(outer_index, sp.Expr) or not isinstance(inner_index, sp.Expr):
+            continue
+        if (
+            loop_symbol not in outer_index.free_symbols
+            or inner_symbol in outer_index.free_symbols
+            or inner_symbol not in inner_index.free_symbols
+            or loop_symbol in inner_index.free_symbols
+        ):
+            continue
+        mapped_outer = cast(
+            ResourceExpr,
+            outer_index.subs(loop_symbol, inner_symbol, simultaneous=True),
+        )
+        if _safe_simplify(cast(ResourceExpr, mapped_outer - inner_index)) != _ZERO:
+            continue
+        slope = _safe_simplify(cast(ResourceExpr, sp.diff(outer_index, loop_symbol)))
+        if loop_symbol in slope.free_symbols or slope.is_zero is not False:
+            continue
+        oriented = outer_index, inner_index
+        break
+    if oriented is None:
+        return None
+    outer_index, _inner_index = oriented
+    inner_iterations = cast(
+        ResourceExpr,
+        sp.Max(_ZERO, inner_stop - inner_start),
+    )
+    depth_fields: dict[str, ResourceExpr] = {}
+    active_fields = 0
+    for field in dataclasses.fields(DepthResources):
+        value = cast(ResourceExpr, getattr(body_depth, field.name))
+        if value == _ZERO:
+            depth_fields[field.name] = _ZERO
+            continue
+        if _safe_simplify(cast(ResourceExpr, value - inner_iterations)) != _ZERO:
+            return None
+        active_fields += 1
+        depth_fields[field.name] = cast(
+            ResourceExpr,
+            sp.Max(_ZERO, 2 * iterations - 3),
+        )
+    if active_fields == 0:
+        return None
+    entry_key: WireKey = (
+        addresses[0][0],
+        _symbolic_wire_range_index(
+            outer_index,
+            loop_symbol,
+            start=start,
+            step=step,
+            iterations=iterations,
+        ),
+    )
+    return DepthResources(**depth_fields), frozenset((entry_key,))
 
 
 def _disjoint_concrete_loop_depth(
@@ -466,33 +846,6 @@ def _loop_body_has_symbolic_quantum_index(
         )
         is not None
     )
-
-
-def _dependency_keys_depend_on_symbol(
-    keys: frozenset[WireKey] | None,
-    symbol: sp.Symbol,
-) -> bool:
-    """Return whether an evaluated footprint still depends on a local symbol.
-
-    Args:
-        keys (frozenset[WireKey] | None): Evaluated dependency footprint, or
-            ``None`` when no precise footprint is available.
-        symbol (sp.Symbol): Loop-local symbol to find.
-
-    Returns:
-        bool: Whether a scalar address or symbolic range uses ``symbol``.
-    """
-    if keys is None:
-        return False
-    for _owner, index in keys:
-        if isinstance(index, _WireRangeIndex):
-            if symbol in (
-                index.index_at_offset.free_symbols | index.iterations.free_symbols
-            ):
-                return True
-        elif isinstance(index, sp.Expr) and symbol in index.free_symbols:
-            return True
-    return False
 
 
 def _symbolic_disjoint_loop_depth(
