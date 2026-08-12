@@ -195,6 +195,16 @@ def _expval_two_vec_elems(obs: qmc.Observable) -> qmc.Float:
     return qmc.expval((q[0], q[1]), obs)
 
 
+@qmc.qkernel
+def _expval_dynamic_vec_elem(
+    index: qmc.UInt,
+    obs: qmc.Observable,
+) -> qmc.Float:
+    """Observe a dynamically selected element of one known root Vector."""
+    q = qmc.qubit_array(2, name="q")
+    return qmc.expval((q[index],), obs)
+
+
 # ---------------------------------------------------------------------------
 # Case (a): ungated Vector-element ancilla — the core regression
 # ---------------------------------------------------------------------------
@@ -337,6 +347,21 @@ def test_expval_vector_element_root_metadata_round_trips():
                 == r_rt.element_parent_uuids[right_index]
             )
     assert r_rt.element_parent_indices == rt.element_parent_indices
+
+
+def test_expval_dynamic_element_root_metadata_round_trips() -> None:
+    """Serialization retains a known root with an unresolved scalar index."""
+    block = InlinePass().run(_expval_dynamic_vec_elem.block)
+    runtime = _find_expval(block).qubits.metadata.array_runtime
+    assert runtime is not None
+    assert runtime.element_parent_uuids[0]
+    assert runtime.element_parent_indices == (-1,)
+
+    restored = InlinePass().run(deserialize(serialize(_expval_dynamic_vec_elem)).block)
+    restored_runtime = _find_expval(restored).qubits.metadata.array_runtime
+    assert restored_runtime is not None
+    assert restored_runtime.element_parent_uuids[0]
+    assert restored_runtime.element_parent_indices == (-1,)
 
 
 def test_get_element_parent_addresses_aligns_with_element_uuids():

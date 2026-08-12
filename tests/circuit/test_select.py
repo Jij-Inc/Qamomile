@@ -1054,6 +1054,17 @@ class TestSelectValidation:
                 case_blocks=[Block(), Block()],
             )
 
+    def test_ir_positional_constructor_preserves_num_index_args_abi(self) -> None:
+        """New callable metadata does not shift the exported positional ABI."""
+        from qamomile.circuit.ir.block import Block
+        from qamomile.circuit.ir.operation.select import SelectOperation
+
+        cases = [Block(), Block()]
+        operation = SelectOperation([], [], 1, cases, 1)
+
+        assert operation.num_index_args == 1
+        assert operation.case_callable_attrs == []
+
 
 class TestSelectSerialization:
     """Preserve SELECT-owned case blocks across qkernel persistence."""

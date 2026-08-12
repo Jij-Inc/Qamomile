@@ -134,12 +134,22 @@ class _DecodeContext:
 
     Holds the value-table dicts keyed by UUID so the recursive
     materializer can resolve cross-references depth-first.
+
+    Args:
+        value_table (list[dict[str, Any]]): Serialized value definitions.
+        callable_table (list[dict[str, Any]] | None): Serialized callable
+            definitions. Defaults to an empty registry.
+        opaque_cost_decoder (Callable[[Any], Any] | None): Optional outer-layer
+            adapter that reconstructs an opaque callable cost from its IR
+            payload. Defaults to identity conversion.
     """
 
     def __init__(
         self,
         value_table: list[dict[str, Any]],
         callable_table: list[dict[str, Any]] | None = None,
+        *,
+        opaque_cost_decoder: Callable[[Any], Any] | None = None,
     ) -> None:
         """Initialize a decode context.
 
@@ -149,6 +159,9 @@ class _DecodeContext:
                 ``uuid`` field; duplicates are an error.
             callable_table (list[dict[str, Any]] | None): Callable definitions
                 keyed by module-local IDs. Defaults to an empty registry.
+            opaque_cost_decoder (Callable[[Any], Any] | None): Optional
+                outer-layer adapter for opaque callable cost payloads. Defaults
+                to ``None``, which preserves decoded payloads unchanged.
 
         Raises:
             ValueError: If a value-table dict lacks a ``uuid`` or if
@@ -170,6 +183,7 @@ class _DecodeContext:
         self._blocks: list[Block] = []
         self._definition_entries: dict[str, dict[str, Any]] = {}
         self._definitions: dict[str, CallableDef] = {}
+        self._opaque_cost_decoder = opaque_cost_decoder
         for entry in callable_table:
             if not isinstance(entry, dict):
                 raise ValueError("callable_table entries must be dicts")
@@ -187,6 +201,20 @@ class _DecodeContext:
             ref = _decode_callable_ref(definition_payload.get("ref"))
             self._definition_entries[definition_id] = definition_payload
             self._definitions[definition_id] = CallableDef(ref=ref)
+
+    def decode_opaque_cost(self, payload: Any) -> Any:
+        """Reconstruct one opaque callable cost from an IR-owned payload.
+
+        Args:
+            payload (Any): Decoded serializer-friendly opaque-cost payload.
+
+        Returns:
+            Any: Cost value produced by the configured adapter, or ``payload``
+            unchanged when no adapter is configured.
+        """
+        if self._opaque_cost_decoder is None:
+            return payload
+        return self._opaque_cost_decoder(payload)
 
     def register_block(self, block: Block) -> Block:
         """Register a decoded block for post-link metadata refresh.
@@ -274,10 +302,27 @@ class _DecodeContext:
         return definition
 
     def populate_definitions(self) -> None:
-        """Populate callable placeholders after every graph node has an ID."""
+        """Populate callable placeholders after every graph node has an ID.
+
+        Callable attributes are populated for every placeholder before any
+        body is decoded. A body may contain a forward reference to a later
+        callable whose attributes participate in invocation validation.
+
+        Raises:
+            ValueError: If callable attributes or definitions are malformed,
+                or if a decoded definition changes its registered reference.
+        """
         for definition_id, payload in self._definition_entries.items():
-            decoded = _decode_callable_def(payload, self)
+            self._definitions[definition_id].attrs = _decode_callable_definition_attrs(
+                payload
+            )
+        for definition_id, payload in self._definition_entries.items():
             placeholder = self._definitions[definition_id]
+            decoded = _decode_callable_def(
+                payload,
+                self,
+                predecoded_attrs=placeholder.attrs,
+            )
             if placeholder.ref != decoded.ref:
                 raise ValueError(
                     f"callable definition {definition_id!r} changed ref while decoding"
@@ -1956,7 +2001,7 @@ def _decode_select(d: dict[str, Any], ctx: _DecodeContext) -> SelectOperation:
 
     Raises:
         ValueError: If the concrete/reference width union, index-argument
-            count, or case list is malformed.
+            count, case list, or SELECT-specific callable attrs are malformed.
     """
     operands, results = _operands_results(d, ctx)
     has_concrete_width = "num_index_qubits" in d
@@ -1993,11 +2038,26 @@ def _decode_select(d: dict[str, Any], ctx: _DecodeContext) -> SelectOperation:
     raw_case_blocks = d.get("case_blocks")
     if not isinstance(raw_case_blocks, list):
         raise ValueError("SelectOperation.case_blocks must be a list.")
+    encoded_case_attrs = _decode_callable_attrs(d.get("callable_attrs"))
+    unsupported_attrs = [key for key in encoded_case_attrs if key != "cases"]
+    if unsupported_attrs:
+        raise ValueError(
+            "SelectOperation callable_attrs supports only the 'cases' key; "
+            f"got unsupported key(s): {unsupported_attrs!r}."
+        )
+    raw_case_attrs = encoded_case_attrs.get("cases", [])
+    if not isinstance(raw_case_attrs, list) or not all(
+        isinstance(attrs, dict) for attrs in raw_case_attrs
+    ):
+        raise ValueError(
+            "SelectOperation callable_attrs.cases must be a list of mappings."
+        )
     return SelectOperation(
         operands=operands,
         results=results,
         num_index_qubits=cast("int | Value", num_index_qubits),
         case_blocks=[_decode_block(block, ctx) for block in raw_case_blocks],
+        case_callable_attrs=[dict(attrs) for attrs in raw_case_attrs],
         num_index_args=cast(int, num_index_args),
     )
 
@@ -2107,7 +2167,7 @@ def _decode_callable_attrs(d: Any) -> dict[str, Any]:
     if attrs is None:
         return {}
     if not isinstance(attrs, dict):
-        raise ValueError("ControlledU callable_attrs must decode to a dict")
+        raise ValueError("callable_attrs must decode to a dict")
     return attrs
 
 
@@ -2221,12 +2281,20 @@ def _decode_signature(d: Any, ctx: _DecodeContext) -> Signature | None:
     return Signature(operands=operands, results=results)
 
 
-def _decode_callable_def(d: Any, ctx: _DecodeContext) -> CallableDef:
+def _decode_callable_def(
+    d: Any,
+    ctx: _DecodeContext,
+    *,
+    predecoded_attrs: dict[str, Any] | None = None,
+) -> CallableDef:
     """Decode a callable definition.
 
     Args:
         d (Any): Serialized definition payload.
         ctx (_DecodeContext): Active decode context.
+        predecoded_attrs (dict[str, Any] | None): Attributes decoded during
+            callable-table prelinking. Defaults to ``None``, which decodes the
+            attributes from ``d`` for standalone definitions.
 
     Returns:
         CallableDef: Reconstructed definition.
@@ -2236,11 +2304,15 @@ def _decode_callable_def(d: Any, ctx: _DecodeContext) -> CallableDef:
     """
     if not isinstance(d, dict):
         raise ValueError("CallableDef payload must be a dict")
-    attrs = _decode_payload(d.get("attrs"))
-    if attrs is None:
-        attrs = {}
-    if not isinstance(attrs, dict):
-        raise ValueError("CallableDef attrs must decode to a dict")
+    attrs = (
+        _decode_callable_definition_attrs(d)
+        if predecoded_attrs is None
+        else predecoded_attrs
+    )
+    raw_opaque_cost = d.get("opaque_cost")
+    opaque_cost = None
+    if raw_opaque_cost is not None:
+        opaque_cost = ctx.decode_opaque_cost(_decode_payload(raw_opaque_cost))
     raw_policy = d.get("default_policy", CallPolicy.INLINE.name)
     return CallableDef(
         ref=_decode_callable_ref(d.get("ref")),
@@ -2251,10 +2323,32 @@ def _decode_callable_def(d: Any, ctx: _DecodeContext) -> CallableDef:
             _decode_callable_implementation(impl, ctx)
             for impl in d.get("implementations", [])
         ],
-        opaque_cost=None,
+        opaque_cost=opaque_cost,
         default_policy=_enum_by_name(CallPolicy, raw_policy, "CallPolicy"),
         attrs=attrs,
     )
+
+
+def _decode_callable_definition_attrs(d: Any) -> dict[str, Any]:
+    """Decode the attributes carried by one callable definition.
+
+    Args:
+        d (Any): Serialized callable-definition payload.
+
+    Returns:
+        dict[str, Any]: Decoded callable attributes.
+
+    Raises:
+        ValueError: If the definition or its attributes are malformed.
+    """
+    if not isinstance(d, dict):
+        raise ValueError("CallableDef payload must be a dict")
+    attrs = _decode_payload(d.get("attrs"))
+    if attrs is None:
+        return {}
+    if not isinstance(attrs, dict):
+        raise ValueError("CallableDef attrs must decode to a dict")
+    return attrs
 
 
 def _decode_invoke_operation(d: dict[str, Any], ctx: _DecodeContext) -> InvokeOperation:

@@ -93,14 +93,16 @@ def log2(value: UInt | Float | int | float) -> Float:
 
 
 def ceil(value: Float | UInt | int | float) -> UInt:
-    """Round a non-negative numeric expression upward to an integer.
+    """Round a numeric expression upward to a non-negative integer.
 
-    ``UInt`` is Qamomile's structural integer type, so negative results are
-    outside this operation's domain. Concrete values fold immediately;
+    ``UInt`` is Qamomile's structural integer type, so inputs whose ceiling is
+    negative are outside this operation's domain. For finite real values this
+    accepts exactly ``value > -1``. Concrete values fold immediately;
     unresolved values emit one abstract ``CEIL`` operation.
 
     Args:
-        value (Float | UInt | int | float): Non-negative numeric expression.
+        value (Float | UInt | int | float): Finite numeric expression whose
+            ceiling is non-negative.
 
     Returns:
         UInt: Least integer greater than or equal to ``value``.

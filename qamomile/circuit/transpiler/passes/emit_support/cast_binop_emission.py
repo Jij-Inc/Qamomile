@@ -17,6 +17,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CondOp,
     NotOp,
+    UnaryMathOp,
 )
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.transpiler.gate_emitter import default_combine_symbolic
@@ -223,3 +224,34 @@ def evaluate_classical_predicate(
     # Write by UUID only — see the matching comment in evaluate_binop above
     # for why name-keyed writes are unsafe for tmp values like "bit_tmp".
     _set_emit_value(bindings, op.results[0].uuid, result)
+
+
+def evaluate_unary_math(
+    emit_pass: "StandardEmitPass",
+    op: UnaryMathOp,
+    bindings: dict[str, Any],
+) -> None:
+    """Evaluate concrete unary math used inside a controlled body.
+
+    An unresolved runtime unary expression is left unbound. Pure unused
+    expressions can then disappear like ordinary dead classical work, while a
+    later loop bound, branch, or gate-angle consumer still fails at its normal
+    resolution boundary instead of receiving a fabricated value.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass used for value
+            resolution and runtime-parameter classification.
+        op (UnaryMathOp): Unary expression to evaluate.
+        bindings (dict[str, Any]): Current emit-time values, updated when the
+            expression resolves to a valid concrete scalar.
+    """
+    if not op.results:
+        return
+    result = fold_classical_op(
+        op,
+        lambda value: emit_pass._resolver.resolve_classical_value(value, bindings),
+        emit_pass._resolver.parameters,
+        FoldPolicy.EMIT_RESPECT_PARAMS,
+    )
+    if result is not None:
+        _set_emit_value(bindings, op.results[0].uuid, result)

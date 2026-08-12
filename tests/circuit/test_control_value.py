@@ -618,6 +618,44 @@ def test_all_ones_control_value_uses_the_canonical_default() -> None:
     assert operation.control_value is None
 
 
+def test_nested_default_controls_keep_the_canonical_default() -> None:
+    """Composing ordinary control groups does not create an explicit pattern."""
+    transformed = qmc.control(
+        qmc.control(qmc.x, num_controls=2),
+        num_controls=1,
+    )
+
+    assert transformed._control_value is None
+
+    @qmc.qkernel
+    def circuit(
+        outer: Qubit,
+        inner_0: Qubit,
+        inner_1: Qubit,
+        target: Qubit,
+    ) -> tuple[Qubit, Qubit, Qubit, Qubit]:
+        """Trace the flattened three-control X operation.
+
+        Args:
+            outer (Qubit): Newly prepended control qubit.
+            inner_0 (Qubit): First original control qubit.
+            inner_1 (Qubit): Second original control qubit.
+            target (Qubit): Target qubit.
+
+        Returns:
+            tuple[Qubit, Qubit, Qubit, Qubit]: Updated controls and target.
+        """
+        return transformed(outer, inner_0, inner_1, target)
+
+    [operation] = [
+        operation
+        for operation in circuit.block.operations
+        if isinstance(operation, ConcreteControlledU)
+    ]
+    assert operation.num_controls == 3
+    assert operation.control_value is None
+
+
 def test_control_value_is_preserved_on_an_opaque_oracle() -> None:
     """Opaque controlled calls retain activation metadata for target emitters."""
     oracle = qmc.opaque("control_value_oracle", num_qubits=1)
@@ -701,9 +739,25 @@ def test_inverse_of_patterned_opaque_oracle_stays_controlled() -> None:
         for operation in outer_inverse.implementation_block.operations
         if isinstance(operation, InvokeOperation)
     ]
-    assert invoke.transform is CallTransform.CONTROLLED
+    assert invoke.transform is CallTransform.CONTROLLED_INVERSE
     assert invoke.control_value == 2
-    assert invoke.target.name == "inverse_control_value_oracle_inv"
+    assert invoke.target.name == "inverse_control_value_oracle"
+
+    restored = deserialize(serialize(inverse_layer)).block
+    [restored_outer_inverse] = [
+        operation
+        for operation in restored.operations
+        if isinstance(operation, InverseBlockOperation)
+    ]
+    assert restored_outer_inverse.implementation_block is not None
+    [restored_invoke] = [
+        operation
+        for operation in restored_outer_inverse.implementation_block.operations
+        if isinstance(operation, InvokeOperation)
+    ]
+    assert restored_invoke.transform is CallTransform.CONTROLLED_INVERSE
+    assert restored_invoke.control_value == 2
+    assert restored_invoke.target == invoke.target
 
 
 def test_control_value_composes_with_existing_oracle_controls() -> None:
@@ -746,7 +800,29 @@ def test_control_value_composes_with_existing_oracle_controls() -> None:
         if isinstance(operation, InvokeOperation)
     ]
     assert invoke.num_control_qubits == 3
+    assert invoke.num_declared_control_qubits == 1
+    assert invoke.num_added_control_qubits == 2
     assert invoke.control_value == 0b110
+    assert invoke.definition is not None
+    assert invoke.definition.attrs["num_control_qubits"] == 1
+    assert invoke.definition.attrs["num_declared_control_qubits"] == 1
+    assert invoke.definition.attrs["num_added_control_qubits"] == 0
+
+    restored = deserialize(serialize(circuit)).block
+    [restored_invoke] = [
+        operation
+        for operation in restored.operations
+        if isinstance(operation, InvokeOperation)
+    ]
+    assert restored_invoke.target == invoke.target
+    assert restored_invoke.num_control_qubits == 3
+    assert restored_invoke.num_declared_control_qubits == 1
+    assert restored_invoke.num_added_control_qubits == 2
+    assert restored_invoke.control_value == 0b110
+    assert restored_invoke.definition is not None
+    assert restored_invoke.definition.attrs["num_control_qubits"] == 1
+    assert restored_invoke.definition.attrs["num_declared_control_qubits"] == 1
+    assert restored_invoke.definition.attrs["num_added_control_qubits"] == 0
 
 
 def test_control_value_round_trips_through_qkernel_serialization() -> None:

@@ -84,9 +84,18 @@ def emit_composite_gate(
     ``EmitError`` if any operand cannot be resolved, rather than
     silently dropping it (previously ``qft(view)`` emitted zero gates).
 
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Backend circuit being emitted into.
+        op (InvokeOperation): Composite or Oracle invocation to emit.
+        qubit_map (QubitMap): Logical-to-physical map, mutated with results.
+        bindings (dict[str, Any]): Bindings visible at the call site.
+
     Raises:
         EmitError: If any control or target qubit operand fails to
-            resolve to a physical qubit index.
+            resolve to a physical qubit index, or an inverse body is absent.
+        ValueError: If the selected implementation body disagrees with the
+            invocation contract.
     """
     from qamomile.circuit.transpiler.passes.emit_support.controlled_block_support import (
         _expand_quantum_operands_to_phys,
@@ -117,7 +126,7 @@ def emit_composite_gate(
         update_composite_result_mapping(op, qubit_groups, qubit_map)
         return
 
-    if op.transform is CallTransform.CONTROLLED:
+    if op.transform.is_controlled:
         from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
             emit_controlled_composite_at_indices,
         )
@@ -133,11 +142,12 @@ def emit_composite_gate(
         update_composite_result_mapping(op, qubit_groups, qubit_map)
         return
 
-    if op.transform is CallTransform.INVERSE:
-        implementation = op.implementation_for(
-            backend=getattr(emit_pass, "backend_name", None)
-        )
-        if implementation is None or implementation.body is None:
+    if op.transform.is_inverse:
+        selection = op.select_body(backend=getattr(emit_pass, "backend_name", None))
+        if (
+            selection.body is None
+            or selection.realized_transform is not CallTransform.INVERSE
+        ):
             raise EmitError(
                 f"Inverse callable '{op.target.name}' has no inverse "
                 "implementation body for this backend. Bind structural "
@@ -148,7 +158,7 @@ def emit_composite_gate(
         emit_pass._emit_custom_composite(
             circuit,
             op,
-            implementation.body,
+            selection.body,
             qubit_indices,
             bindings,
         )

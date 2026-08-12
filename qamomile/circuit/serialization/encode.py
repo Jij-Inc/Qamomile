@@ -47,6 +47,7 @@ from qamomile.circuit.ir.serialize.encode import (
 from qamomile.circuit.ir.types import ValueType
 from qamomile.circuit.ir.value import ValueBase
 
+from ._opaque_cost import OpaqueCostEncoder
 from .canonical import canonicalize_graph
 from .schema import QAMOMILE_VERSION
 from .validation import validate_qkernel_ir
@@ -67,6 +68,8 @@ def to_dict(kernel: QKernelLike) -> dict[str, Any]:
             frontend type or process-local emitter.
         ValueError: If the body is specialized, non-hierarchical, or its
             interface disagrees with the signature.
+        RuntimeError: If an opaque resource estimate contains public metrics or
+            metadata that disagree with retained canonical provenance.
     """
     _validate_kernel_surface(kernel)
     block = kernel.block
@@ -114,7 +117,7 @@ def to_dict(kernel: QKernelLike) -> dict[str, Any]:
         raise ValueError("qkernel return annotations do not match Block outputs")
     validate_qkernel_ir(block)
 
-    ctx = _EncodeContext()
+    ctx = _EncodeContext(opaque_cost_encoder=OpaqueCostEncoder())
     parameters: list[dict[str, Any]] = []
     slots = {slot.name: slot for slot in block.param_slots}
     formals = dict(zip(block.label_args, block.input_values, strict=True))

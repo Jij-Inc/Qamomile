@@ -8,6 +8,7 @@ import math
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 import qamomile.circuit as qmc
@@ -32,7 +33,11 @@ from qamomile.circuit.ir.types import BitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.errors import EmitError, ValidationError
 from qamomile.hugr import HugrTranspiler
-from qamomile.hugr.lowerer import _lower_while
+from qamomile.hugr.lowerer import (
+    _lower_while,
+    _resolve_transformed_power,
+    _validate_pauli_evolution_hamiltonian,
+)
 
 
 def _hugr_operation_names(package: Package) -> list[str]:
@@ -56,6 +61,33 @@ def _hugr_float_constants(package: Package) -> list[float]:
         for _, data in package.modules[0].nodes()
         if isinstance(data.op, ops.Const) and isinstance(data.op.val, FloatVal)
     ]
+
+
+@pytest.mark.parametrize(
+    ("location", "coefficient"),
+    [
+        pytest.param("constant", float("nan"), id="constant-nan"),
+        pytest.param("constant", float("inf"), id="constant-infinity"),
+        pytest.param("term", float("nan"), id="term-nan"),
+        pytest.param("term", float("inf"), id="term-infinity"),
+    ],
+)
+def test_hugr_rejects_nonfinite_pauli_coefficients(
+    location: str,
+    coefficient: float,
+) -> None:
+    """HUGR validation rejects non-finite constants and Pauli terms."""
+    hamiltonian = qm_o.Hamiltonian()
+    if location == "constant":
+        hamiltonian.constant = coefficient
+    else:
+        hamiltonian.add_term(
+            (qm_o.PauliOperator(qm_o.Pauli.X, 0),),
+            coefficient,
+        )
+
+    with pytest.raises(EmitError, match="finite Hamiltonian coefficients"):
+        _validate_pauli_evolution_hamiltonian(hamiltonian)
 
 
 @qmc.qkernel
@@ -278,6 +310,73 @@ def _hugr_dynamic_power_control_call_global_phase(
         global_phase=theta,
     )
     return qmc.measure(control), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_zero_power_control_value(
+    power: qmc.UInt,
+) -> tuple[qmc.Bit, qmc.Bit]:
+    """Apply a zero-activated controlled phase at a symbolic power."""
+    control = qmc.qubit("control")
+    target = qmc.qubit("target")
+    control, target = qmc.control(
+        _hugr_identity,
+        control_value=0,
+    )(
+        control,
+        target,
+        power=power,
+        global_phase=0.5,
+    )
+    return qmc.measure(control), qmc.measure(target)
+
+
+@qmc.qkernel
+def _hugr_conditional_swap_body(
+    left: qmc.Qubit,
+    right: qmc.Qubit,
+    selector: qmc.UInt,
+) -> tuple[qmc.Qubit, qmc.Qubit]:
+    """Conditionally exchange target handles across a synthetic merge.
+
+    Args:
+        left (qmc.Qubit): First target handle.
+        right (qmc.Qubit): Second target handle.
+        selector (qmc.UInt): Whether to exchange the handles.
+
+    Returns:
+        tuple[qmc.Qubit, qmc.Qubit]: Handles in the selected order.
+    """
+    if selector == 1:
+        left, right = right, left
+    return left, right
+
+
+@qmc.qkernel
+def _hugr_zero_power_conditional_swap(
+    power: qmc.UInt,
+    selector: qmc.UInt,
+) -> tuple[qmc.Bit, qmc.Bit, qmc.Bit]:
+    """Apply a conditionally permuting body at a symbolic power.
+
+    Args:
+        power (qmc.UInt): Number of controlled body applications.
+        selector (qmc.UInt): Body-local target permutation selector.
+
+    Returns:
+        tuple[qmc.Bit, qmc.Bit, qmc.Bit]: Control and target measurements.
+    """
+    control = qmc.qubit("control")
+    left = qmc.qubit("left")
+    right = qmc.qubit("right")
+    control, left, right = qmc.control(_hugr_conditional_swap_body)(
+        control,
+        left,
+        right,
+        selector,
+        power=power,
+    )
+    return qmc.measure(control), qmc.measure(left), qmc.measure(right)
 
 
 @qmc.qkernel
@@ -2285,7 +2384,7 @@ def test_hugr_rejects_runtime_controlled_power_explicitly() -> None:
     """A dynamic body power never degrades to one silent application."""
     with pytest.raises(
         EmitError,
-        match="compile-time positive integer",
+        match="compile-time nonnegative integer",
     ) as error:
         HugrTranspiler().to_hugr(
             _hugr_dynamic_power_control_call_global_phase,
@@ -2293,6 +2392,108 @@ def test_hugr_rejects_runtime_controlled_power_explicitly() -> None:
         )
 
     assert error.value.operation == "ControlledUOperation"
+
+
+@pytest.mark.hugr
+@pytest.mark.parametrize(
+    ("candidate", "expected"),
+    [
+        pytest.param(0, 0, id="zero"),
+        pytest.param(2, 2, id="integer"),
+        pytest.param(2.0, 2, id="whole-float"),
+        pytest.param(np.int64(2), 2, id="numpy-integer"),
+    ],
+)
+def test_hugr_transformed_power_accepts_shared_integral_domain(
+    candidate: object,
+    expected: int,
+) -> None:
+    """HUGR accepts the same nonnegative integral powers as other layers."""
+    operation = next(
+        op
+        for op in _hugr_controlled_program.block.operations
+        if isinstance(op, ControlledUOperation)
+    )
+
+    assert (
+        _resolve_transformed_power(
+            dataclasses.replace(operation, power=candidate),
+            {},
+        )
+        == expected
+    )
+
+
+@pytest.mark.hugr
+@pytest.mark.parametrize(
+    ("candidate", "match"),
+    [
+        pytest.param(True, "bool", id="bool"),
+        pytest.param(-1, "nonnegative", id="negative"),
+        pytest.param(1.5, "non-integer float", id="fractional-float"),
+    ],
+)
+def test_hugr_transformed_power_rejects_shared_invalid_domain(
+    candidate: object,
+    match: str,
+) -> None:
+    """HUGR rejects the same malformed numeric powers as other layers."""
+    operation = next(
+        op
+        for op in _hugr_controlled_program.block.operations
+        if isinstance(op, ControlledUOperation)
+    )
+
+    with pytest.raises(EmitError, match=match):
+        _resolve_transformed_power(
+            dataclasses.replace(operation, power=candidate),
+            {},
+        )
+
+
+@pytest.mark.hugr
+def test_hugr_zero_power_skips_body_and_control_value_brackets() -> None:
+    """A bound zero power emits neither its body nor zero-control brackets."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_zero_power_control_value,
+        bindings={"power": 0},
+    )
+
+    transpiler.target.validate(package)
+    names = _hugr_operation_names(package)
+    assert "tket.quantum.X" not in names
+    assert "tket.global_phase.global_phase" not in names
+
+
+@pytest.mark.hugr
+def test_hugr_zero_power_preserves_targets_across_synthetic_body_exits() -> None:
+    """A zero power maps each target result directly to its source wire."""
+    transpiler = HugrTranspiler()
+    package = transpiler.to_hugr(
+        _hugr_zero_power_conditional_swap,
+        bindings={"power": 0, "selector": 1},
+    )
+
+    transpiler.target.validate(package)
+    graph = package.modules[0]
+    allocations = [
+        node
+        for node, data in graph.nodes()
+        if callable(name := getattr(data.op, "name", None))
+        and str(name()) == "tket.quantum.QAlloc"
+    ]
+    measurements = [
+        node
+        for node, data in graph.nodes()
+        if callable(name := getattr(data.op, "name", None))
+        and str(name()) == "tket.quantum.Measure"
+    ]
+
+    assert len(allocations) == len(measurements) == 3
+    assert [list(graph.input_neighbours(node)) for node in measurements] == [
+        [node] for node in allocations
+    ]
 
 
 @pytest.mark.hugr

@@ -1,40 +1,54 @@
-"""Logical symbolic resource estimation for Qamomile circuits.
+"""Algorithmic symbolic resource estimation for Qamomile circuits.
 
-This package's public surface is the *logical* resource estimator. The physical
-(surface-code) conversion in :mod:`qamomile.circuit.estimator.physical` is
-experimental and intentionally not re-exported here — import it explicitly from
-that module if you need it, keeping logical estimation and physical assumptions
-clearly separated.
+The default clean-ancilla Toffoli control-decomposition model includes reusable
+clean ancillas and body-wide shared control ladders when concrete structure
+permits them. The abstract control model represents each controlled source
+primitive as one logical operation. The physical (surface-code) conversion in
+:mod:`qamomile.circuit.estimator.physical` remains experimental and
+intentionally is not re-exported here, keeping algorithmic estimation and
+physical assumptions clearly separated. Measurements and resets are reported
+independently from gates, while depth retains both the complete critical path
+and per-operation-class layers.
 """
 
-from qamomile.circuit.estimator.resource_estimator import (
+from qamomile.circuit.estimator._resource_base import (
+    ApproximationStatus,
+    ControlDecomposition,
+    EstimateDerivation,
+    EstimateQuality,
+)
+from qamomile.circuit.estimator._resource_types import (
     CallResources,
     DepthResources,
-    EstimateQuality,
-    GateBasis,
     GateResources,
-    OpaqueCallContext,
+    MeasurementResources,
+    ResetResources,
     ResourceAssumption,
+    ResourceTraceNode,
+    WidthResources,
+)
+from qamomile.circuit.estimator.resource_estimator import (
+    OpaqueCostContext,
     ResourceEstimate,
     ResourceEstimator,
-    ResourceEstimatorConfig,
-    ResourceTraceNode,
     UnknownResourcePolicy,
-    WidthResources,
     estimate_resources,
 )
 
 __all__ = [
+    "ApproximationStatus",
     "CallResources",
+    "ControlDecomposition",
     "DepthResources",
+    "EstimateDerivation",
     "EstimateQuality",
-    "GateBasis",
     "GateResources",
-    "OpaqueCallContext",
+    "MeasurementResources",
+    "OpaqueCostContext",
+    "ResetResources",
     "ResourceAssumption",
     "ResourceEstimate",
     "ResourceEstimator",
-    "ResourceEstimatorConfig",
     "ResourceTraceNode",
     "UnknownResourcePolicy",
     "WidthResources",

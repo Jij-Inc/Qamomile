@@ -1523,9 +1523,16 @@ def _controlled_region_weight(
             weight += 2
         elif isinstance(operation, ForInstruction):
             body_weight = _controlled_region_weight(operation.body)
-            weight += min(2, len(operation.indexset) * body_weight)
+            if body_weight and operation.indexset:
+                iterations = 2 if operation.indexset[1:] else 1
+                weight += min(2, iterations * body_weight)
         elif isinstance(operation, CallInstruction):
-            weight += 1
+            body_weight = _controlled_region_weight(operation.callee.body.operations)
+            phase_weight = int(not _is_zero(operation.callee.body.global_phase))
+            weight += min(
+                2,
+                operation.callee.power * min(2, body_weight + phase_weight),
+            )
         if weight >= 2:
             return 2
     return weight
@@ -1555,7 +1562,20 @@ def _contains_only_two_control_native_work(
             if operation.kind not in native:
                 return False
         elif isinstance(operation, ForInstruction):
+            if not operation.indexset:
+                continue
             if not _contains_only_two_control_native_work(operation.body):
+                return False
+        elif isinstance(operation, CallInstruction):
+            if operation.callee.power == 0:
+                continue
+            if (
+                operation.callee.controls
+                or not _is_zero(operation.callee.body.global_phase)
+                or not _contains_only_two_control_native_work(
+                    operation.callee.body.operations
+                )
+            ):
                 return False
         else:
             return False

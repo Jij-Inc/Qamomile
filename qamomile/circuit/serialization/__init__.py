@@ -4,9 +4,11 @@ The protobuf format preserves the highest target-neutral static semantics:
 the qkernel interface, hierarchical IR body, shared callable definitions, and
 all value-identity relationships needed by later compiler passes. Random
 process-local UUID and logical-ID spellings are replaced by canonical
-graph-local identities. Invocation bindings, runtime values, prepared compiler
-modules, backend artifacts, resource estimates, and Python evaluation performed
-during tracing are outside the format.
+graph-local identities. Fixed resource estimates attached to bodyless opaque
+callables are preserved, while process-local resource-cost callbacks are
+rejected explicitly. Invocation bindings, runtime values, prepared compiler
+modules, backend artifacts, standalone resource reports, and Python evaluation
+performed during tracing are outside the format.
 
 After :func:`deserialize`, pass the returned :class:`SerializedQKernel` to an
 ordinary Qamomile transpiler with fresh ``bindings`` and ``parameters``.

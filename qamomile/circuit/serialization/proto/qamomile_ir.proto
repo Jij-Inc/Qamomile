@@ -348,6 +348,7 @@ message CallableDefinition {
   repeated CallableImplementation implementations = 5;
   string default_policy = 6;
   Payload attrs = 7;
+  optional Payload opaque_cost = 8;
 }
 
 message CallableRef {

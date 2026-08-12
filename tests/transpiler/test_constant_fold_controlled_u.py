@@ -65,6 +65,8 @@ class TestConstantFoldControlledUFields:
         block = transpiler.to_block(kernel, bindings={"n": 4})
         inlined = transpiler.inline(transpiler.substitute(block))
         validated = transpiler.affine_validate(inlined)
+        source = self._find_controlled_u(validated.operations)
+        assert isinstance(source, SymbolicControlledU)
         folded = transpiler.constant_fold(validated, bindings={"n": 4})
 
         cu = self._find_controlled_u(folded.operations)
@@ -73,6 +75,11 @@ class TestConstantFoldControlledUFields:
             f"Expected promotion to ConcreteControlledU, got {type(cu).__name__}"
         )
         assert cu.num_controls == 3
+        assert source.callable_ref is not None
+        assert source.callable_attrs
+        assert cu.callable_ref == source.callable_ref
+        assert cu.callable_attrs == source.callable_attrs
+        assert cu.callable_attrs is not source.callable_attrs
 
     def test_concrete_num_controls_unchanged(self):
         """A natively concrete ``num_controls`` stays unchanged through folding."""

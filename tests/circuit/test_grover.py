@@ -34,17 +34,16 @@ def mark_all_ones(reg: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
 class _QueryCost:
     """Report one opaque query of cost ``l + n`` per oracle call."""
 
-    def __call__(self, ctx: qmc.OpaqueCallContext) -> qmc.ResourceEstimate:
+    def __call__(self, ctx: qmc.OpaqueCostContext) -> qmc.ResourceEstimate:
         """Return an ``O(l + n)`` gate + one-query estimate.
 
         Args:
-            ctx (qmc.OpaqueCallContext): Call-site context; the register width is
-                read from the operand shape.
+            ctx (qmc.OpaqueCostContext): Definition-level cost context.
 
         Returns:
             qmc.ResourceEstimate: One-query gate/call estimate.
         """
-        n = sum(ctx.operand_shapes.values()) if ctx.operand_shapes else sp.Symbol("n")
+        n = ctx.target_qubits
         cost = sp.Symbol("l", positive=True) + n
         return qmc.ResourceEstimate(
             gates=qmc.GateResources(total=cost, non_clifford=cost),
@@ -52,6 +51,7 @@ class _QueryCost:
                 calls_by_name={"query_oracle": sp.Integer(1)},
                 queries_by_name={"query_oracle": sp.Integer(1)},
             ),
+            control_decomposition=ctx.control_decomposition,
         )
 
 
@@ -82,6 +82,14 @@ def _grover_estimate_kernel(n: qmc.UInt, iterations: qmc.UInt) -> qmc.Vector[qmc
     reg = qmc.qubit_array(n, name="reg")
     reg = grover_search(reg, _query_oracle, iterations)
     return qmc.measure(reg)
+
+
+@pytest.fixture(scope="module")
+def abstract_symbolic_grover_estimate() -> qmc.ResourceEstimate:
+    """Reuse the control-independent symbolic Grover estimate."""
+    return _grover_estimate_kernel.estimate_resources(
+        control_decomposition=qmc.ControlDecomposition.ABSTRACT,
+    )
 
 
 def _numpy_grover_zexp(n: int, iterations: int) -> float:
@@ -167,9 +175,11 @@ def test_grover_iteration_count_uses_arbitrary_precision() -> None:
     assert count.bit_length() > 500
 
 
-def test_grover_symbolic_query_complexity() -> None:
+def test_grover_symbolic_query_complexity(
+    abstract_symbolic_grover_estimate: qmc.ResourceEstimate,
+) -> None:
     """Query count equals the (symbolic) iteration count: O(sqrt(N/m))."""
-    est = _grover_estimate_kernel.estimate_resources()
+    est = abstract_symbolic_grover_estimate
     iterations = est.parameters["iterations"]
     assert est.calls.queries_by_name["query_oracle"] == iterations
 
@@ -184,7 +194,8 @@ def test_grover_optimal_query_complexity_via_inputs() -> None:
     n = sp.Symbol("n", positive=True)
     m = sp.Symbol("m", positive=True)
     est = _grover_estimate_kernel.estimate_resources(
-        inputs={"iterations": grover_iteration_count(n, m)}
+        inputs={"iterations": grover_iteration_count(n, m)},
+        control_decomposition=qmc.ControlDecomposition.ABSTRACT,
     )
     queries = est.calls.queries_by_name["query_oracle"]
     # It is a floor of the optimal continuous count; compare the floor argument
@@ -197,11 +208,23 @@ def test_grover_optimal_query_complexity_via_inputs() -> None:
         assert int(queries.subs({n: nn, m: mm})) == grover_iteration_count(nn, mm)
 
 
-def test_grover_qubit_count_is_linear() -> None:
-    """Grover uses O(n) qubits (the search register width)."""
-    est = _grover_estimate_kernel.estimate_resources()
+def test_grover_qubit_count_includes_clean_control_ancillas(
+    abstract_symbolic_grover_estimate: qmc.ResourceEstimate,
+) -> None:
+    """Grover reports source width and clean control ancillas separately."""
+    est = abstract_symbolic_grover_estimate
     n = est.parameters["n"]
-    assert sp.simplify(est.qubits - n) == 0
+    assert est.width.allocated_qubits == n
+
+    inactive = _grover_estimate_kernel.estimate_resources(
+        inputs={"n": 4, "iterations": 0}
+    )
+    active = _grover_estimate_kernel.estimate_resources(
+        inputs={"n": 4, "iterations": 1}
+    )
+    assert inactive.qubits == 4
+    assert active.width.clean_ancilla_qubits == 2
+    assert active.qubits == 6
 
 
 def test_grover_diffusion_uses_qiskit_native_ccx() -> None:

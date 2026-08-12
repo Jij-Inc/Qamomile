@@ -1,8 +1,20 @@
 """Tests for controlled-emission support helpers."""
 
+import math
+from fractions import Fraction
 from typing import Any
 
+import numpy as np
+import pytest
+import sympy as sp
+
+import qamomile.circuit as qmc
+from qamomile._utils import coerce_nonnegative_integral
 from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    RuntimeClassicalExpr,
+    RuntimeOpKind,
+)
 from qamomile.circuit.ir.operation.callable import (
     CallableDef,
     CallableImplementation,
@@ -11,18 +23,30 @@ from qamomile.circuit.ir.operation.callable import (
     CompositeGateType,
     InvokeOperation,
 )
+from qamomile.circuit.ir.operation.cast import CastOperation
+from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.circuit.ir.operation.gate import (
+    ConcreteControlledU,
     GateOperation,
     GateOperationType,
 )
+from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
+from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
-from qamomile.circuit.ir.types.primitives import FloatType, QubitType
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.types.primitives import FloatType, QubitType, UIntType
+from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.transpiler.errors import EmitError, ValidationError
+from qamomile.circuit.transpiler.passes.analyze import AnalyzePass
+from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
 from qamomile.circuit.transpiler.passes.emit_support import (
     controlled_emission,
     inverse_emission,
+)
+from qamomile.circuit.transpiler.passes.emit_support.control_batching import (
+    should_batch_controlled_body,
 )
 from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
     _gate_matches_qubit_count,
@@ -48,6 +72,49 @@ class _ResolverOnlyEmitPass:
         """Initialize the stand-in with a real ``ValueResolver``."""
         self._resolver = ValueResolver()
 
+    def _get_or_create_parameter(self, name: str, value_uuid: str) -> Any:
+        """Reject unexpected backend-parameter creation in resolver-only tests.
+
+        Args:
+            name (str): Requested backend parameter name.
+            value_uuid (str): IR value identity for the parameter.
+
+        Returns:
+            Any: This stand-in never creates a backend parameter.
+
+        Raises:
+            AssertionError: Always, because these tests supply no runtime
+                parameters.
+        """
+        raise AssertionError(
+            f"unexpected backend parameter request: {name} ({value_uuid})"
+        )
+
+
+def _controlled_u_with_power(
+    power: Any,
+    *,
+    block: Block | None = None,
+) -> ConcreteControlledU:
+    """Build a minimal one-control operation with the requested power.
+
+    Args:
+        power (Any): Concrete, symbolic, or deliberately malformed power.
+        block (Block | None): Wrapped body. Defaults to an empty block.
+
+    Returns:
+        ConcreteControlledU: Operation over one control and one target.
+    """
+    control = Value(type=QubitType(), name="control")
+    target = Value(type=QubitType(), name="target")
+    return ConcreteControlledU(
+        operands=[control, target],
+        results=[control.next_version(), target.next_version()],
+        num_controls=1,
+        power=power,
+        block=Block() if block is None else block,
+    )
+
 
 class _GateWithoutQubitCount:
     """Backend-gate stand-in with no qubit-count attribute."""
@@ -71,6 +138,675 @@ def test_gate_matches_qubit_count_rejects_unknown_width() -> None:
     assert not _gate_matches_qubit_count(_GateWithQubitCount(None), 2)
     assert _gate_matches_qubit_count(_GateWithQubitCount(2), 2)
     assert not _gate_matches_qubit_count(_GateWithQubitCount(1), 2)
+
+
+def test_controlled_walker_rejects_unhandled_classical_operation() -> None:
+    """A classical marker without walker semantics must fail closed."""
+    operation = RuntimeClassicalExpr(kind=RuntimeOpKind.NOT)
+
+    with pytest.raises(EmitError, match="Unsupported operation"):
+        emit_controlled_operations(
+            _MultiControlEmitPass(),
+            object(),
+            [operation],
+            [0],
+            {},
+            {},
+        )
+
+
+@pytest.mark.parametrize(
+    ("angle", "expected_weight"),
+    [
+        pytest.param(0.0, 0, id="zero"),
+        pytest.param(math.tau, 0, id="full-turn"),
+        pytest.param(-math.tau, 0, id="negative-full-turn"),
+        pytest.param(5e-13, 1, id="tiny-nonzero"),
+    ],
+)
+def test_global_phase_batch_profile_uses_exact_identity_class(
+    angle: float,
+    expected_weight: int,
+) -> None:
+    """Bound phases contribute work exactly when they are non-identity."""
+    phase = Value(type=FloatType(), name="phase")
+    operation = GlobalPhaseOperation(operands=[phase], results=[])
+
+    profile = controlled_emission._batch_op_profile(
+        _ResolverOnlyEmitPass(),
+        operation,
+        {phase.uuid: angle},
+    )
+
+    assert profile.weight == expected_weight
+
+
+def test_bodyless_controlled_u_counts_as_unresolved_batch_work() -> None:
+    """An unknown controlled body remains visible to the rejecting walker."""
+    control = Value(type=QubitType(), name="control")
+    target = Value(type=QubitType(), name="target")
+    operation = ConcreteControlledU(
+        operands=[control, target],
+        results=[control.next_version(), target.next_version()],
+        num_controls=1,
+        block=None,
+    )
+
+    profile = controlled_emission._batch_op_profile(
+        _ResolverOnlyEmitPass(),
+        operation,
+        {},
+    )
+
+    assert profile.weight == 1
+    assert profile.selects_exact_two
+
+
+def test_bodyless_invoke_counts_as_unresolved_batch_work() -> None:
+    """A bodyless invocation cannot masquerade as a semantic identity."""
+    target = Value(type=QubitType(), name="target")
+    ref = CallableRef(namespace="test", name="bodyless_invoke")
+    operation = InvokeOperation(
+        operands=[target],
+        results=[target.next_version()],
+        attrs={"num_target_qubits": 1},
+        definition=CallableDef(ref=ref),
+    )
+
+    profile = controlled_emission._batch_op_profile(
+        _ResolverOnlyEmitPass(),
+        operation,
+        {},
+    )
+
+    assert profile.weight == 1
+    assert profile.selects_exact_two
+
+
+def test_bodyless_inverse_counts_as_unresolved_batch_work() -> None:
+    """A bodyless inverse remains visible to the rejecting walker."""
+    target = Value(type=QubitType(), name="target")
+    operation = InverseBlockOperation(
+        operands=[target],
+        results=[target.next_version()],
+        num_target_qubits=1,
+        source_block=None,
+        implementation_block=None,
+    )
+
+    profile = controlled_emission._batch_op_profile(
+        _ResolverOnlyEmitPass(),
+        operation,
+        {},
+    )
+
+    assert profile.weight == 1
+    assert profile.selects_exact_two
+
+
+def test_invalid_for_bounds_remain_visible_to_controlled_emission() -> None:
+    """Unresolved and zero-step loops cannot masquerade as identities."""
+    start = Value(type=UIntType(), name="start")
+    stop = Value(type=UIntType(), name="stop")
+    step = Value(type=UIntType(), name="step")
+    operation = ForOperation(operands=[start, stop, step])
+    emit_pass = _ResolverOnlyEmitPass()
+
+    unresolved = controlled_emission._batch_op_profile(
+        emit_pass,
+        operation,
+        {},
+    )
+    zero_step = controlled_emission._batch_op_profile(
+        emit_pass,
+        operation,
+        {
+            start.uuid: 0,
+            stop.uuid: 3,
+            step.uuid: 0,
+        },
+    )
+
+    assert unresolved.weight == 1
+    assert zero_step.weight == 1
+
+
+def test_controlled_power_analysis_propagates_invalid_values() -> None:
+    """Workspace and batch pre-analysis reject a negative controlled power."""
+    from qamomile.circuit.transpiler.errors import EmitError
+
+    operation = _controlled_u_with_power(-1)
+    emit_pass = _ResolverOnlyEmitPass()
+
+    with pytest.raises(EmitError, match="power must be nonnegative"):
+        controlled_emission.allocate_controlled_workspaces(
+            emit_pass,
+            [operation],
+            {},
+            {},
+            {},
+        )
+    with pytest.raises(EmitError, match="power must be nonnegative"):
+        controlled_emission._batch_op_profile(
+            emit_pass,
+            operation,
+            {},
+        ).weight
+
+
+@pytest.mark.parametrize(
+    ("bound_value", "match"),
+    [
+        pytest.param(True, "bool", id="true"),
+        pytest.param(False, "bool", id="false"),
+        pytest.param(1.5, "non-integer float", id="fractional-float"),
+        pytest.param(3.9, "non-integer float", id="larger-fractional-float"),
+        pytest.param("2", "str", id="string"),
+    ],
+)
+def test_controlled_power_analysis_rejects_non_integer_bindings(
+    bound_value: object,
+    match: str,
+) -> None:
+    """Emit-time power bindings preserve the strict integer contract."""
+    from qamomile.circuit.transpiler.errors import EmitError
+
+    power = Value(type=UIntType(), name="loop_power")
+    operation = _controlled_u_with_power(power)
+    emit_pass = _ResolverOnlyEmitPass()
+    bindings = {power.uuid: bound_value}
+
+    with pytest.raises(EmitError, match=match):
+        controlled_emission.allocate_controlled_workspaces(
+            emit_pass,
+            [operation],
+            {},
+            {},
+            bindings,
+        )
+    with pytest.raises(EmitError, match=match):
+        controlled_emission._batch_op_profile(
+            emit_pass,
+            operation,
+            bindings,
+        ).weight
+
+
+def test_controlled_power_analysis_accepts_integral_float_binding() -> None:
+    """A valid whole-float power does not make an empty body active."""
+    power = Value(type=UIntType(), name="loop_power")
+    operation = _controlled_u_with_power(power)
+    emit_pass = _ResolverOnlyEmitPass()
+    bindings = {power.uuid: 2.0}
+
+    controlled_emission.allocate_controlled_workspaces(
+        emit_pass,
+        [operation],
+        {},
+        {},
+        bindings,
+    )
+
+    assert (
+        controlled_emission._batch_op_profile(
+            emit_pass,
+            operation,
+            bindings,
+        ).weight
+        == 0
+    )
+
+
+@pytest.mark.parametrize(
+    ("candidate", "expected"),
+    [
+        pytest.param(0, 0, id="zero"),
+        pytest.param(2, 2, id="integer"),
+        pytest.param(2.0, 2, id="whole-float"),
+        pytest.param(np.int64(2), 2, id="numpy-integer"),
+        pytest.param(np.float64(2.0), 2, id="numpy-whole-float"),
+        pytest.param(sp.Float(2.0), 2, id="sympy-whole-float"),
+        pytest.param(Fraction(2, 1), 2, id="fraction-whole-real"),
+    ],
+)
+def test_controlled_power_layers_share_accepted_values(
+    candidate: object,
+    expected: int,
+) -> None:
+    """Analysis, folding, and emission accept the shared integral domain."""
+    operation = _controlled_u_with_power(candidate)
+
+    assert coerce_nonnegative_integral(candidate, label="ControlledU power") == expected
+    AnalyzePass()._validate_controlled_u_fields([operation])
+    assert ConstantFoldingPass._strict_int_cast(candidate) == expected
+    assert (
+        controlled_emission._resolve_power_if_bound(
+            _ResolverOnlyEmitPass(),
+            operation,
+            {},
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("candidate", "exception_type", "match"),
+    [
+        pytest.param(True, TypeError, "bool", id="bool"),
+        pytest.param(-1, ValueError, "nonnegative", id="negative"),
+        pytest.param(1.5, TypeError, "non-integer", id="fractional-float"),
+        pytest.param(
+            np.float64(1.5),
+            TypeError,
+            "non-integer",
+            id="numpy-fractional-float",
+        ),
+        pytest.param(
+            sp.Float(1.5),
+            TypeError,
+            "non-integer",
+            id="sympy-fractional-float",
+        ),
+        pytest.param(
+            Fraction(3, 2),
+            TypeError,
+            "non-integer",
+            id="fraction-non-integer-real",
+        ),
+        pytest.param(math.inf, TypeError, "finite integer", id="positive-infinity"),
+        pytest.param(math.nan, TypeError, "finite integer", id="nan"),
+        pytest.param("2", TypeError, "str", id="string"),
+    ],
+)
+def test_controlled_power_layers_share_rejected_values(
+    candidate: object,
+    exception_type: type[Exception],
+    match: str,
+) -> None:
+    """Analysis, folding, and emission reject the same malformed powers."""
+    operation = _controlled_u_with_power(candidate)
+
+    with pytest.raises(exception_type, match=match):
+        coerce_nonnegative_integral(candidate, label="ControlledU power")
+    with pytest.raises(ValidationError, match=match):
+        AnalyzePass()._validate_controlled_u_fields([operation])
+    with pytest.raises(ValueError, match=match):
+        ConstantFoldingPass._strict_int_cast(candidate)
+    with pytest.raises(EmitError, match=match):
+        controlled_emission._resolve_power_if_bound(
+            _ResolverOnlyEmitPass(),
+            operation,
+            {},
+        )
+
+
+def test_controlled_power_analysis_defers_only_unresolved_values() -> None:
+    """An unresolved power still contributes no work for an empty body."""
+    operation = _controlled_u_with_power(
+        Value(type=UIntType(), name="loop_power"),
+    )
+    emit_pass = _ResolverOnlyEmitPass()
+    qubit_map: dict[Any, int] = {}
+    clbit_map: dict[Any, int] = {}
+
+    controlled_emission.allocate_controlled_workspaces(
+        emit_pass,
+        [operation],
+        qubit_map,
+        clbit_map,
+        {},
+    )
+
+    assert qubit_map == {}
+    assert clbit_map == {}
+    assert (
+        controlled_emission._batch_op_profile(
+            emit_pass,
+            operation,
+            {},
+        ).weight
+        == 0
+    )
+
+
+def test_nested_controlled_body_is_heavy_for_outer_batching() -> None:
+    """One active local control justifies sharing the surrounding controls."""
+    target = Value(type=QubitType(), name="nested_target")
+    body = Block(
+        operations=[
+            GateOperation.fixed(
+                GateOperationType.X,
+                [target],
+                [target.next_version()],
+            )
+        ]
+    )
+    operation = _controlled_u_with_power(1, block=body)
+
+    assert (
+        controlled_emission._batch_op_profile(
+            _ResolverOnlyEmitPass(),
+            operation,
+            {},
+        ).weight
+        == 2
+    )
+
+
+def test_select_batch_profile_uses_active_case_bodies() -> None:
+    """A nonempty SELECT case amortizes outer controls through its index."""
+    target = Value(type=QubitType(), name="select_target")
+    active = Block(
+        operations=[
+            GateOperation.fixed(
+                GateOperationType.X,
+                [target],
+                [target.next_version()],
+            )
+        ]
+    )
+    active_select = SelectOperation(
+        num_index_qubits=1,
+        num_index_args=1,
+        case_blocks=[Block(), active],
+    )
+    empty_select = SelectOperation(
+        num_index_qubits=1,
+        num_index_args=1,
+        case_blocks=[Block(), Block()],
+    )
+    emit_pass = _ResolverOnlyEmitPass()
+
+    assert (
+        controlled_emission._batch_op_profile(
+            emit_pass,
+            active_select,
+            {},
+        ).weight
+        == 2
+    )
+    assert (
+        controlled_emission._batch_op_profile(
+            emit_pass,
+            empty_select,
+            {},
+        ).weight
+        == 0
+    )
+
+
+def test_batch_weight_folds_preceding_classical_predicates() -> None:
+    """Emitter and estimator skip a ladder when static branches emit no gates."""
+
+    @qmc.qkernel
+    def conditional_identity(target: qmc.Qubit, flag: qmc.UInt) -> qmc.Qubit:
+        """Apply two statically disabled conditional gates."""
+        if flag > qmc.uint(0):
+            target = qmc.h(target)
+        if flag > qmc.uint(0):
+            target = qmc.h(target)
+        return target
+
+    body = conditional_identity.build()
+    flag = next(value for value in body.input_values if value.type.is_classical())
+    bindings = {flag.uuid: 0, "flag": 0}
+
+    weight = controlled_emission._controlled_body_batch_profile(
+        _ResolverOnlyEmitPass(),
+        body.operations,
+        bindings,
+    ).weight
+
+    @qmc.qkernel
+    def circuit() -> qmc.Qubit:
+        """Control the static identity body with three qubits."""
+        controls = qmc.qubit_array(3, "controls")
+        target = qmc.qubit("target")
+        controls, target = qmc.control(
+            conditional_identity,
+            num_controls=3,
+        )(controls, target, qmc.uint(0))
+        return target
+
+    estimate = circuit.estimate_resources()
+
+    assert weight == 0
+    assert bindings == {flag.uuid: 0, "flag": 0}
+    assert estimate.gates.total == 0
+    assert estimate.gates.toffoli == 0
+    assert estimate.width.clean_ancilla_qubits == 0
+
+
+def test_batch_weight_folds_logical_predicate_chains() -> None:
+    """Emitter and estimator agree when AND, OR, and NOT are all false."""
+
+    @qmc.qkernel
+    def logical_identity(target: qmc.Qubit) -> qmc.Qubit:
+        """Apply no gate after folding three constant logical predicates."""
+        left = qmc.bit(False)
+        right = qmc.bit(False)
+        enabled = qmc.bit(True)
+        if left & right:
+            target = qmc.x(target)
+        if left | right:
+            target = qmc.h(target)
+        if ~enabled:
+            target = qmc.z(target)
+        return target
+
+    weight = controlled_emission._controlled_body_batch_profile(
+        _ResolverOnlyEmitPass(),
+        logical_identity.build().operations,
+        {},
+    ).weight
+
+    @qmc.qkernel
+    def circuit() -> qmc.Qubit:
+        """Control the statically empty logical body with three qubits."""
+        controls = qmc.qubit_array(3, "controls")
+        target = qmc.qubit("target")
+        controls, target = qmc.control(
+            logical_identity,
+            num_controls=3,
+        )(controls, target)
+        return target
+
+    estimate = circuit.estimate_resources()
+
+    assert weight == 0
+    assert estimate.gates.total == 0
+    assert estimate.gates.toffoli == 0
+    assert estimate.width.clean_ancilla_qubits == 0
+
+
+def test_cast_bookkeeping_matches_x_only_control_width_and_batching() -> None:
+    """A carrier cast adds no work or shared-ladder ancilla demand."""
+    pytest.importorskip("quri_parts")
+    from qamomile.quri_parts import QuriPartsTranspiler
+
+    @qmc.qkernel
+    def cast_x(targets: qmc.Vector[qmc.Qubit]) -> qmc.QFixed:
+        """Apply X before consuming its carrier register through a cast."""
+        targets[0] = qmc.x(targets[0])
+        return qmc.cast(targets, qmc.QFixed, int_bits=0)
+
+    @qmc.qkernel
+    def plain_x(targets: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+        """Apply the same X without the bookkeeping cast."""
+        targets[0] = qmc.x(targets[0])
+        return targets
+
+    @qmc.qkernel
+    def cast_circuit() -> qmc.Vector[qmc.Bit]:
+        """Control the cast-bearing body with two coherent controls."""
+        qubits = qmc.qubit_array(3, "qubits")
+        _control_0, _control_1, fixed = qmc.control(
+            cast_x,
+            num_controls=2,
+        )(qubits[0], qubits[1], qubits[2:3])
+        return qmc.measure(fixed)
+
+    @qmc.qkernel
+    def plain_circuit() -> qmc.Vector[qmc.Bit]:
+        """Control the X-only baseline with two coherent controls."""
+        qubits = qmc.qubit_array(3, "qubits")
+        _control_0, _control_1, targets = qmc.control(
+            plain_x,
+            num_controls=2,
+        )(qubits[0], qubits[1], qubits[2:3])
+        return qmc.measure(targets)
+
+    controlled = next(
+        operation
+        for operation in cast_circuit.build().operations
+        if isinstance(operation, ConcreteControlledU)
+    )
+    assert controlled.block is not None
+    assert sum(isinstance(op, CastOperation) for op in controlled.block.operations) == 1
+    profile = controlled_emission._controlled_body_batch_profile(
+        _ResolverOnlyEmitPass(),
+        controlled.block.operations,
+        {},
+    )
+
+    cast_estimate = cast_circuit.estimate_resources()
+    plain_estimate = plain_circuit.estimate_resources()
+    transpiler = QuriPartsTranspiler()
+    cast_emitted = transpiler.transpile(cast_circuit).compiled_quantum[0].circuit
+    plain_emitted = transpiler.transpile(plain_circuit).compiled_quantum[0].circuit
+
+    assert profile.weight == 1
+    assert not should_batch_controlled_body(num_controls=2, profile=profile)
+    assert cast_estimate.gates == plain_estimate.gates
+    assert cast_estimate.width == plain_estimate.width
+    assert cast_estimate.gates.total == cast_estimate.gates.toffoli == 1
+    assert cast_estimate.width.allocated_qubits == 3
+    assert cast_estimate.width.clean_ancilla_qubits == 0
+    assert cast_estimate.qubits == cast_emitted.qubit_count == 3
+    assert plain_estimate.qubits == plain_emitted.qubit_count == 3
+    assert (
+        [gate.name for gate in cast_emitted.gates]
+        == [gate.name for gate in plain_emitted.gates]
+        == ["TOFFOLI"]
+    )
+
+
+def test_batch_weight_binds_invoke_actuals_before_descending() -> None:
+    """Invoke analysis binds actual values before inspecting nested branches."""
+
+    @qmc.qkernel
+    def maybe_h(target: qmc.Qubit, flag: qmc.UInt) -> qmc.Qubit:
+        """Apply a Hadamard only for a nonzero static flag."""
+        if flag > qmc.uint(0):
+            target = qmc.h(target)
+        return target
+
+    @qmc.qkernel
+    def identity_from_invokes(target: qmc.Qubit) -> qmc.Qubit:
+        """Invoke two statically disabled conditional bodies."""
+        target = maybe_h(target, qmc.uint(0))
+        target = maybe_h(target, qmc.uint(0))
+        return target
+
+    weight = controlled_emission._controlled_body_batch_profile(
+        _ResolverOnlyEmitPass(),
+        identity_from_invokes.build().operations,
+        {},
+    ).weight
+
+    @qmc.qkernel
+    def circuit() -> qmc.Qubit:
+        """Control both nested identity invocations with three qubits."""
+        controls = qmc.qubit_array(3, "controls")
+        target = qmc.qubit("target")
+        controls, target = qmc.control(
+            identity_from_invokes,
+            num_controls=3,
+        )(controls, target)
+        return target
+
+    estimate = circuit.estimate_resources()
+
+    assert weight == 0
+    assert estimate.gates.total == 0
+    assert estimate.gates.toffoli == 0
+    assert estimate.width.clean_ancilla_qubits == 0
+
+
+def test_batch_weight_binds_inverse_actuals_before_descending() -> None:
+    """Inverse analysis binds actual values before resolving nested powers."""
+
+    @qmc.qkernel
+    def x_body(target: qmc.Qubit) -> qmc.Qubit:
+        """Apply the target operation used by a symbolic controlled power."""
+        return qmc.x(target)
+
+    @qmc.qkernel
+    def powered_x(
+        control: qmc.Qubit,
+        target: qmc.Qubit,
+        power: qmc.UInt,
+    ) -> tuple[qmc.Qubit, qmc.Qubit]:
+        """Apply X under one control with a caller-provided power."""
+        return qmc.control(x_body)(control, target, power=power)
+
+    @qmc.qkernel
+    def identity_from_inverses(
+        control: qmc.Qubit,
+        target: qmc.Qubit,
+        actual_power: qmc.UInt,
+    ) -> tuple[qmc.Qubit, qmc.Qubit]:
+        """Invert two controlled operations with one caller-provided power."""
+        control, target = qmc.inverse(powered_x)(
+            control,
+            target,
+            actual_power,
+        )
+        control, target = qmc.inverse(powered_x)(
+            control,
+            target,
+            actual_power,
+        )
+        return control, target
+
+    body = identity_from_inverses.build()
+    assert sum(isinstance(op, InverseBlockOperation) for op in body.operations) == 2
+    actual_power = next(
+        value for value in body.input_values if value.type.is_classical()
+    )
+    bindings: dict[str, Any] = {
+        actual_power.uuid: 0,
+        "actual_power": 0,
+    }
+
+    weight = controlled_emission._controlled_body_batch_profile(
+        _ResolverOnlyEmitPass(),
+        body.operations,
+        bindings,
+    ).weight
+
+    @qmc.qkernel
+    def circuit() -> qmc.Qubit:
+        """Control both inverse identity bodies with three qubits."""
+        controls = qmc.qubit_array(3, "controls")
+        inner_control = qmc.qubit("inner_control")
+        target = qmc.qubit("target")
+        controls, inner_control, target = qmc.control(
+            identity_from_inverses,
+            num_controls=3,
+        )(controls, inner_control, target, qmc.uint(0))
+        return target
+
+    estimate = circuit.estimate_resources()
+
+    assert weight == 0
+    assert bindings == {
+        actual_power.uuid: 0,
+        "actual_power": 0,
+    }
+    assert estimate.gates.total == 0
+    assert estimate.gates.toffoli == 0
+    assert estimate.width.clean_ancilla_qubits == 0
 
 
 def test_controlled_dispatch_accepts_inverse_block(monkeypatch) -> None:
@@ -245,10 +981,22 @@ def test_selected_controlled_implementation_keeps_outer_controls() -> None:
 
     own_control = Value(type=QubitType(), name="own_control")
     target = Value(type=QubitType(), name="target")
+    own_control_result = own_control.next_version()
+    target_result = target.next_version()
     ref = CallableRef(namespace="test", name="controlled_impl")
     implementation = CallableImplementation(
         transform=CallTransform.CONTROLLED,
-        body=Block(input_values=[own_control, target]),
+        body=Block(
+            input_values=[own_control, target],
+            output_values=[own_control_result, target_result],
+            operations=[
+                GateOperation.fixed(
+                    GateOperationType.CX,
+                    [own_control, target],
+                    [own_control_result, target_result],
+                )
+            ],
+        ),
     )
     op = InvokeOperation(
         operands=[own_control, target],
@@ -272,6 +1020,220 @@ def test_selected_controlled_implementation_keeps_outer_controls() -> None:
     assert emit_pass._emitter.append_calls == [[7, 3, 5]]
 
 
+def test_selected_controlled_implementation_rejects_input_arity_mismatch() -> None:
+    """A transform body cannot silently ignore invocation operands."""
+    formal_control = Value(type=QubitType(), name="formal_control")
+    actual_control = Value(type=QubitType(), name="actual_control")
+    actual_target = Value(type=QubitType(), name="actual_target")
+    ref = CallableRef(namespace="test", name="short_controlled_body")
+    operation = InvokeOperation(
+        operands=[actual_control, actual_target],
+        results=[actual_control.next_version(), actual_target.next_version()],
+        transform=CallTransform.CONTROLLED,
+        attrs={"num_control_qubits": 1, "num_target_qubits": 1},
+        definition=CallableDef(
+            ref=ref,
+            implementations=[
+                CallableImplementation(
+                    transform=CallTransform.CONTROLLED,
+                    body=Block(
+                        input_values=[formal_control],
+                        output_values=[formal_control],
+                    ),
+                )
+            ],
+        ),
+    )
+
+    with pytest.raises(ValueError, match="input contract expects 1 value"):
+        operation.select_body()
+
+
+def test_selected_controlled_implementation_rejects_input_type_mismatch() -> None:
+    """A transform body cannot bind a quantum actual to a scalar formal."""
+    formal_control = Value(type=QubitType(), name="formal_control")
+    formal_parameter = Value(type=FloatType(), name="formal_parameter")
+    actual_control = Value(type=QubitType(), name="actual_control")
+    actual_target = Value(type=QubitType(), name="actual_target")
+    ref = CallableRef(namespace="test", name="mistyped_controlled_body")
+    operation = InvokeOperation(
+        operands=[actual_control, actual_target],
+        results=[actual_control.next_version(), actual_target.next_version()],
+        transform=CallTransform.CONTROLLED,
+        attrs={"num_control_qubits": 1, "num_target_qubits": 1},
+        definition=CallableDef(
+            ref=ref,
+            implementations=[
+                CallableImplementation(
+                    transform=CallTransform.CONTROLLED,
+                    body=Block(
+                        input_values=[formal_control, formal_parameter],
+                        output_values=[formal_control, formal_parameter],
+                    ),
+                )
+            ],
+        ),
+    )
+
+    with pytest.raises(ValueError, match="input contract value 1 expects"):
+        operation.select_body()
+
+
+def test_selected_controlled_implementation_rejects_output_arity_mismatch() -> None:
+    """A transform body cannot silently omit invocation results."""
+    formal_control = Value(type=QubitType(), name="formal_control")
+    formal_target = Value(type=QubitType(), name="formal_target")
+    actual_control = Value(type=QubitType(), name="actual_control")
+    actual_target = Value(type=QubitType(), name="actual_target")
+    ref = CallableRef(namespace="test", name="short_controlled_output")
+    operation = InvokeOperation(
+        operands=[actual_control, actual_target],
+        results=[actual_control.next_version(), actual_target.next_version()],
+        transform=CallTransform.CONTROLLED,
+        attrs={"num_control_qubits": 1, "num_target_qubits": 1},
+        definition=CallableDef(
+            ref=ref,
+            implementations=[
+                CallableImplementation(
+                    transform=CallTransform.CONTROLLED,
+                    body=Block(
+                        input_values=[formal_control, formal_target],
+                        output_values=[formal_target],
+                    ),
+                )
+            ],
+        ),
+    )
+
+    with pytest.raises(ValueError, match="output contract expects 1 value"):
+        operation.select_body()
+
+
+def test_selected_direct_body_restores_interleaved_declaration_order() -> None:
+    """A controlled direct fallback aligns grouped actuals to body formals."""
+    formal_first = Value(type=QubitType(), name="formal_first")
+    formal_selector = Value(type=UIntType(), name="formal_selector")
+    formal_second = Value(type=QubitType(), name="formal_second")
+    body = Block(
+        input_values=[formal_first, formal_selector, formal_second],
+        output_values=[formal_first, formal_second],
+    )
+    control = Value(type=QubitType(), name="control")
+    first = Value(type=QubitType(), name="first")
+    second = Value(type=QubitType(), name="second")
+    selector = Value(type=UIntType(), name="selector")
+    operation = InvokeOperation(
+        operands=[control, first, second, selector],
+        results=[
+            control.next_version(),
+            first.next_version(),
+            second.next_version(),
+        ],
+        transform=CallTransform.CONTROLLED,
+        attrs={"num_control_qubits": 1, "num_target_qubits": 2},
+        definition=CallableDef(
+            ref=CallableRef(namespace="test", name="interleaved_body"),
+            body=body,
+        ),
+    )
+
+    selection = operation.select_body()
+
+    assert selection.operands == (first, selector, second)
+    assert selection.results == tuple(operation.results[1:])
+
+
+def test_selected_direct_call_restores_interleaved_declaration_order() -> None:
+    """A direct call aligns grouped actuals to declaration-ordered formals."""
+    formal_selector = Value(type=UIntType(), name="formal_selector")
+    formal_target = Value(type=QubitType(), name="formal_target")
+    body = Block(
+        input_values=[formal_selector, formal_target],
+        output_values=[formal_selector, formal_target],
+    )
+    target = Value(type=QubitType(), name="target")
+    selector = Value(type=UIntType(), name="selector")
+    target_result = target.next_version()
+    selector_result = selector.next_version()
+    operation = InvokeOperation(
+        operands=[target, selector],
+        results=[target_result, selector_result],
+        definition=CallableDef(
+            ref=CallableRef(namespace="test", name="interleaved_direct_body"),
+            body=body,
+        ),
+    )
+
+    selection = operation.select_body()
+
+    assert selection.operands == (selector, target)
+    assert selection.results == (selector_result, target_result)
+
+
+def test_selected_body_width_uses_exact_resource_contract() -> None:
+    """An exact width contract resolves statically bound symbolic arrays."""
+    formal_signal_size = Value(type=UIntType(), name="formal_signal_size")
+    formal_system_size = Value(type=UIntType(), name="formal_system_size")
+    formal_signal = ArrayValue(
+        type=QubitType(),
+        name="formal_signal",
+        shape=(formal_signal_size,),
+    )
+    formal_system = ArrayValue(
+        type=QubitType(),
+        name="formal_system",
+        shape=(formal_system_size,),
+    )
+    body = Block(
+        input_values=[formal_signal, formal_system],
+        output_values=[formal_signal, formal_system],
+    )
+    signal = ArrayValue(
+        type=QubitType(),
+        name="signal",
+        shape=(Value(type=UIntType(), name="signal_size"),),
+    )
+    system = ArrayValue(
+        type=QubitType(),
+        name="system",
+        shape=(Value(type=UIntType(), name="system_size"),),
+    )
+    control = Value(type=QubitType(), name="control")
+    operation = InvokeOperation(
+        operands=[control, signal, system],
+        results=[
+            control.next_version(),
+            signal.next_version(),
+            system.next_version(),
+        ],
+        transform=CallTransform.CONTROLLED,
+        attrs={
+            "num_control_qubits": 1,
+            "num_target_qubits": 3,
+            "resource_contract": {
+                "quantum_operand_widths": [
+                    {"index": 0, "name": "signal", "width": 1},
+                    {"index": 1, "name": "system", "width": 2},
+                ]
+            },
+        },
+        definition=CallableDef(
+            ref=CallableRef(namespace="test", name="contracted_body"),
+            body=body,
+        ),
+    )
+    selection = operation.select_body()
+
+    width = controlled_emission._selected_body_quantum_input_width(
+        _ResolverOnlyEmitPass(),
+        operation,
+        selection,
+        {},
+    )
+
+    assert width == 3
+
+
 def test_nested_inverse_invoke_without_implementation_raises() -> None:
     """Nested inverse invocation never falls back to its forward body."""
     import pytest
@@ -280,6 +1242,7 @@ def test_nested_inverse_invoke_without_implementation_raises() -> None:
 
     target = Value(type=QubitType(), name="target")
     ref = CallableRef(namespace="test", name="forward_only")
+    inner = Value(type=QubitType(), name="inner")
     op = InvokeOperation(
         operands=[target],
         results=[target.next_version()],
@@ -287,7 +1250,7 @@ def test_nested_inverse_invoke_without_implementation_raises() -> None:
         attrs={"num_target_qubits": 1},
         definition=CallableDef(
             ref=ref,
-            body=Block(input_values=[Value(type=QubitType(), name="inner")]),
+            body=Block(input_values=[inner], output_values=[inner]),
         ),
     )
 
@@ -358,6 +1321,11 @@ class _RecordingEmitter:
         del circuit
         self.calls.append(("h", qubit))
 
+    def emit_x(self, circuit: Any, qubit: int) -> None:
+        """Record an X emission."""
+        del circuit
+        self.calls.append(("x", qubit))
+
     def emit_toffoli(
         self, circuit: Any, control1: int, control2: int, target: int
     ) -> None:
@@ -406,6 +1374,42 @@ class _MultiControlEmitPass:
         self._record_hook = record_hook
         self._mc_ancilla_pool = ancilla_pool
 
+    def _blockvalue_to_gate(
+        self,
+        block: Block,
+        num_qubits: int,
+        bindings: dict[str, Any],
+    ) -> None:
+        """Force the common gate-by-gate controlled fallback.
+
+        Args:
+            block (Block): Ignored nested body.
+            num_qubits (int): Ignored body width.
+            bindings (dict[str, Any]): Ignored local bindings.
+
+        Returns:
+            None: This stand-in never provides reusable gates.
+        """
+        del block, num_qubits, bindings
+        return None
+
+    def _get_or_create_parameter(self, name: str, value_uuid: str) -> Any:
+        """Reject unexpected runtime-parameter creation.
+
+        Args:
+            name (str): Requested parameter name.
+            value_uuid (str): Requested parameter identity.
+
+        Returns:
+            Any: This stand-in never creates parameters.
+
+        Raises:
+            AssertionError: Always, because the tests use no parameters.
+        """
+        raise AssertionError(
+            f"unexpected backend parameter request: {name} ({value_uuid})"
+        )
+
     def _resolve_angle(self, op: Any, bindings: dict[str, Any]) -> Any:
         """Resolve a rotation angle from the gate's theta constant."""
         del bindings
@@ -451,12 +1455,157 @@ def _rotation_gate(gate_type: "GateOperationType", angle: float) -> "GateOperati
     return GateOperation.rotation(gate_type, [qubit], theta, [qubit.next_version()])
 
 
+def _nested_open_controlled_x() -> tuple[ConcreteControlledU, dict[QubitAddress, int]]:
+    """Build an open-controlled X operation and its physical input map.
+
+    Returns:
+        tuple[ConcreteControlledU, dict[QubitAddress, int]]: Nested operation
+            with local control at physical index 3 and target at index 4.
+    """
+    formal_target = Value(type=QubitType(), name="formal_target")
+    formal_result = formal_target.next_version()
+    body = Block(
+        input_values=[formal_target],
+        output_values=[formal_result],
+        operations=[
+            GateOperation.fixed(
+                GateOperationType.X,
+                [formal_target],
+                [formal_result],
+            )
+        ],
+    )
+    local_control = Value(type=QubitType(), name="local_control")
+    target = Value(type=QubitType(), name="target")
+    operation = ConcreteControlledU(
+        operands=[local_control, target],
+        results=[local_control.next_version(), target.next_version()],
+        num_controls=1,
+        control_value=0,
+        block=body,
+    )
+    qubit_map = {
+        QubitAddress(local_control.uuid): 3,
+        QubitAddress(target.uuid): 4,
+    }
+    return operation, qubit_map
+
+
 def test_multi_controlled_x_two_controls_uses_toffoli() -> None:
     """Two-controlled X reduces to a single Toffoli."""
     emit_pass = _MultiControlEmitPass()
     op = _fixed_gate(GateOperationType.X, 1)
     emit_multi_controlled_gate(emit_pass, object(), op, [4, 5], [9], {})
     assert emit_pass._emitter.calls == [("toffoli", 4, 5, 9)]
+
+
+def test_nested_open_control_brackets_are_not_outer_controlled() -> None:
+    """One outer control leaves the nested operation's X pair unconditional."""
+    emit_pass = _MultiControlEmitPass()
+    operation, qubit_map = _nested_open_controlled_x()
+
+    emit_controlled_operations(
+        emit_pass,
+        object(),
+        [operation],
+        [0],
+        qubit_map,
+        {},
+    )
+
+    assert emit_pass._emitter.calls == [
+        ("x", 3),
+        ("toffoli", 0, 3, 4),
+        ("x", 3),
+    ]
+
+
+def test_shared_outer_ladder_still_leaves_open_brackets_unconditional() -> None:
+    """A shared three-control carrier surrounds, but does not control, the X pair."""
+    pool = MultiControlAncillaPool(first_index=10, count=2)
+    emit_pass = _MultiControlEmitPass(ancilla_pool=pool)
+    operation, qubit_map = _nested_open_controlled_x()
+
+    emit_controlled_operations(
+        emit_pass,
+        object(),
+        [operation],
+        [0, 1, 2],
+        qubit_map,
+        {},
+    )
+
+    assert emit_pass._emitter.calls == [
+        ("toffoli", 0, 1, 10),
+        ("toffoli", 2, 10, 11),
+        ("x", 3),
+        ("toffoli", 11, 3, 4),
+        ("x", 3),
+        ("toffoli", 2, 10, 11),
+        ("toffoli", 0, 1, 10),
+    ]
+
+
+def test_composite_open_controls_share_one_unconditional_bracket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All local zero controls share one X pair around the composite core."""
+    controls = [Value(type=QubitType(), name=f"control_{index}") for index in range(3)]
+    target = Value(type=QubitType(), name="target")
+    operation = InvokeOperation(
+        operands=[*controls, target],
+        results=[
+            *(control.next_version() for control in controls),
+            target.next_version(),
+        ],
+        target=CallableRef(namespace="test", name="patterned"),
+        transform=CallTransform.CONTROLLED,
+        attrs={
+            "num_control_qubits": 3,
+            "num_declared_control_qubits": 1,
+            "num_added_control_qubits": 2,
+            "num_target_qubits": 1,
+            "control_value": 0b010,
+        },
+    )
+    emit_pass = _MultiControlEmitPass()
+
+    def record_core(
+        emit_pass: Any,
+        circuit: Any,
+        operation: InvokeOperation,
+        control_indices: list[int],
+        qubit_indices: list[int],
+        bindings: dict[str, Any],
+    ) -> None:
+        """Record the all-ones core between the local X layers."""
+        del circuit, operation, bindings
+        emit_pass._emitter.calls.append(
+            ("core", tuple(control_indices), tuple(qubit_indices))
+        )
+
+    monkeypatch.setattr(
+        controlled_emission,
+        "_emit_all_ones_controlled_composite_at_indices",
+        record_core,
+    )
+
+    emit_controlled_composite_at_indices(
+        emit_pass,
+        object(),
+        operation,
+        control_indices=[0],
+        qubit_indices=[3, 4, 5, 6],
+        bindings={},
+    )
+
+    assert emit_pass._emitter.calls == [
+        ("x", 3),
+        ("x", 5),
+        ("core", (0,), (3, 4, 5, 6)),
+        ("x", 5),
+        ("x", 3),
+    ]
 
 
 def test_controlled_walker_resolves_if_from_loop_iteration() -> None:
@@ -801,6 +1950,578 @@ def test_batched_multi_gate_body_shares_one_and_ladder() -> None:
     ]
 
 
+def test_controlled_walker_reuses_supplied_batch_profile(monkeypatch: Any) -> None:
+    """A call-site profile avoids replaying the same controlled body."""
+    pool = MultiControlAncillaPool(first_index=10, count=2)
+    emit_pass = _MultiControlEmitPass(ancilla_pool=pool)
+    target = Value(type=QubitType(), name="target")
+    after_x = target.next_version()
+    after_z = after_x.next_version()
+    operations = [
+        GateOperation.fixed(GateOperationType.X, [target], [after_x]),
+        GateOperation.fixed(GateOperationType.Z, [after_x], [after_z]),
+    ]
+    profile = controlled_emission.ControlBatchProfile(weight=2)
+
+    def fail_reanalysis(*args: Any, **kwargs: Any) -> None:
+        """Fail if the controlled walker recomputes a supplied profile."""
+        del args, kwargs
+        raise AssertionError("batch profile was recomputed")
+
+    monkeypatch.setattr(
+        controlled_emission,
+        "_controlled_body_batch_profile",
+        fail_reanalysis,
+    )
+
+    emit_controlled_operations(
+        emit_pass,
+        object(),
+        operations,
+        [0, 1, 2],
+        {QubitAddress(target.uuid): 3},
+        {},
+        batch_profile=profile,
+    )
+
+    assert emit_pass._emitter.calls
+
+
+def test_batch_profile_stops_after_a_decisive_loop_iteration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A large static loop is not replayed after batching is decided."""
+    loop_var = Value(type=UIntType(), name="iteration")
+    operation = ForOperation(
+        operands=[
+            Value(type=UIntType(), name="start").with_const(0),
+            Value(type=UIntType(), name="stop").with_const(1_000_000),
+            Value(type=UIntType(), name="step").with_const(1),
+        ],
+        loop_var="iteration",
+        loop_var_value=loop_var,
+        operations=[_fixed_gate(GateOperationType.CX, 2)],
+    )
+    calls = 0
+
+    def decisive_profile(*args: Any, **kwargs: Any) -> Any:
+        """Return a terminal profile and record one body inspection."""
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        return controlled_emission.ControlBatchProfile(
+            weight=2,
+            selects_exact_two=True,
+        )
+
+    monkeypatch.setattr(
+        controlled_emission,
+        "_batch_op_profile",
+        decisive_profile,
+    )
+
+    profile = controlled_emission._for_batch_profile(
+        _ResolverOnlyEmitPass(),
+        operation,
+        {},
+    )
+
+    assert profile.weight == 2
+    assert profile.selects_exact_two
+    assert calls == 1
+
+
+def test_batch_profile_closes_context_free_direct_loop_without_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A large direct-only loop profiles its context-free body once."""
+    loop_var = Value(type=UIntType(), name="iteration")
+    operation = ForOperation(
+        operands=[
+            Value(type=UIntType(), name="start").with_const(0),
+            Value(type=UIntType(), name="stop").with_const(1_000_000),
+            Value(type=UIntType(), name="step").with_const(1),
+        ],
+        loop_var="iteration",
+        loop_var_value=loop_var,
+        operations=[_fixed_gate(GateOperationType.X, 1)],
+    )
+    calls = 0
+    original_profile = controlled_emission._batch_op_profile
+
+    def counting_profile(*args: Any, **kwargs: Any) -> Any:
+        """Count one body inspection while preserving real classification.
+
+        Args:
+            *args (Any): Positional arguments for the real profiler.
+            **kwargs (Any): Keyword arguments for the real profiler.
+
+        Returns:
+            Any: Profile returned by the real implementation.
+        """
+        nonlocal calls
+        calls += 1
+        return original_profile(*args, **kwargs)
+
+    monkeypatch.setattr(
+        controlled_emission,
+        "_batch_op_profile",
+        counting_profile,
+    )
+
+    profile = controlled_emission._for_batch_profile(
+        _ResolverOnlyEmitPass(),
+        operation,
+        {},
+    )
+
+    assert profile.weight == 2
+    assert not profile.selects_exact_two
+    assert calls == 1
+
+
+@pytest.mark.parametrize(
+    "reuse_gate",
+    [False, True],
+    ids=["zero-power", "reusable-gate"],
+)
+def test_controlled_call_profiles_before_reusable_gate_emission(
+    monkeypatch: pytest.MonkeyPatch,
+    reuse_gate: bool,
+) -> None:
+    """Zero power skips analysis while reusable emission first proves work."""
+    control = Value(type=QubitType(), name="control")
+    target = Value(type=QubitType(), name="target")
+    formal_target = Value(type=QubitType(), name="formal_target")
+    formal_result = formal_target.next_version()
+    block = Block(
+        input_values=[formal_target],
+        output_values=[formal_result],
+        operations=[
+            GateOperation.fixed(
+                GateOperationType.X,
+                [formal_target],
+                [formal_result],
+            )
+        ],
+    )
+    operation = ConcreteControlledU(
+        operands=[control, target],
+        results=[control.next_version(), target.next_version()],
+        num_controls=1,
+        power=1 if reuse_gate else 0,
+        block=block,
+    )
+    emit_pass = _MultiControlEmitPass()
+    appended: list[list[int]] = []
+    if reuse_gate:
+        monkeypatch.setattr(
+            emit_pass,
+            "_blockvalue_to_gate",
+            lambda *args, **kwargs: object(),
+        )
+        monkeypatch.setattr(
+            emit_pass._emitter,
+            "gate_controlled",
+            lambda gate, num_controls: gate,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            emit_pass._emitter,
+            "append_gate",
+            lambda circuit, gate, indices: appended.append(indices),
+            raising=False,
+        )
+
+    profile_calls = 0
+
+    def record_profile(*args: Any, **kwargs: Any) -> Any:
+        """Record the pre-emission profile and preserve this body's work."""
+        nonlocal profile_calls
+        del args, kwargs
+        profile_calls += 1
+        return controlled_emission.ControlBatchProfile(
+            weight=1,
+            selects_exact_two=True,
+        )
+
+    monkeypatch.setattr(
+        controlled_emission,
+        "_controlled_body_batch_profile",
+        record_profile,
+    )
+
+    controlled_emission.emit_controlled_u(
+        emit_pass,
+        object(),
+        operation,
+        {
+            QubitAddress(control.uuid): 0,
+            QubitAddress(target.uuid): 1,
+        },
+        {},
+    )
+
+    assert appended == ([[0, 1]] if reuse_gate else [])
+    assert profile_calls == int(reuse_gate)
+
+
+def test_zero_power_maps_results_without_binding_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A concrete zero-powered call never resolves its inactive body."""
+    formal_target = Value(type=QubitType(), name="formal_target")
+    formal_result = formal_target.next_version()
+    operation = _controlled_u_with_power(
+        0,
+        block=Block(
+            input_values=[formal_target],
+            output_values=[formal_result],
+            operations=[
+                GateOperation.fixed(
+                    GateOperationType.X,
+                    [formal_target],
+                    [formal_result],
+                )
+            ],
+        ),
+    )
+    emit_pass = _MultiControlEmitPass()
+
+    def fail_bind(*args: Any, **kwargs: Any) -> None:
+        """Reject any attempt to inspect the inactive body."""
+        del args, kwargs
+        raise AssertionError("zero-powered body was bound")
+
+    monkeypatch.setattr(emit_pass._resolver, "bind_block_params", fail_bind)
+    control, target = operation.operands
+    qubit_map = {
+        QubitAddress(control.uuid): 0,
+        QubitAddress(target.uuid): 1,
+    }
+
+    controlled_emission.emit_controlled_u(
+        emit_pass,
+        object(),
+        operation,
+        qubit_map,
+        {},
+    )
+
+    assert qubit_map[QubitAddress(operation.results[0].uuid)] == 0
+    assert qubit_map[QubitAddress(operation.results[1].uuid)] == 1
+
+
+def test_repeated_fallback_profiles_body_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated fallback emission reuses one resolved batching profile."""
+    target = Value(type=QubitType(), name="target")
+    target_after_x = target.next_version()
+    target_after_z = target_after_x.next_version()
+    block = Block(
+        input_values=[target],
+        output_values=[target_after_z],
+        operations=[
+            GateOperation.fixed(GateOperationType.X, [target], [target_after_x]),
+            GateOperation.fixed(
+                GateOperationType.Z,
+                [target_after_x],
+                [target_after_z],
+            ),
+        ],
+    )
+    emit_pass = _MultiControlEmitPass(
+        ancilla_pool=MultiControlAncillaPool(first_index=10, count=2)
+    )
+    original_profile = controlled_emission._controlled_body_batch_profile
+    calls = 0
+
+    def record_profile(*args: Any, **kwargs: Any) -> Any:
+        """Count profile resolutions while delegating to the implementation."""
+        nonlocal calls
+        calls += 1
+        return original_profile(*args, **kwargs)
+
+    monkeypatch.setattr(
+        controlled_emission,
+        "_controlled_body_batch_profile",
+        record_profile,
+    )
+
+    controlled_emission.emit_controlled_fallback(
+        emit_pass,
+        object(),
+        block,
+        num_controls=3,
+        control_indices=[0, 1, 2],
+        target_indices=[3],
+        power=5,
+        bindings={},
+    )
+
+    assert calls == 1
+
+
+@pytest.mark.parametrize("num_controls", [2, 3])
+def test_controlled_identity_phase_emits_no_gate_or_ladder(
+    num_controls: int,
+) -> None:
+    """Exact identity phases emit neither a phase primitive nor a ladder."""
+    pool = MultiControlAncillaPool(
+        first_index=10,
+        count=max(1, num_controls - 1),
+    )
+    emit_pass = _MultiControlEmitPass(ancilla_pool=pool)
+    phase = Value(type=FloatType(), name="phase")
+    operation = GlobalPhaseOperation(operands=[phase], results=[])
+
+    emit_controlled_operations(
+        emit_pass,
+        object(),
+        [operation],
+        list(range(num_controls)),
+        {},
+        {phase.uuid: 0.0},
+    )
+
+    assert emit_pass._emitter.calls == []
+
+
+@pytest.mark.parametrize("num_controls", [2, 3])
+def test_controlled_tiny_phase_is_not_erased(num_controls: int) -> None:
+    """A tiny nonzero phase still emits its controlled phase decomposition."""
+    pool = MultiControlAncillaPool(
+        first_index=10,
+        count=max(1, num_controls - 1),
+    )
+    emit_pass = _MultiControlEmitPass(ancilla_pool=pool)
+    phase = Value(type=FloatType(), name="phase")
+    operation = GlobalPhaseOperation(operands=[phase], results=[])
+    angle = 5e-13
+
+    emit_controlled_operations(
+        emit_pass,
+        object(),
+        [operation],
+        list(range(num_controls)),
+        {},
+        {phase.uuid: angle},
+    )
+
+    assert emit_pass._emitter.calls
+    assert any(call[-1] == angle for call in emit_pass._emitter.calls)
+
+
+def test_open_controlled_identity_phase_skips_x_brackets() -> None:
+    """An identity-only controlled body skips its open-control X brackets."""
+    controls = [Value(type=QubitType(), name=f"control_{index}") for index in range(3)]
+    target = Value(type=QubitType(), name="target")
+    formal_target = Value(type=QubitType(), name="formal_target")
+    phase = Value(type=FloatType(), name="phase").with_const(0.0)
+    body = Block(
+        input_values=[formal_target],
+        output_values=[formal_target],
+        operations=[GlobalPhaseOperation(operands=[phase], results=[])],
+    )
+    operation = ConcreteControlledU(
+        operands=[*controls, target],
+        results=[
+            *(control.next_version() for control in controls),
+            target.next_version(),
+        ],
+        num_controls=3,
+        control_value=0,
+        block=body,
+    )
+    qubit_map = {
+        **{QubitAddress(control.uuid): index for index, control in enumerate(controls)},
+        QubitAddress(target.uuid): 3,
+    }
+    emit_pass = _MultiControlEmitPass(
+        ancilla_pool=MultiControlAncillaPool(first_index=10, count=2)
+    )
+
+    controlled_emission.emit_controlled_u(
+        emit_pass,
+        object(),
+        operation,
+        qubit_map,
+        {},
+    )
+
+    assert emit_pass._emitter.calls == []
+
+
+def test_open_controlled_zero_weight_body_skips_reusable_gate() -> None:
+    """A proven zero-work body runs bookkeeping without a gate or brackets."""
+
+    class ReusableGateEmitter(_RecordingEmitter):
+        """Record open-control brackets and reusable-gate emission."""
+
+        def gate_controlled(
+            self,
+            gate: _GateWithQubitCount,
+            num_controls: int,
+        ) -> _GateWithQubitCount:
+            """Return a controlled fake gate and record its control width.
+
+            Args:
+                gate (_GateWithQubitCount): Fake reusable body gate.
+                num_controls (int): Number of controls to add.
+
+            Returns:
+                _GateWithQubitCount: Fake gate with the controlled width.
+            """
+            self.calls.append(("gate_controlled", num_controls))
+            assert gate.num_qubits is not None
+            return _GateWithQubitCount(gate.num_qubits + num_controls)
+
+        def append_gate(
+            self,
+            circuit: Any,
+            gate: _GateWithQubitCount,
+            qubit_indices: list[int],
+        ) -> None:
+            """Record one reusable controlled-gate append.
+
+            Args:
+                circuit (Any): Ignored fake circuit.
+                gate (_GateWithQubitCount): Fake controlled gate.
+                qubit_indices (list[int]): Physical append order.
+            """
+            del circuit, gate
+            self.calls.append(("append_gate", tuple(qubit_indices)))
+
+    class ReusableGateEmitPass(_MultiControlEmitPass):
+        """Expose a reusable gate for a structurally zero-weight body."""
+
+        def __init__(self) -> None:
+            """Initialize the pass with a reusable-gate emitter."""
+            super().__init__()
+            self._emitter = ReusableGateEmitter()
+
+        def _blockvalue_to_gate(
+            self,
+            block: Block,
+            num_qubits: int,
+            bindings: dict[str, Any],
+        ) -> _GateWithQubitCount:
+            """Materialize the test body through the native gate hook.
+
+            Args:
+                block (Block): Structurally zero-weight body.
+                num_qubits (int): External body width.
+                bindings (dict[str, Any]): Active bindings.
+
+            Returns:
+                _GateWithQubitCount: Fake reusable gate for the body.
+            """
+            del block, bindings
+            return _GateWithQubitCount(num_qubits)
+
+    control = Value(type=QubitType(), name="control")
+    target = Value(type=QubitType(), name="target")
+    formal_target = Value(type=QubitType(), name="formal_target")
+    workspace = Value(type=QubitType(), name="workspace")
+    body = Block(
+        input_values=[formal_target],
+        output_values=[formal_target],
+        operations=[QInitOperation(results=[workspace])],
+    )
+    operation = ConcreteControlledU(
+        operands=[control, target],
+        results=[control.next_version(), target.next_version()],
+        num_controls=1,
+        control_value=0,
+        block=body,
+    )
+    emit_pass = ReusableGateEmitPass()
+    emit_pass._active_qubit_map = {QubitAddress(workspace.uuid): 2}
+
+    controlled_emission.emit_controlled_u(
+        emit_pass,
+        object(),
+        operation,
+        {
+            QubitAddress(control.uuid): 0,
+            QubitAddress(target.uuid): 1,
+        },
+        {},
+    )
+
+    assert emit_pass._emitter.calls == []
+
+
+@pytest.mark.parametrize("operation_kind", ["invoke", "inverse"])
+def test_known_identity_callable_skips_boundary_x_brackets(
+    operation_kind: str,
+) -> None:
+    """Known Invoke and inverse identity bodies omit their open-control X pair."""
+    controls = [Value(type=QubitType(), name=f"control_{index}") for index in range(3)]
+    target = Value(type=QubitType(), name="target")
+    formal_target = Value(type=QubitType(), name="formal_target")
+    phase = Value(type=FloatType(), name="phase").with_const(math.tau)
+    body = Block(
+        input_values=[formal_target],
+        output_values=[formal_target],
+        operations=[GlobalPhaseOperation(operands=[phase], results=[])],
+    )
+    emit_pass = _MultiControlEmitPass(
+        ancilla_pool=MultiControlAncillaPool(first_index=10, count=2)
+    )
+    physical_qubits = [0, 1, 2, 3]
+
+    if operation_kind == "invoke":
+        ref = CallableRef(namespace="test", name="identity_phase")
+        operation = InvokeOperation(
+            operands=[*controls, target],
+            results=[
+                *(control.next_version() for control in controls),
+                target.next_version(),
+            ],
+            target=ref,
+            transform=CallTransform.CONTROLLED,
+            attrs={
+                "num_control_qubits": 3,
+                "num_target_qubits": 1,
+                "control_value": 0,
+            },
+            definition=CallableDef(ref=ref, body=body),
+        )
+        emit_controlled_composite_at_indices(
+            emit_pass,
+            object(),
+            operation,
+            control_indices=[],
+            qubit_indices=physical_qubits,
+            bindings={},
+        )
+    else:
+        operation = InverseBlockOperation(
+            operands=[*controls, target],
+            results=[
+                *(control.next_version() for control in controls),
+                target.next_version(),
+            ],
+            num_control_qubits=3,
+            num_target_qubits=1,
+            control_value=0,
+            source_block=body,
+            implementation_block=body,
+        )
+        inverse_emission.emit_inverse_block_at_indices(
+            emit_pass,
+            object(),
+            operation,
+            control_indices=physical_qubits[:3],
+            target_indices=physical_qubits[3:],
+            bindings={},
+        )
+
+    assert emit_pass._emitter.calls == []
+
+
 def test_batched_two_control_all_native_body_uses_per_gate_toffolis() -> None:
     """A two-control body of native X gates is not batched.
 
@@ -828,6 +2549,48 @@ def test_batched_two_control_all_native_body_uses_per_gate_toffolis() -> None:
     assert emit_pass._emitter.calls == [
         ("toffoli", 0, 1, 3),
         ("toffoli", 0, 1, 4),
+    ]
+
+
+def test_batched_two_control_cx_body_shares_one_and_ladder() -> None:
+    """Intrinsic CX controls use the cheaper shared exact-two-control path."""
+    pool = MultiControlAncillaPool(first_index=10, count=1)
+    emit_pass = _MultiControlEmitPass(ancilla_pool=pool)
+
+    control_a = Value(type=QubitType(), name="control_a")
+    target_a = Value(type=QubitType(), name="target_a")
+    control_b = Value(type=QubitType(), name="control_b")
+    target_b = Value(type=QubitType(), name="target_b")
+    cx_a = GateOperation.fixed(
+        GateOperationType.CX,
+        [control_a, target_a],
+        [control_a.next_version(), target_a.next_version()],
+    )
+    cx_b = GateOperation.fixed(
+        GateOperationType.CX,
+        [control_b, target_b],
+        [control_b.next_version(), target_b.next_version()],
+    )
+
+    emit_controlled_operations(
+        emit_pass,
+        object(),
+        [cx_a, cx_b],
+        [0, 1],
+        {
+            QubitAddress(control_a.uuid): 2,
+            QubitAddress(target_a.uuid): 3,
+            QubitAddress(control_b.uuid): 4,
+            QubitAddress(target_b.uuid): 5,
+        },
+        {},
+    )
+
+    assert emit_pass._emitter.calls == [
+        ("toffoli", 0, 1, 10),
+        ("toffoli", 10, 2, 3),
+        ("toffoli", 10, 4, 5),
+        ("toffoli", 0, 1, 10),
     ]
 
 

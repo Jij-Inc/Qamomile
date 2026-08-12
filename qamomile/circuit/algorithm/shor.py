@@ -289,6 +289,10 @@ def shor_order_finding(
     measurement feed-forward instead of a coherent ``2n`` counting register.
     With fixed ``window_size``, the body therefore has ``3n + O(1)`` peak
     width and ``O(n**3)`` gates at the default ``2n`` phase precision.
+    The example's 23-qubit estimate uses the default algorithmic decomposition
+    model: 21 program qubits plus two reusable clean ancillas. An engine that
+    emits the relevant multi-controlled operations natively can therefore
+    produce a 21-qubit circuit.
 
     Args:
         base (int): Integer whose multiplicative order should be found.
@@ -309,7 +313,7 @@ def shor_order_finding(
         >>> order_finding = shor_order_finding(base=2, modulus=15)
         >>> estimate = order_finding.estimate_resources()
         >>> estimate.qubits
-        21
+        23
     """
     if modulus <= 2:
         raise ValueError(f"modulus must be greater than two, got {modulus}.")

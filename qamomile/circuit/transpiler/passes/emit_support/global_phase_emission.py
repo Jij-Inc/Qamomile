@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
+from numbers import Real
 from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation.gate import GateOperationType
@@ -14,6 +16,59 @@ from qamomile.circuit.transpiler.passes.emit_support.gate_emission import (
 
 if TYPE_CHECKING:
     from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
+
+
+def is_exact_real_zero(value: Any) -> bool:
+    """Return whether a value is a concrete real scalar equal to zero.
+
+    The comparison intentionally has no tolerance: a tiny nonzero value must
+    remain observable, while backend parameter expressions remain unresolved.
+
+    Args:
+        value (Any): Concrete numeric value or backend parameter expression.
+
+    Returns:
+        bool: ``True`` only for a non-boolean real scalar exactly equal to
+        zero.
+    """
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return False
+    symbolic_zero = getattr(value, "is_zero", None)
+    if symbolic_zero is not None:
+        return symbolic_zero is True
+    try:
+        return bool(value == 0)
+    except (TypeError, ValueError):
+        return False
+
+
+def is_identity_phase_angle(angle: Any) -> bool:
+    """Return whether a concrete angle is exactly zero modulo two pi.
+
+    The test intentionally uses no tolerance so a tiny but nonzero phase is
+    never discarded. Runtime parameter expressions remain non-identity until
+    an engine resolves them to a concrete number.
+
+    Args:
+        angle (Any): Resolved numeric angle or engine parameter expression.
+
+    Returns:
+        bool: Whether ``angle`` is a finite real number exactly congruent to
+        zero modulo ``2 * pi``.
+    """
+    if isinstance(angle, bool) or not isinstance(angle, Real):
+        return False
+    if is_exact_real_zero(angle):
+        return True
+    try:
+        numeric = float(angle)
+    except (OverflowError, TypeError, ValueError):
+        return False
+    if not math.isfinite(numeric) or numeric == 0.0:
+        # A nonzero exact value that underflows during binary64 conversion is
+        # still an observable phase and must fail closed.
+        return False
+    return is_exact_real_zero(math.fmod(numeric, math.tau))
 
 
 def _require_global_phase_hook(
@@ -122,6 +177,9 @@ def emit_controlled_global_phase(
             provides neither a native primitive nor the shared clean-ancilla
             decomposition.
     """
+    if is_identity_phase_angle(angle):
+        return
+
     num_controls = len(control_indices)
     if num_controls == 0:
         emit_resolved_global_phase(emit_pass, circuit, angle)

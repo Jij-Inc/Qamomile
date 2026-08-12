@@ -46,12 +46,17 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .estimator import (
+    ApproximationStatus,
     CallResources,
+    ControlDecomposition,
     DepthResources,
+    EstimateDerivation,
     EstimateQuality,
-    GateBasis,
     GateResources,
-    OpaqueCallContext,
+    MeasurementResources,
+    OpaqueCostContext,
+    ResetResources,
+    ResourceAssumption,
     ResourceEstimate,
     ResourceEstimator,
     UnknownResourcePolicy,
@@ -115,7 +120,7 @@ from .frontend.operation.qubit_gates import (
     z,
 )
 from .frontend.operation.select import select
-from .frontend.oracle import Oracle, opaque
+from .frontend.oracle import Oracle, TransformedOracle, opaque
 from .frontend.qkernel import QKernel, qkernel
 from .frontend.struct import struct
 from .ir.effect import KernelEffect
@@ -201,14 +206,20 @@ __all__ = [
     "KernelEffect",
     "composite_gate",
     "Oracle",
+    "TransformedOracle",
     "opaque",
     "CallableSignature",
+    "ApproximationStatus",
     "CallResources",
+    "ControlDecomposition",
     "DepthResources",
+    "EstimateDerivation",
     "EstimateQuality",
-    "GateBasis",
     "GateResources",
-    "OpaqueCallContext",
+    "MeasurementResources",
+    "OpaqueCostContext",
+    "ResetResources",
+    "ResourceAssumption",
     "ResourceEstimate",
     "ResourceEstimator",
     "UnknownResourcePolicy",

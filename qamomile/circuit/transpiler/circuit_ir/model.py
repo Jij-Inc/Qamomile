@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import math
 from collections.abc import Mapping
 from typing import Any, TypeAlias
 
@@ -1349,6 +1350,10 @@ class CircuitBuilder:
         time_expression = as_scalar_expr(time)
         if isinstance(hamiltonian, Hamiltonian):
             constant = complex(hamiltonian.constant)
+            if not math.isfinite(constant.real) or not math.isfinite(constant.imag):
+                raise ValueError(
+                    "Pauli evolution requires finite Hamiltonian coefficients"
+                )
             if abs(constant.imag) > HERMITIAN_IMAG_ATOL:
                 raise ValueError("Pauli evolution requires a real Hamiltonian constant")
             if constant.real:
