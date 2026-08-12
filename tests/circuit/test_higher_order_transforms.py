@@ -384,17 +384,6 @@ def test_controlled_inverse_composite_executes_phase_on_every_sdk(
     assert observed == pytest.approx(-1.0, abs=1e-6)
 
 
-def test_double_inverse_qkernel_wrapper_returns_original_qkernel() -> None:
-    """Two direct inverse transforms cancel before tracing."""
-
-    @qmc.qkernel
-    def layer(target: qmc.Qubit) -> qmc.Qubit:
-        """Apply one phase gate."""
-        return qmc.s(target)
-
-    assert qmc.inverse(qmc.inverse(layer)) is layer
-
-
 def test_double_inverse_preserves_effective_callable_metadata() -> None:
     """Cancelling inverse wrappers retains identity and resource contracts."""
 

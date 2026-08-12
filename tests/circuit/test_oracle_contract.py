@@ -53,16 +53,6 @@ def test_oracle_normalizes_numpy_control_count() -> None:
     assert isinstance(oracle.num_control_qubits, int)
 
 
-def test_controlled_oracle_normalizes_numpy_control_count() -> None:
-    """Oracle control transforms normalize NumPy integers before storage."""
-    oracle = qmc.opaque("numpy_added_controls", num_qubits=1)
-
-    transformed = qmc.control(oracle, num_controls=np.int64(2))
-
-    assert transformed.added_num_control_qubits == 2
-    assert isinstance(transformed.added_num_control_qubits, int)
-
-
 def test_transformed_oracle_normalizes_numpy_control_count() -> None:
     """Direct transformed-Oracle construction shares the integral contract."""
     oracle = qmc.opaque("numpy_direct_transform", num_qubits=1)

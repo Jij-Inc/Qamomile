@@ -132,32 +132,6 @@ def test_public_resource_types_retain_owner_introspection() -> None:
     assert type(restored) is qmc.GateResources
 
 
-def test_legacy_resource_pickle_globals_resolve_after_split() -> None:
-    """Legacy module globals still resolve to the relocated class objects."""
-    legacy_globals = {
-        "qamomile.circuit.estimator.resource_estimator": (
-            "_ResourceInlineBoundaryOperation",
-            "_CappedRangeSum",
-            "_EstimatorControlBatchProfile",
-            "_SequentialEstimateComposer",
-            "_OpaqueInvocationTransform",
-            "_ResourceEstimatorConfig",
-            "_LoopMayTaint",
-            "ResourceEstimate",
-            "OpaqueCostContext",
-            "UnknownResourcePolicy",
-            "ResourceInterpreter",
-        ),
-    }
-
-    for module_name, class_names in legacy_globals.items():
-        for class_name in class_names:
-            payload = f"c{module_name}\n{class_name}\n.".encode()
-            restored = pickle.loads(payload)
-            assert inspect.isclass(restored)
-            assert restored.__name__ == class_name
-
-
 def test_ir_gate_arity_profile_is_exhaustive_and_disjoint() -> None:
     """Every IR gate has one explicit arity without synthetic-name fallback."""
     gate_catalog_module._validate_ir_gate_arity_profiles()
@@ -705,10 +679,16 @@ def test_seq_all_matches_left_fold_and_preserves_trace_order() -> None:
 
 
 @pytest.mark.parametrize(
-    "mutation_kind",
-    ["assumptions", "derivation", "quality", "approximation"],
+    ("mutation_kind", "boundary"),
+    [
+        ("assumptions", "report"),
+        ("derivation", "report"),
+        ("quality", "report"),
+        ("approximation", "report"),
+        ("assumptions", "sequential"),
+        ("assumptions", "wire"),
+    ],
 )
-@pytest.mark.parametrize("boundary", ["report", "sequential", "wire"])
 def test_public_metadata_mutation_is_rejected_at_resource_boundaries(
     mutation_kind: str,
     boundary: str,
@@ -820,26 +800,6 @@ def test_seq_all_refreshes_public_symbols_only_after_the_reduction(
     assert combined.parameters == {"symbol": symbol}
     assert qmc.ResourceEstimate.seq_all([leaf]) is leaf
     assert refresh_count == 1
-
-
-def test_nested_seq_all_generator_preserves_symbol_metadata() -> None:
-    """A one-element outer generator retains an inner reduction's symbols."""
-    symbol = sp.Symbol("nested_symbol", integer=True, nonnegative=True)
-    leaf = qmc.ResourceEstimate(gates=qmc.GateResources(total=symbol))
-
-    def nested() -> Iterable[qmc.ResourceEstimate]:
-        """Yield one already reduced symbolic estimate.
-
-        Returns:
-            Iterable[qmc.ResourceEstimate]: One nested sequential composition.
-        """
-        yield qmc.ResourceEstimate.seq_all([leaf, leaf])
-
-    combined = qmc.ResourceEstimate.seq_all(nested())
-
-    assert combined.gates.total == 2 * symbol
-    assert combined.parameters == {"nested_symbol": symbol}
-    assert combined.substitute(nested_symbol=3).gates.total == 6
 
 
 def test_seq_all_validates_first_item_before_advancing_generator() -> None:

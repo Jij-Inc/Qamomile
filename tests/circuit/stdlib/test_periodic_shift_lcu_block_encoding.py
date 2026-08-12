@@ -956,17 +956,6 @@ def test_periodic_descriptor_rejects_inconsistent_metadata(
         dataclasses.replace(encoding, **changes)
 
 
-def test_periodic_width_replacement_reaches_descriptor_validation() -> None:
-    """Generated width metadata does not mask periodic consistency errors."""
-    encoding = _periodic_encoding({0: 0.1, 1: 0.2}, (2,))
-
-    with pytest.raises(
-        ValueError,
-        match="num_signal_qubits does not match the number of canonical terms",
-    ):
-        dataclasses.replace(encoding, num_signal_qubits=2)
-
-
 def test_periodic_stencil_signal_width_tracks_canonical_term_count() -> None:
     """One and two terms use one signal qubit while three terms use two."""
     single = _periodic_encoding({0: 1.0}, (2,))

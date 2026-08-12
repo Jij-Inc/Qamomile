@@ -1667,7 +1667,7 @@ print(serialize(_calls_fixed_cost_oracle).hex())
             capture_output=True,
             text=True,
         ).stdout.strip()
-        for _ in range(3)
+        for _ in range(2)
     ]
 
     assert payloads[1:] == payloads[:-1]

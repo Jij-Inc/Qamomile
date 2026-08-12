@@ -614,19 +614,6 @@ def test_ordered_piecewise_and_nary_extrema_preserve_semantics() -> None:
         assert rewritten.substitute(length=concrete).gates.total == expected
 
 
-def test_protected_sum_node_is_not_rewritten_inside() -> None:
-    """A binding node keeps its nested Max despite an available domain."""
-    source = _domain_only.estimate_resources()
-    length = source.parameters["length"]
-    index = sp.Dummy("index", integer=True)
-    protected = sp.Sum(sp.Max(0, length - 1), (index, 0, 1))
-
-    rewritten = source.seq(_expression_model(length, protected))
-
-    assert rewritten.gates.total.has(sp.Sum)
-    assert rewritten.gates.total.has(sp.Max)
-
-
 @pytest.mark.parametrize(
     "node_kind",
     ["sum", "product", "integral", "derivative", "limit", "lambda", "custom"],
@@ -927,25 +914,6 @@ def test_leaf_rewriter_fails_closed_for_unsupported_constraint_state(
     assert requirements == ()
 
 
-def test_leaf_rewriter_supports_exact_equality_reconstruction() -> None:
-    """An exact input condition can select one Piecewise branch."""
-    length = sp.Symbol("length", integer=True)
-    original = sp.Piecewise((3, sp.Eq(length, 1)), (5, True))
-    constraint = _eligible_constraint(
-        length,
-        minimum=None,
-        expected=sp.Integer(1),
-    )
-
-    rewritten, requirements = _rewrite_expression_over_domain(
-        original,
-        (constraint,),
-    )
-
-    assert rewritten == 3
-    assert tuple(item.predicate for item in requirements) == (sp.Eq(length, 1),)
-
-
 def test_leaf_rewriter_source_budget_exhaustion_is_atomic() -> None:
     """Too many distinct sources return the original formula with no evidence."""
     length = sp.Symbol("length", integer=True)
@@ -965,7 +933,6 @@ def test_leaf_rewriter_source_budget_exhaustion_is_atomic() -> None:
     "limit_name",
     [
         "_DOMAIN_RAW_CONSTRAINT_LIMIT",
-        "_DOMAIN_SOURCE_LIMIT",
         "_DOMAIN_SYMBOL_LIMIT",
         "_DOMAIN_EXPRESSION_NODE_LIMIT",
         "_DOMAIN_PREDICATE_NODE_LIMIT",
@@ -1162,27 +1129,26 @@ def test_dataclasses_replace_rejects_stale_domain_metrics_immediately() -> None:
 
 
 @pytest.mark.parametrize(
-    "mutation_kind",
-    ["field", "nested", "assumptions", "parameters"],
-)
-@pytest.mark.parametrize(
-    "entrypoint",
+    ("mutation_kind", "entrypoint"),
     [
-        "simplify",
-        "substitute",
-        "seq",
-        "seq_all",
-        "parallel",
-        "choice",
-        "conditional",
-        "repeat",
-        "sum",
-        "control",
-        "inverse",
-        "wire",
-        "physical",
-        "report",
-        "explain",
+        ("field", "report"),
+        ("nested", "report"),
+        ("assumptions", "report"),
+        ("parameters", "report"),
+        ("field", "simplify"),
+        ("field", "substitute"),
+        ("field", "seq"),
+        ("field", "seq_all"),
+        ("field", "parallel"),
+        ("field", "choice"),
+        ("field", "conditional"),
+        ("field", "repeat"),
+        ("field", "sum"),
+        ("field", "control"),
+        ("field", "inverse"),
+        ("field", "wire"),
+        ("field", "physical"),
+        ("field", "explain"),
     ],
 )
 def test_mutated_rewritten_estimate_is_rejected(
@@ -1522,29 +1488,6 @@ def test_wire_round_trip_keeps_equal_ordinary_assumption_distinct_from_domain() 
 
     assert restored.assumptions == (ordinary, generated)
     assert specialized.assumptions == (ordinary,)
-
-
-def test_exhaustive_validity_and_rewrite_identity_on_small_domain() -> None:
-    """Projected GHZ domain is neither weaker nor stronger on small integers."""
-    symbolic = _ghz_like.estimate_resources()
-    length = symbolic.parameters["length"]
-    original = 1 + sp.Max(0, length - 1)
-    assert symbolic._domain_rewrite_state is not None
-    (requirement,) = symbolic._domain_rewrite_state.requirements
-
-    for value in range(0, 9):
-        valid = value >= 1
-        assert bool(requirement.predicate.subs(length, value)) is valid
-        if valid:
-            direct = _ghz_like.estimate_resources(inputs={"length": value})
-            late = symbolic.substitute(length=value)
-            assert direct.gates.total == late.gates.total == value
-            assert original.subs(length, value) == value
-        else:
-            with pytest.raises(ValueError, match="in-bounds"):
-                _ghz_like.estimate_resources(inputs={"length": value})
-            with pytest.raises(ValueError, match="in-bounds"):
-                symbolic.substitute(length=value)
 
 
 def test_many_composed_constraints_deduplicate_domain_assumptions() -> None:

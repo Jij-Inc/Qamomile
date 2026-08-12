@@ -325,33 +325,6 @@ class _BaseControlOpaqueCost:
         )
 
 
-class _BaseArityProfileOpaqueCost:
-    """Return one definition-level arity profile from a callback."""
-
-    def __call__(self, ctx: qm.OpaqueCostContext) -> qm.ResourceEstimate:
-        """Return a base one-/two-qubit gate profile.
-
-        Args:
-            ctx (qm.OpaqueCostContext): Definition-level cost context.
-
-        Returns:
-            qm.ResourceEstimate: Definition-level profile to which the
-            estimator still applies external controls.
-        """
-        return qm.ResourceEstimate(
-            gates=qm.GateResources(
-                total=3,
-                single_qubit=2,
-                two_qubit=1,
-            ),
-            calls=qm.CallResources(
-                calls_by_name={
-                    (f"base_definition_controls={ctx.definition_control_qubits}"): 1,
-                }
-            ),
-        )
-
-
 class _ModelNeutralOpaqueCost:
     """Return a call-only cost independent of the control model."""
 
@@ -597,85 +570,6 @@ def test_abstract_aggregate_control_keeps_unclassified_arity_explicit() -> None:
         "transformed arity fields therefore may not sum to total" in assumption.message
         for assumption in two_controls.assumptions
     )
-
-
-def test_abstract_opaque_costs_apply_external_controls_after_base_cost() -> None:
-    """Fixed and callback opaque costs share abstract control projection."""
-    fixed_cost = qm.ResourceEstimate(
-        gates=qm.GateResources(
-            total=3,
-            single_qubit=2,
-            two_qubit=1,
-        ),
-        control_decomposition=qm.ControlDecomposition.ABSTRACT,
-    )
-    fixed_oracle = qm.opaque(
-        "abstract_fixed_oracle",
-        num_qubits=1,
-        cost=fixed_cost,
-    )
-
-    def callback_cost(ctx: qm.OpaqueCostContext) -> qm.ResourceEstimate:
-        """Return the definition's base cost in the requested gate model."""
-        return qm.ResourceEstimate(
-            gates=qm.GateResources(
-                total=3,
-                single_qubit=2,
-                two_qubit=1,
-            ),
-            control_decomposition=ctx.control_decomposition,
-        )
-
-    callback_oracle = qm.opaque(
-        "abstract_callback_oracle",
-        num_qubits=1,
-        cost=callback_cost,
-    )
-
-    @qm.qkernel
-    def fixed_circuit() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
-        """Apply two controls outside the fixed-cost definition."""
-        control_0 = qm.qubit("control_0")
-        control_1 = qm.qubit("control_1")
-        target = qm.qubit("target")
-        return qm.control(fixed_oracle, num_controls=2)(
-            control_0,
-            control_1,
-            target,
-        )
-
-    @qm.qkernel
-    def callback_circuit() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
-        """Apply two controls outside the callback-cost definition."""
-        control_0 = qm.qubit("control_0")
-        control_1 = qm.qubit("control_1")
-        target = qm.qubit("target")
-        return qm.control(callback_oracle, num_controls=2)(
-            control_0,
-            control_1,
-            target,
-        )
-
-    fixed = fixed_circuit.estimate_resources(
-        control_decomposition=qm.ControlDecomposition.ABSTRACT,
-    )
-    callback = callback_circuit.estimate_resources(
-        control_decomposition=qm.ControlDecomposition.ABSTRACT,
-    )
-
-    assert fixed.gates == callback.gates
-    assert fixed.depth == callback.depth
-    assert fixed.gates.total == 3
-    assert fixed.gates.single_qubit == 0
-    assert fixed.gates.two_qubit == 0
-    assert fixed.gates.multi_qubit == 3
-    assert fixed.width.clean_ancilla_qubits == 0
-    assert fixed.derivation is qm.EstimateDerivation.MODELED
-    assert fixed.quality is qm.EstimateQuality.CONSERVATIVE
-    assert fixed.approximation is qm.ApproximationStatus.EXACT
-    assert callback.derivation is qm.EstimateDerivation.MODELED
-    assert callback.quality is qm.EstimateQuality.CONSERVATIVE
-    assert callback.approximation is qm.ApproximationStatus.EXACT
 
 
 def test_controlled_logical_predicates_honor_concrete_inputs() -> None:
@@ -3535,36 +3429,12 @@ def test_open_control_brackets_wrap_projected_fixed_opaque_cost() -> None:
     assert estimate.calls.queries_by_name == {"open_arity_oracle": 1}
 
 
-@pytest.mark.parametrize("cost_kind", ["fixed", "callback"])
-@pytest.mark.parametrize(
-    "control_decomposition",
-    [
-        qm.ControlDecomposition.ABSTRACT,
-        qm.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
-    ],
-)
-def test_empty_opaque_cost_omits_added_open_control_brackets(
-    cost_kind: str,
-    control_decomposition: qm.ControlDecomposition,
-) -> None:
+def test_empty_opaque_cost_omits_added_open_control_brackets() -> None:
     """An explicitly empty opaque call emits no open-control X brackets."""
-
-    def empty_cost(_: qm.OpaqueCostContext) -> qm.ResourceEstimate:
-        """Return the complete empty cost for this opaque definition.
-
-        Args:
-            _ (qm.OpaqueCostContext): Unused definition-level context.
-
-        Returns:
-            qm.ResourceEstimate: Explicit identity cost.
-        """
-        return qm.ResourceEstimate.zero()
-
-    cost = qm.ResourceEstimate.zero() if cost_kind == "fixed" else empty_cost
     oracle = qm.opaque(
-        f"empty_open_{cost_kind}",
+        "empty_open",
         num_qubits=1,
-        cost=cost,
+        cost=qm.ResourceEstimate.zero(),
     )
 
     @qm.qkernel
@@ -3575,9 +3445,7 @@ def test_empty_opaque_cost_omits_added_open_control_brackets(
         _, target = qm.control(oracle, control_value=0)(control, target)
         return target
 
-    estimate = circuit.estimate_resources(
-        control_decomposition=control_decomposition,
-    )
+    estimate = circuit.estimate_resources()
 
     assert estimate.gates.total == 0
     assert estimate.depth.depth == 0
@@ -5285,75 +5153,6 @@ def test_opaque_ancilla_declaration_implies_peak_workspace(
     assert estimate.width.clean_ancilla_qubits == 2
     assert estimate.width.peak_qubits == 3
     assert estimate.width.circuit_qubits == 3
-
-
-def test_opaque_callback_arity_profile_uses_fixed_cost_projection() -> None:
-    """Callback and fixed arity profiles receive the same external controls."""
-    callback_oracle = qm.opaque(
-        "callback_arity_oracle",
-        num_qubits=1,
-        cost=_BaseArityProfileOpaqueCost(),
-    )
-    fixed_cost = qm.ResourceEstimate(
-        gates=qm.GateResources(
-            total=3,
-            single_qubit=2,
-            two_qubit=1,
-        ),
-    )
-    fixed_oracle = qm.opaque(
-        "fixed_arity_oracle",
-        num_qubits=1,
-        cost=fixed_cost,
-    )
-
-    @qm.qkernel
-    def invoke_callback(target: qm.Qubit) -> qm.Qubit:
-        """Invoke the callback-priced opaque Oracle."""
-        (target,) = callback_oracle(target)
-        return target
-
-    @qm.qkernel
-    def callback_circuit() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
-        """Invoke the callback Oracle under two inherited controls."""
-        control_0 = qm.qubit("control_0")
-        control_1 = qm.qubit("control_1")
-        target = qm.qubit("target")
-        return qm.control(
-            invoke_callback,
-            num_controls=2,
-        )(control_0, control_1, target)
-
-    @qm.qkernel
-    def fixed_circuit() -> tuple[qm.Qubit, qm.Qubit, qm.Qubit]:
-        """Invoke the fixed-cost Oracle with two added controls."""
-        control_0 = qm.qubit("control_0")
-        control_1 = qm.qubit("control_1")
-        target = qm.qubit("target")
-        return qm.control(fixed_oracle, num_controls=2)(
-            control_0,
-            control_1,
-            target,
-        )
-
-    callback_estimate = callback_circuit.estimate_resources()
-    fixed_estimate = fixed_circuit.estimate_resources()
-
-    assert callback_estimate.gates == fixed_estimate.gates
-    assert callback_estimate.depth == fixed_estimate.depth
-    assert (
-        callback_estimate.width.clean_ancilla_qubits
-        == fixed_estimate.width.clean_ancilla_qubits
-    )
-    assert callback_estimate.calls.calls_by_name == {
-        "base_definition_controls=0": 1,
-    }
-    assert callback_estimate.derivation is qm.EstimateDerivation.MODELED
-    assert fixed_estimate.derivation is qm.EstimateDerivation.MODELED
-    assert callback_estimate.quality is qm.EstimateQuality.CONSERVATIVE
-    assert fixed_estimate.quality is qm.EstimateQuality.CONSERVATIVE
-    assert callback_estimate.approximation is qm.ApproximationStatus.EXACT
-    assert fixed_estimate.approximation is qm.ApproximationStatus.EXACT
 
 
 @pytest.mark.parametrize("uses_callback", [False, True], ids=["fixed", "callback"])

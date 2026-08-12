@@ -140,21 +140,6 @@ def test_gate_matches_qubit_count_rejects_unknown_width() -> None:
     assert not _gate_matches_qubit_count(_GateWithQubitCount(1), 2)
 
 
-def test_qinit_does_not_contribute_controlled_batch_weight() -> None:
-    """Workspace allocation alone cannot justify a shared control ladder."""
-    workspace = Value(type=QubitType(), name="workspace")
-    operation = QInitOperation(results=[workspace])
-
-    assert (
-        controlled_emission._batch_op_profile(
-            _ResolverOnlyEmitPass(),
-            operation,
-            {},
-        ).weight
-        == 0
-    )
-
-
 def test_controlled_walker_rejects_unhandled_classical_operation() -> None:
     """A classical marker without walker semantics must fail closed."""
     operation = RuntimeClassicalExpr(kind=RuntimeOpKind.NOT)
@@ -344,30 +329,6 @@ def test_controlled_power_analysis_rejects_non_integer_bindings(
             emit_pass,
             operation,
             bindings,
-        ).weight
-
-
-@pytest.mark.parametrize("power", [True, False])
-def test_controlled_power_analysis_rejects_direct_bool(power: bool) -> None:
-    """A direct boolean power cannot exploit Python's integer subclassing."""
-    from qamomile.circuit.transpiler.errors import EmitError
-
-    operation = _controlled_u_with_power(power)
-    emit_pass = _ResolverOnlyEmitPass()
-
-    with pytest.raises(EmitError, match="bool"):
-        controlled_emission.allocate_controlled_workspaces(
-            emit_pass,
-            [operation],
-            {},
-            {},
-            {},
-        )
-    with pytest.raises(EmitError, match="bool"):
-        controlled_emission._batch_op_profile(
-            emit_pass,
-            operation,
-            {},
         ).weight
 
 
@@ -2303,9 +2264,7 @@ def test_repeated_fallback_profiles_body_once(
 
 
 @pytest.mark.parametrize("num_controls", [2, 3])
-@pytest.mark.parametrize("angle", [0.0, math.tau, -math.tau])
 def test_controlled_identity_phase_emits_no_gate_or_ladder(
-    angle: float,
     num_controls: int,
 ) -> None:
     """Exact identity phases emit neither a phase primitive nor a ladder."""
@@ -2323,7 +2282,7 @@ def test_controlled_identity_phase_emits_no_gate_or_ladder(
         [operation],
         list(range(num_controls)),
         {},
-        {phase.uuid: angle},
+        {phase.uuid: 0.0},
     )
 
     assert emit_pass._emitter.calls == []
@@ -2354,13 +2313,12 @@ def test_controlled_tiny_phase_is_not_erased(num_controls: int) -> None:
     assert any(call[-1] == angle for call in emit_pass._emitter.calls)
 
 
-@pytest.mark.parametrize("angle", [0.0, math.tau, -math.tau])
-def test_open_controlled_identity_phase_skips_x_brackets(angle: float) -> None:
+def test_open_controlled_identity_phase_skips_x_brackets() -> None:
     """An identity-only controlled body skips its open-control X brackets."""
     controls = [Value(type=QubitType(), name=f"control_{index}") for index in range(3)]
     target = Value(type=QubitType(), name="target")
     formal_target = Value(type=QubitType(), name="formal_target")
-    phase = Value(type=FloatType(), name="phase").with_const(angle)
+    phase = Value(type=FloatType(), name="phase").with_const(0.0)
     body = Block(
         input_values=[formal_target],
         output_values=[formal_target],

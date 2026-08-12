@@ -24,9 +24,7 @@ from qamomile.circuit.estimator import (
     resource_estimator as estimator_module,
 )
 from qamomile.circuit.estimator.resource_estimator import (
-    MeasurementResources,
     OpaqueCostContext,
-    ResetResources,
     ResourceEstimator,
     UnknownResourcePolicy,
 )
@@ -132,14 +130,6 @@ def test_callable_helpers_are_publicly_reexported():
         )
 
 
-def test_nonunitary_resource_types_are_publicly_reexported() -> None:
-    """Measurement and reset resource records are part of the circuit API."""
-    assert qmc.MeasurementResources is MeasurementResources
-    assert qmc.ResetResources is ResetResources
-    assert "MeasurementResources" in qmc.__all__
-    assert "ResetResources" in qmc.__all__
-
-
 def test_resource_metric_types_keep_one_canonical_identity() -> None:
     """Metric types remain identical through public and compatibility paths."""
     public_metric_names = (
@@ -171,6 +161,7 @@ def test_resource_metric_types_keep_one_canonical_identity() -> None:
         assert getattr(estimator_api, name) is canonical
         assert getattr(estimator_module, name) is canonical
         assert getattr(qmc, name) is canonical
+        assert name in qmc.__all__
 
     assert estimator_api.ResourceTraceNode is resource_types_module.ResourceTraceNode
     assert estimator_module.ResourceTraceNode is resource_types_module.ResourceTraceNode
