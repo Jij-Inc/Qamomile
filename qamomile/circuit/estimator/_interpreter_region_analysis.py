@@ -177,6 +177,10 @@ _CONSUMABLE_COMPOUND_SCHEDULING_ASSUMPTIONS = frozenset(
             "ForOperation",
             "unresolved quantum index may alias any scalar of its allocation",
         ),
+        (
+            "GateOperation",
+            "unresolved quantum index may alias any scalar of its allocation",
+        ),
     }
 )
 
@@ -209,7 +213,13 @@ def _compound_component_metadata_is_consumable(
         and all(
             fact.quality is EstimateQuality.CONSERVATIVE for fact in guarded_qualities
         )
-        and (not guarded_qualities or bool(guarded_assumptions))
+        and all(
+            any(
+                quality.active_when == assumption.active_when
+                for assumption in guarded_assumptions
+            )
+            for quality in guarded_qualities
+        )
     )
 
 
@@ -320,7 +330,7 @@ def _compound_schedule_estimate(
         (
             _SynchronizedEntryCertificate(
                 coverage=schedule.coverage,
-                frontier=frozenset(),
+                frontier=schedule.frontier,
                 active_when=schedule.active_when,
             ),
         )
@@ -334,7 +344,7 @@ def _compound_schedule_estimate(
         _dependency_reads=schedule.coverage,
         _dependency_writes=schedule.coverage,
         _dependency_completion={key: schedule.depth.depth for key in schedule.coverage},
-        _dependency_completion_uniform=False,
+        _dependency_completion_uniform=schedule.completion_uniform,
         _dependency_synchronized_entry_conditions={},
         _dependency_synchronized_entry_certificates=certificates,
         _global_barrier_condition=sp.false,

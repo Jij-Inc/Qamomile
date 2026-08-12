@@ -24,6 +24,7 @@ from qamomile.circuit.estimator._dependency_indices import (
     _wire_index_overlap_condition,
     _wire_index_relation,
     _wire_index_relation_under,
+    _wire_indices_cover,
     _WireRelation,
 )
 from qamomile.circuit.estimator._dependency_synchronization import (
@@ -624,11 +625,13 @@ def _uniform_event_covers(
     Returns:
         bool: Whether one exact-uniform write event covers the full domain.
     """
+    writes_by_owner: dict[str, set[WireIndex]] = {}
+    for write_owner, write_index in writes:
+        writes_by_owner.setdefault(write_owner, set()).add(write_index)
     return estimate._dependency_completion_uniform is True and all(
-        any(
-            write_owner == required_owner
-            and _wire_index_covers(write_index, required_index)
-            for write_owner, write_index in writes
+        _wire_indices_cover(
+            frozenset(writes_by_owner.get(required_owner, set())),
+            required_index,
         )
         for required_owner, required_index in coverage
     )

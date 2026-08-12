@@ -411,6 +411,56 @@ def _wire_index_covers(covering: WireIndex, required: WireIndex) -> bool:
     )
 
 
+def _wire_indices_cover(
+    covering: frozenset[WireIndex],
+    required: WireIndex,
+) -> bool:
+    """Prove that a finite union of footprints covers one requirement.
+
+    Direct evaluation may project a small symbolic range to individual scalar
+    keys while a structural certificate deliberately keeps the same range
+    compact.  This helper first tries single-footprint containment, then
+    expands only a small concrete required range and proves every resulting
+    scalar covered by at least one supplied footprint.
+
+    Args:
+        covering (frozenset[WireIndex]): Candidate owner-local footprints.
+        required (WireIndex): Footprint that must be fully contained.
+
+    Returns:
+        bool: Whether the union is proven to contain every required address.
+    """
+    if any(_wire_index_covers(candidate, required) for candidate in covering):
+        return True
+    if not isinstance(required, _WireRangeIndex):
+        return False
+    iterations = _safe_simplify(required.iterations)
+    if (
+        not iterations.is_number
+        or not _is_concrete_integer(iterations)
+        or not 0 <= int(iterations) <= _MAX_EXACT_LOOP_WIRE_EXPANSION
+    ):
+        return False
+    required_scalars = (
+        _normalize_wire_index(
+            cast(
+                ResourceExpr,
+                required.index_at_offset.subs(
+                    _WIRE_RANGE_OFFSET,
+                    sp.Integer(offset),
+                    simultaneous=True,
+                ),
+            )
+        )
+        for offset in range(int(iterations))
+    )
+    return all(
+        scalar is not _UNKNOWN_WIRE_INDEX
+        and any(_wire_index_covers(candidate, scalar) for candidate in covering)
+        for scalar in required_scalars
+    )
+
+
 @functools.lru_cache(maxsize=4096)
 def _wire_index_relation(left: WireIndex, right: WireIndex) -> _WireRelation:
     """Classify overlap between two indices of the same allocation owner.
@@ -468,6 +518,8 @@ def _wire_range_scalar_membership_condition(
         return None
     slope, start = signature
     offset = _safe_simplify(cast(ResourceExpr, (_expr(scalar) - start) / slope))
+    if offset.is_integer is False:
+        return sp.false
     if offset.is_integer is not True or offset.is_finite is not True:
         return None
     return _boolean_condition(

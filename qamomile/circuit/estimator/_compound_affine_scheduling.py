@@ -18,15 +18,25 @@ from qamomile.circuit.estimator._affine_loop_scheduling import (
     _WireAccess,
 )
 from qamomile.circuit.estimator._constants import _ONE, _ZERO
+from qamomile.circuit.estimator._dependency_footprints import (
+    _expand_dependency_owner_aliases,
+)
 from qamomile.circuit.estimator._dependency_indices import (
     WireKey,
+    _normalize_wire_index,
     _specialize_dependency_expression,
+    _symbolic_wire_range_index,
 )
+from qamomile.circuit.estimator._gate_catalog import _GATE_OPERATION_ARITY
 from qamomile.circuit.estimator._gate_classification import (
     _classify_uncontrolled_gate,
     _serial_depth_from_gate_resources,
 )
 from qamomile.circuit.estimator._loop_executor import symbolic_iterations
+from qamomile.circuit.estimator._quantum_values import (
+    _quantum_allocation_owner,
+    _quantum_element_index_expression,
+)
 from qamomile.circuit.estimator._resolver import ExprResolver, UnresolvedValueError
 from qamomile.circuit.estimator._resource_base import ResourceExpr
 from qamomile.circuit.estimator._resource_expressions import (
@@ -39,6 +49,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import BinOp
 from qamomile.circuit.ir.operation.control_flow import ForOperation
 from qamomile.circuit.ir.operation.gate import GateOperation
 from qamomile.circuit.ir.operation.operation import Operation
+from qamomile.circuit.ir.value import ArrayValue, Value
 
 
 @dataclasses.dataclass(frozen=True)
@@ -89,25 +100,48 @@ class _MirrorLayer:
 
 
 @dataclasses.dataclass(frozen=True)
+class _ExpandingPairTree:
+    """Describe one exact seeded expanding-pair tree.
+
+    Args:
+        depth (DepthResources): Exact whole-span depth by resource category.
+        coverage (frozenset[WireKey]): Complete compact physical footprint.
+        frontier (frozenset[WireKey]): Physical inputs of the first seed gate.
+        active_when (Boolean): Guard under which later tree inputs must not
+            arrive after the seed frontier.
+    """
+
+    depth: DepthResources
+    coverage: frozenset[WireKey]
+    frontier: frozenset[WireKey]
+    active_when: Boolean
+
+
+@dataclasses.dataclass(frozen=True)
 class _CompoundAffineSchedule:
-    """Carry an exact schedule for two adjacent affine loop operations.
+    """Carry an exact schedule for one adjacent structural operation span.
 
     Args:
         first_index (int): Inclusive index of the first grouped operation.
-        stop_index (int): Exclusive index after the second grouped loop.
-        component_indices (tuple[int, int]): Exact loop-operation indices whose
-            private scheduling metadata is consumed by the proof.
+        stop_index (int): Exclusive index after the grouped span.
+        component_indices (tuple[int, ...]): Exact operation indices whose
+            private scheduling metadata the structural proof consumes.
         depth (DepthResources): Exact depth of the grouped operations.
         coverage (frozenset[WireKey]): Proven complete quantum footprint.
+        frontier (frozenset[WireKey]): Exact safe first-event frontier.
+        completion_uniform (bool): Whether all covered wires finish at the
+            aggregate peak.
         active_when (Boolean): Guard under which multiple gate layers require
             synchronized external entry wires.
     """
 
     first_index: int
     stop_index: int
-    component_indices: tuple[int, int]
+    component_indices: tuple[int, ...]
     depth: DepthResources
     coverage: frozenset[WireKey]
+    frontier: frozenset[WireKey]
+    completion_uniform: bool
     active_when: Boolean
 
 
@@ -168,12 +202,108 @@ def _gate_depth_profile(gate: GateOperation) -> DepthResources | None:
         DepthResources | None: Classified unit-layer profile, or ``None`` if
         any active depth field is not exactly one.
     """
-    if gate.gate_type is None:
+    if (
+        gate.gate_type is None
+        or gate.gate_type not in _GATE_OPERATION_ARITY
+        or len(gate.qubit_operands) != _GATE_OPERATION_ARITY[gate.gate_type]
+        or len(gate.results) != _GATE_OPERATION_ARITY[gate.gate_type]
+    ):
         return None
     profile = _serial_depth_from_gate_resources(
         _classify_uncontrolled_gate(gate.gate_type.name.lower())
     )
     return profile if _depth_is_one_gate_per_active_field(profile) else None
+
+
+def _raw_scalar_wire_access(
+    value: Value,
+    resolver: ExprResolver,
+    *,
+    owner_aliases: Mapping[str, frozenset[str]] | None,
+    scalar_values: Mapping[str, sp.Expr] | None,
+    used_names: set[str] | None,
+) -> _WireAccess | None:
+    """Resolve one unique scalar address before affine normalization.
+
+    Expanding trees contain indices such as ``2**stage + offset``.  Their
+    integrality becomes provable only after the loop binders are rewritten to
+    nonnegative canonical ordinals, so the ordinary affine access helper is
+    intentionally too early for this proof.
+
+    Args:
+        value (Value): Candidate scalar quantum value.
+        resolver (ExprResolver): Resolver scoped to the value.
+        owner_aliases (Mapping[str, frozenset[str]] | None): Conditional owner
+            aliases.
+        scalar_values (Mapping[str, sp.Expr] | None): Optional concrete scalar
+            dependency values.
+        used_names (set[str] | None): Optional set updated with used names.
+
+    Returns:
+        _WireAccess | None: Unique root owner and raw scalar index, or ``None``
+        when the value is not an exact scalar array element.
+    """
+    if isinstance(value, ArrayValue) or value.parent_array is None:
+        return None
+    index = _quantum_element_index_expression(
+        value,
+        resolver,
+        scalar_values=scalar_values,
+        used_names=used_names,
+    )
+    if index is None:
+        return None
+    owner = _quantum_allocation_owner(value)
+    if len(_expand_dependency_owner_aliases({(owner, index)}, owner_aliases)) != 1:
+        return None
+    return _WireAccess(owner=owner, index=index, affine=None)
+
+
+def _raw_gate_accesses(
+    gate: GateOperation,
+    resolver: ExprResolver,
+    arity: int,
+    *,
+    owner_aliases: Mapping[str, frozenset[str]] | None,
+    scalar_values: Mapping[str, sp.Expr] | None,
+    used_names: set[str] | None,
+) -> tuple[tuple[_WireAccess, ...], tuple[_WireAccess, ...]] | None:
+    """Resolve exact operand and result addresses for one primitive gate.
+
+    Args:
+        gate (GateOperation): Candidate primitive gate.
+        resolver (ExprResolver): Resolver scoped to the gate.
+        arity (int): Required quantum operand and result count.
+        owner_aliases (Mapping[str, frozenset[str]] | None): Conditional owner
+            aliases.
+        scalar_values (Mapping[str, sp.Expr] | None): Optional concrete scalar
+            dependency values.
+        used_names (set[str] | None): Optional set updated with used names.
+
+    Returns:
+        tuple[tuple[_WireAccess, ...], tuple[_WireAccess, ...]] | None:
+        Operand and result addresses, or ``None`` when any address is
+        unsupported or the arity differs.
+    """
+    if len(gate.qubit_operands) != arity or len(gate.results) != arity:
+        return None
+    values = (*gate.qubit_operands, *gate.results)
+    if not all(isinstance(value, Value) for value in values):
+        return None
+    accesses = tuple(
+        _raw_scalar_wire_access(
+            cast(Value, value),
+            resolver,
+            owner_aliases=owner_aliases,
+            scalar_values=scalar_values,
+            used_names=used_names,
+        )
+        for value in values
+    )
+    if any(access is None for access in accesses):
+        return None
+    typed = cast(tuple[_WireAccess, ...], accesses)
+    return typed[:arity], typed[arity:]
 
 
 def _expressions_equal(left: ResourceExpr, right: ResourceExpr) -> bool:
@@ -187,6 +317,287 @@ def _expressions_equal(left: ResourceExpr, right: ResourceExpr) -> bool:
         bool: Whether the difference is proven to be zero.
     """
     return _safe_simplify(cast(ResourceExpr, left - right)) == _ZERO
+
+
+def _expanding_tree_depth(
+    iterations: ResourceExpr,
+    seed: DepthResources,
+    pair: DepthResources,
+) -> DepthResources:
+    """Build exact field-wise depth for a seeded expanding-pair tree.
+
+    Args:
+        iterations (ResourceExpr): Number of expanding pair layers.
+        seed (DepthResources): One unary seed gate's depth profile.
+        pair (DepthResources): One pair gate's depth profile.
+
+    Returns:
+        DepthResources: Exact whole-span critical path in every depth field.
+    """
+    return DepthResources(
+        **{
+            field.name: _safe_simplify(
+                cast(
+                    ResourceExpr,
+                    getattr(seed, field.name) + iterations * getattr(pair, field.name),
+                )
+            )
+            for field in dataclasses.fields(DepthResources)
+        }
+    )
+
+
+def _prove_expanding_pair_tree(
+    seed_gate: GateOperation,
+    operation: ForOperation,
+    resolver: ExprResolver,
+    *,
+    owner_aliases: Mapping[str, frozenset[str]] | None,
+    scalar_values: Mapping[str, sp.Expr] | None,
+    used_names: set[str] | None,
+) -> _ExpandingPairTree | None:
+    """Prove a unary seed followed by exact doubling pair layers.
+
+    The proof rewrites both loop binders to nonnegative canonical ordinals
+    before inspecting physical indices.  A stage of width ``W(r)`` must pair
+    ``v[c]`` with ``v[W(r) + c]`` for every ``0 <= c < W(r)``, with
+    ``W(0) = 1`` and ``W(r + 1) = 2 W(r)``.  These identities prove one
+    disjoint layer per outer iteration and a uniform final completion without
+    expanding the exponentially large gate set.
+
+    Args:
+        seed_gate (GateOperation): Candidate unary seed operation.
+        operation (ForOperation): Candidate outer expanding loop.
+        resolver (ExprResolver): Resolver for the enclosing region.
+        owner_aliases (Mapping[str, frozenset[str]] | None): Conditional owner
+            aliases.
+        scalar_values (Mapping[str, sp.Expr] | None): Optional concrete scalar
+            dependency values.
+        used_names (set[str] | None): Optional set updated with used names.
+
+    Returns:
+        _ExpandingPairTree | None: Exact whole-span proof, or ``None`` when any
+        structural, address, or depth premise cannot be established.
+    """
+    seed_profile = _gate_depth_profile(seed_gate)
+    seed_accesses = _raw_gate_accesses(
+        seed_gate,
+        resolver,
+        1,
+        owner_aliases=owner_aliases,
+        scalar_values=scalar_values,
+        used_names=used_names,
+    )
+    resolved = _loop_axis(
+        operation,
+        resolver,
+        scalar_values=scalar_values,
+        used_names=used_names,
+    )
+    if seed_profile is None or seed_accesses is None or resolved is None:
+        return None
+    outer_resolver, outer = resolved
+    inner_operations = [
+        item for item in operation.operations if isinstance(item, ForOperation)
+    ]
+    if len(inner_operations) != 1 or not all(
+        isinstance(item, (BinOp, ForOperation)) for item in operation.operations
+    ):
+        return None
+    inner_operation = inner_operations[0]
+    inner_resolved = _loop_axis(
+        inner_operation,
+        outer_resolver,
+        scalar_values=scalar_values,
+        used_names=used_names,
+    )
+    if inner_resolved is None or not all(
+        isinstance(item, (BinOp, GateOperation)) for item in inner_operation.operations
+    ):
+        return None
+    inner_resolver, inner = inner_resolved
+    pair_gates = [
+        item for item in inner_operation.operations if isinstance(item, GateOperation)
+    ]
+    if len(pair_gates) != 1:
+        return None
+    pair_gate = pair_gates[0]
+    pair_profile = _gate_depth_profile(pair_gate)
+    pair_accesses = _raw_gate_accesses(
+        pair_gate,
+        inner_resolver,
+        2,
+        owner_aliases=owner_aliases,
+        scalar_values=scalar_values,
+        used_names=used_names,
+    )
+    if pair_profile is None or pair_accesses is None:
+        return None
+    seed_inputs, seed_results = seed_accesses
+    pair_inputs, pair_results = pair_accesses
+    owner = seed_inputs[0].owner
+    if any(
+        access.owner != owner for access in (*seed_results, *pair_inputs, *pair_results)
+    ):
+        return None
+    seed_index = seed_inputs[0].index
+    seed_result_index = seed_results[0].index
+    if (
+        seed_index is None
+        or seed_result_index is None
+        or not _expressions_equal(seed_index, seed_result_index)
+    ):
+        return None
+
+    outer_ordinal = sp.Dummy("expanding_outer", integer=True, nonnegative=True)
+    inner_ordinal = sp.Dummy("expanding_inner", integer=True, nonnegative=True)
+    input_expressions = tuple(
+        _access_expression_at_ordinals(
+            access,
+            outer,
+            outer_ordinal,
+            inner=inner,
+            inner_ordinal=inner_ordinal,
+        )
+        for access in pair_inputs
+    )
+    result_expressions = tuple(
+        _access_expression_at_ordinals(
+            access,
+            outer,
+            outer_ordinal,
+            inner=inner,
+            inner_ordinal=inner_ordinal,
+        )
+        for access in pair_results
+    )
+    if any(
+        expression is None for expression in (*input_expressions, *result_expressions)
+    ):
+        return None
+    inputs = cast(tuple[ResourceExpr, ResourceExpr], input_expressions)
+    results = cast(tuple[ResourceExpr, ResourceExpr], result_expressions)
+    if any(
+        not _expressions_equal(before, after)
+        for before, after in zip(inputs, results, strict=True)
+    ):
+        return None
+
+    normalized_inner_iterations = _safe_simplify(
+        cast(
+            ResourceExpr,
+            inner.iterations.subs(
+                outer.symbol,
+                outer.start + outer.step * outer_ordinal,
+                simultaneous=True,
+            ),
+        )
+    )
+    traversal_start: ResourceExpr | None = None
+    traversal_step: ResourceExpr | None = None
+    stage_width: ResourceExpr | None = None
+    for old, new in (inputs, tuple(reversed(inputs))):
+        try:
+            step = _safe_simplify(cast(ResourceExpr, sp.diff(old, inner_ordinal)))
+        except (TypeError, ValueError):
+            continue
+        start = _safe_simplify(
+            cast(
+                ResourceExpr,
+                old.subs(inner_ordinal, _ZERO, simultaneous=True),
+            )
+        )
+        if (
+            outer_ordinal in start.free_symbols
+            or inner_ordinal in start.free_symbols
+            or outer_ordinal in step.free_symbols
+            or inner_ordinal in step.free_symbols
+            or start.is_integer is not True
+            or start.is_nonnegative is not True
+            or start.is_finite is not True
+            or step.is_integer is not True
+            or step.is_positive is not True
+            or step.is_finite is not True
+            or not _expressions_equal(old, start + step * inner_ordinal)
+            or not _expressions_equal(seed_index, start)
+        ):
+            continue
+        width = _safe_simplify(cast(ResourceExpr, (new - old) / step))
+        if (
+            inner_ordinal in width.free_symbols
+            or not width.free_symbols <= {outer_ordinal}
+            or width.is_integer is not True
+            or width.is_positive is not True
+            or width.is_finite is not True
+            or not _expressions_equal(
+                new,
+                start + step * (width + inner_ordinal),
+            )
+            or not _expressions_equal(
+                cast(
+                    ResourceExpr,
+                    width.subs(outer_ordinal, _ZERO, simultaneous=True),
+                ),
+                _ONE,
+            )
+            or not _expressions_equal(
+                cast(
+                    ResourceExpr,
+                    width.subs(
+                        outer_ordinal,
+                        outer_ordinal + _ONE,
+                        simultaneous=True,
+                    ),
+                ),
+                2 * width,
+            )
+            or not _expressions_equal(normalized_inner_iterations, width)
+        ):
+            continue
+        traversal_start = start
+        traversal_step = step
+        stage_width = width
+        break
+    if traversal_start is None or traversal_step is None or stage_width is None:
+        return None
+
+    final_width = _safe_simplify(
+        cast(
+            ResourceExpr,
+            stage_width.subs(
+                outer_ordinal,
+                outer.iterations,
+                simultaneous=True,
+            ),
+        )
+    )
+    if (
+        final_width.is_integer is not True
+        or final_width.is_positive is not True
+        or final_width.is_finite is not True
+    ):
+        return None
+    offset = sp.Dummy("expanding_wire", integer=True, nonnegative=True)
+    range_index = _symbolic_wire_range_index(
+        traversal_start + traversal_step * offset,
+        offset,
+        start=_ZERO,
+        step=_ONE,
+        iterations=final_width,
+    )
+    frontier_index = _normalize_wire_index(traversal_start)
+    if not isinstance(frontier_index, (int, sp.Expr)):
+        return None
+    return _ExpandingPairTree(
+        depth=_expanding_tree_depth(
+            outer.iterations,
+            seed_profile,
+            pair_profile,
+        ),
+        coverage=frozenset({(owner, range_index)}),
+        frontier=frozenset({(owner, frontier_index)}),
+        active_when=_boolean_condition(sp.Gt(outer.iterations, _ZERO)),
+    )
 
 
 def _access_expression_at_ordinals(
@@ -704,17 +1115,59 @@ def _compound_affine_region_schedules(
         tuple[_CompoundAffineSchedule, ...]: Proven nonoverlapping schedules in
         program order. Unsupported regions return an empty tuple.
     """
+    schedules: list[_CompoundAffineSchedule] = []
+    consumed_indices: set[int] = set()
+    for seed_index, seed_operation in enumerate(operations):
+        if not isinstance(seed_operation, GateOperation):
+            continue
+        loop_index = seed_index + 1
+        while loop_index < len(operations) and isinstance(
+            operations[loop_index], BinOp
+        ):
+            loop_index += 1
+        if loop_index >= len(operations) or not isinstance(
+            operations[loop_index], ForOperation
+        ):
+            continue
+        tree = _prove_expanding_pair_tree(
+            seed_operation,
+            cast(ForOperation, operations[loop_index]),
+            resolver,
+            owner_aliases=owner_aliases,
+            scalar_values=scalar_values,
+            used_names=used_names,
+        )
+        if tree is None:
+            continue
+        schedules.append(
+            _CompoundAffineSchedule(
+                first_index=seed_index,
+                stop_index=loop_index + 1,
+                component_indices=(seed_index, loop_index),
+                depth=tree.depth,
+                coverage=tree.coverage,
+                frontier=tree.frontier,
+                completion_uniform=True,
+                active_when=tree.active_when,
+            )
+        )
+        consumed_indices.update({seed_index, loop_index})
+
     loop_indices = [
         index
         for index, operation in enumerate(operations)
         if isinstance(operation, ForOperation)
     ]
-    schedules: list[_CompoundAffineSchedule] = []
     consumed_until = 0
     for first, second in zip(loop_indices, loop_indices[1:]):
-        if first < consumed_until or any(
-            not isinstance(operation, BinOp)
-            for operation in operations[first + 1 : second]
+        if (
+            first < consumed_until
+            or first in consumed_indices
+            or second in consumed_indices
+            or any(
+                not isinstance(operation, BinOp)
+                for operation in operations[first + 1 : second]
+            )
         ):
             continue
         first_operation = cast(ForOperation, operations[first])
@@ -770,8 +1223,11 @@ def _compound_affine_region_schedules(
                 component_indices=(first, second),
                 depth=_compound_depth(sweep, mirror),
                 coverage=coverage,
+                frontier=frozenset(),
+                completion_uniform=False,
                 active_when=_boolean_condition(sp.Gt(sweep.traversal.iterations, _ONE)),
             )
         )
+        consumed_indices.update({first, second})
         consumed_until = second + 1
-    return tuple(schedules)
+    return tuple(sorted(schedules, key=lambda schedule: schedule.first_index))
