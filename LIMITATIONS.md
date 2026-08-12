@@ -246,6 +246,30 @@ Element-granularity consumption (`if sel: _ = qmc.measure(qs[0])` followed by re
 
 **Future fix**: remove the executor-side lowering once Qiskit and Aer agree on a memory-safe representation for inverse-derived multiplexers, either by keeping the generic empty-parameter form away from Aer-native basis instructions or by having Aer reject/decompose it through the gate definition instead of entering native assembly.
 
+## Symbolic control widths support only the all-ones activation pattern
+
+When `qmc.control(..., num_controls=width)` receives a qkernel `UInt` as `width`, the controlled operation can activate only when every control qubit is `|1>`. A non-default `control_value` requires a concrete control count. The same restriction applies when nested controlled operations are flattened and their combined width remains symbolic: every control group must use the ordinary all-ones pattern. Opaque `Oracle` transforms are stricter and do not currently accept a symbolic `num_controls` at all.
+
+**When it bites**: a qkernel needs a runtime-sized control register together with an open or mixed control pattern, such as activating when one symbolic-prefix qubit is `|0>`, or an opaque `Oracle` needs a runtime-sized added control prefix. Passing `control_value` with a symbolic `UInt` width raises `ValueError`; passing a symbolic width to `qmc.control(oracle, ...)` raises `TypeError`.
+
+**Why this trade-off was chosen**: the current symbolic-control representation records a runtime-sized leading control prefix but does not carry a runtime-sized activation bit vector. A concrete `control_value` uses an LSB-first bit layout whose valid range and group offsets depend on the final width. Guessing those offsets while composing nested controls could activate the wrong computational-basis state. Oracle calls additionally need a concrete positional prefix to validate their opaque input ABI.
+
+**Workaround**: keep the ordinary all-ones condition for a symbolic width. If an open or mixed pattern is required, bind the width before constructing the controlled operation and pass a concrete `control_value`; build or transpile one circuit per required width when necessary. Oracle controls likewise require a concrete width.
+
+**Future fix**: add a width-aware symbolic activation-pattern representation, propagate it through controlled-call IR, validation, serialization, resource estimation, and every emitter, and define how nested symbolic groups retain their LSB-first ordering. Supporting symbolic Oracle controls would also require a dynamic-prefix ABI that can still validate the opaque target signature.
+
+## Vector-signature Oracles do not yet support coherent controls
+
+An opaque `Oracle` declared with one `Vector[Qubit]` target operand can be called directly and can be inverted when it has no definition-declared controls. It cannot currently receive controls through `qmc.control`, and its vector call form does not accept definition-declared controls either. This restriction is specific to the bodyless Oracle calling convention; body-backed qkernels with vector operands have separate controlled-call support. It is not a limitation of coherently controlling a register-wide unitary in quantum mechanics.
+
+**When it bites**: an application declares an Oracle with `CallableSignature(inputs=[Vector[Qubit]], outputs=[Vector[Qubit]])` and then calls `qmc.control(oracle, ...)`, or declares `num_control_qubits > 0` and tries to use the Oracle's vector call form. Added control is rejected while composing the transform with `TypeError`; a direct vector call on an Oracle that declares controls raises `ValueError` because that call form has no separate control argument.
+
+**Why this trade-off was chosen**: controlled scalar Oracles currently use the positional calling convention `[added controls][definition-declared controls][scalar targets]`. A vector Oracle instead consumes and returns one array value. The mixed form `[added controls][definition-declared controls][vector target]` has not yet been implemented consistently across frontend ownership transfer, control metadata and activation-value ordering, IR signature validation, serialization, resource estimation, and backend emission. Guessing this layout at only one stage could misclassify a target as a control, lose ownership of the returned vector, or make the emitted circuit disagree with its stored signature.
+
+**Workaround**: when the Oracle width is known, declare it with concrete `num_qubits` and use the scalar call form, passing each target qubit positionally after the controls. Otherwise, call or invert the vector-signature Oracle without coherent controls. A body-backed qkernel can use the separate controlled-vector qkernel path when the vector operation can be represented explicitly.
+
+**Future fix**: define the mixed Oracle calling convention explicitly as `[added controls][definition-declared controls][vector target]`, with results in the same group order. Then implement control-pattern partitioning, `Vector` and `VectorView` ownership transfer, dynamic target-width validation, serialization, resource projection, and emission for every backend as one cross-layer change.
+
 ## `qmc.control` rejects a self-recursive qkernel before the fixed-point loop can converge
 
 **When it bites**: a self-recursive qkernel — one whose body calls itself and stops through a base-case `if` on a compile-time-constant driver — is passed to `qmc.control`. The same qkernel can transpile when called directly because the top-level `inline` / `partial_eval` fixed-point loop exposes one recursion layer and folds its base case. `qmc.inverse` commonly fails earlier for the separate eager control-flow restriction described above.
