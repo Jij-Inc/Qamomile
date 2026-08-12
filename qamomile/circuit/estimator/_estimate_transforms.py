@@ -33,6 +33,10 @@ from qamomile.circuit.estimator._dependency_synchronization import (
     _clear_synchronized_entry_frontiers,
     _guard_synchronized_entry_certificates,
 )
+from qamomile.circuit.estimator._estimate_domain import (
+    _apply_domain_rewrite,
+    _restore_domain_rewrite,
+)
 from qamomile.circuit.estimator._estimate_provenance import (
     _estimate_has_control_sensitive_resources,
     _with_estimate_metadata,
@@ -100,8 +104,12 @@ def _repeat_estimate(
         ResourceEstimate: Repeated estimate.
 
     Raises:
+        RuntimeError: If public resource metrics or metadata disagree with
+            retained canonical provenance.
         ValueError: If a concrete factor is negative or non-integral.
     """
+    policy = estimate._domain_rewrite_policy
+    estimate = _restore_domain_rewrite(estimate)
     factor_expr = _expr(factor)
     factor_constraint = _ResourceConstraint(
         expression=factor_expr,
@@ -210,6 +218,7 @@ def _repeat_estimate(
             fact.when(active_when) for fact in (estimate._guarded_approximations or ())
         ),
         _symbol_aliases=estimate._symbol_aliases,
+        _domain_rewrite_policy=policy,
     )
     if (
         factor_expr.is_positive is not True
@@ -261,7 +270,7 @@ def _repeat_estimate(
                 synchronized_entry_active,
             ),
         )
-    return repeated
+    return _apply_domain_rewrite(repeated, policy=policy)
 
 
 def _with_nonuniform_repetition_bound(
@@ -318,10 +327,14 @@ def _control_estimate(
         ResourceEstimate: Controlled aggregate estimate.
 
     Raises:
+        RuntimeError: If public resource metrics or metadata disagree with
+            retained canonical provenance.
         ValueError: If a concrete control count or projected gate count is
             negative or non-integral, or if the estimate contains measurement
             or reset resources.
     """
+    policy = estimate._domain_rewrite_policy
+    estimate = _restore_domain_rewrite(estimate)
     controls = _expr(num_controls)
     control_constraint = _ResourceConstraint(
         expression=controls,
@@ -331,7 +344,7 @@ def _control_estimate(
     )
     control_constraint.validate()
     if controls == _ZERO:
-        return estimate
+        return _apply_domain_rewrite(estimate, policy=policy)
     _require_unitary_resource_estimate(
         estimate,
         transform="coherently control",
@@ -348,8 +361,8 @@ def _control_estimate(
         _estimate_activity(estimate)
     ) == _ZERO and not _estimate_has_control_sensitive_resources(estimate):
         if controls.is_number:
-            return estimate
-        return dataclasses.replace(
+            return _apply_domain_rewrite(estimate, policy=policy)
+        constrained = dataclasses.replace(
             estimate,
             _constraints=(
                 *estimate._constraints,
@@ -357,6 +370,7 @@ def _control_estimate(
                 control_constraint,
             ),
         )
+        return _apply_domain_rewrite(constrained, policy=policy)
     if not _estimate_has_control_sensitive_resources(estimate):
         projected = None
         reason = _aggregate_arity_profile_reason(estimate) or (
@@ -390,7 +404,7 @@ def _control_estimate(
                 _has_output_summary=estimate._has_output_summary,
                 _symbol_aliases=estimate._symbol_aliases,
             )
-        return projected
+        return _apply_domain_rewrite(projected, policy=policy)
     assumption = _unprojected_aggregate_control_assumption(
         reason,
         controls,
@@ -405,7 +419,7 @@ def _control_estimate(
             *((control_constraint,) if not controls.is_number else ()),
         ),
     )
-    return _with_estimate_metadata(
+    controlled = _with_estimate_metadata(
         controlled,
         assumptions=(assumption,),
         derivation=EstimateDerivation.MODELED,
@@ -420,6 +434,7 @@ def _control_estimate(
             )
         ),
     )
+    return _apply_domain_rewrite(controlled, policy=policy)
 
 
 def _invert_estimate(estimate: ResourceEstimate) -> ResourceEstimate:
@@ -432,13 +447,17 @@ def _invert_estimate(estimate: ResourceEstimate) -> ResourceEstimate:
         ResourceEstimate: Estimate with identical logical resources.
 
     Raises:
+        RuntimeError: If public resource metrics or metadata disagree with
+            retained canonical provenance.
         ValueError: If the estimate contains measurement or reset resources.
     """
+    policy = estimate._domain_rewrite_policy
+    estimate = _restore_domain_rewrite(estimate)
     _require_unitary_resource_estimate(
         estimate,
         transform="invert",
     )
-    return dataclasses.replace(
+    inverted = dataclasses.replace(
         estimate,
         trace=_wrap_trace("inverse", estimate.trace),
         _dependency_completion=None,
@@ -449,3 +468,4 @@ def _invert_estimate(estimate: ResourceEstimate) -> ResourceEstimate:
             )
         ),
     )
+    return _apply_domain_rewrite(inverted, policy=policy)

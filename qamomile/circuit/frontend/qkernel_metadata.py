@@ -101,6 +101,9 @@ def estimate_qkernel_resources(
             call, and parameter resources.
 
     Raises:
+        RuntimeError: If a fixed or callback-provided opaque cost contains
+            public metrics or metadata that disagree with retained canonical
+            provenance.
         ValueError: If an input, estimation configuration, callable resource
             contract, or structural requirement is invalid.
         TypeError: If the qkernel cannot be built as an estimator input.

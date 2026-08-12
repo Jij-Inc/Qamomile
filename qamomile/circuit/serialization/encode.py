@@ -68,6 +68,8 @@ def to_dict(kernel: QKernelLike) -> dict[str, Any]:
             frontend type or process-local emitter.
         ValueError: If the body is specialized, non-hierarchical, or its
             interface disagrees with the signature.
+        RuntimeError: If an opaque resource estimate contains public metrics or
+            metadata that disagree with retained canonical provenance.
     """
     _validate_kernel_surface(kernel)
     block = kernel.block

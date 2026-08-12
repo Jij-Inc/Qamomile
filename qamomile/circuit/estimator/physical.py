@@ -270,6 +270,10 @@ def estimate_physical_resources(
     is not a synthesis-aware conversion and does not account for the different
     costs of arbitrary rotations, T gates, and Toffoli gates. Pass an explicit
     ``non_clifford_gates`` value when a separate synthesis model is available.
+    A logical formula simplified under an unresolved qkernel input condition
+    must first be specialized with ``ResourceEstimate.substitute()``. Because
+    explicit values no longer depend on that logical formula, supplying both
+    ``logical_qubits`` and ``non_clifford_gates`` also permits conversion.
 
     Args:
         estimate (ResourceEstimate): Logical resource estimate to convert.
@@ -294,16 +298,33 @@ def estimate_physical_resources(
     Raises:
         TypeError: If a logical count or model coefficient is not a numeric or
             symbolic scalar of the declared kind.
-        ValueError: If ``threshold`` is not strictly greater than
-            ``physical_error_rate``, a model coefficient is not positive and
-            finite, or either logical count is provably negative, non-real, or
-            non-finite.
+        RuntimeError: If public resource metrics or metadata disagree with
+            retained canonical provenance.
+        ValueError: If the logical estimate has an unresolved input-domain
+            condition while either logical count is read from it, ``threshold``
+            is not strictly greater than ``physical_error_rate``, a model
+            coefficient is not positive and finite, or either logical count is
+            provably negative, non-real, or non-finite.
 
     Example:
         >>> import qamomile.circuit as qmc
         >>> # est = kernel.estimate_resources(inputs={"n": 2048})
         >>> # phys = estimate_physical_resources(est)
     """
+    from qamomile.circuit.estimator._estimate_domain import (
+        _validate_domain_rewrite_state,
+    )
+
+    _validate_domain_rewrite_state(estimate)
+    state = estimate._domain_rewrite_state
+    reads_logical_estimate = logical_qubits is None or non_clifford_gates is None
+    if state is not None and state.requirements and reads_logical_estimate:
+        raise ValueError(
+            "Cannot derive physical resources from a symbolic logical estimate "
+            "whose formula has an unresolved qkernel input-domain condition; "
+            "specialize it with substitute() first, or override both logical "
+            "counts explicitly."
+        )
     n = estimate.qubits if logical_qubits is None else logical_qubits
     if non_clifford_gates is None:
         gates = estimate.gates

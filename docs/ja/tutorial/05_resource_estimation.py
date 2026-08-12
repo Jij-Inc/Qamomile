@@ -133,11 +133,8 @@ print("深さ:", ghz_symbolic_estimate.depth.depth)
 print("ゲートの深さ:", ghz_symbolic_estimate.depth.gate_depth)
 
 n = ghz_symbolic_estimate.parameters["n"]
-cx_count = sp.Max(0, n - 1)
-expected_depth = sp.Piecewise(
-    (cx_count + 2, n > 0),
-    (cx_count + 1, True),
-)
+cx_count = n - 1
+expected_depth = n + 1
 
 assert sp.simplify(ghz_symbolic_estimate.qubits - n) == 0
 assert sp.simplify(ghz_symbolic_estimate.gates.total - (cx_count + 1)) == 0
@@ -146,11 +143,41 @@ assert sp.simplify(ghz_symbolic_estimate.gates.two_qubit - cx_count) == 0
 assert sp.simplify(ghz_symbolic_estimate.measurements.total - n) == 0
 assert sp.simplify(ghz_symbolic_estimate.depth.depth - expected_depth) == 0
 assert sp.simplify(ghz_symbolic_estimate.depth.gate_depth - (cx_count + 1)) == 0
+assert ghz_symbolic_estimate.quality is qmc.EstimateQuality.CONSERVATIVE
+assert any(
+    assumption.source == "qkernel input domain"
+    and "n >= 1" in assumption.message
+    for assumption in ghz_symbolic_estimate.assumptions
+)
 
 # %% [markdown]
-# `ghz_state`では、`n >= 1`のとき、1個のHadamardゲートと`n - 1`個のCXゲートを使います。`qmc.UInt`は0も表せるため、まだ値が決まっていない段階では、ループ回数が`Max(0, n - 1)`で表されます。したがって、`gates.total`には`Max(0, n - 1) + 1`が現れます。GHZ状態を構成できる`n >= 1`の範囲では、これは`n`と同じです。
+# #### 有効な入力範囲を使った簡約
 #
-# 確保する量子ビット数と測定数も`n`になり、問題サイズ`n`に応じて複数のリソース項目がどのように増えるかを確認できます。`ghz_state`は`qubits[0]`へアクセスするため、有効な入力は`n >= 1`です。シンボリックな式では、この入力要件を使って式を簡約しないため、`Piecewise`の条件が残ります。有効な範囲では、`gate_depth`は`n`、測定を含む全体の深さは`n + 1`です。
+# `ghz_state`では、1個のHadamardゲートと`n - 1`個のCXゲートを使います。`qmc.UInt`そのものは0も表せますが、この量子カーネルは`qubits[0]`へ無条件にアクセスするため、有効な入力は`n >= 1`です。リソース推定器は、この入力要件を使って`1 + Max(0, n - 1)`を`n`へ簡約します。
+#
+# 簡約に使った`n >= 1`という条件は`assumptions`に残ります。この有効な入力範囲のassumption自体は`quality`を下げません。なお、この例の`quality`は、シンボリックな幅の測定に対する別の依存関係のassumptionによって`CONSERVATIVE`です。`n=0`を`inputs`または`.substitute()`で与えると、もっともらしいリソース数を返すのではなく`ValueError`になります。`if n > 0: ...`のように先頭要素へのアクセスを条件で保護した量子カーネルなら、0も有効になり、リソースが0の分岐が保たれます。
+#
+# `ResourceEstimator(simplify=False)`を使うと、この有効な入力範囲を使った簡約を無効にして、無条件の`Max`や`Piecewise`を含む式を保てます。`.substitute()`はこの設定を維持し、明示的に`.simplify()`を呼ぶと有効な入力範囲を使った簡約が有効になります。
+
+
+# %%
+ghz_unsimplified_estimate = qmc.ResourceEstimator(simplify=False).estimate(ghz_state)
+ghz_unsimplified_n = ghz_unsimplified_estimate.parameters["n"]
+
+assert ghz_unsimplified_estimate.gates.total == 1 + sp.Max(0, ghz_unsimplified_n - 1)
+assert not any(
+    assumption.source == "qkernel input domain"
+    for assumption in ghz_unsimplified_estimate.assumptions
+)
+
+ghz_resimplified_estimate = ghz_unsimplified_estimate.simplify()
+
+assert ghz_resimplified_estimate.gates.total == ghz_unsimplified_n
+assert ghz_unsimplified_estimate.substitute(n=4).gates.total == 4
+assert any(
+    assumption.source == "qkernel input domain"
+    for assumption in ghz_resimplified_estimate.assumptions
+)
 
 # %% [markdown]
 # ### 1.3 特定の入力で具体化する
@@ -972,7 +999,7 @@ assert (
 # %% [markdown]
 # ### 5.2 assumptions
 #
-# `assumptions`には、三つの項目だけでは表せない具体的な前提や理由が入ります。各要素は、説明文の`message`と、原因となった演算などを示す`source`を持ちます。
+# `assumptions`には、三つの項目だけでは表せない具体的な前提や理由が入ります。これにはモデル上の仮定だけでなく、リソース式の簡約に使った未具体化の有効な入力条件も含まれます。各要素は、説明文の`message`と、原因となった演算などを示す`source`を持ちます。有効な入力条件は式の適用範囲を示すものであり、それだけで`quality`が`EXACT`から下がるわけではありません。
 
 # %% [markdown]
 # `ZERO_WITH_WARNING`を使った推定結果には、costのないOracleを0として数えたことが記録されます。
@@ -1018,7 +1045,7 @@ assert any(
 # | `depth` | 論理的な深さの推定値 |
 # | `calls` | 名前別に記録したopaque call/queryの回数 |
 # | `parameters` | 未具体化のシンボリックなパラメータ名とSymPy symbolの対応 |
-# | `assumptions` | 推定時に置いた具体的な仮定。各要素は`message`と`source`を持つ |
+# | `assumptions` | 推定時の前提。モデル上の仮定や、式の簡約に使った未具体化の有効な入力条件を含み、各要素は`message`と`source`を持つ |
 # | `derivation` | 量子カーネルそのものから導き出される`STRUCTURAL`か、cost/policyを使った`MODELED`か |
 # | `quality` | 推定結果に含まれる曖昧さについて`EXACT`、`CONSERVATIVE`、`UNKNOWN`のどれか |
 # | `approximation` | 認識されている数学的な近似が`EXACT`か`APPROXIMATE`か |

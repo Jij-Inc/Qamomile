@@ -24,8 +24,15 @@ from qamomile.circuit.estimator._estimate_composition import (
     _compose_sequential,
     _SequentialEstimateComposer as _SequentialEstimateComposer,
 )
+from qamomile.circuit.estimator._estimate_domain import (
+    _apply_domain_rewrite,
+    _DomainRewritePolicy,
+    _DomainRewriteState,
+    _validate_domain_rewrite_state,
+)
 from qamomile.circuit.estimator._estimate_loops import _sum_estimate_over_range
 from qamomile.circuit.estimator._estimate_provenance import (
+    _DEFER_RESOURCE_SYMBOL_METADATA,
     _initialize_estimate_provenance,
     _refresh_symbol_metadata as _refresh_estimate_symbol_metadata,
     _with_estimate_metadata,
@@ -83,7 +90,11 @@ class ResourceEstimate:
         calls (CallResources): Callable/query-resource estimate.
         measurements (MeasurementResources): Per-qubit measurement resources.
         resets (ResetResources): Per-qubit reset resources.
-        assumptions (tuple[ResourceAssumption, ...]): Modeling assumptions.
+        assumptions (tuple[ResourceAssumption, ...]): Premises needed to
+            interpret the estimate, including modeling choices and unresolved
+            valid-input conditions consumed by formula simplification. A
+            domain premise does not lower ``EXACT`` quality because the formula
+            remains exact for every valid qkernel input.
         trace (ResourceTraceNode | None): Explanation tree root. Defaults to
             ``None``.
         parameters (dict[str, sp.Symbol]): Symbols present in the estimate,
@@ -136,9 +147,8 @@ class ResourceEstimate:
             the listed caller-visible wires enter the operation at the same
             dependency layer. The enclosing scheduler marks a result
             conservative when prior work may violate that requirement.
-        _dependency_synchronized_entry_certificates (
-            tuple[_SynchronizedEntryCertificate, ...]
-        ): Grouped synchronized-entry premises. Each certificate keeps its
+        _dependency_synchronized_entry_certificates (tuple[_SynchronizedEntryCertificate, ...]):
+            Grouped synchronized-entry premises. Each certificate keeps its
             complete reset coverage, exact safe first-gate frontier, and
             activation guard together so unrelated frontiers cannot be
             combined. Defaults to an empty tuple.
@@ -164,6 +174,13 @@ class ResourceEstimate:
             value.
         _symbol_aliases (dict[sp.Symbol, str]): Internal stable public aliases
             retained across expression rewrites and partial substitution.
+        _domain_rewrite_policy (_DomainRewritePolicy): Whether qkernel input
+            domain simplification is inherited, enabled, or disabled.
+        _domain_rewrite_state (_DomainRewriteState | None): Original public
+            metrics and exact consumed predicates for a conditional rewrite.
+        _rendered_assumption_snapshot (tuple[ResourceAssumption, ...] | None):
+            Identity-preserving snapshot used to distinguish derived domain
+            assumptions from newly supplied ordinary assumptions.
     """
 
     width: WidthResources = dataclasses.field(default_factory=WidthResources.zero)
@@ -281,9 +298,30 @@ class ResourceEstimate:
         repr=False,
         compare=False,
     )
+    _domain_rewrite_policy: _DomainRewritePolicy = dataclasses.field(
+        default=_DomainRewritePolicy.INHERITED,
+        repr=False,
+    )
+    _domain_rewrite_state: _DomainRewriteState | None = dataclasses.field(
+        default=None,
+        repr=False,
+    )
+    _rendered_assumption_snapshot: tuple[ResourceAssumption, ...] | None = (
+        dataclasses.field(
+            default=None,
+            repr=False,
+            compare=False,
+        )
+    )
 
     def __post_init__(self) -> None:
-        """Normalize guarded metadata and derive the public parameter map."""
+        """Normalize guarded metadata and derive the public parameter map.
+
+        Raises:
+            RuntimeError: If retained input-domain rewrite evidence disagrees
+                with public metrics, rendered assumptions, parameters, or
+                symbol aliases.
+        """
         _initialize_estimate_provenance(self)
 
     def _refresh_symbol_metadata(
@@ -418,6 +456,12 @@ class ResourceEstimate:
 
         Returns:
             ResourceEstimate: Sequentially composed estimate.
+
+        Raises:
+            RuntimeError: If public resource metrics or metadata disagree with
+                retained canonical provenance.
+            ValueError: If the estimates use incompatible control-decomposition
+                provenance.
         """
         return _compose_sequential(self, other)
 
@@ -439,13 +483,59 @@ class ResourceEstimate:
             estimate for an empty sequence.
 
         Raises:
+            RuntimeError: If public resource metrics or metadata disagree with
+                retained canonical provenance.
             ValueError: If the estimates use incompatible control-decomposition
                 provenance.
         """
+        iterator = iter(estimates)
+        try:
+            first = next(iterator)
+        except StopIteration:
+            return ResourceEstimate.zero()
         composer = _SequentialEstimateComposer(ResourceEstimate.zero())
-        for estimate in estimates:
-            composer.append(estimate)
-        return composer.finish()
+        composer.append(first)
+        previous_external = first
+        try:
+            second = next(iterator)
+        except StopIteration:
+            _validate_domain_rewrite_state(previous_external)
+            return composer.finish()
+        if not _DEFER_RESOURCE_SYMBOL_METADATA.get():
+            _validate_domain_rewrite_state(previous_external)
+            _validate_domain_rewrite_state(second)
+
+        already_deferred = _DEFER_RESOURCE_SYMBOL_METADATA.get()
+        defer_token = _DEFER_RESOURCE_SYMBOL_METADATA.set(True)
+        try:
+            composer.append(second)
+            previous_external = second
+            while True:
+                if already_deferred:
+                    try:
+                        estimate = next(iterator)
+                    except StopIteration:
+                        break
+                else:
+                    validation_token = _DEFER_RESOURCE_SYMBOL_METADATA.set(False)
+                    try:
+                        try:
+                            estimate = next(iterator)
+                        except StopIteration:
+                            _validate_domain_rewrite_state(previous_external)
+                            break
+                        _validate_domain_rewrite_state(previous_external)
+                        _validate_domain_rewrite_state(estimate)
+                    finally:
+                        _DEFER_RESOURCE_SYMBOL_METADATA.reset(validation_token)
+                composer.append(estimate)
+                previous_external = estimate
+            result = composer.finish()
+        finally:
+            _DEFER_RESOURCE_SYMBOL_METADATA.reset(defer_token)
+        if not already_deferred:
+            result._refresh_symbol_metadata()
+        return result
 
     def parallel(self, other: ResourceEstimate) -> ResourceEstimate:
         """Compose this estimate in parallel with another estimate.
@@ -455,6 +545,12 @@ class ResourceEstimate:
 
         Returns:
             ResourceEstimate: Parallel composition.
+
+        Raises:
+            RuntimeError: If public resource metrics or metadata disagree with
+                retained canonical provenance.
+            ValueError: If the estimates use incompatible control-decomposition
+                provenance.
         """
         return _compose_parallel(self, other)
 
@@ -466,6 +562,12 @@ class ResourceEstimate:
 
         Returns:
             ResourceEstimate: Element-wise maximum of both branches.
+
+        Raises:
+            RuntimeError: If public resource metrics or metadata disagree with
+                retained canonical provenance.
+            ValueError: If the estimates use incompatible control-decomposition
+                provenance.
         """
         return _compose_choice(self, other)
 
@@ -483,6 +585,12 @@ class ResourceEstimate:
 
         Returns:
             ResourceEstimate: Field-wise exact piecewise branch estimate.
+
+        Raises:
+            RuntimeError: If public resource metrics or metadata disagree with
+                retained canonical provenance.
+            ValueError: If the estimates use incompatible control-decomposition
+                provenance.
         """
         return _compose_conditional(self, other, condition)
 
@@ -496,6 +604,8 @@ class ResourceEstimate:
             ResourceEstimate: Repeated estimate.
 
         Raises:
+            RuntimeError: If public resource metrics or metadata disagree with
+                retained canonical provenance.
             ValueError: If a concrete factor is negative or non-integral.
         """
         return _repeat_estimate(
@@ -534,6 +644,8 @@ class ResourceEstimate:
             ResourceEstimate: Estimate with a recorded controlled assumption.
 
         Raises:
+            RuntimeError: If public resource metrics or metadata disagree with
+                retained canonical provenance.
             ValueError: If a concrete control count or projected gate count is
                 negative or non-integral, or if the estimate contains
                 measurement or reset resources.
@@ -547,6 +659,8 @@ class ResourceEstimate:
             ResourceEstimate: Estimate with identical logical resources.
 
         Raises:
+            RuntimeError: If public resource metrics or metadata disagree with
+                retained canonical provenance.
             ValueError: If the estimate contains measurement or reset
                 resources and is therefore not unitary.
         """
@@ -570,6 +684,12 @@ class ResourceEstimate:
         Returns:
             ResourceEstimate: Estimate with additive metrics summed over the
             loop and width kept reusable.
+
+        Raises:
+            RuntimeError: If public resource metrics or metadata disagree with
+                retained canonical provenance.
+            ValueError: If the loop step or concrete iteration count is
+                invalid.
         """
         return self._sum_over(
             loop_symbol,
@@ -629,6 +749,11 @@ class ResourceEstimate:
     def substitute(self, **values: object) -> ResourceEstimate:
         """Substitute concrete values for symbolic parameters.
 
+        Substitution preserves whether input-domain simplification is enabled
+        or disabled. It validates retained qkernel requirements and removes a
+        domain assumption once the supplied values prove it. It does not
+        rebuild dependency scheduling decisions made during estimation.
+
         Args:
             **values (object): Mapping from parameter name to a concrete
                 numeric scalar.
@@ -637,19 +762,37 @@ class ResourceEstimate:
             ResourceEstimate: Estimate with substituted expressions.
 
         Raises:
+            RuntimeError: If public resource metrics or metadata disagree with
+                retained canonical provenance.
             ValueError: If a name is not a parameter, or a supplied value
-                violates an integer or nonnegative parameter domain.
+                violates an integer, nonnegative, or other retained valid-input
+                requirement.
             TypeError: If a supplied value is not a concrete numeric scalar.
         """
         return _substitute_estimate(self, values)
 
     def simplify(self) -> ResourceEstimate:
-        """Simplify all symbolic expressions.
+        """Simplify expressions using valid qkernel input-domain conditions.
+
+        Public metrics may be reduced under a structural input condition that
+        is exposed through :attr:`assumptions`. The estimate remains exact on
+        that stated valid domain, and invalid concrete inputs still raise.
+        Calling this method explicitly enables domain simplification even when
+        the estimate came from a :class:`ResourceEstimator` configured with
+        ``simplify=False``.
 
         Returns:
             ResourceEstimate: Simplified estimate.
+
+        Raises:
+            RuntimeError: If public resource metrics or metadata disagree with
+                retained canonical provenance.
         """
-        return _simplify_estimate(self)
+        simplified = _simplify_estimate(self)
+        return _apply_domain_rewrite(
+            simplified,
+            policy=_DomainRewritePolicy.ENABLED,
+        )
 
     def explain(self, metric: str | None = None) -> str:
         """Render the resource-estimation trace.
@@ -661,6 +804,10 @@ class ResourceEstimate:
 
         Returns:
             str: Human-readable explanation tree.
+
+        Raises:
+            RuntimeError: If public resource metrics or metadata disagree with
+                retained canonical provenance.
         """
         return _explain_estimate(self, metric)
 
@@ -676,6 +823,10 @@ class ResourceEstimate:
         Returns:
             dict[str, Any]: Report fields with stringified resource
                 expressions.
+
+        Raises:
+            RuntimeError: If public resource metrics or metadata disagree with
+                retained canonical provenance.
         """
         return _estimate_to_dict(self)
 
@@ -702,6 +853,10 @@ class ResourceEstimate:
 
         Returns:
             ResourceEstimate: Rewritten estimate.
+
+        Raises:
+            RuntimeError: If public resource metrics or metadata disagree with
+                retained canonical provenance.
         """
         return _map_estimate_expressions(
             self,

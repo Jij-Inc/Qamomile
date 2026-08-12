@@ -32,12 +32,18 @@ from qamomile.circuit.estimator._serialization import (
 
 @dataclasses.dataclass(frozen=True)
 class ResourceAssumption:
-    """Record a modeling assumption made during resource estimation.
+    """Record a premise needed to interpret a resource estimate.
+
+    Assumptions disclose modeling choices, recognized approximations, and any
+    still-symbolic valid-input condition consumed while simplifying a resource
+    formula. A valid-input premise limits where the formula applies; by itself
+    it does not make an otherwise exact count conservative.
 
     Args:
-        message (str): Human-readable assumption text.
+        message (str): Human-readable premise or qualification.
         source (str | None): Optional callable or operation that caused the
-            assumption. Defaults to ``None``.
+            premise. Domain-derived entries use ``"qkernel input domain"``.
+            Defaults to ``None``.
     """
 
     message: str

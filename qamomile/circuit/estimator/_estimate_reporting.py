@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from qamomile.circuit.estimator._estimate_domain import (
+    _validate_domain_rewrite_state,
+)
 from qamomile.circuit.estimator._symbol_discovery import _serialization_registry
 
 if TYPE_CHECKING:
@@ -22,7 +25,12 @@ def _explain_estimate(
             Filtering is reserved for a later pass. Defaults to ``None``.
     Returns:
         str: Human-readable explanation tree.
+
+    Raises:
+        RuntimeError: If public resource metrics or metadata disagree with
+            retained canonical provenance.
     """
+    _validate_domain_rewrite_state(estimate)
     heading = "Resource estimate"
     if metric is not None:
         heading = f"{heading} for {metric}"
@@ -41,7 +49,12 @@ def _estimate_to_dict(
         estimate (ResourceEstimate): Estimate to serialize for reporting.
     Returns:
         dict[str, Any]: Report fields with stringified resource expressions.
+
+    Raises:
+        RuntimeError: If public resource metrics or metadata disagree with
+            retained canonical provenance.
     """
+    _validate_domain_rewrite_state(estimate)
     registry = _serialization_registry(estimate)
     serialize = registry.stringify
     return {

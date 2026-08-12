@@ -19,6 +19,8 @@ from qamomile.circuit.estimator._resource_base import (
     _is_concrete_integer,
 )
 from qamomile.circuit.estimator._resource_constraints import (
+    _ConstraintOrigin,
+    _ConstraintProvenance,
     _ResourceConstraint,
 )
 from qamomile.circuit.estimator._resource_expressions import (
@@ -234,6 +236,10 @@ def _array_index_constraints(
                     expression=index_expression,
                     minimum=0,
                     label=f"{label} lower bound",
+                    provenance=_ConstraintProvenance(
+                        origin=_ConstraintOrigin.ARRAY_ACCESS,
+                        source_expressions=(index_expression,),
+                    ),
                 ),
                 _ResourceConstraint(
                     expression=dimension_expression - index_expression,
@@ -243,6 +249,13 @@ def _array_index_constraints(
                         "in-bounds margin (dimension - index)"
                     ),
                     unit="element",
+                    provenance=_ConstraintProvenance(
+                        origin=_ConstraintOrigin.ARRAY_ACCESS,
+                        source_expressions=(
+                            dimension_expression,
+                            index_expression,
+                        ),
+                    ),
                 ),
             )
         )
@@ -305,22 +318,38 @@ def _array_view_constraints(
             minimum=0,
             label=f"Array view '{display_name}' length",
             unit="element",
+            provenance=_ConstraintProvenance(
+                origin=_ConstraintOrigin.ARRAY_VIEW,
+                source_expressions=(length,),
+            ),
         ),
         _ResourceConstraint(
             expression=start,
             minimum=0,
             label=f"Array view '{display_name}' start",
+            provenance=_ConstraintProvenance(
+                origin=_ConstraintOrigin.ARRAY_VIEW,
+                source_expressions=(start,),
+            ),
         ),
         _ResourceConstraint(
             expression=step,
             minimum=1,
             label=f"Array view '{display_name}' step",
+            provenance=_ConstraintProvenance(
+                origin=_ConstraintOrigin.ARRAY_VIEW,
+                source_expressions=(step,),
+            ),
         ),
         _ResourceConstraint(
             expression=coverage_slack,
             minimum=1,
             label=f"Array view '{display_name}' parent coverage",
             unit="element",
+            provenance=_ConstraintProvenance(
+                origin=_ConstraintOrigin.ARRAY_VIEW,
+                source_expressions=(parent_length, start, step, length),
+            ),
         ),
     )
 
@@ -437,16 +466,21 @@ def _quantum_operand_width_constraints(
                 f"{entry.index}, "
                 f"but the call has only {len(quantum_operands)} quantum operands."
             )
+        operand_width = _qubit_value_size(
+            quantum_operands[entry.index],
+            resolver,
+        )
         constraints.append(
             _ResourceConstraint(
-                expression=_qubit_value_size(
-                    quantum_operands[entry.index],
-                    resolver,
-                ),
+                expression=operand_width,
                 minimum=None,
                 expected=sp.Integer(entry.width),
                 label=f"{source} {entry.name} register width",
                 unit="qubit",
+                provenance=_ConstraintProvenance(
+                    origin=_ConstraintOrigin.MODEL_CONTRACT,
+                    source_expressions=(operand_width,),
+                ),
             )
         )
     legacy_total_width = attrs.get("num_target_qubits")
@@ -455,19 +489,20 @@ def _quantum_operand_width_constraints(
         and type(legacy_total_width) is int
         and legacy_total_width > 0
     ):
+        target_widths = tuple(
+            _qubit_value_size(operand, resolver) for operand in quantum_operands
+        )
         constraints.append(
             _ResourceConstraint(
-                expression=sum(
-                    (
-                        _qubit_value_size(operand, resolver)
-                        for operand in quantum_operands
-                    ),
-                    _ZERO,
-                ),
+                expression=sum(target_widths, _ZERO),
                 minimum=None,
                 expected=sp.Integer(legacy_total_width),
                 label=f"{source} target register width",
                 unit="qubit",
+                provenance=_ConstraintProvenance(
+                    origin=_ConstraintOrigin.MODEL_CONTRACT,
+                    source_expressions=target_widths,
+                ),
             )
         )
     return tuple(constraints)
@@ -489,14 +524,19 @@ def _block_input_constraints(
     """
     constraints = [
         _ResourceConstraint(
-            expression=resolver.resolve(dimension),
+            expression=expression,
             minimum=0,
             label=f"Quantum input '{value.name}' dimension {position}",
             unit="element",
+            provenance=_ConstraintProvenance(
+                origin=_ConstraintOrigin.QKERNEL_INPUT,
+                source_expressions=(expression,),
+            ),
         )
         for value in block.input_values
         if isinstance(value, ArrayValue) and value.type.is_quantum()
         for position, dimension in enumerate(value.shape)
+        for expression in (resolver.resolve(dimension),)
     ]
     values_by_name = {
         value.name: value
@@ -523,6 +563,10 @@ def _block_input_constraints(
                 expression=expression,
                 minimum=0,
                 label=f"Parameter '{slot.name}'",
+                provenance=_ConstraintProvenance(
+                    origin=_ConstraintOrigin.QKERNEL_INPUT,
+                    source_expressions=(expression,),
+                ),
             )
         )
         if isinstance(slot.type, BitType):
@@ -531,6 +575,10 @@ def _block_input_constraints(
                     expression=_ONE - expression,
                     minimum=0,
                     label=f"Bit parameter '{slot.name}' upper bound",
+                    provenance=_ConstraintProvenance(
+                        origin=_ConstraintOrigin.QKERNEL_INPUT,
+                        source_expressions=(expression,),
+                    ),
                 )
             )
     return tuple(constraints)

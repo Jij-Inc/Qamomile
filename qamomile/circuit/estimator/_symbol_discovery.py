@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, cast
 
 import sympy as sp
 
+from qamomile.circuit.estimator._estimate_domain import _domain_state_expressions
 from qamomile.circuit.estimator._resource_base import (
     ResourceExpr,
 )
@@ -36,12 +37,16 @@ def _free_symbols(estimate: ResourceEstimate) -> set[sp.Symbol]:
         constraint_symbols.update(sp.sympify(constraint.active_when).free_symbols)
         if constraint.expected is not None:
             constraint_symbols.update(sp.sympify(constraint.expected).free_symbols)
+        for source_expression in constraint.provenance.source_expressions:
+            constraint_symbols.update(sp.sympify(source_expression).free_symbols)
         bound_symbols = {loop_range.symbol for loop_range in constraint.ranges}
         for loop_range in constraint.ranges:
             constraint_symbols.update(sp.sympify(loop_range.start).free_symbols)
             constraint_symbols.update(sp.sympify(loop_range.step).free_symbols)
             constraint_symbols.update(sp.sympify(loop_range.iterations).free_symbols)
         symbols.update(cast(set[sp.Symbol], constraint_symbols - bound_symbols))
+    for expression in _domain_state_expressions(estimate):
+        symbols.update(cast(set[sp.Symbol], expression.free_symbols))
     for fact in (
         *(estimate._guarded_assumptions or ()),
         *(estimate._guarded_derivations or ()),
@@ -105,11 +110,13 @@ def _serialization_expressions(
             encounter order.
     """
     expressions: list[sp.Basic | int | float] = list(_all_exprs(estimate))
+    expressions.extend(_domain_state_expressions(estimate))
     for constraint in estimate._constraints:
         expressions.append(constraint.expression)
         expressions.append(constraint.active_when)
         if constraint.expected is not None:
             expressions.append(constraint.expected)
+        expressions.extend(constraint.provenance.source_expressions)
         for loop_range in constraint.ranges:
             expressions.extend(
                 (

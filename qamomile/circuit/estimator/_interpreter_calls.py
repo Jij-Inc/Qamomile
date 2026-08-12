@@ -46,6 +46,7 @@ from qamomile.circuit.estimator._dependency_metadata import (
 from qamomile.circuit.estimator._estimate import (
     ResourceEstimate,
 )
+from qamomile.circuit.estimator._estimate_domain import _demote_opaque_domain
 from qamomile.circuit.estimator._estimate_provenance import (
     _DEFER_RESOURCE_SYMBOL_METADATA,
 )
@@ -657,6 +658,7 @@ class _CallInterpreter(_ForItemsInterpreter):
             name=operation.custom_name,
             control_decomposition=self.config.control_decomposition,
         )
+        estimate = _demote_opaque_domain(estimate)
         # Public resource dataclasses accept ordinary Python numeric values.
         # Compose one base application through the resource algebra so every
         # field is normalized before dependency scheduling inspects SymPy

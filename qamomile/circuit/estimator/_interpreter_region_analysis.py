@@ -241,6 +241,8 @@ def _without_consumed_compound_scheduling_facts(
         quality=EstimateQuality.EXACT,
         _guarded_assumptions=(),
         _guarded_qualities=(),
+        _domain_rewrite_state=None,
+        _rendered_assumption_snapshot=None,
         _dependency_synchronized_entry_conditions={},
         _dependency_synchronized_entry_certificates=(),
         _global_barrier_condition=sp.false,

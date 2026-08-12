@@ -18,6 +18,11 @@ from qamomile.circuit.estimator._dependency_metadata import (
 from qamomile.circuit.estimator._dependency_synchronization import (
     _map_synchronized_entry_certificates,
 )
+from qamomile.circuit.estimator._estimate_domain import (
+    _apply_domain_rewrite,
+    _DomainRewritePolicy,
+    _restore_domain_rewrite,
+)
 from qamomile.circuit.estimator._resource_base import _is_concrete_integer
 from qamomile.circuit.estimator._resource_expressions import (
     _boolean_condition,
@@ -56,10 +61,14 @@ def _substitute_estimate(
         ResourceEstimate: Estimate with substituted and simplified expressions.
 
     Raises:
+        RuntimeError: If public resource metrics or metadata disagree with
+            retained canonical provenance.
         ValueError: If a name is not a parameter, or a supplied value violates
             an integer or nonnegative parameter domain.
         TypeError: If a supplied value is not a concrete numeric scalar.
     """
+    original_policy = estimate._domain_rewrite_policy
+    estimate = _restore_domain_rewrite(estimate)
     substitutions: dict[sp.Symbol, sp.Expr] = {}
     for name, value in values.items():
         parameter = estimate.parameters.get(name)
@@ -112,7 +121,16 @@ def _substitute_estimate(
     # small Piecewise/Min/Max form. Re-run the bounded public simplifier so
     # post-hoc specialization has the same canonical shape as direct input
     # specialization while respecting the global simplification node budget.
-    return mapped.simplify()
+    simplified = _simplify_estimate(mapped)
+    if original_policy is _DomainRewritePolicy.ENABLED:
+        return _apply_domain_rewrite(
+            simplified,
+            policy=_DomainRewritePolicy.ENABLED,
+        )
+    return dataclasses.replace(
+        simplified,
+        _domain_rewrite_policy=original_policy,
+    )
 
 
 def _simplify_estimate(estimate: ResourceEstimate) -> ResourceEstimate:
@@ -123,6 +141,10 @@ def _simplify_estimate(estimate: ResourceEstimate) -> ResourceEstimate:
 
     Returns:
         ResourceEstimate: Simplified estimate.
+
+    Raises:
+        RuntimeError: If public resource metrics or metadata disagree with
+            retained canonical provenance.
     """
     return _map_estimate_expressions(
         estimate,
@@ -160,7 +182,12 @@ def _map_estimate_expressions(
 
     Returns:
         ResourceEstimate: Rewritten estimate.
+
+    Raises:
+        RuntimeError: If public resource metrics or metadata disagree with
+            retained canonical provenance.
     """
+    estimate = _restore_domain_rewrite(estimate)
     rewrite_constraint = fn if constraint_fn is None else constraint_fn
     rewrite_guard = rewrite_constraint if guard_fn is None else guard_fn
     rewrite_dependency = rewrite_constraint if dependency_fn is None else dependency_fn
@@ -293,6 +320,9 @@ def _map_estimate_expressions(
         _guarded_qualities=mapped_qualities,
         _guarded_approximations=mapped_approximations,
         _symbol_aliases=estimate._symbol_aliases,
+        _domain_rewrite_policy=estimate._domain_rewrite_policy,
+        _domain_rewrite_state=None,
+        _rendered_assumption_snapshot=None,
     )
 
 

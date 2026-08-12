@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import pickle
+from collections.abc import Iterable
 from typing import get_type_hints
 from unittest.mock import Mock
 
@@ -13,6 +14,8 @@ import sympy as sp
 import qamomile.circuit as qmc
 import qamomile.circuit.estimator._call_liveness as call_liveness_module
 import qamomile.circuit.estimator._config as config_module
+import qamomile.circuit.estimator._estimate as estimate_module
+import qamomile.circuit.estimator._estimate_composition as composition_module
 import qamomile.circuit.estimator._gate_catalog as gate_catalog_module
 import qamomile.circuit.estimator._interpreter_calls as interpreter_calls_module
 import qamomile.circuit.estimator._interpreter_for as interpreter_for_module
@@ -30,7 +33,13 @@ import qamomile.observable as qm_o
 import qamomile.observable.hamiltonian as hamiltonian_module
 from qamomile.circuit.estimator import resource_estimator as estimator_module
 from qamomile.circuit.estimator._resolver import ExprResolver
-from qamomile.circuit.estimator._resource_constraints import _ResourceConstraint
+from qamomile.circuit.estimator._resource_constraints import (
+    _ConstraintOrigin,
+    _ConstraintProvenance,
+    _ResourceConstraint,
+)
+from qamomile.circuit.estimator._serialization import SymbolRegistry
+from qamomile.circuit.estimator._wire import resource_estimate_to_wire
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.callable import (
     CallableDef,
@@ -695,34 +704,204 @@ def test_seq_all_matches_left_fold_and_preserves_trace_order() -> None:
     assert qmc.ResourceEstimate.seq_all([]) == qmc.ResourceEstimate.zero()
 
 
+@pytest.mark.parametrize(
+    "mutation_kind",
+    ["assumptions", "derivation", "quality", "approximation"],
+)
+@pytest.mark.parametrize("boundary", ["report", "sequential", "wire"])
+def test_public_metadata_mutation_is_rejected_at_resource_boundaries(
+    mutation_kind: str,
+    boundary: str,
+) -> None:
+    """Public metadata cannot diverge from its guarded provenance."""
+    original_assumption = qmc.ResourceAssumption("original", "test")
+    replacement_assumption = qmc.ResourceAssumption("replacement", "test")
+    estimate = qmc.ResourceEstimate(
+        assumptions=(original_assumption,),
+        derivation=qmc.EstimateDerivation.MODELED,
+        quality=qmc.EstimateQuality.CONSERVATIVE,
+        approximation=qmc.ApproximationStatus.APPROXIMATE,
+    )
+    if mutation_kind == "assumptions":
+        estimate.assumptions = (replacement_assumption,)
+    elif mutation_kind == "derivation":
+        estimate.derivation = qmc.EstimateDerivation.STRUCTURAL
+    elif mutation_kind == "quality":
+        estimate.quality = qmc.EstimateQuality.EXACT
+    else:
+        estimate.approximation = qmc.ApproximationStatus.EXACT
+
+    with pytest.raises(RuntimeError, match="guarded provenance"):
+        if boundary == "report":
+            estimate.to_dict()
+        elif boundary == "sequential":
+            estimate.seq(qmc.ResourceEstimate.zero())
+        else:
+            resource_estimate_to_wire(estimate)
+
+
 def test_seq_all_keeps_large_metadata_reduction_balanced(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Metadata work grows by balanced levels rather than left-fold history."""
     estimate_count = 1024
     leaf = qmc.ResourceEstimate(quality=qmc.EstimateQuality.CONSERVATIVE)
-    original = qmc.ResourceEstimate.seq
+    original = composition_module._compose_sequential_without_domain_rewrite
     seq_calls = 0
     metadata_visits = 0
 
     def record_seq(
-        self: qmc.ResourceEstimate,
+        left: qmc.ResourceEstimate,
         other: qmc.ResourceEstimate,
     ) -> qmc.ResourceEstimate:
-        """Count guarded-quality records visited by each composition."""
+        """Count guarded-quality records visited by each composition.
+
+        Args:
+            left (qmc.ResourceEstimate): Earlier partial composition.
+            other (qmc.ResourceEstimate): Later partial composition.
+
+        Returns:
+            qmc.ResourceEstimate: Domain-independent sequential composition.
+        """
         nonlocal metadata_visits, seq_calls
         seq_calls += 1
-        metadata_visits += len(self._guarded_qualities or ())
+        metadata_visits += len(left._guarded_qualities or ())
         metadata_visits += len(other._guarded_qualities or ())
-        return original(self, other)
+        return original(left, other)
 
-    monkeypatch.setattr(qmc.ResourceEstimate, "seq", record_seq)
+    monkeypatch.setattr(
+        composition_module,
+        "_compose_sequential_without_domain_rewrite",
+        record_seq,
+    )
     combined = qmc.ResourceEstimate.seq_all(leaf for _ in range(estimate_count))
 
     assert seq_calls == estimate_count - 1
     assert metadata_visits <= estimate_count * estimate_count.bit_length()
     assert len(combined._guarded_qualities or ()) == estimate_count
     assert combined.quality is qmc.EstimateQuality.CONSERVATIVE
+
+
+def test_seq_all_refreshes_public_symbols_only_after_the_reduction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Balanced composition derives the public symbol registry only once."""
+    symbol = sp.Symbol("symbol", integer=True, nonnegative=True)
+    leaf = qmc.ResourceEstimate(gates=qmc.GateResources(total=symbol))
+    original = estimate_module._refresh_estimate_symbol_metadata
+    refresh_count = 0
+
+    def counted_refresh(
+        estimate: qmc.ResourceEstimate,
+        registry: SymbolRegistry | None = None,
+    ) -> SymbolRegistry:
+        """Count final symbol-registry refreshes before delegating.
+
+        Args:
+            estimate (qmc.ResourceEstimate): Estimate being refreshed.
+            registry (SymbolRegistry | None): Optional prebuilt registry.
+
+        Returns:
+            SymbolRegistry: Registry returned by the production helper.
+        """
+        nonlocal refresh_count
+        refresh_count += 1
+        return original(estimate, registry)
+
+    monkeypatch.setattr(
+        estimate_module,
+        "_refresh_estimate_symbol_metadata",
+        counted_refresh,
+    )
+
+    combined = qmc.ResourceEstimate.seq_all([leaf] * 1024)
+
+    assert refresh_count == 1
+    assert combined.parameters == {"symbol": symbol}
+    assert qmc.ResourceEstimate.seq_all([leaf]) is leaf
+    assert refresh_count == 1
+
+
+def test_nested_seq_all_generator_preserves_symbol_metadata() -> None:
+    """A one-element outer generator retains an inner reduction's symbols."""
+    symbol = sp.Symbol("nested_symbol", integer=True, nonnegative=True)
+    leaf = qmc.ResourceEstimate(gates=qmc.GateResources(total=symbol))
+
+    def nested() -> Iterable[qmc.ResourceEstimate]:
+        """Yield one already reduced symbolic estimate.
+
+        Returns:
+            Iterable[qmc.ResourceEstimate]: One nested sequential composition.
+        """
+        yield qmc.ResourceEstimate.seq_all([leaf, leaf])
+
+    combined = qmc.ResourceEstimate.seq_all(nested())
+
+    assert combined.gates.total == 2 * symbol
+    assert combined.parameters == {"nested_symbol": symbol}
+    assert combined.substitute(nested_symbol=3).gates.total == 6
+
+
+def test_seq_all_validates_first_item_before_advancing_generator() -> None:
+    """A stale first estimate fails before requesting a second item."""
+    symbol = sp.Symbol("stale_symbol", integer=True, nonnegative=True)
+    first = qmc.ResourceEstimate(
+        gates=qmc.GateResources(total=1 + sp.Max(0, symbol - 1)),
+        _constraints=(
+            _ResourceConstraint(
+                expression=symbol - 1,
+                minimum=0,
+                label="first accessed qubit",
+                provenance=_ConstraintProvenance(
+                    origin=_ConstraintOrigin.ARRAY_ACCESS,
+                    source_expressions=(symbol,),
+                    root_formal_names=("stale_symbol",),
+                ),
+            ),
+        ),
+    ).simplify()
+    assert first._domain_rewrite_state is not None
+    first.gates.total = 999
+    advanced = False
+
+    def estimates() -> Iterable[qmc.ResourceEstimate]:
+        """Yield one stale estimate and record any later advancement.
+
+        Returns:
+            Iterable[qmc.ResourceEstimate]: Stale-first estimate stream.
+        """
+        nonlocal advanced
+        yield first
+        advanced = True
+        yield qmc.ResourceEstimate.zero()
+
+    with pytest.raises(RuntimeError, match="domain rewrite state"):
+        qmc.ResourceEstimate.seq_all(estimates())
+
+    assert advanced is False
+
+
+def test_sequential_composer_is_transactional_after_failed_append() -> None:
+    """A failed append leaves the reusable internal reduction unchanged."""
+    abstract = qmc.ResourceEstimate(
+        gates=qmc.GateResources(total=1),
+        control_decomposition=qmc.ControlDecomposition.ABSTRACT,
+    )
+    clean = qmc.ResourceEstimate(
+        gates=qmc.GateResources(total=1),
+        control_decomposition=qmc.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI,
+    )
+    composer = composition_module._SequentialEstimateComposer(
+        qmc.ResourceEstimate.zero()
+    )
+    composer.append(abstract)
+
+    with pytest.raises(ValueError, match="different control decompositions"):
+        composer.append(clean)
+
+    assert composer.finish() is abstract
+    composer.append(abstract)
+    assert composer.finish().gates.total == 2
 
 
 def test_all_z_pauli_evolution_skips_pairwise_commutation_scan(

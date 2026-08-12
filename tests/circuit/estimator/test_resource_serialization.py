@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -315,6 +316,15 @@ def test_resource_wire_rejects_executable_expression_syntax() -> None:
         resource_estimate_from_wire(wire)
 
 
+def test_resource_wire_rejects_nonstring_metric_fields_as_value_error() -> None:
+    """Malformed mixed-type metric keys retain the decoder's error contract."""
+    wire = resource_estimate_to_wire(qm.ResourceEstimate())
+    wire["width"][1] = "Integer(0)"
+
+    with pytest.raises(ValueError, match="width fields must be"):
+        resource_estimate_from_wire(wire)
+
+
 def test_resource_wire_rejects_unsupported_expression_before_encoding() -> None:
     """A fixed cost is never persisted when its expression cannot decode."""
     repetitions = sp.Symbol("repetitions", integer=True, nonnegative=True)
@@ -326,8 +336,8 @@ def test_resource_wire_rejects_unsupported_expression_before_encoding() -> None:
         resource_estimate_to_wire(estimate)
 
 
-def test_resource_wire_version_five_round_trips() -> None:
-    """The current basis-free wire format preserves estimator provenance."""
+def test_resource_wire_round_trips_estimator_provenance() -> None:
+    """The closed wire format preserves estimator provenance."""
     estimate = qm.ResourceEstimate(
         gates=qm.GateResources(total=2, two_qubit=2),
         control_decomposition=qm.ControlDecomposition.ABSTRACT,
@@ -337,8 +347,42 @@ def test_resource_wire_version_five_round_trips() -> None:
     wire = resource_estimate_to_wire(estimate)
     restored = resource_estimate_from_wire(wire)
 
-    assert wire["version"] == 5
     assert restored == estimate
+
+
+@pytest.mark.parametrize(
+    ("field", "provenance_field", "replacement"),
+    [
+        ("derivation", "derivations", qm.EstimateDerivation.STRUCTURAL.value),
+        ("quality", "qualities", qm.EstimateQuality.EXACT.value),
+        (
+            "approximation",
+            "approximations",
+            qm.ApproximationStatus.EXACT.value,
+        ),
+    ],
+)
+@pytest.mark.parametrize("tamper_target", ["public", "guarded"])
+def test_resource_wire_rejects_inconsistent_canonical_provenance(
+    field: str,
+    provenance_field: str,
+    replacement: str,
+    tamper_target: str,
+) -> None:
+    """Public metadata and guarded facts must encode one canonical meaning."""
+    estimate = qm.ResourceEstimate(
+        derivation=qm.EstimateDerivation.MODELED,
+        quality=qm.EstimateQuality.CONSERVATIVE,
+        approximation=qm.ApproximationStatus.APPROXIMATE,
+    )
+    wire = deepcopy(resource_estimate_to_wire(estimate))
+    if tamper_target == "public":
+        wire[field] = replacement
+    else:
+        wire["provenance"][provenance_field] = []
+
+    with pytest.raises(ValueError, match="public metadata.*guarded provenance"):
+        resource_estimate_from_wire(wire)
 
 
 def test_resource_wire_round_trips_global_barrier_condition() -> None:
@@ -380,6 +424,9 @@ def test_resource_wire_schema_accounts_for_every_estimate_field() -> None:
         "_guarded_qualities",
         "_guarded_approximations",
         "_symbol_aliases",
+        "_domain_rewrite_policy",
+        "_domain_rewrite_state",
+        "_rendered_assumption_snapshot",
     }
     caller_or_interpreter_local = {
         "_allocation_sites",
@@ -605,16 +652,6 @@ def test_substitution_rewrites_complete_synchronized_entry_certificate() -> None
     )
 
 
-@pytest.mark.parametrize("version", [1, 2, 3, 4])
-def test_resource_wire_rejects_versions_before_five(version: int) -> None:
-    """Older payloads cannot be decoded after removing basis provenance."""
-    wire = resource_estimate_to_wire(qm.ResourceEstimate())
-    wire["version"] = version
-
-    with pytest.raises(ValueError, match="wire versions before 5 are not supported"):
-        resource_estimate_from_wire(wire)
-
-
 def test_resource_wire_round_trips_large_substituted_capped_range_sum() -> None:
     """A specialized large loop remains serializable without eager replay."""
     index = sp.Dummy("index", integer=True, nonnegative=True)
@@ -765,31 +802,6 @@ def test_resource_wire_shares_dummy_identity_across_one_payload() -> None:
 
     assert isinstance(metric_symbol, sp.Dummy)
     assert metric_symbol is trace_symbol
-
-
-def test_resource_wire_decodes_legacy_nondeterministic_dummy_indices() -> None:
-    """Older payloads with process-assigned Dummy indices remain readable."""
-    trace_flag = sp.Dummy("trace_flag", integer=True, nonnegative=True)
-    estimate = qm.ResourceEstimate(
-        trace=ResourceTraceNode(
-            name="conditional trace",
-            source_kind="test",
-            active_when=sp.Gt(trace_flag, 0),
-        )
-    )
-    wire = resource_estimate_to_wire(estimate)
-    wire["trace"]["nodes"][0]["active_when"] = wire["trace"]["nodes"][0][
-        "active_when"
-    ].replace("dummy_index=0", "dummy_index=987654")
-    wire["symbol_aliases"]["trace_flag"] = wire["symbol_aliases"]["trace_flag"].replace(
-        "dummy_index=0", "dummy_index=987654"
-    )
-
-    restored = resource_estimate_from_wire(wire)
-
-    assert restored.explain() == (
-        "Resource estimate\n  conditional trace [test] when=trace_flag > 0"
-    )
 
 
 def test_resource_wire_round_trips_capped_symbolic_loop_work() -> None:

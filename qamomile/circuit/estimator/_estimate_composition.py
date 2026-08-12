@@ -25,6 +25,12 @@ from qamomile.circuit.estimator._dependency_synchronization import (
     _guard_synchronized_entry_certificates,
     _merge_synchronized_entry_certificates,
 )
+from qamomile.circuit.estimator._estimate_domain import (
+    _apply_domain_rewrite,
+    _merge_domain_rewrite_policy,
+    _restore_domain_rewrite,
+    _validate_domain_rewrite_state,
+)
 from qamomile.circuit.estimator._estimate_provenance import (
     _merge_estimate_provenance,
     _merge_symbol_aliases,
@@ -90,9 +96,48 @@ def _compose_sequential(
 
     Returns:
         ResourceEstimate: Sequential composition.
+
+    Raises:
+        RuntimeError: If public resource metrics or metadata disagree with
+            retained canonical provenance.
+        ValueError: If the estimates use incompatible control-decomposition
+            provenance.
     """
+    composed = _compose_sequential_without_domain_rewrite(left, right)
+    return _apply_domain_rewrite(
+        composed,
+        policy=composed._domain_rewrite_policy,
+    )
+
+
+def _compose_sequential_without_domain_rewrite(
+    left: ResourceEstimate,
+    right: ResourceEstimate,
+) -> ResourceEstimate:
+    """Compose two estimates while retaining domain-independent formulas.
+
+    Args:
+        left (ResourceEstimate): Estimate executed first.
+        right (ResourceEstimate): Estimate executed second.
+
+    Returns:
+        ResourceEstimate: Sequential composition ready for one later batched
+        input-domain rewrite.
+
+    Raises:
+        RuntimeError: If public resource metrics or metadata disagree with
+            retained canonical provenance.
+        ValueError: If the estimates use incompatible control-decomposition
+            provenance.
+    """
+    policy = _merge_domain_rewrite_policy(
+        left._domain_rewrite_policy,
+        right._domain_rewrite_policy,
+    )
+    left = _restore_domain_rewrite(left)
+    right = _restore_domain_rewrite(right)
     control_decomposition = _merge_estimate_provenance(left, right)
-    return dataclasses.replace(
+    composed = dataclasses.replace(
         left.zero(),
         width=_seq_width(left.width, right.width),
         gates=_add_gates(left.gates, right.gates),
@@ -100,7 +145,7 @@ def _compose_sequential(
         calls=_add_calls(left.calls, right.calls),
         measurements=_add_measurements(left.measurements, right.measurements),
         resets=_add_resets(left.resets, right.resets),
-        assumptions=(*left.assumptions, *right.assumptions),
+        assumptions=(),
         trace=_merge_trace("seq", left.trace, right.trace),
         derivation=_combine_derivation(left.derivation, right.derivation),
         quality=_combine_quality(left.quality, right.quality),
@@ -163,7 +208,9 @@ def _compose_sequential(
             *(right._guarded_approximations or ()),
         ),
         _symbol_aliases=_merge_symbol_aliases(left, right),
+        _domain_rewrite_policy=policy,
     )
+    return composed
 
 
 def _compose_parallel(
@@ -178,9 +225,21 @@ def _compose_parallel(
 
     Returns:
         ResourceEstimate: Parallel composition.
+
+    Raises:
+        RuntimeError: If public resource metrics or metadata disagree with
+            retained canonical provenance.
+        ValueError: If the estimates use incompatible control-decomposition
+            provenance.
     """
+    policy = _merge_domain_rewrite_policy(
+        left._domain_rewrite_policy,
+        right._domain_rewrite_policy,
+    )
+    left = _restore_domain_rewrite(left)
+    right = _restore_domain_rewrite(right)
     control_decomposition = _merge_estimate_provenance(left, right)
-    return dataclasses.replace(
+    composed = dataclasses.replace(
         left.zero(),
         width=_parallel_width(left.width, right.width),
         gates=_add_gates(left.gates, right.gates),
@@ -188,7 +247,7 @@ def _compose_parallel(
         calls=_add_calls(left.calls, right.calls),
         measurements=_add_measurements(left.measurements, right.measurements),
         resets=_add_resets(left.resets, right.resets),
-        assumptions=(*left.assumptions, *right.assumptions),
+        assumptions=(),
         trace=_merge_trace("parallel", left.trace, right.trace),
         derivation=_combine_derivation(left.derivation, right.derivation),
         quality=_combine_quality(left.quality, right.quality),
@@ -251,7 +310,9 @@ def _compose_parallel(
             *(right._guarded_approximations or ()),
         ),
         _symbol_aliases=_merge_symbol_aliases(left, right),
+        _domain_rewrite_policy=policy,
     )
+    return _apply_domain_rewrite(composed, policy=policy)
 
 
 def _compose_choice(
@@ -266,13 +327,25 @@ def _compose_choice(
 
     Returns:
         ResourceEstimate: Conservative choice composition.
+
+    Raises:
+        RuntimeError: If public resource metrics or metadata disagree with
+            retained canonical provenance.
+        ValueError: If the estimates use incompatible control-decomposition
+            provenance.
     """
+    policy = _merge_domain_rewrite_policy(
+        left._domain_rewrite_policy,
+        right._domain_rewrite_policy,
+    )
+    left = _restore_domain_rewrite(left)
+    right = _restore_domain_rewrite(right)
     control_decomposition = _merge_estimate_provenance(left, right)
     allocation_sites = _merge_allocation_sites(
         left._allocation_sites,
         right._allocation_sites,
     )
-    return dataclasses.replace(
+    composed = dataclasses.replace(
         left.zero(),
         width=_branch_width_with_static_allocations(
             _max_width(left.width, right.width),
@@ -287,7 +360,7 @@ def _compose_choice(
         calls=_max_calls(left.calls, right.calls),
         measurements=_max_measurements(left.measurements, right.measurements),
         resets=_max_resets(left.resets, right.resets),
-        assumptions=(*left.assumptions, *right.assumptions),
+        assumptions=(),
         trace=_merge_trace("choice", left.trace, right.trace),
         derivation=_combine_derivation(left.derivation, right.derivation),
         quality=_combine_quality(
@@ -351,7 +424,9 @@ def _compose_choice(
             *(right._guarded_approximations or ()),
         ),
         _symbol_aliases=_merge_symbol_aliases(left, right),
+        _domain_rewrite_policy=policy,
     )
+    return _apply_domain_rewrite(composed, policy=policy)
 
 
 def _compose_conditional(
@@ -368,12 +443,30 @@ def _compose_conditional(
 
     Returns:
         ResourceEstimate: Field-wise conditional estimate.
+
+    Raises:
+        RuntimeError: If public resource metrics or metadata disagree with
+            retained canonical provenance.
+        ValueError: If the estimates use incompatible control-decomposition
+            provenance.
     """
     predicate = _boolean_condition(condition)
     if predicate is sp.true:
-        return when_true
+        restored = _restore_domain_rewrite(when_true)
+        if restored is when_true:
+            return when_true
+        return _apply_domain_rewrite(restored, policy=restored._domain_rewrite_policy)
     if predicate is sp.false:
-        return when_false
+        restored = _restore_domain_rewrite(when_false)
+        if restored is when_false:
+            return when_false
+        return _apply_domain_rewrite(restored, policy=restored._domain_rewrite_policy)
+    policy = _merge_domain_rewrite_policy(
+        when_true._domain_rewrite_policy,
+        when_false._domain_rewrite_policy,
+    )
+    when_true = _restore_domain_rewrite(when_true)
+    when_false = _restore_domain_rewrite(when_false)
     control_decomposition = _merge_estimate_provenance(
         when_true,
         when_false,
@@ -422,7 +515,7 @@ def _compose_conditional(
             when_false.resets,
             predicate,
         ),
-        assumptions=(*when_true.assumptions, *when_false.assumptions),
+        assumptions=(),
         trace=_conditional_trace(predicate, when_true.trace, when_false.trace),
         derivation=_combine_derivation(
             when_true.derivation,
@@ -529,6 +622,7 @@ def _compose_conditional(
             ),
         ),
         _symbol_aliases=_merge_symbol_aliases(when_true, when_false),
+        _domain_rewrite_policy=policy,
     )
     masks_differ = when_true._dependency_keys != when_false._dependency_keys
     if masks_differ and (dependency_keys is None or len(dependency_keys) > 1):
@@ -542,7 +636,7 @@ def _compose_conditional(
             quality=EstimateQuality.CONSERVATIVE,
             active_when=_unresolved_condition_guard(predicate),
         )
-    return estimate
+    return _apply_domain_rewrite(estimate, policy=policy)
 
 
 class _SequentialEstimateComposer:
@@ -557,6 +651,7 @@ class _SequentialEstimateComposer:
         """
         self._levels: list[ResourceEstimate | None] = []
         self._empty = empty
+        self._count = 0
 
     def append(self, estimate: ResourceEstimate) -> None:
         """Append one estimate after all previously supplied estimates.
@@ -565,21 +660,26 @@ class _SequentialEstimateComposer:
             estimate (ResourceEstimate): Next estimate in execution order.
 
         Raises:
+            RuntimeError: If public resource metrics or metadata disagree with
+                retained canonical provenance.
             ValueError: If composition encounters incompatible
                 control-decomposition provenance.
         """
+        _validate_domain_rewrite_state(estimate)
         carry = estimate
         level = 0
         while level < len(self._levels) and self._levels[level] is not None:
             earlier = self._levels[level]
             assert earlier is not None
-            carry = earlier.seq(carry)
-            self._levels[level] = None
+            carry = _compose_sequential_without_domain_rewrite(earlier, carry)
             level += 1
+        for consumed_level in range(level):
+            self._levels[consumed_level] = None
         if level == len(self._levels):
             self._levels.append(carry)
         else:
             self._levels[level] = carry
+        self._count += 1
 
     def finish(self) -> ResourceEstimate:
         """Return the order-preserving composition accumulated so far.
@@ -589,6 +689,8 @@ class _SequentialEstimateComposer:
                 estimate was appended.
 
         Raises:
+            RuntimeError: If public resource metrics or metadata disagree with
+                retained canonical provenance.
             ValueError: If composition encounters incompatible
                 control-decomposition provenance.
         """
@@ -596,5 +698,17 @@ class _SequentialEstimateComposer:
         for estimate in reversed(self._levels):
             if estimate is None:
                 continue
-            result = estimate if result is None else result.seq(estimate)
-        return result if result is not None else self._empty
+            result = (
+                estimate
+                if result is None
+                else _compose_sequential_without_domain_rewrite(result, estimate)
+            )
+        if result is None:
+            return self._empty
+        if self._count == 1:
+            _validate_domain_rewrite_state(result)
+            return result
+        return _apply_domain_rewrite(
+            result,
+            policy=result._domain_rewrite_policy,
+        )

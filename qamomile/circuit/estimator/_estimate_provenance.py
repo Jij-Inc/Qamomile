@@ -10,6 +10,10 @@ from typing import TYPE_CHECKING
 import sympy as sp
 
 from qamomile.circuit.estimator._constants import _ZERO
+from qamomile.circuit.estimator._estimate_domain import (
+    _domain_assumptions,
+    _validate_domain_rewrite_metrics,
+)
 from qamomile.circuit.estimator._resource_base import (
     ApproximationStatus,
     ControlDecomposition,
@@ -55,7 +59,13 @@ def _initialize_estimate_provenance(
 
     Args:
         estimate (ResourceEstimate): Newly initialized estimate to normalize.
+
+    Raises:
+        RuntimeError: If retained input-domain rewrite evidence disagrees with
+            public metrics, rendered assumptions, parameters, or symbol
+            aliases.
     """
+    _validate_domain_rewrite_metrics(estimate)
     estimate._constraints = tuple(
         constraint
         for constraint in estimate._constraints
@@ -64,10 +74,32 @@ def _initialize_estimate_provenance(
     estimate._global_barrier_condition = _boolean_condition(
         estimate._global_barrier_condition
     )
+    prior_rendered = estimate._rendered_assumption_snapshot
     if estimate._guarded_assumptions is None:
         estimate._guarded_assumptions = tuple(
             _GuardedAssumption(sp.true, assumption)
             for assumption in estimate.assumptions
+        )
+    elif prior_rendered is not None:
+        if len(estimate.assumptions) < len(prior_rendered) or any(
+            assumption is not carried
+            for assumption, carried in zip(
+                estimate.assumptions,
+                prior_rendered,
+                strict=False,
+            )
+        ):
+            raise RuntimeError(
+                "resource estimate assumptions no longer preserve the rendered "
+                "domain snapshot prefix; append ordinary assumptions instead of "
+                "inserting, removing, or reordering entries"
+            )
+        estimate._guarded_assumptions = (
+            *estimate._guarded_assumptions,
+            *(
+                _GuardedAssumption(sp.true, assumption)
+                for assumption in estimate.assumptions[len(prior_rendered) :]
+            ),
         )
     else:
         active_assumptions = _active_assumptions(estimate._guarded_assumptions)
@@ -96,6 +128,9 @@ def _initialize_estimate_provenance(
             _GuardedDerivation(sp.true, estimate.derivation),
         )
     estimate.assumptions = _active_assumptions(estimate._guarded_assumptions)
+    estimate._rendered_assumption_snapshot = (
+        estimate.assumptions if estimate._domain_rewrite_state is not None else None
+    )
     estimate.derivation = _active_derivation(estimate._guarded_derivations)
     if estimate._guarded_qualities is None:
         estimate._guarded_qualities = (
@@ -152,6 +187,11 @@ def _refresh_symbol_metadata(
     active_registry = registry or _serialization_registry(estimate)
     estimate._symbol_aliases = active_registry.aliases()
     estimate.parameters = _collect_parameters(estimate, active_registry)
+    ordinary = _active_assumptions(estimate._guarded_assumptions or ())
+    estimate.assumptions = (*ordinary, *_domain_assumptions(estimate, active_registry))
+    estimate._rendered_assumption_snapshot = (
+        estimate.assumptions if estimate._domain_rewrite_state is not None else None
+    )
     return active_registry
 
 

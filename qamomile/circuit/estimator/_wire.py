@@ -14,6 +14,12 @@ from typing import Any
 import sympy as sp
 
 from qamomile.circuit.estimator._estimate import ResourceEstimate
+from qamomile.circuit.estimator._estimate_domain import (
+    _apply_domain_rewrite,
+    _PublicResourceSnapshot,
+    _validate_domain_rewrite_state,
+)
+from qamomile.circuit.estimator._parameter_domain import _DomainRewritePolicy
 from qamomile.circuit.estimator._resource_base import (
     ApproximationStatus,
     ControlDecomposition,
@@ -21,7 +27,6 @@ from qamomile.circuit.estimator._resource_base import (
     EstimateQuality,
 )
 from qamomile.circuit.estimator._resource_types import (
-    CallResources,
     DepthResources,
     GateResources,
     MeasurementResources,
@@ -38,8 +43,11 @@ from qamomile.circuit.estimator._wire_expression import (
 from qamomile.circuit.estimator._wire_records import (
     _assumption_from_wire,
     _assumption_to_wire,
+    _calls_from_wire,
+    _calls_to_wire,
+    _domain_state_from_wire,
+    _domain_state_to_wire,
     _enum_from_wire,
-    _expression_map_from_wire,
     _guarded_approximation_from_wire,
     _guarded_assumption_from_wire,
     _guarded_derivation_from_wire,
@@ -47,13 +55,37 @@ from qamomile.circuit.estimator._wire_records import (
     _mapping,
     _metric_from_wire,
     _metric_to_wire,
+    _public_snapshot_from_resources,
+    _require_fields,
     _requirement_from_wire,
+    _requirement_to_wire,
     _sequence,
     _trace_from_wire,
     _trace_to_wire,
 )
 
-_RESOURCE_ESTIMATE_WIRE_VERSION = 5
+_RESOURCE_ESTIMATE_WIRE_FIELDS = {
+    "$type",
+    "width",
+    "gates",
+    "depth",
+    "measurements",
+    "resets",
+    "calls",
+    "assumptions",
+    "trace",
+    "symbol_aliases",
+    "parameters",
+    "derivation",
+    "quality",
+    "approximation",
+    "control_decomposition",
+    "global_barrier_condition",
+    "requirements",
+    "domain_rewrite_policy",
+    "domain_rewrite_state",
+    "provenance",
+}
 
 
 def resource_estimate_to_wire(
@@ -78,12 +110,15 @@ def resource_estimate_to_wire(
         ValueError: If its expression language or explanation trace exceeds
             the supported wire contract, or if it carries caller-scoped
             liveness state that has no meaning for an opaque definition.
+        RuntimeError: If public resource metrics or metadata disagree with
+            retained canonical provenance.
     """
     if not isinstance(estimate, ResourceEstimate):
         raise TypeError(
             "opaque_cost serialization requires a fixed ResourceEstimate; "
             f"got {type(estimate).__name__}"
         )
+    _validate_domain_rewrite_state(estimate)
     if estimate._output_sizes or estimate._input_sizes or estimate._has_output_summary:
         raise ValueError(
             "opaque_cost serialization does not support caller-scoped "
@@ -101,22 +136,12 @@ def resource_estimate_to_wire(
     guarded_approximations = estimate._guarded_approximations or ()
     return {
         "$type": "ResourceEstimate",
-        "version": _RESOURCE_ESTIMATE_WIRE_VERSION,
         "width": _metric_to_wire(estimate.width, encoder),
         "gates": _metric_to_wire(estimate.gates, encoder),
         "depth": _metric_to_wire(estimate.depth, encoder),
         "measurements": _metric_to_wire(estimate.measurements, encoder),
         "resets": _metric_to_wire(estimate.resets, encoder),
-        "calls": {
-            "calls_by_name": {
-                name: expression(value)
-                for name, value in estimate.calls.calls_by_name.items()
-            },
-            "queries_by_name": {
-                name: expression(value)
-                for name, value in estimate.calls.queries_by_name.items()
-            },
-        },
+        "calls": _calls_to_wire(estimate.calls, encoder),
         "assumptions": [
             _assumption_to_wire(assumption) for assumption in estimate.assumptions
         ],
@@ -133,32 +158,14 @@ def resource_estimate_to_wire(
         "control_decomposition": estimate.control_decomposition.value,
         "global_barrier_condition": expression(estimate._global_barrier_condition),
         "requirements": [
-            {
-                "expression": expression(constraint.expression),
-                "active_when": expression(constraint.active_when),
-                "minimum": constraint.minimum,
-                "label": constraint.label,
-                "unit": constraint.unit,
-                "integer": constraint.integer,
-                "minimum_inclusive": constraint.minimum_inclusive,
-                "finite": constraint.finite,
-                "expected": (
-                    expression(constraint.expected)
-                    if constraint.expected is not None
-                    else None
-                ),
-                "ranges": [
-                    {
-                        "symbol": expression(loop_range.symbol),
-                        "start": expression(loop_range.start),
-                        "step": expression(loop_range.step),
-                        "iterations": expression(loop_range.iterations),
-                    }
-                    for loop_range in constraint.ranges
-                ],
-            }
+            _requirement_to_wire(constraint, encoder)
             for constraint in estimate._constraints
         ],
+        "domain_rewrite_policy": estimate._domain_rewrite_policy.value,
+        "domain_rewrite_state": _domain_state_to_wire(
+            estimate._domain_rewrite_state,
+            encoder,
+        ),
         "provenance": {
             "assumptions": [
                 {
@@ -215,28 +222,23 @@ def resource_estimate_from_wire(
     record = _mapping(payload, "opaque ResourceEstimate")
     if record.get("$type") != "ResourceEstimate":
         raise ValueError("opaque cost payload is not a ResourceEstimate")
-    version = record.get("version")
-    if (
-        isinstance(version, int)
-        and not isinstance(version, bool)
-        and version < _RESOURCE_ESTIMATE_WIRE_VERSION
-    ):
-        raise ValueError(
-            "opaque ResourceEstimate wire versions before 5 are not supported; "
-            f"got {version!r}"
-        )
-    if version != _RESOURCE_ESTIMATE_WIRE_VERSION:
-        raise ValueError(
-            f"unsupported opaque ResourceEstimate wire version {version!r}"
-        )
+    _require_fields(
+        record,
+        _RESOURCE_ESTIMATE_WIRE_FIELDS,
+        "opaque ResourceEstimate",
+    )
 
     decoder = _WireExpressionDecoder() if decoder is None else decoder
-    calls = _mapping(record.get("calls"), "opaque ResourceEstimate calls")
     provenance = _mapping(
         record.get("provenance"),
         "opaque ResourceEstimate provenance",
     )
-    assumptions = tuple(
+    _require_fields(
+        provenance,
+        {"assumptions", "derivations", "qualities", "approximations"},
+        "opaque ResourceEstimate provenance",
+    )
+    serialized_assumptions = tuple(
         _assumption_from_wire(item)
         for item in _sequence(
             record.get("assumptions"),
@@ -278,66 +280,88 @@ def resource_estimate_from_wire(
             "opaque ResourceEstimate approximation provenance",
         )
     )
+    width = _metric_from_wire(
+        record.get("width"),
+        WidthResources,
+        "opaque ResourceEstimate width",
+        decoder,
+    )
+    gates = _metric_from_wire(
+        record.get("gates"),
+        GateResources,
+        "opaque ResourceEstimate gates",
+        decoder,
+    )
+    depth = _metric_from_wire(
+        record.get("depth"),
+        DepthResources,
+        "opaque ResourceEstimate depth",
+        decoder,
+    )
+    measurements = _metric_from_wire(
+        record.get("measurements"),
+        MeasurementResources,
+        "opaque ResourceEstimate measurements",
+        decoder,
+    )
+    resets = _metric_from_wire(
+        record.get("resets"),
+        ResetResources,
+        "opaque ResourceEstimate resets",
+        decoder,
+    )
+    calls = _calls_from_wire(
+        record.get("calls"),
+        "opaque ResourceEstimate calls",
+        decoder,
+    )
+    visible_snapshot = _public_snapshot_from_resources(
+        width,
+        gates,
+        measurements,
+        resets,
+        depth,
+        calls,
+    )
+    serialized_state = _domain_state_from_wire(
+        record.get("domain_rewrite_state"),
+        decoder,
+    )
+    policy = _enum_from_wire(
+        _DomainRewritePolicy,
+        record.get("domain_rewrite_policy"),
+        "opaque ResourceEstimate domain rewrite policy",
+    )
+    serialized_derivation = _enum_from_wire(
+        EstimateDerivation,
+        record.get("derivation"),
+        "opaque ResourceEstimate derivation",
+    )
+    serialized_quality = _enum_from_wire(
+        EstimateQuality,
+        record.get("quality"),
+        "opaque ResourceEstimate quality",
+    )
+    serialized_approximation = _enum_from_wire(
+        ApproximationStatus,
+        record.get("approximation"),
+        "opaque ResourceEstimate approximation",
+    )
+    original_snapshot = (
+        serialized_state.original if serialized_state is not None else visible_snapshot
+    )
     estimate = ResourceEstimate(
-        width=_metric_from_wire(
-            record.get("width"),
-            WidthResources,
-            "opaque ResourceEstimate width",
-            decoder,
-        ),
-        gates=_metric_from_wire(
-            record.get("gates"),
-            GateResources,
-            "opaque ResourceEstimate gates",
-            decoder,
-        ),
-        depth=_metric_from_wire(
-            record.get("depth"),
-            DepthResources,
-            "opaque ResourceEstimate depth",
-            decoder,
-        ),
-        measurements=_metric_from_wire(
-            record.get("measurements"),
-            MeasurementResources,
-            "opaque ResourceEstimate measurements",
-            decoder,
-        ),
-        resets=_metric_from_wire(
-            record.get("resets"),
-            ResetResources,
-            "opaque ResourceEstimate resets",
-            decoder,
-        ),
-        calls=CallResources(
-            calls_by_name=_expression_map_from_wire(
-                calls.get("calls_by_name"),
-                "opaque ResourceEstimate calls_by_name",
-                decoder,
-            ),
-            queries_by_name=_expression_map_from_wire(
-                calls.get("queries_by_name"),
-                "opaque ResourceEstimate queries_by_name",
-                decoder,
-            ),
-        ),
-        assumptions=assumptions,
+        width=original_snapshot.width_resources(),
+        gates=original_snapshot.gate_resources(),
+        measurements=original_snapshot.measurement_resources(),
+        resets=original_snapshot.reset_resources(),
+        depth=original_snapshot.depth_resources(),
+        calls=original_snapshot.call_resources(),
+        assumptions=(),
         trace=_trace_from_wire(record.get("trace"), decoder),
-        derivation=_enum_from_wire(
-            EstimateDerivation,
-            record.get("derivation"),
-            "opaque ResourceEstimate derivation",
-        ),
-        quality=_enum_from_wire(
-            EstimateQuality,
-            record.get("quality"),
-            "opaque ResourceEstimate quality",
-        ),
-        approximation=_enum_from_wire(
-            ApproximationStatus,
-            record.get("approximation"),
-            "opaque ResourceEstimate approximation",
-        ),
+        derivation=serialized_derivation,
+        quality=serialized_quality,
+        approximation=serialized_approximation,
         control_decomposition=_enum_from_wire(
             ControlDecomposition,
             record.get("control_decomposition"),
@@ -353,7 +377,32 @@ def resource_estimate_from_wire(
         _guarded_derivations=guarded_derivations,
         _guarded_qualities=guarded_qualities,
         _guarded_approximations=guarded_approximations,
+        _domain_rewrite_policy=policy,
     )
+    estimate = _apply_domain_rewrite(estimate, policy=policy)
+    _validate_domain_rewrite_state(estimate)
+    if _PublicResourceSnapshot.capture(estimate) != visible_snapshot:
+        raise ValueError(
+            "opaque ResourceEstimate visible metrics disagree with its "
+            "canonical domain rewrite"
+        )
+    if estimate._domain_rewrite_state != serialized_state:
+        raise ValueError(
+            "opaque ResourceEstimate domain rewrite state disagrees with "
+            "canonical proof evidence"
+        )
+    if (
+        estimate._guarded_derivations != guarded_derivations
+        or estimate._guarded_qualities != guarded_qualities
+        or estimate._guarded_approximations != guarded_approximations
+        or estimate.derivation is not serialized_derivation
+        or estimate.quality is not serialized_quality
+        or estimate.approximation is not serialized_approximation
+    ):
+        raise ValueError(
+            "opaque ResourceEstimate public metadata disagrees with canonical "
+            "guarded provenance"
+        )
     raw_parameters = _mapping(
         record.get("parameters"),
         "opaque ResourceEstimate parameters",
@@ -397,6 +446,12 @@ def resource_estimate_from_wire(
         )
     estimate._symbol_aliases = symbol_aliases
     estimate._refresh_symbol_metadata()
+    if estimate.assumptions != serialized_assumptions:
+        raise ValueError(
+            "opaque ResourceEstimate assumptions disagree with canonical "
+            "domain provenance"
+        )
+    _validate_domain_rewrite_state(estimate)
     return estimate
 
 

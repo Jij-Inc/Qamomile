@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Mapping
+import enum
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 import sympy as sp
@@ -11,6 +12,9 @@ from sympy.calculus.util import minimum as calculus_minimum
 from sympy.logic.boolalg import Boolean
 
 from qamomile.circuit.estimator._constants import _ONE, _ZERO
+from qamomile.circuit.estimator._domain_affine import (
+    _extract_affine_domain_expression,
+)
 from qamomile.circuit.estimator._resource_base import (
     ResourceExpr,
     _is_concrete_integer,
@@ -26,6 +30,82 @@ from qamomile.circuit.estimator._resource_expressions import (
     _safe_simplify,
     _substitute_basic_lazily,
 )
+
+
+class _ConstraintOrigin(enum.StrEnum):
+    """Classify the semantic producer of a resource constraint.
+
+    Values:
+        INTERNAL: Internal structural requirement with no public input-domain
+            contract.
+        QKERNEL_INPUT: Scalar type or quantum-array shape declared by the root
+            qkernel interface.
+        ARRAY_ACCESS: Bounds requirement created by an array element access.
+        ARRAY_VIEW: Shape or coverage requirement created by an array view.
+        MODEL_CONTRACT: Opaque or modeled resource contract.
+    """
+
+    INTERNAL = "internal"
+    QKERNEL_INPUT = "qkernel_input"
+    ARRAY_ACCESS = "array_access"
+    ARRAY_VIEW = "array_view"
+    MODEL_CONTRACT = "model_contract"
+
+
+_DOMAIN_ELIGIBLE_ORIGINS = frozenset(
+    {
+        _ConstraintOrigin.QKERNEL_INPUT,
+        _ConstraintOrigin.ARRAY_ACCESS,
+        _ConstraintOrigin.ARRAY_VIEW,
+    }
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class _ConstraintProvenance:
+    """Retain typed input-domain lineage for one structural constraint.
+
+    Args:
+        origin (_ConstraintOrigin): Semantic producer classification. Defaults
+            to an internal, non-eligible requirement.
+        source_expressions (tuple[sp.Basic, ...]): Exact resolved expressions
+            from which the requirement was derived. Defaults to an empty
+            tuple.
+        root_formal_names (tuple[str, ...]): Stable root-qkernel formal names
+            verified to cover every symbol in the constraint payload. An empty
+            tuple means the constraint has not crossed that trust boundary.
+    """
+
+    origin: _ConstraintOrigin = _ConstraintOrigin.INTERNAL
+    source_expressions: tuple[sp.Basic, ...] = ()
+    root_formal_names: tuple[str, ...] = ()
+
+    @property
+    def domain_eligible(self) -> bool:
+        """Return whether typed provenance reached the root-domain boundary.
+
+        Returns:
+            bool: Whether the origin is supported and at least one verified
+                root formal contributes to the constraint.
+        """
+        return self.origin in _DOMAIN_ELIGIBLE_ORIGINS and bool(self.root_formal_names)
+
+    def mapped(self, fn: Any) -> _ConstraintProvenance:
+        """Rewrite the recorded source expressions.
+
+        Args:
+            fn (Any): Callable that accepts and returns a SymPy expression.
+
+        Returns:
+            _ConstraintProvenance: Provenance with mapped source expressions
+                and unchanged stable formal names.
+        """
+        return dataclasses.replace(
+            self,
+            source_expressions=tuple(
+                cast(sp.Basic, fn(expression)) for expression in self.source_expressions
+            ),
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -92,6 +172,8 @@ class _ResourceConstraint:
             tuple.
         active_when (Boolean): Predicate under which the requirement applies.
             Defaults to true.
+        provenance (_ConstraintProvenance): Typed semantic origin and resolved
+            input lineage. Defaults to a non-eligible internal origin.
     """
 
     expression: ResourceExpr
@@ -104,6 +186,38 @@ class _ResourceConstraint:
     expected: ResourceExpr | None = None
     ranges: tuple[_ConstraintRange, ...] = ()
     active_when: Boolean = sp.true
+    provenance: _ConstraintProvenance = dataclasses.field(
+        default_factory=_ConstraintProvenance
+    )
+
+    @property
+    def domain_eligible(self) -> bool:
+        """Return whether this requirement can be offered to the domain prover.
+
+        Returns:
+            bool: Whether provenance is trusted and the requirement is
+                unguarded and range-free.
+        """
+        return _constraint_is_domain_eligible(self)
+
+    @property
+    def source_formals(self) -> tuple[str, ...]:
+        """Return stable root-qkernel formal names for this requirement.
+
+        Returns:
+            tuple[str, ...]: Verified source formal names in root-interface
+                order, or an empty tuple for a non-domain constraint.
+        """
+        return self.provenance.root_formal_names
+
+    def domain_predicate(self) -> Boolean | None:
+        """Return the supported Boolean input-domain predicate.
+
+        Returns:
+            Boolean | None: Exact equality or lower-bound predicate, or
+                ``None`` when this requirement must remain validation-only.
+        """
+        return _constraint_predicate(self)
 
     def mapped(self, fn: Any) -> _ResourceConstraint:
         """Rewrite and validate the constrained expression.
@@ -124,6 +238,7 @@ class _ResourceConstraint:
             expected=(fn(self.expected) if self.expected is not None else None),
             ranges=tuple(loop_range.mapped(fn) for loop_range in self.ranges),
             active_when=_boolean_condition(fn(self.active_when)),
+            provenance=self.provenance.mapped(fn),
         )
         mapped.validate()
         return mapped
@@ -664,6 +779,14 @@ class _ResourceConstraint:
         Raises:
             ValueError: If a concrete nonempty range violates the constraint.
         """
+        if any(
+            loop_symbol in expression.free_symbols
+            for expression in self.provenance.source_expressions
+        ):
+            self = dataclasses.replace(
+                self,
+                provenance=_ConstraintProvenance(),
+            )
         range_expressions = (
             expression
             for loop_range in self.ranges
@@ -744,3 +867,137 @@ class _ResourceConstraint:
         )
         bound.validate()
         return bound
+
+
+def _mark_root_domain_constraints(
+    constraints: Sequence[_ResourceConstraint],
+    root_formals: Mapping[sp.Symbol, str],
+) -> tuple[_ResourceConstraint, ...]:
+    """Mark typed constraints whose complete lineage belongs to root inputs.
+
+    SymPy symbol equality, rather than display spelling, defines membership in
+    the root interface. Equal non-``Dummy`` symbols represent the same SymPy
+    variable even when an IR view reconstructed the Python object. A symbol
+    with different assumptions and every identity-distinct ``Dummy`` remain
+    separate and cannot be promoted merely because their names match.
+    Quantified requirements remain unmarked because their bound symbols are
+    intentionally outside the root interface.
+
+    Args:
+        constraints (Sequence[_ResourceConstraint]): Structural requirements
+            after call and view mapping and before user input substitution.
+        root_formals (Mapping[sp.Symbol, str]): Root-interface symbols mapped
+            to their stable public formal names in interface order.
+
+    Returns:
+        tuple[_ResourceConstraint, ...]: Constraints with verified source
+            formal names attached only to supported typed origins.
+    """
+    formal_entries = tuple(root_formals.items())
+    marked: list[_ResourceConstraint] = []
+    for constraint in constraints:
+        provenance = dataclasses.replace(
+            constraint.provenance,
+            root_formal_names=(),
+        )
+        if provenance.origin not in _DOMAIN_ELIGIBLE_ORIGINS or constraint.ranges:
+            marked.append(dataclasses.replace(constraint, provenance=provenance))
+            continue
+
+        payload: list[sp.Basic] = [
+            constraint.expression,
+            constraint.active_when,
+            *provenance.source_expressions,
+        ]
+        if constraint.expected is not None:
+            payload.append(constraint.expected)
+        symbols = set().union(*(expression.free_symbols for expression in payload))
+        if (
+            not symbols
+            or any(isinstance(symbol, sp.Dummy) for symbol in symbols)
+            or any(symbol not in root_formals for symbol in symbols)
+        ):
+            marked.append(dataclasses.replace(constraint, provenance=provenance))
+            continue
+
+        names = tuple(name for symbol, name in formal_entries if symbol in symbols)
+        marked.append(
+            dataclasses.replace(
+                constraint,
+                provenance=dataclasses.replace(
+                    provenance,
+                    root_formal_names=names,
+                ),
+            )
+        )
+    return tuple(marked)
+
+
+def _constraint_predicate(
+    constraint: _ResourceConstraint,
+) -> Boolean | None:
+    """Build the supported domain predicate for one trusted requirement.
+
+    Args:
+        constraint (_ResourceConstraint): Constraint whose typed root
+            provenance, activation, range, and scalar facts are inspected.
+
+    Returns:
+        Boolean | None: Exact equality or lower-bound predicate, or ``None``
+            when the constraint must remain validation-only.
+    """
+    if not constraint.domain_eligible:
+        return None
+    expression = constraint.expression
+    if constraint.expected is not None:
+        return cast(Boolean, sp.Eq(expression, constraint.expected))
+    return constraint._minimum_relation(expression)
+
+
+def _constraint_is_domain_eligible(constraint: _ResourceConstraint) -> bool:
+    """Return whether a constraint satisfies the first-pass source grammar.
+
+    Args:
+        constraint (_ResourceConstraint): Typed structural requirement to
+            inspect before constructing its Boolean predicate.
+
+    Returns:
+        bool: Whether the requirement is trusted, unguarded, range-free,
+            finite, integral when required, and affine.
+    """
+    if (
+        not constraint.provenance.domain_eligible
+        or constraint.ranges
+        or constraint.active_when is not sp.true
+    ):
+        return False
+    expression = constraint.expression
+    if not _is_affine_domain_expression(expression):
+        return False
+    if (
+        constraint.integer and expression.is_integer is not True
+    ) or expression.is_finite is not True:
+        return False
+    if constraint.expected is not None:
+        if not _is_affine_domain_expression(constraint.expected):
+            return False
+        return (
+            constraint.minimum is None
+            and (not constraint.integer or constraint.expected.is_integer is True)
+            and constraint.expected.is_finite is True
+        )
+    return constraint.minimum is not None and (
+        constraint.integer or expression.is_real is True
+    )
+
+
+def _is_affine_domain_expression(expression: sp.Expr) -> bool:
+    """Return whether an expression is affine in all of its free symbols.
+
+    Args:
+        expression (sp.Expr): Candidate source side for a domain relation.
+
+    Returns:
+        bool: Whether bounded structural inspection proves an affine form.
+    """
+    return _extract_affine_domain_expression(expression) is not None

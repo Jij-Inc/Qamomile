@@ -20,6 +20,10 @@ from qamomile.circuit.estimator._dependency_metadata import (
     _project_dependency_metadata_over_symbol,
     _synchronized_entry_condition_symbols,
 )
+from qamomile.circuit.estimator._estimate_domain import (
+    _apply_domain_rewrite,
+    _restore_domain_rewrite,
+)
 from qamomile.circuit.estimator._estimate_provenance import _with_estimate_metadata
 from qamomile.circuit.estimator._estimate_transforms import (
     _repeat_estimate,
@@ -88,7 +92,15 @@ def _sum_estimate_over_range(
     Returns:
         ResourceEstimate: Estimate with additive metrics summed over the loop
             and width kept reusable.
+
+    Raises:
+        RuntimeError: If public resource metrics or metadata disagree with
+            retained canonical provenance.
+        ValueError: If the loop step or a retained structural constraint is
+            invalid.
     """
+    policy = estimate._domain_rewrite_policy
+    estimate = _restore_domain_rewrite(estimate)
     step_constraint = _ResourceConstraint(
         expression=sp.Abs(step),
         minimum=1,
@@ -110,7 +122,7 @@ def _sum_estimate_over_range(
         | _dependency_completion_symbols(estimate)
         | _synchronized_entry_condition_symbols(estimate)
     ) and not (conservative_nonuniform and dependency_key_varies):
-        return _project_dependency_metadata_over_symbol(
+        projected = _project_dependency_metadata_over_symbol(
             _with_constraints(
                 _repeat_estimate(
                     estimate,
@@ -125,6 +137,7 @@ def _sum_estimate_over_range(
             step=dependency_step,
             iterations=projected_iterations,
         )
+        return _apply_domain_rewrite(projected, policy=policy)
     width, allocation_sites, width_conservative_when = _maximum_width_over_range(
         estimate.width,
         estimate._allocation_sites,
@@ -282,6 +295,7 @@ def _sum_estimate_over_range(
             for fact in (estimate._guarded_approximations or ())
         ),
         _symbol_aliases=estimate._symbol_aliases,
+        _domain_rewrite_policy=policy,
     )
     if width_conservative_when is not sp.false:
         summed = _with_estimate_metadata(
@@ -326,10 +340,11 @@ def _sum_estimate_over_range(
                 quality=EstimateQuality.CONSERVATIVE,
                 active_when=active_twice,
             )
-    return _project_dependency_metadata_over_symbol(
+    projected = _project_dependency_metadata_over_symbol(
         summed,
         loop_symbol,
         start=dependency_start,
         step=dependency_step,
         iterations=projected_iterations,
     )
+    return _apply_domain_rewrite(projected, policy=policy)

@@ -33,6 +33,8 @@ class ResourceEstimateWireEncoder:
         Raises:
             TypeError: If ``estimate`` is not a ``ResourceEstimate``.
             ValueError: If the estimate exceeds the supported wire contract.
+            RuntimeError: If public resource metrics or metadata disagree with
+                retained canonical provenance.
         """
         return resource_estimate_to_wire(
             estimate,

@@ -31,7 +31,8 @@ class _ResourceEstimatorConfig:
     Args:
         strategies (dict[str, str]): Strategy overrides by callable name.
         trace (bool): Whether estimates should carry trace nodes.
-        simplify (bool): Whether to simplify the final estimate.
+        simplify (bool): Whether to simplify the final estimate, including
+            simplification over valid qkernel input conditions.
         unknown_policy (UnknownResourcePolicy): Handling for unknown opaque
             callables.
         control_decomposition (ControlDecomposition): Coherent-control

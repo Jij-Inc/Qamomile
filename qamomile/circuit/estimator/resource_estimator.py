@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
+
+import sympy as sp
 
 from qamomile.circuit.estimator._input_contract import (
     _contract_names,
@@ -36,6 +38,7 @@ from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.operation import (
     Operation,
 )
+from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase
 
 if TYPE_CHECKING:
     from qamomile.circuit.frontend.qkernel import QKernel
@@ -58,6 +61,7 @@ from qamomile.circuit.estimator._estimate import ResourceEstimate
 from qamomile.circuit.estimator._estimate_composition import (
     _SequentialEstimateComposer as _SequentialEstimateComposer,
 )
+from qamomile.circuit.estimator._estimate_domain import _DomainRewritePolicy
 from qamomile.circuit.estimator._estimate_provenance import (
     _DEFER_RESOURCE_SYMBOL_METADATA,
 )
@@ -82,6 +86,9 @@ from qamomile.circuit.estimator._opaque import (
 from qamomile.circuit.estimator._product_formula import (
     _apply_product_formula_contract,
     _require_concrete_product_formula_structure,
+)
+from qamomile.circuit.estimator._resource_constraints import (
+    _mark_root_domain_constraints,
 )
 from qamomile.circuit.estimator._symbolic import (
     _CappedRangeSum as _CappedRangeSum,
@@ -109,8 +116,71 @@ __all__ = [
 ]
 
 
+def _root_formal_resource_symbols(
+    block: Block,
+    resolver: ExprResolver,
+) -> dict[sp.Symbol, str]:
+    """Resolve exact root-formal symbol identities and stable input names.
+
+    Args:
+        block (Block): Root qkernel block whose interface is authoritative.
+        resolver (ExprResolver): Resolver configured for the root interface.
+
+    Returns:
+        dict[sp.Symbol, str]: Exact symbolic identities mapped to formal names.
+    """
+    slot_names = tuple(dict.fromkeys(slot.name for slot in block.param_slots))
+    values_by_name: dict[str, ValueBase] = {
+        value.name: value
+        for value in (*block.input_values, *block.parameters.values())
+        if isinstance(value, (Value, ArrayValue)) and value.name
+    }
+    symbols: dict[sp.Symbol, str] = {}
+    for name in slot_names:
+        value = values_by_name.get(name)
+        if isinstance(value, Value):
+            expression = resolver.resolve(value)
+            if isinstance(expression, sp.Symbol):
+                symbols[expression] = name
+    input_names = (
+        {
+            value.uuid: name
+            for name, value in zip(block.label_args, block.input_values, strict=True)
+        }
+        if len(block.label_args) == len(block.input_values)
+        else {}
+    )
+    for value in block.input_values:
+        if not isinstance(value, ArrayValue):
+            continue
+        formal_name = input_names.get(value.uuid) or value.name or "input"
+        for dimension in value.shape:
+            expression = resolver.resolve(dimension)
+            for symbol in cast(set[sp.Symbol], expression.free_symbols):
+                symbols[symbol] = formal_name
+    return symbols
+
+
 class ResourceEstimator:
-    """Estimate algorithmic resources for qkernels and IR blocks."""
+    """Estimate algorithmic resources for qkernels and IR blocks.
+
+    Args:
+        strategies (dict[str, str] | None): Strategy overrides by callable
+            name. Defaults to ``None``.
+        trace (bool): Whether to keep explanation traces. Defaults to
+            ``False``.
+        simplify (bool): Whether to simplify final expressions, including
+            simplification over valid qkernel input conditions. Defaults to
+            ``True``.
+        unknown_policy (str | UnknownResourcePolicy): Handling for unknown
+            bodyless callables. Defaults to ``ERROR``.
+        control_decomposition (str | ControlDecomposition): Coherent-control
+            decomposition. Defaults to ``CLEAN_ANCILLA_TOFFOLI``.
+
+    Raises:
+        ValueError: If ``unknown_policy`` or ``control_decomposition`` is
+            unknown.
+    """
 
     def __init__(
         self,
@@ -129,8 +199,12 @@ class ResourceEstimator:
                 name. Defaults to ``None``.
             trace (bool): Whether to keep explanation traces. Defaults to
                 ``False``.
-            simplify (bool): Whether to simplify the final estimate. Defaults
-                to ``True``.
+            simplify (bool): Whether to simplify the final estimate, including
+                simplification under valid qkernel input conditions. Consumed
+                conditions remain visible in ``ResourceEstimate.assumptions``.
+                Set to ``False`` to preserve the unconditional symbolic
+                formulas; calling ``ResourceEstimate.simplify()`` later
+                explicitly enables the domain-aware pass. Defaults to ``True``.
             unknown_policy (str | UnknownResourcePolicy): Handling for unknown
                 bodyless callables. Defaults to ``ERROR``.
             control_decomposition (str | ControlDecomposition):
@@ -190,6 +264,9 @@ class ResourceEstimator:
             ResourceEstimate: Algorithmic resource estimate.
 
         Raises:
+            RuntimeError: If a fixed or callback-provided opaque cost contains
+                public metrics or metadata that disagree with retained
+                canonical provenance.
             ValueError: If an input name is unknown, a callable resource
                 contract is malformed or violated, or a structural resource
                 requirement fails.
@@ -331,6 +408,25 @@ class ResourceEstimator:
         # and constraint validation path specializes every alternative rather
         # than reintroducing an already supplied symbol afterward.
         estimate = interpreter.resolve_finite_runtime_constraints(estimate)
+        if isinstance(block_or_ops, Block):
+            formal_resolver = ExprResolver(
+                block=block_or_ops,
+                context=_root_input_binding_context(
+                    block_or_ops,
+                    build_inputs,
+                ),
+            )
+            formal_symbols = _root_formal_resource_symbols(
+                block_or_ops,
+                formal_resolver,
+            )
+            estimate = dataclasses.replace(
+                estimate,
+                _constraints=_mark_root_domain_constraints(
+                    estimate._constraints,
+                    formal_symbols,
+                ),
+            )
         if build_inputs:
             estimate._refresh_symbol_metadata()
             estimate = _substitute_bindings(estimate, build_inputs)
@@ -362,8 +458,14 @@ class ResourceEstimator:
             # deeper than Python's recursion limit.  A disabled trace is not
             # observable, so discard it before symbolic mapping/simplification.
             estimate = dataclasses.replace(estimate, trace=None)
+        interpreter.validate_no_internal_resource_symbols(estimate)
         if config.simplify:
             estimate = estimate.simplify()
+        else:
+            estimate = dataclasses.replace(
+                estimate,
+                _domain_rewrite_policy=_DomainRewritePolicy.DISABLED,
+            )
         estimate = dataclasses.replace(
             estimate,
             control_decomposition=config.control_decomposition,
@@ -457,6 +559,9 @@ def estimate_resources(
         ResourceEstimate: Algorithmic resource estimate.
 
     Raises:
+        RuntimeError: If a fixed or callback-provided opaque cost contains
+            public metrics or metadata that disagree with retained canonical
+            provenance.
         ValueError: If the input specialization, estimator configuration,
             callable resource contract, or structural requirements are invalid.
         TypeError: If ``kernel`` is not a supported estimator input.

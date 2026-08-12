@@ -17,6 +17,8 @@ import sympy as sp
 import qamomile.circuit as qmc
 from qamomile.circuit.estimator import ResourceTraceNode
 from qamomile.circuit.estimator._resource_constraints import (
+    _ConstraintOrigin,
+    _ConstraintProvenance,
     _ConstraintRange,
     _ResourceConstraint,
 )
@@ -1604,6 +1606,48 @@ def test_fixed_opaque_resource_cost_round_trips_with_provenance() -> None:
     assert inactive.quality is qmc.EstimateQuality.EXACT
     assert inactive.approximation is qmc.ApproximationStatus.EXACT
     assert inactive.trace == expected_inactive.trace
+
+
+def test_stale_fixed_opaque_cost_is_rejected_by_public_serializers() -> None:
+    """Public qkernel serializers expose stale domain-state rejection."""
+    length = sp.Symbol("stale_length", integer=True)
+    stale = qmc.ResourceEstimate(
+        gates=qmc.GateResources(total=1 + sp.Max(0, length - 1)),
+        _constraints=(
+            _ResourceConstraint(
+                expression=length - 1,
+                minimum=0,
+                label="stale serialization input",
+                provenance=_ConstraintProvenance(
+                    origin=_ConstraintOrigin.ARRAY_ACCESS,
+                    source_expressions=(length,),
+                    root_formal_names=("stale_length",),
+                ),
+            ),
+        ),
+    ).simplify()
+    stale.gates.total = 999
+    oracle = qmc.Oracle(
+        name="serialization_stale_cost_oracle",
+        num_qubits=1,
+        cost=stale,
+    )
+
+    @qmc.qkernel
+    def calls_stale_cost() -> qmc.Bit:
+        """Invoke an oracle whose fixed cost was mutated after simplification.
+
+        Returns:
+            qmc.Bit: Measurement of the oracle target.
+        """
+        target = qmc.qubit("target")
+        (target,) = oracle(target)
+        return qmc.measure(target)
+
+    with pytest.raises(RuntimeError, match="domain rewrite state"):
+        kernel_to_dict(calls_stale_cost)
+    with pytest.raises(RuntimeError, match="domain rewrite state"):
+        serialize(calls_stale_cost)
 
 
 def test_fixed_opaque_resource_cost_has_process_deterministic_bytes() -> None:

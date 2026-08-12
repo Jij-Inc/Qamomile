@@ -31,6 +31,8 @@ class OpaqueCostEncoder:
             TypeError: If ``cost`` is a process-local callback or is not a
                 fixed ``ResourceEstimate``.
             ValueError: If the fixed estimate exceeds serialization limits.
+            RuntimeError: If public resource metrics or metadata disagree with
+                retained canonical provenance.
         """
         return encode_opaque_cost(cost, encoder=self._encoder)
 
@@ -76,6 +78,8 @@ def encode_opaque_cost(
         TypeError: If ``cost`` is a process-local callback or is not a fixed
             ``ResourceEstimate``.
         ValueError: If the fixed estimate exceeds serialization limits.
+        RuntimeError: If public resource metrics or metadata disagree with
+            retained canonical provenance.
     """
     if callable(cost):
         raise TypeError(
