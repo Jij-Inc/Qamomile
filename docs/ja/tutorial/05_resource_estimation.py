@@ -151,35 +151,6 @@ assert any(
 )
 
 # %% [markdown]
-# #### 有効な入力範囲を使った簡約
-#
-# `ghz_state`では、1個のHadamardゲートと`n - 1`個のCXゲートを使います。`qmc.UInt`そのものは0も表せますが、この量子カーネルは`qubits[0]`へ無条件にアクセスするため、有効な入力は`n >= 1`です。リソース推定器は、この入力要件を使って`1 + Max(0, n - 1)`を`n`へ簡約します。
-#
-# 簡約に使った`n >= 1`という条件は`assumptions`に残ります。この有効な入力範囲のassumption自体は`quality`を下げません。なお、この例の`quality`は、シンボリックな幅の測定に対する別の依存関係のassumptionによって`CONSERVATIVE`です。`n=0`を`inputs`または`.substitute()`で与えると、もっともらしいリソース数を返すのではなく`ValueError`になります。`if n > 0: ...`のように先頭要素へのアクセスを条件で保護した量子カーネルなら、0も有効になり、リソースが0の分岐が保たれます。
-#
-# `ResourceEstimator(simplify=False)`を使うと、この有効な入力範囲を使った簡約を無効にして、無条件の`Max`や`Piecewise`を含む式を保てます。`.substitute()`はこの設定を維持し、明示的に`.simplify()`を呼ぶと有効な入力範囲を使った簡約が有効になります。
-
-
-# %%
-ghz_unsimplified_estimate = qmc.ResourceEstimator(simplify=False).estimate(ghz_state)
-ghz_unsimplified_n = ghz_unsimplified_estimate.parameters["n"]
-
-assert ghz_unsimplified_estimate.gates.total == 1 + sp.Max(0, ghz_unsimplified_n - 1)
-assert not any(
-    assumption.source == "qkernel input domain"
-    for assumption in ghz_unsimplified_estimate.assumptions
-)
-
-ghz_resimplified_estimate = ghz_unsimplified_estimate.simplify()
-
-assert ghz_resimplified_estimate.gates.total == ghz_unsimplified_n
-assert ghz_unsimplified_estimate.substitute(n=4).gates.total == 4
-assert any(
-    assumption.source == "qkernel input domain"
-    for assumption in ghz_resimplified_estimate.assumptions
-)
-
-# %% [markdown]
 # ### 1.3 特定の入力で具体化する
 #
 # 特定の入力に対する具体的な値が必要な場合は、推定時に`inputs`を渡す方法と、すでに得たシンボリックな推定結果へ`.substitute()`を適用する方法があります。
@@ -999,7 +970,7 @@ assert (
 # %% [markdown]
 # ### 5.2 assumptions
 #
-# `assumptions`には、三つの項目だけでは表せない具体的な前提や理由が入ります。これにはモデル上の仮定だけでなく、リソース式の簡約に使った未具体化の有効な入力条件も含まれます。各要素は、説明文の`message`と、原因となった演算などを示す`source`を持ちます。有効な入力条件は式の適用範囲を示すものであり、それだけで`quality`が`EXACT`から下がるわけではありません。
+# `assumptions`には、三つの項目だけでは表せない具体的な前提や理由が入ります。これにはモデル上の仮定だけでなく、リソース式の簡約に使った未具体化の有効な入力条件も含まれます。リソース推定器は、量子カーネルの入力型、量子ビット配列を含む配列のshape、配列要素へのアクセス、viewの範囲などから有効な入力条件を導ける場合、その条件が成り立つ範囲でリソース式を簡約し、未具体化の条件を`assumptions`に残します。各要素は、説明文の`message`と、原因となった演算などを示す`source`を持ちます。有効な入力条件は式の適用範囲を示すものであり、それだけで`quality`が`EXACT`から下がるわけではありません。上のGHZ例では、CXの列を実行した後に各量子ビットが準備できる時刻が異なります。現在の推定器は、このループと後続の`measure(qubits)`との依存を、量子ビットごとの完了時刻ではなくループ全体の最長時間を使って安全側に扱うため、早く準備できた量子ビットの測定を必要以上に遅く見積もる可能性があります。そのため`quality`は`CONSERVATIVE`になりますが、このGHZでは最後に準備できる量子ビットが実際の全体の深さも決めるので、推定された深さ`n + 1`は実際のスケジュールと一致します。これは有効な入力条件を使った簡約とは別の理由です。
 
 # %% [markdown]
 # `ZERO_WITH_WARNING`を使った推定結果には、costのないOracleを0として数えたことが記録されます。

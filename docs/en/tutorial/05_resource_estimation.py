@@ -151,35 +151,6 @@ assert any(
 )
 
 # %% [markdown]
-# #### Simplification over Valid Inputs
-#
-# `ghz_state` uses one Hadamard gate and `n - 1` CX gates. Although `qmc.UInt` itself includes zero, this qkernel accesses `qubits[0]` unconditionally, so its valid inputs satisfy `n >= 1`. The resource estimator uses this input requirement to simplify `1 + Max(0, n - 1)` to `n`.
-#
-# The consumed condition `n >= 1` remains visible in `assumptions`. This valid-input assumption does not itself lower `quality`. In this example, `quality` is `CONSERVATIVE` because of a separate dependency assumption for measuring a symbolically sized array. Supplying `n=0` through `inputs` or `.substitute()` raises `ValueError` instead of returning a plausible-looking resource count. A qkernel that guards the first-element access with a condition such as `if n > 0: ...` would make zero valid and retain a zero-resource branch.
-#
-# `ResourceEstimator(simplify=False)` disables simplification over the valid-input domain and preserves the unconditional expression containing `Max` or `Piecewise`. `.substitute()` preserves this setting, while an explicit `.simplify()` enables domain-aware simplification.
-
-
-# %%
-ghz_unsimplified_estimate = qmc.ResourceEstimator(simplify=False).estimate(ghz_state)
-ghz_unsimplified_n = ghz_unsimplified_estimate.parameters["n"]
-
-assert ghz_unsimplified_estimate.gates.total == 1 + sp.Max(0, ghz_unsimplified_n - 1)
-assert not any(
-    assumption.source == "qkernel input domain"
-    for assumption in ghz_unsimplified_estimate.assumptions
-)
-
-ghz_resimplified_estimate = ghz_unsimplified_estimate.simplify()
-
-assert ghz_resimplified_estimate.gates.total == ghz_unsimplified_n
-assert ghz_unsimplified_estimate.substitute(n=4).gates.total == 4
-assert any(
-    assumption.source == "qkernel input domain"
-    for assumption in ghz_resimplified_estimate.assumptions
-)
-
-# %% [markdown]
 # ### 1.3 Specialize an Estimate for a Particular Input
 #
 # To obtain concrete values for a particular input, either pass `inputs` while estimating or apply `.substitute()` to an existing symbolic estimate.
@@ -999,7 +970,7 @@ assert (
 # %% [markdown]
 # ### 5.2 Assumptions
 #
-# `assumptions` contains specific premises and reasons that the other three fields alone cannot express. These include not only model assumptions but also unresolved valid-input conditions used to simplify resource expressions. Each item has a descriptive `message` and a `source` identifying the responsible operation or other origin. A valid-input condition specifies the domain over which an expression applies; by itself, it does not reduce `quality` from `EXACT`.
+# `assumptions` contains specific premises and reasons that the other three fields alone cannot express. These include not only model assumptions but also unresolved valid-input conditions used to simplify resource expressions. When the resource estimator can derive valid-input conditions from qkernel input types, array shapes including qubit-array shapes, array element accesses, or view coverage, it simplifies resource expressions over that domain and retains any unresolved conditions in `assumptions`. Each item has a descriptive `message` and a `source` identifying the responsible operation or other origin. A valid-input condition specifies the domain over which an expression applies; by itself, it does not reduce `quality` from `EXACT`. In the GHZ example above, the qubits become ready at different times after the CX chain. The current estimator conservatively relates this loop to the subsequent `measure(qubits)` using the longest latency of the whole loop rather than each qubit's individual completion time, so it may schedule measurements of earlier-ready qubits later than necessary. This makes `quality` `CONSERVATIVE`. In this GHZ qkernel, however, the last-ready qubit also determines the actual total depth, so the estimated depth `n + 1` matches the actual schedule. This is separate from simplification over the valid input domain.
 
 # %% [markdown]
 # An estimate produced with `ZERO_WITH_WARNING` records that an Oracle without a cost was counted as zero.
