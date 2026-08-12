@@ -9,6 +9,11 @@ from typing import cast
 import sympy as sp
 from sympy.logic.boolalg import Boolean
 
+from qamomile.circuit.estimator._affine_loop_scheduling import (
+    _align_affine_entry_conditions,
+    _LoopCompletionMode,
+    _symbolic_affine_loop_schedule,
+)
 from qamomile.circuit.estimator._array_state import (
     _ArrayState,
     _unknown_loop_array_summary_state,
@@ -30,10 +35,25 @@ from qamomile.circuit.estimator._dependency_exactness import (
 )
 from qamomile.circuit.estimator._dependency_footprints import (
     _classical_dependency_key,
+    _is_classical_dependency_key,
     _WireFootprint,
+)
+from qamomile.circuit.estimator._dependency_indices import (
+    WireKey,
+    _normalize_wire_index,
+    _specialize_dependency_expression,
+    _wire_index_covers,
+    _wire_index_relation_under,
+    _WireRelation,
 )
 from qamomile.circuit.estimator._dependency_metadata import (
     _dependency_keys_depend_on_symbol,
+    _merge_synchronized_entry_conditions,
+)
+from qamomile.circuit.estimator._dependency_synchronization import (
+    _clear_synchronized_entry_frontiers,
+    _merge_synchronized_entry_certificates,
+    _SynchronizedEntryCertificate,
 )
 from qamomile.circuit.estimator._estimate import (
     ResourceEstimate,
@@ -43,9 +63,6 @@ from qamomile.circuit.estimator._loop_scheduling import (
     _concrete_loop_dependency_completion,
     _disjoint_concrete_loop_depth,
     _loop_body_has_symbolic_quantum_index,
-    _symbolic_disjoint_loop_depth,
-    _symbolic_shared_anchor_loop_entry_keys,
-    _symbolic_triangular_pair_loop_depth,
     _uniform_parallel_loop_dependency_completion,
 )
 from qamomile.circuit.estimator._resolver import (
@@ -75,7 +92,7 @@ from qamomile.circuit.estimator._scheduling import (
     _estimate_depth_activity_condition,
     _estimate_has_nonzero_depth,
     _scheduled_depth_activity_conditions,
-    _synchronized_entry_overlap_condition,
+    _synchronized_entry_scan,
 )
 from qamomile.circuit.estimator._scopes import (
     _typed_value_symbol,
@@ -136,6 +153,85 @@ def _loop_requires_hamiltonian_element_replay(operation: ForOperation) -> bool:
                 visited.add(current)
                 pending.extend(graph.get(current, ()))
     return False
+
+
+def _serial_entry_certificate(
+    sequential: ResourceEstimate,
+    frontier: frozenset[WireKey] | None,
+    active_when: Boolean,
+    *,
+    scalar_values: Mapping[str, sp.Expr] | None = None,
+    used_names: set[str] | None = None,
+) -> _SynchronizedEntryCertificate | None:
+    """Build a grouped serial-entry certificate from projected dependencies.
+
+    The full coverage uses the immediate loop estimate's caller-visible
+    quantum keys. The first-gate frontier is accepted only when every scalar
+    key is proven to lie inside that same projection under the certificate
+    guard; otherwise the caller falls back to the legacy full-synchronization
+    requirement.
+
+    Args:
+        sequential (ResourceEstimate): Exact scalar loop sum whose dependency
+            keys define the complete serial-chain coverage.
+        frontier (frozenset[WireKey] | None): Exact physical inputs of the
+            first serial gate, or ``None`` when projection failed.
+        active_when (Boolean): Guard under which at least two serial gates
+            execute.
+        scalar_values (Mapping[str, sp.Expr] | None): Optional concrete scalar
+            inputs used only to resolve physical frontier addresses. Defaults
+            to ``None``.
+        used_names (set[str] | None): Optional set updated with scalar input
+            names used by physical specialization. Defaults to ``None``.
+
+    Returns:
+        _SynchronizedEntryCertificate | None: Grouped certificate, or ``None``
+            when coverage and frontier cannot be related exactly.
+    """
+    if frontier is None or sequential._dependency_keys is None:
+        return None
+    specialized_frontier = frozenset(
+        (
+            owner,
+            _normalize_wire_index(
+                _specialize_dependency_expression(
+                    index,
+                    scalar_values,
+                    used_names,
+                )
+            ),
+        )
+        if isinstance(index, sp.Expr)
+        else (owner, index)
+        for owner, index in frontier
+    )
+    coverage = frozenset(
+        key
+        for key in sequential._dependency_keys
+        if not _is_classical_dependency_key(key)
+    )
+    if not coverage:
+        return None
+    for frontier_owner, frontier_index in specialized_frontier:
+        if not any(
+            coverage_owner == frontier_owner
+            and (
+                _wire_index_covers(coverage_index, frontier_index)
+                or _wire_index_relation_under(
+                    coverage_index,
+                    frontier_index,
+                    active_when,
+                )
+                is _WireRelation.DEFINITE_OVERLAP
+            )
+            for coverage_owner, coverage_index in coverage
+        ):
+            return None
+    return _SynchronizedEntryCertificate(
+        coverage=coverage,
+        frontier=specialized_frontier,
+        active_when=active_when,
+    )
 
 
 class _LoopSupportInterpreter(_PrimitiveInterpreter):
@@ -389,11 +485,13 @@ class _LoopSupportInterpreter(_PrimitiveInterpreter):
         if _expr(controls) != _ZERO or loop_barrier_condition is sp.true:
             return sequential
 
+        affine_schedule = None
         if loop_barrier_condition is sp.false:
-            triangular = _symbolic_triangular_pair_loop_depth(
+            affine_schedule = _symbolic_affine_loop_schedule(
                 operation,
                 body_resolver,
                 body.depth,
+                sequential.depth,
                 loop_symbol=loop_symbol,
                 start=start,
                 stop=stop,
@@ -402,61 +500,75 @@ class _LoopSupportInterpreter(_PrimitiveInterpreter):
                 allocated_qubits=body.width.allocated_qubits,
                 clean_ancillas=body.width.clean_ancilla_qubits,
                 dirty_ancillas=body.width.dirty_ancilla_qubits,
+                owner_aliases=self._run_state.dependency_owner_aliases,
                 scalar_values=self._run_state.condition_values,
                 used_names=self._run_state.branch_condition_names,
             )
-            if triangular is not None and sequential._dependency_keys is not None:
-                triangular_depth, entry_keys = triangular
-                entry_active = _boolean_condition(sp.Gt(iterations, 2))
+
+        parallel_depth = None
+        affine_entry_conditions = {}
+        if affine_schedule is not None:
+            if affine_schedule.completion_mode is _LoopCompletionMode.KEEP_SEQUENTIAL:
+                certificate = _serial_entry_certificate(
+                    sequential,
+                    affine_schedule.serial_frontier,
+                    affine_schedule.serial_active_when,
+                    scalar_values=self._run_state.condition_values,
+                    used_names=self._run_state.branch_condition_names,
+                )
+                if certificate is not None:
+                    return dataclasses.replace(
+                        sequential,
+                        _dependency_synchronized_entry_certificates=(
+                            _merge_synchronized_entry_certificates(
+                                sequential._dependency_synchronized_entry_certificates,
+                                (certificate,),
+                            )
+                        ),
+                    )
+                affine_entry_conditions = dict(
+                    _align_affine_entry_conditions(
+                        affine_schedule.synchronized_entry_conditions,
+                        sequential._dependency_keys,
+                    )
+                )
                 return dataclasses.replace(
                     sequential,
-                    depth=triangular_depth,
+                    _dependency_synchronized_entry_conditions=(
+                        _merge_synchronized_entry_conditions(
+                            sequential._dependency_synchronized_entry_conditions,
+                            affine_entry_conditions,
+                        )
+                    ),
+                )
+            affine_entry_conditions = dict(
+                _align_affine_entry_conditions(
+                    affine_schedule.synchronized_entry_conditions,
+                    sequential._dependency_keys,
+                )
+            )
+            if (
+                affine_schedule.completion_mode is _LoopCompletionMode.AGGREGATE_SAFE
+                and sequential._dependency_keys is not None
+            ):
+                return dataclasses.replace(
+                    sequential,
+                    depth=affine_schedule.depth,
                     _dependency_completion={
-                        key: triangular_depth.depth
+                        key: affine_schedule.depth.depth
                         for key in sequential._dependency_keys
                     },
                     _dependency_completion_uniform=False,
-                    _dependency_synchronized_entry_conditions={
-                        key: entry_active for key in entry_keys
-                    },
+                    _dependency_synchronized_entry_conditions=(
+                        _merge_synchronized_entry_conditions(
+                            sequential._dependency_synchronized_entry_conditions,
+                            affine_entry_conditions,
+                        )
+                    ),
                     _global_barrier_condition=sp.false,
                 )
-
-            shared_anchor_keys = _symbolic_shared_anchor_loop_entry_keys(
-                operation,
-                body_resolver,
-                body.depth,
-                loop_symbol=loop_symbol,
-                start=start,
-                step=step,
-                iterations=iterations,
-                allocated_qubits=body.width.allocated_qubits,
-                clean_ancillas=body.width.clean_ancilla_qubits,
-                dirty_ancillas=body.width.dirty_ancilla_qubits,
-                scalar_values=self._run_state.condition_values,
-                used_names=self._run_state.branch_condition_names,
-            )
-            if shared_anchor_keys is not None:
-                entry_active = _boolean_condition(sp.Gt(iterations, _ONE))
-                return dataclasses.replace(
-                    sequential,
-                    _dependency_synchronized_entry_conditions={
-                        key: entry_active for key in shared_anchor_keys
-                    },
-                )
-
-        parallel_depth = _symbolic_disjoint_loop_depth(
-            operation,
-            body_resolver,
-            body.depth,
-            loop_symbol=loop_symbol,
-            iterations=iterations,
-            allocated_qubits=body.width.allocated_qubits,
-            clean_ancillas=body.width.clean_ancilla_qubits,
-            dirty_ancillas=body.width.dirty_ancilla_qubits,
-            scalar_values=self._run_state.condition_values,
-            used_names=self._run_state.branch_condition_names,
-        )
+            if affine_schedule.completion_mode is _LoopCompletionMode.PROJECT_PARALLEL:
+                parallel_depth = affine_schedule.depth
         if parallel_depth is None:
             parallel_depth = _disjoint_concrete_loop_depth(
                 operation,
@@ -470,6 +582,7 @@ class _LoopSupportInterpreter(_PrimitiveInterpreter):
                 allocated_qubits=body.width.allocated_qubits,
                 clean_ancillas=body.width.clean_ancilla_qubits,
                 dirty_ancillas=body.width.dirty_ancilla_qubits,
+                owner_aliases=self._run_state.dependency_owner_aliases,
                 scalar_values=self._run_state.condition_values,
                 used_names=self._run_state.branch_condition_names,
             )
@@ -564,6 +677,12 @@ class _LoopSupportInterpreter(_PrimitiveInterpreter):
                     for field in dataclasses.fields(DepthResources)
                 )
             ),
+            _dependency_synchronized_entry_conditions=(
+                _merge_synchronized_entry_conditions(
+                    sequential._dependency_synchronized_entry_conditions,
+                    affine_entry_conditions,
+                )
+            ),
             _global_barrier_condition=sp.false,
         )
         if parallel_completion is None and parallel_estimate._dependency_keys:
@@ -607,10 +726,30 @@ class _LoopSupportInterpreter(_PrimitiveInterpreter):
             ResourceEstimate: Combined estimate with dependency-scheduled
                 depth and caller-visible wire completion when available.
         """
-        if not entry_estimates or any(
-            estimate.width.allocated_qubits != _ZERO for estimate in entry_estimates
-        ):
+        combined = dataclasses.replace(
+            combined,
+            _dependency_synchronized_entry_certificates=(
+                _clear_synchronized_entry_frontiers(
+                    combined._dependency_synchronized_entry_certificates
+                )
+            ),
+        )
+        entry_estimates = tuple(
+            dataclasses.replace(
+                estimate,
+                _dependency_synchronized_entry_certificates=(
+                    _clear_synchronized_entry_frontiers(
+                        estimate._dependency_synchronized_entry_certificates
+                    )
+                ),
+            )
+            for estimate in entry_estimates
+        )
+        if not entry_estimates:
             return combined
+        has_body_local_allocations = any(
+            estimate.width.allocated_qubits != _ZERO for estimate in entry_estimates
+        )
 
         scheduled: list[tuple[Operation, ResourceEstimate]] = []
         footprints: list[_WireFootprint | None] = []
@@ -643,56 +782,67 @@ class _LoopSupportInterpreter(_PrimitiveInterpreter):
             footprints.append((reads, writes))
 
         depth_activity_conditions = _scheduled_depth_activity_conditions(scheduled)
-        (
-            scheduled_depth,
-            scheduled_completion,
-            possible_alias_active,
-            completion_is_uniform,
-        ) = _dependency_depth(
-            scheduled,
-            footprints,
-            activity_conditions=depth_activity_conditions,
-            scalar_values=self._run_state.condition_values,
-            used_names=self._run_state.branch_condition_names,
-        )
-        result = dataclasses.replace(
-            combined,
-            depth=scheduled_depth,
-            _dependency_completion=scheduled_completion,
-            _dependency_completion_uniform=completion_is_uniform,
-        )
-        if possible_alias_active is not sp.false:
-            assumption = ResourceAssumption(
-                "concrete loop quantum indices may alias and are "
-                "scheduled conservatively",
-                source="loop dependency scheduler",
-            )
-            result = result._with_metadata(
-                assumptions=(assumption,),
-                quality=EstimateQuality.CONSERVATIVE,
-                active_when=possible_alias_active,
-            )
-        aggregate_completion_active = _aggregate_completion_overlap_condition(
+        synchronized_entry = _synchronized_entry_scan(
             scheduled,
             footprints,
             activity_conditions=depth_activity_conditions,
         )
-        if aggregate_completion_active is not sp.false:
-            assumption = ResourceAssumption(
-                "aggregate loop-iteration latency may over-serialize a "
-                "later wire dependency",
-                source="loop dependency scheduler",
-            )
-            result = result._with_metadata(
-                assumptions=(assumption,),
-                quality=EstimateQuality.CONSERVATIVE,
-                active_when=aggregate_completion_active,
-            )
-        synchronized_entry_active = _synchronized_entry_overlap_condition(
-            scheduled,
-            footprints,
-            activity_conditions=depth_activity_conditions,
+        residual_certificates = _clear_synchronized_entry_frontiers(
+            synchronized_entry.residual_certificates
         )
+        if has_body_local_allocations:
+            result = dataclasses.replace(
+                combined,
+                _dependency_synchronized_entry_certificates=residual_certificates,
+            )
+        else:
+            (
+                scheduled_depth,
+                scheduled_completion,
+                possible_alias_active,
+                completion_is_uniform,
+            ) = _dependency_depth(
+                scheduled,
+                footprints,
+                activity_conditions=depth_activity_conditions,
+                scalar_values=self._run_state.condition_values,
+                used_names=self._run_state.branch_condition_names,
+            )
+            result = dataclasses.replace(
+                combined,
+                depth=scheduled_depth,
+                _dependency_completion=scheduled_completion,
+                _dependency_completion_uniform=completion_is_uniform,
+                _dependency_synchronized_entry_certificates=residual_certificates,
+            )
+            if possible_alias_active is not sp.false:
+                assumption = ResourceAssumption(
+                    "concrete loop quantum indices may alias and are "
+                    "scheduled conservatively",
+                    source="loop dependency scheduler",
+                )
+                result = result._with_metadata(
+                    assumptions=(assumption,),
+                    quality=EstimateQuality.CONSERVATIVE,
+                    active_when=possible_alias_active,
+                )
+            aggregate_completion_active = _aggregate_completion_overlap_condition(
+                scheduled,
+                footprints,
+                activity_conditions=depth_activity_conditions,
+            )
+            if aggregate_completion_active is not sp.false:
+                assumption = ResourceAssumption(
+                    "aggregate loop-iteration latency may over-serialize a "
+                    "later wire dependency",
+                    source="loop dependency scheduler",
+                )
+                result = result._with_metadata(
+                    assumptions=(assumption,),
+                    quality=EstimateQuality.CONSERVATIVE,
+                    active_when=aggregate_completion_active,
+                )
+        synchronized_entry_active = synchronized_entry.violation
         if synchronized_entry_active is not sp.false:
             assumption = ResourceAssumption(
                 "aggregate loop-iteration depth assumes synchronized input "

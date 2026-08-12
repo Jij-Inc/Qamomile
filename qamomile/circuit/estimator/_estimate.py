@@ -14,6 +14,9 @@ from qamomile.circuit.estimator._constants import (
     _ONE,
 )
 from qamomile.circuit.estimator._dependency_indices import WireKey
+from qamomile.circuit.estimator._dependency_synchronization import (
+    _SynchronizedEntryCertificate,
+)
 from qamomile.circuit.estimator._estimate_composition import (
     _compose_choice,
     _compose_conditional,
@@ -133,6 +136,12 @@ class ResourceEstimate:
             the listed caller-visible wires enter the operation at the same
             dependency layer. The enclosing scheduler marks a result
             conservative when prior work may violate that requirement.
+        _dependency_synchronized_entry_certificates (
+            tuple[_SynchronizedEntryCertificate, ...]
+        ): Grouped synchronized-entry premises. Each certificate keeps its
+            complete reset coverage, exact safe first-gate frontier, and
+            activation guard together so unrelated frontiers cannot be
+            combined. Defaults to an empty tuple.
         _global_barrier_condition (Boolean): Condition under which an opaque,
             nested non-unitary, or runtime-control boundary lacks enough
             wire-level provenance for exact dependency scheduling.
@@ -227,6 +236,13 @@ class ResourceEstimate:
             repr=False,
             compare=False,
         )
+    )
+    _dependency_synchronized_entry_certificates: tuple[
+        _SynchronizedEntryCertificate, ...
+    ] = dataclasses.field(
+        default_factory=tuple,
+        repr=False,
+        compare=False,
     )
     _global_barrier_condition: Boolean = dataclasses.field(
         default=sp.false,

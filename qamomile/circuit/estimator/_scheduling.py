@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import heapq
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, cast
 
@@ -19,8 +20,15 @@ from qamomile.circuit.estimator._dependency_indices import (
     WireKey,
     _OwnerWireIndices,
     _specialize_dependency_expression,
+    _wire_index_covers,
+    _wire_index_overlap_condition,
     _wire_index_relation,
+    _wire_index_relation_under,
     _WireRelation,
+)
+from qamomile.circuit.estimator._dependency_synchronization import (
+    _merge_synchronized_entry_certificates,
+    _SynchronizedEntryCertificate,
 )
 from qamomile.circuit.estimator._resource_base import (
     EstimateQuality,
@@ -64,6 +72,25 @@ from qamomile.circuit.ir.operation.select import SelectOperation
 
 if TYPE_CHECKING:
     from qamomile.circuit.estimator._estimate import ResourceEstimate
+
+
+_SYNCHRONIZED_ENTRY_EXACT_EVENT_LIMIT = 32
+
+
+@dataclasses.dataclass(frozen=True)
+class _SynchronizedEntryScan:
+    """Carry synchronized-entry violations and unresolved certificates.
+
+    Args:
+        violation (Boolean): Guard under which at least one aggregate premise
+            was violated inside the scanned operation sequence.
+        residual_certificates (tuple[_SynchronizedEntryCertificate, ...]):
+            Grouped premises that no internal event discharged or violated and
+            therefore remain requirements of the enclosing caller.
+    """
+
+    violation: Boolean
+    residual_certificates: tuple[_SynchronizedEntryCertificate, ...]
 
 
 def _estimate_has_nonzero_depth(estimate: ResourceEstimate) -> bool:
@@ -448,19 +475,353 @@ def _aggregate_completion_overlap_condition(
     )
 
 
-def _synchronized_entry_overlap_condition(
+def _candidate_synchronized_entry_events(
+    keys: Sequence[WireKey],
+    prior_wire_indices: Mapping[str, _OwnerWireIndices],
+    prior_events_by_key: Mapping[WireKey, list[int]],
+) -> list[int]:
+    """Return relevant prior event indices in reverse program order.
+
+    Args:
+        keys (Sequence[WireKey]): Current physical coverage to query.
+        prior_wire_indices (Mapping[str, _OwnerWireIndices]): Indexed prior
+            addresses grouped by allocation owner.
+        prior_events_by_key (Mapping[WireKey, list[int]]): Ascending event
+            indices associated with each indexed physical key.
+
+    Returns:
+        list[int]: Deduplicated candidate event indices, newest first.
+    """
+    candidate_keys: set[WireKey] = set()
+    for owner, index in keys:
+        owner_indices = prior_wire_indices.get(owner)
+        if owner_indices is None:
+            continue
+        for candidate_index in owner_indices.candidates(index):
+            if _wire_index_relation(index, candidate_index) is _WireRelation.DISJOINT:
+                continue
+            candidate_keys.add((owner, candidate_index))
+    event_lists = (reversed(prior_events_by_key[key]) for key in candidate_keys)
+    return list(dict.fromkeys(heapq.merge(*event_lists, reverse=True)))
+
+
+def _event_key_frontier_condition(
+    event_key: WireKey,
+    frontier: frozenset[WireKey],
+) -> Boolean:
+    """Return when one complete event address lies inside the frontier.
+
+    Args:
+        event_key (WireKey): Prior event address that overlaps certificate
+            coverage.
+        frontier (frozenset[WireKey]): Exact first-gate scalar addresses.
+    Returns:
+        Boolean: Exact known confinement guard. Unsupported range or alias
+            forms conservatively return false.
+    """
+    event_owner, event_index = event_key
+    conditions: list[Boolean] = []
+    for frontier_key in frontier:
+        frontier_owner, frontier_index = frontier_key
+        if frontier_owner != event_owner:
+            continue
+        if frontier_key == event_key or _wire_index_covers(
+            frontier_index,
+            event_index,
+        ):
+            return sp.true
+        if isinstance(event_index, (int, sp.Expr)):
+            overlap = _wire_index_overlap_condition(frontier_index, event_index)
+            if overlap is not None:
+                conditions.append(overlap)
+    return _boolean_condition(sp.Or(*conditions) if conditions else sp.false)
+
+
+def _grouped_frontier_dependency_condition(
+    estimate: ResourceEstimate,
+    read_key: WireKey,
+    event_key: WireKey,
+) -> Boolean:
+    """Return when one possible dependency is a certified frontier event.
+
+    A serial-chain certificate makes differing readiness on its first gate
+    operands exact.  The ordinary dependency scheduler may still see a
+    symbolic range/scalar alias between that aggregate and an earlier scalar
+    event.  Keep the safe dependency upper bound, but suppress its alias
+    disclosure exactly when the read is one of the certificate's own coverage
+    descriptors and the earlier event resolves inside the guarded frontier.
+
+    Args:
+        estimate (ResourceEstimate): Current aggregate carrying grouped
+            serial-entry certificates.
+        read_key (WireKey): Current dependency read being scheduled.
+        event_key (WireKey): Earlier possible dependency address.
+
+    Returns:
+        Boolean: Guard under which the earlier event is certified as frontier
+            work for this exact aggregate read.
+    """
+    conditions: list[Boolean] = []
+    for certificate in estimate._dependency_synchronized_entry_certificates:
+        if read_key not in certificate.coverage:
+            continue
+        confined = _event_key_frontier_condition(event_key, certificate.frontier)
+        if confined is sp.false:
+            continue
+        conditions.append(_and_conditions(certificate.active_when, confined))
+    return _boolean_condition(sp.Or(*conditions) if conditions else sp.false)
+
+
+def _event_certificate_hazard_condition(
+    event_keys: frozenset[WireKey],
+    certificate: _SynchronizedEntryCertificate,
+) -> Boolean:
+    """Return when one prior event touches non-frontier coverage.
+
+    The decision is event-level: touching one safe frontier key never exempts
+    another key from the same operation that may touch a late chain wire.
+
+    Args:
+        event_keys (frozenset[WireKey]): Complete prior quantum footprint.
+        certificate (_SynchronizedEntryCertificate): Grouped serial-chain
+            coverage and first-gate frontier.
+    Returns:
+        Boolean: Exact guarded hazard when supported, or a conservative true
+            predicate for an unresolved possible overlap.
+    """
+    hazards: list[Boolean] = []
+    for event_key in event_keys:
+        event_owner, event_index = event_key
+        overlaps: list[Boolean] = []
+        for coverage_owner, coverage_index in certificate.coverage:
+            if coverage_owner != event_owner:
+                continue
+            overlap = _wire_index_overlap_condition(coverage_index, event_index)
+            overlaps.append(sp.true if overlap is None else overlap)
+        if not overlaps:
+            continue
+        overlaps_coverage = _boolean_condition(sp.Or(*overlaps))
+        confined = _event_key_frontier_condition(
+            event_key,
+            certificate.frontier,
+        )
+        hazards.append(_boolean_condition(sp.And(overlaps_coverage, sp.Not(confined))))
+    return _boolean_condition(sp.Or(*hazards) if hazards else sp.false)
+
+
+def _uniform_event_covers(
+    estimate: ResourceEstimate,
+    writes: frozenset[WireKey],
+    coverage: Sequence[WireKey],
+) -> bool:
+    """Prove that one uniform event writes every required physical key.
+
+    Args:
+        estimate (ResourceEstimate): Prior event resource summary.
+        writes (frozenset[WireKey]): Prior event quantum writes.
+        coverage (Sequence[WireKey]): Complete reset domain to cover.
+
+    Returns:
+        bool: Whether one exact-uniform write event covers the full domain.
+    """
+    return estimate._dependency_completion_uniform is True and all(
+        any(
+            write_owner == required_owner
+            and _wire_index_covers(write_index, required_index)
+            for write_owner, write_index in writes
+        )
+        for required_owner, required_index in coverage
+    )
+
+
+def _scan_legacy_entry_requirements(
+    requirements: Mapping[WireKey, Boolean],
+    current_active: Boolean,
+    prior: Sequence[
+        tuple[
+            ResourceEstimate,
+            frozenset[WireKey],
+            frozenset[WireKey],
+            Boolean,
+            Boolean,
+        ]
+    ],
+    candidate_events: Sequence[int],
+) -> Boolean:
+    """Scan legacy per-wire synchronized-entry requirements.
+
+    Args:
+        requirements (Mapping[WireKey, Boolean]): Guarded legacy requirements.
+        current_active (Boolean): Current operation depth-activity guard.
+        prior (Sequence[tuple[ResourceEstimate, frozenset[WireKey],
+            frozenset[WireKey], Boolean, Boolean]]): Prior event records.
+        candidate_events (Sequence[int]): Relevant prior event indices in
+            reverse program order.
+
+    Returns:
+        Boolean: Guard under which an earlier event violates the premise.
+    """
+    relevant_active = _and_conditions(
+        current_active,
+        cast(Boolean, sp.Or(*requirements.values())),
+    )
+    unresolved = relevant_active
+    violation: Boolean = sp.false
+    for ordinal, prior_index in enumerate(candidate_events):
+        if unresolved is sp.false:
+            break
+        if ordinal >= _SYNCHRONIZED_ENTRY_EXACT_EVENT_LIMIT:
+            remaining_active = cast(
+                Boolean,
+                sp.Or(*(prior[index][3] for index in candidate_events[ordinal:])),
+            )
+            violation = _boolean_condition(
+                sp.Or(violation, _and_conditions(unresolved, remaining_active))
+            )
+            break
+        prior_estimate, prior_keys, prior_writes, prior_active, prior_violation = prior[
+            prior_index
+        ]
+        if _uniform_event_covers(prior_estimate, prior_writes, tuple(requirements)):
+            reset_active = _and_conditions(
+                prior_active,
+                cast(Boolean, sp.Not(prior_violation)),
+            )
+            unresolved = _and_conditions(
+                unresolved,
+                cast(Boolean, sp.Not(reset_active)),
+            )
+            continue
+        overlapping: list[Boolean] = []
+        for requirement, requirement_active in requirements.items():
+            owner, index = requirement
+            guarded_requirement = _and_conditions(unresolved, requirement_active)
+            if any(
+                candidate_owner == owner
+                and _wire_index_relation_under(
+                    index,
+                    candidate_index,
+                    guarded_requirement,
+                )
+                is not _WireRelation.DISJOINT
+                for candidate_owner, candidate_index in prior_keys
+            ):
+                overlapping.append(requirement_active)
+        if not overlapping:
+            continue
+        hazard = _and_conditions(
+            unresolved,
+            _and_conditions(prior_active, cast(Boolean, sp.Or(*overlapping))),
+        )
+        violation = _boolean_condition(sp.Or(violation, hazard))
+        unresolved = _and_conditions(unresolved, cast(Boolean, sp.Not(hazard)))
+    return violation
+
+
+def _scan_grouped_entry_certificate(
+    certificate: _SynchronizedEntryCertificate,
+    current_active: Boolean,
+    prior: Sequence[
+        tuple[
+            ResourceEstimate,
+            frozenset[WireKey],
+            frozenset[WireKey],
+            Boolean,
+            Boolean,
+        ]
+    ],
+    candidate_events: Sequence[int],
+) -> tuple[Boolean, _SynchronizedEntryCertificate | None]:
+    """Scan one grouped serial-chain certificate against prior events.
+
+    Args:
+        certificate (_SynchronizedEntryCertificate): Grouped full coverage,
+            first-gate frontier, and activity guard.
+        current_active (Boolean): Current operation depth-activity guard.
+        prior (Sequence[tuple[ResourceEstimate, frozenset[WireKey],
+            frozenset[WireKey], Boolean, Boolean]]): Prior event records.
+        candidate_events (Sequence[int]): Relevant prior event indices in
+            reverse program order.
+
+    Returns:
+        tuple[Boolean, _SynchronizedEntryCertificate | None]: Violation guard
+            and unresolved caller-visible certificate.
+    """
+    unresolved = _and_conditions(current_active, certificate.active_when)
+    violation: Boolean = sp.false
+    coarse = False
+    relevant_events = 0
+    for position, prior_index in enumerate(candidate_events):
+        if unresolved is sp.false:
+            break
+        prior_estimate, prior_keys, prior_writes, prior_active, prior_violation = prior[
+            prior_index
+        ]
+        uniformly_covers = _uniform_event_covers(
+            prior_estimate,
+            prior_writes,
+            tuple(certificate.coverage),
+        )
+        hazard_condition = _event_certificate_hazard_condition(
+            prior_keys,
+            certificate,
+        )
+        if not uniformly_covers and hazard_condition is sp.false:
+            continue
+        if relevant_events >= _SYNCHRONIZED_ENTRY_EXACT_EVENT_LIMIT:
+            remaining_active = cast(
+                Boolean,
+                sp.Or(*(prior[index][3] for index in candidate_events[position:])),
+            )
+            coarse_hazard = _and_conditions(unresolved, remaining_active)
+            violation = _boolean_condition(sp.Or(violation, coarse_hazard))
+            unresolved = _and_conditions(
+                unresolved,
+                cast(Boolean, sp.Not(coarse_hazard)),
+            )
+            coarse = True
+            break
+        relevant_events += 1
+        if uniformly_covers:
+            reset_active = _and_conditions(
+                prior_active,
+                cast(Boolean, sp.Not(prior_violation)),
+            )
+            unresolved = _and_conditions(
+                unresolved,
+                cast(Boolean, sp.Not(reset_active)),
+            )
+            continue
+        hazard = _and_conditions(
+            unresolved,
+            _and_conditions(prior_active, hazard_condition),
+        )
+        violation = _boolean_condition(sp.Or(violation, hazard))
+        unresolved = _and_conditions(unresolved, cast(Boolean, sp.Not(hazard)))
+    if unresolved is sp.false:
+        return violation, None
+    residual = dataclasses.replace(
+        certificate,
+        frontier=frozenset() if coarse else certificate.frontier,
+        active_when=unresolved,
+    )
+    return violation, residual
+
+
+def _synchronized_entry_scan(
     scheduled: Sequence[tuple[Operation, ResourceEstimate]],
     wire_footprints: Sequence[_WireFootprint | None],
     *,
     activity_conditions: Sequence[Boolean] | None = None,
-) -> Boolean:
-    """Return when prior work may desynchronize an aggregate's input wires.
+) -> _SynchronizedEntryScan:
+    """Scan legacy and grouped synchronized-entry premises in program order.
 
     Some compact loop-depth formulas are exact only when all of their input
     wires enter at one common dependency layer. A prior operation on any
-    possibly overlapping wire can violate that premise. This check is
-    deliberately conservative: it does not try to prove that prior work
-    advanced every required wire by the same amount.
+    possibly overlapping wire can violate that premise. A prior operation
+    whose exact uniform completion writes every required key re-synchronizes
+    those wires; earlier desynchronization is then irrelevant while that
+    operation is active. Every other possible overlap remains conservative.
 
     Args:
         scheduled (Sequence[tuple[Operation, ResourceEstimate]]): Operations
@@ -471,8 +832,8 @@ def _synchronized_entry_overlap_condition(
             activity guards. Defaults to computing them once for this call.
 
     Returns:
-        Boolean: Guard under which a synchronized-entry premise may be
-        violated by earlier nonzero-depth work.
+        _SynchronizedEntryScan: Combined violation guard and grouped premises
+            that remain requirements of the enclosing caller.
 
     Raises:
         AssertionError: If the operation, footprint, and activity sequences
@@ -487,53 +848,179 @@ def _synchronized_entry_overlap_condition(
         )
     if not any(
         estimate._dependency_synchronized_entry_conditions
+        or estimate._dependency_synchronized_entry_certificates
         for _operation, estimate in scheduled
     ):
-        return sp.false
-    prior_indices: dict[str, _OwnerWireIndices] = {}
-    prior_activity: dict[WireKey, Boolean] = {}
+        return _SynchronizedEntryScan(sp.false, ())
+    legacy_entries = sum(
+        bool(estimate._dependency_synchronized_entry_conditions)
+        for _operation, estimate in scheduled
+    )
+    coarse_legacy_violation: Boolean | None = None
+    if legacy_entries > _SYNCHRONIZED_ENTRY_EXACT_EVENT_LIMIT:
+        synchronized_activity = [
+            _and_conditions(
+                active,
+                cast(
+                    Boolean,
+                    sp.Or(*estimate._dependency_synchronized_entry_conditions.values()),
+                ),
+            )
+            for (_operation, estimate), active in zip(
+                scheduled,
+                activity_conditions,
+                strict=True,
+            )
+            if estimate._dependency_synchronized_entry_conditions
+        ]
+        depth_activity = [
+            active
+            for (_operation, estimate), active in zip(
+                scheduled,
+                activity_conditions,
+                strict=True,
+            )
+            if _estimate_has_nonzero_depth(estimate)
+        ]
+        active_count = cast(
+            ResourceExpr,
+            sp.Add(*(_ConditionIndicator(active) for active in depth_activity)),
+        )
+        coarse_legacy_violation = _and_conditions(
+            cast(Boolean, sp.Or(*synchronized_activity)),
+            _boolean_condition(sp.Gt(active_count, _ONE)),
+        )
+    prior: list[
+        tuple[
+            ResourceEstimate,
+            frozenset[WireKey],
+            frozenset[WireKey],
+            Boolean,
+            Boolean,
+        ]
+    ] = []
+    prior_wire_indices: dict[str, _OwnerWireIndices] = {}
+    prior_events_by_key: dict[WireKey, list[int]] = {}
     overlap_conditions: set[Boolean] = set()
+    residual_certificates: list[_SynchronizedEntryCertificate] = []
     for (_operation, estimate), footprint, active in zip(
         scheduled,
         wire_footprints,
         activity_conditions,
         strict=True,
     ):
-        for (
-            required,
-            requirement_active,
-        ) in estimate._dependency_synchronized_entry_conditions.items():
-            owner, index = required
-            owner_indices = prior_indices.get(owner)
-            if owner_indices is None:
-                continue
-            for candidate in owner_indices.candidates(index):
-                if _wire_index_relation(index, candidate) is _WireRelation.DISJOINT:
-                    continue
-                condition = _and_conditions(
-                    prior_activity[(owner, candidate)],
-                    _and_conditions(active, requirement_active),
+        requirements = {
+            key: _boolean_condition(condition)
+            for key, condition in (
+                estimate._dependency_synchronized_entry_conditions.items()
+            )
+            if _boolean_condition(condition) is not sp.false
+        }
+        entry_violations: list[Boolean] = []
+        if requirements:
+            if coarse_legacy_violation is not None:
+                # Keep the legacy path compact even when grouped certificates
+                # in the same region still need their exact residual scan. The
+                # same conservative guard is recorded on each legacy event so
+                # a later grouped reset cannot trust an event whose own entry
+                # premise may have failed.
+                entry_violations.append(coarse_legacy_violation)
+            else:
+                candidates = _candidate_synchronized_entry_events(
+                    tuple(requirements),
+                    prior_wire_indices,
+                    prior_events_by_key,
                 )
-                if condition is not sp.false:
-                    overlap_conditions.add(condition)
-        if not _estimate_has_nonzero_depth(estimate):
-            continue
-        if footprint is None:
-            raise AssertionError(
-                "A nonzero-depth scheduled operation requires a wire footprint."
+                entry_violations.append(
+                    _scan_legacy_entry_requirements(
+                        requirements,
+                        active,
+                        prior,
+                        candidates,
+                    )
+                )
+        for certificate in estimate._dependency_synchronized_entry_certificates:
+            candidates = _candidate_synchronized_entry_events(
+                tuple(certificate.coverage),
+                prior_wire_indices,
+                prior_events_by_key,
             )
-        for key in set(footprint[0]) | set(footprint[1]):
-            if _is_classical_dependency_key(key):
-                continue
-            owner, index = key
-            prior_indices.setdefault(owner, _OwnerWireIndices()).add(index)
-            prior_activity[key] = _boolean_condition(
-                sp.Or(prior_activity.get(key, sp.false), active)
+            certificate_violation, residual = _scan_grouped_entry_certificate(
+                certificate,
+                active,
+                prior,
+                candidates,
             )
-    return cast(
-        Boolean,
-        sp.Or(*overlap_conditions) if overlap_conditions else sp.false,
+            entry_violations.append(certificate_violation)
+            if residual is not None:
+                residual_certificates.append(residual)
+        entry_violation = _boolean_condition(
+            sp.Or(*entry_violations) if entry_violations else sp.false
+        )
+        if entry_violation is not sp.false:
+            overlap_conditions.add(entry_violation)
+        if _estimate_has_nonzero_depth(estimate):
+            if footprint is None:
+                raise AssertionError(
+                    "A nonzero-depth scheduled operation requires a wire footprint."
+                )
+            quantum_keys = frozenset(
+                key
+                for key in set(footprint[0]) | set(footprint[1])
+                if not _is_classical_dependency_key(key)
+            )
+            quantum_writes = frozenset(
+                key for key in footprint[1] if not _is_classical_dependency_key(key)
+            )
+            prior_index = len(prior)
+            prior.append(
+                (
+                    estimate,
+                    quantum_keys,
+                    quantum_writes,
+                    active,
+                    entry_violation,
+                )
+            )
+            for key in quantum_keys:
+                owner, index = key
+                prior_wire_indices.setdefault(owner, _OwnerWireIndices()).add(index)
+                prior_events_by_key.setdefault(key, []).append(prior_index)
+    return _SynchronizedEntryScan(
+        violation=cast(
+            Boolean,
+            sp.Or(*overlap_conditions) if overlap_conditions else sp.false,
+        ),
+        residual_certificates=_merge_synchronized_entry_certificates(
+            residual_certificates
+        ),
     )
+
+
+def _synchronized_entry_overlap_condition(
+    scheduled: Sequence[tuple[Operation, ResourceEstimate]],
+    wire_footprints: Sequence[_WireFootprint | None],
+    *,
+    activity_conditions: Sequence[Boolean] | None = None,
+) -> Boolean:
+    """Return the synchronized-entry violation guard for one operation list.
+
+    Args:
+        scheduled (Sequence[tuple[Operation, ResourceEstimate]]): Operations
+            paired with resource summaries in program order.
+        wire_footprints (Sequence[_WireFootprint | None]): Read/write
+            footprints aligned with ``scheduled``.
+        activity_conditions (Sequence[Boolean] | None): Optional depth-activity
+            guards. Defaults to deriving them from the summaries.
+
+    Returns:
+        Boolean: Combined legacy and grouped premise-violation condition.
+    """
+    return _synchronized_entry_scan(
+        scheduled,
+        wire_footprints,
+        activity_conditions=activity_conditions,
+    ).violation
 
 
 def _conditional_completion(
@@ -723,7 +1210,7 @@ def _dependency_depth(
             duration = cast(ResourceExpr, getattr(estimate.depth, field))
             owner_depths = availability[field]
             definite_dependencies: list[ResourceExpr] = []
-            possible_dependencies: list[ResourceExpr] = []
+            possible_dependencies: list[tuple[ResourceExpr, Boolean, Boolean]] = []
             for owner, index in reads:
                 read_condition = operation_reads.get((owner, index), sp.true)
                 if read_condition is sp.false:
@@ -742,19 +1229,42 @@ def _dependency_depth(
                             _ZERO,
                             read_condition,
                         )
-                    relation = _wire_index_relation(index, candidate_index)
+                    relation = _wire_index_relation_under(
+                        index,
+                        candidate_index,
+                        _and_conditions(
+                            _and_conditions(operation_active, read_condition),
+                            cast(Boolean, sp.Not(barrier_condition)),
+                        ),
+                    )
                     if relation is _WireRelation.DISJOINT:
                         continue
-                    if relation is _WireRelation.DEFINITE_OVERLAP:
+                    if relation is _WireRelation.DEFINITE_OVERLAP or (
+                        _wire_index_covers(candidate_index, index)
+                    ):
                         definite_dependencies.append(depth)
                     else:
-                        possible_dependencies.append(depth)
+                        frontier_dependency = _grouped_frontier_dependency_condition(
+                            estimate,
+                            (owner, index),
+                            (owner, candidate_index),
+                        )
+                        possible_dependencies.append(
+                            (
+                                depth,
+                                sp.true,
+                                cast(Boolean, sp.Not(frontier_dependency)),
+                            )
+                        )
             if structurally_schedulable:
                 baseline_start = _resource_max_many(
                     [*definite_dependencies, barrier_availability[field]]
                 )
                 dependency_start = _resource_max_many(
-                    [baseline_start, *possible_dependencies]
+                    [
+                        baseline_start,
+                        *(depth for depth, _guard, _unknown in possible_dependencies),
+                    ]
                 )
                 barrier_start = _resource_max(
                     peaks[field],
@@ -765,17 +1275,26 @@ def _dependency_depth(
                     dependency_start,
                     barrier_condition,
                 )
-                for dependency_depth in possible_dependencies:
+                for (
+                    dependency_depth,
+                    overlap_guard,
+                    alias_disclosure,
+                ) in possible_dependencies:
+                    if alias_disclosure is sp.false:
+                        continue
                     condition = _and_conditions(
                         _and_conditions(
                             operation_active,
                             cast(Boolean, sp.Not(barrier_condition)),
                         ),
                         _and_conditions(
-                            _resource_activity_condition(dependency_depth),
-                            sp.Gt(
-                                dependency_depth,
-                                baseline_start,
+                            _and_conditions(overlap_guard, alias_disclosure),
+                            _and_conditions(
+                                _resource_activity_condition(dependency_depth),
+                                sp.Gt(
+                                    dependency_depth,
+                                    baseline_start,
+                                ),
                             ),
                         ),
                     )

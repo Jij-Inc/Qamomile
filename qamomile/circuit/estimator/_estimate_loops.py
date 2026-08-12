@@ -205,6 +205,9 @@ def _sum_estimate_over_range(
         _dependency_synchronized_entry_conditions=dict(
             estimate._dependency_synchronized_entry_conditions
         ),
+        _dependency_synchronized_entry_certificates=(
+            estimate._dependency_synchronized_entry_certificates
+        ),
         _global_barrier_condition=_boolean_condition(
             _activation_over_range(
                 estimate._global_barrier_condition,

@@ -21,6 +21,10 @@ from qamomile.circuit.estimator._dependency_metadata import (
     _merge_synchronized_entry_conditions,
     _seq_dependency_completion,
 )
+from qamomile.circuit.estimator._dependency_synchronization import (
+    _guard_synchronized_entry_certificates,
+    _merge_synchronized_entry_certificates,
+)
 from qamomile.circuit.estimator._estimate_provenance import (
     _merge_estimate_provenance,
     _merge_symbol_aliases,
@@ -128,6 +132,12 @@ def _compose_sequential(
                 right._dependency_synchronized_entry_conditions,
             )
         ),
+        _dependency_synchronized_entry_certificates=(
+            _merge_synchronized_entry_certificates(
+                left._dependency_synchronized_entry_certificates,
+                right._dependency_synchronized_entry_certificates,
+            )
+        ),
         _global_barrier_condition=sp.Or(
             left._global_barrier_condition,
             right._global_barrier_condition,
@@ -208,6 +218,12 @@ def _compose_parallel(
             _merge_synchronized_entry_conditions(
                 left._dependency_synchronized_entry_conditions,
                 right._dependency_synchronized_entry_conditions,
+            )
+        ),
+        _dependency_synchronized_entry_certificates=(
+            _merge_synchronized_entry_certificates(
+                left._dependency_synchronized_entry_certificates,
+                right._dependency_synchronized_entry_certificates,
             )
         ),
         _global_barrier_condition=sp.Or(
@@ -301,6 +317,12 @@ def _compose_choice(
             _merge_synchronized_entry_conditions(
                 left._dependency_synchronized_entry_conditions,
                 right._dependency_synchronized_entry_conditions,
+            )
+        ),
+        _dependency_synchronized_entry_certificates=(
+            _merge_synchronized_entry_certificates(
+                left._dependency_synchronized_entry_certificates,
+                right._dependency_synchronized_entry_certificates,
             )
         ),
         _global_barrier_condition=sp.Or(
@@ -450,6 +472,18 @@ def _compose_conditional(
                         when_false._dependency_synchronized_entry_conditions.items()
                     )
                 },
+            )
+        ),
+        _dependency_synchronized_entry_certificates=(
+            _merge_synchronized_entry_certificates(
+                _guard_synchronized_entry_certificates(
+                    when_true._dependency_synchronized_entry_certificates,
+                    predicate,
+                ),
+                _guard_synchronized_entry_certificates(
+                    when_false._dependency_synchronized_entry_certificates,
+                    sp.Not(predicate),
+                ),
             )
         ),
         _global_barrier_condition=sp.Or(

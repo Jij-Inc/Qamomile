@@ -29,11 +29,18 @@ from qamomile.circuit.transpiler.block_parameter_binding import pair_block_opera
 
 if TYPE_CHECKING:
     from qamomile.circuit.estimator._estimate import ResourceEstimate
-from qamomile.circuit.estimator._dependency_footprints import _quantum_value_wire_keys
+from qamomile.circuit.estimator._dependency_footprints import (
+    _expand_dependency_owner_aliases,
+    _quantum_value_wire_keys,
+)
 from qamomile.circuit.estimator._dependency_indices import (
     _UNKNOWN_WIRE_INDEX,
     WireKey,
     _WireRangeIndex,
+)
+from qamomile.circuit.estimator._dependency_synchronization import (
+    _merge_synchronized_entry_certificates,
+    _SynchronizedEntryCertificate,
 )
 from qamomile.circuit.estimator._quantum_values import (
     _array_wire_key_at_index,
@@ -338,3 +345,226 @@ def _map_body_synchronized_entry_conditions(
                     sp.Or(mapped.get(caller_key, sp.false), condition)
                 )
     return mapped
+
+
+def _map_or_widen_certificate_coverage_key(
+    source: Value,
+    actual: Value,
+    key: WireKey,
+    resolver: ExprResolver,
+    *,
+    scalar_values: Mapping[str, sp.Expr] | None = None,
+    used_names: set[str] | None = None,
+    owner_aliases: Mapping[str, frozenset[str]] | None = None,
+) -> set[WireKey]:
+    """Map one formal coverage key without silently losing caller scope.
+
+    Args:
+        source (Value): Callee formal quantum value owning ``key``.
+        actual (Value): Caller quantum value paired with ``source``.
+        key (WireKey): One callee synchronized-entry coverage key.
+        resolver (ExprResolver): Caller resolver for arrays and views.
+        scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
+            values. Defaults to ``None``.
+        used_names (set[str] | None): Optional set updated with used input
+            names. Defaults to ``None``.
+        owner_aliases (Mapping[str, frozenset[str]] | None): Optional caller
+            owner aliases to include conservatively. Defaults to ``None``.
+
+    Returns:
+        set[WireKey]: Nonempty caller coverage, widened to the actual operand
+            footprint or owner when exact key mapping is unavailable.
+    """
+    mapped = _map_value_dependency_keys(
+        source,
+        actual,
+        frozenset((key,)),
+        resolver,
+        scalar_values=scalar_values,
+        used_names=used_names,
+    )
+    if not mapped:
+        mapped = _quantum_value_wire_keys(
+            actual,
+            resolver,
+            scalar_values=scalar_values,
+            used_names=used_names,
+            owner_aliases=owner_aliases,
+        )
+    if not mapped:
+        mapped = {(_quantum_allocation_owner(actual), None)}
+    return _expand_dependency_owner_aliases(mapped, owner_aliases)
+
+
+def _map_exact_certificate_frontier_key(
+    source: Value,
+    actual: Value,
+    key: WireKey,
+    resolver: ExprResolver,
+    *,
+    scalar_values: Mapping[str, sp.Expr] | None = None,
+    used_names: set[str] | None = None,
+    owner_aliases: Mapping[str, frozenset[str]] | None = None,
+) -> WireKey | None:
+    """Map one formal frontier key only through an exact scalar image.
+
+    Args:
+        source (Value): Callee formal quantum value owning ``key``.
+        actual (Value): Caller quantum value paired with ``source``.
+        key (WireKey): One callee first-gate frontier key.
+        resolver (ExprResolver): Caller resolver for arrays and views.
+        scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
+            values. Defaults to ``None``.
+        used_names (set[str] | None): Optional set updated with used input
+            names. Defaults to ``None``.
+        owner_aliases (Mapping[str, frozenset[str]] | None): Optional caller
+            owner aliases. Any nontrivial expansion rejects the frontier.
+            Defaults to ``None``.
+
+    Returns:
+        WireKey | None: Unique caller root-scalar image, or ``None`` when the
+            mapping widens, aliases, or remains unresolved.
+    """
+    source_index = key[1]
+    if source_index is _UNKNOWN_WIRE_INDEX or isinstance(
+        source_index,
+        _WireRangeIndex,
+    ):
+        return None
+    if source_index is None and (
+        isinstance(source, ArrayValue) or source.parent_array is not None
+    ):
+        return None
+    if actual.is_cast_result() or actual.metadata.array_runtime is not None:
+        return None
+    mapped = _map_value_dependency_keys(
+        source,
+        actual,
+        frozenset((key,)),
+        resolver,
+        scalar_values=scalar_values,
+        used_names=used_names,
+    )
+    expanded = _expand_dependency_owner_aliases(mapped, owner_aliases)
+    if len(expanded) != 1:
+        return None
+    caller_key = next(iter(expanded))
+    caller_index = caller_key[1]
+    if caller_index is _UNKNOWN_WIRE_INDEX or isinstance(
+        caller_index,
+        _WireRangeIndex,
+    ):
+        return None
+    if caller_index is None and (
+        isinstance(actual, ArrayValue) or actual.parent_array is not None
+    ):
+        return None
+    return caller_key
+
+
+def _map_body_synchronized_entry_certificates(
+    block: Block,
+    body_estimate: ResourceEstimate,
+    actual_operands: Sequence[ValueBase],
+    resolver: ExprResolver,
+    *,
+    scalar_values: Mapping[str, sp.Expr] | None = None,
+    used_names: set[str] | None = None,
+    owner_aliases: Mapping[str, frozenset[str]] | None = None,
+) -> tuple[_SynchronizedEntryCertificate, ...]:
+    """Translate grouped callee entry certificates onto caller inputs.
+
+    Callee-local and output-only owners have no caller entry state and are
+    removed. Coverage may widen when a formal input cannot be mapped exactly,
+    but it never disappears. The entire frontier is cleared unless every
+    formal frontier key has exactly one root-scalar caller image.
+
+    Args:
+        block (Block): Evaluated callable implementation.
+        body_estimate (ResourceEstimate): Body estimate carrying grouped entry
+            certificates.
+        actual_operands (Sequence[ValueBase]): Caller operands aligned with
+            the block inputs.
+        resolver (ExprResolver): Caller resolver for arrays and views.
+        scalar_values (Mapping[str, sp.Expr] | None): Optional supplied scalar
+            values. Defaults to ``None``.
+        used_names (set[str] | None): Optional set updated with used input
+            names. Defaults to ``None``.
+        owner_aliases (Mapping[str, frozenset[str]] | None): Optional caller
+            owner aliases used to reject ambiguous frontiers and widen
+            coverage. Defaults to ``None``.
+
+    Returns:
+        tuple[_SynchronizedEntryCertificate, ...]: Caller-scoped grouped
+            certificates with fail-closed frontiers.
+    """
+    certificates = body_estimate._dependency_synchronized_entry_certificates
+    if not certificates:
+        return ()
+    pairs_by_owner: dict[str, list[tuple[Value, Value]]] = {}
+    for formal, actual in pair_block_operands(block, actual_operands):
+        if not (
+            isinstance(formal, Value)
+            and isinstance(actual, Value)
+            and formal.type.is_quantum()
+            and actual.type.is_quantum()
+        ):
+            continue
+        pairs_by_owner.setdefault(_quantum_allocation_owner(formal), []).append(
+            (formal, actual)
+        )
+
+    mapped_certificates: list[_SynchronizedEntryCertificate] = []
+    for certificate in certificates:
+        mapped_coverage: set[WireKey] = set()
+        for key in certificate.coverage:
+            for source, actual in pairs_by_owner.get(key[0], ()):
+                mapped_coverage.update(
+                    _map_or_widen_certificate_coverage_key(
+                        source,
+                        actual,
+                        key,
+                        resolver,
+                        scalar_values=scalar_values,
+                        used_names=used_names,
+                        owner_aliases=owner_aliases,
+                    )
+                )
+        if not mapped_coverage:
+            continue
+
+        mapped_frontier: set[WireKey] = set()
+        frontier_is_exact = True
+        for key in certificate.frontier:
+            source_pairs = pairs_by_owner.get(key[0], ())
+            if not source_pairs:
+                continue
+            key_images: set[WireKey] = set()
+            for source, actual in source_pairs:
+                image = _map_exact_certificate_frontier_key(
+                    source,
+                    actual,
+                    key,
+                    resolver,
+                    scalar_values=scalar_values,
+                    used_names=used_names,
+                    owner_aliases=owner_aliases,
+                )
+                if image is None:
+                    frontier_is_exact = False
+                    break
+                key_images.add(image)
+            if not frontier_is_exact or len(key_images) != 1:
+                frontier_is_exact = False
+                break
+            mapped_frontier.update(key_images)
+        if not frontier_is_exact:
+            mapped_frontier.clear()
+        mapped_certificates.append(
+            _SynchronizedEntryCertificate(
+                coverage=frozenset(mapped_coverage),
+                frontier=frozenset(mapped_frontier),
+                active_when=certificate.active_when,
+            )
+        )
+    return _merge_synchronized_entry_certificates(mapped_certificates)

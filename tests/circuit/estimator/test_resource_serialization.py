@@ -13,6 +13,15 @@ import pytest
 import sympy as sp
 
 import qamomile.circuit as qm
+from qamomile.circuit.estimator._dependency_indices import _WireRangeIndex
+from qamomile.circuit.estimator._dependency_metadata import (
+    _dependency_metadata_symbols,
+    _synchronized_entry_condition_symbols,
+)
+from qamomile.circuit.estimator._dependency_synchronization import (
+    _merge_synchronized_entry_certificates,
+    _SynchronizedEntryCertificate,
+)
 from qamomile.circuit.estimator._resource_conditions import _PhaseIdentity
 from qamomile.circuit.estimator._resource_constraints import (
     _ConstraintRange,
@@ -383,11 +392,216 @@ def test_resource_wire_schema_accounts_for_every_estimate_field() -> None:
         "_dependency_completion",
         "_dependency_completion_uniform",
         "_dependency_synchronized_entry_conditions",
+        "_dependency_synchronized_entry_certificates",
         "_measurement_taint_conditions",
     }
 
     assert {field.name for field in dataclasses.fields(qm.ResourceEstimate)} == (
         persisted_or_verified | caller_or_interpreter_local
+    )
+
+
+def test_synchronized_entry_certificates_stay_grouped_during_composition() -> None:
+    """Composition never combines safe frontiers from distinct premises."""
+    left_certificate = _SynchronizedEntryCertificate(
+        coverage=frozenset({("left", 0)}),
+        frontier=frozenset({("left", 0)}),
+        active_when=sp.true,
+    )
+    right_certificate = _SynchronizedEntryCertificate(
+        coverage=frozenset({("right", 0)}),
+        frontier=frozenset({("right", 0)}),
+        active_when=sp.true,
+    )
+    left = qm.ResourceEstimate(
+        _dependency_synchronized_entry_certificates=(left_certificate,)
+    )
+    right = qm.ResourceEstimate(
+        _dependency_synchronized_entry_certificates=(right_certificate,)
+    )
+
+    for composed in (left.seq(right), left.parallel(right), left.choice(right)):
+        assert composed._dependency_synchronized_entry_certificates == (
+            left_certificate,
+            right_certificate,
+        )
+
+    selector = sp.Symbol("selector", integer=True, nonnegative=True)
+    predicate = sp.Gt(selector, 0)
+    conditional = left.conditional(right, predicate)
+
+    assert len(conditional._dependency_synchronized_entry_certificates) == 2
+    true_group, false_group = conditional._dependency_synchronized_entry_certificates
+    assert true_group.coverage == left_certificate.coverage
+    assert true_group.active_when == predicate
+    assert false_group.coverage == right_certificate.coverage
+    assert false_group.active_when == sp.Not(predicate)
+
+
+def test_identical_synchronized_entry_certificates_merge_their_guards() -> None:
+    """Equivalent groups share one certificate with a disjoined guard."""
+    left_active = sp.Eq(sp.Symbol("left_active", integer=True), 1)
+    right_active = sp.Eq(sp.Symbol("right_active", integer=True), 1)
+    coverage = frozenset({("register", 0), ("register", 1)})
+    frontier = frozenset({("register", 0)})
+    left = _SynchronizedEntryCertificate(coverage, frontier, left_active)
+    right = _SynchronizedEntryCertificate(coverage, frontier, right_active)
+
+    (merged,) = _merge_synchronized_entry_certificates((left,), (right,))
+
+    assert merged.coverage == coverage
+    assert merged.frontier == frontier
+    assert merged.active_when == sp.Or(left_active, right_active)
+
+
+def test_frontier_clearing_coalesces_newly_identical_certificates() -> None:
+    """A temporal transform merges groups that differ only by frontier."""
+    left_active = sp.Eq(sp.Symbol("left_active", integer=True), 1)
+    right_active = sp.Eq(sp.Symbol("right_active", integer=True), 1)
+    coverage = frozenset({("register", 0), ("register", 1)})
+    left = _SynchronizedEntryCertificate(
+        coverage,
+        frozenset({("register", 0)}),
+        left_active,
+    )
+    right = _SynchronizedEntryCertificate(
+        coverage,
+        frozenset({("register", 1)}),
+        right_active,
+    )
+    estimate = qm.ResourceEstimate(
+        _dependency_synchronized_entry_certificates=(left, right)
+    )
+
+    (merged,) = estimate.repeat(1)._dependency_synchronized_entry_certificates
+
+    assert merged.coverage == coverage
+    assert merged.frontier == frozenset()
+    assert merged.active_when == sp.Or(left_active, right_active)
+
+
+def test_temporal_transforms_clear_only_synchronized_entry_frontier() -> None:
+    """Repeat and inverse retain reset coverage but invalidate the frontier."""
+    flag = sp.Symbol("flag", integer=True, nonnegative=True)
+    certificate = _SynchronizedEntryCertificate(
+        coverage=frozenset({("register", 0), ("register", 1)}),
+        frontier=frozenset({("register", 0)}),
+        active_when=sp.Gt(flag, 0),
+    )
+    estimate = qm.ResourceEstimate(
+        _dependency_synchronized_entry_certificates=(certificate,)
+    )
+
+    for transformed in (estimate.repeat(1), estimate.inverse()):
+        (transformed_certificate,) = (
+            transformed._dependency_synchronized_entry_certificates
+        )
+        assert transformed_certificate.coverage == certificate.coverage
+        assert transformed_certificate.frontier == frozenset()
+        assert transformed_certificate.active_when == certificate.active_when
+
+    assert estimate.repeat(0)._dependency_synchronized_entry_certificates == ()
+
+
+@pytest.mark.parametrize(
+    ("start", "stop", "step", "expected_indices"),
+    [
+        (0, 0, 1, frozenset()),
+        (0, 1, 1, frozenset({0, 1})),
+        (0, 3, 1, frozenset({0, 1, 2, 3})),
+        (4, 0, -2, frozenset({2, 3, 4, 5})),
+    ],
+)
+def test_sum_over_projects_certificate_coverage_and_clears_frontier(
+    start: int,
+    stop: int,
+    step: int,
+    expected_indices: frozenset[int],
+) -> None:
+    """Signed and strided loop projection preserves U and discards F."""
+    index = sp.Symbol("index", integer=True, nonnegative=True)
+    flag = sp.Symbol("flag", integer=True, nonnegative=True)
+    certificate = _SynchronizedEntryCertificate(
+        coverage=frozenset({("register", index), ("register", index + 1)}),
+        frontier=frozenset({("register", index)}),
+        active_when=sp.Gt(flag, 0),
+    )
+    estimate = qm.ResourceEstimate(
+        _dependency_synchronized_entry_certificates=(certificate,)
+    )
+
+    summed = estimate.sum_over(
+        index,
+        sp.Integer(start),
+        sp.Integer(stop),
+        sp.Integer(step),
+    )
+
+    if not expected_indices:
+        assert summed._dependency_synchronized_entry_certificates == ()
+        return
+    (projected,) = summed._dependency_synchronized_entry_certificates
+    assert projected.coverage == frozenset(
+        ("register", wire_index) for wire_index in expected_indices
+    )
+    assert projected.frontier == frozenset()
+    assert projected.active_when == certificate.active_when
+
+
+def test_symbolic_sum_projects_certificate_without_leaking_binder() -> None:
+    """Symbolic U projection removes the outer binder and always clears F."""
+    index = sp.Symbol("index", integer=True, nonnegative=True)
+    iterations = sp.Symbol("iterations", integer=True, nonnegative=True)
+    certificate = _SynchronizedEntryCertificate(
+        coverage=frozenset({("register", index), ("register", index + 1)}),
+        frontier=frozenset({("register", index)}),
+        active_when=sp.true,
+    )
+    estimate = qm.ResourceEstimate(
+        _dependency_synchronized_entry_certificates=(certificate,)
+    )
+
+    summed = estimate.sum_over(
+        index,
+        sp.Integer(0),
+        iterations,
+        sp.Integer(2),
+    )
+
+    (projected,) = summed._dependency_synchronized_entry_certificates
+    assert projected.frontier == frozenset()
+    assert projected.active_when == sp.Gt(sp.ceiling(iterations / 2), 0)
+    assert all(
+        isinstance(wire_index, _WireRangeIndex)
+        and index not in wire_index.index_at_offset.free_symbols
+        for _owner, wire_index in projected.coverage
+    )
+
+
+def test_substitution_rewrites_complete_synchronized_entry_certificate() -> None:
+    """Substitution maps U, F, and the guard through one rewrite."""
+    index = sp.Symbol("index", integer=True, nonnegative=True)
+    flag = sp.Symbol("flag", integer=True, nonnegative=True)
+    certificate = _SynchronizedEntryCertificate(
+        coverage=frozenset({("register", index), ("register", index + 1)}),
+        frontier=frozenset({("register", index)}),
+        active_when=sp.Gt(flag, 0),
+    )
+    estimate = qm.ResourceEstimate(
+        gates=qm.GateResources(total=index + flag),
+        _dependency_synchronized_entry_certificates=(certificate,),
+    )
+
+    assert _dependency_metadata_symbols(estimate) == {index, flag}
+    assert _synchronized_entry_condition_symbols(estimate) == {flag}
+    specialized = estimate.substitute(index=3, flag=1)
+    (mapped,) = specialized._dependency_synchronized_entry_certificates
+    assert mapped.coverage == frozenset({("register", 3), ("register", 4)})
+    assert mapped.frontier == frozenset({("register", 3)})
+    assert mapped.active_when is sp.true
+    assert (
+        estimate.substitute(index=3, flag=0)._dependency_synchronized_entry_certificates
+        == ()
     )
 
 

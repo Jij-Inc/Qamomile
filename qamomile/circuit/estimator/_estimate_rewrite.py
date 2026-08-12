@@ -11,8 +11,12 @@ import sympy as sp
 from qamomile.circuit.estimator._constants import _ZERO
 from qamomile.circuit.estimator._dependency_metadata import (
     _map_dependency_completion,
+    _map_dependency_key,
     _map_dependency_keys,
     _map_synchronized_entry_conditions,
+)
+from qamomile.circuit.estimator._dependency_synchronization import (
+    _map_synchronized_entry_certificates,
 )
 from qamomile.circuit.estimator._resource_base import _is_concrete_integer
 from qamomile.circuit.estimator._resource_expressions import (
@@ -267,6 +271,13 @@ def _map_estimate_expressions(
             _map_synchronized_entry_conditions(
                 estimate._dependency_synchronized_entry_conditions,
                 rewrite_dependency,
+                rewrite_guard,
+            )
+        ),
+        _dependency_synchronized_entry_certificates=(
+            _map_synchronized_entry_certificates(
+                estimate._dependency_synchronized_entry_certificates,
+                lambda key: _map_dependency_key(key, rewrite_dependency),
                 rewrite_guard,
             )
         ),

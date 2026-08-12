@@ -12,15 +12,18 @@ from typing import (
 )
 
 import sympy as sp
+from sympy.logic.boolalg import Boolean
 
-from qamomile.circuit.estimator._constants import _ZERO
+from qamomile.circuit.estimator._constants import _ONE, _ZERO
 from qamomile.circuit.estimator._resource_base import (
     ResourceExpr,
     _is_concrete_integer,
     _symbol_display_name,
 )
 from qamomile.circuit.estimator._resource_expressions import (
+    _boolean_condition,
     _expr,
+    _is_structurally_less_equal,
     _safe_simplify,
 )
 
@@ -276,6 +279,138 @@ def _normalize_wire_index(expression: ResourceExpr | int) -> WireIndex:
     return int(normalized)
 
 
+def _range_positive_extent(iterations: ResourceExpr) -> ResourceExpr:
+    """Return the branch used by a nonempty clipped iteration count.
+
+    A Python-range trip count is commonly represented as ``Max(0, extent)``.
+    Coverage is vacuous when that count is zero; when it is nonempty, the
+    nonzero branch is the exact extent. Other expressions are left unchanged
+    so callers fail closed unless their bounds are globally provable.
+
+    Args:
+        iterations (ResourceExpr): Nonnegative range trip-count expression.
+
+    Returns:
+        ResourceExpr: Exact extent on the range's nonempty branch.
+    """
+    if isinstance(iterations, sp.Max) and len(iterations.args) == 2:
+        if iterations.args[0] == _ZERO:
+            return cast(ResourceExpr, iterations.args[1])
+        if iterations.args[1] == _ZERO:
+            return cast(ResourceExpr, iterations.args[0])
+    return iterations
+
+
+def _wire_range_affine_signature(
+    index: _WireRangeIndex,
+) -> tuple[ResourceExpr, ResourceExpr] | None:
+    """Recover one exact affine offset map from a symbolic wire range.
+
+    Args:
+        index (_WireRangeIndex): Symbolic range footprint to analyze.
+
+    Returns:
+        tuple[ResourceExpr, ResourceExpr] | None: Nonzero slope and start
+            address, or ``None`` when exact affine reconstruction fails.
+    """
+    expression = index.index_at_offset
+    slope = _safe_simplify(cast(ResourceExpr, sp.diff(expression, _WIRE_RANGE_OFFSET)))
+    start = _safe_simplify(
+        cast(
+            ResourceExpr,
+            expression.subs(_WIRE_RANGE_OFFSET, _ZERO, simultaneous=True),
+        )
+    )
+    if (
+        _WIRE_RANGE_OFFSET in slope.free_symbols
+        or _WIRE_RANGE_OFFSET in start.free_symbols
+        or slope.is_zero is not False
+        or slope.is_integer is not True
+        or slope.is_finite is not True
+    ):
+        return None
+    reconstructed = _safe_simplify(
+        cast(ResourceExpr, slope * _WIRE_RANGE_OFFSET + start)
+    )
+    if _safe_simplify(cast(ResourceExpr, expression - reconstructed)) != _ZERO:
+        return None
+    return slope, start
+
+
+@functools.lru_cache(maxsize=4096)
+def _wire_index_covers(covering: WireIndex, required: WireIndex) -> bool:
+    """Prove that one owner-local footprint contains another footprint.
+
+    The additional range proof is deliberately narrow: both address maps
+    must be exact affine progressions, and every required address must map to
+    an integer offset on the covering progression's lattice. This includes
+    sparse and opposite-direction traversal of a denser covering range. A
+    clipped ``Max(0, extent)`` is compared on its nonempty branch; its empty
+    branch is covered vacuously.
+
+    Args:
+        covering (WireIndex): Candidate superset footprint.
+        required (WireIndex): Footprint that must be fully contained.
+
+    Returns:
+        bool: Whether containment is proven for every admissible value.
+    """
+    if (
+        covering is None
+        or required is None
+        or covering is _UNKNOWN_WIRE_INDEX
+        or required is _UNKNOWN_WIRE_INDEX
+    ):
+        return False
+    if covering == required:
+        return True
+    if not isinstance(covering, _WireRangeIndex) or not isinstance(
+        required, _WireRangeIndex
+    ):
+        return False
+    covering_signature = _wire_range_affine_signature(covering)
+    required_signature = _wire_range_affine_signature(required)
+    if covering_signature is None or required_signature is None:
+        return False
+    covering_slope, covering_start = covering_signature
+    required_slope, required_start = required_signature
+    stride_ratio_expression = _safe_simplify(
+        cast(ResourceExpr, required_slope / covering_slope)
+    )
+    if stride_ratio_expression.is_number is not True or not _is_concrete_integer(
+        stride_ratio_expression
+    ):
+        return False
+    stride_ratio = int(stride_ratio_expression)
+    offset_shift = _safe_simplify(
+        cast(
+            ResourceExpr,
+            (required_start - covering_start) / covering_slope,
+        )
+    )
+    if offset_shift.is_integer is not True:
+        return False
+    required_extent = _range_positive_extent(required.iterations)
+    covering_extent = _range_positive_extent(covering.iterations)
+    required_last_offset = _safe_simplify(
+        cast(
+            ResourceExpr,
+            offset_shift + stride_ratio * (required_extent - _ONE),
+        )
+    )
+    required_low, required_high = (
+        (offset_shift, required_last_offset)
+        if stride_ratio > 0
+        else (required_last_offset, offset_shift)
+    )
+    return _is_structurally_less_equal(
+        _ZERO, required_low
+    ) and _is_structurally_less_equal(
+        cast(ResourceExpr, required_high + _ONE),
+        covering_extent,
+    )
+
+
 @functools.lru_cache(maxsize=4096)
 def _wire_index_relation(left: WireIndex, right: WireIndex) -> _WireRelation:
     """Classify overlap between two indices of the same allocation owner.
@@ -307,6 +442,192 @@ def _wire_index_relation(left: WireIndex, right: WireIndex) -> _WireRelation:
     if difference.is_zero is False:
         return _WireRelation.DISJOINT
     return _WireRelation.POSSIBLE_OVERLAP
+
+
+def _wire_range_scalar_membership_condition(
+    wire_range: _WireRangeIndex,
+    scalar: int | ResourceExpr,
+) -> Boolean | None:
+    """Return the exact condition under which a range contains one scalar.
+
+    The proof is deliberately limited to an exact affine address progression
+    whose scalar maps to an integer offset.  Returning ``None`` keeps every
+    unsupported symbolic lattice fail-closed in the caller.
+
+    Args:
+        wire_range (_WireRangeIndex): Candidate affine range footprint.
+        scalar (int | ResourceExpr): Candidate scalar address on the same
+            allocation owner.
+
+    Returns:
+        Boolean | None: Exact membership condition, or ``None`` when integer
+            membership cannot be proven symbolically.
+    """
+    signature = _wire_range_affine_signature(wire_range)
+    if signature is None:
+        return None
+    slope, start = signature
+    offset = _safe_simplify(cast(ResourceExpr, (_expr(scalar) - start) / slope))
+    if offset.is_integer is not True or offset.is_finite is not True:
+        return None
+    return _boolean_condition(
+        sp.And(
+            sp.Ge(offset, _ZERO),
+            sp.Lt(offset, _range_positive_extent(wire_range.iterations)),
+        )
+    )
+
+
+def _wire_index_relation_under(
+    left: WireIndex,
+    right: WireIndex,
+    active_when: Boolean,
+) -> _WireRelation:
+    """Classify two indices under a guarded operation-activity condition.
+
+    The ordinary symmetric relation intentionally leaves every range/scalar
+    pair as a possible alias.  A dependency scheduler has a directional
+    activity guard, so it may additionally prove that an affine range either
+    contains or excludes one scalar whenever that guard is active.  This does
+    not change the public symmetric alias relation.
+
+    Args:
+        left (WireIndex): First owner-local wire index.
+        right (WireIndex): Second owner-local wire index.
+        active_when (Boolean): Condition under which the relation matters.
+
+    Returns:
+        _WireRelation: Guard-specialized overlap classification, falling back
+            to ``POSSIBLE_OVERLAP`` whenever membership remains unresolved.
+    """
+    overlap = _wire_index_overlap_condition(left, right)
+    if overlap is None:
+        return _WireRelation.POSSIBLE_OVERLAP
+    if (
+        active_when is sp.false
+        or overlap is sp.false
+        or _boolean_guard_implies(
+            active_when,
+            sp.Not(overlap),
+        )
+    ):
+        return _WireRelation.DISJOINT
+    if overlap is sp.true or _boolean_guard_implies(active_when, overlap):
+        return _WireRelation.DEFINITE_OVERLAP
+    return _WireRelation.POSSIBLE_OVERLAP
+
+
+def _boolean_guard_implies(active: Boolean, required: Boolean) -> bool:
+    """Prove a narrow structural implication between Boolean guards.
+
+    The helper recognizes conjunctions and monotone lower bounds sharing the
+    exact same symbolic left-hand side. It deliberately avoids SymPy's general
+    inequality solver, which can be both expensive and exception-prone for
+    nested ``Min``/``Max`` resource expressions.
+
+    Args:
+        active (Boolean): Known operation-activity guard.
+        required (Boolean): Predicate that must follow from ``active``.
+
+    Returns:
+        bool: Whether the limited structural rules prove the implication.
+    """
+    if active is sp.false or required is sp.true or active == required:
+        return True
+    if required is sp.false:
+        return False
+    if isinstance(required, sp.And):
+        return all(
+            _boolean_guard_implies(active, cast(Boolean, term))
+            for term in required.args
+        )
+    active_terms = active.args if isinstance(active, sp.And) else (active,)
+    if required in active_terms:
+        return True
+    if not getattr(required, "is_Relational", False):
+        return False
+    required_relation = cast(Any, required)
+    if required_relation.rel_op in (">", ">="):
+        required_lhs = required_relation.lhs
+        required_rhs = required_relation.rhs
+        required_strict = required_relation.rel_op == ">"
+    elif required_relation.rel_op in ("<", "<="):
+        required_lhs = required_relation.rhs
+        required_rhs = required_relation.lhs
+        required_strict = required_relation.rel_op == "<"
+    else:
+        return False
+    for term in active_terms:
+        if not getattr(term, "is_Relational", False):
+            continue
+        active_relation = cast(Any, term)
+        if active_relation.rel_op in (">", ">="):
+            active_lhs = active_relation.lhs
+            active_rhs = active_relation.rhs
+            active_strict = active_relation.rel_op == ">"
+        elif active_relation.rel_op in ("<", "<="):
+            active_lhs = active_relation.rhs
+            active_rhs = active_relation.lhs
+            active_strict = active_relation.rel_op == "<"
+        else:
+            continue
+        if (
+            isinstance(active_lhs, sp.Max)
+            and _ZERO in active_lhs.args
+            and len(active_lhs.args) == 2
+            and (
+                active_rhs.is_positive is True
+                or (active_strict and active_rhs.is_nonnegative is True)
+            )
+        ):
+            active_lhs = next(
+                argument for argument in active_lhs.args if argument != _ZERO
+            )
+        if active_lhs != required_lhs:
+            continue
+        threshold_difference = _safe_simplify(
+            cast(
+                ResourceExpr,
+                active_rhs - required_rhs,
+            )
+        )
+        if threshold_difference.is_nonnegative is not True:
+            continue
+        if (
+            not required_strict
+            or active_strict
+            or threshold_difference.is_positive is True
+        ):
+            return True
+    return False
+
+
+def _wire_index_overlap_condition(
+    left: WireIndex,
+    right: WireIndex,
+) -> Boolean | None:
+    """Return an exact symbolic overlap condition when one is available.
+
+    Args:
+        left (WireIndex): First owner-local scalar or range address.
+        right (WireIndex): Second owner-local scalar or range address.
+
+    Returns:
+        Boolean | None: Exact overlap predicate, or ``None`` when the address
+            forms require conservative possible-alias handling.
+    """
+    relation = _wire_index_relation(left, right)
+    if relation is _WireRelation.DEFINITE_OVERLAP:
+        return sp.true
+    if relation is _WireRelation.DISJOINT:
+        return sp.false
+    if isinstance(left, _WireRangeIndex) and isinstance(right, (int, sp.Expr)):
+        return _wire_range_scalar_membership_condition(left, right)
+    if isinstance(right, _WireRangeIndex) and isinstance(left, (int, sp.Expr)):
+        return _wire_range_scalar_membership_condition(right, left)
+    if isinstance(left, (int, sp.Expr)) and isinstance(right, (int, sp.Expr)):
+        return _boolean_condition(sp.Eq(_expr(left), _expr(right)))
+    return None
 
 
 def _specialize_dependency_expression(

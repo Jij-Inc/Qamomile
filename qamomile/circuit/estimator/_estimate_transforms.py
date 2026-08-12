@@ -29,6 +29,10 @@ from qamomile.circuit.estimator._dependency_exactness import (
 from qamomile.circuit.estimator._dependency_metadata import (
     _synchronized_entry_activity_condition,
 )
+from qamomile.circuit.estimator._dependency_synchronization import (
+    _clear_synchronized_entry_frontiers,
+    _guard_synchronized_entry_certificates,
+)
 from qamomile.circuit.estimator._estimate_provenance import (
     _estimate_has_control_sensitive_resources,
     _with_estimate_metadata,
@@ -174,6 +178,16 @@ def _repeat_estimate(
             }
             if factor_expr != _ZERO
             else {}
+        ),
+        _dependency_synchronized_entry_certificates=(
+            _clear_synchronized_entry_frontiers(
+                _guard_synchronized_entry_certificates(
+                    estimate._dependency_synchronized_entry_certificates,
+                    active_when,
+                )
+            )
+            if factor_expr != _ZERO
+            else ()
         ),
         _global_barrier_condition=sp.And(
             estimate._global_barrier_condition,
@@ -429,4 +443,9 @@ def _invert_estimate(estimate: ResourceEstimate) -> ResourceEstimate:
         trace=_wrap_trace("inverse", estimate.trace),
         _dependency_completion=None,
         _dependency_completion_uniform=None,
+        _dependency_synchronized_entry_certificates=(
+            _clear_synchronized_entry_frontiers(
+                estimate._dependency_synchronized_entry_certificates
+            )
+        ),
     )

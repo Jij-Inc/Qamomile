@@ -19,6 +19,10 @@ from qamomile.circuit.estimator._classical_provenance import (
     _propagate_operation_measurement_taint,
     _resolved_classical_source_conditions,
 )
+from qamomile.circuit.estimator._compound_affine_scheduling import (
+    _compound_affine_region_schedules,
+    _CompoundAffineSchedule,
+)
 from qamomile.circuit.estimator._constants import (
     _ONE,
     _ZERO,
@@ -31,6 +35,7 @@ from qamomile.circuit.estimator._dependency_footprints import (
     _classical_dependency_footprint,
     _classical_dependency_key,
     _expand_dependency_owner_aliases,
+    _is_classical_dependency_key,
     _operation_has_unresolved_quantum_index,
     _quantum_wire_keys,
     _WireFootprint,
@@ -39,6 +44,10 @@ from qamomile.circuit.estimator._dependency_indices import WireKey
 from qamomile.circuit.estimator._dependency_metadata import (
     _merge_synchronized_entry_conditions,
     _normalized_dependency_completion,
+)
+from qamomile.circuit.estimator._dependency_synchronization import (
+    _merge_synchronized_entry_certificates,
+    _SynchronizedEntryCertificate,
 )
 from qamomile.circuit.estimator._estimate import ResourceEstimate
 from qamomile.circuit.estimator._estimate_validation import (
@@ -63,6 +72,8 @@ from qamomile.circuit.estimator._resolver import (
     ExprResolver,
 )
 from qamomile.circuit.estimator._resource_base import (
+    ApproximationStatus,
+    EstimateDerivation,
     EstimateQuality,
     ResourceExpr,
 )
@@ -85,7 +96,7 @@ from qamomile.circuit.estimator._scheduling import (
     _merge_dependency_keys,
     _operation_has_uniform_intrinsic_completion,
     _scheduled_depth_activity_conditions,
-    _synchronized_entry_overlap_condition,
+    _synchronized_entry_scan,
 )
 from qamomile.circuit.estimator._scheduling_classical_sources import (
     _scheduling_classical_input_sources,
@@ -140,6 +151,194 @@ from qamomile.circuit.ir.types.primitives import (
     FloatType,
     UIntType,
 )
+
+_CONSUMABLE_COMPOUND_SCHEDULING_ASSUMPTIONS = frozenset(
+    {
+        (
+            "for",
+            "symbolic loop depth is sequential because disjoint iteration "
+            "footprints could not be proven",
+        ),
+        (
+            "dependency scheduler",
+            "symbolic quantum indices may alias and are scheduled conservatively",
+        ),
+        (
+            "dependency scheduler",
+            "aggregate latency may over-serialize a later wire dependency and "
+            "therefore overestimate depth",
+        ),
+        (
+            "dependency scheduler",
+            "aggregate loop depth assumes synchronized input wires, but prior "
+            "overlapping work may desynchronize them",
+        ),
+        (
+            "ForOperation",
+            "unresolved quantum index may alias any scalar of its allocation",
+        ),
+    }
+)
+
+
+def _compound_component_metadata_is_consumable(
+    estimate: ResourceEstimate,
+) -> bool:
+    """Return whether a structural proof may replace scheduling-only facts.
+
+    Args:
+        estimate (ResourceEstimate): Candidate loop component estimate.
+
+    Returns:
+        bool: Whether every non-exact fact is one of the scheduling limitations
+        independently superseded by the compound affine proof.
+    """
+    guarded_assumptions = estimate._guarded_assumptions or ()
+    guarded_qualities = estimate._guarded_qualities or ()
+    return (
+        estimate.derivation is EstimateDerivation.STRUCTURAL
+        and estimate.approximation is ApproximationStatus.EXACT
+        and estimate._global_barrier_condition is sp.false
+        and not (estimate._guarded_derivations or ())
+        and not (estimate._guarded_approximations or ())
+        and all(
+            (fact.assumption.source, fact.assumption.message)
+            in _CONSUMABLE_COMPOUND_SCHEDULING_ASSUMPTIONS
+            for fact in guarded_assumptions
+        )
+        and all(
+            fact.quality is EstimateQuality.CONSERVATIVE for fact in guarded_qualities
+        )
+        and (not guarded_qualities or bool(guarded_assumptions))
+    )
+
+
+def _without_consumed_compound_scheduling_facts(
+    estimate: ResourceEstimate,
+) -> ResourceEstimate:
+    """Remove only scheduling facts independently discharged by a proof.
+
+    Args:
+        estimate (ResourceEstimate): Proven compound component estimate.
+
+    Returns:
+        ResourceEstimate: Copy retaining public counts, trace, constraints, and
+        non-scheduling provenance while clearing consumed scheduling facts.
+    """
+    return dataclasses.replace(
+        estimate,
+        assumptions=(),
+        quality=EstimateQuality.EXACT,
+        _guarded_assumptions=(),
+        _guarded_qualities=(),
+        _dependency_synchronized_entry_conditions={},
+        _dependency_synchronized_entry_certificates=(),
+        _global_barrier_condition=sp.false,
+    )
+
+
+def _compound_schedule_is_applicable(
+    schedule: _CompoundAffineSchedule,
+    scheduled: list[tuple[Operation, ResourceEstimate]],
+    footprints: list[_WireFootprint | None],
+    classical_dependency_conditions: list[Boolean],
+    classical_read_conditions: list[dict[WireKey, Boolean]],
+) -> bool:
+    """Validate metadata premises for one structural compound schedule.
+
+    Args:
+        schedule (_CompoundAffineSchedule): Structural affine proof.
+        scheduled (list[tuple[Operation, ResourceEstimate]]): Normalized
+            operation estimates in program order.
+        footprints (list[_WireFootprint | None]): Aligned read/write footprints.
+        classical_dependency_conditions (list[Boolean]): Aligned classical
+            dependency activity guards.
+        classical_read_conditions (list[dict[WireKey, Boolean]]): Aligned
+            guarded classical reads.
+
+    Returns:
+        bool: Whether the proof can replace exactly its two loop components
+        without dropping any external classical or non-scheduling metadata.
+    """
+    component_indices = frozenset(schedule.component_indices)
+    for index in range(schedule.first_index, schedule.stop_index):
+        _operation, estimate = scheduled[index]
+        footprint = footprints[index]
+        if (
+            classical_dependency_conditions[index] is not sp.false
+            or classical_read_conditions[index]
+            or (
+                footprint is not None
+                and any(
+                    _is_classical_dependency_key(key)
+                    for key in (*footprint[0], *footprint[1])
+                )
+            )
+        ):
+            return False
+        if index in component_indices:
+            if not _compound_component_metadata_is_consumable(estimate):
+                return False
+            continue
+        if _estimate_has_nonzero_depth(estimate) or footprint not in (
+            None,
+            (frozenset(), frozenset()),
+        ):
+            return False
+    return True
+
+
+def _compound_schedule_estimate(
+    schedule: _CompoundAffineSchedule,
+    scheduled: list[tuple[Operation, ResourceEstimate]],
+) -> ResourceEstimate:
+    """Build one scheduler-only estimate for a proven compound region.
+
+    Args:
+        schedule (_CompoundAffineSchedule): Exact structural schedule proof.
+        scheduled (list[tuple[Operation, ResourceEstimate]]): Original aligned
+            operation estimates.
+
+    Returns:
+        ResourceEstimate: Sequential public resources with proof-derived depth
+        and exact dependency metadata.
+    """
+    component_indices = frozenset(schedule.component_indices)
+    span = [
+        (
+            _without_consumed_compound_scheduling_facts(estimate)
+            if index in component_indices
+            else estimate
+        )
+        for index, (_operation, estimate) in enumerate(
+            scheduled[schedule.first_index : schedule.stop_index],
+            start=schedule.first_index,
+        )
+    ]
+    estimate = ResourceEstimate.seq_all(span)
+    certificates = (
+        (
+            _SynchronizedEntryCertificate(
+                coverage=schedule.coverage,
+                frontier=frozenset(),
+                active_when=schedule.active_when,
+            ),
+        )
+        if schedule.coverage and schedule.active_when is not sp.false
+        else ()
+    )
+    return dataclasses.replace(
+        estimate,
+        depth=schedule.depth,
+        _dependency_keys=schedule.coverage,
+        _dependency_reads=schedule.coverage,
+        _dependency_writes=schedule.coverage,
+        _dependency_completion={key: schedule.depth.depth for key in schedule.coverage},
+        _dependency_completion_uniform=False,
+        _dependency_synchronized_entry_conditions={},
+        _dependency_synchronized_entry_certificates=certificates,
+        _global_barrier_condition=sp.false,
+    )
 
 
 class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
@@ -471,10 +670,86 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
                 )
                 scheduled_with_dependencies.append((operation, operation_estimate))
             scheduled = scheduled_with_dependencies
+            public_scheduled = list(scheduled)
+            scheduler_scheduled = list(scheduled)
+            scheduler_wire_footprints = list(wire_footprints)
+            scheduler_classical_conditions = list(classical_dependency_conditions)
+            scheduler_read_conditions = list(classical_read_conditions)
+            if _expr(control_count) == _ZERO:
+                structural_schedules = _compound_affine_region_schedules(
+                    operations,
+                    resolver,
+                    owner_aliases=self._run_state.dependency_owner_aliases,
+                    scalar_values=self._run_state.condition_values,
+                    used_names=self._run_state.branch_condition_names,
+                )
+                accepted_schedules = tuple(
+                    schedule
+                    for schedule in structural_schedules
+                    if _compound_schedule_is_applicable(
+                        schedule,
+                        scheduled,
+                        wire_footprints,
+                        classical_dependency_conditions,
+                        classical_read_conditions,
+                    )
+                )
+                consumed_components = {
+                    index
+                    for schedule in accepted_schedules
+                    for index in schedule.component_indices
+                }
+                public_scheduled = [
+                    (
+                        operation,
+                        (
+                            _without_consumed_compound_scheduling_facts(
+                                operation_estimate
+                            )
+                            if index in consumed_components
+                            else operation_estimate
+                        ),
+                    )
+                    for index, (operation, operation_estimate) in enumerate(scheduled)
+                ]
+                schedules_by_start = {
+                    schedule.first_index: schedule for schedule in accepted_schedules
+                }
+                scheduler_scheduled = []
+                scheduler_wire_footprints = []
+                scheduler_classical_conditions = []
+                scheduler_read_conditions = []
+                index = 0
+                while index < len(scheduled):
+                    schedule = schedules_by_start.get(index)
+                    if schedule is None:
+                        scheduler_scheduled.append(scheduled[index])
+                        scheduler_wire_footprints.append(wire_footprints[index])
+                        scheduler_classical_conditions.append(
+                            classical_dependency_conditions[index]
+                        )
+                        scheduler_read_conditions.append(
+                            classical_read_conditions[index]
+                        )
+                        index += 1
+                        continue
+                    compound = _compound_schedule_estimate(schedule, scheduled)
+                    scheduler_scheduled.append((scheduled[index][0], compound))
+                    scheduler_wire_footprints.append(
+                        (schedule.coverage, schedule.coverage)
+                    )
+                    scheduler_classical_conditions.append(sp.false)
+                    scheduler_read_conditions.append({})
+                    index = schedule.stop_index
             estimate = ResourceEstimate.seq_all(
-                operation_estimate for _, operation_estimate in scheduled
+                operation_estimate for _, operation_estimate in public_scheduled
             )
-            depth_footprints = wire_footprints
+            dependency_keys = {
+                key
+                for _operation, operation_estimate in scheduler_scheduled
+                for key in (operation_estimate._dependency_keys or frozenset())
+            }
+            depth_footprints = scheduler_wire_footprints
             if _expr(controls) != _ZERO:
                 control_carrier = ("$resource_control_carrier", None)
                 depth_footprints = [
@@ -486,14 +761,16 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
                         if footprint is not None
                         else None
                     )
-                    for footprint in wire_footprints
+                    for footprint in scheduler_wire_footprints
                 ]
-            depth_activity_conditions = _scheduled_depth_activity_conditions(scheduled)
+            depth_activity_conditions = _scheduled_depth_activity_conditions(
+                scheduler_scheduled
+            )
             depth_activity_conditions = tuple(
                 _boolean_condition(sp.Or(depth_active, classical_active))
                 for depth_active, classical_active in zip(
                     depth_activity_conditions,
-                    classical_dependency_conditions,
+                    scheduler_classical_conditions,
                     strict=True,
                 )
             )
@@ -503,20 +780,20 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
                 possible_alias_active,
                 completion_is_uniform,
             ) = _dependency_depth(
-                scheduled,
+                scheduler_scheduled,
                 depth_footprints,
                 activity_conditions=depth_activity_conditions,
-                read_conditions=classical_read_conditions,
+                read_conditions=scheduler_read_conditions,
                 scalar_values=self._run_state.condition_values,
                 used_names=self._run_state.branch_condition_names,
             )
             aggregate_completion_active = _aggregate_completion_overlap_condition(
-                scheduled,
+                scheduler_scheduled,
                 depth_footprints,
                 activity_conditions=depth_activity_conditions,
             )
-            synchronized_entry_active = _synchronized_entry_overlap_condition(
-                scheduled,
+            synchronized_entry = _synchronized_entry_scan(
+                scheduler_scheduled,
                 depth_footprints,
                 activity_conditions=depth_activity_conditions,
             )
@@ -533,6 +810,38 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
                 and operation.results
                 and operation.results[0].logical_id not in (initial_allocations or {})
             }
+            caller_entry_certificates = []
+            for certificate in synchronized_entry.residual_certificates:
+                coverage = frozenset(
+                    key
+                    for key in certificate.coverage
+                    if key[0] not in body_owned_allocation_owners
+                )
+                if not coverage:
+                    continue
+                caller_entry_certificates.append(
+                    dataclasses.replace(
+                        certificate,
+                        coverage=coverage,
+                        frontier=frozenset(
+                            key
+                            for key in certificate.frontier
+                            if key[0] not in body_owned_allocation_owners
+                        ),
+                    )
+                )
+            caller_entry_conditions: dict[WireKey, Boolean] = {}
+            for _operation, operation_estimate in scheduler_scheduled:
+                caller_entry_conditions = _merge_synchronized_entry_conditions(
+                    caller_entry_conditions,
+                    {
+                        key: condition
+                        for key, condition in (
+                            operation_estimate._dependency_synchronized_entry_conditions.items()
+                        )
+                        if key[0] not in body_owned_allocation_owners
+                    },
+                )
             result = dataclasses.replace(
                 estimate,
                 depth=scheduled_depth,
@@ -546,8 +855,8 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
                 _dependency_reads=frozenset(
                     key
                     for (_operation, operation_estimate), footprint in zip(
-                        scheduled,
-                        wire_footprints,
+                        scheduler_scheduled,
+                        scheduler_wire_footprints,
                         strict=True,
                     )
                     if footprint is not None
@@ -557,8 +866,8 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
                 _dependency_writes=frozenset(
                     key
                     for (_operation, operation_estimate), footprint in zip(
-                        scheduled,
-                        wire_footprints,
+                        scheduler_scheduled,
+                        scheduler_wire_footprints,
                         strict=True,
                     )
                     if footprint is not None
@@ -571,13 +880,10 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
                     if key in dependency_keys
                 },
                 _dependency_completion_uniform=completion_is_uniform,
-                _dependency_synchronized_entry_conditions={
-                    key: condition
-                    for key, condition in (
-                        estimate._dependency_synchronized_entry_conditions.items()
-                    )
-                    if key[0] not in body_owned_allocation_owners
-                },
+                _dependency_synchronized_entry_conditions=caller_entry_conditions,
+                _dependency_synchronized_entry_certificates=(
+                    _merge_synchronized_entry_certificates(caller_entry_certificates)
+                ),
                 _output_sizes=liveness.final_live_by_owner,
                 _input_sizes=dict(initial_allocations or {}),
                 _has_output_summary=True,
@@ -607,7 +913,7 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
                     quality=EstimateQuality.CONSERVATIVE,
                     active_when=aggregate_completion_active,
                 )
-            if synchronized_entry_active is not sp.false:
+            if synchronized_entry.violation is not sp.false:
                 assumption = ResourceAssumption(
                     "aggregate loop depth assumes synchronized input wires, "
                     "but prior overlapping work may desynchronize them",
@@ -616,7 +922,7 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
                 result = result._with_metadata(
                     assumptions=(assumption,),
                     quality=EstimateQuality.CONSERVATIVE,
-                    active_when=synchronized_entry_active,
+                    active_when=synchronized_entry.violation,
                 )
             return result
         finally:

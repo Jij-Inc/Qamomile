@@ -24,6 +24,7 @@ from qamomile.circuit.estimator._constraints import (
 from qamomile.circuit.estimator._dependency_call_mapping import (
     _map_body_dependency_completion,
     _map_body_dependency_keys,
+    _map_body_synchronized_entry_certificates,
     _map_body_synchronized_entry_conditions,
 )
 from qamomile.circuit.estimator._dependency_footprints import (
@@ -327,6 +328,15 @@ class _TransformedCallInterpreter(_CallInterpreter):
                 scalar_values=self._run_state.condition_values,
                 used_names=self._run_state.branch_condition_names,
             )
+            synchronized_entry_certificates = _map_body_synchronized_entry_certificates(
+                operation.block,
+                estimate,
+                actual_operands,
+                resolver,
+                scalar_values=self._run_state.condition_values,
+                used_names=self._run_state.branch_condition_names,
+                owner_aliases=self._run_state.dependency_owner_aliases,
+            )
             if dependency_keys is not None:
                 mapped_keys = set(dependency_keys)
                 if _estimate_has_nonzero_depth(estimate):
@@ -343,6 +353,19 @@ class _TransformedCallInterpreter(_CallInterpreter):
                     ),
                     _dependency_synchronized_entry_conditions=(
                         synchronized_entry_conditions
+                    ),
+                    _dependency_synchronized_entry_certificates=(
+                        synchronized_entry_certificates
+                    ),
+                )
+            else:
+                estimate = dataclasses.replace(
+                    estimate,
+                    _dependency_synchronized_entry_conditions=(
+                        synchronized_entry_conditions
+                    ),
+                    _dependency_synchronized_entry_certificates=(
+                        synchronized_entry_certificates
                     ),
                 )
             estimate = _with_constraints(
@@ -600,6 +623,15 @@ class _TransformedCallInterpreter(_CallInterpreter):
                 scalar_values=self._run_state.condition_values,
                 used_names=self._run_state.branch_condition_names,
             )
+            synchronized_entry_certificates = _map_body_synchronized_entry_certificates(
+                case_block,
+                case_estimate,
+                actual_operands,
+                resolver,
+                scalar_values=self._run_state.condition_values,
+                used_names=self._run_state.branch_condition_names,
+                owner_aliases=self._run_state.dependency_owner_aliases,
+            )
             if dependency_keys is not None:
                 mapped_keys = set(dependency_keys)
                 if _estimate_has_nonzero_depth(case_estimate):
@@ -623,6 +655,19 @@ class _TransformedCallInterpreter(_CallInterpreter):
                     ),
                     _dependency_synchronized_entry_conditions=(
                         synchronized_entry_conditions
+                    ),
+                    _dependency_synchronized_entry_certificates=(
+                        synchronized_entry_certificates
+                    ),
+                )
+            else:
+                case_estimate = dataclasses.replace(
+                    case_estimate,
+                    _dependency_synchronized_entry_conditions=(
+                        synchronized_entry_conditions
+                    ),
+                    _dependency_synchronized_entry_certificates=(
+                        synchronized_entry_certificates
                     ),
                 )
             case_estimate = _with_body_boundary_depth_metadata(
@@ -810,6 +855,15 @@ class _TransformedCallInterpreter(_CallInterpreter):
             scalar_values=self._run_state.condition_values,
             used_names=self._run_state.branch_condition_names,
         )
+        synchronized_entry_certificates = _map_body_synchronized_entry_certificates(
+            operation.implementation_block,
+            estimate,
+            actual_operands,
+            resolver,
+            scalar_values=self._run_state.condition_values,
+            used_names=self._run_state.branch_condition_names,
+            owner_aliases=self._run_state.dependency_owner_aliases,
+        )
         if dependency_keys is not None:
             mapped_keys = set(dependency_keys)
             if operation.num_control_qubits and _estimate_has_nonzero_depth(estimate):
@@ -833,6 +887,19 @@ class _TransformedCallInterpreter(_CallInterpreter):
                 ),
                 _dependency_synchronized_entry_conditions=(
                     synchronized_entry_conditions
+                ),
+                _dependency_synchronized_entry_certificates=(
+                    synchronized_entry_certificates
+                ),
+            )
+        else:
+            estimate = dataclasses.replace(
+                estimate,
+                _dependency_synchronized_entry_conditions=(
+                    synchronized_entry_conditions
+                ),
+                _dependency_synchronized_entry_certificates=(
+                    synchronized_entry_certificates
                 ),
             )
         estimate = _with_constraints(

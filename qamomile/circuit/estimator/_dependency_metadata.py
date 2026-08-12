@@ -17,6 +17,10 @@ from qamomile.circuit.estimator._dependency_indices import (
     _symbolic_wire_range_index,
     _WireRangeIndex,
 )
+from qamomile.circuit.estimator._dependency_synchronization import (
+    _merge_synchronized_entry_certificates,
+    _SynchronizedEntryCertificate,
+)
 from qamomile.circuit.estimator._resource_base import (
     ResourceExpr,
     _is_concrete_integer,
@@ -143,7 +147,14 @@ def _synchronized_entry_activity_condition(
     Returns:
         Boolean: Logical union of every guarded entry requirement.
     """
-    conditions = estimate._dependency_synchronized_entry_conditions.values()
+    conditions = (
+        *estimate._dependency_synchronized_entry_conditions.values(),
+        *(
+            certificate.active_when
+            for certificate in estimate._dependency_synchronized_entry_certificates
+            if certificate.coverage
+        ),
+    )
     return cast(
         Boolean,
         sp.Or(*conditions) if conditions else sp.false,
@@ -166,13 +177,17 @@ def _synchronized_entry_condition_symbols(
     Returns:
         set[sp.Symbol]: Free symbols used by the requirement conditions.
     """
+    conditions = (
+        *estimate._dependency_synchronized_entry_conditions.values(),
+        *(
+            certificate.active_when
+            for certificate in estimate._dependency_synchronized_entry_certificates
+            if certificate.coverage
+        ),
+    )
     return cast(
         set[sp.Symbol],
-        {
-            symbol
-            for condition in estimate._dependency_synchronized_entry_conditions.values()
-            for symbol in condition.free_symbols
-        },
+        {symbol for condition in conditions for symbol in condition.free_symbols},
     )
 
 
@@ -210,7 +225,8 @@ def _dependency_metadata_symbols(
 
     Args:
         estimate (ResourceEstimate): Estimate carrying dependency keys,
-            completion expressions, and synchronized-entry conditions.
+            completion expressions, synchronized-entry conditions, and
+            grouped entry certificates.
 
     Returns:
         set[sp.Symbol]: Free symbols used by private dependency metadata.
@@ -244,6 +260,14 @@ def _dependency_metadata_symbols(
         estimate._dependency_writes or (),
         (estimate._dependency_completion or {}).keys(),
         estimate._dependency_synchronized_entry_conditions.keys(),
+        *(
+            certificate.coverage
+            for certificate in estimate._dependency_synchronized_entry_certificates
+        ),
+        *(
+            certificate.frontier
+            for certificate in estimate._dependency_synchronized_entry_certificates
+        ),
     )
     for keys in key_groups:
         for key in keys:
@@ -493,6 +517,29 @@ def _project_dependency_metadata_over_symbol(
                     active,
                 )
             )
+    projected_certificates: list[_SynchronizedEntryCertificate] = []
+    for certificate in estimate._dependency_synchronized_entry_certificates:
+        projected_coverage = frozenset(
+            projected for key in certificate.coverage for projected in project(key)
+        )
+        active = _boolean_condition(
+            _activation_over_range(
+                certificate.active_when,
+                symbol,
+                start_expr,
+                step_expr,
+                iterations_expr,
+            )
+        )
+        if not projected_coverage or active is sp.false:
+            continue
+        projected_certificates.append(
+            _SynchronizedEntryCertificate(
+                coverage=projected_coverage,
+                frontier=frozenset(),
+                active_when=active,
+            )
+        )
     return dataclasses.replace(
         estimate,
         _dependency_keys=projected_keys,
@@ -500,6 +547,9 @@ def _project_dependency_metadata_over_symbol(
         _dependency_writes=projected_writes,
         _dependency_completion=projected_completion,
         _dependency_synchronized_entry_conditions=projected_entry_conditions,
+        _dependency_synchronized_entry_certificates=(
+            _merge_synchronized_entry_certificates(projected_certificates)
+        ),
     )
 
 

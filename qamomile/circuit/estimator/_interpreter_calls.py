@@ -36,6 +36,7 @@ from qamomile.circuit.estimator._constraints import (
 from qamomile.circuit.estimator._dependency_call_mapping import (
     _map_body_dependency_completion,
     _map_body_dependency_keys,
+    _map_body_synchronized_entry_certificates,
     _map_body_synchronized_entry_conditions,
 )
 from qamomile.circuit.estimator._dependency_footprints import _wire_keys_for_values
@@ -522,6 +523,7 @@ class _CallInterpreter(_ForItemsInterpreter):
                 _dependency_reads=None,
                 _dependency_writes=None,
                 _dependency_synchronized_entry_conditions={},
+                _dependency_synchronized_entry_certificates=(),
                 _measurement_taint_conditions={},
             ),
             operation,
@@ -787,6 +789,15 @@ class _CallInterpreter(_ForItemsInterpreter):
             scalar_values=self._run_state.condition_values,
             used_names=self._run_state.branch_condition_names,
         )
+        synchronized_entry_certificates = _map_body_synchronized_entry_certificates(
+            body,
+            body_estimate,
+            actual_operands,
+            resolver,
+            scalar_values=self._run_state.condition_values,
+            used_names=self._run_state.branch_condition_names,
+            owner_aliases=self._run_state.dependency_owner_aliases,
+        )
         if dependency_keys is not None:
             mapped_keys = set(dependency_keys)
             if local_controls and _estimate_has_nonzero_depth(body_estimate):
@@ -810,6 +821,19 @@ class _CallInterpreter(_ForItemsInterpreter):
                 ),
                 _dependency_synchronized_entry_conditions=(
                     synchronized_entry_conditions
+                ),
+                _dependency_synchronized_entry_certificates=(
+                    synchronized_entry_certificates
+                ),
+            )
+        else:
+            body_estimate = dataclasses.replace(
+                body_estimate,
+                _dependency_synchronized_entry_conditions=(
+                    synchronized_entry_conditions
+                ),
+                _dependency_synchronized_entry_certificates=(
+                    synchronized_entry_certificates
                 ),
             )
         input_sizes, output_sizes, has_output_summary = _invoke_quantum_output_sizes(
