@@ -94,7 +94,8 @@ class ResourceEstimate:
             interpret the estimate, including modeling choices and unresolved
             valid-input conditions consumed by formula simplification. A
             domain premise does not lower ``EXACT`` quality because the formula
-            remains exact for every valid qkernel input.
+            remains exact for every valid qkernel input. Every non-exact
+            quality fact also contributes its reason here.
         trace (ResourceTraceNode | None): Explanation tree root. Defaults to
             ``None``.
         parameters (dict[str, sp.Symbol]): Symbols present in the estimate,
@@ -103,7 +104,11 @@ class ResourceEstimate:
             visible structure or use a resource model. Defaults to
             ``STRUCTURAL``.
         quality (EstimateQuality): Relationship between reported counts
-            and the selected circuit cost. Defaults to ``EXACT``.
+            and the selected circuit cost. Every non-exact quality contributes
+            an explanatory entry to ``assumptions``. Direct construction uses
+            the first simultaneous nonblank assumption as that reason, or a
+            quality-specific generic reason when none is supplied. Defaults to
+            ``EXACT``.
         approximation (ApproximationStatus): Whether the selected circuit
             approximates an ideal mathematical operation. Defaults to
             ``EXACT``.
@@ -166,8 +171,9 @@ class ResourceEstimate:
             condition-aware modeled-derivation provenance. ``None`` initializes
             a fact from the public ``derivation`` value.
         _guarded_qualities (tuple[_GuardedQuality, ...] | None): Internal
-            condition-aware non-exact count qualities. ``None`` initializes a
-            fact from the public ``quality`` value.
+            condition-aware non-exact count qualities and their mandatory
+            reasons. ``None`` initializes a fact from the public ``quality``
+            value and a simultaneous or generic reason.
         _guarded_approximations (tuple[_GuardedApproximation, ...] | None):
             Internal condition-aware mathematical approximation provenance.
             ``None`` initializes a fact from the public ``approximation``
@@ -349,6 +355,7 @@ class ResourceEstimate:
         assumptions: Sequence[ResourceAssumption] = (),
         derivation: EstimateDerivation = EstimateDerivation.STRUCTURAL,
         quality: EstimateQuality = EstimateQuality.EXACT,
+        quality_reason: ResourceAssumption | None = None,
         approximation: ApproximationStatus = ApproximationStatus.EXACT,
         active_when: sp.Basic = sp.true,
     ) -> ResourceEstimate:
@@ -361,6 +368,9 @@ class ResourceEstimate:
                 ``STRUCTURAL`` adds no fact. Defaults to ``STRUCTURAL``.
             quality (EstimateQuality): Count quality to append. ``EXACT``
                 adds no fact. Defaults to ``EXACT``.
+            quality_reason (ResourceAssumption | None): Explanation for a
+                non-exact quality. Defaults to the first simultaneous nonblank
+                assumption, then to a generic explanation.
             approximation (ApproximationStatus): Mathematical approximation
                 fact to append. ``EXACT`` adds no fact. Defaults to ``EXACT``.
             active_when (sp.Basic): Activation condition shared by the new
@@ -368,12 +378,19 @@ class ResourceEstimate:
 
         Returns:
             ResourceEstimate: Copy with condition-aware metadata appended.
+
+        Raises:
+            ValueError: If an exact update supplies a quality reason, or an
+                explicit quality reason has a blank message.
+            TypeError: If an explicit quality reason is not a resource
+                assumption.
         """
         return _with_estimate_metadata(
             self,
             assumptions=assumptions,
             derivation=derivation,
             quality=quality,
+            quality_reason=quality_reason,
             approximation=approximation,
             active_when=active_when,
         )

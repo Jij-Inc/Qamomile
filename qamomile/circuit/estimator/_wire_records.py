@@ -35,6 +35,7 @@ from qamomile.circuit.estimator._resource_types import (
     ResourceAssumption,
     ResourceTraceNode,
     WidthResources,
+    _guarded_quality_with_reason,
     _GuardedApproximation,
     _GuardedAssumption,
     _GuardedDerivation,
@@ -979,15 +980,15 @@ def _guarded_quality_from_wire(
         _GuardedQuality: Reconstructed guarded fact.
 
     Raises:
-        ValueError: If the guard or quality is malformed.
+        ValueError: If the guard, quality, or required reason is malformed.
     """
     record = _mapping(payload, "guarded resource quality")
     _require_fields(
         record,
-        {"active_when", "quality"},
+        {"active_when", "quality", "reason"},
         "guarded resource quality",
     )
-    return _GuardedQuality(
+    return _guarded_quality_with_reason(
         active_when=_boolean_expression_from_wire(
             record.get("active_when"),
             "guarded resource quality active_when",
@@ -998,6 +999,7 @@ def _guarded_quality_from_wire(
             record.get("quality"),
             "guarded resource quality",
         ),
+        reason=_assumption_from_wire(record.get("reason")),
     )
 
 

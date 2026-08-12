@@ -211,11 +211,15 @@ def _compound_component_metadata_is_consumable(
             for fact in guarded_assumptions
         )
         and all(
-            fact.quality is EstimateQuality.CONSERVATIVE for fact in guarded_qualities
+            fact.quality is EstimateQuality.CONSERVATIVE
+            and (fact.reason.source, fact.reason.message)
+            in _CONSUMABLE_COMPOUND_SCHEDULING_ASSUMPTIONS
+            for fact in guarded_qualities
         )
         and all(
             any(
                 quality.active_when == assumption.active_when
+                and quality.reason == assumption.assumption
                 for assumption in guarded_assumptions
             )
             for quality in guarded_qualities

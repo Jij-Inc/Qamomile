@@ -800,7 +800,7 @@ else:
 # %% [markdown]
 # 未知部分があってもエラーにせずリソース推定を続けたい場合は、`OPAQUE_CALL`または`ZERO_WITH_WARNING`を明示的に選べます。
 #
-# `OPAQUE_CALL`は、未知部分のゲート数や幅を推測せず、名前付きcallとqueryを1回ずつ記録します。
+# `OPAQUE_CALL`は、未知部分のゲート数や幅を推測せず、名前付きcallとqueryを1回ずつ記録し、具体的なcostがないことを`assumptions`へ記録します。
 
 
 # %%
@@ -815,6 +815,12 @@ print("opaque queries:", opaque_call_estimate.calls.queries_by_name)
 assert opaque_call_estimate.gates.total - 0 == 0
 assert opaque_call_estimate.calls.calls_by_name == {"unpriced_step": 1}
 assert opaque_call_estimate.calls.queries_by_name == {"unpriced_step": 1}
+assert any(
+    assumption.message
+    == "unknown callable is recorded as an opaque call without a declared resource cost"
+    and assumption.source == "unpriced_step"
+    for assumption in opaque_call_estimate.assumptions
+)
 assert opaque_call_estimate.quality is qmc.EstimateQuality.UNKNOWN
 
 # %% [markdown]
@@ -845,7 +851,7 @@ assert zero_warning_estimate.quality is qmc.EstimateQuality.UNKNOWN
 # | policy | 未知部分の扱い |
 # |---|---|
 # | `ERROR` | 既定値。costのないOracleを`ValueError`とする |
-# | `OPAQUE_CALL` | ゲートのcostを推測せず、名前付きcallとqueryを1回ずつ記録する |
+# | `OPAQUE_CALL` | ゲートのcostを推測せず、名前付きcallとqueryを1回ずつ記録し、その理由を`assumptions`へ記録する |
 # | `ZERO_WITH_WARNING` | 未知部分を0と仮定し、その仮定を`assumptions`へ記録する |
 #
 # `OPAQUE_CALL`と`ZERO_WITH_WARNING`でゲート数が0でも、未知部分にゲートがないという意味ではありません。どちらも`quality`は`UNKNOWN`となり、推定できなかった部分があることを示します。`unknown_policy`が影響するのはcostを指定していないOracleです。第3章のように固定costまたはcallbackを指定したOracleでは、そのcostが使われます。このため、明示的に0として扱いたい場合はcostへ0を指定してください。
@@ -867,6 +873,8 @@ assert zero_warning_estimate.quality is qmc.EstimateQuality.UNKNOWN
 # `derivation=STRUCTURAL`は、定義された量子カーネルと選択した分解規則を再帰的に実際に数えたことを表します。`MODELED`は、Oracleへ指定したcostや、costのないOracleに対して選択した`unknown_policy`を使って数値を求めたことを表します。
 #
 # `quality=EXACT`は、選択した分解規則や宣言したcostを含む推定対象に対して、推定値が一致することを表します。`CONSERVATIVE`は過小評価しない安全側の値、`UNKNOWN`は`EXACT`とも`CONSERVATIVE`とも確認できない値です。
+#
+# `quality`が`CONSERVATIVE`または`UNKNOWN`である場合、その理由は必ず`assumptions`にも含まれます。複数の理由が有効ならすべて保持され、より弱い`quality`が全体の値として表示されても、それ以前の理由は失われません。逆に、`assumptions`があるだけで`quality`が`EXACT`から下がるとは限りません。
 #
 # `approximation`は、数値の数え方ではなく、推定結果に理想的な数学的操作に対する既知の近似が含まれているかを表します。
 
@@ -915,7 +923,7 @@ assert decomposed_control_estimate.approximation is qmc.ApproximationStatus.EXAC
 # %% [markdown]
 # #### costのないOracle：`MODELED / UNKNOWN / EXACT`
 #
-# `OPAQUE_CALL`は、costのないOracleを名前付きcall/queryとして記録します。具体的なゲートのcostとの関係は分からないため`quality`は`UNKNOWN`ですが、推定器が認識する数学的な近似が追加されるわけではありません。
+# `OPAQUE_CALL`は、costのないOracleを名前付きcall/queryとして記録し、具体的なcostがないことを`assumptions`へ記録します。具体的なゲートのcostとの関係は分からないため`quality`は`UNKNOWN`ですが、推定器が認識する数学的な近似が追加されるわけではありません。
 
 # %%
 print("derivation:", opaque_call_estimate.derivation.value)
@@ -970,7 +978,7 @@ assert (
 # %% [markdown]
 # ### 5.2 assumptions
 #
-# `assumptions`には、三つの項目だけでは表せない具体的な前提や理由が入ります。これにはモデル上の仮定だけでなく、リソース式の簡約に使った未具体化の有効な入力条件も含まれます。リソース推定器は、量子カーネルの入力型、量子ビット配列を含む配列のshape、配列要素へのアクセス、viewの範囲などから有効な入力条件を導ける場合、その条件が成り立つ範囲でリソース式を簡約し、未具体化の条件を`assumptions`に残します。各要素は、説明文の`message`と、原因となった演算などを示す`source`を持ちます。有効な入力条件は式の適用範囲を示すものであり、それだけで`quality`が`EXACT`から下がるわけではありません。上のGHZ例では、CXの列を実行した後に各量子ビットが準備できる時刻が異なります。現在の推定器は、このループと後続の`measure(qubits)`との依存を、量子ビットごとの完了時刻ではなくループ全体の最長時間を使って安全側に扱うため、早く準備できた量子ビットの測定を必要以上に遅く見積もる可能性があります。そのため`quality`は`CONSERVATIVE`になりますが、このGHZでは最後に準備できる量子ビットが実際の全体の深さも決めるので、推定された深さ`n + 1`は実際のスケジュールと一致します。これは有効な入力条件を使った簡約とは別の理由です。
+# `assumptions`には、三つの項目だけでは表せない具体的な前提や理由が入ります。これには、`CONSERVATIVE`または`UNKNOWN`となった理由、モデル上の仮定、リソース式の簡約に使った未具体化の有効な入力条件が含まれます。リソース推定器は、量子カーネルの入力型、量子ビット配列を含む配列のshape、配列要素へのアクセス、viewの範囲などから有効な入力条件を導ける場合、その条件が成り立つ範囲でリソース式を簡約し、未具体化の条件を`assumptions`に残します。各要素は、説明文の`message`と、原因となった演算などを示す`source`を持ちます。有効な入力条件は式の適用範囲を示すものであり、それだけで`quality`が`EXACT`から下がるわけではありません。上のGHZ例では、CXの列を実行した後に各量子ビットが準備できる時刻が異なります。現在の推定器は、このループと後続の`measure(qubits)`との依存を、量子ビットごとの完了時刻ではなくループ全体の最長時間を使って安全側に扱うため、早く準備できた量子ビットの測定を必要以上に遅く見積もる可能性があります。そのため`quality`は`CONSERVATIVE`になり、この理由も`assumptions`に記録されます。このGHZでは最後に準備できる量子ビットが実際の全体の深さも決めるので、推定された深さ`n + 1`は実際のスケジュールと一致します。これは有効な入力条件を使った簡約とは別の理由です。
 
 # %% [markdown]
 # `ZERO_WITH_WARNING`を使った推定結果には、costのないOracleを0として数えたことが記録されます。
@@ -1016,7 +1024,7 @@ assert any(
 # | `depth` | 論理的な深さの推定値 |
 # | `calls` | 名前別に記録したopaque call/queryの回数 |
 # | `parameters` | 未具体化のシンボリックなパラメータ名とSymPy symbolの対応 |
-# | `assumptions` | 推定時の前提。モデル上の仮定や、式の簡約に使った未具体化の有効な入力条件を含み、各要素は`message`と`source`を持つ |
+# | `assumptions` | 推定時の前提と理由。非`EXACT`の理由、モデル上の仮定、式の簡約に使った未具体化の有効な入力条件を含み、各要素は`message`と`source`を持つ |
 # | `derivation` | 量子カーネルそのものから導き出される`STRUCTURAL`か、cost/policyを使った`MODELED`か |
 # | `quality` | 推定結果に含まれる曖昧さについて`EXACT`、`CONSERVATIVE`、`UNKNOWN`のどれか |
 # | `approximation` | 認識されている数学的な近似が`EXACT`か`APPROXIMATE`か |

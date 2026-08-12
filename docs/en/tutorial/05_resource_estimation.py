@@ -800,7 +800,7 @@ else:
 # %% [markdown]
 # If you want estimation to continue rather than fail when an unknown part is present, explicitly select `OPAQUE_CALL` or `ZERO_WITH_WARNING`.
 #
-# `OPAQUE_CALL` does not guess the unknown gate count or width. Instead, it records one named call and one query.
+# `OPAQUE_CALL` does not guess the unknown gate count or width. Instead, it records one named call and one query, and records the absence of a concrete cost in `assumptions`.
 
 
 # %%
@@ -815,6 +815,12 @@ print("Opaque queries:", opaque_call_estimate.calls.queries_by_name)
 assert opaque_call_estimate.gates.total - 0 == 0
 assert opaque_call_estimate.calls.calls_by_name == {"unpriced_step": 1}
 assert opaque_call_estimate.calls.queries_by_name == {"unpriced_step": 1}
+assert any(
+    assumption.message
+    == "unknown callable is recorded as an opaque call without a declared resource cost"
+    and assumption.source == "unpriced_step"
+    for assumption in opaque_call_estimate.assumptions
+)
 assert opaque_call_estimate.quality is qmc.EstimateQuality.UNKNOWN
 
 # %% [markdown]
@@ -845,7 +851,7 @@ assert zero_warning_estimate.quality is qmc.EstimateQuality.UNKNOWN
 # | Policy | Treatment of unknown parts |
 # |---|---|
 # | `ERROR` | Default. Raises `ValueError` for an Oracle without a cost |
-# | `OPAQUE_CALL` | Does not guess gate cost and records one named call and query |
+# | `OPAQUE_CALL` | Does not guess gate cost, records one named call and query, and records the reason in `assumptions` |
 # | `ZERO_WITH_WARNING` | Assumes zero for the unknown part and records that assumption in `assumptions` |
 #
 # A zero gate count under `OPAQUE_CALL` or `ZERO_WITH_WARNING` does not mean that the unknown part contains no gates. In both cases, `quality` is `UNKNOWN`, indicating that some part could not be estimated. `unknown_policy` affects Oracles without a specified cost. An Oracle with a fixed cost or callback, as in Section 3, uses that cost. Therefore, explicitly specify a zero cost when zero is the intended cost.
@@ -867,6 +873,8 @@ assert zero_warning_estimate.quality is qmc.EstimateQuality.UNKNOWN
 # `derivation=STRUCTURAL` means the estimator recursively counted the defined quantum kernel and the selected decomposition rules. `MODELED` means it obtained the values from a cost assigned to an Oracle or from the selected `unknown_policy` for an Oracle without a cost.
 #
 # `quality=EXACT` means the estimate matches the target being estimated, including the selected decomposition rules and declared costs. `CONSERVATIVE` is a safe value that does not underestimate, while `UNKNOWN` is a value that cannot be confirmed as either `EXACT` or `CONSERVATIVE`.
+#
+# When `quality` is `CONSERVATIVE` or `UNKNOWN`, `assumptions` always includes its reason. If several reasons are active, all of them remain available; showing a weaker overall `quality` does not discard earlier reasons. The converse does not hold: the presence of `assumptions` alone does not necessarily reduce `quality` from `EXACT`.
 #
 # `approximation` describes whether the estimate includes a known approximation to an ideal mathematical operation, rather than how numerical resources were counted.
 
@@ -915,7 +923,7 @@ assert decomposed_control_estimate.approximation is qmc.ApproximationStatus.EXAC
 # %% [markdown]
 # #### Oracle without a cost: `MODELED / UNKNOWN / EXACT`
 #
-# `OPAQUE_CALL` records an Oracle without a cost as a named call and query. Its `quality` is `UNKNOWN` because the relationship to a concrete gate cost is unknown, but it does not introduce a mathematical approximation recognized by the estimator.
+# `OPAQUE_CALL` records an Oracle without a cost as a named call and query, and records the absence of a concrete cost in `assumptions`. Its `quality` is `UNKNOWN` because the relationship to a concrete gate cost is unknown, but it does not introduce a mathematical approximation recognized by the estimator.
 
 # %%
 print("derivation:", opaque_call_estimate.derivation.value)
@@ -970,7 +978,7 @@ assert (
 # %% [markdown]
 # ### 5.2 Assumptions
 #
-# `assumptions` contains specific premises and reasons that the other three fields alone cannot express. These include not only model assumptions but also unresolved valid-input conditions used to simplify resource expressions. When the resource estimator can derive valid-input conditions from qkernel input types, array shapes including qubit-array shapes, array element accesses, or view coverage, it simplifies resource expressions over that domain and retains any unresolved conditions in `assumptions`. Each item has a descriptive `message` and a `source` identifying the responsible operation or other origin. A valid-input condition specifies the domain over which an expression applies; by itself, it does not reduce `quality` from `EXACT`. In the GHZ example above, the qubits become ready at different times after the CX chain. The current estimator conservatively relates this loop to the subsequent `measure(qubits)` using the longest latency of the whole loop rather than each qubit's individual completion time, so it may schedule measurements of earlier-ready qubits later than necessary. This makes `quality` `CONSERVATIVE`. In this GHZ qkernel, however, the last-ready qubit also determines the actual total depth, so the estimated depth `n + 1` matches the actual schedule. This is separate from simplification over the valid input domain.
+# `assumptions` contains specific premises and reasons that the other three fields alone cannot express. These include reasons for `CONSERVATIVE` or `UNKNOWN` quality, model assumptions, and unresolved valid-input conditions used to simplify resource expressions. When the resource estimator can derive valid-input conditions from qkernel input types, array shapes including qubit-array shapes, array element accesses, or view coverage, it simplifies resource expressions over that domain and retains any unresolved conditions in `assumptions`. Each item has a descriptive `message` and a `source` identifying the responsible operation or other origin. A valid-input condition specifies the domain over which an expression applies; by itself, it does not reduce `quality` from `EXACT`. In the GHZ example above, the qubits become ready at different times after the CX chain. The current estimator conservatively relates this loop to the subsequent `measure(qubits)` using the longest latency of the whole loop rather than each qubit's individual completion time, so it may schedule measurements of earlier-ready qubits later than necessary. This makes `quality` `CONSERVATIVE`, and the reason is recorded in `assumptions`. In this GHZ qkernel, however, the last-ready qubit also determines the actual total depth, so the estimated depth `n + 1` matches the actual schedule. This is separate from simplification over the valid input domain.
 
 # %% [markdown]
 # An estimate produced with `ZERO_WITH_WARNING` records that an Oracle without a cost was counted as zero.
@@ -1016,7 +1024,7 @@ assert any(
 # | `depth` | Estimates of logical depth |
 # | `calls` | Counts of recorded opaque calls and queries by name |
 # | `parameters` | Mapping from unresolved symbolic parameter names to SymPy symbols |
-# | `assumptions` | Estimation premises, including model assumptions and unresolved valid-input conditions used to simplify expressions; each item has a `message` and `source` |
+# | `assumptions` | Estimation premises and reasons, including reasons for non-`EXACT` quality, model assumptions, and unresolved valid-input conditions used to simplify expressions; each item has a `message` and `source` |
 # | `derivation` | Whether the estimate is `STRUCTURAL`, derived from the quantum kernel itself, or `MODELED`, derived using a cost or policy |
 # | `quality` | Whether uncertainty in the estimate is `EXACT`, `CONSERVATIVE`, or `UNKNOWN` |
 # | `approximation` | Whether recognized mathematical approximation is `EXACT` or `APPROXIMATE` |

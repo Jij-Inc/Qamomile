@@ -356,7 +356,7 @@ def _clean_ancilla_shared_aggregate_control_ladder(
         _dependency_reads=body._dependency_reads,
         _dependency_writes=body._dependency_writes,
         _symbol_aliases=body._symbol_aliases,
-    )._with_metadata(quality=EstimateQuality.CONSERVATIVE)
+    )
 
 
 def _project_clean_ancilla_aggregate_controlled_cost(

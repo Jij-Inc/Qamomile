@@ -62,6 +62,7 @@ from qamomile.circuit.estimator._resource_expressions import (
     _resource_activity_condition,
 )
 from qamomile.circuit.estimator._resource_types import (
+    ResourceAssumption,
     ResourceTraceNode,
 )
 from qamomile.circuit.estimator._scopes import (
@@ -773,6 +774,14 @@ class _ControlBatchingInterpreter(_InterpreterCore):
             for node in (toffoli.trace, body.trace, toffoli.trace)
             if node is not None
         )
+        reason = ResourceAssumption(
+            message=(
+                "clean-ancilla controlled region uses one shared conjunction "
+                "ladder across the modeled body; a different decomposition "
+                "may use fewer gates, depth, or ancillas"
+            ),
+            source="clean-ancilla shared control ladder",
+        )
         return dataclasses.replace(
             estimate,
             width=dataclasses.replace(
@@ -813,4 +822,7 @@ class _ControlBatchingInterpreter(_InterpreterCore):
                 if body._dependency_completion is not None
                 else None
             ),
-        )._with_metadata(quality=EstimateQuality.CONSERVATIVE)
+        )._with_metadata(
+            assumptions=(reason,),
+            quality=EstimateQuality.CONSERVATIVE,
+        )

@@ -403,15 +403,16 @@ class _PrimitiveInterpreter(_RegionAnalysisInterpreter):
                 calls_by_name={"expval": _ONE},
                 queries_by_name={"expval": _ONE},
             ),
-            assumptions=(assumption,),
             derivation=EstimateDerivation.MODELED,
-            quality=EstimateQuality.UNKNOWN,
             trace=ResourceTraceNode(
                 "expval",
                 "opaque",
                 summary="one abstract expectation query",
                 assumptions=(assumption,),
             ),
+        )._with_metadata(
+            assumptions=(assumption,),
+            quality=EstimateQuality.UNKNOWN,
         )
 
     def eval_project(self, operation: ProjectOperation) -> ResourceEstimate:

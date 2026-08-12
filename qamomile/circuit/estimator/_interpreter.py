@@ -118,14 +118,15 @@ class ResourceInterpreter(_TransformedCallInterpreter):
                 )
             return ResourceEstimate(
                 calls=calls,
-                assumptions=(assumption,),
                 derivation=EstimateDerivation.MODELED,
-                quality=EstimateQuality.UNKNOWN,
                 trace=ResourceTraceNode(
                     "pauli_evolve",
                     "modeled",
                     assumptions=(assumption,),
                 ),
+            )._with_metadata(
+                assumptions=(assumption,),
+                quality=EstimateQuality.UNKNOWN,
             )
 
         register_constraint = _ResourceConstraint(

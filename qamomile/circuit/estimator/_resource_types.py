@@ -21,6 +21,7 @@ from qamomile.circuit.estimator._resource_base import (
 )
 from qamomile.circuit.estimator._resource_expressions import (
     _and_conditions,
+    _boolean_condition,
     _rewrite_condition,
     _safe_simplify,
 )
@@ -37,7 +38,9 @@ class ResourceAssumption:
     Assumptions disclose modeling choices, recognized approximations, and any
     still-symbolic valid-input condition consumed while simplifying a resource
     formula. A valid-input premise limits where the formula applies; by itself
-    it does not make an otherwise exact count conservative.
+    it does not make an otherwise exact count conservative. Every active
+    ``CONSERVATIVE`` or ``UNKNOWN`` quality fact also contributes its reason
+    as an assumption, while exact estimates may still have other assumptions.
 
     Args:
         message (str): Human-readable premise or qualification.
@@ -145,10 +148,36 @@ class _GuardedQuality:
         active_when (sp.Basic): Boolean condition under which the quality
             fact contributes.
         quality (EstimateQuality): Non-exact quality being guarded.
+        reason (ResourceAssumption): Explanation for the non-exact quality.
+
+    Raises:
+        TypeError: If ``quality`` is not an estimate quality, or ``reason`` is
+            not a resource assumption with a string message.
+        ValueError: If ``quality`` is exact or the reason message is blank.
     """
 
     active_when: sp.Basic
     quality: EstimateQuality
+    reason: ResourceAssumption
+
+    def __post_init__(self) -> None:
+        """Validate the non-exact quality and its mandatory reason.
+
+        Raises:
+            TypeError: If ``quality`` is not an estimate quality, or
+                ``reason`` is not a resource assumption with a string message.
+            ValueError: If ``quality`` is exact or the reason message is blank.
+        """
+        if not isinstance(self.quality, EstimateQuality):
+            raise TypeError("guarded resource quality must be an estimate quality")
+        if not isinstance(self.reason, ResourceAssumption):
+            raise TypeError("guarded resource quality reason must be an assumption")
+        if self.quality is EstimateQuality.EXACT:
+            raise ValueError("guarded resource quality must be non-exact")
+        if not isinstance(self.reason.message, str):
+            raise TypeError("guarded resource quality reason message must be a string")
+        if not self.reason.message.strip():
+            raise ValueError("guarded resource quality reason must not be blank")
 
     def when(self, condition: sp.Basic) -> _GuardedQuality:
         """Conjoin another activation condition.
@@ -159,9 +188,10 @@ class _GuardedQuality:
         Returns:
             _GuardedQuality: Quality fact guarded by both conditions.
         """
-        return dataclasses.replace(
-            self,
-            active_when=_and_conditions(self.active_when, condition),
+        return _guarded_quality_with_reason(
+            _and_conditions(self.active_when, condition),
+            self.quality,
+            self.reason,
         )
 
     def mapped(self, fn: Any) -> _GuardedQuality | None:
@@ -177,7 +207,38 @@ class _GuardedQuality:
         active_when = _rewrite_condition(self.active_when, fn)
         if active_when is sp.false:
             return None
-        return dataclasses.replace(self, active_when=active_when)
+        return _guarded_quality_with_reason(
+            active_when,
+            self.quality,
+            self.reason,
+        )
+
+
+def _guarded_quality_with_reason(
+    active_when: sp.Basic,
+    quality: EstimateQuality,
+    reason: ResourceAssumption,
+) -> _GuardedQuality:
+    """Create one guarded non-exact quality with its required reason.
+
+    Args:
+        active_when (sp.Basic): Condition under which the quality applies.
+        quality (EstimateQuality): Non-exact quality to retain.
+        reason (ResourceAssumption): Nonblank explanation for that quality.
+
+    Returns:
+        _GuardedQuality: Validated quality provenance with a Boolean guard.
+
+    Raises:
+        TypeError: If ``quality`` is not an estimate quality, or ``reason`` is
+            not a resource assumption with a string message.
+        ValueError: If ``quality`` is exact or the reason message is blank.
+    """
+    return _GuardedQuality(
+        active_when=_boolean_condition(active_when),
+        quality=quality,
+        reason=reason,
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -223,23 +284,33 @@ class _GuardedApproximation:
         return dataclasses.replace(self, active_when=active_when)
 
 
-def _active_assumptions(
-    facts: Sequence[_GuardedAssumption],
+def _active_assumptions_with_quality_reasons(
+    assumption_facts: Sequence[_GuardedAssumption],
+    quality_facts: Sequence[_GuardedQuality],
 ) -> tuple[ResourceAssumption, ...]:
-    """Return assumptions whose guards have not resolved false.
+    """Render active ordinary assumptions and non-exact quality reasons.
 
     Args:
-        facts (Sequence[_GuardedAssumption]): Guarded assumption provenance.
+        assumption_facts (Sequence[_GuardedAssumption]): Ordinary guarded
+            assumptions in encounter order.
+        quality_facts (Sequence[_GuardedQuality]): Guarded non-exact qualities
+            whose reasons follow the ordinary assumptions.
 
     Returns:
-        tuple[ResourceAssumption, ...]: Active or potentially active
-            assumptions, deduplicated in encounter order.
+        tuple[ResourceAssumption, ...]: Active assumptions and reasons,
+            deduplicated in encounter order.
     """
-    active: list[ResourceAssumption] = []
-    for fact in facts:
-        if fact.active_when is not sp.false and fact.assumption not in active:
-            active.append(fact.assumption)
-    return tuple(active)
+    rendered: list[ResourceAssumption] = []
+    seen: set[ResourceAssumption] = set()
+    for active_when, assumption in (
+        *((fact.active_when, fact.assumption) for fact in assumption_facts),
+        *((fact.active_when, fact.reason) for fact in quality_facts),
+    ):
+        if active_when is sp.false or assumption in seen:
+            continue
+        seen.add(assumption)
+        rendered.append(assumption)
+    return tuple(rendered)
 
 
 def _active_derivation(

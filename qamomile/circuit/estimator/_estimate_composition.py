@@ -76,7 +76,6 @@ from qamomile.circuit.estimator._resource_expressions import (
 )
 from qamomile.circuit.estimator._resource_types import (
     ResourceAssumption,
-    _GuardedQuality,
 )
 from qamomile.circuit.estimator._scheduling import _merge_dependency_keys
 
@@ -363,10 +362,7 @@ def _compose_choice(
         assumptions=(),
         trace=_merge_trace("choice", left.trace, right.trace),
         derivation=_combine_derivation(left.derivation, right.derivation),
-        quality=_combine_quality(
-            EstimateQuality.CONSERVATIVE,
-            _combine_quality(left.quality, right.quality),
-        ),
+        quality=_combine_quality(left.quality, right.quality),
         approximation=_combine_approximation(
             left.approximation,
             right.approximation,
@@ -417,7 +413,6 @@ def _compose_choice(
         _guarded_qualities=(
             *(left._guarded_qualities or ()),
             *(right._guarded_qualities or ()),
-            _GuardedQuality(sp.true, EstimateQuality.CONSERVATIVE),
         ),
         _guarded_approximations=(
             *(left._guarded_approximations or ()),
@@ -425,6 +420,17 @@ def _compose_choice(
         ),
         _symbol_aliases=_merge_symbol_aliases(left, right),
         _domain_rewrite_policy=policy,
+    )
+    reason = ResourceAssumption(
+        "choice combines resource fields independently across alternatives, "
+        "so the result is a conservative upper bound that may not describe "
+        "one alternative",
+        source="choice",
+    )
+    composed = _with_estimate_metadata(
+        composed,
+        assumptions=(reason,),
+        quality=EstimateQuality.CONSERVATIVE,
     )
     return _apply_domain_rewrite(composed, policy=policy)
 

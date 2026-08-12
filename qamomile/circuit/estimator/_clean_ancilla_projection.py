@@ -17,6 +17,7 @@ from qamomile.circuit.estimator._resource_base import (
 )
 from qamomile.circuit.estimator._resource_types import (
     GateResources,
+    ResourceAssumption,
     ResourceTraceNode,
     WidthResources,
 )
@@ -52,7 +53,6 @@ def _clean_ancilla_sequence_estimate(
     gates: GateResources,
     *,
     clean_ancillas: ResourceExpr = _ZERO,
-    quality: EstimateQuality = EstimateQuality.EXACT,
 ) -> ResourceEstimate:
     """Build one clean-ancilla Toffoli decomposition estimate.
 
@@ -63,7 +63,6 @@ def _clean_ancilla_sequence_estimate(
         gates (GateResources): Aggregate logical gate resources.
         clean_ancillas (ResourceExpr): Reusable clean-ancilla demand.
             Defaults to zero.
-        quality (EstimateQuality): Count quality. Defaults to ``EXACT``.
 
     Returns:
         ResourceEstimate: Serial gate/depth and reusable-width estimate.
@@ -77,7 +76,6 @@ def _clean_ancilla_sequence_estimate(
         width=width,
         gates=gates,
         depth=_serial_depth_from_gate_resources(gates),
-        quality=quality,
         trace=ResourceTraceNode(
             name=name,
             source_kind="clean_ancilla_toffoli",
@@ -160,11 +158,20 @@ def _clean_ancilla_generic_multi_control_estimate(
         recipe.total_toffolis,
     )
     central = _clean_ancilla_single_control_estimate(empty, name).gates
-    return _clean_ancilla_sequence_estimate(
+    estimate = _clean_ancilla_sequence_estimate(
         empty,
         f"mc-{name}",
         _add_gates(ladder, central),
         clean_ancillas=recipe.clean_ancillas,
+    )
+    reason = ResourceAssumption(
+        "clean-ancilla multi-control decomposition is an upper bound because "
+        "whole-body ladder sharing or another decomposition may use fewer "
+        "resources",
+        source=f"mc-{name}",
+    )
+    return estimate._with_metadata(
+        assumptions=(reason,),
         quality=EstimateQuality.CONSERVATIVE,
     )
 

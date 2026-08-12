@@ -402,14 +402,15 @@ class _TransformedCallInterpreter(_CallInterpreter):
             )
         if self.config.unknown_policy is UnknownResourcePolicy.ZERO_WITH_WARNING:
             estimate = ResourceEstimate(
-                assumptions=(assumption,),
                 derivation=EstimateDerivation.MODELED,
-                quality=EstimateQuality.UNKNOWN,
                 trace=ResourceTraceNode(
                     name,
                     "opaque",
                     assumptions=(assumption,),
                 ),
+            )._with_metadata(
+                assumptions=(assumption,),
+                quality=EstimateQuality.UNKNOWN,
             )
             if hasattr(operation, "control_value"):
                 estimate = self._with_zero_control_bracket(
@@ -432,15 +433,16 @@ class _TransformedCallInterpreter(_CallInterpreter):
         estimate = ResourceEstimate(
             gates=gates,
             calls=calls,
-            assumptions=(assumption,),
             derivation=EstimateDerivation.MODELED,
-            quality=EstimateQuality.UNKNOWN,
             trace=ResourceTraceNode(
                 name,
                 "opaque",
                 summary=f"controlled power={power}",
                 assumptions=(assumption,),
             ),
+        )._with_metadata(
+            assumptions=(assumption,),
+            quality=EstimateQuality.UNKNOWN,
         )
         if hasattr(operation, "control_value"):
             estimate = self._with_zero_control_bracket(
@@ -751,25 +753,27 @@ class _TransformedCallInterpreter(_CallInterpreter):
                         calls_by_name={name: _ONE},
                         queries_by_name={name: _ONE},
                     ),
-                    assumptions=(assumption,),
                     derivation=EstimateDerivation.MODELED,
-                    quality=EstimateQuality.UNKNOWN,
                     trace=ResourceTraceNode(
                         name,
                         "opaque",
                         assumptions=(assumption,),
                     ),
+                )._with_metadata(
+                    assumptions=(assumption,),
+                    quality=EstimateQuality.UNKNOWN,
                 )
             else:
                 estimate = ResourceEstimate(
-                    assumptions=(assumption,),
                     derivation=EstimateDerivation.MODELED,
-                    quality=EstimateQuality.UNKNOWN,
                     trace=ResourceTraceNode(
                         name,
                         "opaque",
                         assumptions=(assumption,),
                     ),
+                )._with_metadata(
+                    assumptions=(assumption,),
+                    quality=EstimateQuality.UNKNOWN,
                 )
             estimate = self._with_zero_control_bracket(
                 estimate.inverse(),

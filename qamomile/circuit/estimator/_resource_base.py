@@ -174,7 +174,9 @@ class EstimateQuality(enum.StrEnum):
 
     This axis is independent of both count derivation and mathematical
     approximation. A modeled estimate can therefore be exact, conservative,
-    or unknown with respect to the selected resource model.
+    or unknown with respect to the selected resource model. Every active
+    non-exact quality contributes its explanation to the estimate's public
+    ``assumptions``; unrelated assumptions may also accompany exact quality.
 
     Values:
         EXACT: Reported counts exactly follow the selected circuit model.

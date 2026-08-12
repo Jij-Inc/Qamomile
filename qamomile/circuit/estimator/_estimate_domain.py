@@ -25,7 +25,7 @@ from qamomile.circuit.estimator._resource_types import (
     ResourceAssumption,
     WidthResources,
     _active_approximation,
-    _active_assumptions,
+    _active_assumptions_with_quality_reasons,
     _active_derivation,
     _active_quality,
 )
@@ -328,7 +328,10 @@ def _validate_public_provenance_metadata(estimate: ResourceEstimate) -> None:
             were mutated without rebuilding their guarded provenance.
     """
     if estimate._domain_rewrite_state is None and estimate.assumptions != (
-        _active_assumptions(estimate._guarded_assumptions or ())
+        _active_assumptions_with_quality_reasons(
+            estimate._guarded_assumptions or (),
+            estimate._guarded_qualities or (),
+        )
     ):
         raise RuntimeError(
             "resource estimate assumptions do not match guarded provenance; "
@@ -416,10 +419,9 @@ def _restore_domain_rewrite(estimate: ResourceEstimate) -> ResourceEstimate:
     state = estimate._domain_rewrite_state
     if state is None:
         return estimate
-    ordinary_assumptions = tuple(
-        fact.assumption
-        for fact in (estimate._guarded_assumptions or ())
-        if fact.active_when is not sp.false
+    rendered_assumptions = _active_assumptions_with_quality_reasons(
+        estimate._guarded_assumptions or (),
+        estimate._guarded_qualities or (),
     )
     return dataclasses.replace(
         estimate,
@@ -429,7 +431,7 @@ def _restore_domain_rewrite(estimate: ResourceEstimate) -> ResourceEstimate:
         resets=state.original.reset_resources(),
         depth=state.original.depth_resources(),
         calls=state.original.call_resources(),
-        assumptions=ordinary_assumptions,
+        assumptions=rendered_assumptions,
         _domain_rewrite_state=None,
         _rendered_assumption_snapshot=None,
     )

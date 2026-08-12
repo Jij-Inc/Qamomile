@@ -919,13 +919,24 @@ class _CallInterpreter(_ForItemsInterpreter):
         """
         name = operation.custom_name
         if self.config.unknown_policy is UnknownResourcePolicy.OPAQUE_CALL:
+            assumption = ResourceAssumption(
+                "unknown callable is recorded as an opaque call without a "
+                "declared resource cost",
+                source=name,
+            )
             estimate = ResourceEstimate(
                 calls=CallResources(
                     calls_by_name={name: _ONE},
                     queries_by_name={name: _ONE},
                 ),
-                trace=ResourceTraceNode(name, "opaque"),
+                trace=ResourceTraceNode(
+                    name,
+                    "opaque",
+                    assumptions=(assumption,),
+                ),
                 derivation=EstimateDerivation.MODELED,
+            )._with_metadata(
+                assumptions=(assumption,),
                 quality=EstimateQuality.UNKNOWN,
             )
         elif self.config.unknown_policy is UnknownResourcePolicy.ZERO_WITH_WARNING:
@@ -934,9 +945,10 @@ class _CallInterpreter(_ForItemsInterpreter):
                 source=name,
             )
             estimate = ResourceEstimate(
-                assumptions=(assumption,),
                 trace=ResourceTraceNode(name, "opaque", assumptions=(assumption,)),
                 derivation=EstimateDerivation.MODELED,
+            )._with_metadata(
+                assumptions=(assumption,),
                 quality=EstimateQuality.UNKNOWN,
             )
         else:

@@ -50,7 +50,10 @@ from qamomile.circuit.estimator._resource_loop_reductions import (
     _sum_measurements,
     _sum_resets,
 )
-from qamomile.circuit.estimator._resource_types import ResourceAssumption
+from qamomile.circuit.estimator._resource_types import (
+    ResourceAssumption,
+    _guarded_quality_with_reason,
+)
 from qamomile.circuit.estimator._scheduling import (
     _estimate_depth_activity_condition,
 )
@@ -269,15 +272,16 @@ def _sum_estimate_over_range(
             for fact in (estimate._guarded_derivations or ())
         ),
         _guarded_qualities=tuple(
-            dataclasses.replace(
-                fact,
-                active_when=_activation_over_range(
+            _guarded_quality_with_reason(
+                _activation_over_range(
                     fact.active_when,
                     loop_symbol,
                     start,
                     step,
                     iterations,
                 ),
+                fact.quality,
+                fact.reason,
             )
             for fact in (estimate._guarded_qualities or ())
         ),

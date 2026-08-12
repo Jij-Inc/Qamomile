@@ -28,9 +28,10 @@ from qamomile.circuit.estimator._resource_types import (
     GateResources,
     ResourceAssumption,
     _active_approximation,
-    _active_assumptions,
+    _active_assumptions_with_quality_reasons,
     _active_derivation,
     _active_quality,
+    _guarded_quality_with_reason,
     _GuardedApproximation,
     _GuardedAssumption,
     _GuardedDerivation,
@@ -50,6 +51,105 @@ _DEFER_RESOURCE_SYMBOL_METADATA = ContextVar(
     "qamomile_defer_resource_symbol_metadata",
     default=False,
 )
+
+
+def _quality_fallback_reason(quality: EstimateQuality) -> ResourceAssumption:
+    """Return an honest generic reason for a non-exact quality.
+
+    Args:
+        quality (EstimateQuality): Non-exact quality lacking a more specific
+            explanation.
+
+    Returns:
+        ResourceAssumption: Generic reason suitable for public reporting.
+
+    Raises:
+        ValueError: If ``quality`` is exact.
+    """
+    if quality is EstimateQuality.CONSERVATIVE:
+        message = (
+            "resource counts include a conservative estimate without a more "
+            "specific reason"
+        )
+    elif quality is EstimateQuality.UNKNOWN:
+        message = (
+            "resource counts include an estimate of unknown quality without a "
+            "more specific reason"
+        )
+    else:
+        raise ValueError("exact resource quality does not require a reason")
+    return ResourceAssumption(message, source="resource estimate quality")
+
+
+def _quality_reason_from_metadata(
+    quality: EstimateQuality,
+    assumptions: Sequence[ResourceAssumption],
+    explicit_reason: ResourceAssumption | None = None,
+) -> ResourceAssumption:
+    """Select a reason supplied with one non-exact quality update.
+
+    Args:
+        quality (EstimateQuality): Non-exact quality being recorded.
+        assumptions (Sequence[ResourceAssumption]): Assumptions supplied by
+            the same metadata update.
+        explicit_reason (ResourceAssumption | None): Preferred explicit
+            reason. Defaults to ``None``.
+
+    Returns:
+        ResourceAssumption: Explicit, simultaneous, or generic quality reason.
+
+    Raises:
+        TypeError: If an explicit reason is not a resource assumption or its
+            message is not a string.
+        ValueError: If ``quality`` is exact or the explicit reason is blank.
+    """
+    if quality is EstimateQuality.EXACT:
+        raise ValueError("exact resource quality does not require a reason")
+    if explicit_reason is not None:
+        if not isinstance(explicit_reason, ResourceAssumption):
+            raise TypeError("resource quality reason must be an assumption")
+        if not isinstance(explicit_reason.message, str):
+            raise TypeError("resource quality reason message must be a string")
+        if not explicit_reason.message.strip():
+            raise ValueError("resource quality reason must not be blank")
+        return explicit_reason
+    for assumption in assumptions:
+        if (
+            isinstance(assumption, ResourceAssumption)
+            and isinstance(assumption.message, str)
+            and assumption.message.strip()
+        ):
+            return assumption
+    return _quality_fallback_reason(quality)
+
+
+def _newly_supplied_assumptions(
+    supplied: Sequence[ResourceAssumption],
+    rendered: Sequence[ResourceAssumption],
+) -> tuple[ResourceAssumption, ...]:
+    """Separate assumptions appended to already rendered metadata.
+
+    Identity-preserving prefix detection distinguishes an intentionally
+    appended duplicate from the same reason already rendered by an existing
+    quality fact. Non-prefix edits retain the historical additive behavior:
+    values absent from canonical guarded provenance are appended as ordinary
+    assumptions, while existing facts are never removed implicitly.
+
+    Args:
+        supplied (Sequence[ResourceAssumption]): Public assumptions entering
+            estimate normalization.
+        rendered (Sequence[ResourceAssumption]): Canonical assumptions already
+            rendered by retained guarded provenance.
+
+    Returns:
+        tuple[ResourceAssumption, ...]: Newly supplied ordinary assumptions.
+    """
+    if len(supplied) >= len(rendered) and all(
+        assumption is carried
+        for assumption, carried in zip(supplied, rendered, strict=False)
+    ):
+        return tuple(supplied[len(rendered) :])
+    return tuple(assumption for assumption in supplied if assumption not in rendered)
 
 
 def _initialize_estimate_provenance(
@@ -75,10 +175,11 @@ def _initialize_estimate_provenance(
         estimate._global_barrier_condition
     )
     prior_rendered = estimate._rendered_assumption_snapshot
+    new_assumptions: tuple[ResourceAssumption, ...]
     if estimate._guarded_assumptions is None:
+        new_assumptions = tuple(estimate.assumptions)
         estimate._guarded_assumptions = tuple(
-            _GuardedAssumption(sp.true, assumption)
-            for assumption in estimate.assumptions
+            _GuardedAssumption(sp.true, assumption) for assumption in new_assumptions
         )
     elif prior_rendered is not None:
         if len(estimate.assumptions) < len(prior_rendered) or any(
@@ -94,21 +195,28 @@ def _initialize_estimate_provenance(
                 "domain snapshot prefix; append ordinary assumptions instead of "
                 "inserting, removing, or reordering entries"
             )
+        new_assumptions = tuple(estimate.assumptions[len(prior_rendered) :])
         estimate._guarded_assumptions = (
             *estimate._guarded_assumptions,
             *(
                 _GuardedAssumption(sp.true, assumption)
-                for assumption in estimate.assumptions[len(prior_rendered) :]
+                for assumption in new_assumptions
             ),
         )
     else:
-        active_assumptions = _active_assumptions(estimate._guarded_assumptions)
+        rendered_assumptions = _active_assumptions_with_quality_reasons(
+            estimate._guarded_assumptions,
+            estimate._guarded_qualities or (),
+        )
+        new_assumptions = _newly_supplied_assumptions(
+            estimate.assumptions,
+            rendered_assumptions,
+        )
         estimate._guarded_assumptions = (
             *estimate._guarded_assumptions,
             *(
                 _GuardedAssumption(sp.true, assumption)
-                for assumption in estimate.assumptions
-                if assumption not in active_assumptions
+                for assumption in new_assumptions
             ),
         )
     if estimate._guarded_derivations is None:
@@ -127,14 +235,19 @@ def _initialize_estimate_provenance(
             *estimate._guarded_derivations,
             _GuardedDerivation(sp.true, estimate.derivation),
         )
-    estimate.assumptions = _active_assumptions(estimate._guarded_assumptions)
-    estimate._rendered_assumption_snapshot = (
-        estimate.assumptions if estimate._domain_rewrite_state is not None else None
-    )
     estimate.derivation = _active_derivation(estimate._guarded_derivations)
     if estimate._guarded_qualities is None:
         estimate._guarded_qualities = (
-            (_GuardedQuality(sp.true, estimate.quality),)
+            (
+                _guarded_quality_with_reason(
+                    sp.true,
+                    estimate.quality,
+                    _quality_reason_from_metadata(
+                        estimate.quality,
+                        new_assumptions,
+                    ),
+                ),
+            )
             if estimate.quality is not EstimateQuality.EXACT
             else ()
         )
@@ -146,9 +259,23 @@ def _initialize_estimate_provenance(
     ):
         estimate._guarded_qualities = (
             *estimate._guarded_qualities,
-            _GuardedQuality(sp.true, estimate.quality),
+            _guarded_quality_with_reason(
+                sp.true,
+                estimate.quality,
+                _quality_reason_from_metadata(
+                    estimate.quality,
+                    new_assumptions,
+                ),
+            ),
         )
     estimate.quality = _active_quality(estimate._guarded_qualities)
+    estimate.assumptions = _active_assumptions_with_quality_reasons(
+        estimate._guarded_assumptions,
+        estimate._guarded_qualities,
+    )
+    estimate._rendered_assumption_snapshot = (
+        estimate.assumptions if estimate._domain_rewrite_state is not None else None
+    )
     if estimate._guarded_approximations is None:
         estimate._guarded_approximations = (
             (_GuardedApproximation(sp.true, estimate.approximation),)
@@ -187,8 +314,11 @@ def _refresh_symbol_metadata(
     active_registry = registry or _serialization_registry(estimate)
     estimate._symbol_aliases = active_registry.aliases()
     estimate.parameters = _collect_parameters(estimate, active_registry)
-    ordinary = _active_assumptions(estimate._guarded_assumptions or ())
-    estimate.assumptions = (*ordinary, *_domain_assumptions(estimate, active_registry))
+    rendered = _active_assumptions_with_quality_reasons(
+        estimate._guarded_assumptions or (),
+        estimate._guarded_qualities or (),
+    )
+    estimate.assumptions = (*rendered, *_domain_assumptions(estimate, active_registry))
     estimate._rendered_assumption_snapshot = (
         estimate.assumptions if estimate._domain_rewrite_state is not None else None
     )
@@ -201,6 +331,7 @@ def _with_estimate_metadata(
     assumptions: Sequence[ResourceAssumption] = (),
     derivation: EstimateDerivation = EstimateDerivation.STRUCTURAL,
     quality: EstimateQuality = EstimateQuality.EXACT,
+    quality_reason: ResourceAssumption | None = None,
     approximation: ApproximationStatus = ApproximationStatus.EXACT,
     active_when: sp.Basic = sp.true,
 ) -> ResourceEstimate:
@@ -214,6 +345,9 @@ def _with_estimate_metadata(
             ``STRUCTURAL`` adds no fact. Defaults to ``STRUCTURAL``.
         quality (EstimateQuality): Count quality to append. ``EXACT`` adds no
             fact. Defaults to ``EXACT``.
+        quality_reason (ResourceAssumption | None): Explanation for a non-exact
+            quality. Defaults to the first simultaneous nonblank assumption,
+            then to an honest generic reason.
         approximation (ApproximationStatus): Mathematical approximation fact
             to append. ``EXACT`` adds no fact. Defaults to ``EXACT``.
         active_when (sp.Basic): Activation condition shared by the new facts.
@@ -221,8 +355,29 @@ def _with_estimate_metadata(
 
     Returns:
         ResourceEstimate: Copy with condition-aware metadata appended.
+
+    Raises:
+        ValueError: If an exact update supplies a quality reason, or an
+            explicit quality reason has a blank message.
+        TypeError: If an explicit quality reason is not a resource assumption.
     """
     condition = _boolean_condition(active_when)
+    if quality is EstimateQuality.EXACT and quality_reason is not None:
+        raise ValueError("exact resource quality does not accept a reason")
+    guarded_quality_updates: tuple[_GuardedQuality, ...] = ()
+    if quality is not EstimateQuality.EXACT:
+        selected_quality_reason = _quality_reason_from_metadata(
+            quality,
+            assumptions,
+            explicit_reason=quality_reason,
+        )
+        guarded_quality_updates = (
+            _guarded_quality_with_reason(
+                condition,
+                quality,
+                selected_quality_reason,
+            ),
+        )
     guarded_assumptions = estimate._guarded_assumptions or ()
     guarded_derivations = estimate._guarded_derivations or ()
     guarded_qualities = estimate._guarded_qualities or ()
@@ -243,11 +398,7 @@ def _with_estimate_metadata(
         ),
         _guarded_qualities=(
             *guarded_qualities,
-            *(
-                (_GuardedQuality(condition, quality),)
-                if quality is not EstimateQuality.EXACT
-                else ()
-            ),
+            *guarded_quality_updates,
         ),
         _guarded_approximations=(
             *guarded_approximations,

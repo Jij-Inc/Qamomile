@@ -32,6 +32,7 @@ from qamomile.circuit.estimator._resource_types import (
     MeasurementResources,
     ResetResources,
     WidthResources,
+    _active_quality,
 )
 from qamomile.circuit.estimator._serialization import SymbolRegistry
 from qamomile.circuit.estimator._symbol_discovery import _serialization_expressions
@@ -185,6 +186,7 @@ def resource_estimate_to_wire(
                 {
                     "active_when": expression(fact.active_when),
                     "quality": fact.quality.value,
+                    "reason": _assumption_to_wire(fact.reason),
                 }
                 for fact in guarded_qualities
             ],
@@ -342,6 +344,11 @@ def resource_estimate_from_wire(
         record.get("quality"),
         "opaque ResourceEstimate quality",
     )
+    if _active_quality(guarded_qualities) is not serialized_quality:
+        raise ValueError(
+            "opaque ResourceEstimate public metadata disagrees with canonical "
+            "guarded provenance"
+        )
     serialized_approximation = _enum_from_wire(
         ApproximationStatus,
         record.get("approximation"),
@@ -448,8 +455,7 @@ def resource_estimate_from_wire(
     estimate._refresh_symbol_metadata()
     if estimate.assumptions != serialized_assumptions:
         raise ValueError(
-            "opaque ResourceEstimate assumptions disagree with canonical "
-            "domain provenance"
+            "opaque ResourceEstimate assumptions disagree with canonical provenance"
         )
     _validate_domain_rewrite_state(estimate)
     return estimate
