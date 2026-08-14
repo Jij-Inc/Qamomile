@@ -53,7 +53,7 @@ OMMX・JijModeling・`QAOAConverter`を使ったend-to-endの最適化例です�
 :::{card}
 :header: **QAOAでMaxCutを解く: 回路をゼロから構築する**
 :link: qaoa_maxcut
-QAOA回路をゼロから構築してMaxCutを解き、組み込みの`qaoa_state`と比較します。
+量子近似最適化アルゴリズム（QAOA）をQamomileで実装する例です。MaxCutについて、ゼロから構築する方法と組み込みの`qaoa_state`の2通りを紹介します。
 :::
 
 :::{card}
