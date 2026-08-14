@@ -17,13 +17,27 @@
 # tags: [algorithm, sample-based]
 # ---
 #
-# # Quantum-enhanced Markov chain Monte Carlo
+# # Quantum-enhanced Markov chain Monte Carlo (QeMCMC)
 #
-# このチュートリアルでは、Qamomileを使ってQuantum-enhanced Markov chain Monte Carlo (QeMCMC) [](https://doi.org/10.1038/s41586-023-06095-4) を実装する例を示します。
+# このチュートリアルでは、Qamomileを使ってQuantum-enhanced Markov chain Monte Carlo (QeMCMC) {cite:p}`10.1038/s41586-023-06095-4`を実装する例を示します。
 
 # %%
 # 最新のQamomileをpipからインストールします！
 # # !pip install "qamomile[qiskit]"
+
+# %%
+import os
+from typing import Any, Callable
+
+import matplotlib.pyplot as plt
+import numpy as np
+from qiskit_aer import AerSimulator
+
+import qamomile.circuit as qmc
+from qamomile.circuit.algorithm import trotterized_time_evolution
+from qamomile.circuit.stdlib import computational_basis_state
+from qamomile.observable.hamiltonian import Hamiltonian, X, Z
+from qamomile.qiskit import QiskitTranspiler
 
 # %% [markdown]
 # ---
@@ -49,13 +63,10 @@
 # まずは、小さなイジング模型について実際にボルツマン分布を可視化してみましょう。ここでは、1次元強磁性イジング鎖（$J_{i,i+1} = 1$、$h_i = 0$）を考え、逆温度$\beta$を変えながら、エネルギー$E(\bm{x})$ごとの確率を集計したヒストグラムをプロットします。
 
 # %%
-import os
-from typing import Any, Callable
-
-import matplotlib.pyplot as plt
-import numpy as np
-
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+RANDOM_SEED = 42
+QAOA_BLUE = "#2696EB"
+QAOA_RED = "#FF6B6B"
 
 n_spins = 6
 J = 1.0
@@ -87,7 +98,7 @@ for ax, beta in zip(axes, betas):
     weights = np.exp(-beta * energies)
     probs = weights / weights.sum()
     e_probs = np.array([probs[energies == e].sum() for e in unique_energies])
-    ax.bar(unique_energies, e_probs, width=0.8)
+    ax.bar(unique_energies, e_probs, width=0.8, color=QAOA_BLUE)
     ax.set_xlabel(r"Energy $E(\mathbf{x})$")
     ax.set_title(rf"$\beta = {beta}$")
 axes[0].set_ylabel(r"Probability $\mu(E)$")
@@ -98,7 +109,7 @@ plt.show()
 # %% [markdown]
 # ### マルコフ連鎖モンテカルロ法 (MCMC)
 #
-# マルコフ連鎖モンテカルロ法 (MCMC) は、確率分布からのサンプリングに使用される一般的な手法です。MCMCはマルコフ連鎖と呼ばれる確率過程を利用することで、目的の分布$\mu(\bm{x})$からのサンプリングを実現します。ここでは、MCMCの代表的な実装であるMetropolis-Hastings (MH) アルゴリズム [](https://doi.org/10.1093/biomet/57.1.97) を紹介します。
+# マルコフ連鎖モンテカルロ法 (MCMC) は、確率分布からのサンプリングに使用される一般的な手法です。MCMCはマルコフ連鎖と呼ばれる確率過程を利用することで、目的の分布$\mu(\bm{x})$からのサンプリングを実現します。ここでは、MCMCの代表的な実装であるMetropolis-Hastings (MH) アルゴリズム{cite:p}`10.1093/biomet/57.1.97`を紹介します。
 #
 # MHアルゴリズムは、ある提案確率$Q(\bm{y}|\bm{x})$に従ってマルコフ連鎖の新たな遷移$\bm{x} \rightarrow \bm{y}$を生成し、次の採択確率
 # $$
@@ -109,7 +120,7 @@ plt.show()
 # 実際に確認してみましょう。先ほど用意したボルツマン分布をMH法でサンプリングしてみます。提案分布にはさまざまなものが使えますが、ここでは最もシンプルな、ランダムなスピンを1つだけ選んで反転させるものを利用します。
 
 # %%
-rng = np.random.default_rng(seed=0)
+rng = np.random.default_rng(seed=RANDOM_SEED)
 
 
 def local_update(state: np.ndarray) -> np.ndarray:
@@ -197,10 +208,10 @@ theoretical_magnetization = np.sum(probs * magnetization_per_state)
 assert theoretical_magnetization == 0.0
 assert np.isclose(probs.sum(), 1.0)
 
-plt.plot(sample_magnetization, label="MCMC estimate")
+plt.plot(sample_magnetization, color=QAOA_BLUE, label="MCMC estimate")
 plt.axhline(
     theoretical_magnetization,
-    color="red",
+    color="black",
     linestyle="--",
     label=f"Theoretical ({theoretical_magnetization:.3f})",
 )
@@ -215,28 +226,26 @@ plt.show()
 # ## アルゴリズム
 
 # %% [markdown]
-# Quantum-enhanced MCMCアルゴリズムは、量子回路からのサンプリングを提案分布として利用するMCMCです [](https://doi.org/10.1038/s41586-023-06095-4)。現在の状態$\bm{x}$から始め、量子回路$U$を作用させて計算基底で測定することで、新たな状態$\bm{y}$を得ます。このとき、提案分布$Q(\bm{y}|\bm{x})$は以下のようになります:
+# Quantum-enhanced MCMCアルゴリズムは、量子回路からのサンプリングを提案分布として利用するMCMCです{cite:p}`10.1038/s41586-023-06095-4`。現在の状態$\bm{x}$から始め、量子回路$U$を作用させて計算基底で測定することで、新たな状態$\bm{y}$を得ます。このとき、提案分布$Q(\bm{y}|\bm{x})$は以下のようになります:
 # $$
 # Q(\bm{y}|\bm{x}) = \| \langle \bm{y} | U | \bm{x} \rangle \|^2
 # $$
 # この確率を直接計算するのは困難ですが、量子回路が$U = U^\top$を満たすとき、提案分布は$Q(\bm{x} \mid \bm{y}) = Q(\bm{y} \mid \bm{x})$を満たし、採択確率の中で$Q$の項は打ち消されるため、$Q$を明示的に計算する必要がなくなります。例えば、イジング模型のボルツマン分布をサンプリングするためには、時間に依存しないハミルトニアンによるTrotter化された時間発展を利用できます:
 # $$
 # U(\gamma, t) = \exp(-i H t), \quad \quad
-# H = (1-\gamma) \alpha H_M + \gamma H_C.
+# H = (1-\gamma) \alpha H_C + \gamma H_M.
 # $$
-# ここで、$H_M$はミキサーハミルトニアンと呼ばれ、状態間の量子遷移を生み出します。一方、$H_C$はイジングハミルトニアンです。$\gamma \in [0,1]$は2つの項の重みを制御するパラメータです。$\alpha$は、ミキサーハミルトニアンとコストハミルトニアンの固有値のスケールを揃えるための規格化因子です。$(\gamma, t)$はMCMCの効率を決める調整可能なパラメータです。
+# ここで、$H_M$はミキサーハミルトニアンと呼ばれ、状態間の量子遷移を生み出します。一方、$H_C$はイジングハミルトニアンです。$\gamma \in [0,1]$はミキサーハミルトニアンの重みを制御します。正規化係数$\alpha = \lVert H_M \rVert_F / \lVert H_C \rVert_F$は、ミキサーハミルトニアンとコストハミルトニアンのFrobeniusノルムのスケールを揃えます。$(\gamma, t)$はMCMCの効率を決める調整可能なパラメータです。
 
 # %% [markdown]
 # ---
-# ## アルゴリズムの実装
+# ## Qamomileによる実装
 
 # %% [markdown]
 # ### 1. ハミルトニアンの準備
 # いよいよ、アルゴリズムを実装していきましょう。まず、サンプリングしたいモデルのイジングハミルトニアン$H_C$と、提案回路$U$のためのミキサーハミルトニアン$H_M$を準備します。
 
 # %%
-from qamomile.observable.hamiltonian import Hamiltonian, X, Z
-
 mixer_hamiltonian = Hamiltonian()
 for i in range(n_spins):
     mixer_hamiltonian += X(i)
@@ -245,17 +254,20 @@ cost_hamiltonian = Hamiltonian()
 for i in range(n_spins - 1):
     cost_hamiltonian += -J * Z(i) * Z(i + 1)
 
+# 両方のFrobeniusノルムに共通する2**(n_spins / 2)の因子は相殺される
+alpha = np.sqrt(
+    sum(abs(coefficient) ** 2 for coefficient in mixer_hamiltonian.terms.values())
+    / sum(abs(coefficient) ** 2 for coefficient in cost_hamiltonian.terms.values())
+)
+assert np.isclose(alpha, np.sqrt(n_spins / ((n_spins - 1) * J**2)))
+
 # %% [markdown]
 # ### 2. 量子回路の構築
 #
 # 次に、量子回路を実装していきましょう。まず、現在の状態$\bm{x}$を入力状態として符号化するため、`computational_basis_state`を用いて量子状態$\ket{\bm{x}}$を準備します。提案遷移にはTrotter分解に基づく時間発展シミュレーションを利用します。先ほど準備したハミルトニアンに対する回路を、`trotterized_time_evolution`を使って構築します。
 
+
 # %%
-import qamomile.circuit as qmc
-from qamomile.circuit.algorithm import trotterized_time_evolution
-from qamomile.circuit.stdlib import computational_basis_state
-
-
 @qmc.qkernel
 def qemcmc_circuit(
     n: qmc.UInt,
@@ -282,20 +294,18 @@ def qemcmc_circuit(
 # %% [markdown]
 # ### 3. トランスパイル
 #
-# カーネルをトランスパイルします。量子回路を実行するには、ハミルトニアンの混合係数$\gamma$とシミュレーション時間$t$を固定する必要があります。 [](https://doi.org/10.1103/PhysRevA.111.042615) に従い、$\gamma=0.45$、$t=12$、$\Delta t = 0.8$と設定します。トランスパイル時に`n`、`order`、`time`、`step`をバインドし、`input_bits`はランタイムパラメータとして残します。
+# 量子カーネルをトランスパイルします。{cite:t}`10.1103/PhysRevA.111.042615`に従い、ミキサー項の重み$\gamma=0.45$、シミュレーション時間$t=12$、$\Delta t = 0.8$と設定します。トランスパイル時に`n`、`order`、`time`、`step`をバインドし、`input_bits`はランタイムパラメータとして残します。
 # %%
-from qamomile.qiskit import QiskitTranspiler
-
-gamma = 0.45  # 混合係数
+gamma = 0.45  # ミキサー項の重み
 time = 12.0  # 総発展時間
 delta_t = 0.8  # Trotterステップの時間幅
-step = int(time/delta_t)
+step = int(time / delta_t)  # Trotterステップ数
 order = 2  # Suzuki-Trotter近似次数
 assert step == 15  # 12.0 / 0.8
 
 Hs = [
-    (1 - gamma) * mixer_hamiltonian,
-    gamma * cost_hamiltonian,
+    gamma * mixer_hamiltonian,
+    (1 - gamma) * alpha * cost_hamiltonian,
 ]
 assert len(Hs) == 2
 
@@ -311,6 +321,19 @@ executable = transpiler.transpile(
         "step": step,
     },
     parameters=["input_bits"],
+)
+
+# %% [markdown]
+# 以下では、代表例として0と1が交互に並ぶ入力状態に対するQamomileレベルの提案回路を描画します。繰り返されるSuzuki-Trotter構造を簡潔に示すため、ループは折りたたんで表示します。
+
+# %%
+qemcmc_circuit.draw(
+    n=n_spins,
+    input_bits=[i % 2 for i in range(n_spins)],
+    Hs=Hs,
+    order=order,
+    time=time,
+    step=step,
 )
 
 # %% [markdown]
@@ -376,28 +399,35 @@ def quantum_proposal(state: np.ndarray, executable: Any, executor: Any) -> np.nd
 
 # %% [markdown]
 # ---
-# ## 実行例
+# ## 結果
 
 # %% [markdown]
-# 実装したQeMCMCアルゴリズムを実行してみましょう。先ほどよりも低温の $\beta = 1.0$ に設定し、古典MCMCの局所更新では混合が遅くなる条件で量子提案分布の挙動を観察します。公平な比較のため、同じ $\beta = 1.0$ で古典MCMCも併走させます。
+# 実装したQeMCMCアルゴリズムを実行してみましょう。先ほどよりも低温の$\beta = 2.0$に設定し、古典MCMCの局所更新では混合が遅くなる条件で量子提案分布の挙動を観察します。公平な比較のため、同じ$\beta = 2.0$で古典MCMCも併走させます。
 
 # %%
-from qiskit_aer import AerSimulator
-
-beta = 1.0  # 局所更新では混合が遅くなる低温に切り替える
+beta = 2.0  # 局所更新では混合が遅くなる低温に切り替える
 T_quantum = (
     20 if docs_test_mode else 1000
 )  # 量子回路シミュレーションのコストが高いため小さめに設定
 
-# beta=1.0 におけるボルツマン分布から平均磁化の理論値を再計算
+# 各サンプリングジョブを同じ疑似乱数列にリセットせず、再現可能かつ異なるseed列を生成
+quantum_job_seeds = np.random.default_rng(seed=RANDOM_SEED).integers(
+    0,
+    np.iinfo(np.uint32).max,
+    size=T_quantum,
+    dtype=np.uint32,
+)
+assert np.unique(quantum_job_seeds).size == T_quantum
+
+# beta=2.0におけるボルツマン分布から平均磁化の理論値を再計算
 weights = np.exp(-beta * energies)
 probs = weights / weights.sum()
 theoretical_magnetization = np.sum(probs * magnetization_per_state)
-# Z2 対称性により依然として 0 — beta は対の重みを変えるだけで {+spins, -spins}
-# の縮退を破らない。
+# Z2対称性により依然として0であり、betaは対の重みを変えるだけで
+# {+spins, -spins}の縮退を破らない
 assert theoretical_magnetization == 0.0
 
-# 比較用に同じ beta、同じステップ数で古典MCMCも実行
+# 比較用に同じbeta、同じステップ数で古典MCMCも実行
 classical_compare_sample = np.zeros((T_quantum, n_spins))
 state = np.ones(n_spins)  # 初期状態
 for t in range(T_quantum):
@@ -406,35 +436,40 @@ for t in range(T_quantum):
     classical_compare_sample[t] = state
 
 # QeMCMC
-executor = transpiler.executor(backend=AerSimulator(seed_simulator=7))
+quantum_backend = AerSimulator()
+executor = transpiler.executor(backend=quantum_backend)
 quantum_sample = np.zeros((T_quantum, n_spins), dtype=int)
 state = np.ones(n_spins, dtype=int)  # 初期状態
-for t in range(T_quantum):
+for t, job_seed in enumerate(quantum_job_seeds):
+    quantum_backend.set_options(seed_simulator=int(job_seed))
     proposed_state = quantum_proposal(state, executable, executor)
     state = metropolis_hastings(state, proposed_state, ising_energy, beta)
     quantum_sample[t] = state
-# 両 chain とも n_spins サイト・T_quantum サンプル分の +/- 1 スピン列を生成済み。
+# 両chainともn_spinsサイト・T_quantumサンプル分の+/- 1スピン列を生成済み
 assert quantum_sample.shape == (T_quantum, n_spins)
 assert classical_compare_sample.shape == (T_quantum, n_spins)
 assert set(np.unique(quantum_sample).tolist()).issubset({-1, 1})
 
 
 # %% [markdown]
-# 平均磁化の推定量を計算し、同じ $\beta = 1.0$ で実行した古典MCMCの結果と比較します。
+# 平均磁化の推定量を計算し、同じ$\beta = 2.0$で実行した古典MCMCの結果と比較します。
 
 # %%
 quantum_sample_magnetization = np.array(
     [average_magnetization(quantum_sample[:i]) for i in range(1, T_quantum + 1)]
 )
 classical_compare_magnetization = np.array(
-    [average_magnetization(classical_compare_sample[:i]) for i in range(1, T_quantum + 1)]
+    [
+        average_magnetization(classical_compare_sample[:i])
+        for i in range(1, T_quantum + 1)
+    ]
 )
 
-plt.plot(classical_compare_magnetization, label="MCMC estimate")
-plt.plot(quantum_sample_magnetization, label="QeMCMC estimate")
+plt.plot(classical_compare_magnetization, color=QAOA_BLUE, label="MCMC estimate")
+plt.plot(quantum_sample_magnetization, color=QAOA_RED, label="QeMCMC estimate")
 plt.axhline(
     theoretical_magnetization,
-    color="red",
+    color="black",
     linestyle="--",
     label=f"Theoretical ({theoretical_magnetization:.3f})",
 )
@@ -445,7 +480,14 @@ plt.legend()
 plt.show()
 
 # %% [markdown]
+# 低温では、局所更新は異なる配置へ遷移する確率が低下するため、混合が非常に遅くなります。対して、QeMCMCは量子回路による遷移を利用することで、低温においても頻繁に状態が遷移し、厳密な値へ収束していく様子が確認できます。
+
+# %% [markdown]
 # ---
 # ## まとめ
 #
-# 本チュートリアルでは、古典的なMetropolis-Hastings法によるMCMCの復習からはじめ、量子回路$U(\gamma, t) = \exp(-i t H)$（$H = (1-\gamma) H_M + \gamma H_C$）を提案分布として利用するQuantum-enhanced MCMC (QeMCMC) をQamomile上で実装しました。具体的には、`qamomile.observable`でミキサー/コストハミルトニアンを準備したうえで、`@qkernel`の中で`trotterized_time_evolution`を用いたSuzuki-Trotter時間発展による提案回路を構築しました。最後に、トランスパイルされたexecutorを介して量子提案分布を既存のMHループに組み込み、古典MCMCとQeMCMCを同一のイジング鎖上で走らせて平均磁化の収束を比較することで、一連の量子古典ハイブリッドループが意図どおり動作することを確認しました。
+# このノートブックでは、以下を行いました。
+#
+# - 古典的なMetropolis-Hastings MCMCによるボルツマン分布のサンプリングと、低温で局所更新の混合が遅くなる理由を確認しました。
+# - ミキサーハミルトニアンとコストハミルトニアンによる時間発展を`trotterized_time_evolution`で実装し、QamomileでQeMCMCの提案回路を構築しました。
+# - 量子提案をMetropolis-Hastings法へ組み込み、QeMCMCと古典MCMCを比較しました。
