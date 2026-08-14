@@ -20,11 +20,11 @@
 #
 # # Quantum Singular Value Transformation
 #
-# Quantum singular value transformation (QSVT) applies a polynomial to the
-# singular values of a matrix embedded in a larger unitary. In this article, we
-# construct a block encoding of a non-Hermitian $2\times2$ matrix, apply the
-# degree-two Chebyshev polynomial with `qmc.qsvt`, and verify the transformed
-# matrix and logical resource estimate.
+# Quantum singular value transformation (QSVT) {cite:p}`10.1145/3313276.3316366`
+# applies a polynomial to the singular values of a matrix embedded in a larger
+# unitary. In this article, we construct a block encoding of a non-Hermitian
+# $2\times2$ matrix, apply the degree-two Chebyshev polynomial with `qmc.qsvt`,
+# and verify the transformed matrix and logical resource estimate.
 
 # %%
 # Install the latest Qamomile through pip!
@@ -46,9 +46,10 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # ### Quantum signal processing (QSP)
 #
-# Quantum signal processing converts a scalar $x\in[-1,1]$ encoded in a
-# single-qubit unitary into a polynomial response. In one common convention,
-# the signal unitary is
+# Quantum signal processing (QSP) {cite:p}`10.1103/PhysRevLett.118.010501`
+# transforms a scalar value $x\in[-1,1]$ encoded in a single-qubit unitary by a
+# polynomial. QSP is constructed as an alternating product of signal unitaries
+# and phase rotations. In one common convention, the signal unitary is
 #
 # $$
 # W(x)=e^{i\arccos(x)X}
@@ -75,26 +76,26 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # The upper-left entry $\langle0|U_\Phi(x)|0\rangle=P_\Phi(x)$ is a polynomial
 # in $x$. A real target polynomial $p(x)$ can be represented as
-# $\operatorname{Re}P_\Phi(x)$ when it satisfies the following conditions:
+# $\operatorname{Re}[P_\Phi(x)]$ when it satisfies the following conditions:
 #
 # - Its degree is at most $d$.
 # - Its parity matches $d$: $p(-x)=(-1)^d p(x)$.
 # - It is bounded on the signal interval: $|p(x)|\leq1$ for $x\in[-1,1]$.
 #
-# QSP design first approximates a target function by such a polynomial and
-# then classically synthesizes the corresponding phases. A degree-$d$
+# QSP design first approximates a target function $p(x)$ by such a polynomial
+# and then classically synthesizes the corresponding phases. A degree-$d$
 # transformation uses $d$ calls to the signal unitary, so the polynomial degree
-# determines the query complexity. This construction was introduced for
-# Hamiltonian simulation in [Optimal Hamiltonian Simulation by Quantum Signal
-# Processing](https://doi.org/10.1103/PhysRevLett.118.010501).
+# determines the query complexity.
 #
 # QSVT lifts this scalar polynomial transformation to each singular-value
-# subspace of a block-encoded matrix. This framework is developed in [Quantum
-# singular value transformation and
-# beyond](https://doi.org/10.1145/3313276.3316366).
+# subspace of a block-encoded matrix.
 
 # %% [markdown]
 # ### Block encoding
+#
+# Before extending QSP to the singular-value subspaces of a matrix, we first
+# explain how quantum computation handles non-unitary matrices. Block encoding
+# embeds a given (non-unitary) matrix as part of a larger unitary matrix.
 #
 # Let $A$ act on an $n$-qubit system register. An $(\alpha,a)$ block encoding
 # is a unitary $U$ acting on an additional $a$-qubit signal register such that
@@ -118,19 +119,17 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # Common ways to construct a block encoding include:
 #
-# - **Sparse-access oracles:** for a sparse matrix, coherent oracles provide the
+# - **Sparse-access oracles**: for a sparse matrix, coherent oracles provide the
 #   locations and values of its nonzero entries. These oracles can be combined
 #   into a unitary whose projected block is the normalized sparse matrix.
-# - **Linear combination of unitaries (LCU):** when
+# - **Linear combination of unitaries (LCU)**: when
 #   $A=\sum_j c_j U_j$ is expressed as a weighted sum of efficiently
 #   implementable unitaries, an auxiliary register selects $U_j$ with an
 #   amplitude determined by $c_j$. Projecting that register produces
 #   $A/\sum_j|c_j|$.
 #
 # Block encodings can also be constructed from state-preparation procedures or
-# data stored in quantum read-only memory. These constructions are summarized
-# in [Quantum singular value transformation and
-# beyond](https://doi.org/10.1145/3313276.3316366).
+# data stored in quantum read-only memory.
 
 # %% [markdown]
 # ## Algorithm
@@ -434,8 +433,8 @@ plt.show()
 #
 # ### Query complexity
 #
-# The [QSVT circuit construction by Gilyén et
-# al.](https://arxiv.org/abs/1806.01838) (Section 3.2 and Figure 1) uses $U$ and
+# The QSVT circuit construction by Gilyén et al.
+# {cite:p}`10.1145/3313276.3316366` (Section 3.2 and Figure 1) uses $U$ and
 # $U^\dagger$ a total of $d$ times and applies $d+1$ projector phase rotations
 # for a degree-$d$ transformation. The query complexity to the block encoding
 # is therefore $\Theta(d)$. The required degree depends on the target function,
