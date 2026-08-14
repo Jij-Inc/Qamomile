@@ -17,7 +17,7 @@ RabiモデルでのTrotter–Suzuki積公式と収束次数の実験です。
 :::{card}
 :header: **ハイブリッド量子ニューラルネットワーク (HQNN)**
 :link: hybrid_qnn
-CNN＋量子変分回路をFashion-MNISTでend-to-end学習し、パラメータシフトルールで勾配を計算します。
+古典ニューラルネットワークと変分量子回路を組み合わせたハイブリッド量子ニューラルネットワーク(HQNN)をQamomileで実装する例です。
 :::
 
 :::{card}
