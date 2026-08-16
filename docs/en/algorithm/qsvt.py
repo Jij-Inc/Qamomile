@@ -188,12 +188,18 @@ from qamomile.qiskit import QiskitTranspiler
 # 5. Project onto the signal subspace to obtain the desired singular-value
 #    transformation.
 #
-# Exact phase offsets and product ordering depend on the adopted QSP/QSVT
-# convention, so a phase sequence must be used with the convention for which it
-# was synthesized.
+# Different QSP/QSVT references and implementations may define the phases and
+# order the operations differently. A phase sequence synthesized under one
+# convention must therefore be used in a circuit that follows the same
+# convention.
 
 # %% [markdown]
 # ## Qamomile implementation
+#
+# In this section, we use LCU to construct a block encoding of a non-Hermitian
+# matrix and build a Qamomile quantum kernel that applies QSVT to it. We then
+# draw the quantum kernel and convert it to the Qiskit circuit used for the
+# numerical validation.
 #
 # ### Problem setup
 #
@@ -213,7 +219,10 @@ matrix = np.array([[0.0, 1.0], [0.0, 0.0]], dtype=complex)
 # %% [markdown]
 # ### Constructing the block encoding
 #
-# LCU represents a matrix as
+# Linear combination of unitaries (LCU) is one way to construct a block
+# encoding. It decomposes the target matrix into a weighted sum of unitaries
+# and uses an auxiliary register to select them, embedding the sum in a larger
+# unitary circuit. Specifically, LCU represents the matrix as
 #
 # $$
 # A=\sum_j c_j U_j,
