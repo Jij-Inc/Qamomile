@@ -365,7 +365,7 @@ plt.show()
 #
 # ### この例の論理リソース
 #
-# Qamomileのリソース推定機能では、同じ量子カーネルにブロックエンコーディングと位相ベクトルを指定できます。推定結果は、実行先に依存しないQamomileの論理ゲート基底で表されます。
+# Qamomileのリソース推定機能では、同じ量子カーネルにブロックエンコーディングと位相ベクトルを指定できます。推定結果は、実行先に依存しないQamomileの論理ゲート基底で表されます。リソースの数値に加えて、推定方法、推定品質、推定器が認識する数学的近似の有無、計算に用いた仮定も確認できます。
 
 # %%
 estimate = singular_value_transform.estimate_resources(
@@ -378,7 +378,11 @@ estimate = singular_value_transform.estimate_resources(
 print("logical qubits:", estimate.qubits)
 print("logical gates:", estimate.gates.total)
 print("logical depth:", estimate.depth.depth)
-print("estimate quality:", estimate.quality.value)
+print("derivation:", estimate.derivation.value)
+print("quality:", estimate.quality.value)
+print("approximation:", estimate.approximation.value)
+for assumption in estimate.assumptions:
+    print("assumption:", assumption.message)
 
 expected_qubits = (
     block_encoding.num_signal_qubits
@@ -386,12 +390,17 @@ expected_qubits = (
     + 1
 )
 assert estimate.qubits == expected_qubits
-assert estimate.gates.total == 25
-assert estimate.depth.depth == 27
-assert estimate.quality.value == "upper_bound"
+assert estimate.gates.total == 29
+assert estimate.depth.depth == 30
+assert estimate.derivation is qmc.EstimateDerivation.STRUCTURAL
+assert estimate.quality is qmc.EstimateQuality.CONSERVATIVE
+assert estimate.approximation is qmc.ApproximationStatus.EXACT
+assert estimate.assumptions
 
 # %% [markdown]
-# 3つの論理量子ビットは、1つの信号量子ビット、1つの系量子ビット、1つの再利用可能な射影用補助量子ビットです。この例では$d=2$なので、理論上は$U$を1回、$U^\dagger$を1回、射影位相回転を3回適用します。上に表示される論理ゲート数と回路深さは、これらの処理を選択したパウリLCUブロックエンコーディングとQamomileの論理ゲート基底で展開した結果です。同じ抽象度にそろえることで、理論的な内訳と推定値を比較できます。
+# 3つの論理量子ビットは、1つの信号量子ビット、1つの系量子ビット、1つの再利用可能な射影用補助量子ビットです。この例では$d=2$なので、理論上は$U$を1回、$U^\dagger$を1回、射影位相回転を3回適用します。これらの処理を選択したパウリLCUブロックエンコーディングで展開すると、Qamomileの論理ゲート基底では論理ゲート数が29、論理回路深さが30になります。
+#
+# `derivation=STRUCTURAL`は、定義した量子カーネルとそのリソース契約を推定器が再帰的に数えたことを示します。推定全体の`quality=CONSERVATIVE`は、正確な値以上となる可能性がある安全側の推定であることを示します。この例では、表示された仮定から、一括処理されるループと開いた制御を持つブロックの実行順序を決める際に、一部の演算が必要以上に直列化される可能性があると分かります。`approximation=EXACT`はこれとは別の項目で、この回路のリソースを数える際に、推定器が認識する数学的近似を導入していないことを示します。
 #
 # 実行先へ変換すると、多重制御ゲートや回転は、ゲート集合、量子ビット間の接続、回路合成の設定に応じてさらに分解されます。特定の実行先に対するゲート数としては有用ですが、これらの実装条件を考慮せずにブロックエンコーディングの問い合わせ回数と直接比較することはできません。
 

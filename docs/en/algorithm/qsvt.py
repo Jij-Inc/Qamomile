@@ -467,7 +467,9 @@ plt.show()
 #
 # Qamomile's resource estimator can specialize the same quantum kernel with the
 # block encoding and phase vector. The estimate is expressed in Qamomile's
-# target-neutral logical gate basis.
+# target-neutral logical gate basis. Along with the resource values, the result
+# reports how they were derived, their quality, whether the estimator recognizes
+# a mathematical approximation, and any assumptions used in the calculation.
 
 # %%
 estimate = singular_value_transform.estimate_resources(
@@ -480,7 +482,11 @@ estimate = singular_value_transform.estimate_resources(
 print("logical qubits:", estimate.qubits)
 print("logical gates:", estimate.gates.total)
 print("logical depth:", estimate.depth.depth)
-print("estimate quality:", estimate.quality.value)
+print("derivation:", estimate.derivation.value)
+print("quality:", estimate.quality.value)
+print("approximation:", estimate.approximation.value)
+for assumption in estimate.assumptions:
+    print("assumption:", assumption.message)
 
 expected_qubits = (
     block_encoding.num_signal_qubits
@@ -488,17 +494,28 @@ expected_qubits = (
     + 1
 )
 assert estimate.qubits == expected_qubits
-assert estimate.gates.total == 25
-assert estimate.depth.depth == 27
-assert estimate.quality.value == "upper_bound"
+assert estimate.gates.total == 29
+assert estimate.depth.depth == 30
+assert estimate.derivation is qmc.EstimateDerivation.STRUCTURAL
+assert estimate.quality is qmc.EstimateQuality.CONSERVATIVE
+assert estimate.approximation is qmc.ApproximationStatus.EXACT
+assert estimate.assumptions
 
 # %% [markdown]
 # The three logical qubits are one signal qubit, one system qubit, and one
 # reusable projector auxiliary. Here $d=2$, so the theoretical count gives one
-# call to $U$, one call to $U^\dagger$, and three projector rotations. The
-# logical gate count and depth printed above expand those operations using the
-# selected Pauli LCU block encoding and Qamomile's target-neutral gate basis.
-# This provides a comparison on a common abstraction level.
+# call to $U$, one call to $U^\dagger$, and three projector rotations. Expanding
+# those operations with the selected Pauli LCU block encoding gives 29 logical
+# gates and a logical depth of 30 in Qamomile's target-neutral gate basis.
+#
+# `derivation=STRUCTURAL` indicates that the estimator recursively counted the
+# defined quantum kernel and its resource contracts. The overall
+# `quality=CONSERVATIVE` indicates a safe estimate that may be larger than the
+# exact value. In this case, the printed assumptions explain that scheduling
+# aggregate loops and open-control blocks may serialize some operations more
+# than necessary. `approximation=EXACT` independently indicates that the
+# estimator did not introduce a recognized mathematical approximation when
+# counting this circuit.
 #
 # A backend transpiler may further decompose multi-controlled gates and
 # rotations according to its gate set, connectivity, and synthesis settings.
