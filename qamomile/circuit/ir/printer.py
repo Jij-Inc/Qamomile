@@ -480,7 +480,7 @@ def _format_invoke_metadata(op: InvokeOperation) -> str:
     if op.transform is CallTransform.DIRECT:
         return ""
     fields = [f"transform={op.transform.name}"]
-    if op.transform is CallTransform.CONTROLLED:
+    if op.transform.is_controlled:
         fields.append(f"controls={op.num_control_qubits}")
         if op.control_value is not None:
             fields.append(f"control_value={op.control_value}")

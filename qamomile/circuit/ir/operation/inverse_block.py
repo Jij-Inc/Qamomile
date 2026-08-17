@@ -13,10 +13,11 @@ from __future__ import annotations
 import dataclasses
 from typing import TYPE_CHECKING, Any
 
+from qamomile.circuit.ir._resource_contract import quantum_operand_widths
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.callable import CallableRef
 from qamomile.circuit.ir.types.primitives import BlockType, QubitType
-from qamomile.circuit.ir.value import ArrayValue
+from qamomile.circuit.ir.value import ArrayValue, static_quantum_width
 
 from .control_value import normalize_control_value
 from .operation import Operation, OperationKind, ParamHint, Signature
@@ -78,7 +79,9 @@ class InverseBlockOperation(Operation):
                 parameter, or if the results do not mirror the quantum
                 operand layout (one quantum result per control operand
                 followed by one per target operand), or if ``control_value``
-                does not fit the control width.
+                does not fit the control width, or if callable resource
+                metadata is malformed, references a missing operand, or
+                contradicts a statically known operand width.
         """
         if self.num_control_qubits < 0 or self.num_target_qubits < 0:
             raise ValueError("inverse block qubit counts must be non-negative.")
@@ -140,6 +143,24 @@ class InverseBlockOperation(Operation):
                     "inverse block results must mirror operand array-ness: "
                     f"operand {operand.name!r} and result {result.name!r} "
                     "disagree on being a vector."
+                )
+        source = (
+            self.callable_ref.name
+            if self.callable_ref is not None
+            else self.custom_name or "inverse"
+        )
+        for entry in quantum_operand_widths(self.callable_attrs, source=source):
+            if entry.index >= len(self.target_qubits):
+                raise ValueError(
+                    f"{source} resource contract references quantum operand "
+                    f"{entry.index}, but the inverse call has only "
+                    f"{len(self.target_qubits)} target operand(s)."
+                )
+            actual_width = static_quantum_width(self.target_qubits[entry.index])
+            if actual_width is not None and actual_width != entry.width:
+                raise ValueError(
+                    f"{source} {entry.name} register width contract expects "
+                    f"{entry.width} qubit(s), got {actual_width}."
                 )
 
     @property

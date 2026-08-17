@@ -10,6 +10,10 @@ from qamomile.circuit.frontend.func_to_block import (
     is_tuple_type,
 )
 from qamomile.circuit.frontend.handle.containers import Dict, Tuple
+from qamomile.circuit.frontend.qkernel_inputs import (
+    create_bound_input,
+    validate_bound_input_value,
+)
 from qamomile.circuit.ir.types.primitives import (
     DictType,
     FloatType,
@@ -215,6 +219,38 @@ class TestCreateDummyInput:
         assert isinstance(result, Dict)
         assert result.name == "ising"
         assert result.value.is_parameter()
+
+
+class TestBoundContainerInput:
+    """Tests for concrete Tuple and nested-array binding validation."""
+
+    def test_create_tuple_input(self):
+        """A concrete Tuple binding constructs constant element handles."""
+        result = create_bound_input(
+            qmc.Tuple[qmc.UInt, qmc.Float],
+            "pair",
+            (2, 0.5),
+        )
+
+        assert isinstance(result, Tuple)
+        assert result[0].value.get_const() == 2
+        assert result[1].value.get_const() == 0.5
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param([[1, 2]], id="vector-rank-two"),
+            pytest.param([-1], id="negative-uint"),
+        ],
+    )
+    def test_nested_array_binding_rejects_invalid_values(self, value):
+        """A Dict's nested Vector entry enforces rank and element domains."""
+        with pytest.raises((TypeError, ValueError)):
+            validate_bound_input_value(
+                qmc.Dict[qmc.UInt, qmc.Vector[qmc.UInt]],
+                "values",
+                {0: value},
+            )
 
 
 class TestTupleHandle:

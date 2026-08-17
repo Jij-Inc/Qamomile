@@ -8,11 +8,20 @@ import struct
 import subprocess
 import sys
 from importlib.metadata import version
+from pathlib import Path
 
 import numpy as np
 import pytest
+import sympy as sp
 
 import qamomile.circuit as qmc
+from qamomile.circuit.estimator import ResourceTraceNode
+from qamomile.circuit.estimator._resource_constraints import (
+    _ConstraintOrigin,
+    _ConstraintProvenance,
+    _ConstraintRange,
+    _ResourceConstraint,
+)
 from qamomile.circuit.frontend.composite_gate import configure_composite
 from qamomile.circuit.frontend.qkernel_callable import (
     qkernel_callable_attrs,
@@ -48,6 +57,7 @@ from qamomile.circuit.ir.serialize.encode import (
     _EncodeContext,
 )
 from qamomile.circuit.ir.types.primitives import FloatType, QubitType, UIntType
+from qamomile.circuit.ir.types.q_register import QFixedType, QUIntType
 from qamomile.circuit.ir.uuid_remapper import UUIDRemapper
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.serialization import (
@@ -59,6 +69,7 @@ from qamomile.circuit.serialization import (
 from qamomile.circuit.serialization.decode import from_dict as kernel_from_dict
 from qamomile.circuit.serialization.encode import to_dict as kernel_to_dict
 from qamomile.circuit.serialization.graph_protobuf import _OPERATION_TO_PROTO
+from qamomile.circuit.serialization.kernel import _StaticBindingResolver
 from qamomile.circuit.serialization.proto import qamomile_ir_pb2 as pb
 from qamomile.circuit.serialization.validation import validate_qkernel_ir
 from qamomile.qiskit import QiskitTranspiler
@@ -721,6 +732,40 @@ _controlled_oracle = qmc.Oracle(
     num_control_qubits=1,
 )
 
+_explicit_signature_oracle = qmc.Oracle(
+    name="serialization_explicit_signature_oracle",
+    num_qubits=1,
+    num_control_qubits=1,
+    signature=qmc.CallableSignature(
+        inputs=[qmc.Qubit],
+        outputs=[qmc.Qubit],
+    ),
+)
+
+_nested_serialization_oracle = qmc.Oracle(
+    name="nested_serialization_oracle",
+    num_qubits=1,
+    cost=qmc.ResourceEstimate(
+        calls=qmc.CallResources(
+            queries_by_name={"nested_serialization_oracle": 1},
+        ),
+    ),
+)
+
+
+@qmc.qkernel
+def _nested_oracle_helper(target: qmc.Qubit) -> qmc.Qubit:
+    """Invoke an Oracle from a callable-table forward reference."""
+    (target,) = _nested_serialization_oracle(target)
+    return target
+
+
+@qmc.qkernel
+def _calls_nested_oracle_helper() -> qmc.Bit:
+    """Call a nested qkernel whose body contains an Oracle invocation."""
+    target = _nested_oracle_helper(qmc.qubit("target"))
+    return qmc.measure(target)
+
 
 @qmc.qkernel
 def _calls_controlled_oracle() -> qmc.Bit:
@@ -729,6 +774,154 @@ def _calls_controlled_oracle() -> qmc.Bit:
     target = qmc.qubit("target")
     control, target = _controlled_oracle(target, controls=(control,))
     return qmc.measure(control)
+
+
+_OPAQUE_COST_SIZE = sp.Symbol(
+    "opaque_size",
+    integer=True,
+    nonnegative=True,
+)
+_OPAQUE_COST_INDEX = sp.Dummy(
+    "opaque_size",
+    integer=True,
+    nonnegative=True,
+)
+_OPAQUE_COST_ASSUMPTION = qmc.ResourceAssumption(
+    "Serialized opaque cost uses a test model.",
+    source="serialization_fixed_cost",
+)
+_FIXED_OPAQUE_COST = qmc.ResourceEstimate(
+    width=qmc.WidthResources(
+        input_qubits=1,
+        allocated_qubits=2,
+        clean_ancilla_qubits=3,
+        dirty_ancilla_qubits=4,
+        peak_qubits=10,
+    ),
+    gates=qmc.GateResources(
+        total=11,
+        single_qubit=12,
+        two_qubit=13,
+        multi_qubit=14,
+        clifford=15,
+        rotation=16,
+        t=17,
+        toffoli=18,
+        non_clifford=19,
+    ),
+    depth=qmc.DepthResources(
+        depth=20,
+        clifford_depth=21,
+        rotation_depth=22,
+        t_depth=23,
+        toffoli_depth=24,
+        non_clifford_depth=25,
+        measurement_depth=26,
+        gate_depth=27,
+        reset_depth=28,
+    ),
+    calls=qmc.CallResources(
+        calls_by_name={"inner_call": _OPAQUE_COST_SIZE + 1},
+        queries_by_name={"inner_query": 2 * _OPAQUE_COST_SIZE},
+    ),
+    measurements=qmc.MeasurementResources(total=29),
+    resets=qmc.ResetResources(total=30),
+    assumptions=(_OPAQUE_COST_ASSUMPTION,),
+    trace=ResourceTraceNode(
+        name="fixed_opaque_cost",
+        source_kind="opaque_cost",
+        strategy="serialized",
+        summary="all resource fields",
+        assumptions=(_OPAQUE_COST_ASSUMPTION,),
+        children=(
+            ResourceTraceNode(
+                name="inner",
+                source_kind="primitive",
+            ),
+        ),
+    ),
+    derivation=qmc.EstimateDerivation.MODELED,
+    quality=qmc.EstimateQuality.CONSERVATIVE,
+    approximation=qmc.ApproximationStatus.APPROXIMATE,
+    control_decomposition=qmc.ControlDecomposition.ABSTRACT,
+    _constraints=(
+        _ResourceConstraint(
+            expression=_OPAQUE_COST_INDEX + 1,
+            minimum=None,
+            expected=_OPAQUE_COST_INDEX + 1,
+            label="Opaque test index",
+            ranges=(
+                _ConstraintRange(
+                    symbol=_OPAQUE_COST_INDEX,
+                    start=0,
+                    step=1,
+                    iterations=_OPAQUE_COST_SIZE,
+                ),
+            ),
+        ),
+    ),
+).repeat(_OPAQUE_COST_SIZE)
+_fixed_cost_oracle = qmc.Oracle(
+    name="serialization_fixed_cost_oracle",
+    num_qubits=1,
+    cost=_FIXED_OPAQUE_COST,
+)
+
+
+@qmc.qkernel
+def _calls_fixed_cost_oracle() -> qmc.Bit:
+    """Invoke an oracle carrying a fixed symbolic resource estimate."""
+    target = qmc.qubit("target")
+    (target,) = _fixed_cost_oracle(target)
+    return qmc.measure(target)
+
+
+def _callback_opaque_cost(
+    ctx: qmc.OpaqueCostContext,
+) -> qmc.ResourceEstimate:
+    """Return one process-local callback cost for rejection testing.
+
+    Args:
+        ctx (qmc.OpaqueCostContext): Definition-level opaque call context.
+
+    Returns:
+        qmc.ResourceEstimate: One single-qubit gate for the definition.
+    """
+    return qmc.ResourceEstimate(
+        gates=qmc.GateResources(
+            total=ctx.target_qubits,
+            single_qubit=ctx.target_qubits,
+        )
+    )
+
+
+_callback_cost_oracle = qmc.Oracle(
+    name="serialization_callback_cost_oracle",
+    num_qubits=1,
+    cost=_callback_opaque_cost,
+)
+
+
+@qmc.qkernel
+def _calls_callback_cost_oracle() -> qmc.Bit:
+    """Invoke an oracle carrying a process-local cost callback."""
+    target = qmc.qubit("target")
+    (target,) = _callback_cost_oracle(target)
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _calls_controlled_explicit_signature_oracle() -> qmc.Bit:
+    """Add one call-site control to a declared-controlled explicit Oracle."""
+    added = qmc.qubit("added")
+    declared = qmc.qubit("declared")
+    target = qmc.qubit("target")
+    added, declared, target = qmc.control(_explicit_signature_oracle)(
+        added,
+        declared,
+        target,
+    )
+    return qmc.measure(target)
 
 
 _DESERIALIZED_CHILD = deserialize(serialize(_child))
@@ -1185,6 +1378,20 @@ def test_select_parameter_before_target_round_trips_through_dict() -> None:
     assert kernel_to_dict(restored) == payload
 
 
+def test_select_rejects_unrecognized_callable_attrs_during_dict_decode() -> None:
+    """SELECT decoding fails closed on callable metadata outside ``cases``."""
+    payload = kernel_to_dict(_parameter_before_target_select_program)
+    operation = next(
+        operation
+        for operation in payload["artifact"]["body"]["operations"]
+        if operation["$type"] == "SelectOperation"
+    )
+    operation["callable_attrs"]["$map"].append(["unexpected", "payload"])
+
+    with pytest.raises(ValueError, match="supports only the 'cases' key"):
+        kernel_from_dict(payload)
+
+
 def test_concrete_select_width_greater_than_64_round_trips() -> None:
     """The original concrete-width field preserves a large overwide SELECT."""
     message = _message(_wide_select_program)
@@ -1359,6 +1566,233 @@ def test_controlled_oracle_signature_includes_controls() -> None:
     restored = deserialize(serialize(_calls_controlled_oracle))
 
     assert kernel_to_dict(restored) == kernel_to_dict(_calls_controlled_oracle)
+
+
+def test_nested_oracle_definition_round_trips_after_forward_linking() -> None:
+    """Nested Oracle calls validate after every definition header is linked."""
+    restored = deserialize(serialize(_calls_nested_oracle_helper))
+
+    assert kernel_to_dict(restored) == kernel_to_dict(_calls_nested_oracle_helper)
+
+
+def test_fixed_opaque_resource_cost_round_trips_with_provenance() -> None:
+    """Fixed opaque costs retain metrics, symbols, requirements, and guards."""
+    message = _message(_calls_fixed_cost_oracle)
+    encoded_definition = next(
+        entry.definition
+        for entry in message.callable_table
+        if entry.definition.ref.name == "serialization_fixed_cost_oracle"
+    )
+
+    assert encoded_definition.HasField("opaque_cost")
+
+    restored = _restore(message)
+    invoke = next(
+        operation
+        for operation in restored.block.operations
+        if isinstance(operation, InvokeOperation)
+    )
+    assert invoke.definition is not None
+    restored_cost = invoke.definition.opaque_cost
+    assert isinstance(restored_cost, qmc.ResourceEstimate)
+    assert restored_cost.to_dict() == _FIXED_OPAQUE_COST.to_dict()
+    assert restored_cost.explain() == _FIXED_OPAQUE_COST.explain()
+    assert serialize(restored) == serialize(_calls_fixed_cost_oracle)
+
+    inactive = restored_cost.substitute(opaque_size=0)
+    expected_inactive = _FIXED_OPAQUE_COST.substitute(opaque_size=0)
+    assert inactive.gates.total == 0
+    assert inactive.assumptions == ()
+    assert inactive.quality is qmc.EstimateQuality.EXACT
+    assert inactive.approximation is qmc.ApproximationStatus.EXACT
+    assert inactive.trace == expected_inactive.trace
+
+
+def test_stale_fixed_opaque_cost_is_rejected_by_public_serializers() -> None:
+    """Public qkernel serializers expose stale domain-state rejection."""
+    length = sp.Symbol("stale_length", integer=True)
+    stale = qmc.ResourceEstimate(
+        gates=qmc.GateResources(total=1 + sp.Max(0, length - 1)),
+        _constraints=(
+            _ResourceConstraint(
+                expression=length - 1,
+                minimum=0,
+                label="stale serialization input",
+                provenance=_ConstraintProvenance(
+                    origin=_ConstraintOrigin.ARRAY_ACCESS,
+                    source_expressions=(length,),
+                    root_formal_names=("stale_length",),
+                ),
+            ),
+        ),
+    ).simplify()
+    stale.gates.total = 999
+    oracle = qmc.Oracle(
+        name="serialization_stale_cost_oracle",
+        num_qubits=1,
+        cost=stale,
+    )
+
+    @qmc.qkernel
+    def calls_stale_cost() -> qmc.Bit:
+        """Invoke an oracle whose fixed cost was mutated after simplification.
+
+        Returns:
+            qmc.Bit: Measurement of the oracle target.
+        """
+        target = qmc.qubit("target")
+        (target,) = oracle(target)
+        return qmc.measure(target)
+
+    with pytest.raises(RuntimeError, match="domain rewrite state"):
+        kernel_to_dict(calls_stale_cost)
+    with pytest.raises(RuntimeError, match="domain rewrite state"):
+        serialize(calls_stale_cost)
+
+
+def test_fixed_opaque_resource_cost_has_process_deterministic_bytes() -> None:
+    """Quantified Dummy identities never leak process randomness into bytes."""
+    script = """
+from qamomile.circuit.serialization import serialize
+from tests.circuit.serialization.test_qkernel import _calls_fixed_cost_oracle
+
+print(serialize(_calls_fixed_cost_oracle).hex())
+"""
+    repository = Path(__file__).resolve().parents[3]
+    payloads = [
+        subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        for _ in range(2)
+    ]
+
+    assert payloads[1:] == payloads[:-1]
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "factorial(Integer(1000000000))",
+        "Pow(Integer(2), Integer(4097))",
+        "Float('1e1000000', precision=53)",
+    ],
+)
+def test_deserialize_rejects_unbounded_opaque_cost_arithmetic_promptly(
+    expression: str,
+) -> None:
+    """Untrusted opaque costs cannot trigger unbounded eager arithmetic."""
+    script = f"""
+from qamomile.circuit.serialization import deserialize
+from qamomile.circuit.serialization.encode import to_dict
+from qamomile.circuit.serialization.graph_protobuf import qkernel_from_graph_dict
+from tests.circuit.serialization.test_qkernel import _calls_fixed_cost_oracle
+
+envelope = to_dict(_calls_fixed_cost_oracle)
+definition = next(
+    entry["definition"]
+    for entry in envelope["callable_table"]
+    if entry["definition"]["ref"]["name"]
+    == "serialization_fixed_cost_oracle"
+)
+opaque_cost = dict(definition["opaque_cost"]["$map"])
+gate_total = next(
+    pair for pair in opaque_cost["gates"]["$map"] if pair[0] == "total"
+)
+gate_total[1] = {expression!r}
+message = qkernel_from_graph_dict(envelope)
+try:
+    deserialize(message.SerializeToString(deterministic=True))
+except ValueError:
+    print("rejected")
+else:
+    raise AssertionError("unsafe opaque cost was accepted")
+"""
+    repository = Path(__file__).resolve().parents[3]
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert completed.stdout.strip() == "rejected"
+
+
+def test_opaque_resource_callback_fails_serialization_explicitly() -> None:
+    """Process-local opaque cost callbacks never disappear on serialization."""
+    with pytest.raises(
+        TypeError,
+        match="opaque_cost callback objects cannot be serialized",
+    ):
+        serialize(_calls_callback_cost_oracle)
+
+
+def test_scalar_oracle_explicit_signature_survives_added_control_round_trip() -> None:
+    """The base ABI preserves target hints while excluding added controls."""
+    restored = deserialize(serialize(_calls_controlled_explicit_signature_oracle))
+
+    for kernel in (_calls_controlled_explicit_signature_oracle, restored):
+        [invoke] = [
+            operation
+            for operation in kernel.block.operations
+            if isinstance(operation, InvokeOperation)
+        ]
+        assert invoke.num_declared_control_qubits == 1
+        assert invoke.num_added_control_qubits == 1
+        assert invoke.definition is not None
+        assert invoke.definition.signature is not None
+        assert [hint.name for hint in invoke.definition.signature.operands] == [
+            "control_0",
+            "arg_0",
+        ]
+        assert [hint.name for hint in invoke.definition.signature.results] == [
+            "control_0",
+            "result_0",
+        ]
+    assert kernel_to_dict(restored) == kernel_to_dict(
+        _calls_controlled_explicit_signature_oracle
+    )
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [
+        qmc.CallableSignature(
+            inputs=[qmc.Qubit],
+            outputs=[],
+        ),
+        qmc.CallableSignature(
+            inputs=[qmc.Float],
+            outputs=[qmc.Float],
+        ),
+    ],
+)
+def test_scalar_oracle_rejects_mismatched_explicit_signature(
+    signature: qmc.CallableSignature,
+) -> None:
+    """A scalar Oracle does not replace an incompatible explicit signature."""
+    oracle = qmc.Oracle(
+        name="mismatched_explicit_signature_oracle",
+        num_qubits=1,
+        signature=signature,
+    )
+
+    @qmc.qkernel
+    def circuit() -> qmc.Qubit:
+        """Invoke the malformed explicit Oracle signature."""
+        target = qmc.qubit("target")
+        (target,) = oracle(target)
+        return target
+
+    with pytest.raises(ValueError, match="explicit CallableSignature"):
+        circuit.build()
 
 
 @pytest.mark.parametrize(
@@ -2096,6 +2530,37 @@ def test_serialized_symbolic_inverse_refreshes_bound_scalar_width() -> None:
     executable = QiskitTranspiler().transpile(restored, bindings={"width": 3})
     result = executable.sample(QiskitTranspiler().executor(), shots=16).result()
     assert result.results == [((1, 0, 0), 16)]
+
+
+@pytest.mark.parametrize(
+    "register_type",
+    [
+        QUIntType(width=3),
+        QFixedType(integer_bits=1, fractional_bits=2),
+    ],
+)
+def test_serialized_inverse_preserves_packed_register_width(
+    register_type: QUIntType | QFixedType,
+) -> None:
+    """Static-binding validation retains packed-register scalar widths."""
+    target = Value(type=register_type, name="target")
+    operation = InverseBlockOperation(
+        operands=[target],
+        results=[target.next_version()],
+        num_target_qubits=3,
+        callable_attrs={
+            "resource_contract": {
+                "quantum_operand_widths": [
+                    {"index": 0, "name": "target", "width": 3},
+                ],
+            },
+        },
+    )
+    resolver = object.__new__(_StaticBindingResolver)
+
+    resolver._validate_operation_call_widths(operation, {}, {})
+
+    assert operation.num_target_qubits == 3
 
 
 def test_serialized_controlled_static_inverse_refreshes_call_site_width() -> None:

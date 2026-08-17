@@ -276,8 +276,8 @@ def _verify_region(
                 raise ValueError("Reusable call power must be positive")
             if operation.callee.controls < 0:
                 raise ValueError("Reusable call control count must be non-negative")
-            if any(width <= 0 for width in operation.callee.operand_widths):
-                raise ValueError("Reusable call operand widths must be positive")
+            if any(width < 0 for width in operation.callee.operand_widths):
+                raise ValueError("Reusable call operand widths must be non-negative")
             if (
                 operation.callee.operand_widths
                 and sum(operation.callee.operand_widths)

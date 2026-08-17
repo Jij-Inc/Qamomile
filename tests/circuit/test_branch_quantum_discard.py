@@ -52,7 +52,7 @@ from qamomile.circuit.transpiler.errors import (
     QubitRebindError,
 )
 from qamomile.circuit.transpiler.passes.analyze import (
-    _static_loop_trip_count,
+    _static_loop_min_trip_count,
     reject_control_flow_quantum_discard,
 )
 from qamomile.circuit.transpiler.segments import MultipleQuantumSegmentsError
@@ -1113,8 +1113,8 @@ def _for_op_from(kernel, bindings=None):
     return find(operations)
 
 
-class TestStaticLoopTripCount:
-    """`_static_loop_trip_count` resolves any non-bool Integral bound."""
+class TestStaticLoopMinTripCount:
+    """The minimum trip-count proof resolves non-bool Integral bounds."""
 
     @pytest.mark.parametrize("stop", [0, 5])
     def test_numpy_bound_resolves_like_python_int(self, stop):
@@ -1130,8 +1130,12 @@ class TestStaticLoopTripCount:
             return qmc.measure(q)
 
         for_op = _for_op_from(kernel)
-        py_count = _static_loop_trip_count(for_op, {}, {"n": stop})
-        np_count = _static_loop_trip_count(for_op, {}, {"n": np.int64(stop)})
+        py_count = _static_loop_min_trip_count(for_op, {}, {"n": stop})
+        np_count = _static_loop_min_trip_count(
+            for_op,
+            {},
+            {"n": np.int64(stop)},
+        )
         assert py_count == stop
         assert np_count == py_count
 
@@ -1147,7 +1151,7 @@ class TestStaticLoopTripCount:
             return qmc.measure(q)
 
         for_op = _for_op_from(kernel)
-        assert _static_loop_trip_count(for_op, {}, {"n": True}) is None
+        assert _static_loop_min_trip_count(for_op, {}, {"n": True}) is None
 
 
 class TestRejectedLoopDiscards:

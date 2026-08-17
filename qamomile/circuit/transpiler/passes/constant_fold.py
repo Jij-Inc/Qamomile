@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, cast
 
+from qamomile._utils import coerce_nonnegative_integral
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import (
     Operation,
@@ -1040,6 +1041,7 @@ class ConstantFoldingPass(Pass[Block, Block]):
                             power=power,
                             block=result_op.block,
                             callable_ref=result_op.callable_ref,
+                            callable_attrs=dict(result_op.callable_attrs),
                         )
                         extra_kwargs = {}  # Already applied
                     else:
@@ -1132,39 +1134,26 @@ class ConstantFoldingPass(Pass[Block, Block]):
         """Cast *value* to ``int`` with strict validation for power fields.
 
         Only true integer values (or whole ``float`` like ``4.0``) are
-        accepted.  ``bool``, non-integer ``float``, and non-positive
+        accepted.  ``bool``, non-integer ``float``, and negative
         integers are rejected.
 
         Args:
-            value: The resolved constant to cast.
+            value (object): The resolved constant to cast.
 
         Returns:
-            A validated positive ``int``.
+            int: A validated nonnegative integer.
 
         Raises:
             ValueError: If *value* is ``bool``, a non-integer ``float``,
-                a non-``int`` type, or ``<= 0``.
+                a non-``int`` type, or a negative integer.
         """
-        if isinstance(value, bool):
-            raise ValueError(
-                f"ControlledU power must be a positive integer, got bool ({value})."
+        try:
+            return coerce_nonnegative_integral(
+                value,
+                label="ControlledU power",
             )
-        if isinstance(value, float):
-            if value != int(value):
-                raise ValueError(
-                    f"ControlledU power must be an integer, "
-                    f"got non-integer float {value}."
-                )
-            value = int(value)
-        if not isinstance(value, int):
-            raise ValueError(
-                f"ControlledU power must be an integer, got {type(value).__name__}."
-            )
-        if value <= 0:
-            raise ValueError(
-                f"ControlledU power must be strictly positive, got {value}."
-            )
-        return value
+        except TypeError as error:
+            raise ValueError(str(error)) from error
 
     def _expand_symbolic_controlled_operands(
         self,

@@ -10,6 +10,7 @@ from typing import Any
 
 import numpy as np
 
+from qamomile.circuit._array_shape import _rectangular_array_shape
 from qamomile.circuit.transpiler.param_keys import (
     dict_param_key,
     is_decomposable_dict_binding_key,
@@ -361,7 +362,7 @@ def _binding_shape(value: Any) -> tuple[int, ...]:
     """Return the rectangular shape of one public array binding.
 
     Args:
-        value (Any): Nested sequence, ndarray, or scalar candidate.
+        value (Any): Nested list, tuple, ndarray, or scalar candidate.
 
     Returns:
         tuple[int, ...]: Rectangular array shape; scalars have rank zero.
@@ -369,13 +370,6 @@ def _binding_shape(value: Any) -> tuple[int, ...]:
     Raises:
         ValueError: If nested sequences have inconsistent shapes.
     """
-    if isinstance(value, np.ndarray):
-        return tuple(int(dimension) for dimension in value.shape)
-    if not isinstance(value, (list, tuple)):
+    if not isinstance(value, (list, tuple, np.ndarray)):
         return ()
-    if not value:
-        return (0,)
-    child_shapes = [_binding_shape(item) for item in value]
-    if any(shape != child_shapes[0] for shape in child_shapes[1:]):
-        raise ValueError("Runtime parameter arrays must be rectangular.")
-    return (len(value), *child_shapes[0])
+    return _rectangular_array_shape(value)

@@ -16,6 +16,7 @@ select a native realization without changing the frontend or semantic IR.
 from __future__ import annotations
 
 import dataclasses
+from typing import Any
 
 from qamomile._utils import is_plain_int
 from qamomile.circuit.ir.block import Block
@@ -60,11 +61,15 @@ class SelectOperation(Operation):
             physical index qubit, so this equals ``num_index_qubits``.
             Symbolic SELECT may retain heterogeneous scalar/array arguments
             whose flattened width is checked after bindings are available.
+        case_callable_attrs (list[dict[str, Any]]): Serializer-safe callable
+            metadata corresponding to ``case_blocks``. This preserves exact
+            resource contracts when SELECT specializes a callable body.
     """
 
     num_index_qubits: int | Value = 0
     case_blocks: list[Block] = dataclasses.field(default_factory=list)
     num_index_args: int = 0
+    case_callable_attrs: list[dict[str, Any]] = dataclasses.field(default_factory=list)
 
     def __post_init__(self) -> None:
         """Validate the case-count and index-qubit invariants.
@@ -84,13 +89,28 @@ class SelectOperation(Operation):
 
         Raises:
             ValueError: If fewer than two case blocks are present, the width
-                or index-argument count is malformed, or a concrete width
-                cannot address every case.
+                or index-argument count is malformed, callable metadata does
+                not align with the cases, or a concrete width cannot address
+                every case.
         """
         if len(self.case_blocks) < 2:
             raise ValueError(
                 "SelectOperation requires at least two case blocks; a zero- "
                 "or one-case operation is not a multiplexer."
+            )
+
+        if self.case_callable_attrs and len(self.case_callable_attrs) != len(
+            self.case_blocks
+        ):
+            raise ValueError(
+                "SelectOperation.case_callable_attrs must be empty or contain "
+                "one mapping per case block; got "
+                f"{len(self.case_callable_attrs)} attrs for "
+                f"{len(self.case_blocks)} case blocks."
+            )
+        if not all(isinstance(attrs, dict) for attrs in self.case_callable_attrs):
+            raise ValueError(
+                "SelectOperation.case_callable_attrs entries must be mappings."
             )
 
         width_value = self.num_index_qubits

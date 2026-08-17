@@ -9,10 +9,17 @@ import pytest
 
 import qamomile.circuit as qmc
 from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.operation.callable import InvokeOperation
-from qamomile.circuit.ir.operation.operation import Operation
+from qamomile.circuit.ir.operation.callable import (
+    CallableDef,
+    CallableImplementation,
+    CallableRef,
+    CallTransform,
+    InvokeOperation,
+)
+from qamomile.circuit.ir.operation.gate import MeasureOperation
+from qamomile.circuit.ir.operation.operation import CInitOperation, Operation
 from qamomile.circuit.ir.operation.select import SelectOperation
-from qamomile.circuit.ir.types import QubitType
+from qamomile.circuit.ir.types import BitType, QubitType
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.serialization import deserialize, serialize
 from qamomile.circuit.stdlib.arithmetic import modmul_const
@@ -130,6 +137,182 @@ def test_qkernel_block_and_invoke_expose_cached_effects() -> None:
     assert measured_invocation.measurement_result_indices == frozenset({0})
 
 
+def test_invoke_measurement_provenance_tracks_selected_implementation() -> None:
+    """Exact provenance follows selection while the property remains a superset."""
+    direct_target = Value(type=QubitType(), name="direct_target")
+    direct_measured = Value(type=BitType(), name="direct_measured")
+    direct_plain = Value(type=BitType(), name="direct_plain")
+    direct_body = Block(
+        input_values=[direct_target],
+        output_values=[direct_measured, direct_plain],
+        operations=[
+            MeasureOperation(
+                operands=[direct_target],
+                results=[direct_measured],
+            ),
+            CInitOperation(results=[direct_plain]),
+        ],
+    )
+
+    native_control = Value(type=QubitType(), name="native_control")
+    native_target = Value(type=QubitType(), name="native_target")
+    native_plain = Value(type=BitType(), name="native_plain")
+    native_measured = Value(type=BitType(), name="native_measured")
+    native_body = Block(
+        input_values=[native_control, native_target],
+        output_values=[
+            native_control.next_version(),
+            native_plain,
+            native_measured,
+        ],
+        operations=[
+            CInitOperation(results=[native_plain]),
+            MeasureOperation(
+                operands=[native_target],
+                results=[native_measured],
+            ),
+        ],
+    )
+
+    ref = CallableRef(namespace="test", name="selected_measurement_provenance")
+    definition = CallableDef(
+        ref=ref,
+        body=direct_body,
+        implementations=[
+            CallableImplementation(
+                transform=CallTransform.CONTROLLED,
+                backend="qiskit",
+                strategy="native",
+                body=native_body,
+            )
+        ],
+    )
+    control = Value(type=QubitType(), name="control")
+    target = Value(type=QubitType(), name="target")
+    operation = InvokeOperation(
+        operands=[control, target],
+        results=[
+            control.next_version(),
+            Value(type=BitType(), name="first"),
+            Value(type=BitType(), name="second"),
+        ],
+        target=ref,
+        transform=CallTransform.CONTROLLED,
+        attrs={"num_control_qubits": 1, "num_target_qubits": 1},
+        definition=definition,
+    )
+
+    exact_indices = {
+        ("qiskit", "native"): frozenset({2}),
+        ("quri_parts", "native"): frozenset({1}),
+        ("qiskit", "portable"): frozenset({1}),
+    }
+    for (backend, strategy), expected in exact_indices.items():
+        selected = operation.measurement_result_indices_for(
+            backend=backend,
+            strategy=strategy,
+        )
+        assert selected == expected
+        assert selected <= operation.measurement_result_indices
+
+    assert operation.measurement_result_indices == frozenset({1, 2})
+
+
+@pytest.mark.parametrize(
+    ("backend", "strategy"),
+    [
+        ("qiskit", None),
+        (None, "native"),
+    ],
+)
+def test_context_specific_implementation_keeps_fallback_effects(
+    backend: str | None,
+    strategy: str | None,
+) -> None:
+    """A specialized unitary body does not hide a measured fallback body."""
+    direct_target = Value(type=QubitType(), name="direct_target")
+    direct_result = Value(type=BitType(), name="direct_result")
+    direct_body = Block(
+        input_values=[direct_target],
+        output_values=[direct_result],
+        operations=[
+            MeasureOperation(operands=[direct_target], results=[direct_result])
+        ],
+    )
+
+    specialized_target = Value(type=QubitType(), name="specialized_target")
+    specialized_result = Value(type=BitType(), name="specialized_result")
+    specialized_body = Block(
+        input_values=[specialized_target],
+        output_values=[specialized_result],
+        operations=[CInitOperation(results=[specialized_result])],
+    )
+
+    ref = CallableRef(namespace="test", name="context_specific_effect")
+    definition = CallableDef(
+        ref=ref,
+        body=direct_body,
+        implementations=[
+            CallableImplementation(
+                transform=CallTransform.DIRECT,
+                backend=backend,
+                strategy=strategy,
+                body=specialized_body,
+            )
+        ],
+    )
+    result = Value(type=BitType(), name="result")
+    operation = InvokeOperation(
+        operands=[Value(type=QubitType(), name="target")],
+        results=[result],
+        target=ref,
+        definition=definition,
+    )
+
+    assert operation.effects is qmc.KernelEffect.MEASUREMENT
+    assert operation.measurement_result_indices == frozenset({0})
+
+
+def test_fully_generic_implementation_shadows_fallback_effects() -> None:
+    """A fully generic implementation makes the direct fallback unreachable."""
+    direct_target = Value(type=QubitType(), name="direct_target")
+    direct_result = Value(type=BitType(), name="direct_result")
+    direct_body = Block(
+        input_values=[direct_target],
+        output_values=[direct_result],
+        operations=[
+            MeasureOperation(operands=[direct_target], results=[direct_result])
+        ],
+    )
+
+    generic_target = Value(type=QubitType(), name="generic_target")
+    generic_result = Value(type=BitType(), name="generic_result")
+    generic_body = Block(
+        input_values=[generic_target],
+        output_values=[generic_result],
+        operations=[CInitOperation(results=[generic_result])],
+    )
+    ref = CallableRef(namespace="test", name="generic_effect")
+    operation = InvokeOperation(
+        operands=[Value(type=QubitType(), name="target")],
+        results=[Value(type=BitType(), name="result")],
+        target=ref,
+        definition=CallableDef(
+            ref=ref,
+            body=direct_body,
+            implementations=[
+                CallableImplementation(
+                    transform=CallTransform.DIRECT,
+                    body=generic_body,
+                )
+            ],
+        ),
+    )
+
+    assert operation.effects is qmc.KernelEffect.NONE
+    assert operation.measurement_result_indices == frozenset()
+
+
 def test_block_effects_are_lazy_cached_and_replacement_invalidates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -168,6 +351,51 @@ def test_block_effects_are_lazy_cached_and_replacement_invalidates(
     assert calls == 1
     assert replacement.effects == qmc.KernelEffect.NONE
     assert calls == 2
+
+
+@pytest.mark.parametrize("query_b_first", [False, True])
+def test_mutually_recursive_effects_reach_an_order_independent_fixed_point(
+    query_b_first: bool,
+) -> None:
+    """Mutual recursion propagates measurement effects in either query order."""
+    block_a = Block(name="A")
+    block_b = Block(name="B")
+    ref_a = CallableRef(namespace="test", name="A")
+    ref_b = CallableRef(namespace="test", name="B")
+    definition_a = CallableDef(ref=ref_a, body=block_a)
+    definition_b = CallableDef(ref=ref_b, body=block_b)
+
+    output_a = Value(type=BitType(), name="output_a")
+    output_b = Value(type=BitType(), name="output_b")
+    nested_b = Value(type=BitType(), name="nested_b")
+    block_a.output_values = [output_a]
+    block_b.output_values = [output_b]
+    block_a.operations.extend(
+        [
+            InvokeOperation(
+                results=[nested_b],
+                target=ref_b,
+                definition=definition_b,
+            ),
+            MeasureOperation(
+                operands=[Value(type=QubitType(), name="measured")],
+                results=[output_a],
+            ),
+        ]
+    )
+    block_b.operations.append(
+        InvokeOperation(
+            results=[output_b],
+            target=ref_a,
+            definition=definition_a,
+        )
+    )
+
+    first, second = (block_b, block_a) if query_b_first else (block_a, block_b)
+    assert first.effects is qmc.KernelEffect.MEASUREMENT
+    assert second.effects is qmc.KernelEffect.MEASUREMENT
+    assert first.measurement_result_indices == frozenset({0})
+    assert second.measurement_result_indices == frozenset({0})
 
 
 def test_reset_and_feed_forward_effects_are_distinct_and_composable() -> None:

@@ -56,6 +56,11 @@ from __future__ import annotations
 from typing import Sequence
 
 import qamomile.circuit as qmc
+from qamomile.circuit.frontend.qkernel_callable import qkernel_callable_attrs
+from qamomile.circuit.ir._resource_contract import (
+    ProductFormulaContract,
+    merge_product_formula_contract,
+)
 from qamomile.observable import Hamiltonian
 
 
@@ -113,6 +118,24 @@ def _trotter_evolve(
     for _ in qmc.range(step):
         q = _suzuki_trotter_step(q, hamiltonian, order, dt)
     return q
+
+
+_trotter_evolve = _trotter_evolve._clone_with_callable_attrs(
+    merge_product_formula_contract(
+        qkernel_callable_attrs(_trotter_evolve),
+        ProductFormulaContract(
+            kind="suzuki_trotter",
+            operands={
+                "hamiltonian_operand": 1,
+                "order_operand": 2,
+                "time_operand": 3,
+                "steps_operand": 4,
+            },
+        ),
+        source="_trotter_evolve",
+        operand_count=5,
+    )
+)
 
 
 # ======================================================================

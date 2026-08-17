@@ -11,6 +11,7 @@ the corresponding ``_emit_pauli_evolve`` method; calling
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -19,10 +20,14 @@ if TYPE_CHECKING:
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.value import ArrayValue
 from qamomile.circuit.transpiler.errors import EmitError
-from qamomile.observable.hamiltonian import HERMITIAN_IMAG_ATOL, PAULI_TERM_ZERO_ATOL
+from qamomile.observable.hamiltonian import (
+    HERMITIAN_IMAG_ATOL,
+    PAULI_TERM_ZERO_ATOL,
+    Hamiltonian,
+)
 
 from .gate_emission import resolve_angle_value
-from .global_phase_emission import emit_resolved_global_phase
+from .global_phase_emission import emit_resolved_global_phase, is_exact_real_zero
 from .qubit_address import QubitAddress, QubitMap
 
 
@@ -51,6 +56,70 @@ def _resolve_gamma(
         EmitError: If gamma cannot be represented as an angle.
     """
     return resolve_angle_value(emit_pass, op.gamma, bindings)
+
+
+def is_zero_evolution_time(gamma: Any) -> bool:
+    """Return whether a resolved evolution time is the numeric identity.
+
+    Python and NumPy real scalars share the same rule. Backend parameter
+    objects deliberately remain nonzero here: their runtime value is unknown
+    even if they support comparison with Python numbers.
+
+    Args:
+        gamma (Any): Concrete float or backend-native parameter expression.
+
+    Returns:
+        bool: ``True`` only for a concrete numeric zero.
+    """
+    return is_exact_real_zero(gamma)
+
+
+def validate_hermitian_hamiltonian(hamiltonian: Hamiltonian) -> None:
+    """Validate every coefficient before Pauli-evolution emission starts.
+
+    This validation deliberately completes before the zero-time shortcut and
+    before any circuit mutation. Consequently, malformed Hamiltonians fail
+    consistently for controlled and uncontrolled evolution, and a late
+    invalid term cannot leave a partially emitted circuit behind.
+
+    Args:
+        hamiltonian (Hamiltonian): Hamiltonian whose constant and Pauli-term
+            coefficients must be real within ``HERMITIAN_IMAG_ATOL``.
+
+    Raises:
+        EmitError: If the constant or any Pauli-term coefficient is non-finite
+            or has an imaginary component outside the Hermiticity tolerance.
+    """
+    constant = complex(hamiltonian.constant)
+    if not math.isfinite(constant.real) or not math.isfinite(constant.imag):
+        raise EmitError(
+            "PauliEvolveOp requires finite Hamiltonian coefficients, but "
+            f"found constant {hamiltonian.constant}.",
+            operation="PauliEvolveOp",
+        )
+    if abs(constant.imag) > HERMITIAN_IMAG_ATOL:
+        raise EmitError(
+            "PauliEvolveOp requires a Hermitian Hamiltonian (real "
+            f"coefficients), but found complex constant {hamiltonian.constant}.",
+            operation="PauliEvolveOp",
+        )
+    for operators, coefficient in hamiltonian:
+        numeric_coefficient = complex(coefficient)
+        if not math.isfinite(numeric_coefficient.real) or not math.isfinite(
+            numeric_coefficient.imag
+        ):
+            raise EmitError(
+                "PauliEvolveOp requires finite Hamiltonian coefficients, but "
+                f"found coefficient {coefficient} on term {operators}.",
+                operation="PauliEvolveOp",
+            )
+        if abs(numeric_coefficient.imag) > HERMITIAN_IMAG_ATOL:
+            raise EmitError(
+                "PauliEvolveOp requires a Hermitian Hamiltonian "
+                "(real coefficients), but found complex coefficient "
+                f"{coefficient} on term {operators}.",
+                operation="PauliEvolveOp",
+            )
 
 
 def _scale_gamma(gamma: Any, factor: float) -> Any:
@@ -112,6 +181,50 @@ def validate_hamiltonian_within_register(
         )
 
 
+def _map_pauli_evolve_results(
+    emit_pass: "StandardEmitPass",
+    op: PauliEvolveOp,
+    qubit_indices: list[int],
+    qubit_map: QubitMap,
+    bindings: dict[str, Any],
+) -> None:
+    """Map an evolved register to the unchanged physical input qubits.
+
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        op (PauliEvolveOp): Evolution operation whose result is mapped.
+        qubit_indices (list[int]): Physical input qubits acted on by the
+            Hamiltonian.
+        qubit_map (QubitMap): Mutable semantic-to-physical mapping.
+        bindings (dict[str, Any]): Active emit-time bindings.
+
+    Returns:
+        None: ``qubit_map`` is updated in place.
+
+    Raises:
+        EmitError: If the evolved register's slice chain cannot be resolved.
+    """
+    result_array = op.evolved_qubits
+    assert isinstance(result_array, ArrayValue)
+    result_root, result_start, result_step = emit_pass._resolver.resolve_slice_chain(
+        result_array,
+        bindings,
+        operation="PauliEvolveOp",
+    )
+    for index, physical_index in enumerate(qubit_indices):
+        qubit_map.setdefault(
+            QubitAddress(result_array.uuid, index),
+            physical_index,
+        )
+        qubit_map.setdefault(
+            QubitAddress(
+                result_root.uuid,
+                result_start + result_step * index,
+            ),
+            physical_index,
+        )
+
+
 def emit_pauli_evolve(
     emit_pass: "StandardEmitPass",
     circuit: Any,
@@ -160,22 +273,10 @@ def emit_pauli_evolve(
         if n_resolved is not None:
             validate_hamiltonian_within_register(num_h_qubits, n_resolved)
 
-    # Validate Hermitian (real coefficients), including the identity constant.
+    # Complete validation before the zero-time shortcut or any circuit
+    # mutation. The later emission pass is intentionally a second traversal.
+    validate_hermitian_hamiltonian(hamiltonian)
     constant = complex(hamiltonian.constant)
-    if abs(constant.imag) > HERMITIAN_IMAG_ATOL:
-        raise EmitError(
-            "PauliEvolveOp requires a Hermitian Hamiltonian (real "
-            f"coefficients), but found complex constant {hamiltonian.constant}.",
-            operation="PauliEvolveOp",
-        )
-    for operators, coeff in hamiltonian:
-        if abs(coeff.imag) > HERMITIAN_IMAG_ATOL:
-            raise EmitError(
-                f"PauliEvolveOp requires a Hermitian Hamiltonian "
-                f"(real coefficients), but found complex coefficient "
-                f"{coeff} on term {operators}.",
-                operation="PauliEvolveOp",
-            )
 
     # Resolve qubit indices from the input array. For a sliced view
     # (``pauli_evolve(q[1::2], H, gamma)``) walk the ``slice_of`` chain
@@ -195,6 +296,16 @@ def emit_pauli_evolve(
                 f"Key '{str(addr)}' not found in qubit_map.",
                 operation="PauliEvolveOp",
             )
+
+    if is_zero_evolution_time(gamma):
+        _map_pauli_evolve_results(
+            emit_pass,
+            op,
+            qubit_indices,
+            qubit_map,
+            bindings,
+        )
+        return
 
     if constant.real:
         emit_resolved_global_phase(
@@ -261,19 +372,10 @@ def emit_pauli_evolve(
                 emit_pass._emitter.emit_s(circuit, qi)
             # Z and I: no basis change
 
-    # Map result array to same physical qubits. Resolve the result's
-    # own slice chain so downstream ``resolve_qubit_index_detailed``
-    # callers that walk to the root find the registered mapping, while
-    # direct lookups via the result array's own uuid also still work.
-    result_array = op.evolved_qubits
-    assert isinstance(result_array, ArrayValue)
-    result_root, result_start, result_step = emit_pass._resolver.resolve_slice_chain(
-        result_array, bindings, operation="PauliEvolveOp"
+    _map_pauli_evolve_results(
+        emit_pass,
+        op,
+        qubit_indices,
+        qubit_map,
+        bindings,
     )
-    for i, phys_idx in enumerate(qubit_indices):
-        direct_addr = QubitAddress(result_array.uuid, i)
-        if direct_addr not in qubit_map:
-            qubit_map[direct_addr] = phys_idx
-        root_addr = QubitAddress(result_root.uuid, result_start + result_step * i)
-        if root_addr not in qubit_map:
-            qubit_map[root_addr] = phys_idx

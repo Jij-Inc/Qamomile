@@ -844,6 +844,34 @@ def test_nested_qkernel_resolves_annotation_only_local_alias() -> None:
     assert "__qamomile_annotation_localns__" not in nested.raw_func.__dict__
 
 
+def test_callable_attribute_clone_preserves_frozen_local_interface() -> None:
+    """Callable metadata cloning keeps resolved annotation-only local aliases."""
+    local_qubit = qmc.Qubit
+
+    @qmc.qkernel
+    def nested(value: local_qubit) -> tuple[local_qubit]:
+        """Apply X while exposing local aliases only through annotations.
+
+        Args:
+            value (local_qubit): Qubit transformed by the cloned qkernel.
+
+        Returns:
+            tuple[local_qubit]: Singleton tuple containing the transformed
+                qubit.
+        """
+        return (qmc.x(value),)
+
+    assert "__qamomile_annotation_localns__" not in nested.raw_func.__dict__
+
+    cloned = nested._clone_with_callable_attrs({"test_marker": "local-interface"})
+
+    assert cloned.input_types == {"value": qmc.Qubit}
+    assert cloned.return_type == tuple[qmc.Qubit]
+    assert cloned.output_types == [qmc.Qubit]
+    assert cloned.block.output_values[0].type.label() == "QubitType"
+    assert cloned.estimate_resources().gates.total == 1
+
+
 def test_local_annotation_namespace_survives_late_global_resolution() -> None:
     """Deferred annotations retain local names until resolution succeeds."""
     global _LATE_LOCAL_NAMESPACE_ELEMENT

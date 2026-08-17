@@ -23,6 +23,7 @@ from qamomile.circuit.transpiler.passes.emit_support.control_value_emission impo
 )
 from qamomile.circuit.transpiler.passes.emit_support.controlled_block_support import (
     _bind_and_populate_block_inputs,
+    _bind_block_inputs,
     _emitter_supports_reusable_gates,
     _expand_quantum_operands_to_phys,
     _gate_matches_qubit_count,
@@ -208,6 +209,29 @@ def emit_inverse_block_at_indices(
     # ill-defined and would otherwise leak a raw backend error (Qiskit) or
     # compile silently and crash the simulator (CUDA-Q).
     reject_duplicate_physical_indices("inverse block", control_indices + target_indices)
+
+    from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+        _is_resolved_identity_phase_block,
+    )
+
+    implementation_block = op.implementation_block
+    if implementation_block is None:
+        raise EmitError(
+            "Normalized inverse block lost its implementation body.",
+            operation="InverseBlockOperation",
+        )
+    identity_bindings = _bind_block_inputs(
+        emit_pass,
+        implementation_block,
+        [*op.target_qubits, *op.parameters],
+        bindings,
+    )
+    if _is_resolved_identity_phase_block(
+        emit_pass,
+        implementation_block,
+        identity_bindings,
+    ):
+        return
 
     # Nested emission prepends enclosing controls. InverseBlockOperation
     # validates one scalar qubit per control operand, so num_control_qubits is
