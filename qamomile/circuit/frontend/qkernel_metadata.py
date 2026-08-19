@@ -8,7 +8,11 @@ import textwrap
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
+    from qamomile.circuit.estimator import (
+        ControlDecomposition,
+        ResourceEstimate,
+        UnknownResourcePolicy,
+    )
     from qamomile.circuit.frontend.qkernel import QKernel
 
 
@@ -70,40 +74,54 @@ def estimate_qkernel_resources(
     inputs: dict[str, Any] | None = None,
     strategies: dict[str, str] | None = None,
     trace: bool = False,
-    unknown_policy: Any = None,
-    basis: Any = None,
-    precision: float = 1e-10,
+    unknown_policy: str | UnknownResourcePolicy | None = None,
+    control_decomposition: str | ControlDecomposition | None = None,
 ) -> "ResourceEstimate":
     """Estimate resources for a kernel.
 
     Args:
         kernel (QKernel[Any, Any]): Kernel to estimate.
         inputs (dict[str, Any] | None): QKernel input values used to specialize
-            the symbolic estimate. Defaults to ``None``.
+            the symbolic estimate. Exact one-dimensional root quantum-port
+            widths declared by callable resource metadata are inferred when
+            omitted. Defaults to ``None``.
         strategies (dict[str, str] | None): Callable strategy overrides.
             Defaults to ``None``.
         trace (bool): Whether to retain the explanation tree. Defaults to
             ``False``.
-        unknown_policy (Any): Optional ``UnknownResourcePolicy`` override.
-            Defaults to ``None``.
-        basis (Any): Optional ``GateBasis`` override. Defaults to ``None``.
-        precision (float): Rotation-synthesis precision. Defaults to ``1e-10``.
+        unknown_policy (str | UnknownResourcePolicy | None): Policy for
+            bodyless callables without explicit costs. Defaults to ``None``,
+            which uses the estimator default.
+        control_decomposition (str | ControlDecomposition | None):
+            Coherent-control model override. Defaults to ``None``, which uses
+            the clean-ancilla Toffoli model.
 
     Returns:
-        ResourceEstimate: Estimated qubit, gate, and parameter resources.
+        ResourceEstimate: Estimated width, gate, measurement, reset, depth,
+            call, and parameter resources.
+
+    Raises:
+        RuntimeError: If a fixed or callback-provided opaque cost contains
+            public metrics or metadata that disagree with retained canonical
+            provenance.
+        ValueError: If an input, estimation configuration, callable resource
+            contract, or structural requirement is invalid.
+        TypeError: If the qkernel cannot be built as an estimator input.
+        NotImplementedError: If the qkernel contains a construct not supported
+            by resource estimation.
     """
-    from qamomile.circuit.estimator.resource_estimator import (
-        GateBasis,
-        UnknownResourcePolicy,
-        estimate_resources,
-    )
+    from qamomile.circuit.estimator.resource_estimator import estimate_resources
+
+    estimator_options: dict[str, Any] = {}
+    if unknown_policy is not None:
+        estimator_options["unknown_policy"] = unknown_policy
+    if control_decomposition is not None:
+        estimator_options["control_decomposition"] = control_decomposition
 
     return estimate_resources(
         kernel,
         inputs=inputs,
         strategies=strategies,
         trace=trace,
-        unknown_policy=unknown_policy or UnknownResourcePolicy.ERROR,
-        basis=basis or GateBasis.LOGICAL,
-        precision=precision,
+        **estimator_options,
     )

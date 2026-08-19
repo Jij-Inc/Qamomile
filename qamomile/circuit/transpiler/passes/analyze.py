@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import dataclasses
 import numbers
-from typing import Any
+from typing import Any, cast
 
+from qamomile._utils import coerce_nonnegative_integral
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.dataflow import (
     build_dependency_graph,
+    find_loop_carried_condition_reads,
     find_measurement_derived_values,
     find_measurement_results,
 )
@@ -83,11 +85,15 @@ class PrunedIfView:
             keyed by ``id()`` of the rebuilt loop op. The keyed objects
             are kept alive by ``operations``, so the ids are stable for
             this view's lifetime.
+        _loop_condition_reads (dict[int, frozenset[tuple[str, str]]]): Legacy
+            loop-rebind UUID pairs whose entry value controlled a reachable
+            branch before compile-time pruning removed that branch.
     """
 
     operations: list[Operation]
     merge_aliases: tuple[tuple[Value, Value], ...]
     _loop_aliases: dict[int, tuple[tuple[Value, Value], ...]]
+    _loop_condition_reads: dict[int, frozenset[tuple[str, str]]]
 
     def aliases_for_loop(self, loop_op: Operation) -> tuple[tuple[Value, Value], ...]:
         """Return the alias pairs recorded inside one pruned loop's body.
@@ -104,6 +110,21 @@ class PrunedIfView:
                 loop's body, or an empty tuple.
         """
         return self._loop_aliases.get(id(loop_op), ())
+
+    def condition_reads_for_loop(
+        self,
+        loop_op: Operation,
+    ) -> frozenset[tuple[str, str]]:
+        """Return condition-dependent legacy rebinds for one pruned loop.
+
+        Args:
+            loop_op (Operation): Loop operation taken from ``operations``.
+
+        Returns:
+            frozenset[tuple[str, str]]: ``(before_uuid, after_uuid)`` pairs
+                observed on paths visited by compile-time pruning.
+        """
+        return self._loop_condition_reads.get(id(loop_op), frozenset())
 
 
 def prune_compile_time_ifs(
@@ -156,11 +177,13 @@ def prune_compile_time_ifs(
     """
     global_aliases: list[tuple[Value, Value]] = []
     loop_aliases: dict[int, tuple[tuple[Value, Value], ...]] = {}
+    loop_condition_reads: dict[int, frozenset[tuple[str, str]]] = {}
 
     def walk(
         ops: list[Operation],
         concrete_values: dict[str, Any],
         sink: list[tuple[Value, Value]],
+        condition_sink: list[ValueBase],
     ) -> list[Operation]:
         """Prune one operation list, recording aliases into ``sink``.
 
@@ -170,6 +193,8 @@ def prune_compile_time_ifs(
                 this scope; updated in place.
             sink (list[tuple[Value, Value]]): Alias accumulator of the
                 nearest enclosing loop (or the global one).
+            condition_sink (list[ValueBase]): Conditions reached in the
+                nearest enclosing loop, including conditions later pruned.
 
         Returns:
             list[Operation]: The pruned view of ``ops``.
@@ -178,6 +203,7 @@ def prune_compile_time_ifs(
         for op in ops:
             evaluate_classical_op_concrete(op, concrete_values, bindings)
             if isinstance(op, IfOperation):
+                condition_sink.append(op.condition)
                 # A malformed condition-less if resolves as runtime (None
                 # coerces to no compile-time value) and passes through.
                 taken = resolve_compile_time_condition(
@@ -193,16 +219,22 @@ def prune_compile_time_ifs(
                         op = dataclasses.replace(
                             op,
                             true_operations=walk(
-                                op.true_operations, dict(concrete_values), sink
+                                op.true_operations,
+                                dict(concrete_values),
+                                sink,
+                                condition_sink,
                             ),
                             false_operations=walk(
-                                op.false_operations, dict(concrete_values), sink
+                                op.false_operations,
+                                dict(concrete_values),
+                                sink,
+                                condition_sink,
                             ),
                         )
                     pruned.append(op)
                     continue
                 branch = op.true_operations if taken else op.false_operations
-                pruned.extend(walk(branch, concrete_values, sink))
+                pruned.extend(walk(branch, concrete_values, sink, condition_sink))
                 for merge in op.iter_merges():
                     sink.append((merge.result, merge.select(taken)))
                 continue
@@ -212,6 +244,7 @@ def prune_compile_time_ifs(
                     # loop-scoped checks see exactly the pairs from ifs
                     # inside this body — pre-loop pairs must not leak in.
                     subtree: list[tuple[Value, Value]] = []
+                    subtree_conditions: list[ValueBase] = []
                     op = op.rebuild_regions(
                         [
                             dataclasses.replace(
@@ -221,6 +254,7 @@ def prune_compile_time_ifs(
                                         list(region.operations),
                                         dict(concrete_values),
                                         subtree,
+                                        subtree_conditions,
                                     )
                                 ),
                             )
@@ -228,7 +262,20 @@ def prune_compile_time_ifs(
                         ]
                     )
                     loop_aliases[id(op)] = tuple(subtree)
+                    loop_condition_reads[id(op)] = frozenset(
+                        find_loop_carried_condition_reads(
+                            cast(
+                                ForOperation | ForItemsOperation | WhileOperation,
+                                op,
+                            ),
+                            condition_values=subtree_conditions,
+                            selected_aliases={
+                                result.uuid: source.uuid for result, source in subtree
+                            },
+                        )
+                    )
                     sink.extend(subtree)
+                    condition_sink.extend(subtree_conditions)
                 else:
                     op = op.rebuild_regions(
                         [
@@ -239,6 +286,7 @@ def prune_compile_time_ifs(
                                         list(region.operations),
                                         dict(concrete_values),
                                         sink,
+                                        condition_sink,
                                     )
                                 ),
                             )
@@ -248,11 +296,12 @@ def prune_compile_time_ifs(
             pruned.append(op)
         return pruned
 
-    pruned_ops = walk(ops, concrete_values, global_aliases)
+    pruned_ops = walk(ops, concrete_values, global_aliases, [])
     return PrunedIfView(
         operations=pruned_ops,
         merge_aliases=tuple(global_aliases),
         _loop_aliases=loop_aliases,
+        _loop_condition_reads=loop_condition_reads,
     )
 
 
@@ -886,6 +935,7 @@ def _reject_stale_while_condition_reads(
 def _check_loop_carried_rebinds(
     loop_op: ForOperation | ForItemsOperation | WhileOperation,
     body_merge_aliases: tuple[tuple[Value, Value], ...],
+    body_condition_reads: frozenset[tuple[str, str]],
     bindings: dict[str, Any],
     concrete_values: dict[str, Any],
     loop_var_domains: dict[str, tuple[int, int]],
@@ -904,6 +954,9 @@ def _check_loop_carried_rebinds(
             pruned inside this loop's body. Body-local by design: the
             canonical chain below must stop at the pre-loop value, so
             pre-loop merge aliases must not leak in.
+        body_condition_reads (frozenset[tuple[str, str]]): Legacy rebind
+            UUID pairs whose entry value controlled a reachable branch before
+            compile-time pruning removed it.
         bindings (dict[str, Any]): Compile-time parameter bindings used to
             prove a store-only Bit loop has at least one unrolled iteration.
         concrete_values (dict[str, Any]): UUID-keyed singleton values for
@@ -1136,10 +1189,31 @@ def _check_loop_carried_rebinds(
         canon_value = value_table.get(canon_uuid)
         if canon_value is None and canon_uuid == record.after.uuid:
             canon_value = record.after
-        reads_pre_loop_value = record.before.uuid in body_read_uuids
-        if reads_pre_loop_value and is_loop_invariant_if_overwrite(
-            record,
-            canon_uuid,
+        condition_reads_pre_loop_value = (
+            record.before.uuid,
+            record.after.uuid,
+        ) in body_condition_reads
+        reads_pre_loop_value = (
+            record.before.uuid in body_read_uuids or condition_reads_pre_loop_value
+        )
+        if reads_pre_loop_value:
+            trip_count = _static_loop_max_trip_count(
+                loop_op,
+                concrete_values,
+                bindings,
+                producer_by_result,
+                loop_var_domains,
+            )
+            if trip_count is not None and trip_count <= 1:
+                reads_pre_loop_value = False
+                condition_reads_pre_loop_value = False
+        if (
+            reads_pre_loop_value
+            and not condition_reads_pre_loop_value
+            and is_loop_invariant_if_overwrite(
+                record,
+                canon_uuid,
+            )
         ):
             reads_pre_loop_value = False
 
@@ -1183,7 +1257,7 @@ def _check_loop_carried_rebinds(
             )
             and not reads_pre_loop_value
         ):
-            trip_count = _static_loop_trip_count(
+            trip_count = _static_loop_min_trip_count(
                 loop_op,
                 concrete_values,
                 bindings,
@@ -1391,6 +1465,7 @@ def reject_loop_carried_classical_rebinds(
                 _check_loop_carried_rebinds(
                     operation,
                     pruned.aliases_for_loop(operation),
+                    pruned.condition_reads_for_loop(operation),
                     resolved_bindings,
                     concrete_values,
                     loop_var_domains,
@@ -1701,20 +1776,21 @@ def _static_for_iteration_range(
     return range(start, stop, step)
 
 
-def _static_loop_trip_count(
+def _static_loop_trip_count_bounds(
     loop_op: "ForOperation | ForItemsOperation | WhileOperation",
     concrete_values: dict[str, Any],
     bindings: dict[str, Any],
     producer_by_result: dict[str, Operation] | None = None,
     loop_var_domains: dict[str, tuple[int, int]] | None = None,
-) -> int | None:
-    """Resolve a static loop's trip count when its cardinality is known.
+) -> tuple[int, int] | None:
+    """Resolve lower and upper bounds for a static loop's trip count.
 
     ``ForOperation`` bounds resolve through constants, accumulated concrete
     values, parameter bindings, and affine expressions over statically-bounded
-    enclosing loop variables. For the latter, the result is the guaranteed
-    minimum trip count over every enclosing iteration, which is sufficient for
-    callers proving a loop is non-empty on every reachable path.
+    enclosing loop variables. For the latter, the result contains the minimum
+    and maximum trip counts over every enclosing iteration. Keeping both bounds
+    prevents callers proving non-emptiness from accidentally reusing that lower
+    bound to prove a loop runs at most once.
     ``ForItemsOperation`` cardinality resolves through the dict operand's bound
     contents. ``WhileOperation`` trip counts are runtime measurement outcomes
     and always return None. The frontend's zero-trip trace guards
@@ -1737,9 +1813,8 @@ def _static_loop_trip_count(
             variables. Defaults to None.
 
     Returns:
-        int | None: Exact trip count for concrete bounds, guaranteed minimum
-            trip count for affine enclosing-loop domains, or None when the
-            bounds cannot be resolved.
+        tuple[int, int] | None: Inclusive ``(minimum, maximum)`` trip-count
+            bounds, or None when the bounds cannot be resolved.
     """
     if isinstance(loop_op, ForItemsOperation):
         for operand in loop_op.operands:
@@ -1747,7 +1822,8 @@ def _static_loop_trip_count(
                 getattr(operand, "metadata", None), "dict_runtime", None
             )
             if dict_runtime is not None:
-                return len(dict_runtime.bound_data)
+                count = len(dict_runtime.bound_data)
+                return count, count
         return None
     if not isinstance(loop_op, ForOperation) or len(loop_op.operands) < 3:
         return None
@@ -1759,7 +1835,8 @@ def _static_loop_trip_count(
     if all(value is not None for value in resolved):
         start, stop, step = (int(value) for value in resolved)
         try:
-            return len(range(start, stop, step))
+            count = len(range(start, stop, step))
+            return count, count
         except (OverflowError, ValueError):
             # step == 0; leave it to the emit-time bound validation.
             return None
@@ -1853,29 +1930,95 @@ def _static_loop_trip_count(
     if step_form[0]:
         return None
     delta_form = combine(stop_form, start_form, -1)
-    delta = delta_form[1]
+    minimum_delta = delta_form[1]
+    maximum_delta = delta_form[1]
     if delta_form[0]:
         if loop_var_domains is None or any(
             uuid not in loop_var_domains for uuid in delta_form[0]
         ):
             return None
-        minimum = delta_form[1]
-        maximum = delta_form[1]
         for uuid, coefficient in delta_form[0].items():
             lower, upper = loop_var_domains[uuid]
             if coefficient >= 0:
-                minimum += coefficient * lower
-                maximum += coefficient * upper
+                minimum_delta += coefficient * lower
+                maximum_delta += coefficient * upper
             else:
-                minimum += coefficient * upper
-                maximum += coefficient * lower
-        # For a fixed positive step, range length is minimized by the
-        # smallest delta; for a negative step it is minimized by the largest.
-        delta = minimum if step_form[1] > 0 else maximum
+                minimum_delta += coefficient * upper
+                maximum_delta += coefficient * lower
     try:
-        return len(range(0, delta, step_form[1]))
+        endpoint_counts = (
+            len(range(0, minimum_delta, step_form[1])),
+            len(range(0, maximum_delta, step_form[1])),
+        )
     except (OverflowError, ValueError):
         return None
+    return min(endpoint_counts), max(endpoint_counts)
+
+
+def _static_loop_min_trip_count(
+    loop_op: "ForOperation | ForItemsOperation | WhileOperation",
+    concrete_values: dict[str, Any],
+    bindings: dict[str, Any],
+    producer_by_result: dict[str, Operation] | None = None,
+    loop_var_domains: dict[str, tuple[int, int]] | None = None,
+) -> int | None:
+    """Return the guaranteed minimum static trip count.
+
+    Args:
+        loop_op (ForOperation | ForItemsOperation | WhileOperation): Loop to
+            inspect.
+        concrete_values (dict[str, Any]): UUID-keyed concrete values known at
+            the loop position.
+        bindings (dict[str, Any]): Compile-time parameter bindings.
+        producer_by_result (dict[str, Operation] | None): Optional producer
+            lookup for affine bounds. Defaults to None.
+        loop_var_domains (dict[str, tuple[int, int]] | None): Optional domains
+            of enclosing static loop variables. Defaults to None.
+
+    Returns:
+        int | None: Guaranteed minimum trip count, or None when unresolved.
+    """
+    bounds = _static_loop_trip_count_bounds(
+        loop_op,
+        concrete_values,
+        bindings,
+        producer_by_result,
+        loop_var_domains,
+    )
+    return None if bounds is None else bounds[0]
+
+
+def _static_loop_max_trip_count(
+    loop_op: "ForOperation | ForItemsOperation | WhileOperation",
+    concrete_values: dict[str, Any],
+    bindings: dict[str, Any],
+    producer_by_result: dict[str, Operation] | None = None,
+    loop_var_domains: dict[str, tuple[int, int]] | None = None,
+) -> int | None:
+    """Return the guaranteed maximum static trip count.
+
+    Args:
+        loop_op (ForOperation | ForItemsOperation | WhileOperation): Loop to
+            inspect.
+        concrete_values (dict[str, Any]): UUID-keyed concrete values known at
+            the loop position.
+        bindings (dict[str, Any]): Compile-time parameter bindings.
+        producer_by_result (dict[str, Operation] | None): Optional producer
+            lookup for affine bounds. Defaults to None.
+        loop_var_domains (dict[str, tuple[int, int]] | None): Optional domains
+            of enclosing static loop variables. Defaults to None.
+
+    Returns:
+        int | None: Guaranteed maximum trip count, or None when unresolved.
+    """
+    bounds = _static_loop_trip_count_bounds(
+        loop_op,
+        concrete_values,
+        bindings,
+        producer_by_result,
+        loop_var_domains,
+    )
+    return None if bounds is None else bounds[1]
 
 
 def _root_wire_family(
@@ -2842,7 +2985,7 @@ def _check_loop_quantum_discards(
     :func:`_while_zero_trip_rebind_error`). For static loops the same
     zero-trip hazard is closed twice over: the frontend prunes a
     statically-zero-trip loop at build time (no loop op, no record), and
-    :func:`_static_loop_trip_count` rejects any quantum record on a loop
+    :func:`_static_loop_min_trip_count` rejects any quantum record on a loop
     whose bounds still resolve to zero trips at check time.
 
     Args:
@@ -2868,7 +3011,7 @@ def _check_loop_quantum_discards(
     if not quantum_records:
         return
     loop_kind = _LOOP_KIND_NAMES.get(type(loop_op), "for")
-    trip_count = _static_loop_trip_count(loop_op, concrete_values, bindings)
+    trip_count = _static_loop_min_trip_count(loop_op, concrete_values, bindings)
     if trip_count == 0:
         # A statically-zero-trip loop never runs, but post-loop reads
         # keep the traced post-body binding (emit does not restore
@@ -3807,12 +3950,12 @@ class AnalyzePass(Pass[Block, Block]):
 
         ``power`` lives outside ``op.operands``, so the generic
         dependency validation does not cover it.  This method rejects
-        statically-decidable invalid concrete values (``<= 0``,
+        statically-decidable invalid concrete values (negative integers,
         ``bool``, non-integer) while allowing unresolved symbolic
         ``Value`` instances that will be resolved at emit time.
 
         Args:
-            operations: The affine operation list to validate.
+            operations (list[Operation]): The affine operation list to validate.
 
         Raises:
             ValidationError: If a concrete ``power`` value is invalid.
@@ -3820,28 +3963,32 @@ class AnalyzePass(Pass[Block, Block]):
         from qamomile.circuit.ir.operation.gate import ControlledUOperation
 
         def _validate_concrete_power(value: object, op: ControlledUOperation) -> None:
-            if isinstance(value, bool):
-                raise ValidationError(
-                    f"ControlledU power must be a positive integer, got bool ({value})."
-                )
-            if not isinstance(value, (int, float)):
-                raise ValidationError(
-                    f"ControlledU power must be a positive integer, "
-                    f"got {type(value).__name__}."
-                )
-            if isinstance(value, float) and value != int(value):
-                raise ValidationError(
-                    f"ControlledU power must be an integer, "
-                    f"got non-integer float {value}."
-                )
-            int_val = int(value)
-            if int_val <= 0:
-                raise ValidationError(
-                    f"ControlledU power must be strictly positive, got {int_val}."
-                )
+            """Validate one statically resolved controlled-call power.
+
+            Args:
+                value (object): Resolved power candidate.
+                op (ControlledUOperation): Operation owning the candidate.
+
+            Raises:
+                ValidationError: If the candidate is not a nonnegative integer.
+            """
+            try:
+                coerce_nonnegative_integral(value, label="ControlledU power")
+            except (TypeError, ValueError) as error:
+                raise ValidationError(str(error)) from error
 
         class ControlledUValidator(ControlFlowVisitor):
+            """Validate controlled-call powers across nested operation lists."""
+
             def visit_operation(self, op: Operation) -> None:
+                """Validate a controlled operation when its power is concrete.
+
+                Args:
+                    op (Operation): Operation currently visited.
+
+                Raises:
+                    ValidationError: If a controlled-call power is invalid.
+                """
                 if not isinstance(op, ControlledUOperation):
                     return
                 power = op.power

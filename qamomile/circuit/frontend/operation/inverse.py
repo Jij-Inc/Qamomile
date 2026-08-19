@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 from qamomile.circuit.frontend.handle import Handle
 from qamomile.circuit.frontend.handle.array import ArrayBase, VectorView
 from qamomile.circuit.frontend.operation.control import (
+    ControlledGate,
     _control_callable_metadata,
     _qkernel_for_callable,
 )
@@ -38,6 +39,7 @@ from qamomile.circuit.frontend.static_binding import (
     validate_static_binding_argument,
 )
 from qamomile.circuit.frontend.tracer import get_current_tracer
+from qamomile.circuit.ir._resource_contract import quantum_operand_widths
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.effect import require_unitary_effects
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
@@ -80,11 +82,19 @@ from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.primitives import FloatType, UIntType
-from qamomile.circuit.ir.value import ArrayValue, Value, ValueBase, ValueLike
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    Value,
+    ValueBase,
+    ValueLike,
+    static_quantum_width,
+)
 from qamomile.circuit.ir.value_mapping import ValueSubstitutor
 
 if TYPE_CHECKING:
     from inspect import BoundArguments
+
+    from qamomile.circuit.frontend.oracle import Oracle, TransformedOracle
 
 
 _SELF_INVERSE_GATES: frozenset[GateOperationType] = frozenset(
@@ -248,31 +258,28 @@ def _as_value(value: ValueBase, context: str) -> Value:
     raise TypeError(f"{context} requires a Value, got {type(value).__name__}.")
 
 
-def _static_quantum_width(value: ValueBase) -> int | None:
-    """Return the compile-time scalar qubit width of a quantum value.
+def _complete_resource_contract_widths(
+    attrs: dict[str, Any],
+    *,
+    operand_count: int,
+    source: str,
+) -> tuple[int, ...] | None:
+    """Return exact widths when a contract covers every quantum operand.
 
     Args:
-        value (ValueBase): Scalar qubit or quantum array value. The width
-            is computed as the product over all shape dimensions so the
-            result stays correct for any array rank.
+        attrs (dict[str, Any]): Source callable attrs.
+        operand_count (int): Number of source-callable quantum operands.
+        source (str): Callable name used in malformed-contract diagnostics.
 
     Returns:
-        int | None: Number of scalar qubits represented by ``value`` when
-            statically known, or None when the value is an array with no
-            shape or with any non-constant dimension.
+        tuple[int, ...] | None: Widths in quantum-operand order, or ``None``
+            when the callable has no complete exact-width contract.
     """
-    if isinstance(value, ArrayValue):
-        if not value.shape:
-            return None
-        width = 1
-        for dim in value.shape:
-            if not dim.is_constant():
-                return None
-            const = dim.get_const()
-            assert const is not None
-            width *= int(const)
-        return width
-    return 1
+    entries = quantum_operand_widths(attrs, source=source)
+    by_index = {entry.index: entry.width for entry in entries}
+    if set(by_index) != set(range(operand_count)):
+        return None
+    return tuple(by_index[index] for index in range(operand_count))
 
 
 def _inverse_invoke_target_width(
@@ -291,7 +298,7 @@ def _inverse_invoke_target_width(
             width, otherwise the invocation's recorded target width.
     """
     target_values = list(current_qubits[len(op.control_qubits) :])
-    widths = [_static_quantum_width(value) for value in target_values]
+    widths = [static_quantum_width(value) for value in target_values]
     if widths and all(width is not None for width in widths):
         return sum(cast(int, width) for width in widths)
     return op.num_target_qubits
@@ -963,12 +970,12 @@ class _BlockInverter:
             for param in op.parameters
         ]
 
-        if op.transform is CallTransform.INVERSE:
+        if op.transform.is_inverse:
             direct_op = InvokeOperation(
                 operands=[*current_qubits, *mapped_params],
                 results=new_results,
                 target=op.target,
-                transform=CallTransform.DIRECT,
+                transform=op.transform.inverted(),
                 attrs=dict(op.attrs),
                 definition=op.definition,
             )
@@ -983,17 +990,15 @@ class _BlockInverter:
         target = op.target
         body = op.body
         opaque_cost = op.definition.opaque_cost if op.definition is not None else None
-        if op.transform is CallTransform.CONTROLLED:
-            transform = CallTransform.CONTROLLED
-        else:
-            transform = CallTransform.INVERSE
+        transform = op.transform.inverted()
 
         gate_type_name = str(attrs.get("gate_type", "CUSTOM"))
         source_block = None
+        preserve_definition = False
 
         body_ref = op.body_ref
         if body_ref is not None and body_ref.kind == "static_binding":
-            if op.transform is CallTransform.CONTROLLED:
+            if op.transform.is_controlled:
                 raise NotImplementedError(
                     "inverse() cannot represent the inverse of a controlled "
                     "deferred static-binding invocation directly. Control the "
@@ -1028,7 +1033,7 @@ class _BlockInverter:
             body = iqft.block
             transform = (
                 CallTransform.CONTROLLED
-                if op.transform is CallTransform.CONTROLLED
+                if op.transform.is_controlled
                 else CallTransform.DIRECT
             )
         elif gate_type_name == CompositeGateType.IQFT.name:
@@ -1044,7 +1049,7 @@ class _BlockInverter:
             body = qft.block
             transform = (
                 CallTransform.CONTROLLED
-                if op.transform is CallTransform.CONTROLLED
+                if op.transform.is_controlled
                 else CallTransform.DIRECT
             )
         elif op.body is not None:
@@ -1053,8 +1058,10 @@ class _BlockInverter:
             opaque_cost = None
             attrs["gate_type"] = CompositeGateType.CUSTOM.name
             attrs["custom_name"] = f"{op.name}_inverse"
-        elif attrs.get("kind") in {"composite", "oracle"}:
-            if attrs.get("kind") == "composite" and gate_type_name not in {
+        elif attrs.get("kind") == "oracle":
+            preserve_definition = True
+        elif attrs.get("kind") == "composite":
+            if gate_type_name not in {
                 CompositeGateType.CUSTOM.name,
                 "",
             }:
@@ -1095,13 +1102,10 @@ class _BlockInverter:
         else:
             policy = op.default_policy if body is not None else CallPolicy.PRESERVE_BOX
             attrs["default_policy"] = policy.name
-            inverse_op = InvokeOperation(
-                operands=[*current_qubits, *mapped_params],
-                results=new_results,
-                target=target,
-                transform=transform,
-                attrs=attrs,
-                definition=CallableDef(
+            definition = (
+                op.definition
+                if preserve_definition
+                else CallableDef(
                     ref=target,
                     signature=(
                         signature_from_block(body)
@@ -1115,7 +1119,15 @@ class _BlockInverter:
                     opaque_cost=opaque_cost,
                     default_policy=policy,
                     attrs=attrs,
-                ),
+                )
+            )
+            inverse_op = InvokeOperation(
+                operands=[*current_qubits, *mapped_params],
+                results=new_results,
+                target=target,
+                transform=transform,
+                attrs=attrs,
+                definition=definition,
             )
 
         for operand, result in zip(op.control_qubits + op.target_qubits, new_results):
@@ -1485,6 +1497,8 @@ class _BlockInverter:
                 power=power,
                 block=inverse_block,
                 num_control_args=op.num_control_args,
+                callable_ref=op.callable_ref,
+                callable_attrs=dict(op.callable_attrs),
             )
         elif isinstance(op, ConcreteControlledU):
             operands = [*current_results, *mapped_params]
@@ -1545,6 +1559,7 @@ class _BlockInverter:
             results=new_results,
             num_index_qubits=mapped_width,
             case_blocks=inverse_blocks,
+            case_callable_attrs=[dict(attrs) for attrs in op.case_callable_attrs],
             num_index_args=op.num_index_args,
         )
         self._update_quantum_value_map(
@@ -2069,6 +2084,30 @@ class InverseGate:
             return dict(self._target_callable_attrs)
         return qkernel_callable_attrs(self._qkernel)
 
+    def _restored_qkernel(self) -> QKernel:
+        """Restore the forward qkernel without discarding callable metadata.
+
+        Returns the wrapped object itself when its compiler-facing identity and
+        attributes already match the effective inverse-wrapper metadata.
+        Otherwise, returns an isolated clone carrying the effective metadata so
+        cancelling two inverse transforms preserves callable selection and
+        resource contracts.
+
+        Returns:
+            QKernel: Forward qkernel with the effective callable reference and
+                attributes retained.
+        """
+        callable_ref = self._callable_ref()
+        callable_attrs = self._callable_attrs()
+        if callable_ref == qkernel_callable_ref(
+            self._qkernel
+        ) and callable_attrs == qkernel_callable_attrs(self._qkernel):
+            return self._qkernel
+
+        restored = self._qkernel._clone_with_callable_attrs(callable_attrs)
+        setattr(restored, "_callable_ref_override", callable_ref)
+        return restored
+
     def _bind_arguments(self, *args: Any, **kwargs: Any) -> "BoundArguments":
         """Bind and literal-promote call arguments.
 
@@ -2311,11 +2350,20 @@ class InverseGate:
             input_value.logical_id == output.logical_id
             for input_value, output in zip(quantum_inputs, quantum_outputs)
         )
-        return preserves_output_order and all(
-            _static_quantum_width(binding.active_handle.value) is not None
-            for binding in bindings
-            if binding.is_quantum
+        quantum_bindings = [binding for binding in bindings if binding.is_quantum]
+        has_static_widths = all(
+            static_quantum_width(binding.active_handle.value) is not None
+            for binding in quantum_bindings
         )
+        has_contract_widths = (
+            _complete_resource_contract_widths(
+                self._callable_attrs(),
+                operand_count=len(quantum_bindings),
+                source=self._qkernel.name,
+            )
+            is not None
+        )
+        return preserves_output_order and (has_static_widths or has_contract_widths)
 
     def _build_atomic_inverse(
         self,
@@ -2332,6 +2380,10 @@ class InverseGate:
             tuple[InverseBlockOperation, list[_InputBinding], list[Value]]:
                 Operation, quantum bindings, and fresh result values ready for
                 ownership commit and emission.
+
+        Raises:
+            RuntimeError: If neither the call-site values nor a complete
+                resource contract provide the inverse target width.
         """
         shape_value_map: dict[str, ValueBase] = {}
         for binding in bindings:
@@ -2359,11 +2411,21 @@ class InverseGate:
         # `InverseBlockOperation` stores the scalar backend width separately
         # from operand/results lists: a Vector[Qubit] contributes many scalar
         # qubits here but remains a single operand/result value.
-        target_width = sum(
-            width
-            for value in quantum_values
-            if (width := _static_quantum_width(value)) is not None
-        )
+        static_widths = [static_quantum_width(value) for value in quantum_values]
+        if all(width is not None for width in static_widths):
+            target_width = sum(cast(int, width) for width in static_widths)
+        else:
+            contract_widths = _complete_resource_contract_widths(
+                self._callable_attrs(),
+                operand_count=len(quantum_values),
+                source=self._qkernel.name,
+            )
+            if contract_widths is None:
+                raise RuntimeError(
+                    "atomic inverse requires static target widths or a complete "
+                    "quantum-operand resource contract."
+                )
+            target_width = sum(contract_widths)
         parameter_values = [
             binding.active_handle.value
             for binding in bindings
@@ -2606,7 +2668,9 @@ def _inverse_native_gate_target(target: Any) -> Any | None:
     return None
 
 
-def inverse(target: QKernelLike | Callable[..., Any]) -> Any:
+def inverse(
+    target: Oracle | TransformedOracle | QKernelLike | Callable[..., Any],
+) -> Any:
     """Create an inverse operation wrapper.
 
     Native Qamomile gate functions are first synthesized into tiny
@@ -2614,10 +2678,15 @@ def inverse(target: QKernelLike | Callable[..., Any]) -> Any:
     user-defined kernels. Qkernel-like composite gate callables created by
     ``qmc.composite_gate`` reuse their wrapped qkernel body. Known QFT/IQFT
     functions map directly to their counterpart so backend-native composite
-    emission remains available.
+    emission remains available. Opaque Oracles retain their original
+    definition and cost boundary while the call records an inverse transform;
+    the result can be passed directly to ``qmc.control``. Inverting an already
+    controlled Oracle produces the same transformed invocation as controlling
+    its inverse.
 
     Args:
-        target (QKernelLike | Callable[..., Any]): Native gate function,
+        target (Oracle | TransformedOracle | QKernelLike | Callable[..., Any]):
+            Opaque Oracle, transformed Oracle, native gate function,
             qkernel-like object, or supported stdlib function to invert.
 
     Returns:
@@ -2650,6 +2719,16 @@ def inverse(target: QKernelLike | Callable[..., Any]) -> Any:
         ...     q = qmc.inverse(layer)(q, angle)
         ...     return q
     """
+    from qamomile.circuit.frontend.oracle import Oracle, TransformedOracle
+
+    if isinstance(target, Oracle):
+        return TransformedOracle(target, inverse=True)
+    if isinstance(target, TransformedOracle):
+        return target.inverted()
+    if isinstance(target, ControlledGate):
+        return target._inverted()
+    if isinstance(target, InverseGate):
+        return target._restored_qkernel()
     if isinstance(target, _InverseComposite):
         return target.kernel
     known_inverse = _inverse_known_qft_target(target)

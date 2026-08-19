@@ -122,15 +122,45 @@ class _EncodeContext:
     Values are keyed by semantic UUID. Callable definitions are keyed by
     object identity because one :class:`CallableRef` may intentionally identify
     more than one semantic body in a surrounding module.
+
+    Args:
+        opaque_cost_encoder (Callable[[Any], Any] | None): Optional outer-layer
+            adapter that converts an opaque callable cost into an IR payload.
+            Defaults to identity conversion.
     """
 
-    def __init__(self) -> None:
-        """Initialize an empty encode context."""
+    def __init__(
+        self,
+        *,
+        opaque_cost_encoder: Callable[[Any], Any] | None = None,
+    ) -> None:
+        """Initialize an empty encode context.
+
+        Args:
+            opaque_cost_encoder (Callable[[Any], Any] | None): Optional
+                outer-layer adapter for opaque callable costs. Defaults to
+                ``None``, which preserves serializer-friendly values unchanged.
+        """
         self.value_table_dicts: list[dict[str, Any]] = []
         self._seen_uuids: set[str] = set()
         self._values_by_uuid: dict[str, ValueBase] = {}
         self._definition_ids: dict[int, str] = {}
         self._definitions: list[CallableDef] = []
+        self._opaque_cost_encoder = opaque_cost_encoder
+
+    def encode_opaque_cost(self, cost: Any) -> Any:
+        """Convert one opaque callable cost into an IR-owned payload.
+
+        Args:
+            cost (Any): Opaque cost value attached to a callable definition.
+
+        Returns:
+            Any: Serializer-friendly payload produced by the configured
+            adapter, or ``cost`` unchanged when no adapter is configured.
+        """
+        if self._opaque_cost_encoder is None:
+            return cost
+        return self._opaque_cost_encoder(cost)
 
     def register_value(self, v: ValueBase) -> str:
         """Record ``v`` in the value table if not already present.
@@ -1585,6 +1615,8 @@ def _encode_select(op: SelectOperation, ctx: _EncodeContext) -> dict[str, Any]:
     else:
         payload["num_index_qubits"] = op.num_index_qubits
     payload["case_blocks"] = [_encode_block(block, ctx) for block in op.case_blocks]
+    if op.case_callable_attrs:
+        payload["callable_attrs"] = _encode_payload({"cases": op.case_callable_attrs})
     return payload
 
 
@@ -1756,7 +1788,15 @@ def _encode_callable_def(
 
     Returns:
         dict[str, Any]: Serialized definition.
+
+    Raises:
+        TypeError: If the configured opaque-cost adapter or generic payload
+            encoder rejects ``opaque_cost``.
     """
+    opaque_cost = definition.opaque_cost
+    encoded_opaque_cost = None
+    if opaque_cost is not None:
+        encoded_opaque_cost = _encode_payload(ctx.encode_opaque_cost(opaque_cost))
     return {
         "ref": _encode_callable_ref(definition.ref),
         "signature": _encode_signature(definition.signature),
@@ -1768,6 +1808,7 @@ def _encode_callable_def(
             _encode_callable_implementation(impl, ctx)
             for impl in definition.implementations
         ],
+        "opaque_cost": encoded_opaque_cost,
         "default_policy": definition.default_policy.name,
         "attrs": _encode_payload(definition.attrs),
     }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import threading
+from collections.abc import Mapping
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -373,6 +374,63 @@ class QKernel(QKernelBuildMixin, QKernelVisualizationMixin, Generic[P, R]):
         from qamomile.circuit.frontend.qkernel_invocation import invoke_qkernel
 
         return cast(R, invoke_qkernel(self, *args, **kwargs))
+
+    def _clone_with_callable_attrs(self, attrs: Mapping[str, Any]) -> QKernel[P, R]:
+        """Clone this qkernel with isolated compiler-facing attributes.
+
+        A fresh transformed function and self-call state keep descriptor-local
+        metadata from leaking through a shallow copy. An already completed
+        body may be shared because its recursive references have been fully
+        finalized; an unbuilt clone remains independently lazy.
+
+        Args:
+            attrs (Mapping[str, Any]): Serializer-safe callable attributes for
+                the clone.
+
+        Returns:
+            QKernel[P, R]: Independent qkernel carrying the supplied attrs.
+        """
+        with self._annotation_lock:
+            self._ensure_annotation_types_resolved()
+            source_signature = self.signature
+            source_input_types = dict(self._input_types)
+            source_return_type = self._return_type
+            source_output_types = list(self._output_types)
+
+        cloned = QKernel(self.raw_func)
+        cloned.name = self.name
+        with cloned._annotation_lock:
+            cloned.signature = source_signature
+            # The source may have resolved annotation-only local aliases and
+            # released their captured namespace already. Preserve that frozen
+            # interface instead of asking the fresh clone to resolve the raw
+            # annotations again.
+            cloned._input_types = source_input_types
+            cloned._input_type_resolution_errors = {}
+            cloned._input_types_resolved = True
+            cloned._input_type_validation_error = None
+            cloned._return_type = source_return_type
+            cloned._return_type_resolved = True
+            cloned._return_type_resolution_error = None
+            cloned._output_types = source_output_types
+            cloned._freeze_input_types()
+            cloned._freeze_return_type()
+            cloned._release_annotation_localns_if_resolved()
+        cloned._callable_kind = self._callable_kind
+        cloned._callable_name = self._callable_name
+        cloned._callable_namespace = self._callable_namespace
+        cloned._callable_policy = self._callable_policy
+        cloned._callable_gate_type = self._callable_gate_type
+        cloned._callable_implementations = tuple(self._callable_implementations)
+        cloned._callable_semantic_arguments = dict(self._callable_semantic_arguments)
+        with self._block_lock:
+            if self._block is not None:
+                cloned._block = self._block
+        callable_ref = getattr(self, "_callable_ref_override", None)
+        if callable_ref is not None:
+            setattr(cloned, "_callable_ref_override", callable_ref)
+        setattr(cloned, "_callable_attrs_override", dict(attrs))
+        return cloned
 
 
 def _defining_local_namespace(func: Callable[..., Any]) -> dict[str, Any]:

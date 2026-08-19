@@ -13,7 +13,12 @@ from qamomile.circuit.frontend.qkernel_utils import reject_aliased_quantum_args
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.types.primitives import FloatType
-from qamomile.circuit.ir.value import ArrayValue, Value, resolve_root_qubit_address
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    Value,
+    resolve_root_qubit_address,
+    resolve_root_qubit_array,
+)
 
 if TYPE_CHECKING:
     pass
@@ -107,13 +112,16 @@ def expval(
         # or an element produced as a gate/composite result).  A standalone
         # qubit has no ``parent_array`` and resolves to ``None``; it is recorded
         # with the ``("", -1)`` sentinel so emit falls back to the flat UUID
-        # lookup that already resolves standalone qubits.
+        # lookup that already resolves standalone qubits. A symbolic element
+        # keeps its root UUID with index ``-1`` so resource scheduling can wait
+        # on the whole known owner instead of inventing an unrelated wire.
         # We must resolve the root address HERE (at trace time) because the
         # pseudo-ArrayValue below flattens the elements into bare UUID tuples and
         # drops their ``parent_array`` -- emit could not chain-walk later. (The
         # non-tuple branch keeps the real element Value, so it resolves at emit
         # instead; see ``_build_qubit_map``.)
         parent_addrs = [resolve_root_qubit_address(v) for v in qubit_values]
+        parent_roots = [resolve_root_qubit_array(v) for v in qubit_values]
         qubits_value = ArrayValue(
             type=qubit_values[0].type,
             name="expval_qubits",
@@ -121,13 +129,20 @@ def expval(
         ).with_array_runtime_metadata(
             element_uuids=tuple(q.uuid for q in qubit_values),
             element_logical_ids=tuple(q.logical_id for q in qubit_values),
-            # Encode each resolved root as (uuid, idx); ``None`` (standalone
-            # qubit, or unresolved element) becomes the ``("", -1)`` sentinel
-            # that ``get_element_parent_addresses()`` decodes back to ``None``.
+            # Encode each resolved root as (uuid, idx). A symbolic element
+            # retains ``(root_uuid, -1)``; only a standalone qubit uses
+            # ``("", -1)``. ``get_element_parent_addresses()`` decodes both
+            # non-exact forms to ``None``, while owner-aware consumers can use
+            # the raw parallel metadata.
             # Kept as two parallel tuples (not one tuple of pairs) so they ride
             # the existing ArrayRuntimeMetadata serialize / canonical paths.
             element_parent_uuids=tuple(
-                addr[0] if addr is not None else "" for addr in parent_addrs
+                (
+                    addr[0]
+                    if addr is not None
+                    else (root.uuid if root is not None else "")
+                )
+                for addr, root in zip(parent_addrs, parent_roots, strict=True)
             ),
             element_parent_indices=tuple(
                 addr[1] if addr is not None else -1 for addr in parent_addrs

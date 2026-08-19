@@ -1680,9 +1680,7 @@ class ResourceAllocator:
                         dst_addr = QubitAddress(dst.uuid)
                         if dst_addr not in qubit_map:
                             qubit_map[dst_addr] = physical
-            sub_quantum_operands = [
-                v for v in op.operands[op.num_control_args :] if v.type.is_quantum()
-            ]
+            sub_quantum_operands = [v for v in op.body_operands if v.type.is_quantum()]
             sub_quantum_results = [
                 r for r in op.results[op.num_control_args :] if r.type.is_quantum()
             ]

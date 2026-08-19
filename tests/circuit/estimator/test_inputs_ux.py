@@ -2,12 +2,84 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import sympy as sp
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
+from qamomile.circuit.frontend.composite_gate import configure_composite
+from qamomile.circuit.frontend.qkernel_callable import qkernel_callable_attrs
+from qamomile.circuit.ir.operation.callable import (
+    CallableImplementation,
+    CallPolicy,
+    CallTransform,
+)
+
+
+class _ShapeGetterRaises:
+    """Expose a shape descriptor whose getter fails."""
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        """Raise while reading the deliberately malformed shape.
+
+        Raises:
+            RuntimeError: Always, to exercise public error translation.
+        """
+        raise RuntimeError("shape unavailable")
+
+
+class _ShapeIteratorRaises:
+    """Expose a shape object whose iterator fails."""
+
+    @property
+    def shape(self) -> object:
+        """Return a deliberately malformed iterable shape.
+
+        Returns:
+            object: Shape-like object whose iterator raises.
+        """
+
+        class _BrokenShape:
+            """Fail when shape discovery requests dimensions."""
+
+            def __iter__(self):
+                """Raise instead of yielding dimensions.
+
+                Raises:
+                    RuntimeError: Always, to exercise public error translation.
+                """
+                raise RuntimeError("shape iteration unavailable")
+
+        return _BrokenShape()
+
+
+class _SequenceLengthRaises(list[float]):
+    """Expose a sequence whose length provider fails."""
+
+    def __len__(self) -> int:
+        """Raise while discovering the deliberately malformed sequence.
+
+        Raises:
+            RuntimeError: Always, to exercise public error translation.
+        """
+        raise RuntimeError("length unavailable")
+
+
+class _SequenceIteratorRaises(list[float]):
+    """Expose a sequence whose element iterator fails."""
+
+    def __iter__(self):
+        """Raise while traversing the deliberately malformed sequence.
+
+        Raises:
+            RuntimeError: Always, to exercise public error translation.
+        """
+        raise RuntimeError("sequence iteration unavailable")
 
 
 @qmc.composite_gate(name="phase_u")
@@ -35,6 +107,65 @@ def _toy_qpe(bits: qmc.UInt = 4, theta: qmc.Float = 0.1) -> qmc.Vector[qmc.Bit]:
 def _sized_kernel(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
     """Allocate an n-bit register for symbolic-size substitution tests."""
     return qmc.qubit_array(n, name="reg")
+
+
+@qmc.qkernel
+def _recursive_ignore_predicate(
+    depth: qmc.UInt,
+    predicate: qmc.Bit,
+    target: qmc.Qubit,
+) -> qmc.Qubit:
+    """Recurse to one gate without ever reading ``predicate``."""
+    if depth == 0:
+        target = qmc.t(target)
+    else:
+        target = _recursive_ignore_predicate(depth - 1, predicate, target)
+    return target
+
+
+@qmc.qkernel
+def _recursive_ignore_predicate_caller(
+    iterations: qmc.UInt,
+    depth: qmc.UInt,
+) -> qmc.Qubit:
+    """Refresh an ignored predicate after each recursive invocation."""
+    predicate = qmc.bit(False)
+    target = qmc.qubit("target")
+    source = qmc.qubit("source")
+    for _index in qmc.range(iterations):
+        target = _recursive_ignore_predicate(depth, predicate, target)
+        predicate = qmc.measure(source)
+    return target
+
+
+@qmc.qkernel
+def _recursive_use_predicate(
+    depth: qmc.UInt,
+    predicate: qmc.Bit,
+    target: qmc.Qubit,
+) -> qmc.Qubit:
+    """Recurse to a base case that branches on ``predicate``."""
+    if depth == 0:
+        if predicate:
+            target = qmc.t(target)
+    else:
+        target = _recursive_use_predicate(depth - 1, predicate, target)
+    return target
+
+
+@qmc.qkernel
+def _recursive_use_predicate_caller(
+    iterations: qmc.UInt,
+    depth: qmc.UInt,
+) -> qmc.Qubit:
+    """Refresh a predicate after a recursive invocation that reads it."""
+    predicate = qmc.bit(False)
+    target = qmc.qubit("target")
+    source = qmc.qubit("source")
+    for _index in qmc.range(iterations):
+        target = _recursive_use_predicate(depth, predicate, target)
+        predicate = qmc.measure(source)
+    return target
 
 
 @qmc.qkernel
@@ -99,6 +230,32 @@ def test_branch_specialized_on_concrete_flag() -> None:
     assert false_est.gates.total == 2  # qmc.h + qmc.z
 
 
+def test_typed_branch_inputs_retain_uint_and_bit_domains() -> None:
+    """Branch pruning does not erase scalar parameter validation."""
+
+    @qmc.qkernel
+    def bit_branch(flag: qmc.Bit) -> qmc.Qubit:
+        """Select one of two gates from a classical bit parameter."""
+        target = qmc.qubit("target")
+        if flag:
+            target = qmc.x(target)
+        else:
+            target = qmc.h(target)
+        return target
+
+    with pytest.raises(ValueError, match="non-integer value"):
+        _branch_probe.estimate_resources(inputs={"flag": 1.5})
+    with pytest.raises(ValueError, match="negative value"):
+        _branch_probe.estimate_resources(inputs={"flag": -1})
+    with pytest.raises(ValueError, match="upper bound"):
+        bit_branch.estimate_resources(inputs={"flag": 2})
+    assert bit_branch.estimate_resources(inputs={"flag": True}).gates.total == 1
+    assert bit_branch.estimate_resources(inputs={"flag": False}).gates.total == 1
+    for boolean in (False, True):
+        with pytest.raises(TypeError, match="expects UIntType, got bool"):
+            _branch_probe.estimate_resources(inputs={"flag": boolean})
+
+
 @pytest.mark.parametrize(
     "value", [np.int64(1), np.int32(1), np.float64(1.0)], ids=["i64", "i32", "f64"]
 )
@@ -116,7 +273,7 @@ def test_branch_specialized_on_numpy_scalar(value: object) -> None:
 def test_symbolic_compile_time_branch_stays_piecewise() -> None:
     """A Python default remains a symbolic exact branch during estimation."""
     est = _branch_probe.estimate_resources()
-    assert str(est.gates.total) == "Piecewise((1, flag), (2, True))"
+    assert str(est.gates.total) == "Piecewise((1, flag > 0), (2, True))"
 
 
 def test_comparison_branch_specialized() -> None:
@@ -266,7 +423,7 @@ def test_region_arg_drives_later_concrete_loop() -> None:
 
 
 def test_large_input_keeps_region_loop_symbolic(monkeypatch) -> None:
-    """A large estimation input is substituted after loop summarization."""
+    """QKernel and raw IR inputs are substituted after loop summarization."""
     from qamomile.circuit.estimator.resource_estimator import ResourceInterpreter
 
     def fail_concrete_iteration(*args, **kwargs):
@@ -278,8 +435,14 @@ def test_large_input_keeps_region_loop_symbolic(monkeypatch) -> None:
         fail_concrete_iteration,
     )
 
-    estimate = _carried_loop_bound.estimate_resources(inputs={"n": 2048})
-    assert estimate.gates.total == 2048
+    targets = (
+        _carried_loop_bound,
+        _carried_loop_bound.block,
+        _carried_loop_bound.block.operations,
+    )
+    for target in targets:
+        estimate = qmc.estimate_resources(target, inputs={"n": 2048})
+        assert estimate.gates.total == 2048
 
 
 def test_region_arg_drives_later_branch() -> None:
@@ -319,12 +482,65 @@ def test_inputs_force_symbolic_over_python_default() -> None:
     assert int(est.qubits) == 6
 
 
+def test_qubit_allocation_width_requires_an_integer() -> None:
+    """UInt-sized allocations reject fractional direct and later inputs."""
+    symbolic = _sized_kernel.estimate_resources()
+
+    with pytest.raises(ValueError, match="non-integer value"):
+        symbolic.substitute(n=1.5)
+    with pytest.raises(ValueError, match="non-integer value"):
+        _sized_kernel.estimate_resources(inputs={"n": 1.5})
+
+
 def test_inputs_accept_shift_expression() -> None:
     """An input expression may reintroduce the same symbol name (n -> n+1)."""
     n = sp.Symbol("n", integer=True, positive=True)
     est = _sized_kernel.estimate_resources(inputs={"n": n + 1})
     # The reintroduced symbol still sizes the register correctly.
     assert sp.simplify(est.qubits - (n + 1)) == 0
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("8", id="numeric-string"),
+        pytest.param("m", id="symbol-string"),
+        pytest.param("2*k+1", id="expression-string"),
+        pytest.param([1], id="list"),
+        pytest.param(None, id="none"),
+    ],
+)
+def test_scalar_resource_parameters_reject_non_numeric_values(value: object) -> None:
+    """Only numeric scalars or explicit SymPy input expressions are accepted."""
+    symbolic = _sized_kernel.estimate_resources()
+
+    with pytest.raises(TypeError, match=r"requires a .*numeric scalar"):
+        _sized_kernel.estimate_resources(inputs={"n": value})
+    with pytest.raises(TypeError, match=r"requires a .*numeric scalar"):
+        symbolic.substitute(n=value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(complex(1, 1), id="python-complex"),
+        pytest.param(float("nan"), id="python-nan"),
+        pytest.param(float("inf"), id="python-infinity"),
+        pytest.param(sp.I, id="sympy-imaginary"),
+        pytest.param(sp.nan, id="sympy-nan"),
+        pytest.param(sp.oo, id="sympy-infinity"),
+    ],
+)
+def test_scalar_resource_parameters_require_finite_real_values(
+    value: object,
+) -> None:
+    """Concrete resource scalars reject complex and non-finite values."""
+    symbolic = _sized_kernel.estimate_resources()
+
+    with pytest.raises(ValueError, match="finite and real"):
+        _sized_kernel.estimate_resources(inputs={"n": value})
+    with pytest.raises(ValueError, match="finite and real"):
+        symbolic.substitute(n=value)
 
 
 def test_input_typo_raises() -> None:
@@ -390,12 +606,32 @@ def test_inputs_trace_structural_values_and_specialize_scalars() -> None:
     assert estimate.qubits == 3
     assert estimate.gates.total == 3
     assert estimate.parameters == {}
+    assert estimate.calls.calls_by_name == {"expval": 1}
+    assert estimate.calls.queries_by_name == {"expval": 1}
+    assert estimate.derivation is qmc.EstimateDerivation.MODELED
+    assert len(estimate.assumptions) == 1
 
 
 @pytest.mark.parametrize(
     "angles",
-    [np.array([0.1, 0.2, 0.3]), [0.1, 0.2, 0.3]],
-    ids=["numpy", "list"],
+    [
+        np.array([0.1, 0.2, 0.3]),
+        [0.1, 0.2, 0.3],
+        (0.1, 0.2, 0.3),
+        range(3),
+        SimpleNamespace(shape=(3,)),
+        SimpleNamespace(shape=(np.int64(3),)),
+        SimpleNamespace(shape=(sp.Integer(3),)),
+    ],
+    ids=[
+        "numpy",
+        "list",
+        "tuple",
+        "sequence",
+        "shape-attribute",
+        "numpy-shape-dimension",
+        "sympy-shape-dimension",
+    ],
 )
 def test_numeric_vector_input_specializes_shape(angles: object) -> None:
     """A numeric vector input determines symbolic loop and register sizes."""
@@ -413,3 +649,753 @@ def test_numeric_vector_input_specializes_shape(angles: object) -> None:
     assert estimate.qubits == 3
     assert estimate.gates.total == 3
     assert estimate.parameters == {}
+    assert estimate.assumptions == ()
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        pytest.param((3.5,), id="fractional"),
+        pytest.param((True,), id="boolean"),
+        pytest.param((np.bool_(True),), id="numpy-boolean"),
+        pytest.param((-1,), id="negative"),
+    ],
+)
+def test_invalid_array_shape_dimensions_are_rejected(shape: tuple[object, ...]) -> None:
+    """Resource inputs reject shape entries that are not nonnegative integers."""
+
+    @qmc.qkernel
+    def vector_probe(values: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Qubit]:
+        """Allocate one qubit for every supplied vector entry.
+
+        Args:
+            values (qmc.Vector[qmc.Float]): Vector whose length sets width.
+
+        Returns:
+            qmc.Vector[qmc.Qubit]: Register with one qubit per vector entry.
+        """
+        return qmc.qubit_array(values.shape[0], "reg")
+
+    with pytest.raises(ValueError, match="nonnegative integers"):
+        vector_probe.estimate_resources(inputs={"values": SimpleNamespace(shape=shape)})
+
+
+def test_array_shape_dimension_comparison_cannot_leak_provider_errors() -> None:
+    """Resource inputs normalize integer subclasses before sign validation."""
+
+    class HostileDimension(int):
+        """Raise if validation compares the provider-owned object directly."""
+
+        def __lt__(self, other: object) -> bool:
+            """Reject direct ordering comparisons.
+
+            Args:
+                other (object): Right-hand comparison operand.
+
+            Returns:
+                bool: This implementation never returns.
+
+            Raises:
+                RuntimeError: Always, to expose a direct comparison.
+            """
+            raise RuntimeError("provider comparison must not escape")
+
+    @qmc.qkernel
+    def vector_probe(values: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Qubit]:
+        """Allocate one qubit for every supplied vector entry.
+
+        Args:
+            values (qmc.Vector[qmc.Float]): Vector whose length sets width.
+
+        Returns:
+            qmc.Vector[qmc.Qubit]: Register with one qubit per vector entry.
+        """
+        return qmc.qubit_array(values.shape[0], "reg")
+
+    estimate = vector_probe.estimate_resources(
+        inputs={"values": SimpleNamespace(shape=(HostileDimension(3),))}
+    )
+
+    assert estimate.qubits == 3
+    with pytest.raises(ValueError, match="nonnegative integers"):
+        vector_probe.estimate_resources(
+            inputs={"values": SimpleNamespace(shape=(HostileDimension(-1),))}
+        )
+
+
+def test_noniterable_array_shape_is_rejected_as_invalid_input() -> None:
+    """Resource inputs translate a malformed scalar shape into ValueError."""
+
+    @qmc.qkernel
+    def vector_probe(values: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Qubit]:
+        """Allocate one qubit for every supplied vector entry.
+
+        Args:
+            values (qmc.Vector[qmc.Float]): Vector whose length sets width.
+
+        Returns:
+            qmc.Vector[qmc.Qubit]: Register with one qubit per vector entry.
+        """
+        return qmc.qubit_array(values.shape[0], "reg")
+
+    with pytest.raises(ValueError, match="shape must be an iterable"):
+        vector_probe.estimate_resources(inputs={"values": SimpleNamespace(shape=3)})
+
+
+@pytest.mark.parametrize(
+    ("values", "message"),
+    [
+        pytest.param(_ShapeGetterRaises(), "Could not read", id="getter"),
+        pytest.param(_ShapeIteratorRaises(), "must be an iterable", id="iterator"),
+        pytest.param(
+            _SequenceLengthRaises([0.0]),
+            "sequence length",
+            id="sequence-length",
+        ),
+        pytest.param(
+            _SequenceIteratorRaises([0.0]),
+            "iterate over the array sequence",
+            id="sequence-iterator",
+        ),
+    ],
+)
+def test_array_shape_provider_failures_are_translated(
+    values: object,
+    message: str,
+) -> None:
+    """Resource inputs expose malformed shape providers as ValueError."""
+
+    @qmc.qkernel
+    def vector_probe(data: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Qubit]:
+        """Allocate one qubit for every supplied vector entry.
+
+        Args:
+            data (qmc.Vector[qmc.Float]): Vector whose length sets width.
+
+        Returns:
+            qmc.Vector[qmc.Qubit]: Register with one qubit per vector entry.
+        """
+        return qmc.qubit_array(data.shape[0], "reg")
+
+    with pytest.raises(ValueError, match=message) as caught:
+        vector_probe.estimate_resources(inputs={"data": values})
+
+    assert isinstance(caught.value.__cause__, RuntimeError)
+
+
+def test_array_shape_provider_resource_failures_propagate() -> None:
+    """Resource failures from a shape provider are not mislabeled as input errors."""
+
+    class ExhaustedShapeProvider:
+        """Expose a shape descriptor that reports resource exhaustion."""
+
+        @property
+        def shape(self) -> tuple[int, ...]:
+            """Raise the simulated process resource failure.
+
+            Raises:
+                MemoryError: Always, to verify narrow protocol translation.
+            """
+            raise MemoryError("shape allocation exhausted")
+
+    @qmc.qkernel
+    def vector_probe(data: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Qubit]:
+        """Allocate one qubit for every supplied vector entry.
+
+        Args:
+            data (qmc.Vector[qmc.Float]): Vector whose length sets width.
+
+        Returns:
+            qmc.Vector[qmc.Qubit]: Register with one qubit per vector entry.
+        """
+        return qmc.qubit_array(data.shape[0], "reg")
+
+    with pytest.raises(MemoryError, match="allocation exhausted"):
+        vector_probe.estimate_resources(inputs={"data": ExhaustedShapeProvider()})
+
+
+def test_ragged_matrix_input_is_rejected() -> None:
+    """Resource inputs reject ragged nested sequences before specialization."""
+
+    @qmc.qkernel
+    def matrix_probe(values: qmc.Matrix[qmc.Float]) -> qmc.Vector[qmc.Qubit]:
+        """Allocate one qubit for every supplied matrix row.
+
+        Args:
+            values (qmc.Matrix[qmc.Float]): Matrix whose row count sets width.
+
+        Returns:
+            qmc.Vector[qmc.Qubit]: Register with one qubit per matrix row.
+        """
+        return qmc.qubit_array(values.shape[0], "reg")
+
+    with pytest.raises(ValueError, match="must be rectangular"):
+        matrix_probe.estimate_resources(inputs={"values": [[0.1], [0.2, 0.3]]})
+
+
+@pytest.mark.parametrize(
+    "scalar",
+    [
+        pytest.param(0.5, id="python-scalar"),
+        pytest.param(np.array(0.5), id="rank-zero-array"),
+    ],
+)
+def test_scalar_input_does_not_bypass_declared_array_rank(
+    scalar: object,
+) -> None:
+    """A discovered rank-zero input is rejected for an array parameter."""
+
+    @qmc.qkernel
+    def matrix_probe(values: qmc.Matrix[qmc.Float]) -> qmc.Vector[qmc.Qubit]:
+        """Allocate one qubit for every supplied matrix row.
+
+        Args:
+            values (qmc.Matrix[qmc.Float]): Matrix whose row count sets width.
+
+        Returns:
+            qmc.Vector[qmc.Qubit]: Register with one qubit per matrix row.
+        """
+        return qmc.qubit_array(values.shape[0], "reg")
+
+    with pytest.raises(ValueError, match=r"has rank 0.*declares rank 2"):
+        matrix_probe.estimate_resources(inputs={"values": scalar})
+
+
+def test_loop_carried_bit_condition_rejects_only_a_real_backedge() -> None:
+    """A delayed Bit condition is valid once but rejected when it must carry."""
+
+    @qmc.qkernel
+    def delayed_condition(iterations: qmc.UInt) -> qmc.Qubit:
+        """Read the previous predicate before refreshing it each iteration."""
+        predicate = qmc.bit(False)
+        target = qmc.qubit("target")
+        source = qmc.qubit("source")
+        for _index in qmc.range(iterations):
+            if predicate:
+                target = qmc.x(target)
+            predicate = qmc.measure(source)
+        return target
+
+    delayed_condition.estimate_resources(inputs={"iterations": 0})
+    delayed_condition.estimate_resources(inputs={"iterations": 1})
+    with pytest.raises(NotImplementedError, match="Loop-carried"):
+        delayed_condition.estimate_resources(inputs={"iterations": 2})
+    with pytest.raises(NotImplementedError, match="Loop-carried"):
+        delayed_condition.estimate_resources()
+
+
+def test_nested_symbolic_trip_count_uses_maximum_for_backedge_proof() -> None:
+    """An inner loop is rejected when any enclosing iteration repeats it."""
+
+    @qmc.qkernel
+    def varying_inner_trip_count() -> qmc.Qubit:
+        """Run inner loops of lengths one and two."""
+        target = qmc.qubit("target")
+        source = qmc.qubit("source")
+        for outer in qmc.range(1, 3):
+            predicate = qmc.bit(False)
+            for _index in qmc.range(outer):
+                if predicate:
+                    target = qmc.t(target)
+                predicate = qmc.measure(source)
+        return target
+
+    with pytest.raises(NotImplementedError, match="Loop-carried"):
+        varying_inner_trip_count.estimate_resources()
+
+
+def test_nested_translation_invariant_single_trip_has_no_backedge() -> None:
+    """An affine inner range that is always length one remains valid."""
+
+    @qmc.qkernel
+    def invariant_inner_trip_count() -> qmc.Qubit:
+        """Run exactly one inner iteration for every outer value."""
+        target = qmc.qubit("target")
+        source = qmc.qubit("source")
+        for outer in qmc.range(1, 3):
+            predicate = qmc.bit(False)
+            for _index in qmc.range(outer, outer + 1):
+                if predicate:
+                    target = qmc.t(target)
+                predicate = qmc.measure(source)
+        return target
+
+    estimate = invariant_inner_trip_count.estimate_resources()
+
+    assert estimate.gates.total == 0
+    assert estimate.measurements.total == 2
+
+
+def test_loop_carried_bit_validation_honors_selected_refresh_merge() -> None:
+    """A definite same-iteration refresh is not mistaken for stale state."""
+
+    @qmc.qkernel
+    def refreshed_condition(
+        iterations: qmc.UInt,
+        refresh: qmc.UInt,
+    ) -> qmc.Qubit:
+        """Optionally refresh a predicate before its only body read."""
+        predicate = qmc.bit(False)
+        target = qmc.qubit("target")
+        source = qmc.qubit("source")
+        for _index in qmc.range(iterations):
+            if refresh:
+                predicate = qmc.measure(source)
+            if predicate:
+                target = qmc.x(target)
+        return target
+
+    disabled = refreshed_condition.estimate_resources(
+        inputs={"iterations": 2, "refresh": 0}
+    )
+    enabled = refreshed_condition.estimate_resources(
+        inputs={"iterations": 2, "refresh": 1}
+    )
+
+    assert disabled.gates.total == 0
+    assert enabled.gates.total == 2
+
+
+def test_nested_callable_loop_carried_bit_uses_shared_validation() -> None:
+    """A selected callee body receives the same loop-state validation as root."""
+
+    @qmc.qkernel
+    def delayed_body(iterations: qmc.UInt, target: qmc.Qubit) -> qmc.Qubit:
+        """Read a stale predicate inside a nested callable body."""
+        predicate = qmc.bit(False)
+        source = qmc.qubit("source")
+        for _index in qmc.range(iterations):
+            if predicate:
+                target = qmc.x(target)
+            predicate = qmc.measure(source)
+        return target
+
+    @qmc.qkernel
+    def caller(iterations: qmc.UInt) -> qmc.Qubit:
+        """Invoke the delayed body with one fresh target."""
+        return delayed_body(iterations, qmc.qubit("target"))
+
+    caller.estimate_resources(inputs={"iterations": 1})
+    with pytest.raises(NotImplementedError, match="Loop-carried"):
+        caller.estimate_resources(inputs={"iterations": 2})
+
+
+def test_unused_callee_bit_does_not_create_a_loop_backedge_read() -> None:
+    """An unused formal is absent from the inlined validation view."""
+
+    @qmc.qkernel
+    def ignore_predicate(predicate: qmc.Bit, target: qmc.Qubit) -> qmc.Qubit:
+        """Apply one gate without reading the predicate.
+
+        Args:
+            predicate (qmc.Bit): Deliberately unused caller predicate.
+            target (qmc.Qubit): Qubit receiving the gate.
+
+        Returns:
+            qmc.Qubit: Updated target qubit.
+        """
+        return qmc.t(target)
+
+    @qmc.qkernel
+    def caller(iterations: qmc.UInt) -> qmc.Qubit:
+        """Pass a refreshed predicate to a callee that ignores it.
+
+        Args:
+            iterations (qmc.UInt): Number of loop iterations.
+
+        Returns:
+            qmc.Qubit: Updated target qubit.
+        """
+        predicate = qmc.bit(False)
+        target = qmc.qubit("target")
+        source = qmc.qubit("source")
+        for _index in qmc.range(iterations):
+            target = ignore_predicate(predicate, target)
+            predicate = qmc.measure(source)
+        return target
+
+    estimate = caller.estimate_resources(inputs={"iterations": 2})
+
+    assert estimate.gates.total == 2
+
+
+def test_recursive_unused_callee_bit_does_not_create_a_backedge_read() -> None:
+    """Concrete recursive inlining removes an unused carried predicate."""
+    estimate = _recursive_ignore_predicate_caller.estimate_resources(
+        inputs={"iterations": 2, "depth": 2}
+    )
+
+    assert estimate.gates.total == 2
+
+
+@pytest.mark.parametrize("depth", [0, 1, 2])
+def test_recursive_used_callee_bit_preserves_backedge_read(depth: int) -> None:
+    """Recursive specialization retains a reached predicate read.
+
+    Args:
+        depth (int): Concrete recursion depth before the predicate branch.
+    """
+    with pytest.raises(NotImplementedError, match="Loop-carried"):
+        _recursive_use_predicate_caller.estimate_resources(
+            inputs={"iterations": 2, "depth": depth}
+        )
+
+
+def test_callee_compile_time_branch_decides_loop_backedge_read() -> None:
+    """A bound dead callee branch does not make its predicate look read."""
+
+    @qmc.qkernel
+    def optional_predicate(
+        predicate: qmc.Bit,
+        target: qmc.Qubit,
+        enabled: qmc.UInt,
+    ) -> qmc.Qubit:
+        """Read the predicate only when the compile-time flag is enabled.
+
+        Args:
+            predicate (qmc.Bit): Caller predicate used by the optional branch.
+            target (qmc.Qubit): Qubit updated by the optional branch.
+            enabled (qmc.UInt): Compile-time branch selector.
+
+        Returns:
+            qmc.Qubit: Possibly updated target qubit.
+        """
+        if enabled:
+            if predicate:
+                target = qmc.t(target)
+        return target
+
+    @qmc.qkernel
+    def caller(iterations: qmc.UInt, enabled: qmc.UInt) -> qmc.Qubit:
+        """Refresh a predicate after forwarding it to the optional helper.
+
+        Args:
+            iterations (qmc.UInt): Number of loop iterations.
+            enabled (qmc.UInt): Compile-time helper branch selector.
+
+        Returns:
+            qmc.Qubit: Possibly updated target qubit.
+        """
+        predicate = qmc.bit(False)
+        target = qmc.qubit("target")
+        source = qmc.qubit("source")
+        for _index in qmc.range(iterations):
+            target = optional_predicate(predicate, target, enabled)
+            predicate = qmc.measure(source)
+        return target
+
+    disabled = caller.estimate_resources(inputs={"iterations": 2, "enabled": 0})
+
+    assert disabled.gates.total == 0
+    with pytest.raises(NotImplementedError, match="Loop-carried"):
+        caller.estimate_resources(inputs={"iterations": 2, "enabled": 1})
+
+
+def test_selected_strategy_can_remove_a_callee_backedge_read() -> None:
+    """Validation inlines the same strategy body as resource evaluation."""
+
+    @qmc.qkernel
+    def selected_ignores(predicate: qmc.Bit, target: qmc.Qubit) -> qmc.Qubit:
+        """Apply one gate without reading the predicate."""
+        return qmc.h(target)
+
+    @qmc.qkernel
+    def default_reads(predicate: qmc.Bit, target: qmc.Qubit) -> qmc.Qubit:
+        """Conditionally apply one gate from the predicate."""
+        if predicate:
+            target = qmc.t(target)
+        return target
+
+    configured = configure_composite(
+        default_reads,
+        name="strategy_default_reads",
+        policy=CallPolicy.INLINE,
+        implementations=[
+            CallableImplementation(
+                transform=CallTransform.DIRECT,
+                strategy="selected",
+                body=selected_ignores.block,
+            )
+        ],
+    )
+    configured = configured._clone_with_callable_attrs(
+        {
+            **qkernel_callable_attrs(configured),
+            "resource_contract": {
+                "quantum_operand_widths": [{"index": 0, "name": "target", "width": 1}]
+            },
+        }
+    )
+
+    @qmc.qkernel
+    def caller(iterations: qmc.UInt) -> qmc.Qubit:
+        """Refresh a predicate after invoking the configured helper."""
+        predicate = qmc.bit(False)
+        target = qmc.qubit("target")
+        source = qmc.qubit("source")
+        for _index in qmc.range(iterations):
+            target = configured(predicate, target)
+            predicate = qmc.measure(source)
+        return target
+
+    selected = caller.estimate_resources(
+        inputs={"iterations": 2},
+        strategies={"strategy_default_reads": "selected"},
+    )
+
+    assert selected.gates.total == 2
+    with pytest.raises(NotImplementedError, match="Loop-carried"):
+        caller.estimate_resources(inputs={"iterations": 2})
+
+
+def test_selected_strategy_can_introduce_a_callee_backedge_read() -> None:
+    """Validation does not keep an input-unused default body by mistake."""
+
+    @qmc.qkernel
+    def selected_reads(predicate: qmc.Bit, target: qmc.Qubit) -> qmc.Qubit:
+        """Conditionally apply one gate from the predicate."""
+        if predicate:
+            target = qmc.t(target)
+        return target
+
+    @qmc.qkernel
+    def default_ignores(predicate: qmc.Bit, target: qmc.Qubit) -> qmc.Qubit:
+        """Apply one gate without reading the predicate."""
+        return qmc.h(target)
+
+    configured = configure_composite(
+        default_ignores,
+        name="strategy_default_ignores",
+        policy=CallPolicy.INLINE,
+        implementations=[
+            CallableImplementation(
+                transform=CallTransform.DIRECT,
+                strategy="selected",
+                body=selected_reads.block,
+            )
+        ],
+    )
+    configured = configured._clone_with_callable_attrs(
+        {
+            **qkernel_callable_attrs(configured),
+            "resource_contract": {
+                "quantum_operand_widths": [{"index": 0, "name": "target", "width": 1}]
+            },
+        }
+    )
+
+    @qmc.qkernel
+    def caller(iterations: qmc.UInt) -> qmc.Qubit:
+        """Refresh a predicate after invoking the configured helper."""
+        predicate = qmc.bit(False)
+        target = qmc.qubit("target")
+        source = qmc.qubit("source")
+        for _index in qmc.range(iterations):
+            target = configured(predicate, target)
+            predicate = qmc.measure(source)
+        return target
+
+    default = caller.estimate_resources(inputs={"iterations": 2})
+
+    assert default.gates.total == 2
+    with pytest.raises(NotImplementedError, match="Loop-carried"):
+        caller.estimate_resources(
+            inputs={"iterations": 2},
+            strategies={"strategy_default_ignores": "selected"},
+        )
+
+
+def test_output_only_array_index_is_validated_across_call_boundaries() -> None:
+    """A returned element enforces its bounds with or without a helper call."""
+
+    @qmc.qkernel
+    def select_element(
+        register: qmc.Vector[qmc.Qubit],
+        index: qmc.UInt,
+    ) -> qmc.Qubit:
+        """Return one dynamically selected register element."""
+        return register[index]
+
+    contracted = select_element._clone_with_callable_attrs(
+        {
+            **qkernel_callable_attrs(select_element),
+            "resource_contract": {
+                "quantum_operand_widths": [{"index": 0, "name": "register", "width": 2}]
+            },
+        }
+    )
+
+    @qmc.qkernel
+    def direct(index: qmc.UInt) -> qmc.Qubit:
+        """Return a dynamic element directly from the root qkernel."""
+        return qmc.qubit_array(2, "register")[index]
+
+    @qmc.qkernel
+    def through_helper(index: qmc.UInt) -> qmc.Qubit:
+        """Return a dynamic element through an ordinary helper."""
+        return select_element(qmc.qubit_array(2, "register"), index)
+
+    @qmc.qkernel
+    def through_contract(index: qmc.UInt) -> qmc.Qubit:
+        """Return a dynamic element through a width-contracted helper."""
+        return contracted(qmc.qubit_array(2, "register"), index)
+
+    for kernel in (direct, through_helper, through_contract):
+        valid = kernel.estimate_resources(inputs={"index": 1})
+        assert valid.width.peak_qubits == 2
+        with pytest.raises(ValueError, match="in-bounds margin"):
+            kernel.estimate_resources(inputs={"index": 2})
+
+
+def test_structural_bit_inputs_are_validated_before_tracing() -> None:
+    """Bit inputs reject truthy objects before they reach frontend handles."""
+
+    @qmc.qkernel
+    def bit_probe(flag: qmc.Bit) -> qmc.Qubit:
+        """Apply one gate only when the supplied bit is true."""
+        target = qmc.qubit("target")
+        if flag:
+            target = qmc.x(target)
+        return target
+
+    assert bit_probe.estimate_resources(inputs={"flag": 0}).gates.total == 0
+    assert bit_probe.estimate_resources(inputs={"flag": 1}).gates.total == 1
+    with pytest.raises(TypeError, match="Bit binding 'flag'"):
+        bit_probe.estimate_resources(inputs={"flag": "false"})
+    with pytest.raises(TypeError, match="Bit binding 'flag'"):
+        bit_probe.estimate_resources(inputs={"flag": None})
+    with pytest.raises(ValueError, match="must be 0 or 1"):
+        bit_probe.estimate_resources(inputs={"flag": 2})
+
+
+def test_float_inputs_preserve_decimal_scalar_and_array_bindings() -> None:
+    """Float validation retains Decimal support before input partitioning."""
+
+    @qmc.qkernel
+    def decimal_probe(
+        theta: qmc.Float,
+        values: qmc.Vector[qmc.Float],
+    ) -> qmc.Qubit:
+        """Apply rotations using a Decimal scalar and vector binding."""
+        target = qmc.qubit("target")
+        target = qmc.rx(target, theta)
+        target = qmc.ry(target, values[0])
+        return target
+
+    estimate = decimal_probe.estimate_resources(
+        inputs={"theta": Decimal("0.5"), "values": [Decimal("0.25")]}
+    )
+
+    assert estimate.gates.total == 2
+    assert estimate.parameters == {}
+
+
+def test_decimal_input_specializes_a_symbolic_resource_expression() -> None:
+    """Decimal values specialize Float-dependent loop resources exactly."""
+
+    @qmc.qkernel
+    def decimal_loop(repetitions: qmc.Float) -> qmc.Qubit:
+        """Repeat X according to the ceiling of a concrete Float input."""
+        target = qmc.qubit("target")
+        count = qmc.ceil(repetitions)
+        for _index in qmc.range(count):
+            target = qmc.x(target)
+        return target
+
+    estimate = decimal_loop.estimate_resources(inputs={"repetitions": Decimal("2.25")})
+
+    assert estimate.gates.total == 3
+    assert estimate.parameters == {}
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        pytest.param([(0, 0.5)], id="not-a-mapping"),
+        pytest.param({0: "0.5"}, id="string-value"),
+        pytest.param({0: None}, id="none-value"),
+    ],
+)
+def test_structural_dict_inputs_validate_container_entries(data: object) -> None:
+    """Dict inputs validate the mapping and every declared key/value type."""
+
+    @qmc.qkernel
+    def dict_probe(values: qmc.Dict[qmc.UInt, qmc.Float]) -> qmc.Qubit:
+        """Return one qubit while retaining a structural Dict input."""
+        return qmc.qubit("target")
+
+    with pytest.raises((TypeError, ValueError), match="Dict binding 'values'"):
+        dict_probe.estimate_resources(inputs={"values": data})
+
+
+def test_structural_tuple_input_is_bound_after_validation() -> None:
+    """A valid Tuple input remains usable while malformed entries fail early."""
+
+    @qmc.qkernel
+    def tuple_probe(
+        pair: qmc.Tuple[qmc.UInt, qmc.Float],
+    ) -> qmc.Qubit:
+        """Apply one gate for each unit in the Tuple's integer component."""
+        target = qmc.qubit("target")
+        for _index in qmc.range(pair[0]):
+            target = qmc.x(target)
+        return target
+
+    assert tuple_probe.estimate_resources(inputs={"pair": (2, 0.5)}).gates.total == 2
+    with pytest.raises(ValueError, match="expects 2 element"):
+        tuple_probe.estimate_resources(inputs={"pair": (2,)})
+    with pytest.raises(TypeError, match="Tuple binding 'pair'.*sequence"):
+        tuple_probe.estimate_resources(inputs={"pair": "2,0.5"})
+
+
+def test_observable_vector_input_validates_each_hamiltonian() -> None:
+    """A qkernel Observable vector rejects non-Hamiltonian elements early."""
+
+    @qmc.qkernel
+    def observable_probe(
+        observables: qmc.Vector[qmc.Observable],
+    ) -> qmc.Float:
+        """Evaluate the first supplied observable on one qubit."""
+        return qmc.expval(qmc.qubit("target"), observables[0])
+
+    valid = observable_probe.estimate_resources(inputs={"observables": [qm_o.Z(0)]})
+    assert valid.calls.calls_by_name == {"expval": 1}
+    with pytest.raises(TypeError, match="element 0 expects a Hamiltonian"):
+        observable_probe.estimate_resources(inputs={"observables": [object()]})
+
+
+@pytest.mark.parametrize("invalid", ["3", None])
+def test_raw_block_quantum_width_rejects_non_array_values(invalid: object) -> None:
+    """Raw Blocks reject invalid quantum widths before partitioning."""
+
+    @qmc.qkernel
+    def vector_probe(
+        targets: qmc.Vector[qmc.Qubit],
+    ) -> qmc.Vector[qmc.Qubit]:
+        """Apply one gate to each input qubit."""
+        return qmc.x(targets)
+
+    with pytest.raises(ValueError, match="quantum array input 'targets'"):
+        qmc.ResourceEstimator().estimate(
+            vector_probe.block,
+            inputs={"targets": invalid},
+        )
+
+
+@pytest.mark.parametrize("invalid", ["false", None])
+def test_raw_block_bit_rejects_non_integral_values(invalid: object) -> None:
+    """Raw Blocks apply the Bit domain before structural inputs are consumed."""
+
+    @qmc.qkernel
+    def bit_probe(flag: qmc.Bit) -> qmc.Qubit:
+        """Apply a gate when the supplied bit is true."""
+        target = qmc.qubit("target")
+        if flag:
+            target = qmc.x(target)
+        return target
+
+    with pytest.raises(TypeError, match="Bit binding 'flag'"):
+        qmc.ResourceEstimator().estimate(
+            bit_probe.block,
+            inputs={"flag": invalid},
+        )

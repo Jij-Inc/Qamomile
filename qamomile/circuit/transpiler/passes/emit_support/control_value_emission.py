@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -18,7 +18,7 @@ def bracket_control_value(
     circuit: Any,
     control_indices: Sequence[int],
     control_value: int | None,
-) -> Iterator[None]:
+) -> Generator[None, None, None]:
     """Bracket zero-valued controls with target-neutral Pauli-X gates.
 
     The controlled operation inside the context remains an ordinary all-ones

@@ -97,6 +97,7 @@ from qamomile.circuit.ir.value import (
     ValueLike,
     collect_value_like_uuids,
     resolve_root_qubit_address,
+    resolve_root_qubit_array,
 )
 from qamomile.circuit.transpiler.block_parameter_binding import pair_block_operands
 
@@ -606,12 +607,31 @@ def _is_valid_inline_expval_carrier(
                 not isinstance(parent, ArrayValue)
                 or parent.type != QubitType()
                 or parent.slice_of is not None
-                or parent_index < 0
-                or not _array_index_may_be_in_bounds(parent, parent_index)
             ):
                 return False
             known_element = all_produced_values.get(element_uuid)
-            if known_element is not None:
+            if parent_index == -1:
+                if (
+                    type(known_element) is not Value
+                    or element_uuid not in visible
+                    or known_element.type != QubitType()
+                    or known_element.logical_id != element_logical_id
+                ):
+                    return False
+                known_root = resolve_root_qubit_array(known_element)
+                if (
+                    known_root is None
+                    or known_root.uuid != parent_uuid
+                    or resolve_root_qubit_address(known_element) is not None
+                ):
+                    return False
+                logical_address = (element_logical_id, -1)
+            elif parent_index < -1 or not _array_index_may_be_in_bounds(
+                parent,
+                parent_index,
+            ):
+                return False
+            elif known_element is not None:
                 if (
                     element_uuid not in visible
                     or type(known_element) is not Value
@@ -621,9 +641,11 @@ def _is_valid_inline_expval_carrier(
                     != (parent_uuid, parent_index)
                 ):
                     return False
+                logical_address = (parent.logical_id, parent_index)
             elif element_logical_id in produced_logical_ids:
                 return False
-            logical_address = (parent.logical_id, parent_index)
+            else:
+                logical_address = (parent.logical_id, parent_index)
         else:
             element = visible.get(element_uuid)
             if (
@@ -1545,10 +1567,7 @@ def _validate_concrete_controlled(
     """
     if operation.num_controls < 1 or operation.num_controls > len(operation.operands):
         raise ValueError(f"{location} has an invalid num_controls")
-    if not all(
-        operand.type.is_quantum()
-        for operand in operation.operands[: operation.num_controls]
-    ):
+    if not all(operand.type.is_quantum() for operand in operation.control_operands):
         raise ValueError(f"{location} controls must be quantum values")
     _validate_control_activation(
         operation.control_value,
@@ -1607,10 +1626,7 @@ def _validate_symbolic_controlled(
         operation.operands
     ):
         raise ValueError(f"{location} has an invalid num_control_args")
-    if not all(
-        operand.type.is_quantum()
-        for operand in operation.operands[: operation.num_control_args]
-    ):
+    if not all(operand.type.is_quantum() for operand in operation.control_operands):
         raise ValueError(f"{location} control arguments must be quantum values")
     if operation.control_indices is not None:
         _require_types(
@@ -1663,7 +1679,7 @@ def _validate_invoke(operation: InvokeOperation, location: str) -> None:
     if operation_kind != definition_kind:
         raise ValueError(f"{location} kind disagrees with its definition")
     control_count = 0
-    if operation.transform is CallTransform.CONTROLLED:
+    if operation.transform.is_controlled:
         raw_control_count = operation.attrs.get("num_control_qubits")
         if (
             not isinstance(raw_control_count, int)
@@ -1700,8 +1716,11 @@ def _validate_invoke(operation: InvokeOperation, location: str) -> None:
     signature = operation.definition.signature
     if signature is None:
         return
-    signature_includes_controls = operation_kind == "oracle"
-    signature_offset = 0 if signature_includes_controls else control_count
+    signature_offset = (
+        operation.num_added_control_qubits
+        if operation_kind == "oracle"
+        else control_count
+    )
     operands = operation.operands[signature_offset:]
     results = operation.results[signature_offset:]
     if len(signature.operands) != len(operands) or len(signature.results) != len(

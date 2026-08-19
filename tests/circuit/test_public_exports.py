@@ -17,8 +17,14 @@ from __future__ import annotations
 import qamomile.circuit as qmc
 import qamomile.circuit.stdlib as stdlib
 import qamomile.circuit.stdlib.block_encoding as block_encoding
+from qamomile.circuit import estimator as estimator_api
+from qamomile.circuit.estimator import (
+    _resource_base as resource_base_module,
+    _resource_types as resource_types_module,
+    resource_estimator as estimator_module,
+)
 from qamomile.circuit.estimator.resource_estimator import (
-    OpaqueCallContext,
+    OpaqueCostContext,
     ResourceEstimator,
     UnknownResourcePolicy,
 )
@@ -32,7 +38,7 @@ from qamomile.circuit.frontend.operation.measurement import (
     project_z,
     reset,
 )
-from qamomile.circuit.frontend.oracle import Oracle, opaque
+from qamomile.circuit.frontend.oracle import Oracle, TransformedOracle, opaque
 from qamomile.circuit.frontend.struct import struct
 from qamomile.circuit.stdlib.block_encoding.ising_z import (
     IsingZBlockEncoding,
@@ -106,7 +112,8 @@ def test_callable_helpers_are_publicly_reexported():
     assert qmc.CallableSignature is CallableSignature
     assert qmc.ResourceEstimator is ResourceEstimator
     assert qmc.UnknownResourcePolicy is UnknownResourcePolicy
-    assert qmc.OpaqueCallContext is OpaqueCallContext
+    assert qmc.OpaqueCostContext is OpaqueCostContext
+    assert qmc.TransformedOracle is TransformedOracle
 
     for name in (
         "composite_gate",
@@ -115,11 +122,56 @@ def test_callable_helpers_are_publicly_reexported():
         "CallableSignature",
         "ResourceEstimator",
         "UnknownResourcePolicy",
-        "OpaqueCallContext",
+        "OpaqueCostContext",
+        "TransformedOracle",
     ):
         assert name in qmc.__all__, (
             f"{name!r} should be listed in qamomile.circuit.__all__"
         )
+
+
+def test_resource_metric_types_keep_one_canonical_identity() -> None:
+    """Metric types remain identical through public and compatibility paths."""
+    public_metric_names = (
+        "ApproximationStatus",
+        "CallResources",
+        "ControlDecomposition",
+        "DepthResources",
+        "EstimateDerivation",
+        "EstimateQuality",
+        "GateResources",
+        "MeasurementResources",
+        "ResetResources",
+        "ResourceAssumption",
+        "WidthResources",
+    )
+    for name in public_metric_names:
+        owner = (
+            resource_base_module
+            if name
+            in {
+                "ApproximationStatus",
+                "ControlDecomposition",
+                "EstimateDerivation",
+                "EstimateQuality",
+            }
+            else resource_types_module
+        )
+        canonical = getattr(owner, name)
+        assert getattr(estimator_api, name) is canonical
+        assert getattr(estimator_module, name) is canonical
+        assert getattr(qmc, name) is canonical
+        assert name in qmc.__all__
+
+    assert estimator_api.ResourceTraceNode is resource_types_module.ResourceTraceNode
+    assert estimator_module.ResourceTraceNode is resource_types_module.ResourceTraceNode
+
+
+def test_resource_estimator_config_remains_internal() -> None:
+    """Only validated estimator entry points expose configuration publicly."""
+    assert "ResourceEstimatorConfig" not in estimator_api.__all__
+    assert not hasattr(estimator_api, "ResourceEstimatorConfig")
+    assert hasattr(estimator_module, "_ResourceEstimatorConfig")
 
 
 def test_struct_is_publicly_reexported() -> None:

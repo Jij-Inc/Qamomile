@@ -55,6 +55,7 @@ from qamomile.circuit.ir.value import (
     Value,
     ValueBase,
     ValueLike,
+    static_quantum_width,
 )
 from qamomile.circuit.ir.value_mapping import ValueSubstitutor
 
@@ -770,12 +771,9 @@ class _StaticBindingResolver:
 
         if isinstance(operation, ControlledUOperation):
             if operation.block is not None:
-                actuals_without_controls = list(
-                    operation.operands[len(operation.control_operands) :]
-                )
                 self._validate_owned_block_call_widths(
                     operation.block,
-                    actuals_without_controls,
+                    operation.body_operands,
                     list(operation.operands),
                     widths,
                     active_blocks,
@@ -786,9 +784,7 @@ class _StaticBindingResolver:
             _materialize_inverse_target_width(
                 operation,
                 [
-                    self._concrete_array_width(target, widths)
-                    if isinstance(target, ArrayValue)
-                    else 1
+                    self._concrete_quantum_width(target, widths)
                     for target in operation.target_qubits
                 ],
             )
@@ -882,7 +878,29 @@ class _StaticBindingResolver:
         inherited = widths.get(value.logical_id)
         if inherited is not None:
             return inherited
-        return _concrete_quantum_width(value)
+        return static_quantum_width(value)
+
+    @staticmethod
+    def _concrete_quantum_width(
+        value: ValueBase,
+        widths: dict[str, int],
+    ) -> int | None:
+        """Return a quantum value's concrete scalar width at one call site.
+
+        Args:
+            value (ValueBase): Quantum scalar, array, or packed register.
+            widths (dict[str, int]): Concrete array widths inherited from
+                enclosing calls.
+
+        Returns:
+            int | None: Inherited or statically represented scalar-qubit
+            width, or ``None`` while the width remains symbolic.
+        """
+        if isinstance(value, ArrayValue):
+            inherited = widths.get(value.logical_id)
+            if inherited is not None:
+                return inherited
+        return static_quantum_width(value)
 
     def _validate_static_invoke_widths(
         self,
@@ -1213,7 +1231,7 @@ class _StaticBindingResolver:
         concrete_definition = self._definition_for(
             slot_name,
             member_name,
-            require_inverse=operation.transform is CallTransform.INVERSE,
+            require_inverse=operation.transform.is_inverse,
         )
         resolved_attrs = dict(concrete_definition.attrs)
         for key in (
@@ -1346,29 +1364,6 @@ def _collect_formal_replacements(
         ):
             _collect_formal_replacements(formal_key, concrete_key, replacements)
             _collect_formal_replacements(formal_value, concrete_value, replacements)
-
-
-def _concrete_quantum_width(value: ValueBase) -> int | None:
-    """Return the scalar qubit width of one concrete quantum value.
-
-    Args:
-        value (ValueBase): Scalar or array quantum value to inspect.
-
-    Returns:
-        int | None: Scalar qubit width, or ``None`` when an array dimension
-            remains symbolic.
-    """
-    if not isinstance(value, ArrayValue):
-        return 1
-    if not value.shape:
-        return None
-    width = 1
-    for dimension in value.shape:
-        concrete = dimension.get_const()
-        if type(concrete) is not int:
-            return None
-        width *= concrete
-    return width
 
 
 def _materialize_inverse_target_width(
