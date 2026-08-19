@@ -75,7 +75,7 @@ from qamomile.qiskit import QiskitTranspiler
 # このベンチマークでは、混合整数計画法を用いた手法や問題特化型のヒューリスティクスが、QAOA と量子アニーリングを一貫して凌駕することを示しました。
 # そこで、[Soloviev & Krompiec (2025)](https://arxiv.org/abs/2511.21305) では、[Sciorilli et al. (2025)](https://www.nature.com/articles/s41467-024-55346-z) で提案されたパウリ相関符号化 (PCE) を用いた 変分最適化手法 により、これらの限界を突破することを試みました。
 #
-# ### ポートフォリオ最適化
+# ### 定式化
 #
 # ポートフォリオ最適化は [Markowitz (1952)](https://onlinelibrary.wiley.com/doi/10.1111/j.1540-6261.1952.tb01525.x) で定式化されました。
 # ポートフォリオの期待リターンを、各銘柄の重み付き和として表現します。
