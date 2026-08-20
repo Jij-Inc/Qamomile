@@ -17,8 +17,8 @@ import pytest
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm import (
-    eigenstate_filter_probe,
-    eigenstate_filter_projector,
+    qsvt_filter_probe,
+    qsvt_filter_projector,
 )
 
 
@@ -260,9 +260,9 @@ def _encoding_unitary(encoding: qmc.LCUBlockEncoding) -> np.ndarray:
 def test_filter_builders_reject_non_descriptors() -> None:
     """Only block-encoding descriptors can drive the filter builders."""
     with pytest.raises(TypeError, match="LCUBlockEncoding"):
-        eigenstate_filter_projector(object())  # type: ignore[arg-type]
+        qsvt_filter_projector(object())  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="LCUBlockEncoding"):
-        eigenstate_filter_probe(object())  # type: ignore[arg-type]
+        qsvt_filter_probe(object())  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("seed", [0, 1, 2, 42])
@@ -277,7 +277,7 @@ def test_projector_block_is_the_filtered_half_sum(seed: int) -> None:
     }
     phases = rng.uniform(-math.pi, math.pi, size=4).tolist()
     encoding = qmc.ising_z_block_encoding(coefficients, 2)
-    projector = eigenstate_filter_projector(encoding)
+    projector = qsvt_filter_projector(encoding)
 
     @qmc.qkernel
     def top(phi: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
@@ -305,32 +305,29 @@ def test_projector_block_is_the_filtered_half_sum(seed: int) -> None:
     np.testing.assert_allclose(block, expected, atol=1e-8, rtol=0.0)
 
 
-@pytest.mark.parametrize("num_system_qubits", [1, 2])
-@pytest.mark.parametrize("seed", [0, 1, 2, 42])
-def test_probe_samples_and_estimates_on_every_sdk(
-    sdk_transpiler: Any,
+def _expected_success_probability(
+    coefficients: dict[tuple[int, ...], float],
     num_system_qubits: int,
-    seed: int,
-) -> None:
-    """The probe's all-zero ancilla rate matches its exact success probability.
+    encoding: qmc.LCUBlockEncoding,
+    wx_phases: np.ndarray,
+) -> float:
+    r"""Return the exact all-zero ancilla probability of the probe.
 
-    The encodings here have a single signal qubit, so the QSVT good block is
-    ``-i`` times the Wx-convention QSP polynomial and the success probability
-    has a closed form. Random phases keep the circuit short (degree 3) while
-    exercising the full stack — encoding, inverse encoding, the controlled QSVT
-    reflection — on every backend, through both the sampler and the estimator.
+    The QSVT good block is a polynomial of :math:`A/\alpha` alone, so it stays
+    ``-i`` times the Wx-convention QSP polynomial however wide the signal
+    register is. An Ising-Z encoding is diagonal, so applying :math:`(I - R)/2`
+    to the uniform superposition reduces to one scalar per eigenvalue.
+
+    Args:
+        coefficients (dict[tuple[int, ...], float]): Ising-Z coefficients.
+        num_system_qubits (int): Width of the system register.
+        encoding (qmc.LCUBlockEncoding): Encoding whose subnormalization scales
+            the eigenvalues into the signal domain.
+        wx_phases (np.ndarray): Phases in the Wx (signal-rotation) convention.
+
+    Returns:
+        float: Probability that every ancilla measures zero.
     """
-    rng = np.random.default_rng(seed)
-    # At most two Ising terms keep the encoding to one signal qubit.
-    words = ((0,),) if num_system_qubits == 1 else ((0,), (1,))
-    coefficients = {word: float(rng.uniform(-1.0, 1.0)) for word in words}
-    wx_phases = rng.uniform(-math.pi, math.pi, size=4)
-    phases = _to_reflection_phases(wx_phases)
-    encoding = qmc.ising_z_block_encoding(coefficients, num_system_qubits)
-    assert encoding.num_signal_qubits == 1
-    num_ancilla = 1 + encoding.num_signal_qubits
-    probe = eigenstate_filter_probe(encoding)
-
     signal_values = _ising_diagonal(coefficients, num_system_qubits)
     signal_values = signal_values / encoding.normalization
     amplitudes = np.array(
@@ -338,7 +335,22 @@ def test_probe_samples_and_estimates_on_every_sdk(
     )
     # The probe starts from the uniform superposition, so every eigenstate
     # contributes with weight 1 / 2**n.
-    success = float(np.sum(np.abs(amplitudes) ** 2) / (1 << num_system_qubits))
+    return float(np.sum(np.abs(amplitudes) ** 2) / (1 << num_system_qubits))
+
+
+def _probe_expval_kernel(
+    encoding: qmc.LCUBlockEncoding, num_ancilla: int
+) -> qmc.QKernel:
+    """Build the estimator counterpart of the probe kernel.
+
+    Args:
+        encoding (qmc.LCUBlockEncoding): Encoding the projector is built from.
+        num_ancilla (int): Projector qubit plus signal register width.
+
+    Returns:
+        qmc.QKernel: Kernel returning the all-zero ancilla projector's
+            expectation value after the filter.
+    """
 
     @qmc.qkernel
     def expval_kernel(
@@ -351,15 +363,40 @@ def test_probe_samples_and_estimates_on_every_sdk(
             system[index] = qmc.h(system[index])
         proj = ancilla[0:1]
         signal = ancilla[1:num_ancilla]
-        proj, signal, system = eigenstate_filter_projector(encoding)(
+        proj, signal, system = qsvt_filter_projector(encoding)(
             proj, signal, system, phi
         )
         ancilla[0:1] = proj
         ancilla[1:num_ancilla] = signal
         return qmc.expval(ancilla, observable)
 
+    return expval_kernel
+
+
+def _assert_probe_matches_on_sdk(
+    sdk_transpiler: Any,
+    encoding: qmc.LCUBlockEncoding,
+    phases: list[float],
+    success: float,
+) -> None:
+    """Run the probe's sampling and estimation paths and check both.
+
+    Args:
+        sdk_transpiler (Any): SDK fixture bundling a backend name and
+            transpiler.
+        encoding (qmc.LCUBlockEncoding): Encoding under test.
+        phases (list[float]): Reflection-convention phases to bind.
+        success (float): Exact all-zero ancilla probability to compare against.
+
+    Raises:
+        AssertionError: If either path disagrees with ``success``.
+    """
+    num_ancilla = 1 + encoding.num_signal_qubits
     shots = 4096
-    sample = sdk_transpiler.transpiler.transpile(probe, bindings={"phi": phases})
+
+    sample = sdk_transpiler.transpiler.transpile(
+        qsvt_filter_probe(encoding), bindings={"phi": phases}
+    )
     result = sample.sample(_executor(sdk_transpiler), shots=shots).result()
     tolerance = 6.0 * math.sqrt(success * (1.0 - success) / shots) + 0.02
     assert _zero_probability(result.results, num_ancilla) == pytest.approx(
@@ -367,9 +404,69 @@ def test_probe_samples_and_estimates_on_every_sdk(
     )
 
     expval = sdk_transpiler.transpiler.transpile(
-        expval_kernel,
+        _probe_expval_kernel(encoding, num_ancilla),
         bindings={"phi": phases, "observable": _zero_projector(num_ancilla)},
     )
     observed = float(expval.run(_executor(sdk_transpiler)).result())
     atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
     assert observed == pytest.approx(success, abs=atol)
+
+
+@pytest.mark.parametrize("num_system_qubits", [1, 2])
+@pytest.mark.parametrize("seed", [0, 42])
+def test_probe_samples_and_estimates_on_every_sdk(
+    sdk_transpiler: Any,
+    num_system_qubits: int,
+    seed: int,
+) -> None:
+    """The probe's all-zero ancilla rate matches its exact success probability.
+
+    Random phases keep the circuit short (degree 3) while exercising the full
+    stack — encoding, inverse encoding, the controlled QSVT reflection — on
+    every backend, through both the sampler and the estimator. Seeds are
+    trimmed here because the Qiskit projector test above already sweeps four of
+    them against the dense reference; the two-signal-qubit case below covers
+    the wider register.
+    """
+    rng = np.random.default_rng(seed)
+    # At most two Ising terms keep the encoding to one signal qubit.
+    words = ((0,),) if num_system_qubits == 1 else ((0,), (1,))
+    coefficients = {word: float(rng.uniform(-1.0, 1.0)) for word in words}
+    wx_phases = rng.uniform(-math.pi, math.pi, size=4)
+    encoding = qmc.ising_z_block_encoding(coefficients, num_system_qubits)
+    assert encoding.num_signal_qubits == 1
+
+    success = _expected_success_probability(
+        coefficients, num_system_qubits, encoding, wx_phases
+    )
+    _assert_probe_matches_on_sdk(
+        sdk_transpiler, encoding, _to_reflection_phases(wx_phases), success
+    )
+
+
+def test_probe_with_a_two_qubit_signal_register_on_every_sdk(
+    sdk_transpiler: Any,
+) -> None:
+    """A three-term encoding widens the signal register and still matches.
+
+    Two Ising terms fit in a single signal qubit; three need two, so PREPARE
+    loads an unused fourth amplitude and post-selection has to hold across a
+    wider register — inside a *controlled* QSVT reflection, where a backend can
+    plausibly get the extra control wrong.
+
+    The phases are fixed rather than random so that the boundary angles are
+    always exercised: ``0`` and ``2*pi`` are the same rotation, ``pi`` is its
+    opposite, and a backend that wraps or elides one of them fails here.
+    """
+    coefficients = {(0,): 0.4, (1,): -0.7, (0, 1): 0.55}
+    num_system_qubits = 2
+    wx_phases = np.array([0.0, math.pi, 2.0 * math.pi, math.pi / 3])
+    encoding = qmc.ising_z_block_encoding(coefficients, num_system_qubits)
+    assert encoding.num_signal_qubits == 2
+
+    success = _expected_success_probability(
+        coefficients, num_system_qubits, encoding, wx_phases
+    )
+    _assert_probe_matches_on_sdk(
+        sdk_transpiler, encoding, _to_reflection_phases(wx_phases), success
+    )

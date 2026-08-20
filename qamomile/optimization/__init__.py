@@ -10,8 +10,8 @@ converter family: ``QAOAConverter`` (``qaoa.py``, QUBO/Ising and HUBO via
 phase gadgets), ``FQAOAConverter`` (``fqaoa.py``, fermionic mixers with
 particle-number constraints), the QRAC converters (``qrao/``),
 ``PCEConverter`` (``pce.py``, Pauli correlation encoding), and
-``QSVTFilterConverter`` (``qsvt_filter.py``, QSVT eigenstate filtering for the
-Lin & Tong ground-energy search).
+``QSVTEigenstateFilterConverter`` (``qsvt_eigenstate_filter.py``, QSVT
+eigenstate filtering for the Lin & Tong ground-energy search).
 
 Layering constraint (inviolable)
 --------------------------------

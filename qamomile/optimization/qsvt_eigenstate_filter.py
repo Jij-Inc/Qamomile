@@ -13,7 +13,7 @@ By default the filter keeps the eigenspace *below* the threshold, so the search
 converges on the ground energy. That is the orientation every OMMX problem
 wants: ``Instance.to_hubo`` negates a maximization into a minimization before
 the converter ever sees it, so the optimum is always the smallest eigenvalue.
-Passing a positive ``scale`` to :meth:`QSVTFilterConverter.transpile` inverts
+Passing a positive ``scale`` to :meth:`QSVTEigenstateFilterConverter.transpile` inverts
 the filter into a largest-eigenvalue search; nothing else about the circuit
 changes.
 """
@@ -25,14 +25,14 @@ import io
 import logging
 import math
 from collections.abc import Iterator
-from typing import Any
 
 import numpy as np
+import ommx.v1
 from numpy.polynomial.chebyshev import chebval
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.qsvt_filter import eigenstate_filter_probe
+from qamomile.circuit.algorithm.qsvt_eigenstate_filter import qsvt_filter_probe
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.circuit.transpiler.transpiler import Transpiler
@@ -110,7 +110,7 @@ def _pyqsp_output_to_logger() -> Iterator[None]:
                 _LOGGER.debug("%s", line)
 
 
-class QSVTFilterConverter(MathematicalProblemConverter):
+class QSVTEigenstateFilterConverter(MathematicalProblemConverter):
     r"""Converter for QSVT eigenstate filtering (Lin & Tong ground-energy search).
 
     The problem's Ising Hamiltonian :math:`H` is block encoded once with
@@ -138,9 +138,11 @@ class QSVTFilterConverter(MathematicalProblemConverter):
 
     Example:
         >>> from qamomile.optimization.binary_model import BinaryModel
-        >>> from qamomile.optimization.qsvt_filter import QSVTFilterConverter
+        >>> from qamomile.optimization.qsvt_eigenstate_filter import (
+        ...     QSVTEigenstateFilterConverter,
+        ... )
         >>> model = BinaryModel.from_higher_ising({(0,): 1.0, (0, 1): -1.0})
-        >>> converter = QSVTFilterConverter(model)
+        >>> converter = QSVTEigenstateFilterConverter(model)
         >>> converter.normalization
         2.0
     """
@@ -180,8 +182,9 @@ class QSVTFilterConverter(MathematicalProblemConverter):
                 Hamiltonian.
         """
         raise NotImplementedError(
-            "QSVTFilterConverter does not expose a cost Hamiltonian; the Ising "
-            "operator is block encoded internally for the QSVT sign filter."
+            "QSVTEigenstateFilterConverter does not expose a cost Hamiltonian; "
+            "the Ising operator is block encoded internally for the QSVT sign "
+            "filter."
         )
 
     def num_ancilla_bits(self, mu: float) -> int:
@@ -261,9 +264,9 @@ class QSVTFilterConverter(MathematicalProblemConverter):
         A cache miss logs one summary line naming the filter shape being
         built at ``INFO``. ``pyqsp``'s own progress prints are captured and
         logged at ``DEBUG`` instead (see :func:`_pyqsp_output_to_logger`); raise
-        ``logging.getLogger("qamomile.optimization.qsvt_filter")`` to ``INFO``
-        for the summary or ``DEBUG`` for the polynomial fit and convergence
-        trace.
+        ``logging.getLogger("qamomile.optimization.qsvt_eigenstate_filter")``
+        to ``INFO`` for the summary or ``DEBUG`` for the polynomial fit and
+        convergence trace.
 
         Args:
             degree (int): Odd degree of the sign approximation. Higher degree
@@ -286,22 +289,36 @@ class QSVTFilterConverter(MathematicalProblemConverter):
         Raises:
             ImportError: If ``pyqsp`` is not installed.
             ValueError: If ``degree`` is not a positive odd integer, ``delta``
-                is not positive, ``scale`` is zero or exceeds
-                :data:`MAX_POLYNOMIAL_SCALE` in magnitude, or the scaled
-                polynomial breaks the QSP bound :math:`\lvert p \rvert \le 1`
-                (measured on :data:`POLYNOMIAL_BOUND_SAMPLES` points).
+                is not positive and finite, ``scale`` is zero, non-finite, or
+                exceeds :data:`MAX_POLYNOMIAL_SCALE` in magnitude, or the
+                scaled polynomial breaks the QSP bound
+                :math:`\lvert p \rvert \le 1` (measured on
+                :data:`POLYNOMIAL_BOUND_SAMPLES` points). ``bool`` is rejected
+                for all three: it satisfies every numeric comparison below
+                while meaning nothing as a degree, a width, or a rescaling.
         """
-        if not isinstance(degree, int) or degree < 1 or degree % 2 == 0:
+        if (
+            isinstance(degree, bool)
+            or not isinstance(degree, int)
+            or degree < 1
+            or degree % 2 == 0
+        ):
             raise ValueError(f"degree must be a positive odd int; got {degree!r}.")
         # Negated comparisons so NaN, which compares false either way, is
-        # rejected rather than passed through to pyqsp.
-        if not delta > 0.0:
-            raise ValueError(f"delta must be positive; got {delta!r}.")
-        if not 0.0 < abs(scale) <= MAX_POLYNOMIAL_SCALE:
+        # rejected rather than passed through to pyqsp. isfinite then rules out
+        # the infinities, which do satisfy the comparisons.
+        if isinstance(delta, bool) or not delta > 0.0 or not math.isfinite(delta):
+            raise ValueError(f"delta must be positive and finite; got {delta!r}.")
+        if (
+            isinstance(scale, bool)
+            or not math.isfinite(scale)
+            or not 0.0 < abs(scale) <= MAX_POLYNOMIAL_SCALE
+        ):
             raise ValueError(
-                f"|scale| must lie in (0, {MAX_POLYNOMIAL_SCALE}]; got {scale!r}. "
-                "Larger magnitudes push the sign polynomial outside the QSP "
-                "bound |p| <= 1 and the extracted phases become meaningless."
+                f"|scale| must be finite and lie in (0, {MAX_POLYNOMIAL_SCALE}]; "
+                f"got {scale!r}. Larger magnitudes push the sign polynomial "
+                "outside the QSP bound |p| <= 1 and the extracted phases become "
+                "meaningless."
             )
 
         key = (degree, float(delta), float(scale))
@@ -312,11 +329,11 @@ class QSVTFilterConverter(MathematicalProblemConverter):
         try:
             from pyqsp.angle_sequence import QuantumSignalProcessingPhases
             from pyqsp.poly import PolySign
-        except ImportError as error:  # pragma: no cover - depends on install
+        except ImportError as error:
             raise ImportError(
-                "QSVTFilterConverter._qsp_phases requires pyqsp. Install it with "
-                "`pip install 'qamomile[qsvt]'`, or pass precomputed phases via "
-                "the `phi` argument of transpile()."
+                "QSVTEigenstateFilterConverter._qsp_phases requires pyqsp. "
+                "Install it with `pip install 'qamomile[qsvt]'`, or pass "
+                "precomputed phases via the `phi` argument of transpile()."
             ) from error
 
         # Synthesis blocks for seconds inside transpile, so record which filter
@@ -408,16 +425,21 @@ class QSVTFilterConverter(MathematicalProblemConverter):
                 Ignored when ``phi`` is given.
             phi (list[float] | None): Precomputed reflection-convention phases.
                 Defaults to None, meaning they are computed with ``pyqsp``.
-                Must have even length.
+                When given it must hold an even number of at least two finite
+                phases — the sign approximation is an odd polynomial, so its
+                phase count is even, and an empty sequence describes no
+                alternation at all. Values are angles in radians and are not
+                wrapped, so any real magnitude is accepted.
 
         Returns:
             ExecutableProgram: Compiled probe circuit for this threshold. Its
                 post-selected ancilla block is ``num_ancilla_bits(mu)`` wide.
 
         Raises:
-            ValueError: If ``phi`` has odd or fewer than two entries, or if the
-                phase-synthesis arguments are out of range or jointly break the
-                QSP bound (see :meth:`_qsp_phases`).
+            ValueError: If ``phi`` is empty, has odd or fewer than two entries,
+                or holds a non-finite phase; or if the phase-synthesis
+                arguments are out of range or jointly break the QSP bound (see
+                :meth:`_qsp_phases`).
             ImportError: If ``phi`` is omitted and ``pyqsp`` is not installed.
         """
         phases = (
@@ -428,9 +450,17 @@ class QSVTFilterConverter(MathematicalProblemConverter):
                 "phi must hold an even number of at least two phases "
                 f"(odd polynomial degree); got {len(phases)}."
             )
+        # A NaN or infinite phase compiles into a rotation angle the backend
+        # will either reject far downstream or silently turn into garbage, so
+        # it is caught here where the offending value is still nameable.
+        if not all(math.isfinite(phase) for phase in phases):
+            raise ValueError(
+                "phi must hold finite phases; got "
+                f"{[phase for phase in phases if not math.isfinite(phase)]!r}."
+            )
 
         return transpiler.transpile(
-            eigenstate_filter_probe(self._shifted_encoding(mu)),
+            qsvt_filter_probe(self._shifted_encoding(mu)),
             bindings={"phi": phases},
         )
 
@@ -495,9 +525,9 @@ class QSVTFilterConverter(MathematicalProblemConverter):
             return 0.0
         return kept_shots / samples.shots
 
-    def decode_to_binary_sampleset(
+    def decode_to_binary_sampleset(  # type: ignore[override]
         self,
-        samples: SampleResult[Any],
+        samples: SampleResult[tuple[list[int], list[int], list[int]]],
     ) -> BinarySampleSet:
         """Decode the post-selected system measurements into problem samples.
 
@@ -507,16 +537,17 @@ class QSVTFilterConverter(MathematicalProblemConverter):
         :meth:`success_probability` on the same result to recover how many were
         discarded.
 
-        The payload is typed as ``Any`` to stay compatible with the base-class
-        signature, which decodes a flat ``list[int]`` per shot. This converter
-        requires the probe's three-register tuple instead and validates that
-        shape at runtime rather than in the annotation.
+        The payload type narrows the base class's flat ``list[int]`` per shot
+        to the probe's three-register tuple, which is what
+        :func:`~qamomile.circuit.algorithm.qsvt_filter_probe` actually returns.
+        The base signature therefore cannot type this override, and the
+        shape is still validated at runtime by :meth:`_postselect`.
 
         Args:
-            samples (SampleResult[Any]): Raw probe results, each value holding
-                the projector, signal, and system bits in that order, as
-                returned by the kernel built by
-                :func:`~qamomile.circuit.algorithm.eigenstate_filter_probe`.
+            samples (SampleResult[tuple[list[int], list[int], list[int]]]): Raw
+                probe results, each value holding the projector, signal, and
+                system bits in that order, as returned by the kernel built by
+                :func:`~qamomile.circuit.algorithm.qsvt_filter_probe`.
 
         Returns:
             BinarySampleSet: Post-selected samples in the converter's original
@@ -529,3 +560,33 @@ class QSVTFilterConverter(MathematicalProblemConverter):
         return super().decode_to_binary_sampleset(
             SampleResult(results=kept, shots=kept_shots)
         )
+
+    def decode(  # type: ignore[override]
+        self,
+        samples: SampleResult[tuple[list[int], list[int], list[int]]],
+    ) -> BinarySampleSet | ommx.v1.SampleSet:
+        """Decode probe results, post-selecting before the base conversion.
+
+        Behaviour is the base class's: an :class:`ommx.v1.SampleSet` for a
+        converter built from an :class:`ommx.v1.Instance`, a
+        :class:`BinarySampleSet` for one built from a
+        :class:`~qamomile.optimization.binary_model.BinaryModel`. Only the
+        accepted payload differs — this converter's probe returns three
+        registers per shot rather than one flat bitstring, so the base
+        signature cannot describe it. The post-selection itself happens in
+        :meth:`decode_to_binary_sampleset`, which the base implementation
+        calls.
+
+        Args:
+            samples (SampleResult[tuple[list[int], list[int], list[int]]]): Raw
+                probe results, each value holding the projector, signal, and
+                system bits in that order.
+
+        Returns:
+            BinarySampleSet | ommx.v1.SampleSet: Post-selected samples, in
+                whichever form matches the converter's input.
+
+        Raises:
+            ValueError: If a result value is not a three-register tuple.
+        """
+        return super().decode(samples)  # type: ignore[arg-type]

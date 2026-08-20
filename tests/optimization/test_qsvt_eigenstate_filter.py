@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import sys
 from typing import Any
 
 import numpy as np
@@ -13,7 +14,7 @@ import pytest
 
 from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.optimization.binary_model import BinaryModel
-from qamomile.optimization.qsvt_filter import QSVTFilterConverter
+from qamomile.optimization.qsvt_eigenstate_filter import QSVTEigenstateFilterConverter
 
 
 @pytest.fixture
@@ -51,7 +52,7 @@ def _ising_diagonal(
 
 
 def _exact_success_probability(
-    converter: QSVTFilterConverter,
+    converter: QSVTEigenstateFilterConverter,
     transpiler: Any,
     mu: float,
     phases: list[float],
@@ -60,7 +61,7 @@ def _exact_success_probability(
     """Return the noiseless all-zero ancilla probability of the probe circuit.
 
     Args:
-        converter (QSVTFilterConverter): Converter under test.
+        converter (QSVTEigenstateFilterConverter): Converter under test.
         transpiler (Any): Qiskit transpiler used for compilation.
         mu (float): Energy threshold.
         phases (list[float]): Reflection-convention phases.
@@ -91,7 +92,7 @@ def test_encoding_holds_out_the_constant_term() -> None:
     model = BinaryModel.from_higher_ising(
         {(0,): 1.0, (1,): -1.0, (0, 1): -1.0}, constant=0.5
     )
-    converter = QSVTFilterConverter(model)
+    converter = QSVTEigenstateFilterConverter(model)
 
     assert converter.encoding.num_system_qubits == 2
     # 1-norm of the non-constant coefficients only.
@@ -107,7 +108,7 @@ def test_encoding_holds_out_the_constant_term() -> None:
 def test_cost_hamiltonian_is_not_exposed() -> None:
     """The converter block encodes the cost operator instead of exposing it."""
     model = BinaryModel.from_higher_ising({(0,): 1.0, (0, 1): -1.0})
-    converter = QSVTFilterConverter(model)
+    converter = QSVTEigenstateFilterConverter(model)
 
     with pytest.raises(NotImplementedError, match="cost Hamiltonian"):
         converter.get_cost_hamiltonian()
@@ -134,7 +135,7 @@ def test_shifted_encoding_normalization_grows_with_the_residual_shift(
     threshold that is not the offset has to be paid for.
     """
     model = BinaryModel.from_higher_ising({(0,): 1.0, (0, 1): -1.0}, constant=0.75)
-    converter = QSVTFilterConverter(model)
+    converter = QSVTEigenstateFilterConverter(model)
 
     shifted = converter._shifted_encoding(mu)
 
@@ -158,10 +159,10 @@ def test_holding_out_the_constant_shrinks_the_subnormalization() -> None:
     """
     coefficients = {(0,): 1.0, (1,): -1.0, (0, 1): -1.0}
     constant = 5.0
-    converter = QSVTFilterConverter(
+    converter = QSVTEigenstateFilterConverter(
         BinaryModel.from_higher_ising(coefficients, constant=constant)
     )
-    bare = QSVTFilterConverter(BinaryModel.from_higher_ising(coefficients))
+    bare = QSVTEigenstateFilterConverter(BinaryModel.from_higher_ising(coefficients))
 
     for mu in (constant, constant - 1.0, constant + 2.0, 0.0):
         held_out = converter._shifted_encoding(mu).normalization
@@ -177,7 +178,7 @@ def test_qsp_phases_are_odd_length_and_cached() -> None:
     """Phase generation returns degree+1 phases and reuses its cache."""
     pytest.importorskip("pyqsp")
     model = BinaryModel.from_higher_ising({(0,): 1.0})
-    converter = QSVTFilterConverter(model)
+    converter = QSVTEigenstateFilterConverter(model)
 
     phases = converter._qsp_phases(degree=11, delta=5)
     assert len(phases) == 12
@@ -201,9 +202,11 @@ def test_qsp_phases_log_the_summary_and_demote_pyqsp_output(
     """
     pytest.importorskip("pyqsp")
     model = BinaryModel.from_higher_ising({(0,): 1.0})
-    converter = QSVTFilterConverter(model)
+    converter = QSVTEigenstateFilterConverter(model)
 
-    with caplog.at_level(logging.DEBUG, logger="qamomile.optimization.qsvt_filter"):
+    with caplog.at_level(
+        logging.DEBUG, logger="qamomile.optimization.qsvt_eigenstate_filter"
+    ):
         converter._qsp_phases(degree=11, delta=5, scale=-1.1)
 
     assert capsys.readouterr().out == ""
@@ -230,7 +233,7 @@ def test_qsp_phases_reject_a_polynomial_outside_the_qsp_bound() -> None:
     """
     pytest.importorskip("pyqsp")
     model = BinaryModel.from_higher_ising({(0,): 1.0})
-    converter = QSVTFilterConverter(model)
+    converter = QSVTEigenstateFilterConverter(model)
 
     with pytest.raises(ValueError, match=r"QSP bound") as excinfo:
         converter._qsp_phases(degree=21, delta=20, scale=1.10)
@@ -245,52 +248,72 @@ def test_qsp_phases_accept_a_bounded_polynomial() -> None:
     """The default combination clears the bound and still synthesizes."""
     pytest.importorskip("pyqsp")
     model = BinaryModel.from_higher_ising({(0,): 1.0})
-    converter = QSVTFilterConverter(model)
+    converter = QSVTEigenstateFilterConverter(model)
 
     phases = converter._qsp_phases(degree=61, delta=20, scale=1.10)
 
     assert len(phases) == 62
 
 
-@pytest.mark.parametrize("degree", [0, -1, 10])
+# `True` is an int and satisfies every numeric guard, so it needs its own case.
+@pytest.mark.parametrize("degree", [0, -1, 10, True])
 def test_qsp_phases_reject_non_odd_positive_degrees(degree: int) -> None:
     """The sign approximation is an odd polynomial, so degree must be odd."""
     model = BinaryModel.from_higher_ising({(0,): 1.0})
-    converter = QSVTFilterConverter(model)
+    converter = QSVTEigenstateFilterConverter(model)
 
     with pytest.raises(ValueError, match="degree"):
         converter._qsp_phases(degree=degree)
 
 
-@pytest.mark.parametrize("delta", [0.0, -1.0])
+@pytest.mark.parametrize("delta", [0.0, -1.0, True, math.nan, math.inf, -math.inf])
 def test_qsp_phases_reject_non_positive_transition_widths(delta: float) -> None:
-    """A non-positive transition width has no sign-approximation meaning."""
+    """A transition width must be a positive finite number to mean anything."""
     model = BinaryModel.from_higher_ising({(0,): 1.0})
-    converter = QSVTFilterConverter(model)
+    converter = QSVTEigenstateFilterConverter(model)
 
     with pytest.raises(ValueError, match="delta"):
         converter._qsp_phases(delta=delta)
 
 
-@pytest.mark.parametrize("scale", [0.0, 1.3, -5.0])
+@pytest.mark.parametrize("scale", [0.0, 1.3, -5.0, True, math.nan, math.inf, -math.inf])
 def test_qsp_phases_reject_scales_outside_the_qsp_bound(scale: float) -> None:
     """Rescaling past the QSP bound would silently yield meaningless phases."""
     model = BinaryModel.from_higher_ising({(0,): 1.0})
-    converter = QSVTFilterConverter(model)
+    converter = QSVTEigenstateFilterConverter(model)
 
     with pytest.raises(ValueError, match="scale"):
         converter._qsp_phases(scale=scale)
 
 
-@pytest.mark.parametrize("phases", [[0.1], [0.1, 0.2, 0.3]])
-def test_transpile_rejects_odd_length_phase_sequences(
+@pytest.mark.parametrize("phases", [[], [0.1], [0.1, 0.2, 0.3]])
+def test_transpile_rejects_phase_sequences_that_are_not_even_and_non_empty(
     transpiler: Any, phases: list[float]
 ) -> None:
-    """The alternation needs an even phase count (odd polynomial degree)."""
+    """The alternation needs an even, non-empty phase count.
+
+    An odd polynomial has an even phase count, and an empty sequence
+    describes no alternation at all, so neither can compile.
+    """
     model = BinaryModel.from_higher_ising({(0,): 1.0})
-    converter = QSVTFilterConverter(model)
+    converter = QSVTEigenstateFilterConverter(model)
 
     with pytest.raises(ValueError, match="even number"):
+        converter.transpile(transpiler, mu=0.0, phi=phases)
+
+
+@pytest.mark.parametrize(
+    "phases",
+    [[math.nan, 0.2], [0.1, math.inf], [-math.inf, 0.2, 0.3, 0.4]],
+)
+def test_transpile_rejects_non_finite_phases(
+    transpiler: Any, phases: list[float]
+) -> None:
+    """A NaN or infinite phase is caught here, not far down in the backend."""
+    model = BinaryModel.from_higher_ising({(0,): 1.0})
+    converter = QSVTEigenstateFilterConverter(model)
+
+    with pytest.raises(ValueError, match="finite phases"):
         converter.transpile(transpiler, mu=0.0, phi=phases)
 
 
@@ -299,7 +322,7 @@ def test_transpile_sizes_the_circuit_from_the_shifted_encoding(
 ) -> None:
     """The probe allocates one projector qubit plus signal and system."""
     model = BinaryModel.from_higher_ising({(0,): 1.0, (1,): -1.0, (0, 1): -1.0})
-    converter = QSVTFilterConverter(model)
+    converter = QSVTEigenstateFilterConverter(model)
     shifted = converter._shifted_encoding(0.5)
 
     executable = converter.transpile(transpiler, mu=0.5, phi=[0.1, 0.2])
@@ -329,7 +352,7 @@ def test_success_probability_counts_the_states_below_the_threshold(
     pytest.importorskip("pyqsp")
     coefficients = {(0,): 1.0, (1,): -1.0, (0, 1): -1.0}
     model = BinaryModel.from_higher_ising(coefficients)
-    converter = QSVTFilterConverter(model)
+    converter = QSVTEigenstateFilterConverter(model)
     phases = converter._qsp_phases()
 
     probability = _exact_success_probability(converter, transpiler, mu, phases, 2)
@@ -352,7 +375,7 @@ def test_the_predicate_is_unchanged_by_holding_out_the_constant(
     pytest.importorskip("pyqsp")
     coefficients = {(0,): 1.0, (1,): -1.0, (0, 1): -1.0}
     constant = 5.0
-    converter = QSVTFilterConverter(
+    converter = QSVTEigenstateFilterConverter(
         BinaryModel.from_higher_ising(coefficients, constant=constant)
     )
     phases = converter._qsp_phases()
@@ -377,7 +400,7 @@ def test_a_positive_scale_inverts_the_filter(transpiler: Any) -> None:
     pytest.importorskip("pyqsp")
     coefficients = {(0,): 1.0, (1,): -1.0, (0, 1): -1.0}
     model = BinaryModel.from_higher_ising(coefficients)
-    converter = QSVTFilterConverter(model)
+    converter = QSVTEigenstateFilterConverter(model)
 
     below = _exact_success_probability(
         converter, transpiler, -0.5, converter._qsp_phases(), 2
@@ -396,7 +419,7 @@ def test_sampled_filter_recovers_the_ground_states(transpiler: Any) -> None:
     pytest.importorskip("pyqsp")
     coefficients = {(0,): 1.0, (1,): -1.0, (0, 1): -1.0}
     model = BinaryModel.from_higher_ising(coefficients)
-    converter = QSVTFilterConverter(model)
+    converter = QSVTEigenstateFilterConverter(model)
     phases = converter._qsp_phases()
 
     executable = converter.transpile(transpiler, mu=-0.5, phi=phases)
@@ -419,7 +442,7 @@ def test_sampled_filter_recovers_the_ground_states(transpiler: Any) -> None:
 def test_decode_rejects_results_that_are_not_probe_measurements() -> None:
     """Decoding fails loudly when handed results from another circuit."""
     model = BinaryModel.from_higher_ising({(0,): 1.0, (0, 1): -1.0})
-    converter = QSVTFilterConverter(model)
+    converter = QSVTEigenstateFilterConverter(model)
     samples: SampleResult[Any] = SampleResult(results=[([0, 1], 10)], shots=10)
 
     with pytest.raises(ValueError, match="projector, signal, system"):
@@ -449,7 +472,7 @@ def test_ommx_decode_post_selects_before_evaluating_the_original_instance() -> N
         constraints=[(x0 + x1 == 1).set_id(0)],
         sense=ommx.v1.Instance.MINIMIZE,
     )
-    converter = QSVTFilterConverter(instance, uniform_penalty_weight=2.0)
+    converter = QSVTEigenstateFilterConverter(instance, uniform_penalty_weight=2.0)
 
     # Measured bit 1 decodes to spin -1, i.e. binary 1.
     raw: SampleResult[Any] = SampleResult(
@@ -477,7 +500,92 @@ def test_ommx_decode_post_selects_before_evaluating_the_original_instance() -> N
 def test_success_probability_of_an_empty_result_is_zero() -> None:
     """A zero-shot result reports no filtered weight instead of dividing by 0."""
     model = BinaryModel.from_higher_ising({(0,): 1.0})
-    converter = QSVTFilterConverter(model)
+    converter = QSVTEigenstateFilterConverter(model)
     empty: SampleResult[Any] = SampleResult(results=[], shots=0)
 
     assert converter.success_probability(empty) == 0.0
+
+
+def test_a_fully_rejected_result_decodes_to_nothing() -> None:
+    """Shots were taken, none survived post-selection, and nothing is invented.
+
+    Distinct from the zero-shot case: here the circuit ran and every shot
+    missed the filtered block, so the whole pipeline -- probability, binary
+    sample set, and the OMMX round trip -- must report an empty answer rather
+    than raise or fabricate a sample.
+    """
+    x0 = ommx.v1.DecisionVariable.binary(0, name="x0")
+    x1 = ommx.v1.DecisionVariable.binary(1, name="x1")
+    instance = ommx.v1.Instance.from_components(
+        decision_variables=[x0, x1],
+        objective=-10.0 * x0,
+        constraints=[(x0 + x1 == 1).set_id(0)],
+        sense=ommx.v1.Instance.MINIMIZE,
+    )
+    converter = QSVTEigenstateFilterConverter(instance, uniform_penalty_weight=2.0)
+
+    raw: SampleResult[Any] = SampleResult(
+        results=[
+            (([1], [0], [0, 1]), 3),  # dropped: projector fired
+            (([0], [1], [1, 0]), 2),  # dropped: signal register non-zero
+        ],
+        shots=5,
+    )
+
+    assert converter.success_probability(raw) == 0.0
+
+    binary = converter.decode_to_binary_sampleset(raw)
+    assert binary.samples == []
+    assert binary.num_occurrences == []
+    assert binary.energy == []
+
+    decoded = converter.decode(raw)
+    assert isinstance(decoded, ommx.v1.SampleSet)
+    assert list(decoded.sample_ids) == []
+    assert dict(decoded.objectives) == {}
+
+
+def _hide_pyqsp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every ``pyqsp`` import raise ``ImportError`` for one test.
+
+    ``None`` in ``sys.modules`` is the interpreter's own "this module is
+    unavailable" marker, so it reproduces a missing install even when the test
+    environment has ``pyqsp`` present.
+
+    Args:
+        monkeypatch (pytest.MonkeyPatch): Fixture used to restore ``sys.modules``.
+    """
+    for name in ("pyqsp", "pyqsp.angle_sequence", "pyqsp.poly"):
+        monkeypatch.setitem(sys.modules, name, None)
+
+
+def test_transpile_without_pyqsp_points_at_the_extra(
+    transpiler: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase synthesis is the only part that needs the optional dependency.
+
+    Omitting ``phi`` asks the converter to synthesize phases, which is exactly
+    what ``pyqsp`` is for, so a missing install must say how to get it rather
+    than surface a bare module-not-found.
+    """
+    model = BinaryModel.from_higher_ising({(0,): 1.0})
+    converter = QSVTEigenstateFilterConverter(model)
+    _hide_pyqsp(monkeypatch)
+
+    with pytest.raises(ImportError, match=r"qamomile\[qsvt\]"):
+        converter.transpile(transpiler, mu=0.0)
+
+
+def test_transpile_with_precomputed_phases_does_not_need_pyqsp(
+    transpiler: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Passing ``phi`` is the documented escape hatch, so it must really work."""
+    model = BinaryModel.from_higher_ising({(0,): 1.0})
+    converter = QSVTEigenstateFilterConverter(model)
+    _hide_pyqsp(monkeypatch)
+
+    executable = converter.transpile(transpiler, mu=0.5, phi=[0.1, 0.2])
+
+    shifted = converter._shifted_encoding(0.5)
+    expected = 2 + shifted.num_signal_qubits + shifted.num_system_qubits
+    assert executable.quantum_circuit.num_qubits == expected

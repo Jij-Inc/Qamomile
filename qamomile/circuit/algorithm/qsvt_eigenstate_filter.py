@@ -32,7 +32,7 @@ from qamomile.circuit.frontend.qkernel import QKernel
 from qamomile.circuit.stdlib.block_encoding import LCUBlockEncoding
 
 
-def eigenstate_filter_projector(encoding: LCUBlockEncoding) -> QKernel:
+def qsvt_filter_projector(encoding: LCUBlockEncoding) -> QKernel:
     r"""Build the Lin & Tong projector kernel for one block encoding.
 
     A Hadamard test on one extra qubit turns the QSVT reflection block
@@ -112,12 +112,12 @@ def eigenstate_filter_projector(encoding: LCUBlockEncoding) -> QKernel:
     return projector
 
 
-def eigenstate_filter_probe(encoding: LCUBlockEncoding) -> QKernel:
+def qsvt_filter_probe(encoding: LCUBlockEncoding) -> QKernel:
     r"""Build the sampling circuit of the Lin & Tong extremal-energy search.
 
     Prepares the uniform superposition :math:`\lvert\varphi_0\rangle =
     H^{\otimes n}\lvert 0\rangle` on the system register, applies
-    :func:`eigenstate_filter_projector`, and measures every register. The
+    :func:`qsvt_filter_projector`, and measures every register. The
     fraction of shots whose projector and signal bits are all zero estimates
     :math:`\lVert P_\mu\lvert\varphi_0\rangle\rVert^2`; the system bits of
     those shots are samples of the projected state.
@@ -134,7 +134,7 @@ def eigenstate_filter_probe(encoding: LCUBlockEncoding) -> QKernel:
     Raises:
         TypeError: If ``encoding`` is not an :class:`LCUBlockEncoding`.
     """
-    projector = eigenstate_filter_projector(encoding)
+    projector = qsvt_filter_projector(encoding)
     num_signal_qubits = encoding.num_signal_qubits
     num_system_qubits = encoding.num_system_qubits
 
