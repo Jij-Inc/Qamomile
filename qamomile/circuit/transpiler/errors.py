@@ -114,7 +114,27 @@ class SeparationError(QamomileCompileError):
 
 
 class EmitError(QamomileCompileError):
-    """Error during backend code emission."""
+    """Report a backend failure to emit one semantic operation.
+
+    Args:
+        message (str): Human-readable emission failure.
+        operation (str | None): Related operation description. Defaults to
+            ``None``.
+
+    Example:
+        Correct — identify the unsupported operation at its target boundary::
+
+            raise EmitError(
+                "HUGR cannot emit a symbolic gate power",
+                operation="ControlledUOperation",
+            )
+
+        Incorrect — silently dropping an unsupported operation can change the
+        compiled program's meaning::
+
+            if not target_supports(operation):
+                return
+    """
 
     def __init__(self, message: str, operation: str | None = None):
         """Initialize a backend emission diagnosis.

@@ -20,7 +20,6 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
 )
 from qamomile.circuit.ir.operation.callable import (
     CallableRef,
-    CallPolicy,
     CallTransform,
     InvokeOperation,
 )
@@ -68,23 +67,16 @@ from qamomile.circuit.ir.value import (
     resolve_root_array_index,
     resolve_root_qubit_address,
 )
-from qamomile.circuit.transpiler.artifact import (
+from qamomile.circuit.transpiler import (
+    CallableDefinitionConflictError,
     CompilationMetadata,
     CompiledProgram,
-)
-from qamomile.circuit.transpiler.block_parameter_binding import pair_block_operands
-from qamomile.circuit.transpiler.errors import (
-    CallableDefinitionConflictError,
     EmitError,
+    PreparedModule,
+    inline_callables,
+    pair_block_operands,
+    validate_program_graph_semantics,
 )
-from qamomile.circuit.transpiler.passes.analyze import (
-    reject_control_flow_quantum_discard,
-)
-from qamomile.circuit.transpiler.passes.inline import InlinePass
-from qamomile.circuit.transpiler.passes.validate_while import (
-    ValidateWhileContractPass,
-)
-from qamomile.circuit.transpiler.prepared import PreparedModule
 
 _QuantumOrigin: TypeAlias = tuple[str, int | None]
 _QuantumFootprint: TypeAlias = frozenset[_QuantumOrigin]
@@ -148,7 +140,7 @@ class HugrTarget:
             CallableDefinitionConflictError: If one source callable produced
                 multiple specialized bodies that cannot share one HUGR symbol.
         """
-        _validate_direct_semantics(program)
+        validate_program_graph_semantics(program)
         for ref, variants in program.definition_variants.items():
             if len(variants) > 1:
                 symbol = f"{ref.namespace}.{ref.name}@{ref.version}"
@@ -206,42 +198,6 @@ class HugrTarget:
                 "HUGR support requires the optional 'hugr' and 'tket-exts' packages."
             ) from error
         validate(artifact.to_bytes())
-
-
-def _validate_direct_semantics(program: PreparedModule) -> None:
-    """Validate target-neutral invariants skipped by direct HUGR lowering.
-
-    Circuit-family planning runs these checks as part of partial evaluation,
-    analysis, and segmentation. HUGR intentionally preserves the prepared
-    program graph, so it invokes only the non-destructive semantic checks
-    here instead of importing the circuit segmentation pipeline. INLINE
-    callables are expanded only in this validation view so formal values are
-    checked with their call-site provenance; emitted HUGR remains hierarchical.
-
-    Args:
-        program (PreparedModule): Prepared entrypoint and callable bodies.
-
-    Raises:
-        ValidationError: If a while condition is not measurement-backed.
-        AffineTypeError: If control flow discards a quantum value.
-    """
-    inline = InlinePass()
-    blocks: list[tuple[Block, Mapping[str, Any]]] = [
-        (inline.run(program.entrypoint), program.bindings)
-    ]
-    blocks.extend(
-        (inline.run(definition.body), {})
-        for definition in program.definitions.values()
-        if definition.body is not None
-        and definition.default_policy is not CallPolicy.INLINE
-    )
-    visited: set[int] = set()
-    for block, bindings in blocks:
-        if id(block) in visited:
-            continue
-        visited.add(id(block))
-        ValidateWhileContractPass().run(block)
-        reject_control_flow_quantum_discard(block.operations, dict(bindings))
 
 
 def _require_hugr() -> tuple[Any, Any, Any, Any, Any]:
@@ -3019,7 +2975,7 @@ def _lower_transformed_call(
         display_name = operation.target.name
     if body is None:
         raise EmitError(f"Transformed HUGR callable {display_name!r} is opaque")
-    body = InlinePass().run(body)
+    body = inline_callables(body)
     power = _resolve_transformed_power(operation, environment)
     # Array carriers are mutable lists. Keep body-local element updates from
     # changing parent aliases before result publication consumes the old wires.

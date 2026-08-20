@@ -99,26 +99,42 @@ Design principles
   a distinct native compilation product intentionally.
 """
 
+from qamomile.circuit.frontend.qkernel_like import QKernelLike
 from qamomile.circuit.transpiler.artifact import (
     CompilationDiagnostic,
     CompilationMetadata,
     CompiledProgram,
     DiagnosticSeverity,
 )
+from qamomile.circuit.transpiler.block_parameter_binding import pair_block_operands
 from qamomile.circuit.transpiler.compiler import QamomileCompiler
 from qamomile.circuit.transpiler.config import CompilerConfig, TranspilerConfig
+from qamomile.circuit.transpiler.errors import (
+    CallableDefinitionConflictError,
+    EmitError,
+)
 from qamomile.circuit.transpiler.prepared import PreparedModule, prepare_module
+from qamomile.circuit.transpiler.program_graph import (
+    inline_callables,
+    validate_program_graph_semantics,
+)
 from qamomile.circuit.transpiler.target import CompilationTarget
 
 __all__ = [
+    "CallableDefinitionConflictError",
     "CompilationDiagnostic",
     "CompilationMetadata",
     "CompilationTarget",
     "CompiledProgram",
     "CompilerConfig",
     "DiagnosticSeverity",
+    "EmitError",
     "PreparedModule",
+    "QKernelLike",
     "QamomileCompiler",
     "TranspilerConfig",
+    "inline_callables",
+    "pair_block_operands",
     "prepare_module",
+    "validate_program_graph_semantics",
 ]

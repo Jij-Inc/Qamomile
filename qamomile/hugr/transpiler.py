@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from qamomile.circuit.frontend.qkernel_like import QKernelLike
-from qamomile.circuit.transpiler.artifact import CompiledProgram
-from qamomile.circuit.transpiler.compiler import QamomileCompiler
-from qamomile.circuit.transpiler.config import CompilerConfig
+from qamomile.circuit.transpiler import (
+    CompiledProgram,
+    CompilerConfig,
+    QamomileCompiler,
+    QKernelLike,
+)
 from qamomile.hugr.lowerer import HugrTarget
 
 
