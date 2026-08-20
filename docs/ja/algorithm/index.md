@@ -81,6 +81,12 @@ QAOA回路をゼロから構築してMaxCutを解き、組み込みの`qaoa_stat
 :::
 
 :::{card}
+:header: **QSVT Filteringによるグラフ分割問題の求解**
+:link: qsvt_eigenstate_filter_graph_partitioning
+コストハミルトニアンをブロックエンコーディングしてsign関数のQSVT近似でフィルタし、post-selectionの割合を使ったLin & Tongの二分探索で基底エネルギーを求めます。
+:::
+
+:::{card}
 :header: **スタビライザ形式論と Steane 符号**
 :link: steane_code
 Hamming [7,4,3]符号からのCSS構成、6スタビライザー、横断的Hadamardを扱います。

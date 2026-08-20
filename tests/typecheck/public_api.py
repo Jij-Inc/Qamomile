@@ -5,9 +5,13 @@ from __future__ import annotations
 from typing import Any, assert_type
 
 import numpy as np
+import ommx.v1
 import sympy as sp
 
 import qamomile.circuit as qmc
+from qamomile.circuit.transpiler.job import SampleResult
+from qamomile.optimization.binary_model import BinarySampleSet
+from qamomile.optimization.qsvt_eigenstate_filter import QSVTEigenstateFilterConverter
 
 
 def _check_oracle_result_shapes(
@@ -63,4 +67,24 @@ def _check_grover_types(
             qmc.grover_iteration_count(3),
         ),
         qmc.Vector[qmc.Qubit],
+    )
+
+
+def _check_qsvt_eigenstate_filter_decode_types(
+    converter: QSVTEigenstateFilterConverter,
+    probe_result: SampleResult[tuple[list[int], list[int], list[int]]],
+) -> None:
+    """Verify the probe's three-register payload is accepted statically.
+
+    The base converter decodes a flat ``list[int]`` per shot, but this
+    converter's probe returns projector, signal, and system registers, so both
+    decode entry points narrow the payload rather than falling back to ``Any``.
+    """
+    assert_type(
+        converter.decode(probe_result),
+        BinarySampleSet | ommx.v1.SampleSet,
+    )
+    assert_type(
+        converter.decode_to_binary_sampleset(probe_result),
+        BinarySampleSet,
     )

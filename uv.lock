@@ -3356,6 +3356,17 @@ wheels = [
 ]
 
 [[package]]
+name = "pyqsp"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/58/16/1ec68abe5447711b79324be38f2c71a519fa863a52a0f081f16cbe72b345/pyqsp-0.2.0.tar.gz", hash = "sha256:5b4901a88f98467a84838470a97ccba9853649a2227ad5bcb2cdefc662ec6d5e", size = 86999, upload-time = "2024-12-06T02:35:20.263Z" }
+
+[[package]]
 name = "pyscf"
 version = "2.12.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3658,6 +3669,9 @@ qiskit = [
     { name = "qiskit" },
     { name = "qiskit-aer" },
 ]
+qsvt = [
+    { name = "pyqsp" },
+]
 quri-parts = [
     { name = "quri-parts-circuit" },
     { name = "quri-parts-core" },
@@ -3681,6 +3695,7 @@ dev = [
     { name = "openfermion" },
     { name = "openfermionpyscf" },
     { name = "pylatexenc" },
+    { name = "pyqsp" },
     { name = "pyscf" },
     { name = "pytest" },
     { name = "pytest-mock" },
@@ -3704,6 +3719,7 @@ requires-dist = [
     { name = "matplotlib", marker = "extra == 'visualization'", specifier = ">=3.10.8" },
     { name = "ommx", specifier = ">=2.3.3" },
     { name = "protobuf", specifier = ">=5.29,<7" },
+    { name = "pyqsp", marker = "extra == 'qsvt'", specifier = ">=0.2.0" },
     { name = "qbraid", extras = ["qiskit"], marker = "extra == 'qbraid'", specifier = ">=0.11.0" },
     { name = "qiskit", marker = "extra == 'qiskit'", specifier = ">=2.3.0" },
     { name = "qiskit-aer", marker = "extra == 'qiskit'", specifier = ">=0.17.2" },
@@ -3714,7 +3730,7 @@ requires-dist = [
     { name = "sympy", specifier = ">=1.14.0" },
     { name = "tket-exts", marker = "extra == 'hugr'", specifier = ">=0.12,<0.13" },
 ]
-provides-extras = ["qiskit", "visualization", "cudaq-cu12", "cudaq-cu13", "quri-parts", "qbraid", "hugr"]
+provides-extras = ["qiskit", "visualization", "qsvt", "cudaq-cu12", "cudaq-cu13", "quri-parts", "qbraid", "hugr"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -3730,6 +3746,7 @@ dev = [
     { name = "openfermion", specifier = ">=1.7.0" },
     { name = "openfermionpyscf", specifier = ">=0.5" },
     { name = "pylatexenc", specifier = ">=2.10" },
+    { name = "pyqsp", specifier = ">=0.2.0" },
     { name = "pyscf", specifier = ">=2.5.0" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest-mock", specifier = ">=3.14.0" },
