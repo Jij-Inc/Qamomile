@@ -47,6 +47,7 @@ from .block_encoding import (
     lcu_block_encoding,
     pauli_lcu_block_encoding,
     periodic_shift_lcu_block_encoding,
+    product_block_encoding,
 )
 from .grover import grover_iteration_count, grover_search
 from .multi_controlled_x import mcx, multi_controlled_x
@@ -72,6 +73,7 @@ __all__ = [
     "LCUBlockEncodingTerm",
     "identity_block_encoding",
     "lcu_block_encoding",
+    "product_block_encoding",
     "IsingZBlockEncoding",
     "ising_z_block_encoding",
     "PauliLCUBlockEncoding",
