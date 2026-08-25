@@ -33,6 +33,9 @@
 
 
 # %%
+# %pip install kagglehub
+
+# %%
 import glob
 import os
 from collections import deque
@@ -45,7 +48,7 @@ import pandas as pd
 from scipy.optimize import minimize
 
 import qamomile.circuit as qmc
-from qamomile.circuit.algorithm.basic import ry_layer, rz_layer
+from qamomile.circuit.algorithm.basic import cx_entangling_layer, ry_layer, rz_layer
 from qamomile.optimization.binary_model import BinaryModel, BinarySampleSet
 from qamomile.optimization.pce import PCEConverter
 from qamomile.qiskit import QiskitTranspiler
@@ -53,13 +56,13 @@ from qamomile.qiskit import QiskitTranspiler
 # %% [markdown]
 # ## 背景
 #
-# ### 問題: ポートフォリオ最適化
+# ### ポートフォリオ最適化と量子計算
 #
 # ポートフォリオ最適化問題は、期待リターンの最大化とリスクの最小化を両立することを目指したものです。
 # 現実の制約と市場の次元が増加すると、古典計算では対処しきれなくなります。
 # そこで組合せ最適化の新しい手法として、量子計算手法が注目されています。
 # 量子回路手法では、量子近似最適化アルゴリズム (QAOA) と変分量子固有値ソルバー (VQE) が多く研究されてきました。
-# しかしながら、必要な量子ビット数が資産数 $m$ に線形で増加するという欠点がありました。
+# しかしながら、必要な量子ビット数が銘柄数 $m$ に線形に増加するという欠点がありました。
 # 大きな量子回路を小さな量子回路に分割する、回路切断 (circuit cutting) と呼ばれる手法も提案されています。
 # しかしそれでも扱える規模は $m < 100$ にとどまっています。
 # 量子回路以外の手法として、量子アニーラを用いた大規模な組合せ最適化計算も提案されています。
@@ -75,7 +78,7 @@ from qamomile.qiskit import QiskitTranspiler
 # このベンチマークでは、混合整数計画法を用いた手法や問題特化型のヒューリスティクスが、QAOA と量子アニーリングを一貫して凌駕することを示しました。
 # そこで、[Soloviev & Krompiec (2025)](https://arxiv.org/abs/2511.21305) では、[Sciorilli et al. (2025)](https://www.nature.com/articles/s41467-024-55346-z) で提案されたパウリ相関符号化 (PCE) を用いた 変分最適化手法 により、これらの限界を突破することを試みました。
 #
-# ### 定式化
+# ### ポートフォリオ最適化の定式化
 #
 # ポートフォリオ最適化は [Markowitz (1952)](https://onlinelibrary.wiley.com/doi/10.1111/j.1540-6261.1952.tb01525.x) で定式化されました。
 # ポートフォリオの期待リターンを、各銘柄の重み付き和として表現します。
@@ -346,7 +349,7 @@ plt.show()
 K = 2                      # 相関演算子の次数
 BETA = 0.5                 # 正則化強度
 MAXITER = 200
-DEPTH = 3                  # None にすると論文の p = floor(N/n)
+DEPTH = None                 # None にすると論文の p = floor(N/n)
 SEED = 42
 
 
@@ -354,11 +357,11 @@ SEED = 42
 # ### HEA の定義
 #
 # Qamomile を用い、HEA を定義しましょう。
-# 論文と同じ Ry, Rz、そして CZ エンタングラーからなる構成を実装します。
+# Ry, Rz、そして CX エンタングル層からなる構成を実装します。
 
 # %%
 @qmc.qkernel
-def hea_cz(
+def hea(
     n: qmc.UInt,
     depth: qmc.UInt,
     thetas: qmc.Vector[qmc.Float],
@@ -371,9 +374,7 @@ def hea_cz(
         offset = d * 2 * n
         q = ry_layer(q, thetas, offset)
         q = rz_layer(q, thetas, offset + n)
-        # 線形 CZ エンタングラ
-        for i in qmc.range(n - 1):
-            q[i], q[i + 1] = qmc.cz(q[i], q[i + 1])
+        q = cx_entangling_layer(q)
     return qmc.expval(q, P)
 
 transpiler = QiskitTranspiler()
