@@ -92,6 +92,7 @@ dev = [
     "pyscf>=2.5.0",
     "ommx-quantum-benchmarks>=0.0.2",
     "grpcio-tools>=1.71,<2",
+    "kagglehub>=1.0.2",
 ]
 
 [tool.pytest.ini_options]
