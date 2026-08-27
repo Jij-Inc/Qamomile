@@ -1,0 +1,5 @@
+# Repository metadata that is not consumed by the current test, lint,
+# type-check, or documentation jobs.
+.gitattributes
+.gitignore
+LICENSE.txt

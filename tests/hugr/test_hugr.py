@@ -3147,6 +3147,7 @@ def test_hugr_rejects_while_array_region_arg_before_tail_loop(
 
 
 @pytest.mark.hugr
+@pytest.mark.ci_smoke
 def test_hugr_nested_measurement_control_executes_on_selene(tmp_path) -> None:
     """The nested while/if package compiles and terminates on Selene."""
     selene = pytest.importorskip("selene_sim")

@@ -331,6 +331,7 @@ class TestValidation:
 #   * Qiskit       — native ``pauli_evolve`` backend.
 #   * QURI Parts   — consumes the default decomposition.
 #   * CUDA-Q       — emits a Python ``@cudaq.kernel`` source artifact.
+#   * Amazon Braket — emits primitive Pauli phase gadgets.
 #
 # CUDA-Q and QURI Parts blocks use ``importorskip`` so the file still
 # runs against a qiskit-only environment.
@@ -359,6 +360,24 @@ def _cudaq_statevector(cudaq_circuit) -> np.ndarray:
     return np.array(cudaq.get_state(cudaq_circuit.kernel_func))
 
 
+def _braket_statevector(braket_circuit: Any) -> np.ndarray:
+    """Simulate a Braket circuit and normalize its statevector ordering.
+
+    Args:
+        braket_circuit (Any): Native Amazon Braket circuit.
+
+    Returns:
+        np.ndarray: Statevector in the little-endian convention used by the
+        other backend helpers.
+    """
+    from braket.devices import LocalSimulator
+
+    circuit = braket_circuit.copy().state_vector()
+    state = np.asarray(LocalSimulator().run(circuit, shots=0).result().values[0])
+    axes = tuple(reversed(range(braket_circuit.qubit_count)))
+    return state.reshape((2,) * braket_circuit.qubit_count).transpose(axes).reshape(-1)
+
+
 def _backend_statevector(sdk_transpiler: Any, circuit: Any) -> np.ndarray:
     """Simulate one emitted circuit with its owning backend.
 
@@ -378,6 +397,8 @@ def _backend_statevector(sdk_transpiler: Any, circuit: Any) -> np.ndarray:
         return _qulacs_statevector_from_quri_parts(circuit)
     if sdk_transpiler.backend_name == "cudaq":
         return _cudaq_statevector(circuit)
+    if sdk_transpiler.backend_name == "braket":
+        return _braket_statevector(circuit)
     raise AssertionError(f"Unsupported backend {sdk_transpiler.backend_name!r}")
 
 
@@ -466,10 +487,19 @@ class TestCrossBackendCompilation:
         elif sdk_transpiler.backend_name == "quri_parts":
             assert circuit.qubit_count == 1
             assert _pauli_rotation_count_quri_parts(circuit) == expected
-        else:
-            assert sdk_transpiler.backend_name == "cudaq"
+        elif sdk_transpiler.backend_name == "cudaq":
             assert circuit.num_qubits == 1
             assert _exp_pauli_count_cudaq(circuit) == expected
+        else:
+            assert sdk_transpiler.backend_name == "braket"
+            assert circuit.qubit_count == 1
+            assert (
+                sum(
+                    instruction.operator.name == "Rz"
+                    for instruction in circuit.instructions
+                )
+                == expected
+            )
 
 
 class TestCrossBackendStatevector:

@@ -681,8 +681,8 @@ class TestSelectCrossBackend:
 
     def test_select_inside_runtime_if(self, sdk_transpiler: Any) -> None:
         """SELECT results merge from a measurement-backed conditional."""
-        if sdk_transpiler.backend_name == "quri_parts":
-            pytest.skip("QURI Parts has no dynamic if primitive")
+        if sdk_transpiler.backend_name in {"quri_parts", "braket"}:
+            pytest.skip("This backend has no dynamic if primitive")
 
         @qkernel
         def circuit() -> Bit:
@@ -701,8 +701,8 @@ class TestSelectCrossBackend:
 
     def test_select_inside_runtime_while(self, sdk_transpiler: Any) -> None:
         """SELECT results remain loop-carried through a dynamic while."""
-        if sdk_transpiler.backend_name == "quri_parts":
-            pytest.skip("QURI Parts has no dynamic while primitive")
+        if sdk_transpiler.backend_name in {"quri_parts", "braket"}:
+            pytest.skip("This backend has no dynamic while primitive")
 
         @qkernel
         def circuit() -> Bit:

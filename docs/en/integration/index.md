@@ -9,6 +9,12 @@ Notes on using Qamomile together with external libraries and quantum platforms.
 ::::{grid} 1 1 1 1
 
 :::{card}
+:header: **Amazon Braket Support**
+:link: braket_support
+Transpile native Braket circuits and run local or AWS-backed execution.
+:::
+
+:::{card}
 :header: **CUDA-Q Support**
 :link: cudaq_support
 Transpile MaxCut QAOA to CUDA-Q and run sampling and expectation-value workflows.

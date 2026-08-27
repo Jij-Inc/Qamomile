@@ -61,8 +61,8 @@ def _load_probe(a: int, x: int, n: int, modulus: int, path: str):
 
 def test_modmul_const_non_cyclic_executes(sdk_transpiler, tmp_path) -> None:
     """A small non-rotation instance executes the polynomial reversible body."""
-    if sdk_transpiler.backend_name == "quri_parts":
-        pytest.skip("QURI Parts cannot represent modmul's mid-circuit reset")
+    if sdk_transpiler.backend_name in {"quri_parts", "braket"}:
+        pytest.skip("This backend cannot represent modmul's mid-circuit reset")
 
     probe = _load_probe(3, 2, 3, 7, str(tmp_path / "noncyclic.py"))
     transpiler = sdk_transpiler.transpiler

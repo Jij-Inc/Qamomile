@@ -2110,7 +2110,7 @@ class TestControlledBuiltinErrors:
 
 
 class TestControlledBuiltinSynthesisInternals:
-    """Cover the wrapper-synthesis edge cases the Copilot review flagged."""
+    """Cover wrapper-synthesis cache and signature edge cases."""
 
     def test_recursive_controlled_inside_wrapped_fn_does_not_deadlock(self):
         """A wrapped callable that itself calls control() must not deadlock.
@@ -2326,10 +2326,10 @@ class TestControlledBuiltinSynthesisInternals:
     def test_keyword_callable_name_falls_back_to_internal_id(self):
         """A callable whose ``__name__`` is a Python keyword must not crash compile().
 
-        Regression for the Copilot #9 review: ``"class".isidentifier()`` is
-        ``True`` but ``def class(...)`` is a ``SyntaxError``, so the
-        synthesizer must additionally consult ``keyword.iskeyword`` and
-        fall back to the safe ``_qmc_controlled_wrapper_<n>`` identifier.
+        ``"class".isidentifier()`` is ``True`` but ``def class(...)`` is a
+        ``SyntaxError``, so the synthesizer must additionally consult
+        ``keyword.iskeyword`` and fall back to the safe
+        ``_qmc_controlled_wrapper_<n>`` identifier.
         """
 
         # ``def class(...)`` is itself unparseable, so build a function
@@ -2346,13 +2346,12 @@ class TestControlledBuiltinSynthesisInternals:
     def test_int_param_lowered_as_uint_type(self):
         """A wrapped kernel that declares ``int`` lowers raw int kwargs to UIntType.
 
-        Regression for the Copilot #8 review: previously
-        ``_params_to_operands`` always wrapped raw scalars as
-        ``FloatType``, which mismatched the wrapper-side ``UInt``
+        ``_params_to_operands`` must not wrap every raw scalar as
+        ``FloatType`` because doing so mismatches the wrapper-side ``UInt``
         annotation that ``_classify_callable_param`` produces for ``int``
-        parameters.  After the fix, the controlled-U operand for the
-        ``int`` parameter carries a ``UIntType`` constant that lines up
-        with the wrapped block's ``input_values``.
+        parameters. The controlled-U operand for the ``int`` parameter must
+        carry a ``UIntType`` constant that matches the wrapped block's
+        ``input_values``.
         """
         from qamomile.circuit.ir.operation.gate import ControlledUOperation
         from qamomile.circuit.ir.types.primitives import UIntType
@@ -2408,13 +2407,11 @@ class TestControlledBuiltinSynthesisInternals:
     def test_dynamic_callable_is_released_on_gc(self):
         """Once the user drops a dynamically-defined callable, the wrapper cache must release it.
 
-        Regression for the Copilot #5 review: an earlier draft used
-        ``WeakKeyDictionary`` but the wrapper's globals captured ``fn``
-        with a strong ref via ``__qmc_target__``, so the cache transitively
-        kept ``fn`` alive forever.  Post-fix the wrapper holds a
-        ``weakref.proxy(fn)`` and ``Block`` is built eagerly (so the
-        proxy is never re-invoked), letting the cache + linecache entries
-        die with ``fn``.
+        A ``WeakKeyDictionary`` alone is insufficient when the wrapper's
+        globals capture ``fn`` with a strong reference via ``__qmc_target__``
+        because the cache would transitively keep ``fn`` alive. The wrapper
+        therefore holds a ``weakref.proxy(fn)`` and builds ``Block`` eagerly,
+        allowing the cache and linecache entries to expire with ``fn``.
         """
         import gc
         import linecache as _linecache_module

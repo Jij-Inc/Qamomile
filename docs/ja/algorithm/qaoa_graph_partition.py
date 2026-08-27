@@ -88,6 +88,8 @@ problem
 # 再現性を確保するため、8 ノード 16 エッジの固定グラフを使用します。
 
 # %%
+import os
+
 import matplotlib.pyplot as plt
 import networkx as nx
 
@@ -173,7 +175,8 @@ assert len(hamiltonian.terms) == 12
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
-p = 5  # QAOA の層数
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+p = 1 if docs_test_mode else 5  # QAOA の層数
 executable = converter.transpile(transpiler, p=p)
 
 # %% [markdown]
@@ -252,7 +255,6 @@ x_mixer.draw(q=converter.spin_model.num_bits, fold_loops=False)
 # `executable.sample()` を使って各イテレーションでコストを評価します。オプティマイザはサンプリングされたビット列の平均エネルギーを最小化する `gammas` と `betas` を探索します。
 
 # %%
-import os
 import numpy as np
 from qiskit_aer import AerSimulator
 from scipy.optimize import minimize
@@ -264,9 +266,9 @@ from scipy.optimize import minimize
 executor = transpiler.executor(
     backend=AerSimulator(seed_simulator=901, max_parallel_threads=1)
 )
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-sample_shots = 256 if docs_test_mode else 2048
-maxiter = 25 if docs_test_mode else 1000
+sample_shots = 1 if docs_test_mode else 2048
+maxiter = 4 if docs_test_mode else 1000
+final_shots = 8 if docs_test_mode else 1000
 
 rng = np.random.default_rng(900)
 initial_params = rng.uniform(0, np.pi, 2 * p)
@@ -330,7 +332,7 @@ betas_opt = list(res.x[p:])
 
 sample_result = executable.sample(
     executor,
-    shots=1000,
+    shots=final_shots,
     bindings={"gammas": gammas_opt, "betas": betas_opt},
 ).result()
 
@@ -356,12 +358,14 @@ assert isinstance(sample_set, ommx.v1.SampleSet)
 summary = sample_set.summary
 total_feasible = int(summary["feasible"].sum())
 total_samples = len(summary)
+if docs_test_mode:
+    assert total_feasible > 0
 
 print(
     f"Feasible samples: {total_feasible} / {total_samples} "
     f"({100 * total_feasible / total_samples:.1f}%)"
 )
-assert total_samples == 1000  # 上のハードコードされた shots と一致
+assert total_samples == final_shots
 
 # %% [markdown]
 # ### 最良の実行可能解

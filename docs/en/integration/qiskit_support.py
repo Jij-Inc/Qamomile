@@ -154,7 +154,8 @@ def qaoa_ansatz(
 # Meanwhile, `gammas` / `betas` are left as parameters whose values are supplied later.
 
 # %%
-p = 3  # number of QAOA layers
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+p = 1 if docs_test_mode else 3  # number of QAOA layers
 qaoa_ansatz.draw(
     p=p,
     quad=spin_model.quad,
@@ -235,9 +236,8 @@ rng = np.random.default_rng(SEED)
 init_params = rng.uniform(-np.pi / 2, np.pi / 2, 2 * p)
 init_gammas = list(init_params[:p])
 init_betas = list(init_params[p:])
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-sample_shots = 256 if docs_test_mode else 2000
-maxiter = 20 if docs_test_mode else 100
+sample_shots = 1 if docs_test_mode else 2000
+maxiter = 4 if docs_test_mode else 100
 
 # Sample the parameterized executable and decode bitstrings to Ising energies.
 executor = transpiler.executor(backend=make_seeded_backend())

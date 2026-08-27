@@ -3231,9 +3231,9 @@ def _check_loop_quantum_discards(
         # unrolled loops re-instantiate the body without carrying the
         # rebound register between iterations, and a runtime while
         # re-executes its body on one persistent register without reset,
-        # so "fresh per iteration" is not expressible either way (review
-        # measured an rx-gated while repeat-until-success body sampling
-        # the wire-reuse distribution, not the fresh-register one).
+        # so "fresh per iteration" is not expressible either way. An
+        # rx-gated repeat-until-success body would otherwise sample the
+        # wire-reuse distribution instead of the fresh-register one.
         if not record.after.type.is_quantum():
             raise _loop_nonquantum_overwrite_error(record.var_name, loop_kind)
         raise _loop_quantum_discard_error(record.var_name, loop_kind)

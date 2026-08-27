@@ -7,7 +7,7 @@
 > This repository is actively developed.
 > APIs may still change, including breaking changes, while active development continues.
 
-Qamomile is a typed quantum programming SDK for writing quantum kernels in Python, inspecting them as Qamomile IR, estimating resources symbolically, and transpiling them to concrete execution quantum SDK such as Qiskit, QURI Parts, CUDA-Q. Furthermore, as a backend for Qiskit, we support qBraid.
+Qamomile is a typed quantum programming SDK for writing quantum kernels in Python, inspecting them as Qamomile IR, estimating resources symbolically, and transpiling them to concrete execution quantum SDKs such as Qiskit, QURI Parts, CUDA-Q, and Amazon Braket. Furthermore, as a backend for Qiskit, we support qBraid.
 
 The current workflow is:
 
@@ -52,8 +52,17 @@ uv sync
 
 This installs the default development dependency group.
 In the current `pyproject.toml`, that gives you Qiskit, circuit visualization,
-documentation, and test tooling.
-Optional backend integrations such as QURI Parts, qBraid, and CUDA-Q still need their corresponding extras.
+and test tooling. Optional backend integrations such as QURI Parts, qBraid,
+and CUDA-Q still need their corresponding extras.
+
+Documentation development environment:
+
+```bash
+uv sync --group docs
+```
+
+The `docs` group includes the default development dependencies and the
+credential-free backend integrations exercised by the documentation suite.
 
 Runtime-only environment from source:
 
@@ -73,6 +82,12 @@ Runtime-only environment from source with QURI Parts support:
 
 ```bash
 uv sync --no-dev --extra quri_parts
+```
+
+Runtime-only environment from source with Amazon Braket support:
+
+```bash
+uv sync --no-dev --extra braket
 ```
 
 Runtime-only environment from source with qBraid support:
@@ -106,6 +121,7 @@ If you prefer an explicit editable install inside your environment, this also wo
 pip install -e .
 pip install -e ".[qiskit,visualization]"  # Qiskit Quick Start + draw()
 pip install -e ".[quri_parts]"   # optional
+pip install -e ".[braket]"       # optional
 pip install -e ".[qbraid]"       # optional
 pip install -e ".[cudaq-cu12]"   # optional, CUDA 12.x
 pip install -e ".[cudaq-cu13]"   # optional, CUDA 13.x
@@ -160,6 +176,7 @@ If it returns a `qmc.Float` from `qmc.expval(...)`, use `run()` instead.
 - `qamomile.cudaq`: optional CUDA-Q transpiler, executor, and observable conversion (supports both static sampling and runtime control-flow modes)
 - `qamomile.qbraid`: optional qBraid executor support for running Qiskit circuits on qBraid-supported devices
 - `qamomile.quri_parts`: optional QURI Parts transpiler and executor support
+- `qamomile.braket`: optional Amazon Braket transpiler, local/cloud executor, and observable conversion
 - `qamomile.optimization`: optimization-oriented functionality retained for continuity with older Qamomile workflows
 
 ## Optimization Support
@@ -178,24 +195,6 @@ This README focuses on the current circuit-first API, but optimization support r
 ## Contributing
 
 Contributions, bug reports, and feedback are welcome via [GitHub Issues](https://github.com/Jij-Inc/Qamomile/issues) and pull requests.
-
-### Notes for Windows developers
-
-This repository uses git symlinks (e.g., `AGENTS.md` → `CLAUDE.md`). On Windows, Git for Windows does not create real symlinks by default, and a symlinked file will be checked out as a plain text file containing the target path. To get real symlinks, enable `core.symlinks` before cloning and make sure your environment allows symlink creation (either run in Developer Mode, available since Windows 10 Creators Update, or run as administrator):
-
-```bash
-git config --global core.symlinks true
-git clone https://github.com/Jij-Inc/Qamomile.git
-```
-
-If you already cloned without this setting, you can re-checkout the affected paths after enabling it:
-
-```bash
-git config core.symlinks true
-git checkout -- AGENTS.md
-```
-
-On macOS, Linux, and WSL2 this is handled automatically — no action needed.
 
 ## License
 

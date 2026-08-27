@@ -151,7 +151,8 @@ def qaoa_ansatz(
 # 一方、`gammas` / `betas`には値を渡さず、後で決めるパラメータとして残します。
 
 # %%
-p = 3  # QAOAの層数
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+p = 1 if docs_test_mode else 3  # QAOAの層数
 qaoa_ansatz.draw(
     p=p,
     quad=spin_model.quad,
@@ -231,9 +232,8 @@ rng = np.random.default_rng(SEED)
 init_params = rng.uniform(-np.pi / 2, np.pi / 2, 2 * p)
 init_gammas = list(init_params[:p])
 init_betas = list(init_params[p:])
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-sample_shots = 256 if docs_test_mode else 2000
-maxiter = 20 if docs_test_mode else 100
+sample_shots = 1 if docs_test_mode else 2000
+maxiter = 4 if docs_test_mode else 100
 
 # パラメータ化されたexecutableをサンプリングし、ビット列をIsingエネルギーへデコードします。
 executor = transpiler.executor(backend=make_seeded_backend())

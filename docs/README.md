@@ -48,6 +48,9 @@ independent goals, split it into two pages.
 - **Docs as tests**: every runnable notebook should include assertions for the
   important shapes, counts, or result properties. Keep runtime small enough for
   [tests/docs/test_tutorials.py](../tests/docs/test_tutorials.py).
+- **Execute English pages in CI**: docs tests use the English page as the
+  canonical runtime check. Changes to shared executable code, CI settings, and
+  assertions must be mirrored in the Japanese counterpart.
 - **No manual References section**: use MyST cross-references, citations, or
   external links instead of hand-maintaining a References section.
 - **Use MyST notes for remarks**: tips, notes, and remarks should use
@@ -94,6 +97,12 @@ ReadTheDocs builds with `execute.enabled: false`, assuming that executed `.ipynb
 > pre-push workflow), make sure `QAMOMILE_DOCS_TEST` is **unset** (or not
 > equal to `"1"`) so the notebooks run with the full settings and produce
 > the high-quality outputs intended for readers.
+>
+> CI settings are execution-path smoke settings rather than statistical or
+> optimization-quality settings. One-shot sampling, minimum optimizer budgets,
+> representative cases, and synthetic input data are acceptable under the flag
+> as long as the same transpile/execute/decode or forward/backward path reaches
+> completion. Normal notebook execution must retain the reader-facing settings.
 
 ## Directory Guide
 
@@ -120,14 +129,13 @@ ReadTheDocs builds with `execute.enabled: false`, assuming that executed `.ipynb
 Run this once before editing or building docs:
 
 ```bash
-uv sync
+uv sync --group docs
 ```
 
-To execute notebooks that need optional extras:
-
-```bash
-uv sync --extra OPTIONAL_DEPENDENCY    # e.g. quri_parts, cudaq-cu13
-```
+The `docs` group includes the regular development tools and the
+credential-free backend integrations exercised by the documentation suite.
+Pages that require external credentials still need their service-specific
+setup.
 
 ### Editing an existing page
 
@@ -365,10 +373,10 @@ notes (`release_notes/`) are intentionally out of scope and never tagged.
 
 ### "No module named 'qamomile'"
 
-Ensure dev dependencies are installed in the active env:
+Ensure documentation dependencies are installed in the active environment:
 
 ```bash
-uv sync
+uv sync --group docs
 ```
 
 ### Port 8000 already in use

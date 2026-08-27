@@ -52,11 +52,11 @@ import os
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 RANDOM_STATE = 7
-N_SAMPLES = 8 if docs_test_mode else 40
-TEST_SIZE = 0.25
+N_SAMPLES = 6 if docs_test_mode else 40
+TEST_SIZE = 1 / 3 if docs_test_mode else 0.25
 
 LAYERS = 2       # 特徴マップの繰り返し回数（トランスパイル時にバインド）
-SHOTS = 64 if docs_test_mode else 1024
+SHOTS = 1 if docs_test_mode else 1024
 C_SVC = 1.0
 
 # %% [markdown]
@@ -456,7 +456,7 @@ assert set(y_pred_rbf.tolist()).issubset({0, 1})
 # ### 決定境界ヘルパー
 
 # %%
-GRID_SIZE = 3 if docs_test_mode else 15
+GRID_SIZE = 2 if docs_test_mode else 15
 
 
 def preprocess_for_kernel(X_raw_points: np.ndarray) -> np.ndarray:

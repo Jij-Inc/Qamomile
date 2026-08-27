@@ -1,0 +1,252 @@
+# Every third-party action below is pinned to a full commit SHA instead of a
+# mutable tag such as v4. A tag can be repointed at malicious code if the
+# action repository is compromised: in March 2025 the tj-actions/changed-files
+# incident retagged existing releases and exfiltrated CI secrets from the
+# repositories that consumed them. A commit SHA is content-addressed and
+# cannot be repointed. The comment on each `uses:` line records the release
+# the SHA was resolved from, with a link for verifying the correspondence.
+
+name: Python Test
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.11.32"
+
+jobs:
+  # CI keeps one end-to-end smoke path per installable transpiler. Quration is
+  # omitted because PyQret is not provided by the locked dependency sources.
+  # Each matrix job pins UV_PYTHON so `uv run` cannot fall back to the
+  # repository's .python-version. `--no-sync` then preserves the backend extra
+  # installed for that matrix entry instead of recreating its environment.
+  base-test:
+    name: Qiskit smoke (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    env:
+      MPLBACKEND: Agg
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - name: Check out the repository
+        # v4.4.0 = https://github.com/actions/checkout/releases/tag/v4.4.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        # v5.6.0 = https://github.com/actions/setup-python/releases/tag/v5.6.0
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        # v5.4.2 = https://github.com/astral-sh/setup-uv/releases/tag/v5.4.2
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Install base dependencies
+        run: uv sync --frozen --python "${{ matrix.python-version }}" --group dev
+
+      - name: Verify Qiskit dependencies
+        run: uv run --no-sync python -c "import qiskit"
+
+      - name: Transpile and execute with Qiskit
+        run: >-
+          uv run --no-sync pytest
+          -m "ci_smoke and not quri_parts and not cudaq"
+          tests/circuit/test_frontend_cross_backend_execution.py
+          -v
+
+  quri-parts-test:
+    name: QURI Parts smoke (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    env:
+      MPLBACKEND: Agg
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - name: Check out the repository
+        # v4.4.0 = https://github.com/actions/checkout/releases/tag/v4.4.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        # v5.6.0 = https://github.com/actions/setup-python/releases/tag/v5.6.0
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        # v5.4.2 = https://github.com/astral-sh/setup-uv/releases/tag/v5.4.2
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Install dependencies with quri-parts
+        run: >-
+          uv sync --frozen --python "${{ matrix.python-version }}"
+          --group dev --extra quri_parts
+
+      - name: Verify QURI Parts dependencies
+        run: uv run --no-sync python -c "import quri_parts, quri_parts.qulacs"
+
+      - name: Transpile and execute with QURI Parts
+        run: >-
+          uv run --no-sync pytest
+          -m "ci_smoke and quri_parts"
+          tests/circuit/test_frontend_cross_backend_execution.py
+          -v
+
+  braket-test:
+    name: Amazon Braket smoke (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    env:
+      MPLBACKEND: Agg
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - name: Check out the repository
+        # v4.4.0 = https://github.com/actions/checkout/releases/tag/v4.4.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        # v5.6.0 = https://github.com/actions/setup-python/releases/tag/v5.6.0
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        # v5.4.2 = https://github.com/astral-sh/setup-uv/releases/tag/v5.4.2
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Install dependencies with Amazon Braket
+        run: >-
+          uv sync --frozen --python "${{ matrix.python-version }}"
+          --group dev --extra braket
+
+      - name: Verify Amazon Braket dependencies
+        run: uv run --no-sync python -c "import braket.circuits, braket.devices"
+
+      - name: Transpile and execute with Amazon Braket
+        run: >-
+          uv run --no-sync pytest
+          -m "ci_smoke and braket"
+          tests/circuit/test_frontend_cross_backend_execution.py
+          -v
+
+  hugr-test:
+    name: HUGR smoke (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    env:
+      MPLBACKEND: Agg
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - name: Check out the repository
+        # v4.4.0 = https://github.com/actions/checkout/releases/tag/v4.4.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        # v5.6.0 = https://github.com/actions/setup-python/releases/tag/v5.6.0
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        # v5.4.2 = https://github.com/astral-sh/setup-uv/releases/tag/v5.4.2
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Install dependencies with HUGR
+        run: >-
+          uv sync --frozen --python "${{ matrix.python-version }}"
+          --group dev --extra hugr
+
+      - name: Verify HUGR dependencies
+        run: uv run --no-sync python -c "import hugr, selene_sim"
+
+      - name: Transpile and execute HUGR with Selene
+        run: >-
+          uv run --no-sync pytest
+          -m "ci_smoke and hugr"
+          tests/hugr/test_hugr.py
+          -v
+
+  cudaq-test-ubuntu:
+    name: CUDA-Q smoke (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    env:
+      MPLBACKEND: Agg
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - name: Check out the repository
+        # v4.4.0 = https://github.com/actions/checkout/releases/tag/v4.4.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        # v5.6.0 = https://github.com/actions/setup-python/releases/tag/v5.6.0
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        # v5.4.2 = https://github.com/astral-sh/setup-uv/releases/tag/v5.4.2
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Install dependencies with CUDA-Q
+        run: >-
+          uv sync --frozen --python "${{ matrix.python-version }}"
+          --group dev --extra cudaq-cu12
+
+      - name: Verify CUDA-Q dependencies
+        run: uv run --no-sync python -c "import cudaq"
+
+      - name: Transpile and execute with CUDA-Q
+        run: >-
+          uv run --no-sync pytest
+          -m "ci_smoke and cudaq"
+          tests/circuit/test_frontend_cross_backend_execution.py
+          -v

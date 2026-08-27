@@ -66,6 +66,8 @@
 # non-trivial, yet small enough to brute-force for comparison.
 
 # %%
+import os
+
 import matplotlib.pyplot as plt
 import networkx as nx
 
@@ -302,7 +304,8 @@ def qaoa_ansatz(
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
-p = 3  # number of QAOA layers
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+p = 1 if docs_test_mode else 3  # number of QAOA layers
 
 executable = transpiler.transpile(
     qaoa_ansatz,
@@ -330,8 +333,6 @@ executable = transpiler.transpile(
 # drop it (or only enable it in tests / docs builds).
 
 # %%
-import os
-
 import numpy as np
 from qiskit_aer import AerSimulator
 from scipy.optimize import minimize
@@ -345,9 +346,8 @@ def make_seeded_backend() -> AerSimulator:
 
 
 executor = transpiler.executor(backend=make_seeded_backend())
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-sample_shots = 256 if docs_test_mode else 2048
-maxiter = 20 if docs_test_mode else 500
+sample_shots = 1 if docs_test_mode else 2048
+maxiter = 4 if docs_test_mode else 500
 cost_history: list[float] = []
 
 

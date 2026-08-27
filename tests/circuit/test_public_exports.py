@@ -60,6 +60,17 @@ from qamomile.circuit.stdlib.block_encoding.periodic_shift import (
 )
 from qamomile.circuit.stdlib.qsvt import qsvt
 from qamomile.circuit.transpiler import job as _job_module
+from qamomile.circuit.transpiler.execution_capability import ExecutionCapabilities
+from qamomile.circuit.transpiler.execution_handle import (
+    ExecutionHandle,
+    ExecutionReference,
+)
+from qamomile.circuit.transpiler.execution_request import (
+    Exact,
+    ShotBased,
+    TargetPrecision,
+)
+from qamomile.circuit.transpiler.job import JobKind, JobSnapshot
 
 
 def test_job_types_are_publicly_reexported():
@@ -70,6 +81,8 @@ def test_job_types_are_publicly_reexported():
     """
     for name in (
         "Job",
+        "JobKind",
+        "JobSnapshot",
         "JobStatus",
         "SampleResult",
         "SampleJob",
@@ -93,6 +106,8 @@ def test_job_types_listed_in_all():
     """
     for name in (
         "Job",
+        "JobKind",
+        "JobSnapshot",
         "JobStatus",
         "SampleResult",
         "SampleJob",
@@ -102,6 +117,23 @@ def test_job_types_listed_in_all():
         assert name in qmc.__all__, (
             f"{name!r} should be listed in qamomile.circuit.__all__"
         )
+
+
+def test_execution_submission_types_are_publicly_reexported() -> None:
+    """Remote lifecycle and accuracy policy types form public circuit API."""
+    exports = {
+        "ExecutionHandle": ExecutionHandle,
+        "ExecutionCapabilities": ExecutionCapabilities,
+        "ExecutionReference": ExecutionReference,
+        "JobKind": JobKind,
+        "JobSnapshot": JobSnapshot,
+        "Exact": Exact,
+        "ShotBased": ShotBased,
+        "TargetPrecision": TargetPrecision,
+    }
+    for name, value in exports.items():
+        assert getattr(qmc, name) is value
+        assert name in qmc.__all__
 
 
 def test_callable_helpers_are_publicly_reexported():

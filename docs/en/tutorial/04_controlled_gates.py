@@ -39,12 +39,15 @@
 
 # %%
 import math
+import os
 
 import qamomile.circuit as qmc
 from qamomile.circuit.transpiler.errors import UnreturnedBorrowError
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 256
 
 # %% [markdown]
 # (cg-1)=
@@ -97,20 +100,20 @@ crx_control_on.draw()
 # %%
 off_counts = dict(
     transpiler.transpile(crx_control_off)
-    .sample(transpiler.executor(), shots=256)
+    .sample(transpiler.executor(), shots=sample_shots)
     .result()
     .results
 )
 on_counts = dict(
     transpiler.transpile(crx_control_on)
-    .sample(transpiler.executor(), shots=256)
+    .sample(transpiler.executor(), shots=sample_shots)
     .result()
     .results
 )
 print("control |0> ->", off_counts)
-assert off_counts == {0: 256}
+assert off_counts == {0: sample_shots}
 print("control |1> ->", on_counts)
-assert on_counts == {1: 256}
+assert on_counts == {1: sample_shots}
 
 # %% [markdown]
 # A few points to note:
@@ -384,11 +387,11 @@ def phase_kickback_demo() -> qmc.Bit:
 
 phase_counts = dict(
     transpiler.transpile(phase_kickback_demo)
-    .sample(transpiler.executor(), shots=256)
+    .sample(transpiler.executor(), shots=sample_shots)
     .result()
     .results
 )
-assert phase_counts == {1: 256}
+assert phase_counts == {1: sample_shots}
 
 # %% [markdown]
 # :::{note}
@@ -566,18 +569,18 @@ def control_value_zero_demo() -> qmc.Bit:
 # %%
 control_value_two_counts = dict(
     transpiler.transpile(control_value_two_demo)
-    .sample(transpiler.executor(), shots=256)
+    .sample(transpiler.executor(), shots=sample_shots)
     .result()
     .results
 )
 control_value_zero_counts = dict(
     transpiler.transpile(control_value_zero_demo)
-    .sample(transpiler.executor(), shots=256)
+    .sample(transpiler.executor(), shots=sample_shots)
     .result()
     .results
 )
-assert control_value_two_counts == {1: 256}
-assert control_value_zero_counts == {1: 256}
+assert control_value_two_counts == {1: sample_shots}
+assert control_value_zero_counts == {1: sample_shots}
 
 # %% [markdown]
 # `control_value=None` is the default all-ones control. Supplying the explicit

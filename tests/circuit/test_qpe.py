@@ -505,6 +505,14 @@ class TestQPEFallbackVectorViewPhase:
 
         _assert_fallback_qpe_vector_view_phase(CudaqTranspiler())
 
+    @pytest.mark.braket
+    def test_braket_executes_vector_view_phase(self):
+        """Amazon Braket executes fallback QPE with a VectorView phase."""
+        pytest.importorskip("braket")
+        from qamomile.braket import BraketTranspiler
+
+        _assert_fallback_qpe_vector_view_phase(BraketTranspiler())
+
 
 class TestQPEBuiltinVectorViewPhase:
     """Public QPE with VectorView phase operands."""
@@ -531,6 +539,14 @@ class TestQPEBuiltinVectorViewPhase:
         from qamomile.cudaq import CudaqTranspiler
 
         _assert_builtin_qpe_vector_view_phase(CudaqTranspiler())
+
+    @pytest.mark.braket
+    def test_braket_executes_vector_view_phase(self):
+        """Amazon Braket executes public QPE with a VectorView phase."""
+        pytest.importorskip("braket")
+        from qamomile.braket import BraketTranspiler
+
+        _assert_builtin_qpe_vector_view_phase(BraketTranspiler())
 
 
 class TestQPEConsistency:

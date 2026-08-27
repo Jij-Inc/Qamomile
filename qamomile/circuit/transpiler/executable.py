@@ -18,7 +18,13 @@ from qamomile.circuit.transpiler.compiled_segments import (
 )
 from qamomile.circuit.transpiler.errors import ExecutionError
 from qamomile.circuit.transpiler.execution_context import ExecutionContext
-from qamomile.circuit.transpiler.job import ExpvalJob, RunJob, SampleJob
+from qamomile.circuit.transpiler.execution_request import EstimationAccuracy
+from qamomile.circuit.transpiler.job import (
+    ExpvalJob,
+    JobSnapshot,
+    RunJob,
+    SampleJob,
+)
 from qamomile.circuit.transpiler.parameter_binding import (
     ParameterArrayInfo,
     ParameterContainerKind,
@@ -133,7 +139,7 @@ class ExecutableProgram(Generic[T]):
         shots: int = 1024,
         bindings: dict[str, Any] | None = None,
     ) -> SampleJob[Any]:
-        """Execute with multiple shots and return counts.
+        """Submit a multi-shot execution and return its lazy job.
 
         Args:
             executor (QuantumExecutor[T]): Backend-specific quantum executor.
@@ -168,8 +174,10 @@ class ExecutableProgram(Generic[T]):
         self,
         executor: QuantumExecutor[T],
         bindings: dict[str, Any] | None = None,
+        *,
+        estimation: EstimationAccuracy | None = None,
     ) -> RunJob[Any] | ExpvalJob:
-        """Execute once and return single result.
+        """Submit one execution and return its lazy result job.
 
         Args:
             executor (QuantumExecutor[T]): Backend-specific quantum executor.
@@ -179,6 +187,9 @@ class ExecutableProgram(Generic[T]):
                 - Dict parameter: {"coeffs": {0: 0.1, (0, 1): 0.2}},
                   decomposed per key onto the emitted parameters
                 - Indexed: {"gammas[0]": 0.1, "coeffs[(0, 1)]": 0.2}
+            estimation (EstimationAccuracy | None): Optional per-execution
+                expectation accuracy policy. Defaults to the executor's
+                configured behavior.
 
         Returns:
             RunJob[Any] | ExpvalJob: A RunJob that resolves to the kernel's
@@ -198,16 +209,79 @@ class ExecutableProgram(Generic[T]):
             ProgramOrchestrator,
         )
 
-        return ProgramOrchestrator(self).run(executor, bindings)
+        return ProgramOrchestrator(self).run(executor, bindings, estimation)
+
+    def restore(
+        self,
+        executor: QuantumExecutor[T],
+        snapshot: JobSnapshot,
+        bindings: dict[str, Any] | None = None,
+    ) -> SampleJob[Any] | RunJob[Any] | ExpvalJob:
+        """Restore a provider execution with this program's typed result ABI.
+
+        The snapshot stores only provider identifiers and public operation
+        metadata. Pass the original runtime bindings explicitly so Qamomile can
+        reproduce classical pre- and post-processing without persisting
+        caller-owned application data.
+
+        Args:
+            executor (QuantumExecutor[T]): Backend adapter configured with the
+                provider credentials and target used by the original job.
+            snapshot (JobSnapshot): Snapshot returned by the original public
+                job's ``snapshot()`` method.
+            bindings (dict[str, Any] | None): Original runtime parameter
+                bindings. Defaults to ``None`` for parameter-free programs.
+
+        Returns:
+            SampleJob[Any] | RunJob[Any] | ExpvalJob: Restored lazy job with
+                the same typed public result conversion as a new execution.
+
+        Raises:
+            ExecutionError: If the snapshot operation or execution shape does
+                not match this executable program.
+            NotImplementedError: If the executor cannot restore the referenced
+                provider execution.
+            ValueError: If required bindings are missing or invalid.
+
+        Example:
+            >>> original = executable.sample(executor, shots=1000)
+            >>> snapshot = original.snapshot()
+            >>> restored = executable.restore(executor, snapshot)
+            >>> restored.result()
+        """
+        from qamomile.circuit.transpiler.program_orchestrator import (
+            ProgramOrchestrator,
+        )
+
+        return ProgramOrchestrator(self).restore(executor, snapshot, bindings)
 
     def _run_expval(
         self,
         executor: QuantumExecutor[T],
         bindings: dict[str, Any] | None = None,
+        *,
+        estimation: EstimationAccuracy | None = None,
     ) -> ExpvalJob:
-        """Backward-compatible helper for pure expval execution."""
+        """Submit a pure expectation execution through the compatibility API.
+
+        Args:
+            executor (QuantumExecutor[T]): Backend execution adapter.
+            bindings (dict[str, Any] | None): Runtime public bindings.
+            estimation (EstimationAccuracy | None): Optional accuracy policy.
+
+        Returns:
+            ExpvalJob: Deferred expectation result.
+
+        Raises:
+            ExecutionError: If the program does not contain one pure
+                expectation computation.
+        """
         from qamomile.circuit.transpiler.program_orchestrator import (
             ProgramOrchestrator,
         )
 
-        return ProgramOrchestrator(self).run_expval(executor, bindings)
+        return ProgramOrchestrator(self).run_expval(
+            executor,
+            bindings,
+            estimation,
+        )

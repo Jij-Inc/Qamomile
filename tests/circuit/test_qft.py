@@ -70,12 +70,9 @@ def test_qft_resource_formula(n_value: int) -> None:
 
 
 @pytest.mark.parametrize("n", [1, 2, 3, 5])
-def test_qft_round_trip_qiskit(n: int) -> None:
-    """QFT followed by IQFT preserves a basis state on a real backend."""
-    pytest.importorskip("qiskit")
-    from qamomile.qiskit import QiskitTranspiler
-
-    transpiler = QiskitTranspiler()
+def test_qft_round_trip_sdk(sdk_transpiler, n: int) -> None:
+    """QFT followed by IQFT preserves a basis state on every SDK backend."""
+    transpiler = sdk_transpiler.transpiler
     executable = transpiler.transpile(qft_round_trip, bindings={"n": n})
     result = executable.sample(transpiler.executor(), shots=128).result()
 
@@ -83,11 +80,9 @@ def test_qft_round_trip_qiskit(n: int) -> None:
 
 
 @pytest.mark.parametrize("seed", [0, 1, 2, 42])
-def test_qft_inverse_statevector(seed: int) -> None:
-    """Random product-state expvals survive a QFT/inverse-QFT round trip."""
-    pytest.importorskip("qiskit")
+def test_qft_inverse_statevector(sdk_transpiler, seed: int) -> None:
+    """Random product-state expvals survive a QFT round trip on every SDK."""
     import qamomile.observable as qm_o
-    from qamomile.qiskit import QiskitTranspiler
 
     rng = np.random.default_rng(seed)
     angles = rng.uniform(0.0, 2 * np.pi, size=3)
@@ -103,7 +98,7 @@ def test_qft_inverse_statevector(seed: int) -> None:
         qubits = qmc.iqft(qubits)
         return qmc.expval(qubits, observable)
 
-    transpiler = QiskitTranspiler()
+    transpiler = sdk_transpiler.transpiler
     observable = qm_o.Z(0)
     actual_executable = transpiler.transpile(
         circuit,
@@ -125,4 +120,4 @@ def test_qft_inverse_statevector(seed: int) -> None:
         bindings={"observable": observable},
     )
     expected = reference_executable.run(transpiler.executor()).result()
-    assert np.isclose(actual, expected, atol=1e-8)
+    assert np.isclose(actual, expected, rtol=0.0, atol=1e-8)

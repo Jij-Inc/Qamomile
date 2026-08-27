@@ -9,6 +9,12 @@ Qamomileを外部ライブラリや量子プラットフォームと組み合わ
 ::::{grid} 1 1 1 1
 
 :::{card}
+:header: **Amazon Braketサポート**
+:link: braket_support
+Braketネイティブ回路へトランスパイルし、ローカルまたはAWS上で実行します。
+:::
+
+:::{card}
 :header: **CUDA-Qサポート**
 :link: cudaq_support
 MaxCut QAOAをCUDA-Qへトランスパイルし、サンプリングと期待値計算を実行します。

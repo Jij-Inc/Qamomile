@@ -104,6 +104,18 @@ def _toy_qpe(bits: qmc.UInt = 4, theta: qmc.Float = 0.1) -> qmc.Vector[qmc.Bit]:
 
 
 @qmc.qkernel
+def _builtin_qpe_probe(
+    bits: qmc.UInt = 4,
+    theta: qmc.Float = 0.1,
+) -> qmc.Float:
+    """Run built-in QPE and measure its symbolic-width QFixed result."""
+    counting = qmc.qubit_array(bits, name="counting")
+    target = qmc.qubit(name="target")
+    phase = qmc.qpe(target, counting, _phase_u, theta=theta)
+    return qmc.measure(phase)
+
+
+@qmc.qkernel
 def _sized_kernel(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
     """Allocate an n-bit register for symbolic-size substitution tests."""
     return qmc.qubit_array(n, name="reg")
@@ -464,6 +476,8 @@ def test_inputs_include_noop_angle() -> None:
     est = _toy_qpe.estimate_resources(inputs={"bits": 5, "theta": 0.25})
 
     assert int(est.qubits) == 6  # 5 counting + 1 target
+    assert est.gates.total == 54
+    assert est.measurements.total == 5
     ignored = [a.message for a in est.assumptions if "ignored" in a.message]
     assert any("theta" in message for message in ignored)
 
@@ -490,6 +504,13 @@ def test_qubit_allocation_width_requires_an_integer() -> None:
         symbolic.substitute(n=1.5)
     with pytest.raises(ValueError, match="non-integer value"):
         _sized_kernel.estimate_resources(inputs={"n": 1.5})
+
+
+def test_qfixed_measurement_count_tracks_symbolic_qpe_width() -> None:
+    """Built-in QPE reports one measurement per QFixed register qubit."""
+    estimate = _builtin_qpe_probe.estimate_resources(inputs={"bits": 5, "theta": 0.25})
+
+    assert estimate.measurements.total == 5
 
 
 def test_inputs_accept_shift_expression() -> None:

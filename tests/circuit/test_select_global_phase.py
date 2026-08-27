@@ -707,8 +707,8 @@ def test_phase_select_survives_mixed_runtime_control_flow(
     sdk_transpiler: Any,
 ) -> None:
     """A phased SELECT survives nested while, if, and for regions."""
-    if sdk_transpiler.backend_name == "quri_parts":
-        pytest.skip("QURI Parts has no dynamic if or while primitive")
+    if sdk_transpiler.backend_name in {"quri_parts", "braket"}:
+        pytest.skip("This backend has no dynamic if or while primitive")
 
     @qmc.qkernel
     def circuit() -> qmc.Bit:

@@ -37,6 +37,7 @@ def qiskit_transpiler():
         pytest.param("qiskit", id="qiskit"),
         pytest.param("quri_parts", marks=pytest.mark.quri_parts, id="quri_parts"),
         pytest.param("cudaq", marks=pytest.mark.cudaq, id="cudaq"),
+        pytest.param("braket", marks=pytest.mark.braket, id="braket"),
     ]
 )
 def sdk_transpiler(request):
@@ -57,6 +58,11 @@ def sdk_transpiler(request):
         from qamomile.cudaq import CudaqTranspiler
 
         return SdkTranspilerCase(backend, CudaqTranspiler())
+    if backend == "braket":
+        pytest.importorskip("braket")
+        from qamomile.braket import BraketTranspiler
+
+        return SdkTranspilerCase(backend, BraketTranspiler())
     raise AssertionError(f"Unsupported SDK backend fixture value: {backend}")
 
 

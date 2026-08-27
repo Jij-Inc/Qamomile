@@ -34,12 +34,15 @@
 
 # %%
 import math
+import os
 
 import qamomile.circuit as qmc
 import qamomile.observable as qmo
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 256
 
 # %% [markdown]
 # ## 複数量子ビットの`sample()`
@@ -67,14 +70,14 @@ parity_probe.draw(theta=0.7)
 exe_sample = transpiler.transpile(parity_probe, parameters=["theta"])
 sample_result = exe_sample.sample(
     transpiler.executor(),
-    shots=256,
+    shots=sample_shots,
     bindings={"theta": 0.7},
 ).result()
 
 for outcome, count in sample_result.results:
     print(f"  outcome={outcome}, count={count}")
-assert sample_result.shots == 256
-assert sum(count for _, count in sample_result.results) == 256
+assert sample_result.shots == sample_shots
+assert sum(count for _, count in sample_result.results) == sample_shots
 # parity_probe は tuple[Bit, Bit] を返す → 各 outcome は 2 要素 tuple。
 assert all(
     isinstance(outcome, tuple) and len(outcome) == 2

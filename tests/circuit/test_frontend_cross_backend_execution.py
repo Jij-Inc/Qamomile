@@ -2,7 +2,7 @@
 
 This module exercises user-facing frontend constructs through the full
 ``transpile -> sample`` and ``transpile -> run`` paths on every supported
-local SDK backend (Qiskit, QURI Parts, CUDA-Q).  Backend emitter tests
+local SDK backend (Qiskit, QURI Parts, CUDA-Q, Amazon Braket). Backend emitter tests
 already validate low-level gate matrices; these tests instead pin the
 combinations users can write in qkernels: native gates, qkernel calls,
 broadcasts, controlled calls, composite gates, and Pauli evolution.
@@ -31,6 +31,7 @@ SampleMode = Literal["deterministic", "uniform", "bell"]
         "qiskit",
         pytest.param("quri_parts", marks=pytest.mark.quri_parts),
         pytest.param("cudaq", marks=pytest.mark.cudaq),
+        pytest.param("braket", marks=pytest.mark.braket),
     ]
 )
 def backend(request) -> Backend:
@@ -54,6 +55,12 @@ def backend(request) -> Backend:
         from qamomile.cudaq import CudaqTranspiler
 
         transpiler = CudaqTranspiler()
+        return name, transpiler, transpiler.executor()
+    if name == "braket":
+        pytest.importorskip("braket")
+        from qamomile.braket import BraketTranspiler
+
+        transpiler = BraketTranspiler()
         return name, transpiler, transpiler.executor()
     raise AssertionError(f"unknown backend {name}")
 
@@ -1317,15 +1324,18 @@ class FrontendExecutionCase:
 
 
 FRONTEND_EXECUTION_CASES = [
-    FrontendExecutionCase(
-        name="native-gates",
-        sample_kernel=native_gate_sample,
-        run_kernel=native_gate_run,
-        sample_mode="deterministic",
-        expected_bits=(1, 1, 1, 1),
-        expected_support={(1, 1, 1, 1)},
-        expected_expval=-4.0,
-        run_bindings={"obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2) + qm_o.Z(3)},
+    pytest.param(
+        FrontendExecutionCase(
+            name="native-gates",
+            sample_kernel=native_gate_sample,
+            run_kernel=native_gate_run,
+            sample_mode="deterministic",
+            expected_bits=(1, 1, 1, 1),
+            expected_support={(1, 1, 1, 1)},
+            expected_expval=-4.0,
+            run_bindings={"obs": qm_o.Z(0) + qm_o.Z(1) + qm_o.Z(2) + qm_o.Z(3)},
+        ),
+        marks=pytest.mark.ci_smoke,
     ),
     FrontendExecutionCase(
         name="qkernel-broadcast",

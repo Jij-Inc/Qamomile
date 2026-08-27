@@ -16,8 +16,8 @@ Each test exercises three layers of evidence:
 1. **Build**: the outer kernel's `.block` builds without raising.
 2. **Transpile**: `transpiler.transpile(...)` returns an executable.
 3. **Execute**: ``executable.sample(...)`` and/or ``executable.run(...)``
-   produce results matching an analytic baseline. Per CLAUDE.md, sampling
-   and expval go through different backend primitives and must both pass.
+   produce results matching an analytic baseline. Sampling and expval use
+   different backend primitives, so both execution paths are covered.
 
 Cross-backend coverage spans Qiskit, QuriParts (Qulacs), and CUDA-Q with
 ``importorskip``-style guards so a missing SDK skips rather than errors.

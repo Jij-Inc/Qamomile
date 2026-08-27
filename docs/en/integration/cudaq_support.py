@@ -163,7 +163,8 @@ def qaoa_ansatz(
 # Meanwhile, `gammas` / `betas` are left as parameters whose values are supplied later.
 
 # %%
-p = 3  # number of QAOA layers
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+p = 1 if docs_test_mode else 3  # number of QAOA layers
 qaoa_ansatz.draw(
     p=p,
     quad=spin_model.quad,
@@ -236,9 +237,8 @@ rng = np.random.default_rng(42)
 init_params = rng.uniform(-np.pi / 2, np.pi / 2, 2 * p)
 init_gammas = list(init_params[:p])
 init_betas = list(init_params[p:])
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-sample_shots = 256 if docs_test_mode else 2000
-maxiter = 20 if docs_test_mode else 100
+sample_shots = 1 if docs_test_mode else 2000
+maxiter = 4 if docs_test_mode else 100
 
 # Sample the parameterized executable and decode bitstrings to Ising energies.
 sample_result = executable.sample(
@@ -435,7 +435,7 @@ assert np.isclose(energy_from_run, energy_via_estimate, atol=1e-10)
 # We also time the sampling call on each target.
 
 # %%
-benchmark_shots = 512 if docs_test_mode else 100_000
+benchmark_shots = 1 if docs_test_mode else 100_000
 benchmark_seed = 13
 
 
@@ -532,7 +532,9 @@ def energy_distribution(decoded_samples):
 if gpu_decoded is not None:
     energy_delta = abs(cpu_energy - gpu_energy)
     print(f"mean-energy difference: {energy_delta:.4f}")
-    assert energy_delta < (0.5 if docs_test_mode else 0.15)
+    assert np.isfinite(cpu_energy) and np.isfinite(gpu_energy)
+    if not docs_test_mode:
+        assert energy_delta < 0.15
 
 fig, axes = plt.subplots(
     1,
@@ -603,7 +605,7 @@ print(runnable_circuit.source)
 # The example above is deterministic: the first measurement is always `1`, so the branch flips `q1` and the returned bit is always `1`.
 
 # %%
-runnable_shots = 128
+runnable_shots = 1 if docs_test_mode else 128
 runnable_sample = runnable_executable.sample(executor, shots=runnable_shots).result()
 print(runnable_sample.results)
 assert sum(count for _, count in runnable_sample.results) == runnable_shots

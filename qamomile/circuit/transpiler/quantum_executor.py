@@ -52,8 +52,21 @@ Bitstring Format:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Generic, Sequence, TypeVar
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
+from qamomile.circuit.transpiler.execution_capability import ExecutionCapabilities
+from qamomile.circuit.transpiler.execution_handle import (
+    CompletedExecutionHandle,
+    CompositeExecutionHandle,
+    ExecutionHandle,
+    ExecutionReference,
+)
+from qamomile.circuit.transpiler.execution_request import (
+    CircuitInvocation,
+    EstimateRequest,
+    SampleRequest,
+)
 from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
 
 if TYPE_CHECKING:
@@ -113,6 +126,140 @@ class QuantumExecutor(ABC, Generic[T]):
             Example: {"00": 512, "11": 512}
         """
         pass
+
+    @property
+    def capabilities(self) -> ExecutionCapabilities:
+        """Describe backend execution features available through this adapter.
+
+        Synchronous compatibility executors inherit conservative lifecycle
+        defaults. Estimation support is inferred from the overridden method so
+        existing third-party executors do not need an immediate source change.
+
+        Returns:
+            ExecutionCapabilities: Immutable executor capability declaration.
+        """
+        return ExecutionCapabilities(
+            supports_estimation=type(self).estimate is not QuantumExecutor.estimate
+        )
+
+    def submit_sample(
+        self,
+        request: SampleRequest[T],
+    ) -> ExecutionHandle[dict[str, int]]:
+        """Submit a sampling request through the synchronous compatibility path.
+
+        Remote executors should override this method and return immediately
+        with a provider-backed handle. Existing synchronous executors inherit
+        this implementation unchanged.
+
+        Args:
+            request (SampleRequest[T]): Circuit invocation and shot count.
+
+        Returns:
+            ExecutionHandle[dict[str, int]]: Completed compatibility handle.
+        """
+        circuit = self.bind_invocation(request.invocation)
+        return CompletedExecutionHandle(self.execute(circuit, request.shots))
+
+    def submit_samples(
+        self,
+        requests: Sequence[SampleRequest[T]],
+    ) -> ExecutionHandle[tuple[dict[str, int], ...]]:
+        """Submit an ordered collection of sampling requests.
+
+        Backends with native batch or parameter-sweep support should override
+        this method. The default preserves ordering with individual requests.
+
+        Args:
+            requests (Sequence[SampleRequest[T]]): Sampling requests.
+
+        Returns:
+            ExecutionHandle[tuple[dict[str, int], ...]]: Composite result
+                handle preserving request order.
+        """
+        return CompositeExecutionHandle(
+            [self.submit_sample(request) for request in requests]
+        )
+
+    def submit_estimate(
+        self,
+        request: EstimateRequest[T],
+    ) -> ExecutionHandle[float]:
+        """Submit an expectation request through the synchronous path.
+
+        Args:
+            request (EstimateRequest[T]): Circuit, Hamiltonian, and optional
+                accuracy policy.
+
+        Returns:
+            ExecutionHandle[float]: Completed compatibility handle.
+
+        Raises:
+            NotImplementedError: If an explicit accuracy policy is requested
+                from an executor that has not implemented request submission.
+        """
+        if request.accuracy is not None:
+            raise NotImplementedError(
+                f"{type(self).__name__} does not support per-request estimation "
+                "accuracy; configure the executor or override submit_estimate()."
+            )
+        circuit = self.bind_invocation(request.invocation)
+        return CompletedExecutionHandle(self.estimate(circuit, request.hamiltonian))
+
+    def submit_estimates(
+        self,
+        requests: Sequence[EstimateRequest[T]],
+    ) -> ExecutionHandle[tuple[float, ...]]:
+        """Submit an ordered collection of expectation requests.
+
+        Args:
+            requests (Sequence[EstimateRequest[T]]): Expectation requests.
+
+        Returns:
+            ExecutionHandle[tuple[float, ...]]: Composite result handle in
+                request order.
+        """
+        return CompositeExecutionHandle(
+            [self.submit_estimate(request) for request in requests]
+        )
+
+    def bind_invocation(self, invocation: CircuitInvocation[T]) -> T:
+        """Bind one invocation for a backend without native input submission.
+
+        Args:
+            invocation (CircuitInvocation[T]): Circuit, flattened bindings,
+                and backend parameter metadata.
+
+        Returns:
+            T: Bound circuit, or the original circuit when it has no runtime
+                parameters.
+        """
+        if not invocation.parameter_metadata.parameters:
+            return invocation.circuit
+        return self.bind_parameters(
+            invocation.circuit,
+            dict(invocation.bindings),
+            invocation.parameter_metadata,
+        )
+
+    def restore(
+        self,
+        reference: ExecutionReference,
+    ) -> ExecutionHandle[Any]:
+        """Restore a remote execution from a secret-free reference.
+
+        Args:
+            reference (ExecutionReference): Provider execution reference.
+
+        Returns:
+            ExecutionHandle[Any]: Restored provider-backed handle.
+
+        Raises:
+            NotImplementedError: If this executor cannot restore jobs.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support execution restoration"
+        )
 
     def bind_parameters(
         self,
