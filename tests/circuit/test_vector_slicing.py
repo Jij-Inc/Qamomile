@@ -2865,22 +2865,16 @@ class TestWholeViewEmit:
         )
 
 
-class TestRound2Reviewer:
-    """Regression tests for the 2nd-round adversarial review findings.
+class TestSliceSafety:
+    """Cover slice bounds, ownership, lowering, snapshots, and step validation."""
 
-    Covers P1-A (OOB slice clamp), P1-B (destructive view consume),
-    P1-C (if-lowering merge substitution on SliceArrayOp result),
-    P2-A (frontend/post-fold drain alignment), P2-B (H snapshot),
-    P2-C (UInt const negative/zero validation).
-    """
-
-    # ----- P1-A -------------------------------------------------------------
+    # ----- Slice-bound clamping ---------------------------------------------
 
     def test_slice_stop_beyond_parent_is_clamped(self):
         """``q[3:10]`` on a 4-qubit register produces a length-1 view.
 
-        Regression (P1-A): without clamping, emit produced a 7-clbit
-        result with only one measurement — silent data loss.
+        Without clamping, emit would produce a 7-clbit result with only
+        one measurement, causing silent data loss.
         """
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler
@@ -2900,14 +2894,13 @@ class TestRound2Reviewer:
         n_meas = sum(1 for inst in qc.data if inst.operation.name == "measure")
         assert n_meas == 1
 
-    # ----- P1-B -------------------------------------------------------------
+    # ----- Destructive view consumption ------------------------------------
 
     def test_measure_view_then_measure_parent_rejects(self):
         """``measure(q[1::2]); measure(q)`` must error — q[1], q[3] destroyed.
 
-        Regression (P1-B): frontend previously released only the view
-        slice-borrow and left the parent re-consumable, allowing a
-        second measure to silently re-measure collapsed qubits.
+        The frontend must preserve the destroyed parent slots after releasing
+        the view borrow so a second measurement cannot reuse collapsed qubits.
         """
         from qamomile.circuit.transpiler.errors import QubitConsumedError
 
@@ -2958,13 +2951,13 @@ class TestRound2Reviewer:
         assert qc.num_qubits == 4
         assert qc.num_clbits == 4
 
-    # ----- P1-C -------------------------------------------------------------
+    # ----- Slice-result substitution ---------------------------------------
 
     def test_if_lowering_substitutes_slice_array_op_results(self):
         """``_apply_substitution`` now walks SliceArrayOp result metadata.
 
-        Regression (P1-C): for an ``if`` whose branches flow into a
-        slice's bounds, the merge-output references must be substituted
+        For an ``if`` whose branches flow into a slice's bounds, the
+        merge-output references must be substituted
         into ``SliceArrayOperation.results[0].slice_start`` /
         ``slice_step`` — not just operands — so post-fold coverage
         registration sees the concrete bounds.  Directly exercising
@@ -3003,7 +2996,7 @@ class TestRound2Reviewer:
         assert isinstance(result_av, ArrayValue)
         assert result_av.slice_start is folded_start
 
-    # ----- P2-A -------------------------------------------------------------
+    # ----- Overlapping-view validation -------------------------------------
 
     def test_overlapping_top_level_views_are_rejected(self):
         """Top-level same-range / overlapping views are rejected at trace time.
@@ -3035,14 +3028,14 @@ class TestRound2Reviewer:
         ):
             _ = kern.block
 
-    # ----- P2-B -------------------------------------------------------------
+    # ----- Observable-binding snapshots -----------------------------------
 
     def test_expval_snapshots_hamiltonian_binding(self):
         """Post-transpile mutations of ``H`` do not leak into ``exe.run``.
 
-        Regression (P2-B): the compiled executable held the binding
-        by reference, so ``H.add_term(...)`` between transpile and
-        run silently altered the evaluated observable.
+        The compiled executable must not hold the binding by reference;
+        otherwise ``H.add_term(...)`` between transpile and run would
+        silently alter the evaluated observable.
         """
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler
@@ -3065,14 +3058,13 @@ class TestRound2Reviewer:
             f"exe.run picked up post-transpile H mutation; got {value}"
         )
 
-    # ----- P2-C -------------------------------------------------------------
+    # ----- Constant slice-step validation ---------------------------------
 
     def test_zero_uint_const_step_rejected(self):
         """``q[0:4:UInt(0)]`` raises ``NotImplementedError`` before arithmetic.
 
-        Regression (P2-C): the previous ``int``-only validation let a
-        ``UInt`` handle with const 0 through; ``_compute_slice_length``
-        then hit ``ZeroDivisionError`` inside arithmetic.
+        Validation must also reject a ``UInt`` handle with const 0 before
+        ``_compute_slice_length`` reaches a division by zero.
         """
         from qamomile.circuit.frontend.handle.primitives import UInt
         from qamomile.circuit.ir.types.primitives import UIntType
@@ -3093,31 +3085,19 @@ class TestRound2Reviewer:
             kern.block
 
 
-class TestRound3Reviewer:
-    """Regression tests for Codex Round 3 adversarial review findings.
+class TestMeasurementResultShapeFolding:
+    """Verify bound-derived measurement shapes are folded before allocation."""
 
-    Covers R3-A: constant-fold does not fold result ArrayValues for
-    non-SliceArrayOp ops (``MeasureVectorOperation`` clbit-result
-    shape stays symbolic → allocator emits 0 clbits).
-
-    The accompanying R3-B regressions (``measure(q[1::2])`` then
-    ``expval(q, ...)`` over the same register and friends) used to
-    live here as well; they have moved to
-    ``tests/circuit/test_expval.py::TestExpvalOverConsumedSlots``
-    alongside the other expval-consume guarantees.
-    """
-
-    # ----- R3-A: constant-fold must fold operation *results* ----------------
+    # ----- Fold operation results before allocation ------------------------
 
     def test_binop_derived_slice_bounds_emit_correct_clbit_count(self):
         """``measure(q[lo+0 : hi+0])`` folds to concrete clbits via bound bindings.
 
-        Regression (R3-A): ``_substitute_folded_operands`` only folded
-        ``op.operands``, not ``op.results``.  The ``MeasureVectorOperation``
-        clbit-result array carries a ``shape`` derived from the BinOp
-        ``(hi+0) - (lo+0)``; without result folding the shape remained
-        symbolic and the allocator produced zero clbits — a silent data
-        loss identical to the earlier OOB clamp bug.
+        ``_substitute_folded_operands`` must fold ``op.results`` as well as
+        ``op.operands``. The ``MeasureVectorOperation`` clbit-result array
+        carries a ``shape`` derived from the BinOp ``(hi+0) - (lo+0)``;
+        without result folding the shape remains symbolic and the allocator
+        produces zero clbits.
         """
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler
@@ -3172,15 +3152,12 @@ class TestRound3Reviewer:
         assert qc.num_clbits == 3
 
 
-class TestRound4Reviewer:
-    """Regression tests for Codex Round 4 adversarial review findings.
+class TestDerivedSliceBehavior:
+    """Verify clamping, ownership, carrier resolution, and derived-bound folding.
 
-    R4-A: BinOp-derived view stop bound is not clamped to the parent
-    length, so ``measure(q[0:hi+0])`` with ``hi`` greater than the parent
-    length over-reports clbits and silently drops measurements.  The fix
-    routes the clamp through a new :attr:`BinOpKind.MIN` so the same
-    construction handles eager folding (literal bounds) and deferred
-    folding (parameter-derived bounds).
+    BinOp-derived view bounds must clamp to the parent length before
+    allocation. The same construction handles eager folding for literal
+    bounds and deferred folding for parameter-derived bounds.
     """
 
     def test_binop_stop_clamped_to_parent_length_from_zero(self):
@@ -3264,7 +3241,7 @@ class TestRound4Reviewer:
         qc = exe.compiled_quantum[0].circuit
         assert qc.num_clbits == 4
 
-    # ----- R4-B: separately-derived view consumed-slot check ----------------
+    # ----- Consumed slots across separately derived views ------------------
 
     def test_two_same_range_views_with_destructive_consume_rejected(self):
         """``odd1=q[1::2]; odd2=q[1::2]; measure(odd1); expval(odd2,obs)`` is rejected."""
@@ -3290,7 +3267,7 @@ class TestRound4Reviewer:
             q = qmc.qubit_array(4, "q")
             # Sequential same-range slicing triggers the opportunistic
             # drain that transfers parent-slot ownership from view1 to
-            # view2 — the underlying R4-B bug pattern.
+            # view2, exercising same-range ownership transfer.
             view1 = q[0::2]
             view2 = q[0::2]
             _ = qmc.measure(view1)
@@ -3351,7 +3328,7 @@ class TestRound4Reviewer:
         """``measure(q[1::2])`` then ``q[1::2]`` again surfaces as
         ``QubitConsumedError``, not the live-borrow conflict.
 
-        The earlier Round-4 tests pin the LIVE-overlap variant: ``v1 =
+        The live-overlap tests above cover the variant where ``v1 =
         q[1::2]; v2 = q[1::2]`` rejects ``v2``'s construction before
         any destructive consume happens (``QubitBorrowConflictError``).
         This test pins the *post-destructive-consume* recreation path:
@@ -3374,7 +3351,7 @@ class TestRound4Reviewer:
         with pytest.raises(QubitConsumedError, match="already destroyed"):
             kern.block
 
-    # ----- R4-C: cast(view, ...) carrier-key root-space resolution -----------
+    # ----- Root-space carrier resolution for cast views --------------------
 
     def test_cast_view_to_qfixed_measures_root_qubits(self):
         """``cast(q[1::2], QFixed)`` measures the root qubits the view covers."""
@@ -3395,7 +3372,7 @@ class TestRound4Reviewer:
         # The view covers q[1], q[3], q[5], q[7] — four physical qubits.
         assert n_meas == 4, (
             f"cast(q[1::2], QFixed) followed by measure must emit 4 "
-            f"measurements; got {n_meas} (R4-C carrier-key bug)"
+            f"measurements; got {n_meas} (view carrier-resolution regression)"
         )
         # Verify the measured qubits are the root-space {1, 3, 5, 7}.
         measured_q = sorted(
@@ -3467,7 +3444,7 @@ class TestRound4Reviewer:
         with pytest.raises(ValueError, match="symbolic"):
             kern.block
 
-    # ----- R4-D: eager BinOp folding when both operands are constants --------
+    # ----- Eager BinOp folding for constant operands -----------------------
 
     def test_binop_with_two_constants_folds_eagerly_at_trace(self):
         """``UInt(const) + 0`` collapses to a constant Value at trace, no BinOp."""
@@ -3593,26 +3570,15 @@ class TestRound4Reviewer:
         assert measured_q == [2, 3, 4]
 
 
-class TestRound5Reviewer:
-    """Regression tests for Copilot Round 5 review findings.
+class TestSliceBorrowState:
+    """Verify slice-borrow state is isolated and survives loop merges.
 
-    Covers three additional silent-fail / cross-contamination bugs the
-    earlier rounds missed:
-
-    R5-A: ``_build_qubit_map`` swallows ``EmitError`` from
-    ``resolve_slice_chain`` for sliced operands and falls back to the
-    element_uuid path, producing an empty qubit_map and a far-away
-    backend width-mismatch error.
-    R5-B: ``SliceBorrowCheckPass`` borrow-state keyed only by
-    slot index aliases independent registers — consuming ``a[1]``
-    spuriously blocks ``b[1]``.
-    R5-C: The loop-body state merge inside ``_walk_nested`` only
-    propagates *new* keys back to the outer state, dropping
-    consumed-slot markers installed inside the loop and view
-    ownership transitions for views created before the loop.
+    Borrow-state keys must include the root register so equal slot indices in
+    independent registers do not alias. Loop-body merges must propagate
+    consumed-slot markers and ownership transitions back to the outer state.
     """
 
-    # ----- R5-B: borrow keys must be namespaced per root array --------------
+    # ----- Borrow keys namespaced per root array ---------------------------
 
     def test_consume_view_on_one_register_does_not_block_other_register(self):
         """Consuming a view on ``a`` must not block access to register ``b``."""
@@ -3654,7 +3620,7 @@ class TestRound5Reviewer:
         # Both views measure 2 qubits each on their own register.
         assert qc.num_clbits >= 2
 
-    # ----- R5-C: loop-body state must propagate consumed markers -------------
+    # ----- Loop-body state propagates consumed markers ---------------------
 
     def test_destructive_view_consume_inside_for_loop_persists_post_loop(self):
         """A destructive view consume inside a loop body must mark consumed slots."""
@@ -3677,11 +3643,9 @@ class TestRound5Reviewer:
     def test_consumed_marker_in_loop_body_does_not_leak_across_registers(self):
         """The loop-body merge respects the per-root namespace.
 
-        Combines R5-B (per-root namespacing) and R5-C (loop-body
-        merge): a destructive view consume on register ``a`` inside a
-        ``for`` body must mark ``a``'s slots post-loop, but must not
-        bleed into register ``b`` (whose identical-numbered slot would
-        have collided under a non-namespaced key).
+        A destructive view consume on register ``a`` inside a ``for`` body
+        must mark ``a``'s slots after the loop without bleeding into register
+        ``b``, whose identically numbered slots share no ownership state.
         """
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler

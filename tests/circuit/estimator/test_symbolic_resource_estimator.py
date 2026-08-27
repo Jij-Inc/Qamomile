@@ -341,6 +341,34 @@ def test_depth_uses_quantum_wire_dependencies() -> None:
     assert estimate.depth.clifford_depth == 2
 
 
+def test_depth_parallelizes_wire_disjoint_indexed_loop_iterations() -> None:
+    """An element-wise loop has one layer while a shared-wire loop serializes."""
+
+    @qm.qkernel
+    def indexed(n: qm.UInt) -> qm.Vector[qm.Qubit]:
+        """Apply H independently to every register element."""
+        qubits = qm.qubit_array(n, "qubits")
+        for index in qm.range(n):
+            qubits[index] = qm.h(qubits[index])
+        return qubits
+
+    @qm.qkernel
+    def shared(n: qm.UInt) -> qm.Qubit:
+        """Apply H repeatedly to one shared qubit."""
+        qubit = qm.qubit("qubit")
+        for _index in qm.range(n):
+            qubit = qm.h(qubit)
+        return qubit
+
+    indexed_estimate = indexed.estimate_resources(inputs={"n": 5})
+    shared_estimate = shared.estimate_resources(inputs={"n": 5})
+
+    assert indexed_estimate.gates.total == 5
+    assert indexed_estimate.depth.depth == 1
+    assert shared_estimate.gates.total == 5
+    assert shared_estimate.depth.depth == 5
+
+
 @qm.qkernel
 def _released_qubit_probe() -> qm.Qubit:
     """Measure one allocation before creating a replacement qubit."""

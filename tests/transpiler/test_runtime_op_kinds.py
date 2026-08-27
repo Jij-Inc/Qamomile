@@ -5,7 +5,7 @@ The IR contract is that every variant of ``RuntimeOpKind`` reaches
 backend-native runtime expression. Earlier this contract had a gap: the
 backend implemented every match arm but the frontend only emitted
 AND/OR/NOT, so the comparison and arithmetic arms were dead code that
-hid the ``bool(...)`` coercion bug Copilot caught.
+hid an incorrect ``bool(...)`` coercion.
 
 These tests pin every cell:
 
@@ -180,7 +180,7 @@ class TestSyntheticBinaryExprDispatch:
             _materialize_binary(BinaryOperator[kind.name], lhs, rhs)
 
     def test_numeric_constants_preserve_their_type(self, expr_module):
-        """Regression for the Copilot-flagged ``bool(...)`` coercion bug.
+        """Keep numeric constants from being coerced to ``bool``.
 
         Building ``expr.equal(reg, 5)`` must keep ``5`` as an integer; if
         anything coerced operands to ``bool`` it would become ``True`` and

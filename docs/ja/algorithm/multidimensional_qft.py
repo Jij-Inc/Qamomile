@@ -30,6 +30,8 @@
 # # !pip install "qamomile[qiskit]"
 
 # %%
+import os
+
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -37,6 +39,9 @@ import qamomile.circuit as qmc
 from qamomile.circuit.stdlib import mottonen_amplitude_encoding
 from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.qiskit import QiskitTranspiler
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 2**14
 
 # %% [markdown]
 # ## 背景
@@ -260,7 +265,7 @@ def compute_prob(result: SampleResult) -> np.ndarray:
     return prob
 
 
-result1 = exe.sample(transpiler.executor(), shots=2**14).result()
+result1 = exe.sample(transpiler.executor(), shots=sample_shots).result()
 prob = compute_prob(result1)
 
 
@@ -313,7 +318,7 @@ plt.show()
 fw = w2d * f_padding
 fw_flatten = fw.flatten()
 exe = transpiler.transpile(qft_for_multidimension, bindings={"inputs": fw_flatten})
-result2 = exe.sample(transpiler.executor(), shots=2**14).result()
+result2 = exe.sample(transpiler.executor(), shots=sample_shots).result()
 prob2 = compute_prob(result2)
 
 # %% [markdown]

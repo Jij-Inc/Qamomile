@@ -56,11 +56,14 @@
 
 # %%
 import math
+import os
 
 import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 256
 
 # %% [markdown]
 # ## 最初の量子カーネル：偏りのあるコイン
@@ -139,7 +142,7 @@ exe = transpiler.transpile(biased_coin, parameters=["theta"])
 # 独自のカスタムexecutor（例:実機やクラウドサービス）を接続することもできます。
 job = exe.sample(
     transpiler.executor(),
-    shots=256,
+    shots=sample_shots,
     bindings={"theta": math.pi / 4},
 )
 
@@ -148,8 +151,8 @@ job = exe.sample(
 result = job.result()
 
 print("sample results:", result.results)
-assert result.shots == 256
-assert sum(count for _, count in result.results) == 256
+assert result.shots == sample_shots
+assert sum(count for _, count in result.results) == sample_shots
 
 # %% [markdown]
 # 3つの概念を押さえておきましょう：
@@ -226,15 +229,15 @@ demo_result = (
     transpiler.transpile(two_qubit_demo)
     .sample(
         transpiler.executor(),
-        shots=256,
+        shots=sample_shots,
     )
     .result()
 )
 
 for outcome, count in demo_result.results:
     print(f"  outcome={outcome}, count={count}")
-assert demo_result.shots == 256
-assert sum(count for _, count in demo_result.results) == 256
+assert demo_result.shots == sample_shots
+assert sum(count for _, count in demo_result.results) == sample_shots
 # Bell 状態 |Phi+>: (0,0) と (1,1) のみが出現する。
 assert all(outcome in {(0, 0), (1, 1)} for outcome, _ in demo_result.results)
 

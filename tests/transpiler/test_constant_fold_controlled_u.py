@@ -299,8 +299,8 @@ class TestConstantFoldControlledUFields:
         cu = self._find_controlled_u(folded.operations)
         assert cu is not None
         assert isinstance(cu, SymbolicControlledU)
-        # The bug Copilot flagged: num_controls used to become a
-        # bare ``int`` here, crashing every downstream consumer.
+        # num_controls must not become a bare ``int`` here because that
+        # would crash every downstream consumer.
         assert isinstance(cu.num_controls, Value), (
             f"SymbolicControlledU.num_controls must stay a Value; "
             f"got {type(cu.num_controls).__name__}"

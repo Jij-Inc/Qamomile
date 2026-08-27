@@ -163,9 +163,14 @@ from .stdlib import (
 )
 
 # Execution result / job types (return values of ExecutableProgram.sample / run)
+from .transpiler.execution_capability import ExecutionCapabilities
+from .transpiler.execution_handle import ExecutionHandle, ExecutionReference
+from .transpiler.execution_request import Exact, ShotBased, TargetPrecision
 from .transpiler.job import (
     ExpvalJob,
     Job,
+    JobKind,
+    JobSnapshot,
     JobStatus,
     RunJob,
     SampleJob,
@@ -321,11 +326,19 @@ __all__ = [
     "QKernel",
     # Job / result types
     "Job",
+    "JobKind",
+    "JobSnapshot",
     "JobStatus",
     "SampleResult",
     "SampleJob",
     "RunJob",
     "ExpvalJob",
+    "ExecutionCapabilities",
+    "ExecutionHandle",
+    "ExecutionReference",
+    "Exact",
+    "ShotBased",
+    "TargetPrecision",
     # Visualization (lazy-loaded)
     "MatplotlibDrawer",
     "CircuitStyle",

@@ -58,6 +58,12 @@ project:
     - title: API Reference
       file: api/index
       children:
+        - file: api/braket/index
+          children:
+            - file: api/braket/execution
+            - file: api/braket/materializer
+            - file: api/braket/observable
+            - file: api/braket/transpiler
         - file: api/circuit/index
           children:
             - file: api/circuit/algorithm

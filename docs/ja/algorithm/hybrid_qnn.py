@@ -55,15 +55,15 @@ docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 # %%
 N_QUBITS = 4
-N_LAYERS = 2
+N_LAYERS = 1 if docs_test_mode else 2
 N_WEIGHTS_PER_LAYER = N_QUBITS * 3  # 各量子ビットに RZ, RY, RZ
 N_WEIGHTS = N_LAYERS * N_WEIGHTS_PER_LAYER
 
 print(f"量子ビット数: {N_QUBITS}, 層数: {N_LAYERS}, 学習パラメータ数: {N_WEIGHTS}")
 assert N_QUBITS == 4
-assert N_LAYERS == 2
+assert N_LAYERS == (1 if docs_test_mode else 2)
 # N_WEIGHTS = N_LAYERS * N_QUBITS * 3(1層あたり量子ビットごとに RZ + RY + RZ)。
-assert N_WEIGHTS == 24
+assert N_WEIGHTS == (12 if docs_test_mode else 24)
 
 
 # %% [markdown]
@@ -146,11 +146,11 @@ est = variational_ansatz.estimate_resources(
 print(est)
 assert est.qubits == 4
 # 入力 RY 4 + 2 層 * (RZ 4 + RY 4 + RZ 4) = 1-qubit 回転 28 個。
-assert est.gates.single_qubit == 28
+assert est.gates.single_qubit == (16 if docs_test_mode else 28)
 # 2 層 * 3 CZ(4 量子ビット線形チェーン)= 2-qubit Clifford 6 個。
-assert est.gates.two_qubit == 6
-assert est.gates.total == 34
-assert est.gates.rotation_gates == 28
+assert est.gates.two_qubit == (3 if docs_test_mode else 6)
+assert est.gates.total == (19 if docs_test_mode else 34)
+assert est.gates.rotation_gates == (16 if docs_test_mode else 28)
 
 # %% [markdown]
 # ## 量子フォワードパス
@@ -291,23 +291,8 @@ class QLayer(nn.Module):
 N_CLASSES = 4
 SELECTED_CLASSES = [0, 1, 5, 8]  # T-shirt, Trouser, Sandal, Bag
 CLASS_NAMES = ["T-shirt", "Trouser", "Sandal", "Bag"]
-N_TRAIN_PER_CLASS = 2 if docs_test_mode else 60
-N_TEST_PER_CLASS = 2 if docs_test_mode else 30
-
-transform = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize((0.2860,), (0.3530,)),
-])
-
-# 永続キャッシュディレクトリを使用（再ダウンロードを回避）
-_data_root = os.path.join(os.path.expanduser("~"), ".cache", "fashion_mnist")
-full_train = datasets.FashionMNIST(
-    root=_data_root, train=True, download=True, transform=transform
-)
-full_test = datasets.FashionMNIST(
-    root=_data_root, train=False, download=True, transform=transform
-)
-
+N_TRAIN_PER_CLASS = 1 if docs_test_mode else 60
+N_TEST_PER_CLASS = 1 if docs_test_mode else 30
 
 def subset_dataset(dataset, classes, n_per_class):
     """指定クラスからランダムにサブセットを抽出する。"""
@@ -329,8 +314,31 @@ def subset_dataset(dataset, classes, n_per_class):
     return torch.stack(images), torch.tensor(labels)
 
 
-X_train, y_train = subset_dataset(full_train, SELECTED_CLASSES, N_TRAIN_PER_CLASS)
-X_test, y_test = subset_dataset(full_test, SELECTED_CLASSES, N_TEST_PER_CLASS)
+if docs_test_mode:
+    # docs testでは、CI runnerごとの29 MBのFashion-MNISTダウンロードを避けつつ、
+    # hybrid forward/backward/updateの全経路を実行する。
+    data_generator = torch.Generator().manual_seed(0)
+    X_train = torch.rand((N_CLASSES, 1, 28, 28), generator=data_generator)
+    X_test = torch.rand((N_CLASSES, 1, 28, 28), generator=data_generator)
+    y_train = torch.arange(N_CLASSES)
+    y_test = torch.arange(N_CLASSES)
+else:
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.2860,), (0.3530,)),
+    ])
+    # 永続キャッシュディレクトリを使用（再ダウンロードを回避）
+    _data_root = os.path.join(os.path.expanduser("~"), ".cache", "fashion_mnist")
+    full_train = datasets.FashionMNIST(
+        root=_data_root, train=True, download=True, transform=transform
+    )
+    full_test = datasets.FashionMNIST(
+        root=_data_root, train=False, download=True, transform=transform
+    )
+    X_train, y_train = subset_dataset(
+        full_train, SELECTED_CLASSES, N_TRAIN_PER_CLASS
+    )
+    X_test, y_test = subset_dataset(full_test, SELECTED_CLASSES, N_TEST_PER_CLASS)
 
 print(f"訓練データ: {X_train.shape}, テストデータ: {X_test.shape}")
 # 4 クラス × N_PER_CLASS サンプル; Fashion-MNIST は 1x28x28 グレースケール。
@@ -382,7 +390,7 @@ class EndToEndHybridHQNN(nn.Module):
         return logits, feats, q_out
 
 
-EPOCHS = 2 if docs_test_mode else 10
+EPOCHS = 1 if docs_test_mode else 10
 BATCH_SIZE = 4
 
 torch.manual_seed(42)

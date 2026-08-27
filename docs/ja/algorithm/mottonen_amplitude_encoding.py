@@ -26,6 +26,8 @@
 # # !pip install qamomile
 
 # %%
+import os
+
 import numpy as np
 from qiskit.quantum_info import Statevector
 
@@ -41,6 +43,8 @@ from qamomile.linalg import (
     compute_mottonen_amplitude_encoding_rz_angles,
 )
 from qamomile.qiskit import QiskitTranspiler
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 # %% [markdown]
 # ## 背景
@@ -276,7 +280,7 @@ n_runtime_params = len(executable.compiled_quantum[0].circuit.parameters)
 print(f"コンパイル済み回路の実行時パラメータ数: {n_runtime_params}")
 assert n_runtime_params == 2 * (2**2 - 1)
 
-shots = 8192
+shots = 1 if docs_test_mode else 8192
 for trial_amplitudes in (
     [1.0, 0.0, 0.0, 1.0],
     [3.0, 4.0, 0.0, 0.0],
@@ -300,7 +304,9 @@ for trial_amplitudes in (
     expected_probabilities = np.abs(normalize(trial_amplitudes)) ** 2
     max_deviation = float(np.max(np.abs(observed - expected_probabilities)))
     print(f"振幅={str(trial_amplitudes):<48s} max|p_obs - p_exp| = {max_deviation:.4f}")
-    assert max_deviation < ATOL_SHOT
+    assert sum(count for _, count in counts) == shots
+    if not docs_test_mode:
+        assert max_deviation < ATOL_SHOT
 
 # %% [markdown]
 # ### リソース式

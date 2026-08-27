@@ -1,5 +1,42 @@
 #!/usr/bin/env bash
-# Build script for Qamomile Documentation
+#
+# Build, synchronize, execute, serve, and clean the Qamomile documentation.
+#
+# Usage:
+#   ./docs/build.sh [COMMAND] [PAGE_SOURCE ...]
+#   ./build.sh [COMMAND] [PAGE_SOURCE ...]  # when run from docs/
+#
+# Arguments:
+#   COMMAND:
+#     Documentation operation to perform. Defaults to "help". Run with
+#     "help" to list every supported command.
+#   PAGE_SOURCE:
+#     One or more jupytext .py files accepted only by "page-build". Paths
+#     must be under docs/en/ or docs/ja/ and may be relative to either the
+#     repository root or docs/.
+#
+# Environment:
+#   READTHEDOCS:
+#     A value of "True" enables Read the Docs build behavior.
+#   READTHEDOCS_CANONICAL_URL:
+#     Any nonempty value also enables Read the Docs build behavior.
+#   READTHEDOCS_VERSION:
+#     When Read the Docs is detected, a nonempty value is used to construct
+#     the language-specific BASE_URL passed to jupyter-book.
+#   QAMOMILE_DOCS_TEST:
+#     Inherited by executed notebooks. Leave unset or different from "1" when
+#     producing reader-facing notebook outputs.
+#
+# Outputs:
+#   Depending on COMMAND, generates API reference files, synchronizes or
+#   executes notebooks, creates HTML builds, serves a local HTTP server, or
+#   removes generated documentation artifacts. Progress and diagnostics are
+#   written to the standard streams.
+#
+# Exit status:
+#   0 when the requested command completes successfully.
+#   Nonzero when the command is invalid, an input page is invalid, or an
+#   invoked documentation tool fails.
 
 set -e  # Exit on error
 
@@ -24,10 +61,61 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Print a green success message.
+#
+# Arguments:
+#   $1: Message to print.
+#
+# Globals:
+#   GREEN, NC: ANSI color sequences used to format the message.
+#
+# Outputs:
+#   Writes the formatted message to stdout.
+#
+# Returns:
+#   The exit status returned by echo.
 info()  { echo -e "${GREEN}✓${NC} $1"; }
+
+# Print a red error message and terminate the script.
+#
+# Arguments:
+#   $1: Message to print.
+#
+# Globals:
+#   RED, NC: ANSI color sequences used to format the message.
+#
+# Outputs:
+#   Writes the formatted message to stdout.
+#
+# Exit status:
+#   Always exits the script with status 1.
 error() { echo -e "${RED}✗${NC} $1"; exit 1; }
+
+# Print a yellow warning message.
+#
+# Arguments:
+#   $1: Message to print.
+#
+# Globals:
+#   YELLOW, NC: ANSI color sequences used to format the message.
+#
+# Outputs:
+#   Writes the formatted message to stdout.
+#
+# Returns:
+#   The exit status returned by echo.
 warn()  { echo -e "${YELLOW}!${NC} $1"; }
 
+# Display the command-line help text.
+#
+# Arguments:
+#   None.
+#
+# Outputs:
+#   Writes usage information and the supported commands to stdout.
+#
+# Returns:
+#   The exit status returned by the final echo command.
 show_help() {
     echo "Qamomile Documentation Build System"
     echo "===================================="
@@ -58,17 +146,51 @@ show_help() {
     echo ""
 }
 
-# Check if running on ReadTheDocs
+# Return success when the environment indicates a Read the Docs build.
+#
+# Arguments:
+#   None.
+#
+# Environment:
+#   READTHEDOCS: Recognized when equal to "True".
+#   READTHEDOCS_CANONICAL_URL: Recognized when nonempty.
+#
+# Returns:
+#   0 when either Read the Docs indicator is present.
+#   1 otherwise.
 is_rtd() {
     [ "${READTHEDOCS:-}" = "True" ] || [ -n "${READTHEDOCS_CANONICAL_URL:-}" ]
 }
 
+# Generate the API reference from Qamomile docstrings.
+#
+# Arguments:
+#   None.
+#
+# Outputs:
+#   Recreates the generated API reference under docs/api/, refreshes the
+#   managed API TOC region in docs/en/myst.yml and docs/ja/myst.yml, and writes
+#   progress messages to stdout.
+#
+# Returns:
+#   0 on successful completion.
 generate_api() {
     echo "Generating API reference..."
     uv run python generate_api.py
     info "API reference generated"
 }
 
+# Generate tag indexes and inject auto-managed tag content into a docs tree.
+#
+# Arguments:
+#   $1: Optional docs root to process. Defaults to the current directory.
+#
+# Outputs:
+#   Updates tag-related content below the selected docs root and writes
+#   progress messages to stdout.
+#
+# Returns:
+#   0 on successful completion.
 generate_doc_tags() {
     # Inject auto-managed regions (chip blocks, browse-by-tag clouds,
     # per-tag pages) into the build-dir copy of the docs tree pointed
@@ -80,6 +202,23 @@ generate_doc_tags() {
     info "Doc tag pages generated"
 }
 
+# Prepare an isolated documentation source tree for one or more languages.
+#
+# Arguments:
+#   $@: Optional locale names to copy. When omitted, every locale in LANGS is
+#       prepared.
+#
+# Globals:
+#   LANGS: Default locales prepared when no arguments are supplied.
+#   SYNC_DIRS: Sections whose jupytext sources are updated in the scratch tree.
+#
+# Outputs:
+#   Recreates docs/_build_src/, copies the selected language trees and shared
+#   assets, injects tag content, and updates paired notebooks in the scratch
+#   tree. Writes progress messages to stdout.
+#
+# Returns:
+#   0 on successful completion.
 setup_build_src() {
     # Build everything inside docs/_build_src/ so the committed source
     # tree never receives auto-managed injections. Sequence:
@@ -135,6 +274,20 @@ setup_build_src() {
     info "_build_src/ ready (${langs[*]})"
 }
 
+# Copy the generated API reference into every language directory.
+#
+# Arguments:
+#   None.
+#
+# Globals:
+#   LANGS: Locales that receive a copied API reference.
+#
+# Outputs:
+#   Creates or updates docs/<lang>/api/ for every locale in LANGS and writes
+#   progress messages to stdout.
+#
+# Returns:
+#   0 on successful completion.
 copy_api() {
     # NOTE: ``local _lang`` is mandatory. Without it the loop variable
     # would leak into the caller's scope and clobber the caller's own
@@ -151,7 +304,20 @@ copy_api() {
     info "API reference copied"
 }
 
-# Sync .py -> .ipynb for a single language
+# Synchronize jupytext .py sources to .ipynb files for one language.
+#
+# Arguments:
+#   $1: Locale directory name, such as "en" or "ja".
+#
+# Globals:
+#   SYNC_DIRS: Sections whose .py sources are converted.
+#
+# Outputs:
+#   Creates or updates paired notebooks in every SYNC_DIRS section for the
+#   selected locale and writes progress or warning messages to stdout.
+#
+# Returns:
+#   0 on successful completion.
 sync_lang() {
     local lang="$1"
     echo "Converting ${lang} .py files to .ipynb..."
@@ -171,7 +337,25 @@ sync_lang() {
     info "${lang} notebooks synced"
 }
 
-# Execute bulk-runnable .ipynb notebooks for a single language
+# Execute bulk-runnable .ipynb notebooks for one language.
+#
+# Arguments:
+#   $1: Locale directory name, such as "en" or "ja".
+#
+# Environment:
+#   QAMOMILE_DOCS_TEST: Inherited by notebook execution; leave unset or
+#   different from "1" for reader-facing outputs.
+#
+# Globals:
+#   TARGET_DIRS: Sections whose notebooks are executed.
+#
+# Outputs:
+#   Rewrites each existing notebook directly under the selected locale's
+#   TARGET_DIRS sections with executed outputs and writes progress messages to
+#   stdout.
+#
+# Returns:
+#   0 on successful completion.
 execute_lang() {
     local lang="$1"
     local dir nb
@@ -186,8 +370,27 @@ execute_lang() {
     info "${lang} notebooks executed"
 }
 
-# Build a single language from docs/_build_src/<lang>/ (assumes
-# setup_build_src already ran).
+# Build one language from docs/_build_src/<lang>/.
+#
+# Arguments:
+#   $1: Locale directory name, such as "en" or "ja".
+#
+# Environment:
+#   READTHEDOCS, READTHEDOCS_CANONICAL_URL:
+#     Select Read the Docs build behavior through is_rtd.
+#   READTHEDOCS_VERSION:
+#     When nonempty on Read the Docs, forms the BASE_URL for this locale.
+#
+# Outputs:
+#   Builds HTML in the scratch tree, replaces docs/<lang>/_build/ with that
+#   build, injects Colab launch controls, and writes progress messages to
+#   stdout.
+#
+# Preconditions:
+#   setup_build_src must already have prepared the selected locale.
+#
+# Returns:
+#   0 on successful completion.
 _build_lang_from_build_src() {
     local lang="$1"
     echo "Building ${lang} documentation..."
@@ -222,6 +425,18 @@ _build_lang_from_build_src() {
 # single-locale build is an acceptable cost; ``build_all`` calls them
 # once up front and then delegates to ``_build_lang_from_build_src``
 # directly so we don't double-run.
+#
+# Arguments:
+#   $1: Locale directory name, such as "en" or "ja".
+#
+# Outputs:
+#   Regenerates docs/api/ and both managed API TOC regions, refreshes every
+#   language's copied API files, prepares the selected locale in
+#   docs/_build_src/, and replaces that locale's HTML build. Does not execute
+#   committed notebooks.
+#
+# Returns:
+#   0 on successful completion.
 build_lang() {
     local lang="$1"
     generate_api
@@ -230,7 +445,18 @@ build_lang() {
     _build_lang_from_build_src "$lang"
 }
 
-# Sync, execute bulk-runnable notebooks, and build documentation for a single language
+# Synchronize, execute, and build documentation for one language.
+#
+# Arguments:
+#   $1: Locale directory name, such as "en" or "ja".
+#
+# Outputs:
+#   Updates the selected locale's paired notebooks and executed outputs,
+#   regenerates the API source and TOCs, refreshes copied API files for every
+#   locale in LANGS, and replaces the selected locale's HTML build.
+#
+# Returns:
+#   0 on successful completion.
 sync_build_lang() {
     local lang="$1"
     sync_lang "$lang"
@@ -238,6 +464,21 @@ sync_build_lang() {
     build_lang "$lang"
 }
 
+# Synchronize, execute, and build both English and Japanese documentation.
+#
+# Arguments:
+#   None.
+#
+# Globals:
+#   LANGS: Locales whose API copies and scratch sources are refreshed.
+#
+# Outputs:
+#   Updates paired notebooks and executed outputs for both locales, regenerates
+#   the API source, TOCs, copied API files, and scratch sources once, and
+#   replaces both HTML builds.
+#
+# Returns:
+#   0 on successful completion.
 sync_build_all() {
     # Mirror build_all's pattern: run generate_api + copy_api ONCE up
     # front, then drive the per-locale work via the lower-level
@@ -261,6 +502,19 @@ sync_build_all() {
     info "Both English and Japanese documentation synced and built successfully"
 }
 
+# Validate and normalize one page-build source path.
+#
+# Arguments:
+#   $1: Candidate path to a jupytext .py source below docs/en/ or docs/ja/.
+#
+# Outputs:
+#   Writes the docs-relative path to stdout on success or a validation message
+#   to stderr on failure.
+#
+# Returns:
+#   0 when the path names an existing supported page source.
+#   1 when the path is outside a supported locale, is not a .py file, or does
+#   not exist.
 normalize_page_source() {
     local raw="$1"
     local path="${raw#./}"
@@ -280,7 +534,25 @@ normalize_page_source() {
     echo "$path"
 }
 
-# Sync, execute, and build only the languages touched by one or more pages.
+# Synchronize and execute selected pages, then build their languages.
+#
+# Arguments:
+#   $@: One or more jupytext .py paths accepted by normalize_page_source.
+#
+# Environment:
+#   QAMOMILE_DOCS_TEST: Inherited by notebook execution; leave unset or
+#   different from "1" for reader-facing outputs.
+#
+# Outputs:
+#   Updates and executes the paired notebook for every requested page,
+#   regenerates the API source and TOCs, refreshes copied API files for every
+#   locale in LANGS, prepares scratch sources for the affected locales, and
+#   replaces their HTML builds.
+#
+# Exit status:
+#   0 after every requested page and affected locale is built successfully.
+#   1 when no page is supplied or a page fails validation.
+#   Nonzero when an invoked documentation tool fails.
 page_build() {
     if [ "$#" -eq 0 ]; then
         error "Usage: ./build.sh page-build docs/en/<section>/foo.py [docs/ja/<section>/foo.py ...]"
@@ -321,7 +593,19 @@ page_build() {
     info "Requested page source(s) synced, executed, and built"
 }
 
-# Serve documentation for a single language
+# Serve one language's HTML documentation on localhost port 8000.
+#
+# Arguments:
+#   $1: Locale directory name, such as "en" or "ja".
+#
+# Outputs:
+#   If the HTML build is missing, synchronizes, executes, and builds the
+#   selected locale first, including refreshing copied API files for every
+#   locale in LANGS. Changes the working directory to the selected HTML build,
+#   writes the server URL to stdout, and blocks while serving on port 8000.
+#
+# Returns:
+#   The exit status returned by the HTTP server when it stops.
 serve_lang() {
     local lang="$1"
     if [ ! -d "${lang}/_build/html" ]; then
@@ -336,7 +620,19 @@ serve_lang() {
     uv run python -m http.server 8000
 }
 
-# Clean, rebuild, and serve documentation for a single language
+# Clean generated documentation, rebuild one language, and serve it.
+#
+# Arguments:
+#   $1: Locale directory name, such as "en" or "ja".
+#
+# Outputs:
+#   Removes generated artifacts for every locale, synchronizes, executes, and
+#   rebuilds the selected locale, and refreshes copied API files for every
+#   locale in LANGS. Changes the working directory to the selected HTML build
+#   and blocks while serving on port 8000.
+#
+# Returns:
+#   The exit status returned by the HTTP server when it stops.
 fresh_lang() {
     local lang="$1"
     clean
@@ -349,6 +645,20 @@ fresh_lang() {
     uv run python -m http.server 8000
 }
 
+# Build both languages without executing committed notebooks.
+#
+# Arguments:
+#   None.
+#
+# Globals:
+#   LANGS: Locales whose copied API files and scratch sources are refreshed.
+#
+# Outputs:
+#   Regenerates the API source and TOCs, refreshes copied API files, prepares
+#   both locales in the scratch source tree, and replaces both HTML builds.
+#
+# Returns:
+#   0 on successful completion.
 build_all() {
     generate_api
     copy_api
@@ -358,6 +668,22 @@ build_all() {
     info "Both English and Japanese documentation built successfully"
 }
 
+# Remove generated documentation artifacts.
+#
+# Arguments:
+#   None.
+#
+# Globals:
+#   LANGS: Locales whose generated artifacts are removed.
+#   TARGET_DIRS: Sections whose directly contained notebooks are removed.
+#
+# Outputs:
+#   Removes notebooks directly under TARGET_DIRS, copied API references, HTML
+#   builds, and docs/_build_src/ for every locale. Writes progress messages to
+#   stdout.
+#
+# Returns:
+#   0 on successful completion.
 clean() {
     local _lang _dir
     echo "Cleaning generated files..."
@@ -372,6 +698,21 @@ clean() {
     info "Cleaned generated target notebooks, copied API docs, and build outputs"
 }
 
+# Remove generated documentation artifacts and defensively clear cache paths.
+#
+# Arguments:
+#   None.
+#
+# Globals:
+#   LANGS: Locales whose cache paths are checked after cleanup.
+#
+# Outputs:
+#   Performs clean, which removes each locale's entire build directory, then
+#   idempotently removes the now-normally-absent Jupyter cache paths. Writes
+#   progress messages to stdout.
+#
+# Returns:
+#   0 on successful completion.
 clean_all() {
     local _lang
     clean

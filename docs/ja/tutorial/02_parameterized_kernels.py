@@ -46,10 +46,14 @@
 # 典型的なパターンは、構造をトランスパイル時に固定し、ゲートパラメータを実行時にスイープすることです。
 
 # %%
+import os
+
 import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 128
 
 # %% [markdown]
 # ## `qubit_array`と`qmc.range`
@@ -145,12 +149,12 @@ exe = transpiler.transpile(
 for theta in [0.1, 0.5, 1.0]:
     result = exe.sample(
         transpiler.executor(),
-        shots=128,
+        shots=sample_shots,
         bindings={"theta": theta},
     ).result()
     print(f"theta={theta:.1f} -> {result.results}")
-    assert result.shots == 128
-    assert sum(count for _, count in result.results) == 128
+    assert result.shots == sample_shots
+    assert sum(count for _, count in result.results) == sample_shots
     # n=4 量子ビット測定 → 各 outcome は 4 要素のビット tuple。
     assert all(len(outcome) == 4 for outcome, _ in result.results)
 

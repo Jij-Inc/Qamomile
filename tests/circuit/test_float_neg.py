@@ -11,8 +11,8 @@ These tests exercise three layers of evidence:
 
 1. **Build / transpile**: a kernel using ``-theta`` compiles on each backend.
 2. **Execute**: both ``sample`` and ``run`` (expval) paths produce results
-   matching an analytic baseline. Per CLAUDE.md, sampling and expval go
-   through different backend primitives and must both pass.
+   matching an analytic baseline. Sampling and expval use different backend
+   primitives, so both execution paths are covered.
 3. **Equivalence**: ``-theta`` is numerically identical to ``0.0 - theta``.
 
 Note on scope: arithmetic on a *runtime* parameter feeding a gate angle

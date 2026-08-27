@@ -12,10 +12,27 @@ Example:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Sequence
 
 from qamomile.circuit.transpiler.errors import ExecutionError
 from qamomile.circuit.transpiler.executable import ParameterMetadata, QuantumExecutor
+from qamomile.circuit.transpiler.execution_capability import ExecutionCapabilities
+from qamomile.circuit.transpiler.execution_handle import (
+    CompletedExecutionHandle,
+    CompositeExecutionHandle,
+    ExecutionHandle,
+    MappedExecutionHandle,
+)
+from qamomile.circuit.transpiler.execution_request import (
+    CircuitInvocation,
+    EstimateRequest,
+    Exact,
+    SampleRequest,
+    ShotBased,
+    TargetPrecision,
+)
+from qamomile.qbraid.execution import QBraidExecutionHandle
 
 if TYPE_CHECKING:
     from qiskit import QuantumCircuit
@@ -98,8 +115,39 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
         timeout: int | None = None,
         poll_interval: int = 5,
         run_kwargs: dict[str, Any] | None = None,
-    ):
-        # Validate: device is mutually exclusive with device_id/provider/api_key
+    ) -> None:
+        """Initialize qBraid device access and execution policy.
+
+        Args:
+            device (Any | None): Pre-configured qBraid device. Mutually
+                exclusive with identifier and credential arguments.
+            device_id (str | None): qBraid device identifier. Defaults to
+                ``None``.
+            provider (Any | None): Provider used to resolve ``device_id``.
+                Defaults to ``None``.
+            api_key (str | None): API key used when constructing a provider.
+                Defaults to ``None``.
+            expval_shots (int): Positive shots per expectation basis group.
+                Defaults to 4096.
+            timeout (int | None): Default result wait timeout in seconds.
+                Defaults to no timeout.
+            poll_interval (int): Positive provider polling interval in seconds.
+                Defaults to five.
+            run_kwargs (dict[str, Any] | None): Additional qBraid submission
+                options. Defaults to ``None``.
+
+        Raises:
+            ValueError: If device arguments conflict, required identifiers are
+                missing, numeric wait options are invalid, or ``run_kwargs``
+                contains an executor-owned key.
+        """
+        if isinstance(expval_shots, bool) or expval_shots <= 0:
+            raise ValueError("expval_shots must be a positive integer")
+        if isinstance(poll_interval, bool) or poll_interval <= 0:
+            raise ValueError("poll_interval must be a positive integer")
+        if timeout is not None and (isinstance(timeout, bool) or timeout <= 0):
+            raise ValueError("timeout must be a positive integer or None")
+        self._device_id = device_id
         if device is not None:
             if device_id is not None or provider is not None or api_key is not None:
                 raise ValueError(
@@ -116,11 +164,26 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
                 "identify the target quantum device."
             )
 
-        self.expval_shots = expval_shots
+        self.expval_shots = int(expval_shots)
         self.timeout = timeout
         self.poll_interval = poll_interval
         self.run_kwargs = dict(run_kwargs) if run_kwargs else {}
         self._validate_run_kwargs(self.run_kwargs)
+
+    @property
+    def capabilities(self) -> ExecutionCapabilities:
+        """Describe qBraid features implemented by this executor.
+
+        Returns:
+            ExecutionCapabilities: Sampling lifecycle and estimation support.
+        """
+        return ExecutionCapabilities(
+            supports_async_sampling=True,
+            supports_async_estimation=True,
+            supports_estimation=True,
+            supports_cancellation=True,
+            estimation_accuracy=frozenset({ShotBased}),
+        )
 
     _RESERVED_RUN_KWARGS = frozenset({"shots"})
 
@@ -204,15 +267,65 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
             ValueError: If ``run_kwargs`` was mutated after construction
                 to include reserved keys.
         """
+        return self._submit(circuit, shots).result()
+
+    def _submit(
+        self,
+        circuit: "QuantumCircuit",
+        shots: int,
+    ) -> QBraidExecutionHandle:
+        """Submit one qBraid sampling job without waiting for completion.
+
+        Args:
+            circuit (QuantumCircuit): Measured Qiskit circuit to submit.
+            shots (int): Positive number of measurement shots.
+
+        Returns:
+            QBraidExecutionHandle: Lazy provider-backed sampling handle.
+
+        Raises:
+            ValueError: If mutable run options contain a reserved key.
+            Exception: Any qBraid submission failure.
+        """
         self._validate_run_kwargs(self.run_kwargs)
         job = self.device.run(circuit, shots=shots, **self.run_kwargs)
-        job.wait_for_final_state(
+
+        def decode(result: Any) -> dict[str, int]:
+            """Normalize counts from one qBraid result.
+
+            Args:
+                result (Any): Native qBraid result object.
+
+            Returns:
+                dict[str, int]: Canonical big-endian counts.
+            """
+            return self._normalize_counts(
+                result.data.get_counts(),
+                circuit.num_clbits,
+            )
+
+        return QBraidExecutionHandle(
+            job,
+            decode,
+            target=self._target_id(),
             timeout=self.timeout,
             poll_interval=self.poll_interval,
         )
-        result = job.result()
-        raw_counts = result.data.get_counts()
-        return self._normalize_counts(raw_counts, circuit.num_clbits)
+
+    def _target_id(self) -> str | None:
+        """Return a stable qBraid device identifier when available.
+
+        Returns:
+            str | None: Configured or SDK-provided device identifier.
+        """
+        if self._device_id:
+            return self._device_id
+        for attribute in ("id", "device_id"):
+            value = getattr(self.device, attribute, None)
+            value = value() if callable(value) else value
+            if isinstance(value, str) and value:
+                return value
+        return None
 
     @staticmethod
     def _normalize_counts(
@@ -271,8 +384,29 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
             Dictionary mapping canonical big-endian classical-bit strings
             to counts.
         """
-        circuit_with_meas = self._ensure_measurements(circuit)
-        return self._submit_and_wait(circuit_with_meas, shots)
+        request_circuit = self._ensure_measurements(circuit)
+        return self._submit_and_wait(request_circuit, shots)
+
+    def submit_sample(
+        self,
+        request: SampleRequest["QuantumCircuit"],
+    ) -> ExecutionHandle[dict[str, int]]:
+        """Submit qBraid sampling without waiting for the remote result.
+
+        Args:
+            request (SampleRequest[QuantumCircuit]): Circuit invocation and
+                requested shot count.
+
+        Returns:
+            ExecutionHandle[dict[str, int]]: Lazy qBraid sampling handle.
+
+        Raises:
+            ValueError: If runtime bindings are incomplete or run options
+                contain a reserved key.
+            Exception: Any qBraid submission failure.
+        """
+        circuit = self.bind_invocation(request.invocation)
+        return self._submit(self._ensure_measurements(circuit), request.shots)
 
     def bind_parameters(
         self,
@@ -339,6 +473,78 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
                 after binding, or if the result has a non-negligible
                 imaginary part.
         """
+        if params is not None:
+            circuit = circuit.assign_parameters(list(params))
+        invocation = CircuitInvocation(circuit, {}, ParameterMetadata())
+        request = EstimateRequest(
+            invocation,
+            hamiltonian,
+            ShotBased(self.expval_shots),
+        )
+        return self.submit_estimate(request).result()
+
+    def submit_estimate(
+        self,
+        request: EstimateRequest["QuantumCircuit"],
+    ) -> ExecutionHandle[float]:
+        """Submit counts-based expectation tasks without waiting.
+
+        Args:
+            request (EstimateRequest[QuantumCircuit]): Circuit invocation,
+                Hamiltonian, and optional shot policy.
+
+        Returns:
+            ExecutionHandle[float]: Lazy aggregate expectation handle.
+
+        Raises:
+            ValueError: If exact or target-precision estimation is requested.
+            ExecutionError: If the circuit or Hamiltonian cannot be estimated
+                safely through normalized counts.
+        """
+        shots = self.expval_shots
+        if isinstance(request.accuracy, ShotBased):
+            shots = request.accuracy.shots
+        elif isinstance(request.accuracy, Exact):
+            raise ValueError("qBraid counts execution does not support Exact")
+        elif isinstance(request.accuracy, TargetPrecision):
+            raise ValueError("qBraid counts execution does not support TargetPrecision")
+
+        circuit = self.bind_invocation(request.invocation)
+        circuits, decoder = self._prepare_estimate_tasks(
+            circuit,
+            request.hamiltonian,
+        )
+        if not circuits:
+            return CompletedExecutionHandle(decoder(()))
+        executions = CompositeExecutionHandle(
+            tuple(self._submit(task, shots) for task in circuits)
+        )
+        return MappedExecutionHandle(executions, decoder)
+
+    def _prepare_estimate_tasks(
+        self,
+        circuit: "QuantumCircuit",
+        hamiltonian: "qm_o.Hamiltonian",
+    ) -> tuple[
+        tuple["QuantumCircuit", ...],
+        Callable[[tuple[dict[str, int], ...]], float],
+    ]:
+        """Build basis-rotation circuits and their aggregate decoder.
+
+        Args:
+            circuit (QuantumCircuit): Bound state-preparation circuit without
+                pre-existing classical bits.
+            hamiltonian (qm_o.Hamiltonian): Observable to estimate.
+
+        Returns:
+            tuple[tuple[QuantumCircuit, ...], Callable[[tuple[dict[str, int], ...]], float]]:
+                Ordered measurement circuits and a callable that converts their
+                counts to one expectation.
+
+        Raises:
+            ExecutionError: If the circuit has classical bits or unbound
+                parameters, or the Hamiltonian exceeds the circuit width.
+        """
         if circuit.num_clbits > 0:
             raise ExecutionError(
                 "QBraidExecutor.estimate() does not support circuits with "
@@ -349,11 +555,6 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
                 "registers for expectation value estimation."
             )
 
-        # Bind parameters if provided (positional semantics, same as Qiskit).
-        if params is not None:
-            circuit = circuit.assign_parameters(list(params))
-
-        # Reject circuits with unresolved parameters before remote submission.
         if circuit.parameters:
             raise ExecutionError(
                 f"Circuit has {len(circuit.parameters)} unbound parameter(s) "
@@ -362,7 +563,6 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
                 "`circuit.assign_parameters(...)` before `estimate()`."
             )
 
-        # Validate Hamiltonian qubit indices are within circuit width.
         num_qubits = circuit.num_qubits
         max_idx = -1
         for operators, _ in hamiltonian:
@@ -377,8 +577,6 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
 
         from qamomile.observable import Pauli
 
-        # Group Pauli terms by compatible measurement basis assignment.
-        # Terms that only differ by identities can share one measurement run.
         basis_groups: list[
             tuple[dict[int, Pauli], list[tuple[tuple[Any, ...], complex]]]
         ] = []
@@ -399,62 +597,93 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
             else:
                 basis_groups.append((dict(basis_assignment), [(operators, coeff)]))
 
-        total_expval: complex = hamiltonian.constant
-
+        circuits = []
         for basis_assignment, terms in basis_groups:
-            # Build the rotated circuit
             rotated = circuit.copy()
-
             for qubit_idx, pauli_type in sorted(basis_assignment.items()):
                 if pauli_type == Pauli.X:
                     rotated.h(qubit_idx)
                 elif pauli_type == Pauli.Y:
                     rotated.sdg(qubit_idx)
                     rotated.h(qubit_idx)
-                # Z and I need no rotation
-
             rotated.measure_all()
+            circuits.append(rotated)
 
-            counts = self._submit_and_wait(rotated, self.expval_shots)
+        def decode(results: tuple[dict[str, int], ...]) -> float:
+            """Combine measurement-group counts into one expectation value.
 
-            # Compute parity expectation for each term in this group
-            total_shots = sum(counts.values())
+            Args:
+                results (tuple[dict[str, int], ...]): Counts in basis-group
+                    order.
 
-            for operators, coeff in terms:
-                # Determine which qubits contribute to parity for this term
-                parity_qubits = [op.index for op in operators if op.pauli != Pauli.I]
+            Returns:
+                float: Real Hamiltonian expectation value.
 
-                if not parity_qubits:
-                    # Pure identity term (should have been absorbed into constant)
-                    total_expval += coeff
-                    continue
+            Raises:
+                ExecutionError: If results are missing, contain no shots, or
+                    produce a non-negligible imaginary value.
+            """
+            if len(results) != len(basis_groups):
+                raise ExecutionError(
+                    "qBraid expectation result count does not match submitted "
+                    f"basis groups: expected={len(basis_groups)}, "
+                    f"actual={len(results)}"
+                )
+            total_expval: complex = hamiltonian.constant
+            for (_, terms), counts in zip(basis_groups, results, strict=True):
+                total_expval += self._decode_basis_group(counts, terms, Pauli.I)
+            if abs(total_expval.imag) > 1e-6:
+                raise ExecutionError(
+                    "Expectation value has non-negligible imaginary part: "
+                    f"{total_expval.imag:.6e}. This indicates an error in the "
+                    "Hamiltonian or circuit."
+                )
+            return float(total_expval.real)
 
-                parity_sum = 0.0
-                for bitstring, count in counts.items():
-                    # bitstring is big-endian: leftmost bit = highest qubit index
-                    bits = bitstring.replace(" ", "")
-                    n_bits = len(bits)
-                    parity = 0
-                    for q in parity_qubits:
-                        # big-endian: bit for qubit q is at position (n_bits - 1 - q)
-                        bit_pos = n_bits - 1 - q
-                        if 0 <= bit_pos < n_bits:
-                            parity ^= int(bits[bit_pos])
-                    # parity 0 -> +1, parity 1 -> -1
-                    parity_sum += ((-1) ** parity) * count
+        return tuple(circuits), decode
 
-                term_expval = parity_sum / total_shots
-                total_expval += coeff * term_expval
+    @staticmethod
+    def _decode_basis_group(
+        counts: dict[str, int],
+        terms: list[tuple[tuple[Any, ...], complex]],
+        identity: Any,
+    ) -> complex:
+        """Decode all compatible Pauli terms from one counts dictionary.
 
-        # Check imaginary part
-        if abs(total_expval.imag) > 1e-6:
-            raise ExecutionError(
-                f"Expectation value has non-negligible imaginary part: "
-                f"{total_expval.imag:.6e}. This indicates an error in the "
-                f"Hamiltonian or circuit."
-            )
+        Args:
+            counts (dict[str, int]): Big-endian measurement counts.
+            terms (list[tuple[tuple[Any, ...], complex]]): Pauli terms sharing
+                the submitted measurement basis.
+            identity (Any): Backend-independent identity Pauli enum value.
 
-        return float(total_expval.real)
+        Returns:
+            complex: Sum of coefficient-weighted term expectations.
+
+        Raises:
+            ExecutionError: If the provider returns an empty counts mapping.
+        """
+        total_shots = sum(counts.values())
+        if total_shots <= 0:
+            raise ExecutionError("qBraid returned no shots for expectation decoding")
+        group_expval = 0j
+        for operators, coeff in terms:
+            parity_qubits = [op.index for op in operators if op.pauli != identity]
+            if not parity_qubits:
+                group_expval += coeff
+                continue
+
+            parity_sum = 0.0
+            for bitstring, count in counts.items():
+                bits = bitstring.replace(" ", "")
+                n_bits = len(bits)
+                parity = 0
+                for qubit in parity_qubits:
+                    bit_position = n_bits - 1 - qubit
+                    if 0 <= bit_position < n_bits:
+                        parity ^= int(bits[bit_position])
+                parity_sum += (-1 if parity else 1) * count
+            group_expval += coeff * (parity_sum / total_shots)
+        return group_expval
 
     @staticmethod
     def _ensure_measurements(circuit: "QuantumCircuit") -> "QuantumCircuit":

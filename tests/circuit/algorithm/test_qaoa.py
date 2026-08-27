@@ -1,5 +1,6 @@
 """Tests for qamomile/circuit/algorithm/qaoa.py circuit primitives."""
 
+import numpy as np
 import pytest
 
 pytest.importorskip("qiskit")
@@ -134,6 +135,80 @@ def _wrap_hubo_qaoa_state(
 ) -> qmc.Vector[qmc.Bit]:
     q = hubo_qaoa_state(p_val, quad, linear, higher, n, gammas, betas)
     return qmc.measure(q)
+
+
+@qmc.qkernel
+def _wrap_qaoa_expval(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    n: qmc.UInt,
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+    observable: qmc.Observable,
+) -> qmc.Float:
+    """Prepare a QAOA state and evaluate one observable.
+
+    Args:
+        p (qmc.UInt): Number of QAOA layers.
+        quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): Quadratic
+            Ising coefficients.
+        linear (qmc.Dict[qmc.UInt, qmc.Float]): Linear Ising coefficients.
+        n (qmc.UInt): Number of qubits.
+        gammas (qmc.Vector[qmc.Float]): Cost-layer angles.
+        betas (qmc.Vector[qmc.Float]): Mixer-layer angles.
+        observable (qmc.Observable): Observable to evaluate.
+
+    Returns:
+        qmc.Float: Observable expectation value.
+    """
+    q = qaoa_state(p, quad, linear, n, gammas, betas)
+    return qmc.expval(q, observable)
+
+
+def _exact_qaoa_probabilities(
+    n: int,
+    quad: dict[tuple[int, int], float],
+    linear: dict[int, float],
+    gamma: float,
+    beta: float,
+) -> dict[tuple[int, ...], float]:
+    """Return exact computational-basis probabilities for one QAOA layer.
+
+    Args:
+        n (int): Number of qubits.
+        quad (dict[tuple[int, int], float]): Quadratic Ising coefficients.
+        linear (dict[int, float]): Linear Ising coefficients.
+        gamma (float): Cost-layer angle.
+        beta (float): Mixer-layer angle.
+
+    Returns:
+        dict[tuple[int, ...], float]: Basis states mapped to exact
+            probabilities.
+    """
+    state = np.full(2**n, 1.0 / np.sqrt(2**n), dtype=np.complex128)
+    for basis in range(2**n):
+        spins = [1 - 2 * ((basis >> index) & 1) for index in range(n)]
+        energy = sum(
+            coefficient * spins[left] * spins[right]
+            for (left, right), coefficient in quad.items()
+        ) + sum(coefficient * spins[index] for index, coefficient in linear.items())
+        state[basis] *= np.exp(-1j * gamma * energy)
+    cosine = np.cos(beta)
+    sine = -1j * np.sin(beta)
+    for qubit in range(n):
+        stride = 1 << qubit
+        for start in range(0, 2**n, 2 * stride):
+            for offset in range(stride):
+                zero = start + offset
+                one = zero + stride
+                a, b = state[zero], state[one]
+                state[zero] = cosine * a + sine * b
+                state[one] = sine * a + cosine * b
+    return {
+        tuple((basis >> index) & 1 for index in range(n)): float(abs(value) ** 2)
+        for basis, value in enumerate(state)
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -361,3 +436,45 @@ def test_hubo_qaoa_state_sample():
     assert counts.get("rz", 0) == 2
     assert counts.get("cx", 0) == 4
     assert counts.get("rx", 0) == 3
+
+
+@pytest.mark.parametrize("seed", [0, 42])
+@pytest.mark.parametrize("n", [1, 2])
+def test_qaoa_executes_sampling_and_expval_on_every_sdk(
+    sdk_transpiler, seed: int, n: int
+) -> None:
+    """Random one-layer QAOA agrees with an analytic reference on every SDK."""
+    import qamomile.observable as qm_o
+
+    rng = np.random.default_rng(seed)
+    quad = {(0, 1): float(rng.uniform(-1.0, 1.0))} if n == 2 else {}
+    linear = {index: float(rng.uniform(-1.0, 1.0)) for index in range(n)}
+    gamma = float(rng.uniform(0.0, 2 * np.pi))
+    beta = float(rng.uniform(0.0, np.pi))
+    bindings = {
+        "p": 1,
+        "quad": quad,
+        "linear": linear,
+        "n": n,
+        "gammas": [gamma],
+        "betas": [beta],
+    }
+    transpiler = sdk_transpiler.transpiler
+    executable = transpiler.transpile(_wrap_qaoa_state, bindings=bindings)
+    shots = 2_048
+    sampled = executable.sample(transpiler.executor(), shots=shots).result()
+    observed = {tuple(bits): count / shots for bits, count in sampled.results}
+    expected = _exact_qaoa_probabilities(n, quad, linear, gamma, beta)
+    for bits, probability in expected.items():
+        assert abs(observed.get(bits, 0.0) - probability) < 0.1
+
+    observable = qm_o.Z(0)
+    expval_executable = transpiler.transpile(
+        _wrap_qaoa_expval,
+        bindings={**bindings, "observable": observable},
+    )
+    actual_expval = expval_executable.run(transpiler.executor()).result()
+    expected_expval = sum(
+        probability * (1 - 2 * bits[0]) for bits, probability in expected.items()
+    )
+    assert np.isclose(actual_expval, expected_expval, rtol=0.0, atol=1e-8)

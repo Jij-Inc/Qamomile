@@ -40,10 +40,14 @@
 # # !pip install "qamomile[qiskit,visualization]"
 
 # %%
+import os
+
 import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 128
 
 # %% [markdown]
 # ## Pattern 1: Helper QKernel
@@ -77,13 +81,13 @@ result = (
     transpiler.transpile(ghz_with_helper, bindings={"n": 4})
     .sample(
         transpiler.executor(),
-        shots=128,
+        shots=sample_shots,
     )
     .result()
 )
 print("GHZ result:", result.results)
-assert result.shots == 128
-assert sum(count for _, count in result.results) == 128
+assert result.shots == sample_shots
+assert sum(count for _, count in result.results) == sample_shots
 # 4-qubit GHZ state -> only (0, 0, 0, 0) and (1, 1, 1, 1) outcomes.
 assert all(
     outcome in {(0, 0, 0, 0), (1, 1, 1, 1)}

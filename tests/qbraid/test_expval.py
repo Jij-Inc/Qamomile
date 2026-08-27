@@ -10,6 +10,12 @@ from qiskit.circuit.random import random_circuit
 from qiskit.quantum_info import Statevector, random_pauli_list
 
 from qamomile.circuit.transpiler.errors import ExecutionError
+from qamomile.circuit.transpiler.execution_request import (
+    CircuitInvocation,
+    EstimateRequest,
+    ShotBased,
+)
+from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
 from qamomile.observable import Hamiltonian, Pauli, PauliOperator, X, Y, Z
 from qamomile.qbraid.executor import QBraidExecutor
 from qamomile.qiskit.observable import hamiltonian_to_sparse_pauli_op
@@ -36,6 +42,7 @@ def _mock_device_multi(counts_sequence: list[dict[str, int]]):
         jobs.append(job)
 
     device.run.side_effect = jobs
+    device.jobs = jobs
     return device
 
 
@@ -340,6 +347,26 @@ class TestWaitHelperReuse:
         executor.estimate(qc, Z(0))
 
         job.wait_for_final_state.assert_called_once_with(timeout=None, poll_interval=3)
+
+    def test_submit_estimate_returns_before_waiting(self):
+        """Expectation submission defers every basis-group result retrieval."""
+        device = _mock_device_multi([{"0": 100}])
+        executor = QBraidExecutor(device=device, expval_shots=100)
+        circuit = QuantumCircuit(1)
+
+        handle = executor.submit_estimate(
+            EstimateRequest(
+                CircuitInvocation(circuit, {}, ParameterMetadata()),
+                Z(0),
+                ShotBased(100),
+            )
+        )
+
+        for submitted_job in device.jobs:
+            submitted_job.wait_for_final_state.assert_not_called()
+        assert handle.result() == pytest.approx(1.0)
+        for submitted_job in device.jobs:
+            submitted_job.wait_for_final_state.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
