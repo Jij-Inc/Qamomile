@@ -9,6 +9,12 @@ Qamomileで実装した具体的な量子アルゴリズム例です。
 ::::{grid} 1 1 1 1
 
 :::{card}
+:header: **PUBOのための有限虚時間発展 (FinITE)**
+:link: FinITE_Max_3_XORSAT
+`FinITEConverter`でMax-3-XORSATのインスタンスを解きます。虚時間発展の伝播子を項ごとのLCUでblock encodingし、ancillaでpost-selectionします。高次項は二次化せずそのままencodingされます。
+:::
+
+:::{card}
 :header: **Suzuki–Trotter分解によるハミルトニアンシミュレーション (Rabi振動)**
 :link: hamiltonian_simulation
 RabiモデルでのTrotter–Suzuki積公式と収束次数の実験です。
