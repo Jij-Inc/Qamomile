@@ -16,11 +16,12 @@ build:
     install:
       - UV_PROJECT_ENVIRONMENT="${READTHEDOCS_VIRTUALENV_PATH}" uv sync --frozen --no-default-groups --group docs
     post_install:
-      - uv run python -m ipykernel install --user --name=qamomile  # Install the kernel for Jupyter
+      - ${READTHEDOCS_VIRTUALENV_PATH}/bin/python -m ipykernel install --user --name=qamomile  # Install the kernel for Jupyter
       - chmod +x ./docs/build.sh  # Enable execution of the build script
     build:
       html:
-        - ./docs/build.sh build
+        # Reuse the pre-synced RTD environment for every uv run in build.sh.
+        - UV_PROJECT_ENVIRONMENT="${READTHEDOCS_VIRTUALENV_PATH}" UV_NO_SYNC=1 ./docs/build.sh build
         # $READTHEDOCS_OUTPUT: the place where we deploy the documentation
         - mkdir -p $READTHEDOCS_OUTPUT/html/ja
         - mkdir -p $READTHEDOCS_OUTPUT/html/en
