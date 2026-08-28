@@ -24,10 +24,14 @@ def mark_all_ones(reg: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
     Returns:
         qmc.Vector[qmc.Qubit]: Phase-marked search register.
     """
-    top = reg.shape[0] - 1
-    reg[top] = qmc.h(reg[top])
-    reg[0:top], reg[top] = qmc.mcx(reg[0:top], reg[top])
-    reg[top] = qmc.h(reg[top])
+    n = reg.shape[0]
+    if n == 1:
+        reg[0] = qmc.z(reg[0])
+    else:
+        top = n - 1
+        reg[top] = qmc.h(reg[top])
+        reg[0:top], reg[top] = qmc.mcx(reg[0:top], reg[top])
+        reg[top] = qmc.h(reg[top])
     return reg
 
 
@@ -114,6 +118,20 @@ def _numpy_grover_zexp(n: int, iterations: int) -> float:
     probs = np.abs(state) ** 2
     p_bit0_one = sum(probs[x] for x in range(dim) if x & 1)
     return float(1 - 2 * p_bit0_one)
+
+
+def _numpy_grover_marked_probability(n: int, iterations: int) -> float:
+    """Compute the marked-state probability after Grover amplification.
+
+    Args:
+        n (int): Number of search qubits.
+        iterations (int): Number of Grover iterations.
+
+    Returns:
+        float: Analytic probability of the single marked state.
+    """
+    theta = np.arcsin(1 / np.sqrt(2**n))
+    return float(np.sin((2 * iterations + 1) * theta) ** 2)
 
 
 def test_grover_iteration_count_concrete_and_symbolic() -> None:
@@ -219,10 +237,16 @@ def test_grover_qubit_count_includes_clean_control_ancillas(
     inactive = _grover_estimate_kernel.estimate_resources(
         inputs={"n": 4, "iterations": 0}
     )
+    single_qubit = _grover_estimate_kernel.estimate_resources(
+        inputs={"n": 1, "iterations": 1}
+    )
     active = _grover_estimate_kernel.estimate_resources(
         inputs={"n": 4, "iterations": 1}
     )
     assert inactive.qubits == 4
+    assert single_qubit.width.allocated_qubits == 1
+    assert single_qubit.width.clean_ancilla_qubits == 0
+    assert single_qubit.qubits == 1
     assert active.width.clean_ancilla_qubits == 2
     assert active.qubits == 6
 
@@ -244,12 +268,12 @@ def test_grover_diffusion_uses_qiskit_native_ccx() -> None:
     )
 
 
-@pytest.mark.parametrize("n", [2, 3])
-@pytest.mark.parametrize("seed", [0, 3])
-def test_grover_cross_backend_amplifies_marked_state(
+@pytest.mark.parametrize("n", [1, 2, 3, 5])
+@pytest.mark.parametrize("seed", [0, 1, 2, 42])
+def test_grover_cross_backend_matches_marked_probability(
     sdk_transpiler, n: int, seed: int, tmp_path
 ) -> None:
-    """Grover amplifies the marked all-ones state on every SDK backend."""
+    """Grover matches the analytic marked-state probability on every SDK backend."""
     src = (
         "import qamomile.circuit as qmc\n"
         "from tests.circuit.test_grover import mark_all_ones\n"
@@ -284,16 +308,23 @@ def test_grover_cross_backend_amplifies_marked_state(
     result = exe.sample(executor, shots=1024).result()
 
     marked = tuple(1 for _ in range(n))
-    top_bits, top_count = result.most_common(1)[0]
-    assert top_bits == marked, (
-        f"{sdk_transpiler.backend_name}: marked state {marked} not dominant, "
-        f"got {top_bits}"
+    marked_count = dict(result.results).get(marked, 0)
+    observed_probability = marked_count / result.shots
+    expected_probability = _numpy_grover_marked_probability(
+        n, grover_iteration_count(n, 1)
     )
-    # Amplitude amplification should give the marked state a clear majority.
-    assert top_count / result.shots > 0.6
+    assert np.isclose(
+        observed_probability,
+        expected_probability,
+        atol=0.1,
+        rtol=0.0,
+    ), (
+        f"{sdk_transpiler.backend_name} n={n}: expected marked-state "
+        f"probability {expected_probability}, got {observed_probability}"
+    )
 
 
-@pytest.mark.parametrize("n", [2, 3])
+@pytest.mark.parametrize("n", [1, 2, 3, 5])
 def test_grover_cross_backend_expval(sdk_transpiler, n: int, tmp_path) -> None:
     """Grover's amplified state matches the analytic ``<Z_0>`` on each backend."""
     import qamomile.observable as qm_o
@@ -324,6 +355,6 @@ def test_grover_cross_backend_expval(sdk_transpiler, n: int, tmp_path) -> None:
 
     reference = _numpy_grover_zexp(n, grover_iteration_count(n, 1))
     atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
-    assert np.isclose(value, reference, atol=atol), (
+    assert np.isclose(value, reference, atol=atol, rtol=0.0), (
         f"{sdk_transpiler.backend_name} n={n}: expected <Z_0>={reference}, got {value}"
     )
