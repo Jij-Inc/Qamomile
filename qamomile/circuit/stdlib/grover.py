@@ -115,6 +115,7 @@ def grover_iteration_count(
     return sp.floor((sp.pi / 4) * sp.sqrt(sp.Integer(2) ** n / m))
 
 
+@qmc.qkernel
 def _diffusion(reg: Vector[Qubit]) -> Vector[Qubit]:
     """Apply the Grover diffusion operator ``2|s><s| - I`` in place.
 
@@ -134,11 +135,16 @@ def _diffusion(reg: Vector[Qubit]) -> Vector[Qubit]:
         reg[i] = qmc.h(reg[i])
     with for_loop(0, n, var_name="i") as i:
         reg[i] = qmc.x(reg[i])
-    # Multi-controlled Z on the top qubit, controlled by the lower n-1 qubits.
-    top = n - 1
-    reg[top] = qmc.h(reg[top])
-    reg[0:top], reg[top] = qmc.mcx(reg[0:top], reg[top])
-    reg[top] = qmc.h(reg[top])
+    if n == 1:
+        # The zero-control specialization of multi-controlled Z is Z itself.
+        # Handle it explicitly because coherent controls require positive width.
+        reg[0] = qmc.z(reg[0])
+    else:
+        # Multi-controlled Z on the top qubit, controlled by the lower qubits.
+        top = n - 1
+        reg[top] = qmc.h(reg[top])
+        reg[0:top], reg[top] = qmc.mcx(reg[0:top], reg[top])
+        reg[top] = qmc.h(reg[top])
     with for_loop(0, n, var_name="i") as i:
         reg[i] = qmc.x(reg[i])
     with for_loop(0, n, var_name="i") as i:
