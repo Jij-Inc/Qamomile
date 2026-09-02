@@ -39,14 +39,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from IPython.display import display
-from qiskit_aer import AerSimulator
 from qiskit.quantum_info import Statevector
+from qiskit_aer import AerSimulator
 from scipy.optimize import minimize
 
 import qamomile.circuit as qmc
 from qamomile.circuit.algorithm.basic import superposition_vector
 from qamomile.circuit.algorithm.qaoa import ising_cost, x_mixer
-from qamomile.circuit.visualization import MatplotlibDrawer
 from qamomile.optimization.binary_model import BinaryModel
 from qamomile.optimization.qaoa import QAOAConverter
 from qamomile.qiskit import QiskitTranspiler
@@ -90,7 +89,7 @@ from qamomile.qiskit import QiskitTranspiler
 # $\Sigma$ が半正定値行列の場合に、先ほどの QUBO を次のように緩和することにしましょう。
 #
 # $$
-# \min_{\boldsymbol{x} \in [0, 1]^n} \boldsymbol{x}^\top \Sigma \boldsymbol{x} \tag{2}
+# \min_{\boldsymbol{x} \in [0, 1]^n} \boldsymbol{x}^\top \Sigma \boldsymbol{x}  + \boldsymbol{\mu}^\top \boldsymbol{x} \tag{2}
 # $$
 #
 # これは凸 2 次計画問題 (QP) であり、その最適解 $\boldsymbol{c}^\ast$ は古典最適化手法により簡単に得ることができると知られています。  
@@ -111,6 +110,8 @@ from qamomile.qiskit import QiskitTranspiler
 # ### Continuous warm-start QAOA
 #
 # 元の QUBO を緩和して得られた 式 (2), (3) の解を古典的に求め、それを QAOA の初期状態に用いるというのが、 WS-QAOA です。
+# このページでは式 (2) の最適解 $\boldsymbol{c}^\ast$ を初期状態に埋め込む方法を示します。
+# SDP である (3) 式の最適解 $Y^\ast$ を利用する場合には、丸めなどにより初期ビット列や初期確率へ変換する必要があります。
 # 式 (2) の最適解 $\boldsymbol{c}^\ast$ を埋め込む場合には、次のようにします。
 #
 # $$
@@ -158,14 +159,14 @@ from qamomile.qiskit import QiskitTranspiler
 # \theta_i 
 # = \left\{ \begin{array}{ll} 
 # 2 \mathrm{arcsin} (\sqrt{c_i^\ast}) & \mathrm{if} \ c_i^\ast \in [\epsilon, 1 -\epsilon] \\
-# 2 \mathrm{arcsin} (\sqrt{\epsilon}) & \mathrm{if} \ c_i \leq \epsilon \\
+# 2 \mathrm{arcsin} (\sqrt{\epsilon}) & \mathrm{if} \ c_i^\ast \leq \epsilon \\
 # 2 \mathrm{arcsin} (\sqrt{1-\epsilon}) & \mathrm{if} \ c_i^\ast \geq 1 - \epsilon
 # \end{array} \right. \tag{7}
 # $$
 #
 # のようにします。
 # $c_i^\ast \in [\epsilon, 1 - \epsilon]$ の場合には、そのまま $c_i^\ast$ の値を用いますが、それ以外の範囲では $\epsilon, 1-\epsilon$ のようにすることで $c_i^\ast \sim 0, 1$ となるような状況を回避します。
-# すなわち、限りなく $c_i^\ast \sim 0$ となるような状況でも、$\epsilon$ の確率だけ $c_i^\ast = 1$ となる可能性を残すことができます。
+# すなわち、限りなく $c_i^\ast \sim 0$ となるような状況でも、$\epsilon$ の確率だけ $x_i = 1$ を測定する確率を $\epsilon$ 以上に保ちます。
 # $\epsilon = 0.5$ の場合、全ての量子ビットについて $\theta_i = \pi / 2$ となり、$\hat{H}_{M, i}^{(\mathrm{ws})} = - X_i$ となります。
 # よって、これは通常の QAOA に一致します。
 
@@ -374,7 +375,7 @@ print("Ising constant       :", spin_model.constant)
 # QAOA に用いる量子カーネルを定義しましょう。
 # ここでは
 #
-# 1. 標準的な QAOA (ランダム初期化・X ミキサー)
+# 1. 標準的な QAOA (一様重ね合わせ初期化・X ミキサー)
 # 2. 初期化のみ変更した QAOA
 # 3. Continous WS-QAOA
 #
