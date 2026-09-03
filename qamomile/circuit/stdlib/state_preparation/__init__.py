@@ -20,6 +20,10 @@ Available routines:
   sequences or ``Vector[Float]`` kernel parameters.
 * :func:`amplitude_encoding_from_angles`: compatibility name for
   :func:`mottonen_amplitude_encoding_from_angles`.
+* :func:`prepare_dicke`: prepare a Dicke state :math:`|D^n_k\\rangle` (an
+  equal superposition of all computational basis states of Hamming weight
+  ``k``) via the deterministic split-and-cyclic-shift construction, built
+  from the :func:`scs_gate_2q` / :func:`scs_gate_3q` primitives.
 
 The classical Möttönen angle precomputation
 (``compute_mottonen_amplitude_encoding_ry_angles`` /
@@ -35,6 +39,7 @@ to feed pre-computed angles into
 """
 
 from .computational_basis_state import computational_basis_state
+from .dicke import prepare_dicke, scs_gate_2q, scs_gate_3q
 from .mottonen_amplitude_encoding import (
     amplitude_encoding,
     amplitude_encoding_from_angles,
@@ -48,4 +53,7 @@ __all__ = [
     "amplitude_encoding_from_angles",
     "mottonen_amplitude_encoding",
     "mottonen_amplitude_encoding_from_angles",
+    "prepare_dicke",
+    "scs_gate_2q",
+    "scs_gate_3q",
 ]

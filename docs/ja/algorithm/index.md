@@ -9,6 +9,12 @@ Qamomileで実装した具体的な量子アルゴリズム例です。
 ::::{grid} 1 1 1 1
 
 :::{card}
+:header: **グラフ彩色のためのAlternating Operator Ansatz**
+:link: aoa_coloring_problem
+Dicke状態による初期状態とXYミキサーを使い、ワンホットの可行部分空間に留まったままK彩色問題をAlternating Operator Ansatzで解きます。
+:::
+
+:::{card}
 :header: **Suzuki–Trotter分解によるハミルトニアンシミュレーション (Rabi振動)**
 :link: hamiltonian_simulation
 RabiモデルでのTrotter–Suzuki積公式と収束次数の実験です。
