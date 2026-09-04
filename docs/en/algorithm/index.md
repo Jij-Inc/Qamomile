@@ -9,6 +9,12 @@ Concrete quantum algorithm examples built with Qamomile.
 ::::{grid} 1 1 1 1
 
 :::{card}
+:header: **Finite Imaginary-Time Evolution (FinITE) for PUBO**
+:link: FinITE_Max_3_XORSAT
+Solve a Max-3-XORSAT instance with `FinITEConverter`, block-encoding the imaginary-time propagator with a termwise LCU and post-selecting on the ancillas. Higher-order terms are encoded directly, without quadratization.
+:::
+
+:::{card}
 :header: **Hamiltonian Simulation with Suzuki–Trotter (Rabi oscillation)**
 :link: hamiltonian_simulation
 Trotter–Suzuki product formulas on the Rabi model with empirical convergence orders.

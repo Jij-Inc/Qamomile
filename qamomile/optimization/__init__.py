@@ -9,7 +9,9 @@ decodes measurement results back into classical solutions. It hosts the
 converter family: ``QAOAConverter`` (``qaoa.py``, QUBO/Ising and HUBO via
 phase gadgets), ``FQAOAConverter`` (``fqaoa.py``, fermionic mixers with
 particle-number constraints), the QRAC converters (``qrao/``), and
-``PCEConverter`` (``pce.py``, Pauli correlation encoding).
+``PCEConverter`` (``pce.py``, Pauli correlation encoding), and
+``FinITEConverter`` (``finite_ite.py``, finite imaginary-time evolution
+block-encoded by a termwise LCU with post-selection).
 
 Layering constraint (inviolable)
 --------------------------------

@@ -98,6 +98,7 @@ project:
           children:
             - file: api/optimization/binary_model
             - file: api/optimization/converter
+            - file: api/optimization/finite_ite
             - file: api/optimization/fqaoa
             - file: api/optimization/pce
             - file: api/optimization/post_process

@@ -58,6 +58,7 @@ from qamomile.circuit.stdlib.block_encoding.periodic_shift import (
     PeriodicShiftLCUBlockEncoding,
     periodic_shift_lcu_block_encoding,
 )
+from qamomile.circuit.stdlib.block_encoding.product import product_block_encoding
 from qamomile.circuit.stdlib.qsvt import qsvt
 from qamomile.circuit.transpiler import job as _job_module
 from qamomile.circuit.transpiler.execution_capability import ExecutionCapabilities
@@ -263,6 +264,7 @@ def test_block_encoding_subpackage_groups_every_public_producer() -> None:
         "pauli_lcu_block_encoding": pauli_lcu_block_encoding,
         "PeriodicShiftLCUBlockEncoding": PeriodicShiftLCUBlockEncoding,
         "periodic_shift_lcu_block_encoding": periodic_shift_lcu_block_encoding,
+        "product_block_encoding": product_block_encoding,
     }
     for name, value in exports.items():
         assert getattr(block_encoding, name) is value

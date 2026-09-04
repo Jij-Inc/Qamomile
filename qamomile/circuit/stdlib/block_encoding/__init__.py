@@ -17,12 +17,14 @@ from .periodic_shift import (
     PeriodicShiftLCUBlockEncoding,
     periodic_shift_lcu_block_encoding,
 )
+from .product import product_block_encoding
 
 __all__ = [
     "LCUBlockEncoding",
     "LCUBlockEncodingTerm",
     "identity_block_encoding",
     "lcu_block_encoding",
+    "product_block_encoding",
     "IsingZBlockEncoding",
     "ising_z_block_encoding",
     "PauliLCUBlockEncoding",

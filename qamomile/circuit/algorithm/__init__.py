@@ -8,6 +8,7 @@ from .basic import (
     rz_layer,
     superposition_vector,
 )
+from .finite_ite import finite_ite_block_encoding, finite_ite_state
 from .fqaoa import (
     cost_layer,
     fqaoa_layers,
@@ -60,4 +61,7 @@ __all__ = [
     "fqaoa_state",
     # Trotterization
     "trotterized_time_evolution",
+    # FinITE
+    "finite_ite_block_encoding",
+    "finite_ite_state",
 ]
