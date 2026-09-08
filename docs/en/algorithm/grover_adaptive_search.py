@@ -240,7 +240,7 @@ MatplotlibDrawer(block).draw(fold_loops=False)
 # $A_y$ prepares $\sum_x \ket{x, f(x) - y}$ from QFT phase encodings:
 
 # %%
-apply_function_preparation_qubo.draw(
+preparation_figure = apply_function_preparation_qubo.draw(
     q_output=output_bits,
     q_input=converter.binary_model.num_bits,
     y=0,
@@ -251,16 +251,22 @@ apply_function_preparation_qubo.draw(
     fold_loops=False,
 )
 
+assert preparation_figure.get_axes(), "the drawn preparation circuit must not be empty"
+preparation_figure
+
 # %% [markdown]
 # and $D$ reflects the input register about the uniform superposition:
 
 # %%
-diffusion_op.draw(
+diffusion_figure = diffusion_op.draw(
     q_input=converter.binary_model.num_bits,
     inline=True,
     inline_depth=None,
     fold_loops=False,
 )
+
+assert diffusion_figure.get_axes(), "the drawn diffusion circuit must not be empty"
+diffusion_figure
 
 # %% [markdown]
 # ### The classical layer

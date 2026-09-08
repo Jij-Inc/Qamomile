@@ -217,7 +217,7 @@ MatplotlibDrawer(block).draw(fold_loops=False)
 # $A_y$ はQFTによる位相エンコーディングから $\sum_x \ket{x, f(x) - y}$ を準備します。
 
 # %%
-apply_function_preparation_qubo.draw(
+preparation_figure = apply_function_preparation_qubo.draw(
     q_output=output_bits,
     q_input=converter.binary_model.num_bits,
     y=0,
@@ -228,16 +228,22 @@ apply_function_preparation_qubo.draw(
     fold_loops=False,
 )
 
+assert preparation_figure.get_axes(), "描画した準備回路は空であってはなりません"
+preparation_figure
+
 # %% [markdown]
 # $D$ は入力レジスタを一様重ね合わせのまわりで反転させます。
 
 # %%
-diffusion_op.draw(
+diffusion_figure = diffusion_op.draw(
     q_input=converter.binary_model.num_bits,
     inline=True,
     inline_depth=None,
     fold_loops=False,
 )
+
+assert diffusion_figure.get_axes(), "描画した拡散回路は空であってはなりません"
+diffusion_figure
 
 # %% [markdown]
 # ### 古典レイヤー
