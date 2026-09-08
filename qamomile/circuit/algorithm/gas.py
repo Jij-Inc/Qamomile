@@ -18,6 +18,72 @@ from __future__ import annotations
 import numpy as np
 
 import qamomile.circuit as qmc
+from qamomile.circuit.frontend.operation.control_flow import for_loop
+
+
+def _resolve_width(q_input: qmc.Vector[qmc.Qubit]) -> int | None:
+    """Return a register's width as a Python int when it is known at trace time.
+
+    ``Vector.shape[0]`` is a ``UInt`` handle even when the register was
+    allocated from a compile-time binding, but it carries the concrete value.
+    Mirrors ``qamomile.circuit.algorithm.trotter._resolve_hamiltonian_len``.
+
+    Args:
+        q_input (qmc.Vector[qmc.Qubit]): Register whose width is wanted.
+
+    Returns:
+        int | None: The width, or ``None`` when it is genuinely symbolic.
+
+    """
+    dim = q_input.shape[0]
+    if isinstance(dim, int):
+        return dim
+    if isinstance(dim, qmc.UInt) and dim.value.is_constant():
+        return int(dim.value.get_const())
+    return None
+
+
+def apply_diffusion(q_input: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Apply the reflection about |0...0> to ``q_input`` in place.
+
+    Deliberately a plain Python function rather than inline kernel-body code:
+    the DSL transformer rewrites an ``if`` inside a qkernel body into an
+    ``IfOperation`` and traces *both* branches, so the multi-controlled branch
+    would still build ``qmc.control(qmc.z, num_controls=0)`` for a one-qubit
+    register and raise before the dead branch is ever pruned. The transformer
+    never descends into a called helper, so the branch below is resolved at
+    trace time and only the taken path is emitted.
+
+    Args:
+        q_input (qmc.Vector[qmc.Qubit]): Register to reflect. Consumed and
+            returned.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Updated input register.
+
+    """
+    n = q_input.shape[0]
+    if _resolve_width(q_input) == 1:
+        # X Z X = -Z, so a single Z realizes the one-qubit reflection up to the
+        # same global sign the X^n C^{n-1}Z X^n identity already carries for
+        # n >= 2. The general path would ask for `num_controls=0`, which
+        # `qmc.control` rejects, making a valid single-variable problem
+        # untranspilable.
+        q_input[0] = qmc.z(q_input[0])
+        return q_input
+
+    controlled_z = qmc.control(qmc.z, num_controls=n - 1)
+
+    with for_loop(0, n, var_name="i") as i:
+        q_input[i] = qmc.x(q_input[i])
+    controls = q_input[0 : n - 1]  # type: ignore[misc]
+    target = q_input[n - 1]  # type: ignore[misc]
+    controls, target = controlled_z(controls, target)
+    q_input[0 : n - 1] = controls  # type: ignore[misc]  # ReleaseSliceViewOperation — releases borrow
+    q_input[n - 1] = target  # type: ignore[misc]
+    with for_loop(0, n, var_name="i") as i:
+        q_input[i] = qmc.x(q_input[i])
+    return q_input
 
 
 @qmc.qkernel
@@ -280,7 +346,9 @@ def diffusion_op(
     """Apply the Grover diffusion operator on the input register.
 
     Implements the reflection 2|s><s| - I about the uniform superposition
-    via the X^n C^{n-1}Z X^n circuit identity.
+    via the X^n C^{n-1}Z X^n circuit identity. A single-qubit register uses a
+    bare Z instead, since that identity would degenerate into a controlled gate
+    with no controls.
 
     Args:
         q_input (qmc.Vector[qmc.Qubit]): Input register to reflect around the uniform superposition.
@@ -289,19 +357,7 @@ def diffusion_op(
         qmc.Vector[qmc.Qubit]: Updated input register.
 
     """
-    n = q_input.shape[0]
-    controlled_z = qmc.control(qmc.z, num_controls=n - 1)
-
-    for i in qmc.range(n):
-        q_input[i] = qmc.x(q_input[i])
-    controls = q_input[0 : n - 1]  # type: ignore[misc]
-    target = q_input[n - 1]  # type: ignore[misc]
-    controls, target = controlled_z(controls, target)
-    q_input[0 : n - 1] = controls  # type: ignore[misc]  # ReleaseSliceViewOperation — releases borrow
-    q_input[n - 1] = target  # type: ignore[misc]
-    for i in qmc.range(n):
-        q_input[i] = qmc.x(q_input[i])
-    return q_input
+    return apply_diffusion(q_input)
 
 
 @qmc.qkernel

@@ -8,6 +8,7 @@ import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.gas import (
     apply_function_preparation_qubo,
     apply_function_preparation_qubo_dagger,
+    diffusion_op,
     first_degree_qft_encoding,
     function_preparation_qubo,
     grover_algorithm,
@@ -71,7 +72,15 @@ _BACKENDS = [
 
 @qmc.qkernel
 def _wrap_qft_encoding(n: qmc.UInt, coef: qmc.Float) -> qmc.Vector[qmc.Bit]:
-    """Apply qft_encoding on a fresh register and measure it."""
+    """Apply qft_encoding on a fresh register and measure it.
+
+    Args:
+        n (qmc.UInt): Width of the register to encode into.
+        coef (qmc.Float): Coefficient to encode as a phase.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement outcomes of the register.
+    """
     q = qmc.qubit_array(n, name="q")
     q = qft_encoding(q, coef)
     return qmc.measure(q)
@@ -79,7 +88,16 @@ def _wrap_qft_encoding(n: qmc.UInt, coef: qmc.Float) -> qmc.Vector[qmc.Bit]:
 
 @qmc.qkernel
 def _wrap_zero_degree(n: qmc.UInt, m: qmc.UInt, coef: qmc.Float) -> qmc.Vector[qmc.Bit]:
-    """Apply zero-degree encoding and measure the input register."""
+    """Apply zero-degree encoding and measure the input register.
+
+    Args:
+        n (qmc.UInt): Number of input (decision-variable) qubits.
+        m (qmc.UInt): Number of output (objective-value) qubits.
+        coef (qmc.Float): Constant-term coefficient to encode.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement outcomes of the input register.
+    """
     q_output = qmc.qubit_array(m, name="q_output")
     q_input = qmc.qubit_array(n, name="q_input")
     q_output, q_input = zero_degree_qft_encoding(q_output, q_input, coef)
@@ -93,7 +111,18 @@ def _wrap_first_degree(
     control_idx: qmc.UInt,
     coef: qmc.Float,
 ) -> qmc.Vector[qmc.Bit]:
-    """Apply first-degree encoding and measure the input register."""
+    """Apply first-degree encoding and measure the input register.
+
+    Args:
+        n (qmc.UInt): Number of input (decision-variable) qubits.
+        m (qmc.UInt): Number of output (objective-value) qubits.
+        control_idx (qmc.UInt): Index of the control qubit, excited first so
+            the controlled phase actually fires.
+        coef (qmc.Float): Coefficient to encode when the control is active.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement outcomes of the input register.
+    """
     q_output = qmc.qubit_array(m, name="q_output")
     q_input = qmc.qubit_array(n, name="q_input")
     q_input[control_idx] = qmc.x(q_input[control_idx])
@@ -109,7 +138,18 @@ def _wrap_second_degree(
     control_idx1: qmc.UInt,
     coef: qmc.Float,
 ) -> qmc.Vector[qmc.Bit]:
-    """Apply second-degree encoding and measure the input register."""
+    """Apply second-degree encoding and measure the input register.
+
+    Args:
+        n (qmc.UInt): Number of input (decision-variable) qubits.
+        m (qmc.UInt): Number of output (objective-value) qubits.
+        control_idx0 (qmc.UInt): Index of the first control qubit.
+        control_idx1 (qmc.UInt): Index of the second control qubit.
+        coef (qmc.Float): Coefficient to encode when both controls are active.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement outcomes of the input register.
+    """
     q_output = qmc.qubit_array(m, name="q_output")
     q_input = qmc.qubit_array(n, name="q_input")
     q_input[control_idx0] = qmc.x(q_input[control_idx0])
@@ -127,8 +167,21 @@ def _wrap_apply_then_dagger(
     y: qmc.Float,
     linear: qmc.Dict[qmc.UInt, qmc.Float],
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-) -> qmc.Vector[qmc.Bit]:
-    """Apply preparation then its dagger and measure the input register."""
+) -> qmc.Tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
+    """Apply preparation then its dagger and measure both registers.
+
+    Args:
+        n (qmc.UInt): Number of input (decision-variable) qubits.
+        m (qmc.UInt): Number of output (objective-value) qubits.
+        y (qmc.Float): Objective threshold offset encoded as a constant term.
+        linear (qmc.Dict[qmc.UInt, qmc.Float]): Linear QUBO coefficients.
+        quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): Quadratic
+            QUBO coefficients indexed by variable pairs.
+
+    Returns:
+        qmc.Tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]: Measurement
+            outcomes of the output and input registers.
+    """
     q_output = qmc.qubit_array(m, name="q_output")
     q_input = qmc.qubit_array(n, name="q_input")
     q_output, q_input = apply_function_preparation_qubo(
@@ -137,7 +190,7 @@ def _wrap_apply_then_dagger(
     q_output, q_input = apply_function_preparation_qubo_dagger(
         q_output, q_input, y, linear, quad
     )
-    return qmc.measure(q_input)
+    return qmc.measure(q_output), qmc.measure(q_input)
 
 
 @qmc.qkernel
@@ -148,7 +201,19 @@ def _wrap_function_preparation(
     linear: qmc.Dict[qmc.UInt, qmc.Float],
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
 ) -> qmc.Vector[qmc.Bit]:
-    """Run full function preparation and measure the input register."""
+    """Run full function preparation and measure the input register.
+
+    Args:
+        n (qmc.UInt): Number of input (decision-variable) qubits.
+        m (qmc.UInt): Number of output (objective-value) qubits.
+        y (qmc.Float): Objective threshold offset encoded as a constant term.
+        linear (qmc.Dict[qmc.UInt, qmc.Float]): Linear QUBO coefficients.
+        quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): Quadratic
+            QUBO coefficients indexed by variable pairs.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement outcomes of the input register.
+    """
     q_output, q_input = function_preparation_qubo(n, m, y, linear, quad)
     _ = q_output
     return qmc.measure(q_input)
@@ -163,7 +228,20 @@ def _wrap_grover_algorithm(
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
     iters: qmc.UInt,
 ) -> qmc.Vector[qmc.Bit]:
-    """Run grover_algorithm and measure the input register."""
+    """Run grover_algorithm and measure the input register.
+
+    Args:
+        n (qmc.UInt): Number of input (decision-variable) qubits.
+        m (qmc.UInt): Number of output (objective-value) qubits.
+        y (qmc.Float): Objective threshold offset encoded as a constant term.
+        linear (qmc.Dict[qmc.UInt, qmc.Float]): Linear QUBO coefficients.
+        quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): Quadratic
+            QUBO coefficients indexed by variable pairs.
+        iters (qmc.UInt): Number of Grover iterations.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement outcomes of the input register.
+    """
     q_output, q_input = grover_algorithm(n, m, y, linear, quad, iters)
     _ = q_output
     return qmc.measure(q_input)
@@ -237,8 +315,12 @@ def test_degree_encodings_transpile_and_sample_smoke(
 
 
 @pytest.mark.parametrize("make_transpiler", _BACKENDS)
-def test_apply_then_dagger_restores_input_register(make_transpiler):
-    """Applying preparation then dagger restores the input register to |0...0>."""
+def test_apply_then_dagger_restores_both_registers(make_transpiler):
+    """Applying preparation then dagger restores both registers to |0...0>.
+
+    A^dagger A = I acts on the pair, so checking only the input register would
+    miss an output-register phase or rotation that fails to invert.
+    """
     tr = make_transpiler()
     bindings = {
         "n": 3,
@@ -250,10 +332,11 @@ def test_apply_then_dagger_restores_input_register(make_transpiler):
     exe = tr.transpile(_wrap_apply_then_dagger, bindings=bindings)
     results = _sample_results(exe, tr, bindings={}, shots=32)
 
-    assert len(results) > 0
-    for bits, count in results:
-        assert tuple(int(b) for b in bits) == (0, 0, 0)
-        assert count > 0
+    assert len(results) == 1, f"Expected only |0...0>, got {results}"
+    (((output_bits, input_bits), count),) = results
+    assert tuple(int(b) for b in output_bits) == (0, 0, 0, 0)
+    assert tuple(int(b) for b in input_bits) == (0, 0, 0)
+    assert count == 32
 
 
 @pytest.mark.parametrize("make_transpiler", _BACKENDS)
@@ -307,24 +390,108 @@ def _wrap_qft_encoding_expval(
     coef: qmc.Float,
     H: qmc.Observable,
 ) -> qmc.Float:
-    """Apply qft_encoding on a fresh 1-qubit |0> register and return <H>."""
+    """Encode ``coef`` as a phase on |+> and return the expectation of ``H``.
+
+    Args:
+        coef (qmc.Float): Coefficient handed to ``qft_encoding``.
+        H (qmc.Observable): Observable to estimate.
+
+    Returns:
+        qmc.Float: The expectation value <H>.
+    """
     q = qmc.qubit_array(1, name="q")
+    q[0] = qmc.h(q[0])
     q = qft_encoding(q, coef)
     return qmc.expval(q, H)
 
 
 @pytest.mark.parametrize("make_transpiler", _BACKENDS)
-def test_qft_encoding_expval_zero_coef_ground_state(make_transpiler):
-    """qft_encoding with coef=0 leaves |0> unchanged; Z-observable expval is +1.
+@pytest.mark.parametrize(
+    "coef,expected_x",
+    [
+        (0.0, 1.0),
+        (0.5, 0.0),
+        (1.0, -1.0),
+        (1 / 3, 0.5),
+    ],
+    ids=["coef-0", "coef-half", "coef-one", "coef-third"],
+)
+def test_qft_encoding_expval_matches_analytic_phase(make_transpiler, coef, expected_x):
+    """<X> after phase-encoding ``coef`` on |+> equals cos(pi * coef).
 
-    With coef=0, the phase gate applies zero rotation and the state remains |0>.
-    The expectation of Z on |0> is exactly +1. This analytic reference is trivial
-    (<Z>_{|0>} = 1) and exercises the estimator path independently from the sampler
-    path on every backend.
+    On a one-qubit register ``qft_encoding`` applies P(2*pi*coef/2) = P(pi*coef).
+    Starting from |+> = (|0> + |1>)/sqrt(2) that yields
+    (|0> + exp(i*pi*coef)|1>)/sqrt(2), whose X-expectation is exactly
+    cos(pi * coef). Unlike an all-|0> reference, this value moves with ``coef``,
+    so a wrong phase angle (or a dropped phase gate) is detected rather than
+    hidden. Exercises the estimator path on every backend.
     """
     tr = make_transpiler()
-    H = qm_o.Z(0)
-    exe = tr.transpile(_wrap_qft_encoding_expval, bindings={"coef": 0.0, "H": H})
+    H = qm_o.X(0)
+    exe = tr.transpile(_wrap_qft_encoding_expval, bindings={"coef": coef, "H": H})
     result = exe.run(tr.executor()).result()
 
-    np.testing.assert_allclose(result, 1.0, atol=1e-6)
+    np.testing.assert_allclose(result, expected_x, atol=1e-6, rtol=0.0)
+
+
+# ---------------------------------------------------------------------------
+# Diffusion operator across register widths
+# ---------------------------------------------------------------------------
+
+
+@qmc.qkernel
+def _wrap_diffusion_on_uniform(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Apply H^n, the diffuser, then H^n on a fresh register and measure it.
+
+    Args:
+        n (qmc.UInt): Width of the register to reflect.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement outcomes of the register.
+    """
+    q = qmc.qubit_array(n, name="q")
+    for i in qmc.range(n):
+        q[i] = qmc.h(q[i])
+    q = diffusion_op(q)
+    for i in qmc.range(n):
+        q[i] = qmc.h(q[i])
+    return qmc.measure(q)
+
+
+@pytest.mark.parametrize("make_transpiler", _BACKENDS)
+@pytest.mark.parametrize("n", [1, 2, 3, 5])
+def test_diffusion_op_transpiles_for_every_register_width(make_transpiler, n):
+    """The diffuser transpiles and runs for n = 1, 2, 3 and 5 on every backend.
+
+    ``n == 1`` is the regression case: the X^n C^{n-1}Z X^n identity would ask
+    for a controlled-Z with zero controls, which ``qmc.control`` rejects, so a
+    perfectly valid single-variable QUBO used to be untranspilable.
+
+    The measured distribution is also pinned analytically. The diffuser is the
+    reflection ``I - 2|0><0|`` (the global sign the identity carries is
+    irrelevant), so conjugating it by H^n and applying it to |0...0> leaves
+    amplitude ``1 - 2/N`` on |0...0> and ``-2/N`` on each of the other
+    ``N - 1`` states, with ``N = 2**n``. For ``n == 1`` that is |1> with
+    certainty.
+    """
+    tr = make_transpiler()
+    shots = 4096
+    exe = tr.transpile(_wrap_diffusion_on_uniform, bindings={"n": n})
+    results = _sample_results(exe, tr, bindings={}, shots=shots)
+
+    counts = {tuple(int(b) for b in bits): count for bits, count in results}
+    assert sum(counts.values()) == shots
+    for bits in counts:
+        assert len(bits) == n
+
+    size = 2**n
+    zero = tuple(0 for _ in range(n))
+    expected_zero = (1.0 - 2.0 / size) ** 2
+    expected_other = (2.0 / size) ** 2
+    # Three sigma of the binomial shot noise, floored so the p ~= 0 cases stay
+    # meaningful.
+    tolerance = 3.0 * (0.25 / shots) ** 0.5
+    assert abs(counts.get(zero, 0) / shots - expected_zero) < tolerance
+    for bits, count in counts.items():
+        if bits != zero:
+            assert abs(count / shots - expected_other) < tolerance

@@ -19,8 +19,9 @@ def normalize_problem_input(
     ommx.v1.Instance | None,
     VarType,
     BinaryModel,
+    BinaryModel,
 ]:
-    """Normalize a problem into evaluation, transformed, and spin forms.
+    """Normalize a problem into evaluation, transformed, binary, and spin forms.
 
     Shared canonical entry point used by every converter that consumes a
     combinatorial optimization problem expressed either as an OMMX
@@ -61,11 +62,16 @@ def normalize_problem_input(
 
     Returns:
         tuple[ommx.v1.Instance | None, ommx.v1.Instance | None, VarType,
-        BinaryModel]: A tuple ``(original_instance, transformed_instance,
-        original_vartype, spin_model)``. The two instances are ``None`` for a
-        :class:`BinaryModel` input. The original copy is reserved for
-        unpenalized result evaluation; the transformed copy owns the binary
-        substitutions and penalty metadata needed to reconstruct samples.
+        BinaryModel, BinaryModel]: A tuple ``(original_instance,
+        transformed_instance, original_vartype, binary_model, spin_model)``. The
+        two instances are ``None`` for a :class:`BinaryModel` input. The original
+        copy is reserved for unpenalized result evaluation; the transformed copy
+        owns the binary substitutions and penalty metadata needed to reconstruct
+        samples. ``binary_model`` and ``spin_model`` are the same objective in
+        the BINARY and SPIN domains; each is produced with at most one
+        ``change_vartype`` call so that no caller has to pay for a
+        BINARY-SPIN-BINARY round trip (which expands a degree-``d`` monomial
+        into ``2**d`` terms in each direction and injects float noise).
 
     Raises:
         TypeError: If ``instance`` is neither an :class:`ommx.v1.Instance`
@@ -78,10 +84,14 @@ def normalize_problem_input(
             raise ValueError(
                 "Penalty weights can only be used with an ommx.v1.Instance"
             )
+        # ``change_vartype`` copies rather than converting when the vartype
+        # already matches, so a BINARY input pays only for the copy and only a
+        # genuine SPIN input is actually converted — in one direction each.
         return (
             None,
             None,
             instance.vartype,
+            instance.change_vartype(VarType.BINARY),
             instance.change_vartype(VarType.SPIN),
         )
     if isinstance(instance, ommx.v1.Instance):
@@ -91,8 +101,9 @@ def normalize_problem_input(
             uniform_penalty_weight=uniform_penalty_weight,
             penalty_weights=dict(penalty_weights or {}),
         )
-        spin_model = BinaryModel.from_hubo(hubo, constant).change_vartype(VarType.SPIN)
-        return original, transformed, VarType.BINARY, spin_model
+        binary_model = BinaryModel.from_hubo(hubo, constant)
+        spin_model = binary_model.change_vartype(VarType.SPIN)
+        return original, transformed, VarType.BINARY, binary_model, spin_model
     raise TypeError("instance must be ommx.v1.Instance or BinaryModel")
 
 
@@ -213,6 +224,20 @@ def binary_sampleset_to_ommx_samples(
 
 
 class MathematicalProblemConverter(abc.ABC):
+    """Base class for converters that compile a problem into a circuit.
+
+    Attributes:
+        original_instance (ommx.v1.Instance | None): Untouched copy of the
+            caller's instance, used for unpenalized result evaluation. ``None``
+            for a :class:`BinaryModel` input.
+        instance (ommx.v1.Instance | None): Copy carrying the binary
+            substitutions and penalty metadata produced by ``to_hubo()``.
+            ``None`` for a :class:`BinaryModel` input.
+        original_vartype (VarType): Vartype the problem was supplied in.
+        binary_model (BinaryModel): Normalized objective in the BINARY domain.
+        spin_model (BinaryModel): The same objective in the SPIN domain.
+    """
+
     def __init__(
         self,
         instance: ommx.v1.Instance | BinaryModel,
@@ -233,6 +258,7 @@ class MathematicalProblemConverter(abc.ABC):
             self.original_instance,
             self.instance,
             self.original_vartype,
+            self.binary_model,
             self.spin_model,
         ) = normalize_problem_input(
             instance,

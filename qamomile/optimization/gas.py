@@ -15,6 +15,7 @@ import numpy as np
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.gas import (
+    apply_diffusion,
     grover_algorithm,
     qft_encoding,
     zero_degree_qft_encoding,
@@ -22,7 +23,6 @@ from qamomile.circuit.algorithm.gas import (
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.transpiler import Transpiler
 
-from .binary_model import VarType
 from .binary_model.model import BinaryModel
 from .converter import MathematicalProblemConverter
 
@@ -59,9 +59,9 @@ def _scatter_controls_back(
 class GASConverter(MathematicalProblemConverter):
     """Converter for Grover Adaptive Search (GAS).
 
-    Internally maintains a BINARY-domain model derived from ``spin_model``
-    so that the Grover QFT-arithmetic circuit receives the correct QUBO
-    coefficients (binary variables take values in {0, 1}, not ±1).
+    Encodes the BINARY-domain model normalized by the base converter, so that
+    the Grover QFT-arithmetic circuit receives the correct QUBO coefficients
+    (binary variables take values in {0, 1}, not ±1).
 
     Attributes:
         binary_model (BinaryModel): Precision-aligned BINARY-domain model in
@@ -80,8 +80,13 @@ class GASConverter(MathematicalProblemConverter):
     _MAX_EXACT_INT_IN_FLOAT_BITS = 54
 
     def __post_init__(self) -> None:
-        """Derive and cache the BINARY model from the parent spin model."""
-        self.binary_model = self.spin_model.change_vartype(VarType.BINARY)
+        """Precision-align the inherited BINARY model and set the encoding state.
+
+        Uses the BINARY model the base converter already normalized rather than
+        converting ``spin_model`` back: a degree-``d`` BINARY monomial expands
+        into ``2**d`` SPIN terms, so a round trip would pay that cost twice and
+        add the float noise ``_align_precision`` then has to remove.
+        """
         coeffs = [self.binary_model.constant] + list(
             self.binary_model.coefficients.values()
         )
@@ -118,6 +123,12 @@ class GASConverter(MathematicalProblemConverter):
         precisions. Integer-valued coefficients (within ``atol=1e-12``) are
         considered exact.
 
+        Every comparison here is absolute-only (``rtol=0.0``). The default
+        relative tolerance of ``np.isclose`` scales with the magnitude of the
+        compared value, which would make a large but genuinely fractional
+        coefficient such as ``100000.4`` compare equal to ``100000`` and be
+        silently snapped to an integer before quantization ever runs.
+
         Args:
             values (list[float]): Coefficient values to align, typically the
                 model's constant followed by its interaction coefficients.
@@ -132,13 +143,13 @@ class GASConverter(MathematicalProblemConverter):
         non_integer_values = []
         for v in values:
             fv = float(v)
-            if not np.isclose(fv, round(fv), atol=1e-12):
+            if not np.isclose(fv, round(fv), atol=1e-12, rtol=0.0):
                 non_integer_values.append(fv)
 
         if not non_integer_values:
             return [
                 float(round(float(v)))
-                if np.isclose(float(v), round(float(v)), atol=1e-12)
+                if np.isclose(float(v), round(float(v)), atol=1e-12, rtol=0.0)
                 else float(v)
                 for v in values
             ]
@@ -163,7 +174,7 @@ class GASConverter(MathematicalProblemConverter):
         aligned = []
         for v in values:
             fv = float(v)
-            if np.isclose(fv, round(fv), atol=1e-12):
+            if np.isclose(fv, round(fv), atol=1e-12, rtol=0.0):
                 # Snap integer-like float artifacts (e.g. 4.000000000000005)
                 # to exact integers so downstream precision detection does not
                 # keep meaningless binary tails.
@@ -261,7 +272,7 @@ class GASConverter(MathematicalProblemConverter):
         coef_list = [binary_model.constant] + list(binary_model.coefficients.values())
         coef_array = np.asarray(coef_list, dtype=float)
         max_val = np.max(np.abs(coef_array))
-        if np.isclose(max_val, 0.0, atol=1e-12):
+        if np.isclose(max_val, 0.0, atol=1e-12, rtol=0.0):
             return binary_model, 1.0
         rescaled_coef_list = coef_array / max_val
 
@@ -299,19 +310,21 @@ class GASConverter(MathematicalProblemConverter):
         )
 
     @staticmethod
-    def _required_output_bits(binary_model: BinaryModel) -> int:
-        """Compute the maximum output-register size for the Grover QFT circuit.
+    def _objective_bounds(binary_model: BinaryModel) -> tuple[float, float]:
+        """Return the extreme values the objective can take over all bitstrings.
 
-        The register holds ``f(x) − y`` in two's complement.  The extremes of
-        that quantity are ``±(f_max − f_min)``, so we need
-        ``2^(m−1) > f_max − f_min``.
+        Every monomial is a product of binary variables, so each coefficient
+        contributes either its full value or nothing. The bounds are therefore
+        the constant plus the sum of the positive and negative coefficients
+        respectively. They are attainable only when no two terms conflict, which
+        makes them a safe (never too narrow) envelope for register sizing.
 
         Args:
             binary_model (BinaryModel): Binary model (QUBO or HUBO) whose
                 coefficients define the objective range.
 
         Returns:
-            int: Minimum number of output qubits ``m``.
+            tuple[float, float]: ``(f_min, f_max)``.
 
         """
         all_coeffs = (
@@ -321,10 +334,64 @@ class GASConverter(MathematicalProblemConverter):
         )
         f_max = binary_model.constant + sum(c for c in all_coeffs if c > 0)
         f_min = binary_model.constant + sum(c for c in all_coeffs if c < 0)
-        range_span = f_max - f_min
-        if range_span <= 0:
+        return f_min, f_max
+
+    @staticmethod
+    def _required_output_bits(binary_model: BinaryModel, y_scaled: float = 0.0) -> int:
+        """Compute the minimum output-register size for the Grover QFT circuit.
+
+        The register holds ``f(x) − y`` in two's complement, so it must fit
+        every value in ``[f_min − y, f_max − y]``. Sizing for the *span*
+        ``f_max − f_min`` alone is not enough: a threshold outside the objective
+        range, or an objective that never comes near zero, pushes the encoded
+        quantity beyond the representable interval, wrapping it around and
+        flipping the sign bit the oracle tests. ``m`` is therefore the smallest
+        width with ``2^(m−1) > max(|f_min − y|, |f_max − y|)``.
+
+        Args:
+            binary_model (BinaryModel): Binary model (QUBO or HUBO) whose
+                coefficients define the objective range. Pass the *effective*
+                (quantized) model when one is in use.
+            y_scaled (float): Oracle threshold expressed in the same scale as
+                ``binary_model`` — that is, the caller's ``y`` already
+                multiplied by ``quantization_scale``. Defaults to ``0.0``.
+
+        Returns:
+            int: Minimum number of output qubits ``m``.
+
+        """
+        f_min, f_max = GASConverter._objective_bounds(binary_model)
+        bound = max(abs(f_min - y_scaled), abs(f_max - y_scaled))
+        if bound <= 0:
             return 2
-        return max(2, int(math.floor(math.log2(range_span))) + 2)
+        return max(2, int(math.floor(math.log2(bound))) + 2)
+
+    def required_output_bits(self, y: float = 0.0) -> int:
+        """Return the output-register width ``transpile()`` would pick for ``y``.
+
+        Exposes the automatic sizing so callers can reserve the register
+        themselves — for drawing the circuit, estimating resources, or checking
+        a width before passing it as ``output_bits``.
+
+        Reports the width for the *current* ``effective_model``. On a freshly
+        built converter that is the un-quantized model, so for a model with
+        real-valued coefficients the answer grows once ``transpile()`` has
+        quantized them: call this again afterwards, or pass
+        ``approximate_real_coefficients=False``.
+
+        Args:
+            y (float): Oracle threshold in the model's original (un-quantized)
+                scale, exactly as it would be passed to ``transpile()``.
+                Defaults to ``0.0``.
+
+        Returns:
+            int: Minimum number of output qubits for the current
+                ``effective_model`` and ``quantization_scale``.
+
+        """
+        return self._required_output_bits(
+            self.effective_model, y * self.quantization_scale
+        )
 
     def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
         """Raise NotImplementedError because GAS is oracle-based and has no cost Hamiltonian.
@@ -365,11 +432,12 @@ class GASConverter(MathematicalProblemConverter):
 
         Args:
             transpiler (Transpiler): Backend transpiler to use.
-            output_bits (int | None): Number of output qubits for the function output domain.
-                arithmetic register.  When ``None`` (default), the minimum
-                sufficient size is computed automatically via
-                ``_required_output_bits``.  A manual value must satisfy
-                ``2**(output_bits-1) > f_max - f_min``.
+            output_bits (int | None): Number of qubits in the arithmetic
+                register holding ``f(x) - y``. When ``None`` (default), the
+                minimum sufficient size is computed automatically from the
+                effective model *and* the threshold via
+                ``required_output_bits``. A manual value is rejected when it
+                cannot represent the whole range of ``f(x) - y``.
             y (float): Current best known objective value.  The oracle marks
                 all states ``x`` where ``f(x) < y``.  Pass the QUBO objective
                 directly, in the model's original scale — the sign convention
@@ -386,6 +454,10 @@ class GASConverter(MathematicalProblemConverter):
         Returns:
             ExecutableProgram: The compiled circuit program.
 
+        Raises:
+            ValueError: If ``output_bits`` is too small to represent
+                ``f(x) - y`` over the whole search space.
+
         """
 
         # If the model contains real values
@@ -393,7 +465,7 @@ class GASConverter(MathematicalProblemConverter):
             self.binary_model.coefficients.values()
         )
         has_non_integer = any(
-            not np.isclose(v, round(v), atol=1e-12) for v in all_values
+            not np.isclose(v, round(v), atol=1e-12, rtol=0.0) for v in all_values
         )
         if has_non_integer and approximate_real_coefficients:
             (
@@ -413,8 +485,20 @@ class GASConverter(MathematicalProblemConverter):
             self.effective_model = self.binary_model
             self.quantization_scale = 1.0
 
+        y_scaled = y * self.quantization_scale
+        required_bits = self._required_output_bits(self.effective_model, y_scaled)
         if output_bits is None:
-            output_bits = self._required_output_bits(self.effective_model)
+            output_bits = required_bits
+        elif output_bits < required_bits:
+            f_min, f_max = self._objective_bounds(self.effective_model)
+            raise ValueError(
+                f"output_bits={output_bits} is too small to hold f(x) - y for "
+                f"every x: the encoded value ranges over "
+                f"[{f_min - y_scaled}, {f_max - y_scaled}], which needs at "
+                f"least {required_bits} qubits. A narrower register wraps "
+                "around in two's complement and inverts the sign bit the "
+                "oracle tests, so the wrong states get marked."
+            )
 
         if not self.effective_model.higher:
             return self._transpile_quadratic(
@@ -859,6 +943,9 @@ class GASConverter(MathematicalProblemConverter):
         ) -> qmc.Vector[qmc.Qubit]:
             """Apply the diffusion step for the HUBO Grover operator.
 
+            A single-qubit register uses a bare Z: the X^n C^{n-1}Z X^n
+            identity would otherwise need a controlled gate with no controls.
+
             Args:
                 q_input (qmc.Vector[qmc.Qubit]): Input register to reflect around the uniform superposition.
 
@@ -866,18 +953,7 @@ class GASConverter(MathematicalProblemConverter):
                 qmc.Vector[qmc.Qubit]: Updated input register.
 
             """
-            n = q_input.shape[0]
-            controlled_z = qmc.control(qmc.z, num_controls=n - 1)
-            for i in qmc.range(n):
-                q_input[i] = qmc.x(q_input[i])
-            controls = q_input[0 : n - 1]  # type: ignore[misc]
-            target = q_input[n - 1]  # type: ignore[misc]
-            controls, target = controlled_z(controls, target)
-            q_input[0 : n - 1] = controls  # type: ignore[misc]  # ReleaseSliceViewOperation — releases borrow
-            q_input[n - 1] = target  # type: ignore[misc]
-            for i in qmc.range(n):
-                q_input[i] = qmc.x(q_input[i])
-            return q_input
+            return apply_diffusion(q_input)
 
         @qmc.qkernel
         def hubo_grover_operator(

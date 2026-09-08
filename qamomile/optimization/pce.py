@@ -372,11 +372,13 @@ class PCEConverter:
         self.original_instance: ommx.v1.Instance | None
         self.instance: ommx.v1.Instance | None
         self.original_vartype: VarType
+        self.binary_model: BinaryModel
         self.spin_model: BinaryModel
         (
             self.original_instance,
             self.instance,
             self.original_vartype,
+            self.binary_model,
             self.spin_model,
         ) = normalize_problem_input(
             instance,
