@@ -53,6 +53,8 @@ def __emit_oracle(
         "kind": "oracle",
         "gate_type": CompositeGateType.CUSTOM.name,
         "num_control_qubits": 0,
+        "num_declared_control_qubits": 0,
+        "num_added_control_qubits": 0,
         "num_target_qubits": 0,
         "custom_name": name,
     }
@@ -388,9 +390,11 @@ def parallel_ghz_state(m: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
     qs[0] = qmc.h(qs[0])
 
     for i in qmc.range(m):
-        step = n // (2**i)
-        for j in qmc.range(0, n, step):
-            qs[j], qs[j + step // 2] = qmc.cx(qs[j], qs[j + step // 2])
+        width = 2**i
+
+        for control in qmc.range(width):
+            target = width + control
+            qs[control], qs[target] = qmc.cx(qs[control], qs[target])
 
     return qs
 
@@ -458,6 +462,7 @@ _controlled_oracle = qmc.Oracle(
     num_control_qubits=1,
     cost=qmc.ResourceEstimate(
         gates=qmc.GateResources(total=1, two_qubit=1),
+        depth=qmc.DepthResources(depth=1, gate_depth=1),
         calls=qmc.CallResources(queries_by_name={"controlled_oracle": 1}),
     ),
 )
@@ -533,7 +538,7 @@ def deutsch() -> qmc.Bit:
 
 
 @qmc.qkernel
-def deutsch_jozsa(n: qmc.UInt) -> qmc.Bit:
+def deutsch_jozsa(n: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     qs = qmc.qubit_array(n + 1, name="qs")
     targets = qs[0:n]
     ancilla = qs[n]

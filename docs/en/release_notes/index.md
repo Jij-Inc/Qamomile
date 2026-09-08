@@ -4,6 +4,8 @@ slug: release-notes
 
 # Release Notes
 
+- [v0.15.0](v0_15_0) — expanded resource estimation with circuit width, category-specific depth, and derivation metadata; Amazon Braket support; composable Oracle transformations and an engine-independent asynchronous execution lifecycle
+- [v0.14.0](v0_14_0) — composable LCU block encodings and `qmc.qsvt`, lower-width Shor order finding and the quantum stage of Ekerå–Håstad factoring, plus `qmc.struct`, `qmc.bit_array`, and `qmc.log2`/`qmc.ceil` for register-width calculations
 - [v0.13.0](v0_13_0) — semantic `qmc.select`, exact `qmc.global_phase`, loop-carried scalars, and generic versus explicit Möttönen amplitude encoding; Qiskit moved to the `qiskit` extra
 - [v0.12.7](v0_12_7) — `Dict[K, Float]` coefficients as runtime parameters with `d[key]` subscript, `%` operator on `UInt`, and a batch of new compile-time errors (`QubitRebindError`, `QubitConsumedError`, `TypeError` on `bool` / mismatched args) that reject previously silent miscompiles
 - [v0.12.6](v0_12_6) — circuit inversion with `qmc.inverse` (built-in gates, `@qkernel`s, QFT/IQFT), `qmc.modular_increment` / `qmc.modular_decrement` basis-state arithmetic, job/result types importable from `qamomile.circuit`

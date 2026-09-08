@@ -35,8 +35,15 @@ def test_shor_factory_returns_one_executable_qkernel() -> None:
     assert isinstance(kernel, QKernel)
     estimate = _shor_estimate(2, 15)
     assert estimate.parameters == {}
-    assert estimate.qubits == 21
+    assert (
+        estimate.control_decomposition is qmc.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
+    )
+    assert estimate.width.allocated_qubits == 21
+    assert estimate.width.clean_ancilla_qubits == 2
     assert estimate.width.dirty_ancilla_qubits == 0
+    assert estimate.width.peak_qubits == 23
+    assert estimate.width.circuit_qubits == 23
+    assert estimate.qubits == 23
     assert estimate.gates.total > 0
     assert "modmul_const" not in estimate.calls.calls_by_name
     assert estimate.trace is None
@@ -52,11 +59,16 @@ def test_shor_width_is_body_derived_three_n_plus_constant(
     base: int,
     modulus: int,
 ) -> None:
-    """Specialized bodies expose the expected ``3n + w + 7`` peak width."""
+    """The clean-ancilla model adds reusable ancillas to body allocations."""
     n = modulus.bit_length()
     estimate = _shor_estimate(base, modulus)
 
-    assert estimate.qubits == 3 * n + 2 + 7
+    allocated = 3 * n + 2 + 7
+    assert estimate.width.allocated_qubits == allocated
+    assert estimate.width.clean_ancilla_qubits == 2
+    assert estimate.width.peak_qubits == allocated + 2
+    assert estimate.width.circuit_qubits == allocated + 2
+    assert estimate.qubits == allocated + 2
 
 
 def test_shor_skips_identity_modular_multiplication_rounds() -> None:
@@ -65,11 +77,22 @@ def test_shor_skips_identity_modular_multiplication_rounds() -> None:
         base=2,
         modulus=15,
         precision=2,
-    ).estimate_resources()
-    full_schedule = _shor_estimate(2, 15)
+    ).estimate_resources(
+        control_decomposition=qmc.ControlDecomposition.ABSTRACT,
+    )
+    full_schedule = qmc.shor_order_finding(
+        base=2,
+        modulus=15,
+    ).estimate_resources(
+        control_decomposition=qmc.ControlDecomposition.ABSTRACT,
+    )
 
-    assert arithmetic_rounds.gates.total == 3420
-    assert full_schedule.gates.total == 3465
+    assert arithmetic_rounds.gates.total == 3186
+    assert arithmetic_rounds.measurements.total == 74
+    assert arithmetic_rounds.resets.total == 74
+    assert full_schedule.gates.total == 3225
+    assert full_schedule.measurements.total == 80
+    assert full_schedule.resets.total == 80
     assert full_schedule.gates.two_qubit == arithmetic_rounds.gates.two_qubit
     assert full_schedule.gates.multi_qubit == arithmetic_rounds.gates.multi_qubit
 
@@ -116,8 +139,8 @@ def test_small_shor_order_finding_recovers_period_two(sdk_transpiler) -> None:
     Order finding is sample-only by design: its mid-circuit measurements are
     the algorithm output, so an expectation-value execution path is invalid.
     """
-    if sdk_transpiler.backend_name == "quri_parts":
-        pytest.skip("QURI Parts cannot represent Shor's mid-circuit reset")
+    if sdk_transpiler.backend_name in {"quri_parts", "braket"}:
+        pytest.skip("This backend cannot represent Shor's mid-circuit reset")
 
     kernel = qmc.shor_order_finding(base=2, modulus=3)
     transpiler = sdk_transpiler.transpiler
@@ -138,21 +161,26 @@ def test_small_shor_order_finding_recovers_period_two(sdk_transpiler) -> None:
 def test_four_bit_shor_transpiles_without_statevector_execution(
     sdk_transpiler,
 ) -> None:
-    """Transpile the 21-qubit benchmark without allocating its statevector.
+    """Transpile the 21-allocated-qubit benchmark without statevector execution.
 
     This test covers the realistic four-bit circuit without coupling its
-    runtime to statevector sampling.
+    runtime to statevector sampling. The default clean-ancilla control model
+    additionally reserves two ancillas for its controlled-gate decomposition.
 
     Args:
         sdk_transpiler: Parametrized SDK backend fixture.
     """
-    if sdk_transpiler.backend_name == "quri_parts":
-        pytest.skip("QURI Parts cannot represent Shor's mid-circuit reset")
+    if sdk_transpiler.backend_name in {"quri_parts", "braket"}:
+        pytest.skip("This backend cannot represent Shor's mid-circuit reset")
 
     kernel = qmc.shor_order_finding(base=2, modulus=15)
     executable = sdk_transpiler.transpiler.transpile(kernel)
 
-    assert _shor_estimate(2, 15).qubits == 21
+    estimate = _shor_estimate(2, 15)
+    assert estimate.width.allocated_qubits == 21
+    assert estimate.width.clean_ancilla_qubits == 2
+    assert estimate.width.peak_qubits == 23
+    assert estimate.width.circuit_qubits == 23
     assert executable.compiled_quantum
     assert executable.plan.steps
 
@@ -163,7 +191,14 @@ def test_ekera_hastad_uses_two_short_exponent_registers() -> None:
     estimate = kernel.estimate_resources()
 
     assert isinstance(kernel, QKernel)
-    assert estimate.qubits == 18
+    assert (
+        estimate.control_decomposition is qmc.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
+    )
+    assert estimate.width.allocated_qubits == 18
+    assert estimate.width.clean_ancilla_qubits == 2
+    assert estimate.width.peak_qubits == 20
+    assert estimate.width.circuit_qubits == 20
+    assert estimate.qubits == 20
     assert "modmul_const" not in estimate.calls.calls_by_name
     assert len(kernel.output_types) == 1
     assert kernel.output_types[0] == qmc.Vector[qmc.Bit]
@@ -175,8 +210,8 @@ def test_small_ekera_hastad_schedule_executes(sdk_transpiler) -> None:
     The schedule is sample-only because its measurement record is the
     factoring output; expectation-value execution is intentionally rejected.
     """
-    if sdk_transpiler.backend_name == "quri_parts":
-        pytest.skip("QURI Parts cannot represent Ekerå–Håstad's mid-circuit reset")
+    if sdk_transpiler.backend_name in {"quri_parts", "braket"}:
+        pytest.skip("This backend cannot represent Ekerå–Håstad's mid-circuit reset")
 
     kernel = qmc.ekera_hastad_factoring(generator=2, modulus=3, window_size=2)
     transpiler = sdk_transpiler.transpiler

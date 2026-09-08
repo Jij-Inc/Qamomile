@@ -4,6 +4,8 @@ slug: release-notes
 
 # リリースノート
 
+- [v0.15.0](v0_15_0) — 回路幅・種類別深さ・推定根拠を追跡するリソース推定、Amazon Braketサポート、Oracle変換の合成とエンジン共通の非同期実行ライフサイクル
+- [v0.14.0](v0_14_0) — 組み合わせ可能なLCU block encodingと`qmc.qsvt`、量子ビット幅を抑えたShorの位数探索とEkerå–Håstad法の量子計算部分、`qmc.struct`、`qmc.bit_array`、レジスタ幅の計算に使える`qmc.log2`と`qmc.ceil`
 - [v0.13.0](v0_13_0) — semanticな`qmc.select`、厳密な`qmc.global_phase`、ループをまたぐscalar、汎用と明示的なMöttönen amplitude encoding。Qiskitを`qiskit` extraへ移動
 - [v0.12.7](v0_12_7) — `Dict[K, Float]`の係数を`d[key]`添字付きでruntime parameterとして扱う、`UInt`の`%`演算子、これまでsilentなmiscompileだったパターンを拒否する一連の新しいコンパイル時エラー(`QubitRebindError`、`QubitConsumedError`、`bool` / 型不一致引数への`TypeError`)
 - [v0.12.6](v0_12_6) — `qmc.inverse`による回路の逆操作(ビルトインゲート・`@qkernel`・QFT/IQFT)、計算基底レジスタの算術`qmc.modular_increment` / `qmc.modular_decrement`、job型・結果型を`qamomile.circuit`からimport可能に

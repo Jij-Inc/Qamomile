@@ -1,41 +1,72 @@
-"""Unified value resolution for resource estimation.
-
-ExprResolver converts IR Values to SymPy expressions, providing a single
-source of truth for all estimators (gate counting, qubits).
-
-Two-mode API:
-  resolve()          — symbolic; unbound parameters → sp.Symbol
-  resolve_concrete() — concrete; must return int, raises on symbolic
-"""
+"""Resolve scoped IR values into symbolic resource expressions."""
 
 from __future__ import annotations
 
-from typing import Any
+import numbers
+from collections.abc import Mapping, Sequence
+from decimal import Decimal
+from typing import Any, cast
 
 import sympy as sp
+from sympy.logic.boolalg import Boolean
 
-from qamomile.circuit.ir.block import Block
-from qamomile.circuit.ir.operation.arithmetic_operations import (
-    BinOp,
-    BinOpKind,
-    CompOp,
-    CompOpKind,
-    UnaryMathOp,
-    UnaryMathOpKind,
+from qamomile.circuit.estimator._array_context import _ArrayContext
+from qamomile.circuit.estimator._array_projection import _ArrayProjector
+from qamomile.circuit.estimator._array_state import (
+    _ArrayState as _ArrayState,
 )
+from qamomile.circuit.estimator._classical_expression import (
+    _fallback_symbol as _fallback_symbol,
+    _parameter_symbol as _parameter_symbol,
+)
+from qamomile.circuit.estimator._classical_facts import (
+    _choice_classical_fact as _choice_classical_fact,
+    _fact_with_dependencies as _fact_with_dependencies,
+    _merge_source_guard_maps as _merge_source_guard_maps,
+    _ResolvedClassicalFact as _ResolvedClassicalFact,
+)
+from qamomile.circuit.estimator._classical_trace import _trace_classical_value
+from qamomile.circuit.estimator._resolver_indices import (
+    _compute_input_shape_dimension_aliases,
+    _ResolverBlockIndex,
+)
+from qamomile.circuit.estimator._symbolic import _normalize_resource_scalar
+from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.callable import CallTransform
+from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
 from qamomile.circuit.ir.operation.operation import Operation
-from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
 from qamomile.circuit.transpiler.block_parameter_binding import pair_block_operands
 
-from ._utils import BINOP_TO_SYMPY, UNARY_MATH_TO_SYMPY
+
+def input_shape_dimension_aliases(block: Block) -> dict[str, str]:
+    """Return collision-free public aliases for root array dimensions.
+
+    Frontend-generated dimension labels can collide with an ordinary
+    classical argument (for example, a vector ``signal`` and a UInt argument
+    named ``signal_dim0``). Reusing that spelling for both SymPy symbols would
+    make one resource input specialize two semantically different values.
+
+    Args:
+        block (Block): Root block whose input dimensions should be named.
+
+    Returns:
+        dict[str, str]: Dimension UUID to deterministic, unique input alias.
+    """
+    return _compute_input_shape_dimension_aliases(block)
 
 
 class UnresolvedValueError(Exception):
     """A value cannot be concretized during resource estimation."""
 
-    def __init__(self, uuid: str, message: str = ""):
+    def __init__(self, uuid: str, message: str = "") -> None:
+        """Initialize an unresolved-value diagnostic.
+
+        Args:
+            uuid (str): Identity of the IR value that could not be resolved.
+            message (str): Optional diagnostic message. Defaults to a message
+                containing ``uuid``.
+        """
         self.uuid = uuid
         super().__init__(message or f"Cannot resolve value {uuid} to concrete int")
 
@@ -55,11 +86,15 @@ class ExprResolver:
     """
 
     __slots__ = (
+        "_array_context",
+        "_array_projector",
         "_block",
+        "_block_index",
+        "_classical_fact_context",
         "_context",
         "_loop_var_names",
         "_parent_blocks",
-        "_producer_maps",
+        "_structural_scope",
     )
 
     def __init__(
@@ -68,7 +103,10 @@ class ExprResolver:
         context: dict[str, sp.Expr] | None = None,
         loop_var_names: dict[str, sp.Expr] | None = None,
         parent_blocks: list[Any] | None = None,
-        producer_maps: dict[int, tuple[Any, dict[str, Operation]]] | None = None,
+        block_index: _ResolverBlockIndex | None = None,
+        structural_scope: tuple[tuple[int, int], ...] | None = None,
+        array_context: dict[str, _ArrayState] | None = None,
+        classical_fact_context: dict[str, _ResolvedClassicalFact] | None = None,
     ):
         """Initialise an ExprResolver.
 
@@ -82,17 +120,42 @@ class ExprResolver:
                 expression mapping for loop variables in scope.
             parent_blocks (list[Any] | None): Ancestor blocks to search
                 when tracing fails in the current block.
-            producer_maps (dict[int, tuple[Any, dict[str, Operation]]] | None):
-                Shared block-identity index containing a strong block reference
-                and its result UUID to producer-operation map. Child resolvers
-                reuse it so every block is indexed at most once. Defaults to
-                ``None``.
+            block_index (_ResolverBlockIndex | None): Shared immutable-block
+                index for producer and input-shape lookups. Child resolvers
+                reuse one owner so every block is indexed at most once.
+                Defaults to ``None``, which creates a new index owner.
+            structural_scope (tuple[tuple[int, int], ...] | None): Stable
+                call-site path used by structural resource symbols. Each item
+                contains the invocation and selected-body identities. Defaults
+                to ``None`` for a root scope.
+            array_context (dict[str, _ArrayState] | None): Array-result UUID to
+                immutable element-wise state. Ordinary child regions share the
+                mapping, while callable scopes copy and explicitly publish
+                output snapshots. Defaults to ``None``.
+            classical_fact_context (dict[str, _ResolvedClassicalFact] | None):
+                Scalar or whole-array UUID to its resolved value and guarded
+                scheduler dependencies. Defaults to ``None``.
         """
         self._block = block
+        self._block_index = block_index or _ResolverBlockIndex()
+        self._classical_fact_context = dict(classical_fact_context or {})
         self._context: dict[str, sp.Expr] = dict(context or {})
         self._loop_var_names: dict[str, sp.Expr] = dict(loop_var_names or {})
         self._parent_blocks: list[Any] = list(parent_blocks or [])
-        self._producer_maps = producer_maps if producer_maps is not None else {}
+        self._structural_scope = structural_scope or ()
+        self._array_context = _ArrayContext(
+            self.resolve_classical_fact,
+            self._array_producer,
+            array_context,
+        )
+        self._array_projector = _ArrayProjector(
+            self._array_context.get,
+            lambda value, concrete: self._resolve_classical_fact(
+                value,
+                concrete=concrete,
+            ),
+            self._array_producer,
+        )
 
     # ------------------------------------------------------------------ #
     #  Public API                                                         #
@@ -133,6 +196,136 @@ class ExprResolver:
             f"Expected concrete int, got {expr}",
         )
 
+    def resolve_classical_fact(self, value: Any) -> _ResolvedClassicalFact:
+        """Resolve a classical value together with scheduler dependencies.
+
+        Precise array-element state takes precedence over a conservative
+        whole-array fact. The whole-array dependency is used only when the
+        persistent state cannot project the requested element.
+
+        Args:
+            value (Any): IR value, primitive Python value, or SymPy value to
+                resolve.
+
+        Returns:
+            _ResolvedClassicalFact: Resolved value and guarded source tokens.
+        """
+        return self._resolve_classical_fact(value, concrete=False)
+
+    def bind_classical_fact(
+        self,
+        value: Value,
+        fact: _ResolvedClassicalFact,
+    ) -> None:
+        """Bind one scalar or whole-array provenance fact by SSA identity.
+
+        Args:
+            value (Value): IR value receiving the fact.
+            fact (_ResolvedClassicalFact): Resolved value and dependencies.
+        """
+        self._classical_fact_context[value.uuid] = fact
+        self._context[value.uuid] = cast(sp.Expr, fact.value)
+
+    def bind_classical_selection(
+        self,
+        result: Value,
+        when_true: _ResolvedClassicalFact,
+        when_false: _ResolvedClassicalFact,
+        selector: _ResolvedClassicalFact,
+        value_override: sp.Basic | int | float | bool | None = None,
+    ) -> None:
+        """Bind a branch-selected scalar fact to one SSA result.
+
+        Branch dependencies use the same guarded choice semantics as array
+        element projection. A caller may supply a separately derived value
+        expression without changing those dependency guards.
+
+        Args:
+            result (Value): Scalar SSA result receiving the selected fact.
+            when_true (_ResolvedClassicalFact): True-branch value and sources.
+            when_false (_ResolvedClassicalFact): False-branch value and
+                sources.
+            selector (_ResolvedClassicalFact): Branch selector and its source
+                dependencies.
+            value_override (sp.Basic | int | float | bool | None): Optional
+                result expression to use instead of the selected Piecewise
+                value. Defaults to ``None``.
+        """
+        selected = _choice_classical_fact(when_true, when_false, selector)
+        if value_override is not None:
+            selected = _ResolvedClassicalFact.create(
+                value_override,
+                selected.dependencies,
+            )
+        self.bind_classical_fact(result, selected)
+
+    def unresolved_fallback_symbol(self, value: Value) -> sp.Symbol | None:
+        """Return the private fallback symbol used for an unresolved value.
+
+        A resolved expression can contain both runtime-derived state and
+        ordinary public inputs.  Callers that classify the former must not
+        infer provenance from every free symbol in the expression.  This
+        method distinguishes the one identity-qualified symbol introduced by
+        the resolver itself when no binding, constant, parameter, supported
+        producer, or public input-shape alias can explain ``value``.
+
+        Args:
+            value (Value): IR scalar value to classify.
+
+        Returns:
+            sp.Symbol | None: The resolver-owned fallback symbol, or ``None``
+                when ``value`` has an ordinary symbolic resolution.
+        """
+        if value.uuid in self._context or value.is_constant() or value.is_parameter():
+            return None
+        if (
+            value.is_array_element()
+            and self._resolve_array_element(
+                value,
+                concrete=False,
+            )
+            is not None
+        ):
+            return None
+        if self._block is not None:
+            traced = self._trace(value, self._block, set(), concrete=False)
+            if traced is not None:
+                return None
+        for parent_block in reversed(self._parent_blocks):
+            traced = self._trace(value, parent_block, set(), concrete=False)
+            if traced is not None:
+                return None
+        if self._input_shape_dimension_alias(value) is not None:
+            return None
+        return _fallback_symbol(value)
+
+    @property
+    def structural_scope(self) -> tuple[tuple[int, int], ...]:
+        """Return the nested callable path for structural resource symbols.
+
+        Returns:
+            tuple[tuple[int, int], ...]: Invocation/body identity pairs from
+                the root block to this resolver scope.
+        """
+        return self._structural_scope
+
+    def call_structural_scope(
+        self,
+        call_op: Any,
+        called_block: Block,
+    ) -> tuple[tuple[int, int], ...]:
+        """Return the structural scope of one selected callable body.
+
+        Args:
+            call_op (Any): Invocation-like operation defining the call site.
+            called_block (Block): Selected body entered at that call site.
+
+        Returns:
+            tuple[tuple[int, int], ...]: Parent path extended by this call
+                site and selected body.
+        """
+        return (*self._structural_scope, (id(call_op), id(called_block)))
+
     def child_scope(
         self,
         inner_block: Any,
@@ -171,7 +364,48 @@ class ExprResolver:
             context=ctx,
             loop_var_names=lvn,
             parent_blocks=new_parents,
-            producer_maps=self._producer_maps,
+            block_index=self._block_index,
+            structural_scope=self._structural_scope,
+            array_context=self._array_context.shared_states(),
+            classical_fact_context=self._classical_fact_context,
+        )
+
+    def isolated_scope(
+        self,
+        inner_block: Any,
+        extra_context: dict[str, sp.Expr] | None = None,
+        structural_scope: tuple[tuple[int, int], ...] | None = None,
+    ) -> ExprResolver:
+        """Create a resolver scope isolated from caller block visibility.
+
+        Callable bodies receive only values mapped explicitly through their
+        operands, but immutable block indexes remain safe to share across the
+        resolver tree.
+
+        Args:
+            inner_block (Any): Callable block for the isolated scope.
+            extra_context (dict[str, sp.Expr] | None): Additional UUID to
+                expression mappings for formal inputs. Defaults to ``None``.
+            structural_scope (tuple[tuple[int, int], ...] | None): Explicit
+                call-site path for the isolated scope. Defaults to the current
+                path.
+
+        Returns:
+            ExprResolver: Resolver with no parent blocks and shared block
+                indexes.
+        """
+        context = dict(extra_context or {})
+        return ExprResolver(
+            block=inner_block,
+            context=context,
+            loop_var_names=self._loop_var_names.copy(),
+            parent_blocks=[],
+            block_index=self._block_index,
+            structural_scope=(
+                self._structural_scope if structural_scope is None else structural_scope
+            ),
+            array_context={},
+            classical_fact_context={},
         )
 
     def call_child_scope(
@@ -180,6 +414,7 @@ class ExprResolver:
         *,
         called_block: Block | None = None,
         body_implements_transform: bool = False,
+        actual_operands: Sequence[Any] | None = None,
     ) -> ExprResolver:
         """Create a child resolver for an inline callable invocation.
 
@@ -202,6 +437,10 @@ class ExprResolver:
                 transform-specific implementation whose formal inputs include
                 control operands. Defaults to ``False`` for a direct body that
                 the compiler transforms structurally.
+            actual_operands (Sequence[Any] | None): Call-site operands already
+                aligned to ``called_block``. When omitted, the resolver derives
+                the alignment from the invocation metadata. Defaults to
+                ``None``.
 
         Returns:
             ExprResolver: A new resolver scoped to the callee block with
@@ -219,31 +458,57 @@ class ExprResolver:
             # Not a nested Block input — use child_scope as fallback
             return self.child_scope(called_block)
 
-        actual_operands = call_op.operands
-        if (
-            getattr(call_op, "transform", None) is CallTransform.CONTROLLED
-            and not body_implements_transform
-        ):
-            actual_operands = actual_operands[call_op.num_control_qubits :]
+        if actual_operands is None:
+            actual_operands = call_op.operands
+            if (
+                getattr(call_op, "transform", CallTransform.DIRECT).is_controlled
+                and not body_implements_transform
+            ):
+                control_count = getattr(
+                    call_op,
+                    "num_body_external_control_qubits",
+                    call_op.num_control_qubits,
+                )
+                actual_operands = actual_operands[control_count:]
 
         extra: dict[str, sp.Expr] = {}
+        array_inputs: list[tuple[ArrayValue, ArrayValue]] = []
+        classical_inputs: list[tuple[Value, Value]] = []
         for formal, actual in pair_block_operands(called_block, actual_operands):
             extra[formal.uuid] = self.resolve(actual)
+            if (
+                isinstance(formal, Value)
+                and isinstance(actual, Value)
+                and not isinstance(formal, ArrayValue)
+                and not isinstance(actual, ArrayValue)
+                and not formal.type.is_quantum()
+            ):
+                classical_inputs.append((formal, actual))
             # Map array shape dimension UUIDs
             if isinstance(actual, ArrayValue) and isinstance(formal, ArrayValue):
+                if not formal.type.is_quantum():
+                    array_inputs.append((formal, actual))
                 for df, da in zip(formal.shape, actual.shape):
                     extra[df.uuid] = self.resolve(da)
 
-        # Callee gets fresh scope — no parent blocks from caller
-        ctx = self._context.copy()
-        ctx.update(extra)
-        return ExprResolver(
-            block=called_block,
-            context=ctx,
-            loop_var_names=self._loop_var_names.copy(),
-            parent_blocks=[],
-            producer_maps=self._producer_maps,
+        # Callee gets fresh scope — no parent blocks from caller.
+        child = self.isolated_scope(
+            called_block,
+            extra,
+            structural_scope=self.call_structural_scope(call_op, called_block),
         )
+        for formal, actual in classical_inputs:
+            child.bind_classical_fact(
+                formal,
+                self.resolve_classical_fact(actual),
+            )
+        for formal, actual in array_inputs:
+            child.bind_call_array_input(
+                called_block,
+                formal,
+                self.snapshot_array_state(actual),
+            )
+        return child
 
     def bind(self, value: Value, expression: sp.Expr) -> None:
         """Bind an IR value to an expression in this resolver scope.
@@ -259,27 +524,291 @@ class ExprResolver:
                 the value.
         """
         self._context[value.uuid] = expression
+        self._classical_fact_context[value.uuid] = _ResolvedClassicalFact.create(
+            expression
+        )
+
+    def bind_array_selection(
+        self,
+        result: ArrayValue,
+        when_true: ArrayValue,
+        when_false: ArrayValue,
+        condition: sp.Basic | _ResolvedClassicalFact,
+    ) -> None:
+        """Delegate a branch-selected array binding to the array owner.
+
+        Args:
+            result (ArrayValue): Array SSA version visible after selection.
+            when_true (ArrayValue): Source array selected when ``condition``
+                is true.
+            when_false (ArrayValue): Source array selected when ``condition``
+                is false.
+            condition (sp.Basic | _ResolvedClassicalFact): Predicate selecting
+                the source array, optionally with source-token provenance.
+        """
+        self._array_context.bind_selection(
+            result,
+            when_true,
+            when_false,
+            condition,
+        )
+
+    def bind_array_state(self, result: ArrayValue, state: _ArrayState) -> None:
+        """Delegate an immutable array-state binding to the array owner.
+
+        Args:
+            result (ArrayValue): Array SSA value receiving the snapshot.
+            state (_ArrayState): Frozen state resolved in the producing scope.
+        """
+        self._array_context.bind_state(result, state)
+
+    def bind_array_state_selection(
+        self,
+        result: ArrayValue,
+        when_true: _ArrayState,
+        when_false: _ArrayState,
+        selector: _ResolvedClassicalFact,
+    ) -> None:
+        """Delegate detached branch snapshots to the array owner.
+
+        Args:
+            result (ArrayValue): Array SSA result receiving the selected state.
+            when_true (_ArrayState): Detached true-branch snapshot.
+            when_false (_ArrayState): Detached false-branch snapshot.
+            selector (_ResolvedClassicalFact): Branch selector and its source
+                dependencies.
+        """
+        self._array_context.bind_state_selection(
+            result,
+            when_true,
+            when_false,
+            selector,
+        )
+
+    def copy_array_context(self) -> None:
+        """Detach this resolver from a shared mutable array-context mapping."""
+        self._array_context.detach()
+
+    def fork_array_context(self) -> dict[str, _ArrayState]:
+        """Return a detached shallow copy for a child resolver scope.
+
+        The state nodes are immutable, so copying only the UUID map is enough
+        to isolate later bindings while retaining structural sharing.
+
+        Returns:
+            dict[str, _ArrayState]: Detached array-state mapping.
+        """
+        return self._array_context.fork()
+
+    def export_array_context(
+        self,
+        arrays: Sequence[ArrayValue] | None = None,
+    ) -> dict[str, _ArrayState]:
+        """Export all or selected persistent array-state bindings.
+
+        Args:
+            arrays (Sequence[ArrayValue] | None): Optional array SSA values to
+                export. Defaults to ``None``, which exports every binding.
+
+        Returns:
+            dict[str, _ArrayState]: Detached mapping safe to import elsewhere.
+        """
+        return self._array_context.export(arrays)
+
+    def import_array_context(
+        self,
+        context: Mapping[str, _ArrayState],
+        *,
+        replace: bool = False,
+    ) -> None:
+        """Import persistent array-state bindings into this resolver.
+
+        Args:
+            context (Mapping[str, _ArrayState]): Exported UUID-to-state map.
+            replace (bool): Whether to replace every existing binding before
+                importing. Defaults to ``False``, which overlays the supplied
+                bindings.
+        """
+        self._array_context.import_states(context, replace=replace)
+
+    def bind_call_array_input(
+        self,
+        block: Block,
+        formal: ArrayValue,
+        state: _ArrayState,
+    ) -> None:
+        """Delegate callable-entry array aliasing to the array owner.
+
+        Args:
+            block (Block): Selected callable body.
+            formal (ArrayValue): Array value paired with the call operand.
+            state (_ArrayState): Caller state captured at invocation time.
+        """
+        self._array_context.bind_call_input(block, formal, state)
+
+    def bind_loop_array_input(
+        self,
+        operations: Sequence[Operation],
+        entry: ArrayValue,
+        state: _ArrayState,
+    ) -> None:
+        """Delegate loop-entry array aliasing to the array owner.
+
+        Args:
+            operations (Sequence[Operation]): Loop-body operations.
+            entry (ArrayValue): Pre-loop array value naming the carried lineage.
+            state (_ArrayState): Snapshot produced by the previous iteration.
+        """
+        self._array_context.bind_loop_input(operations, entry, state)
+
+    def snapshot_array_state(
+        self,
+        array: ArrayValue,
+        *,
+        ignore_binding: str | None = None,
+        visited: set[str] | None = None,
+    ) -> _ArrayState:
+        """Delegate immutable array-state capture to the array owner.
+
+        Args:
+            array (ArrayValue): Array whose current state is captured.
+            ignore_binding (str | None): Array binding bypassed for one raw
+                producer lookup. Defaults to ``None``.
+            visited (set[str] | None): Array UUIDs already visited on this
+                capture path. Defaults to ``None``.
+
+        Returns:
+            _ArrayState: Immutable state tree rooted at ``array``.
+        """
+        return self._array_context.snapshot(
+            array,
+            ignore_binding=ignore_binding,
+            visited=visited,
+        )
+
+    def array_state_dependencies(self, array: ArrayValue) -> dict[str, Boolean]:
+        """Delegate whole-array dependency summarization to the array owner.
+
+        Args:
+            array (ArrayValue): Array whose immutable state is summarized.
+
+        Returns:
+            dict[str, Boolean]: Retained source tokens and activation guards.
+        """
+
+        return self._array_context.dependencies(array)
+
+    def guard_array_update(
+        self,
+        result: ArrayValue,
+        previous: ArrayValue,
+        condition: sp.Basic | _ResolvedClassicalFact,
+    ) -> None:
+        """Delegate one execution-guarded update to the array owner.
+
+        Args:
+            result (ArrayValue): Array SSA version produced by the store.
+            previous (ArrayValue): Array version read by the store.
+            condition (sp.Basic | _ResolvedClassicalFact): Predicate that the
+                enclosing region executes, optionally with provenance.
+        """
+        self._array_context.guard_update(result, previous, condition)
+
+    def record_array_store(self, operation: StoreArrayElementOperation) -> None:
+        """Delegate one sequential store record to the array owner.
+
+        Args:
+            operation (StoreArrayElementOperation): Store just encountered by
+                the estimator's sequential interpreter.
+        """
+        self._array_context.record_store(operation)
 
     # Read-only accessors for engine / accumulator use
 
     @property
     def context(self) -> dict[str, sp.Expr]:
-        """Copy of the UUID → expression context mapping."""
+        """Return a copy of the UUID-to-expression context mapping.
+
+        Returns:
+            dict[str, sp.Expr]: Copied resolver context keyed by value UUID.
+        """
         return self._context.copy()
 
     @property
     def loop_var_names(self) -> dict[str, sp.Expr]:
-        """Copy of the loop variable name → expression mapping."""
+        """Return a copy of the loop-variable expression mapping.
+
+        Returns:
+            dict[str, sp.Expr]: Copied loop-variable expressions keyed by name.
+        """
         return self._loop_var_names.copy()
 
     @property
     def block(self) -> Any:
-        """The current block being resolved against."""
+        """Return the current block being resolved against.
+
+        Returns:
+            Any: Current resolver block or operation container.
+        """
         return self._block
 
     # ------------------------------------------------------------------ #
     #  Internal resolution                                                #
     # ------------------------------------------------------------------ #
+
+    def _resolve_classical_fact(
+        self,
+        value: Any,
+        *,
+        concrete: bool,
+    ) -> _ResolvedClassicalFact:
+        """Resolve one value and its guarded observation dependencies.
+
+        Args:
+            value (Any): IR, Python, or SymPy value to resolve.
+            concrete (bool): Whether unresolved symbolic values are rejected.
+
+        Returns:
+            _ResolvedClassicalFact: Resolved value and source-token guards.
+
+        Raises:
+            UnresolvedValueError: If ``concrete`` is true and the value cannot
+                be resolved concretely.
+        """
+        if isinstance(value, Value):
+            direct = self._classical_fact_context.get(value.uuid)
+            if direct is not None:
+                return direct
+            if value.is_array_element():
+                projected = self._resolve_array_element_fact(
+                    value,
+                    concrete=concrete,
+                )
+                if projected is not None:
+                    # A proven element state is strictly more precise than an
+                    # aggregate array fallback. In particular, a strong Store
+                    # overwrites old dependencies instead of unioning them.
+                    return projected
+                fallback = _ResolvedClassicalFact.create(
+                    self._resolve(value, concrete),
+                )
+                parent = value.parent_array
+                inherited: dict[str, Boolean] = {}
+                if parent is not None:
+                    parent_fact = self._classical_fact_context.get(parent.uuid)
+                    if parent_fact is not None:
+                        inherited.update(parent_fact.dependencies)
+                for index in value.element_indices:
+                    index_fact = self._resolve_classical_fact(
+                        index,
+                        concrete=concrete,
+                    )
+                    inherited = _merge_source_guard_maps(
+                        inherited,
+                        index_fact.dependencies,
+                    )
+                return _fact_with_dependencies(fallback, inherited)
+        return _ResolvedClassicalFact.create(self._resolve(value, concrete))
 
     def _resolve(self, v: Any, concrete: bool) -> sp.Expr:
         """Core resolution dispatcher (9-step priority chain).
@@ -298,16 +827,19 @@ class ExprResolver:
         """
         # 1. Already SymPy
         if isinstance(v, sp.Basic):
-            return v  # type: ignore[return-value]
+            return cast(sp.Expr, v)
 
         # 2. Primitive Python types
         if not isinstance(v, Value):
             if isinstance(v, bool):
                 return sp.Integer(1 if v else 0)
-            if isinstance(v, int):
-                return sp.Integer(v)
-            if isinstance(v, float):
-                return sp.Float(v)
+            if isinstance(v, (numbers.Number, Decimal)):
+                return _normalize_resource_scalar(
+                    v,
+                    label="resolver value",
+                    allow_symbolic=False,
+                    allow_bool=True,
+                )
             if concrete:
                 raise UnresolvedValueError("?", f"Non-Value type: {type(v).__name__}")
             return sp.Symbol(str(v), integer=True, positive=True)
@@ -323,8 +855,17 @@ class ExprResolver:
                 if isinstance(c, bool):
                     return sp.Integer(1 if c else 0)
                 if isinstance(c, float):
-                    return sp.Float(c)
+                    return cast(sp.Expr, sp.Float(c))
                 return sp.Integer(int(c))
+
+        # Array element loads are encoded as Value provenance rather than a
+        # dedicated operation. Try the parent array state before accepting an
+        # element-shaped parameter label: inlining can retain the callee's
+        # parameter metadata after substituting a concrete caller array.
+        if v.is_array_element():
+            element = self._resolve_array_element(v, concrete=concrete)
+            if element is not None:
+                return element
 
         # 5. Unbound parameter
         if v.is_parameter():
@@ -351,34 +892,80 @@ class ExprResolver:
         # and canonical UUIDs commonly share long prefixes.
         if concrete:
             raise UnresolvedValueError(v.uuid, f"Unresolvable: '{v.name}'")
-        if self._is_input_shape_dimension(v):
-            return sp.Symbol(v.name, integer=True, nonnegative=True)
-        fallback_name = f"{v.name}_{v.uuid}"
-        if isinstance(v.type, FloatType):
-            return sp.Symbol(fallback_name, real=True)
-        if isinstance(v.type, (BitType, UIntType)):
-            return sp.Symbol(fallback_name, integer=True, nonnegative=True)
-        return sp.Symbol(fallback_name)
+        shape_alias = self._input_shape_dimension_alias(v)
+        if shape_alias is not None:
+            return sp.Symbol(shape_alias, integer=True, nonnegative=True)
+        return _fallback_symbol(v)
 
-    def _is_input_shape_dimension(self, value: Value) -> bool:
-        """Return whether a value is a public input-array dimension.
+    def _resolve_array_element(
+        self,
+        value: Value,
+        *,
+        concrete: bool,
+    ) -> sp.Expr | None:
+        """Resolve one scalar element through the array projector.
+
+        Args:
+            value (Value): Scalar value carrying parent-array provenance.
+            concrete (bool): Whether index and value resolution is concrete.
+
+        Returns:
+            sp.Expr | None: Projected expression, or ``None`` when the
+                persistent array state cannot explain the element.
+        """
+        return self._array_projector.resolve_element(value, concrete=concrete)
+
+    def _resolve_array_element_fact(
+        self,
+        value: Value,
+        *,
+        concrete: bool,
+    ) -> _ResolvedClassicalFact | None:
+        """Resolve one scalar array element through the array projector.
+
+        Args:
+            value (Value): Scalar value carrying parent-array provenance.
+            concrete (bool): Whether index and value resolution is concrete.
+
+        Returns:
+            _ResolvedClassicalFact | None: Precise projected fact, or ``None``
+                when the persistent array state cannot explain the element.
+        """
+        return self._array_projector.resolve_element_fact(
+            value,
+            concrete=concrete,
+        )
+
+    def _array_producer(self, array: ArrayValue) -> Operation | None:
+        """Return the operation producing one array SSA version.
+
+        Args:
+            array (ArrayValue): Array value whose producer is requested.
+
+        Returns:
+            Operation | None: Producing operation in the current or an
+                enclosing block, or ``None`` when the array is an input or
+                initializer.
+        """
+        return self._block_index.array_producer(
+            array,
+            (self._block, *reversed(self._parent_blocks)),
+        )
+
+    def _input_shape_dimension_alias(self, value: Value) -> str | None:
+        """Return the collision-free alias for an input-array dimension.
 
         Args:
             value (Value): Unresolved value considered for symbolic fallback.
 
         Returns:
-            bool: Whether ``value`` appears in an input array's shape in the
-                current or an enclosing block.
+            str | None: Stable input alias when ``value`` is an input-array
+                dimension in the current or an enclosing block.
         """
-        for block in (self._block, *reversed(self._parent_blocks)):
-            if not isinstance(block, Block):
-                continue
-            for input_value in block.input_values:
-                if isinstance(input_value, ArrayValue) and any(
-                    dimension.uuid == value.uuid for dimension in input_value.shape
-                ):
-                    return True
-        return False
+        return self._block_index.input_shape_dimension_alias(
+            value,
+            (self._block, *reversed(self._parent_blocks)),
+        )
 
     def _trace(
         self, v: Value, block: Any, visited: set[int], concrete: bool
@@ -396,147 +983,11 @@ class ExprResolver:
             sp.Expr | None: Resolved expression if a supported defining
                 classical operation was found; ``None`` otherwise.
         """
-        vid = id(v)
-        if vid in visited:
-            return None
-        visited.add(vid)
-
-        op = self._producer_map(block).get(v.uuid)
-        if isinstance(op, BinOp):
-            left = self._resolve(op.operands[0], concrete)
-            right = self._resolve(op.operands[1], concrete)
-            assert op.kind is not None
-            return _apply_binop(op.kind, left, right)
-
-        if isinstance(op, CompOp):
-            left = self._resolve(op.operands[0], concrete)
-            right = self._resolve(op.operands[1], concrete)
-            assert op.kind is not None
-            return _apply_compop(op.kind, left, right)
-
-        if isinstance(op, UnaryMathOp):
-            operand = self._resolve(op.input, concrete)
-            assert op.kind is not None
-            return _apply_unary_math(op.kind, operand)
-
-        return None
-
-    def _producer_map(self, block: Any) -> dict[str, Operation]:
-        """Return the cached producer index for one block.
-
-        Args:
-            block (Any): Block-like object exposing an ``operations`` list.
-
-        Returns:
-            dict[str, Operation]: Result UUID to defining operation. All
-                operation results are indexed, not only the first result.
-        """
-        block_id = id(block)
-        cached = self._producer_maps.get(block_id)
-        if cached is None or cached[0] is not block:
-            producers = {
-                result.uuid: operation
-                for operation in block.operations
-                for result in operation.results
-            }
-            self._producer_maps[block_id] = (block, producers)
-            return producers
-        return cached[1]
-
-
-# ------------------------------------------------------------------ #
-#  Module-level helpers                                               #
-# ------------------------------------------------------------------ #
-
-
-def _parameter_symbol(value: Value, name: str) -> sp.Symbol:
-    """Create a symbol matching an IR parameter's scalar domain.
-
-    Args:
-        value (Value): Parameter value whose IR type defines assumptions.
-        name (str): Public parameter name used for the symbol.
-
-    Returns:
-        sp.Symbol: A nonnegative integer for UInt/Bit, a real symbol for
-            Float, or an unconstrained symbol for other value types.
-    """
-    if isinstance(value.type, FloatType):
-        return sp.Symbol(name, real=True)
-    if isinstance(value.type, (BitType, UIntType)):
-        # Zero is a valid UInt/Bit value. Assuming strict positivity lets SymPy
-        # erase ``value == 0`` branches and zero-trip width guards before a
-        # later substitution can recover them.
-        return sp.Symbol(name, integer=True, nonnegative=True)
-    return sp.Symbol(name)
-
-
-_COMPOP_MAP = {
-    CompOpKind.EQ: sp.Eq,
-    CompOpKind.NEQ: sp.Ne,
-    CompOpKind.LT: sp.Lt,
-    CompOpKind.LE: sp.Le,
-    CompOpKind.GT: sp.Gt,
-    CompOpKind.GE: sp.Ge,
-}
-
-
-def _apply_binop(kind: BinOpKind, left: sp.Expr, right: sp.Expr) -> sp.Expr:
-    """Apply binary arithmetic.
-
-    Args:
-        kind (BinOpKind): The arithmetic operation kind.
-        left (sp.Expr): Left operand.
-        right (sp.Expr): Right operand.
-
-    Returns:
-        sp.Expr: Result of applying the operation.
-
-    Raises:
-        ValueError: If *kind* is not in ``BINOP_TO_SYMPY``.
-    """
-    fn = BINOP_TO_SYMPY.get(kind)
-    if fn is None:
-        raise ValueError(f"Unknown BinOpKind: {kind}")
-    return fn(left, right)
-
-
-def _apply_unary_math(
-    kind: UnaryMathOpKind,
-    operand: sp.Expr,
-) -> sp.Expr:
-    """Apply one exact symbolic unary mathematical operation.
-
-    Args:
-        kind (UnaryMathOpKind): Mathematical operation kind.
-        operand (sp.Expr): Symbolic numeric operand.
-
-    Returns:
-        sp.Expr: Exact SymPy expression.
-
-    Raises:
-        ValueError: If ``kind`` has no symbolic implementation.
-    """
-    fn = UNARY_MATH_TO_SYMPY.get(kind)
-    if fn is None:
-        raise ValueError(f"Unknown UnaryMathOpKind: {kind}")
-    return fn(operand)
-
-
-def _apply_compop(kind: CompOpKind, left: sp.Expr, right: sp.Expr) -> sp.Expr:
-    """Apply comparison operation.
-
-    Args:
-        kind (CompOpKind): The comparison operation kind.
-        left (sp.Expr): Left operand.
-        right (sp.Expr): Right operand.
-
-    Returns:
-        sp.Expr: SymPy relational expression (e.g. ``sp.Eq``, ``sp.Lt``).
-
-    Raises:
-        ValueError: If *kind* is not in ``_COMPOP_MAP``.
-    """
-    fn = _COMPOP_MAP.get(kind)
-    if fn is None:
-        raise ValueError(f"Unknown CompOpKind: {kind}")
-    return fn(left, right)  # type: ignore[return-value]
+        return _trace_classical_value(
+            v,
+            block,
+            visited,
+            concrete,
+            resolve=self._resolve,
+            producer_map=self._block_index.producer_map,
+        )

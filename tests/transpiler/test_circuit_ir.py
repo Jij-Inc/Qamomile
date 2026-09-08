@@ -472,6 +472,24 @@ def test_builder_reduces_constant_only_pauli_evolution_to_phase() -> None:
     verify_circuit(program)
 
 
+@pytest.mark.parametrize(
+    "constant",
+    [float("nan"), float("inf"), complex(1.0, float("nan"))],
+)
+def test_builder_rejects_nonfinite_pauli_identity_coefficient(
+    constant: complex | float,
+) -> None:
+    """Circuit IR never converts a non-finite identity term into phase."""
+    builder = CircuitBuilder(1, 0)
+
+    with pytest.raises(ValueError, match="finite Hamiltonian coefficients"):
+        builder.append_pauli_evolution(
+            (0,),
+            qm_o.Hamiltonian.identity(constant, num_qubits=1),
+            ParameterExpr("theta"),
+        )
+
+
 def test_builder_hoists_uncontrolled_call_phase_with_inverse_and_power() -> None:
     """An unconditional call contributes one canonical enclosing phase."""
     theta = ParameterExpr("theta")

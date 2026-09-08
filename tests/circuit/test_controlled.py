@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+import sympy as sp
 
 if TYPE_CHECKING:
     from qiskit.circuit import QuantumCircuit
@@ -20,9 +21,19 @@ from qamomile.circuit.frontend.handle.primitives import Float, Qubit
 from qamomile.circuit.frontend.operation.control import ControlledGate, control
 from qamomile.circuit.frontend.tracer import trace
 from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.effect import KernelEffect
 from qamomile.circuit.ir.operation import GlobalPhaseOperation
-from qamomile.circuit.ir.operation.callable import CallTransform, InvokeOperation
-from qamomile.circuit.ir.operation.gate import ControlledUOperation
+from qamomile.circuit.ir.operation.callable import (
+    CallableDef,
+    CallableImplementation,
+    CallableRef,
+    CallTransform,
+    InvokeOperation,
+)
+from qamomile.circuit.ir.operation.gate import (
+    ControlledUOperation,
+    SymbolicControlledU,
+)
 from qamomile.circuit.ir.operation.operation import OperationKind
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.types.primitives import FloatType, QubitType
@@ -654,16 +665,17 @@ class TestNormalizeControlIndices:
 class TestControlledPowerValidation:
     """Tests for power parameter validation in ControlledGate."""
 
-    def test_power_zero_raises(self):
+    def test_power_zero_emits_an_identity_call(self):
+        """A concrete zero power is represented for identity lowering."""
         cg = ControlledGate(_mock_qkernel(), num_controls=1)
-        with trace():
-            with pytest.raises(ValueError, match="strictly positive"):
-                cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=0)
+        with trace() as tracer:
+            cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=0)
+        assert tracer.operations[0].power == 0
 
     def test_power_negative_raises(self):
         cg = ControlledGate(_mock_qkernel(), num_controls=1)
         with trace():
-            with pytest.raises(ValueError, match="strictly positive"):
+            with pytest.raises(ValueError, match="nonnegative"):
                 cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=-3)
 
     def test_power_bool_true_raises(self):
@@ -678,11 +690,36 @@ class TestControlledPowerValidation:
             with pytest.raises(TypeError, match="bool"):
                 cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=False)
 
-    def test_power_float_raises(self):
+    def test_power_fractional_float_raises(self):
         cg = ControlledGate(_mock_qkernel(), num_controls=1)
         with trace():
-            with pytest.raises(TypeError, match="int or UInt"):
+            with pytest.raises(TypeError, match="non-integer"):
                 cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=1.5)
+
+    @pytest.mark.parametrize(
+        "power",
+        [
+            0.0,
+            2.0,
+            np.int64(2),
+            np.float64(2.0),
+            sp.Float(0.0),
+            sp.Float(2.0),
+        ],
+    )
+    def test_power_accepts_integer_valued_real_scalars(self, power: object):
+        """Frontend power validation matches analysis and emission."""
+        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        with trace() as tracer:
+            cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=power)
+        assert tracer.operations[0].power == int(power)
+
+    def test_power_rejects_fractional_sympy_float(self):
+        """A non-integral SymPy real does not truncate into gate power."""
+        cg = ControlledGate(_mock_qkernel(), num_controls=1)
+        with trace():
+            with pytest.raises(TypeError, match="non-integer"):
+                cg(_make_qubit("ctrl"), _make_qubit("tgt"), power=sp.Float(1.5))
 
     def test_power_uint_normalizes_to_value(self):
         from qamomile.circuit.frontend.handle.primitives import UInt as UIntHandle
@@ -1312,6 +1349,280 @@ class TestControlledAcceptsBuiltinGate:
         assert op.definition is not None
         assert op.definition.body is boxed_h.block
 
+    def test_controlled_inverse_composite_preserves_inverse_implementation(
+        self,
+        qiskit_transpiler: "QiskitTranspiler",
+    ) -> None:
+        """Control composes around a registered inverse body semantically."""
+
+        @qmc.qkernel
+        def inverse_body(target: qmc.Qubit) -> qmc.Qubit:
+            """Implement S-dagger as an equivalent two-gate decomposition."""
+            target = qmc.z(target)
+            return qmc.s(target)
+
+        @qmc.composite_gate(
+            name="inverse_implemented_phase",
+            implementations=[
+                CallableImplementation(
+                    transform=CallTransform.INVERSE,
+                    body=inverse_body.block,
+                )
+            ],
+        )
+        def phase(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply the direct phase operation."""
+            return qmc.s(target)
+
+        @qmc.qkernel
+        def circuit() -> tuple[qmc.Bit, qmc.Bit]:
+            """Apply the explicitly implemented inverse under one control."""
+            control = qmc.qubit("control")
+            target = qmc.qubit("target")
+            control = qmc.x(control)
+            control, target = qmc.control(qmc.inverse(phase))(control, target)
+            return qmc.measure(control), qmc.measure(target)
+
+        [operation] = [
+            candidate
+            for candidate in circuit.block.operations
+            if isinstance(candidate, InvokeOperation)
+        ]
+        assert operation.transform is CallTransform.CONTROLLED_INVERSE
+        assert operation.definition is not None
+        inverse_implementation = operation.definition.implementation_for(
+            transform=CallTransform.INVERSE
+        )
+        assert inverse_implementation is not None
+        assert inverse_implementation.body is inverse_body.block
+
+        estimate = circuit.estimate_resources()
+        assert estimate.gates.total == 3
+        assert estimate.gates.single_qubit == 1
+        assert estimate.gates.two_qubit == 2
+
+        executable = qiskit_transpiler.transpile(circuit)
+        [controlled_gate] = [
+            instruction.operation
+            for instruction in executable.quantum_circuit.data
+            if getattr(instruction.operation, "base_gate", None) is not None
+        ]
+        assert dict(controlled_gate.base_gate.definition.count_ops()) == {
+            "z": 1,
+            "s": 1,
+        }
+        result = executable.sample(qiskit_transpiler.executor(), shots=32).result()
+        assert _counts_dict(result.results) == {(1, 0): 32}
+
+    def test_controlled_inverse_uses_generic_body_after_specific_bodyless_match(
+        self,
+        qiskit_transpiler: "QiskitTranspiler",
+    ) -> None:
+        """A bodyless engine candidate cannot hide a generic inverse body."""
+
+        @qmc.qkernel
+        def inverse_body(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply the generic inverse fallback."""
+            return qmc.x(target)
+
+        @qmc.composite_gate(
+            name="bodyless_specific_inverse",
+            implementations=[
+                CallableImplementation(
+                    transform=CallTransform.INVERSE,
+                    body=inverse_body.block,
+                ),
+                CallableImplementation(
+                    transform=CallTransform.INVERSE,
+                    backend="circuit_ir",
+                ),
+            ],
+        )
+        def operation(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply the direct callable body."""
+            return qmc.z(target)
+
+        @qmc.qkernel
+        def circuit() -> tuple[qmc.Bit, qmc.Bit]:
+            """Control the inverse implementation selected after fallback."""
+            control = qmc.qubit("control")
+            target = qmc.qubit("target")
+            control = qmc.x(control)
+            control, target = qmc.control(qmc.inverse(operation))(control, target)
+            return qmc.measure(control), qmc.measure(target)
+
+        @qmc.qkernel
+        def direct_inverse() -> qmc.Bit:
+            """Apply the same inverse implementation without outer control."""
+            target = qmc.qubit("target")
+            target = qmc.inverse(operation)(target)
+            return qmc.measure(target)
+
+        executable = qiskit_transpiler.transpile(circuit)
+        result = executable.sample(qiskit_transpiler.executor(), shots=16).result()
+
+        direct_executable = qiskit_transpiler.transpile(direct_inverse)
+        direct_result = direct_executable.sample(
+            qiskit_transpiler.executor(), shots=16
+        ).result()
+
+        assert _counts_dict(result.results) == {(1, 1): 16}
+        assert _counts_dict(direct_result.results) == {1: 16}
+
+    def test_controlled_inverse_reserves_selected_body_workspace(
+        self,
+        qiskit_transpiler: "QiskitTranspiler",
+    ) -> None:
+        """A partial inverse body may allocate clean temporary workspace."""
+
+        @qmc.qkernel
+        def inverse_body(target: qmc.Qubit) -> qmc.Qubit:
+            """Toggle the target through a clean temporary qubit."""
+            workspace = qmc.qubit("workspace")
+            workspace = qmc.x(workspace)
+            workspace, target = qmc.cx(workspace, target)
+            workspace = qmc.x(workspace)
+            return target
+
+        @qmc.composite_gate(
+            name="workspace_inverse",
+            implementations=[
+                CallableImplementation(
+                    transform=CallTransform.INVERSE,
+                    body=inverse_body.block,
+                )
+            ],
+        )
+        def operation(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply the direct callable body."""
+            return qmc.z(target)
+
+        @qmc.qkernel
+        def circuit() -> tuple[qmc.Bit, qmc.Bit]:
+            """Control the inverse body that owns clean workspace."""
+            control = qmc.qubit("control")
+            target = qmc.qubit("target")
+            control = qmc.x(control)
+            control, target = qmc.control(qmc.inverse(operation))(control, target)
+            return qmc.measure(control), qmc.measure(target)
+
+        executable = qiskit_transpiler.transpile(circuit)
+        result = executable.sample(qiskit_transpiler.executor(), shots=16).result()
+
+        assert executable.quantum_circuit.num_qubits == 3
+        assert _counts_dict(result.results) == {(1, 1): 16}
+
+    def test_exact_controlled_body_reserves_private_workspace(
+        self,
+        qiskit_transpiler: "QiskitTranspiler",
+    ) -> None:
+        """An exact controlled implementation may own temporary workspace."""
+
+        @qmc.qkernel
+        def controlled_body(
+            control: qmc.Qubit,
+            target: qmc.Qubit,
+        ) -> tuple[qmc.Qubit, qmc.Qubit]:
+            """Implement controlled-X through one clean temporary qubit."""
+            workspace = qmc.qubit("workspace")
+            workspace = qmc.x(workspace)
+            control, workspace, target = qmc.ccx(control, workspace, target)
+            workspace = qmc.x(workspace)
+            return control, target
+
+        @qmc.composite_gate(
+            name="workspace_controlled",
+            implementations=[
+                CallableImplementation(
+                    transform=CallTransform.CONTROLLED,
+                    body=controlled_body.block,
+                )
+            ],
+        )
+        def operation(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply the direct callable body."""
+            return qmc.z(target)
+
+        @qmc.qkernel
+        def circuit() -> tuple[qmc.Bit, qmc.Bit]:
+            """Invoke the exact controlled body with an active control."""
+            control = qmc.qubit("control")
+            target = qmc.qubit("target")
+            control = qmc.x(control)
+            control, target = qmc.control(operation)(control, target)
+            return qmc.measure(control), qmc.measure(target)
+
+        executable = qiskit_transpiler.transpile(circuit)
+        result = executable.sample(qiskit_transpiler.executor(), shots=16).result()
+
+        assert executable.quantum_circuit.num_qubits == 3
+        assert _counts_dict(result.results) == {(1, 1): 16}
+
+    def test_partial_inverse_effects_come_from_selected_body(self) -> None:
+        """A direct reset does not leak through a selected unitary inverse."""
+
+        @qmc.qkernel
+        def inverse_body(target: qmc.Qubit) -> qmc.Qubit:
+            """Provide a unitary inverse implementation."""
+            return qmc.x(target)
+
+        @qmc.composite_gate(
+            name="effect_specific_inverse",
+            implementations=[
+                CallableImplementation(
+                    transform=CallTransform.INVERSE,
+                    body=inverse_body.block,
+                )
+            ],
+        )
+        def operation(target: qmc.Qubit) -> qmc.Qubit:
+            """Expose a non-unitary direct body that is not selected."""
+            return qmc.reset(target)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Qubit:
+            """Control only the unitary inverse implementation."""
+            control = qmc.qubit("control")
+            target = qmc.qubit("target")
+            _, target = qmc.control(qmc.inverse(operation))(control, target)
+            return target
+
+        [invoke] = [
+            candidate
+            for candidate in circuit.block.operations
+            if isinstance(candidate, InvokeOperation)
+        ]
+
+        assert invoke.effects is KernelEffect.NONE
+        assert circuit.block.effects is KernelEffect.NONE
+
+    def test_controlled_empty_composite_emits_no_custom_gate(
+        self,
+        qiskit_transpiler: "QiskitTranspiler",
+    ) -> None:
+        """An explicit empty controlled implementation is an identity."""
+
+        @qmc.composite_gate(name="explicit_empty_controlled")
+        def operation(target: qmc.Qubit) -> qmc.Qubit:
+            """Return the target unchanged."""
+            return target
+
+        @qmc.qkernel
+        def circuit() -> tuple[qmc.Bit, qmc.Bit]:
+            """Invoke an empty callable under one active control."""
+            control = qmc.qubit("control")
+            target = qmc.qubit("target")
+            control = qmc.x(control)
+            control, target = qmc.control(operation)(control, target)
+            return qmc.measure(control), qmc.measure(target)
+
+        executable = qiskit_transpiler.transpile(circuit)
+
+        assert dict(executable.quantum_circuit.count_ops()) == {
+            "x": 1,
+            "measure": 2,
+        }
+
     def test_controlled_composite_counts_vector_target_width(self):
         """Controlled composite attrs count scalar qubits inside a Vector."""
 
@@ -1381,6 +1692,28 @@ class TestControlledAcceptsBuiltinGate:
 class TestControlledOracle:
     """``control(Oracle)`` routes through controlled InvokeOperation."""
 
+    @pytest.mark.parametrize("num_control_qubits", [True, 1.0])
+    def test_oracle_rejects_non_integer_declared_control_count(
+        self,
+        num_control_qubits: object,
+    ) -> None:
+        """Oracle definitions require a non-boolean integral control count."""
+        with pytest.raises(TypeError, match="must be an integer"):
+            qmc.opaque(
+                "invalid_control_count",
+                num_qubits=1,
+                num_control_qubits=num_control_qubits,  # type: ignore[arg-type]
+            )
+
+    def test_oracle_rejects_negative_declared_control_count(self) -> None:
+        """Oracle definitions reject a negative declared control count."""
+        with pytest.raises(ValueError, match="nonnegative"):
+            qmc.opaque(
+                "negative_control_count",
+                num_qubits=1,
+                num_control_qubits=-1,
+            )
+
     def test_controlled_oracle_emits_controlled_invoke(self):
         """control(Oracle) emits a controlled bodyless oracle invocation."""
         cost = qmc.ResourceEstimate(
@@ -1404,10 +1737,90 @@ class TestControlledOracle:
         assert op.transform is CallTransform.CONTROLLED
         assert op.attrs["kind"] == "oracle"
         assert op.num_control_qubits == 1
+        assert op.num_declared_control_qubits == 0
+        assert op.num_added_control_qubits == 1
         assert op.num_target_qubits == 1
         assert op.body is None
         assert op.definition is not None
         assert op.definition.opaque_cost is cost
+        assert op.definition.attrs["num_control_qubits"] == 0
+        assert op.definition.attrs["num_declared_control_qubits"] == 0
+        assert op.definition.attrs["num_added_control_qubits"] == 0
+
+    def test_controlled_bodyless_oracle_fails_emission(
+        self,
+        qiskit_transpiler: "QiskitTranspiler",
+    ) -> None:
+        """Control batching never erases an Oracle without an implementation."""
+        oracle = qmc.opaque("missing_controlled_implementation", num_qubits=1)
+
+        @qmc.qkernel
+        def body(target: qmc.Qubit) -> qmc.Qubit:
+            """Invoke the bodyless Oracle under an outer controlled kernel."""
+            (target,) = oracle(target)
+            return target
+
+        @qmc.qkernel
+        def circuit() -> tuple[qmc.Bit, qmc.Bit, qmc.Bit]:
+            """Apply the unavailable body with two coherent controls."""
+            control_0 = qmc.qubit("control_0")
+            control_1 = qmc.qubit("control_1")
+            target = qmc.qubit("target")
+            control_0, control_1, target = qmc.control(
+                body,
+                num_controls=2,
+            )(control_0, control_1, target)
+            return (
+                qmc.measure(control_0),
+                qmc.measure(control_1),
+                qmc.measure(target),
+            )
+
+        with pytest.raises(EmitError, match="without an implementation"):
+            qiskit_transpiler.transpile(circuit)
+
+    def test_oracle_control_partition_requires_both_fields(self):
+        """Oracle IR rejects a half-specified declared/added partition."""
+        ref = CallableRef(namespace="user.oracle", name="partial_partition")
+        attrs = {
+            "kind": "oracle",
+            "num_control_qubits": 1,
+            "num_declared_control_qubits": 0,
+            "num_target_qubits": 1,
+        }
+
+        with pytest.raises(ValueError, match="must provide both"):
+            InvokeOperation(
+                target=ref,
+                transform=CallTransform.CONTROLLED,
+                attrs=attrs,
+                definition=CallableDef(ref=ref, attrs=attrs),
+            )
+
+    def test_oracle_definition_partition_must_describe_base_abi(self):
+        """Oracle IR rejects definitions that include added call-site controls."""
+        ref = CallableRef(namespace="user.oracle", name="mismatched_partition")
+        attrs = {
+            "kind": "oracle",
+            "num_control_qubits": 2,
+            "num_declared_control_qubits": 1,
+            "num_added_control_qubits": 1,
+            "num_target_qubits": 1,
+        }
+        definition_attrs = {
+            **attrs,
+            "num_control_qubits": 2,
+            "num_declared_control_qubits": 1,
+            "num_added_control_qubits": 1,
+        }
+
+        with pytest.raises(ValueError, match="base ABI"):
+            InvokeOperation(
+                target=ref,
+                transform=CallTransform.CONTROLLED,
+                attrs=attrs,
+                definition=CallableDef(ref=ref, attrs=definition_attrs),
+            )
 
     def test_controlled_oracle_rejects_symbolic_control_count(self):
         """control(Oracle) rejects symbolic control counts for now."""
@@ -1697,7 +2110,7 @@ class TestControlledBuiltinErrors:
 
 
 class TestControlledBuiltinSynthesisInternals:
-    """Cover the wrapper-synthesis edge cases the Copilot review flagged."""
+    """Cover wrapper-synthesis cache and signature edge cases."""
 
     def test_recursive_controlled_inside_wrapped_fn_does_not_deadlock(self):
         """A wrapped callable that itself calls control() must not deadlock.
@@ -1913,10 +2326,10 @@ class TestControlledBuiltinSynthesisInternals:
     def test_keyword_callable_name_falls_back_to_internal_id(self):
         """A callable whose ``__name__`` is a Python keyword must not crash compile().
 
-        Regression for the Copilot #9 review: ``"class".isidentifier()`` is
-        ``True`` but ``def class(...)`` is a ``SyntaxError``, so the
-        synthesizer must additionally consult ``keyword.iskeyword`` and
-        fall back to the safe ``_qmc_controlled_wrapper_<n>`` identifier.
+        ``"class".isidentifier()`` is ``True`` but ``def class(...)`` is a
+        ``SyntaxError``, so the synthesizer must additionally consult
+        ``keyword.iskeyword`` and fall back to the safe
+        ``_qmc_controlled_wrapper_<n>`` identifier.
         """
 
         # ``def class(...)`` is itself unparseable, so build a function
@@ -1933,13 +2346,12 @@ class TestControlledBuiltinSynthesisInternals:
     def test_int_param_lowered_as_uint_type(self):
         """A wrapped kernel that declares ``int`` lowers raw int kwargs to UIntType.
 
-        Regression for the Copilot #8 review: previously
-        ``_params_to_operands`` always wrapped raw scalars as
-        ``FloatType``, which mismatched the wrapper-side ``UInt``
+        ``_params_to_operands`` must not wrap every raw scalar as
+        ``FloatType`` because doing so mismatches the wrapper-side ``UInt``
         annotation that ``_classify_callable_param`` produces for ``int``
-        parameters.  After the fix, the controlled-U operand for the
-        ``int`` parameter carries a ``UIntType`` constant that lines up
-        with the wrapped block's ``input_values``.
+        parameters. The controlled-U operand for the ``int`` parameter must
+        carry a ``UIntType`` constant that matches the wrapped block's
+        ``input_values``.
         """
         from qamomile.circuit.ir.operation.gate import ControlledUOperation
         from qamomile.circuit.ir.types.primitives import UIntType
@@ -1995,13 +2407,11 @@ class TestControlledBuiltinSynthesisInternals:
     def test_dynamic_callable_is_released_on_gc(self):
         """Once the user drops a dynamically-defined callable, the wrapper cache must release it.
 
-        Regression for the Copilot #5 review: an earlier draft used
-        ``WeakKeyDictionary`` but the wrapper's globals captured ``fn``
-        with a strong ref via ``__qmc_target__``, so the cache transitively
-        kept ``fn`` alive forever.  Post-fix the wrapper holds a
-        ``weakref.proxy(fn)`` and ``Block`` is built eagerly (so the
-        proxy is never re-invoked), letting the cache + linecache entries
-        die with ``fn``.
+        A ``WeakKeyDictionary`` alone is insufficient when the wrapper's
+        globals capture ``fn`` with a strong reference via ``__qmc_target__``
+        because the cache would transitively keep ``fn`` alive. The wrapper
+        therefore holds a ``weakref.proxy(fn)`` and builds ``Block`` eagerly,
+        allowing the cache and linecache entries to expire with ``fn``.
         """
         import gc
         import linecache as _linecache_module
@@ -3643,6 +4053,97 @@ class TestControlledVectorClassicalParameter:
 class TestControlledBroadcastWithVectorFloatParameter:
     """Controlled custom kernels that broadcast over sliced vector targets."""
 
+    def test_qiskit_empty_open_control_broadcast_emits_no_brackets(self):
+        """An empty broadcast is an identity before open-control bracketing."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def scalar_body(target: qmc.Qubit) -> qmc.Qubit:
+            """Use private workspace before updating one scalar target."""
+            workspace = qmc.qubit("workspace")
+            workspace = qmc.h(workspace)
+            return qmc.x(target)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            """Broadcast an open-controlled workspace body over no targets."""
+            control = qmc.qubit("control")
+            targets = qmc.qubit_array(0, "targets")
+            control, targets = qmc.control(scalar_body, control_value=0)(
+                control,
+                targets,
+            )
+            return qmc.measure(control)
+
+        executable = QiskitTranspiler().transpile(circuit)
+
+        assert dict(executable.quantum_circuit.count_ops()) == {"measure": 1}
+
+    def test_qiskit_inverse_scalar_body_broadcasts_over_vector(self):
+        """A nested inverse keeps its scalar template during vector broadcast."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def scalar_x(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply one scalar X gate."""
+            return qmc.x(target)
+
+        @qmc.qkernel
+        def inverse_body(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply the inverse scalar body."""
+            return qmc.inverse(scalar_x)(target)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Vector[qmc.Bit]:
+            """Broadcast the controlled inverse over two vector elements."""
+            qubits = qmc.qubit_array(3, "qubits")
+            qubits[0] = qmc.x(qubits[0])
+            control, targets = qmc.control(inverse_body)(
+                qubits[0],
+                qubits[1:3],
+            )
+            qubits[0] = control
+            qubits[1:3] = targets
+            return qmc.measure(qubits)
+
+        transpiler = QiskitTranspiler()
+        executable = transpiler.transpile(circuit)
+        result = executable.sample(transpiler.executor(), shots=128).result()
+
+        assert _counts_dict(result.results) == {(1, 1, 1): 128}
+
+    def test_qiskit_empty_inverse_scalar_broadcast_is_identity(self):
+        """A zero-lane inverse template is unreachable and emits no brackets."""
+        pytest.importorskip("qiskit")
+        from qamomile.qiskit import QiskitTranspiler
+
+        @qmc.qkernel
+        def scalar_x(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply one scalar X gate."""
+            return qmc.x(target)
+
+        @qmc.qkernel
+        def inverse_body(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply the inverse scalar body."""
+            return qmc.inverse(scalar_x)(target)
+
+        @qmc.qkernel
+        def circuit() -> qmc.Bit:
+            """Broadcast the controlled inverse over an empty vector."""
+            control = qmc.qubit("control")
+            targets = qmc.qubit_array(0, "targets")
+            control, targets = qmc.control(inverse_body, control_value=0)(
+                control,
+                targets,
+            )
+            return qmc.measure(control)
+
+        executable = QiskitTranspiler().transpile(circuit)
+
+        assert dict(executable.quantum_circuit.count_ops()) == {"measure": 1}
+
     @pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
     def test_broadcast_slice_sampling_runs(self, transpiler_factory):
         """Controlled broadcast over ``qs[1:3]`` samples on supported SDKs."""
@@ -4564,6 +5065,80 @@ class TestSymbolicMultiArgControl:
     or VectorView[Qubit] (the control pool)``.
     """
 
+    @pytest.mark.parametrize("body_kind", ["empty", "identity_phase"])
+    @pytest.mark.parametrize("control_layout", ["indexed", "multi_arg"])
+    def test_symbolic_noop_body_emits_no_controlled_gate(
+        self,
+        qiskit_transpiler: "QiskitTranspiler",
+        body_kind: str,
+        control_layout: str,
+    ) -> None:
+        """Every symbolic operand layout shares controlled no-op handling."""
+
+        @qmc.qkernel
+        def empty_body(target: qmc.Qubit) -> qmc.Qubit:
+            """Return the target without applying an operation."""
+            return target
+
+        @qmc.qkernel
+        def identity_phase_body(target: qmc.Qubit) -> qmc.Qubit:
+            """Apply a resolved identity phase around an empty body."""
+            return qmc.global_phase(empty_body, 0.0)(target)
+
+        controlled_body = empty_body if body_kind == "empty" else identity_phase_body
+
+        if control_layout == "indexed":
+
+            @qmc.qkernel
+            def circuit(
+                width: qmc.UInt,
+            ) -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+                """Apply a no-op body through an indexed control pool."""
+                controls = qmc.qubit_array(width, "controls")
+                target = qmc.qubit("target")
+                controlled = qmc.control(controlled_body, num_controls=width)
+                controls, target = controlled(
+                    controls,
+                    target,
+                    control_indices=[0],
+                )
+                return qmc.measure(controls), qmc.measure(target)
+
+        else:
+
+            @qmc.qkernel
+            def circuit(
+                width: qmc.UInt,
+            ) -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
+                """Apply a no-op body through a multi-argument prefix."""
+                controls = qmc.qubit_array(width, "controls")
+                target = qmc.qubit("target")
+                controlled = qmc.control(controlled_body, num_controls=width)
+                controls[0], controls[1:width], target = controlled(
+                    controls[0],
+                    controls[1:width],
+                    target,
+                )
+                return qmc.measure(controls), qmc.measure(target)
+
+        [operation] = [
+            candidate
+            for candidate in circuit.block.operations
+            if isinstance(candidate, SymbolicControlledU)
+        ]
+        if control_layout == "indexed":
+            assert operation.control_indices is not None
+            width = 1
+        else:
+            assert operation.num_control_args == 2
+            width = 2
+
+        executable = qiskit_transpiler.transpile(
+            circuit,
+            bindings={"width": width},
+        )
+        assert dict(executable.quantum_circuit.count_ops()) == {"measure": width + 1}
+
     def test_user_controlled_increment_runs(self):
         """User-facing controlled-increment kernel transpiles and runs.
 
@@ -5056,6 +5631,16 @@ def _symbolic_power_x(target: qmc.Qubit) -> qmc.Qubit:
 
 
 @qmc.qkernel
+def _symbolic_power_workspace_phase(target: qmc.Qubit) -> qmc.Qubit:
+    """Apply a phase through one private qubit returned to the zero state."""
+    workspace = qmc.qubit("workspace")
+    target, workspace = qmc.cx(target, workspace)
+    workspace = qmc.z(workspace)
+    target, workspace = qmc.cx(target, workspace)
+    return target
+
+
+@qmc.qkernel
 def _symbolic_zero_power_probe() -> qmc.Vector[qmc.Bit]:
     """Apply controlled-X with loop powers zero and one."""
     q = qmc.qubit_array(2, name="q")
@@ -5063,6 +5648,21 @@ def _symbolic_zero_power_probe() -> qmc.Vector[qmc.Bit]:
     q[0] = qmc.x(q[0])
     for power in qmc.range(2):
         q[0], q[1] = controlled_x(q[0], q[1], power=power)
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _bound_zero_power_workspace_probe(power: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Apply a bound power to a controlled body with private workspace."""
+    q = qmc.qubit_array(2, name="q")
+    q[0] = qmc.x(q[0])
+    q[1] = qmc.h(q[1])
+    q[0], q[1] = qmc.control(_symbolic_power_workspace_phase)(
+        q[0],
+        q[1],
+        power=power,
+    )
+    q[1] = qmc.h(q[1])
     return qmc.measure(q)
 
 
@@ -5102,6 +5702,18 @@ def test_symbolic_controlled_power_zero_is_identity(sdk_transpiler) -> None:
     )
 
     assert result.results == [((1, 1), 32)]
+
+
+def test_bound_zero_power_skips_controlled_workspace(qiskit_transpiler) -> None:
+    """A bound zero power emits identity without reserving body workspace."""
+    executable = qiskit_transpiler.transpile(
+        _bound_zero_power_workspace_probe,
+        bindings={"power": 0},
+    )
+
+    assert executable.get_first_circuit().num_qubits == 2
+    result = executable.sample(qiskit_transpiler.executor(), shots=32).result()
+    assert result.results == [((1, 0), 32)]
 
 
 def test_nested_symbolic_controlled_power_zero_is_identity(

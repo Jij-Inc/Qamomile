@@ -32,9 +32,10 @@ from qamomile.circuit.ir.serialize.decode import (
     _decode_value_type,
     _DecodeContext,
 )
-from qamomile.circuit.ir.types import DictType, QFixedType, ValueType
+from qamomile.circuit.ir.types import DictType, QFixedType, TupleType, ValueType
 from qamomile.circuit.ir.value import ArrayValue, ValueLike
 
+from ._opaque_cost import OpaqueCostDecoder
 from .kernel import SerializedQKernel
 from .schema import QAMOMILE_VERSION
 from .validation import validate_qkernel_ir
@@ -94,7 +95,11 @@ def from_dict(envelope: dict[str, Any]) -> SerializedQKernel:
     if not isinstance(value_table, list) or not isinstance(callable_table, list):
         raise ValueError("envelope is missing value or callable tables")
 
-    ctx = _DecodeContext(value_table, callable_table)
+    ctx = _DecodeContext(
+        value_table,
+        callable_table,
+        opaque_cost_decoder=OpaqueCostDecoder(),
+    )
     ctx.populate_definitions()
     raw_body = artifact.get("body")
     if not isinstance(raw_body, dict):
@@ -348,8 +353,9 @@ def _is_body_type_compatible(
 
     Unbound ``DictValue`` formals currently carry ``DictType(None, None)`` in
     the Block even though their qkernel annotation retains concrete key and
-    value types. Those absent Block details are not contradictions; every type
-    component that the Block does specify must still match exactly.
+    value types. Those absent Block details are not contradictions, including
+    when nested in structural types; every detail present in the Block must
+    still match exactly.
 
     Args:
         interface_type (ValueType): Type declared by the qkernel interface.
@@ -363,11 +369,36 @@ def _is_body_type_compatible(
             isinstance(interface_type, DictType)
             and (
                 body_type.key_type is None
-                or interface_type.key_type == body_type.key_type
+                or (
+                    interface_type.key_type is not None
+                    and _is_body_type_compatible(
+                        interface_type.key_type,
+                        body_type.key_type,
+                    )
+                )
             )
             and (
                 body_type.value_type is None
-                or interface_type.value_type == body_type.value_type
+                or (
+                    interface_type.value_type is not None
+                    and _is_body_type_compatible(
+                        interface_type.value_type,
+                        body_type.value_type,
+                    )
+                )
+            )
+        )
+    if isinstance(body_type, TupleType):
+        return (
+            isinstance(interface_type, TupleType)
+            and len(body_type.element_types) == len(interface_type.element_types)
+            and all(
+                _is_body_type_compatible(interface_element, body_element)
+                for interface_element, body_element in zip(
+                    interface_type.element_types,
+                    body_type.element_types,
+                    strict=True,
+                )
             )
         )
     return interface_type == body_type

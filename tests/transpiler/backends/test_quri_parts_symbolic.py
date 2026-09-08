@@ -307,8 +307,8 @@ class TestSymbolicEndToEnd:
     def test_qaoa_expval_matches_qiskit(self):
         """QAOA expval through both QURI Parts and Qiskit must agree.
 
-        Cross-backend equivalence check per CLAUDE.md (sampling + expval
-        both required for algorithm/stdlib changes).
+        Sampling and expval use different backend primitives, so the
+        cross-backend checks cover both execution paths.
         """
         pytest.importorskip("qiskit")
         import qamomile.observable as qm_o

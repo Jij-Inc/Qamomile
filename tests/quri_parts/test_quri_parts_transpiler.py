@@ -12,9 +12,13 @@ pytest.importorskip("quri_parts.circuit")
 
 import qamomile.circuit as qmc  # noqa: E402
 from qamomile.circuit.transpiler.circuit_ir import (  # noqa: E402
+    CallInstruction,
     CircuitBuilder,
+    CircuitProgram,
+    GateInstruction,
     ParameterExpr,
     ReusableCircuit,
+    WireId,
 )
 from qamomile.circuit.transpiler.errors import EmitError  # noqa: E402
 from qamomile.circuit.transpiler.gate_emitter import GateKind  # noqa: E402
@@ -492,6 +496,49 @@ class TestQuriPartsTranspiler:
         circuit = QuriPartsMaterializer().materialize(caller.freeze()).artifact
 
         assert len(circuit.gates) == 1
+
+    def test_controlled_identity_call_does_not_trigger_shared_ancilla(self) -> None:
+        """A reusable identity contributes no controlled batching work."""
+        input_wire = WireId(0)
+        identity = CircuitProgram(
+            "identity",
+            1,
+            0,
+            (input_wire,),
+            (input_wire,),
+            (),
+        )
+        call_output = WireId(1)
+        gate_output = WireId(2)
+        body = CircuitProgram(
+            "body",
+            1,
+            0,
+            (input_wire,),
+            (gate_output,),
+            (
+                CallInstruction(
+                    ReusableCircuit(identity, "identity"),
+                    (input_wire,),
+                    (call_output,),
+                ),
+                GateInstruction(
+                    GateKind.X,
+                    (call_output,),
+                    (gate_output,),
+                ),
+            ),
+        )
+        outer = CircuitBuilder(3, 0)
+        outer.append_call(
+            ReusableCircuit(body, "body", controls=2),
+            (0, 1, 2),
+        )
+
+        circuit = QuriPartsMaterializer().materialize(outer.freeze()).artifact
+
+        assert circuit.qubit_count == 3
+        assert [gate.name for gate in circuit.gates] == ["TOFFOLI"]
 
     def test_controlled_cp_with_runtime_parameter_transpiles(self) -> None:
         """Controlled CP fallback preserves a symbolic QURI Parts angle."""

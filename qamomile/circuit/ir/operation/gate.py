@@ -242,6 +242,16 @@ class ControlledUOperation(Operation):
         raise NotImplementedError  # pragma: no cover
 
     @property
+    def body_operands(self) -> list[Value]:
+        """Get the wrapped callable's complete argument list.
+
+        Returns:
+            list[Value]: Quantum, classical, and object operands after the
+                external control prefix, in wrapped-callable argument order.
+        """
+        return list(self.operands[len(self.control_operands) :])
+
+    @property
     def target_operands(self) -> list[Value]:
         """Get the target qubit values (arguments to U)."""
         raise NotImplementedError  # pragma: no cover
@@ -328,7 +338,12 @@ class ConcreteControlledU(ControlledUOperation):
 
     @property
     def target_operands(self) -> list[Value]:
-        return self.operands[self.num_controls :]
+        """Return the wrapped callable's target and parameter operands.
+
+        Returns:
+            list[Value]: Complete body operands after the concrete controls.
+        """
+        return self.body_operands
 
     @property
     def param_operands(self) -> list[Value]:
@@ -340,19 +355,24 @@ class ConcreteControlledU(ControlledUOperation):
         """
         return [
             op
-            for op in self.operands[self.num_controls :]
+            for op in self.body_operands
             if op.type.is_classical() or op.type.is_object()
         ]
 
     @property
     def signature(self) -> Signature:
+        """Build the concrete controlled call signature.
+
+        Returns:
+            Signature: Control-prefixed operand and result contract.
+        """
         nc = self.num_controls
         return Signature(
             operands=[
                 *[ParamHint(name=f"control_{i}", type=QubitType()) for i in range(nc)],
                 *[
                     ParamHint(name=f"arg_{i}", type=op.type)
-                    for i, op in enumerate(self.operands[nc:])
+                    for i, op in enumerate(self.body_operands)
                 ],
             ],
             results=[
@@ -428,7 +448,13 @@ class SymbolicControlledU(ControlledUOperation):
 
     @property
     def target_operands(self) -> list[Value]:
-        return list(self.operands[self.num_control_args :])
+        """Return the wrapped callable's target and parameter operands.
+
+        Returns:
+            list[Value]: Complete body operands after the symbolic control
+                arguments.
+        """
+        return self.body_operands
 
     @property
     def param_operands(self) -> list[Value]:
@@ -440,7 +466,7 @@ class SymbolicControlledU(ControlledUOperation):
         """
         return [
             op
-            for op in self.operands[self.num_control_args :]
+            for op in self.body_operands
             if op.type.is_classical() or op.type.is_object()
         ]
 

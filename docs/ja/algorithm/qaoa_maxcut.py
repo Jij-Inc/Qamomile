@@ -56,6 +56,8 @@
 # 5頂点、6辺の小さなグラフを使います。全探索が可能な規模でありながら、自明でない構造を持っています。
 
 # %%
+import os
+
 import matplotlib.pyplot as plt
 import networkx as nx
 
@@ -265,7 +267,8 @@ def qaoa_ansatz(
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
-p = 3  # QAOAレイヤー数
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+p = 1 if docs_test_mode else 3  # QAOAレイヤー数
 
 executable = transpiler.transpile(
     qaoa_ansatz,
@@ -284,7 +287,6 @@ executable = transpiler.transpile(
 # 本チュートリアルでは再現性を確保するため、(i)`AerSimulator`に`seed_simulator=SEED`を渡してショットごとの擬似乱数サンプリングを決定的にし、(ii)NumPy乱数生成器も同じ値でシードして初期変分パラメータを固定し、(iii)スレッド間で乱数ドローが交錯しないよう`max_parallel_threads=1`に設定します。シングルスレッド化は若干の性能低下と引き換えに完全な再現性を得るための設定で、実運用コードでは省略するか、テスト/ドキュメントビルド時のみ有効化する形で構いません。
 
 # %%
-import os
 import numpy as np
 from qiskit_aer import AerSimulator
 from scipy.optimize import minimize
@@ -298,9 +300,8 @@ def make_seeded_backend() -> AerSimulator:
 
 
 executor = transpiler.executor(backend=make_seeded_backend())
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-sample_shots = 256 if docs_test_mode else 2048
-maxiter = 20 if docs_test_mode else 500
+sample_shots = 1 if docs_test_mode else 2048
+maxiter = 4 if docs_test_mode else 500
 cost_history: list[float] = []
 
 

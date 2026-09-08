@@ -1,0 +1,5 @@
+# Documentation hosting and environment files that are not consumed by the
+# current test, lint, type-check, or documentation jobs.
+.binder/**
+.readthedocs.yaml
+myst.yml

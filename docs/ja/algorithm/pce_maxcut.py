@@ -241,9 +241,10 @@ pce_ansatz.draw(n=3, depth=1, P=observables[0], fold_loops=False)
 
 # %%
 transpiler = QiskitTranspiler()
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 n = converter.num_qubits
-depth = 3
+depth = 1 if docs_test_mode else 3
 num_thetas = 2 * n * depth
 
 executables = [
@@ -275,8 +276,7 @@ assert num_thetas == 2 * n * depth
 
 # %%
 executor = transpiler.executor()
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-maxiter = 10 if docs_test_mode else 100
+maxiter = 1 if docs_test_mode else 100
 
 # https://doi.org/10.48550/arXiv.2401.09421 のハイパーパラメータ:
 #   alpha = N^(k/2) (N = ノード数、k = PCEの相関演算子の次数)
@@ -399,6 +399,7 @@ print(f"PCE spin assignment : {spins}")
 print(f"PCE cut value       : {pce_cut}")
 print(f"Brute-force optimum : {best_cut}")
 print(f"Approximation ratio : {pce_cut / best_cut:.3f}")
+assert np.isclose(pce_cut, -sampleset.energy[0], rtol=0.0, atol=1e-12)
 
 # %% [markdown]
 # #### 解の可視化

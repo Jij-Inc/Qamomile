@@ -8,7 +8,7 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any, TypeAlias, cast
 
-from qamomile._utils import is_close_zero
+from qamomile._utils import coerce_nonnegative_integral, is_close_zero
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import (
@@ -3015,7 +3015,7 @@ def _lower_transformed_call(
             for value in operation.operands
             if value.type.is_classical() or value.type.is_object()
         ]
-        inverse = operation.transform is CallTransform.INVERSE
+        inverse = operation.transform.is_inverse
         display_name = operation.target.name
     if body is None:
         raise EmitError(f"Transformed HUGR callable {display_name!r} is opaque")
@@ -3093,7 +3093,7 @@ def _lower_transformed_call(
         resolved = _resolve_wire(value, environment)
         control_wires.extend(resolved if isinstance(resolved, list) else [resolved])
     control_value = _transformed_control_value(operation)
-    if control_value is not None:
+    if power > 0 and control_value is not None:
         control_wires = _toggle_zero_controls(
             builder,
             control_wires,
@@ -3107,7 +3107,7 @@ def _lower_transformed_call(
             control_wires,
             inverse,
         )
-    if control_value is not None:
+    if power > 0 and control_value is not None:
         control_wires = _toggle_zero_controls(
             builder,
             control_wires,
@@ -3128,6 +3128,17 @@ def _lower_transformed_call(
         control_offset += width
         wire: Any = selected if isinstance(result, ArrayValue) else selected[0]
         _publish_transformed_result(source, result, wire, environment, live_qubits)
+    if power == 0:
+        for source, result in zip(targets, result_targets, strict=True):
+            wire = _resolve_wire(source, environment)
+            _publish_transformed_result(
+                source,
+                result,
+                wire,
+                environment,
+                live_qubits,
+            )
+        return
     for source, result, formal in zip(
         targets, result_targets, quantum_exit, strict=True
     ):
@@ -3164,10 +3175,7 @@ def _transformed_control_value(
     """
     if isinstance(operation, (ConcreteControlledU, InverseBlockOperation)):
         return operation.control_value
-    if (
-        isinstance(operation, InvokeOperation)
-        and operation.transform is CallTransform.CONTROLLED
-    ):
+    if isinstance(operation, InvokeOperation) and operation.transform.is_controlled:
         return operation.control_value
     return None
 
@@ -3518,7 +3526,7 @@ def _resolve_transformed_power(
     operation: InvokeOperation | ControlledUOperation | InverseBlockOperation,
     environment: dict[str, Any],
 ) -> int:
-    """Resolve a transformed call's statically known positive power.
+    """Resolve a transformed call's statically known nonnegative power.
 
     Args:
         operation (InvokeOperation | ControlledUOperation |
@@ -3527,7 +3535,7 @@ def _resolve_transformed_power(
             mapping.
 
     Returns:
-        int: Positive number of complete body applications.
+        int: Nonnegative number of complete body applications.
 
     Raises:
         EmitError: If a controlled-call power is dynamic or invalid.
@@ -3535,20 +3543,27 @@ def _resolve_transformed_power(
     if not isinstance(operation, ControlledUOperation):
         return 1
     power = operation.power
-    if isinstance(power, bool):
-        resolved: Any = None
-    elif isinstance(power, int):
-        resolved = power
+    if not isinstance(power, Value):
+        resolved: Any = power
     elif power.is_constant():
         resolved = power.get_const()
     else:
         resolved = environment.get(f"__index__:{power.uuid}")
-    if isinstance(resolved, bool) or not isinstance(resolved, int) or resolved <= 0:
+    if resolved is None:
         raise EmitError(
-            "HUGR transformed call power must be a compile-time positive integer",
+            "HUGR transformed call power must be a compile-time nonnegative integer",
             operation="ControlledUOperation",
         )
-    return resolved
+    try:
+        return coerce_nonnegative_integral(
+            resolved,
+            label="HUGR transformed call power",
+        )
+    except (TypeError, ValueError) as error:
+        raise EmitError(
+            str(error),
+            operation="ControlledUOperation",
+        ) from error
 
 
 def _publish_transformed_result(
@@ -3745,18 +3760,29 @@ def _validate_pauli_evolution_hamiltonian(hamiltonian: Any) -> None:
         hamiltonian (Any): Bound Qamomile Hamiltonian.
 
     Raises:
-        EmitError: If the identity or a Pauli coefficient has a material
-            imaginary component.
+        EmitError: If the identity or a Pauli coefficient is non-finite or has
+            a material imaginary component.
     """
     from qamomile.observable.hamiltonian import HERMITIAN_IMAG_ATOL
 
-    if abs(hamiltonian.constant.imag) > HERMITIAN_IMAG_ATOL:
+    constant = complex(hamiltonian.constant)
+    if not math.isfinite(constant.real) or not math.isfinite(constant.imag):
+        raise EmitError("HUGR Pauli evolution requires finite Hamiltonian coefficients")
+    if abs(constant.imag) > HERMITIAN_IMAG_ATOL:
         raise EmitError(
             "HUGR Pauli evolution requires a Hermitian Hamiltonian; "
             "the identity coefficient is non-real"
         )
     for operators, coefficient in hamiltonian:
-        if abs(coefficient.imag) > HERMITIAN_IMAG_ATOL:
+        numeric_coefficient = complex(coefficient)
+        if not math.isfinite(numeric_coefficient.real) or not math.isfinite(
+            numeric_coefficient.imag
+        ):
+            raise EmitError(
+                "HUGR Pauli evolution requires finite Hamiltonian coefficients; "
+                f"found {coefficient} on term {operators}"
+            )
+        if abs(numeric_coefficient.imag) > HERMITIAN_IMAG_ATOL:
             raise EmitError(
                 "HUGR Pauli evolution requires a Hermitian Hamiltonian; "
                 f"coefficient {coefficient} on term {operators} is non-real"

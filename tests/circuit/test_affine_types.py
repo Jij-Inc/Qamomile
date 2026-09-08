@@ -488,6 +488,23 @@ class TestErrorMessageQuality:
         error = exc_info.value
         assert error.handle_name is not None
 
+    def test_error_message_uses_allocated_qubit_name(self):
+        """Allocated qubit diagnostics should use the user-provided name."""
+
+        @qkernel
+        def bad_circuit() -> qm.Bit:
+            qubit = qm.qubit("qubit")
+            qm.x(qubit)
+            qm.h(qubit)
+            return qm.measure(qubit)
+
+        with pytest.raises(QubitConsumedError) as exc_info:
+            bad_circuit.build()
+
+        error = exc_info.value
+        assert error.handle_name == "qubit"
+        assert "Qubit 'qubit'" in str(error)
+
     def test_error_message_contains_operation_names(self):
         """Error messages should name both operations involved."""
 

@@ -3965,14 +3965,14 @@ class TestControlledGate:
         assert statevectors_equal(sv, expected)
 
     def test_controlled_nested_multi_gate_body_batches_once(self):
-        """A nested controlled multi-gate kernel composes to one batched ladder.
+        """A nested controlled body shares one outer-control carrier.
 
         ``control(control(xz, 1), 2)`` composes to three controls on an X
-        then Z block. The outer controlled-U carries a single body op so it
-        does not batch on its own; the walker composes the outer controls
-        with the inner control and reaches the two-gate body under three
-        controls, where a single shared ladder is emitted. The result is
-        the exact dense three-controlled ``Z @ X`` unitary with four
+        then Z block. The active local control makes the outer two-control
+        condition worth sharing: it is computed onto one carrier, X and Z
+        each become a Toffoli under that carrier plus the local control, and
+        the carrier is uncomputed. The result is the exact dense
+        three-controlled ``Z @ X`` unitary with one ancilla and four
         Toffolis.
         """
 
@@ -4001,7 +4001,7 @@ class TestControlledGate:
             return qmc.measure(ctrl), qmc.measure(t)
 
         _, circ = _transpile_and_get_circuit(circuit)
-        assert circ.qubit_count == 6
+        assert circ.qubit_count == 5
         assert self._count_toffoli(circ) == 4
         sv = _strip_zero_ancillas(_run_statevector(circ), 4)
         h_gate = GATE_SPECS["H"].matrix_fn()

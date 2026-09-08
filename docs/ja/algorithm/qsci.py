@@ -183,7 +183,7 @@ assert opt_params.shape == (n_params,)
 # 各サンプルはタプル`(b_0, ..., b_{n-1})`で、$q$番目の要素は量子ビット$q$のZ固有値インデックスです。これは`subspace_hamiltonian`が期待する形式そのものです。
 
 # %%
-shots = 500 if docs_test_mode else 4000
+shots = 1 if docs_test_mode else 4000
 sample_results = (
     sample_exec.sample(executor, bindings={"thetas": list(opt_params)}, shots=shots)
     .result()

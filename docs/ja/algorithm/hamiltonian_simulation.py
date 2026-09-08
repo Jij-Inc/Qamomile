@@ -28,6 +28,7 @@
 # # !pip install "qamomile[qiskit]"
 
 # %%
+import os
 from typing import Any
 
 import matplotlib.pyplot as plt
@@ -40,6 +41,8 @@ import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm import trotterized_time_evolution
 from qamomile.qiskit import QiskitTranspiler
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 # %% [markdown]
 # ## Rabiハミルトニアン
@@ -312,7 +315,7 @@ for name, order in suzuki_orders.items():
 # フィデリティ誤差は状態ノルム誤差の**2乗**になります(先頭項)。2つのベクトルが十分近ければ$1 - |\langle a | b \rangle| \approx \tfrac{1}{2}\lVert a - b \rVert^2$なので、以下のプロットに現れる傾きは$1, 2, 4$ではなく$2, 4, 8$です。
 
 # %%
-Ns = np.array([2, 4, 8, 16, 32, 64])
+Ns = np.array([2, 4, 8] if docs_test_mode else [2, 4, 8, 16, 32, 64])
 all_names = ["S1", "S2", "S4", "S6"]
 errors: dict[str, Any] = {name: [] for name in all_names}
 

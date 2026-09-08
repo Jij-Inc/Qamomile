@@ -8,6 +8,9 @@ from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
 from qamomile.circuit.transpiler.errors import EmitError
+from qamomile.circuit.transpiler.passes.emit_support.clean_ancilla_toffoli import (
+    clean_ancilla_toffoli_ladder,
+)
 from qamomile.circuit.transpiler.passes.emit_support.gate_emission import (
     reject_duplicate_physical_indices,
 )
@@ -165,10 +168,11 @@ def _and_ladder_steps(
         list[tuple[int, int, int]]: ``(control_a, control_b, target)``
             triples, one per Toffoli, in compute order.
     """
+    recipe = clean_ancilla_toffoli_ladder(len(control_indices))
     steps: list[tuple[int, int, int]] = [
         (control_indices[0], control_indices[1], ancilla_indices[0])
     ]
-    for i in range(2, len(control_indices)):
+    for i in range(2, recipe.compute_toffolis + 1):
         steps.append(
             (control_indices[i], ancilla_indices[i - 2], ancilla_indices[i - 1])
         )
@@ -244,10 +248,11 @@ def emit_multi_controlled_on_clean_ancillas(
             f"got {num_controls}.",
             operation="ControlledGate",
         )
-    if len(ancilla_indices) < num_controls - 1:
+    recipe = clean_ancilla_toffoli_ladder(num_controls)
+    if len(ancilla_indices) < recipe.clean_ancillas:
         raise EmitError(
             f"Toffoli-cascade lowering of a {num_controls}-controlled "
-            f"{gate_type.name} needs {num_controls - 1} clean ancilla "
+            f"{gate_type.name} needs {recipe.clean_ancillas} clean ancilla "
             f"qubit(s) but only {len(ancilla_indices)} were supplied.",
             operation="ControlledGate",
         )
@@ -259,7 +264,7 @@ def emit_multi_controlled_on_clean_ancillas(
         emit_pass,
         circuit,
         gate_type,
-        ancilla_indices[num_controls - 2],
+        ancilla_indices[recipe.clean_ancillas - 1],
         target_idx,
         angle,
     )

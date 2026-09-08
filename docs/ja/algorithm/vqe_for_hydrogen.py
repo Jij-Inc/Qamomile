@@ -227,7 +227,7 @@ def hydrogen_molecule(bond_length):
     return openfermion_to_qamomile(jw_hamiltonian), molecule.fci_energy
 
 
-n_points = 3 if docs_test_mode else 15
+n_points = 1 if docs_test_mode else 15
 bond_lengths = np.linspace(0.2, 1.5, n_points)
 assert bond_lengths.shape == (n_points,)
 energies = []

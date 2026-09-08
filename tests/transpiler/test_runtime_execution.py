@@ -27,7 +27,17 @@ from qamomile.circuit.transpiler.compiled_segments import (
 from qamomile.circuit.transpiler.errors import ExecutionError
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.execution_context import ExecutionContext
-from qamomile.circuit.transpiler.job import SampleJob
+from qamomile.circuit.transpiler.execution_handle import (
+    ExecutionHandle,
+    ExecutionReference,
+    JobStatus,
+)
+from qamomile.circuit.transpiler.execution_request import (
+    EstimateRequest,
+    Exact,
+    SampleRequest,
+)
+from qamomile.circuit.transpiler.job import JobKind, SampleJob
 from qamomile.circuit.transpiler.parameter_binding import (
     ParameterInfo,
     ParameterMetadata,
@@ -83,6 +93,199 @@ class _FakeExecutor(QuantumExecutor[str]):
         params=None,
     ) -> float:
         return self._expval
+
+
+class _DeferredFloatHandle(ExecutionHandle[float]):
+    """Record lazy expectation result retrieval."""
+
+    def __init__(
+        self,
+        value: float,
+        reference: ExecutionReference | None = None,
+    ) -> None:
+        """Initialize a deferred value.
+
+        Args:
+            value (float): Result returned on retrieval.
+            reference (ExecutionReference | None): Optional provider reference.
+        """
+        self.value = value
+        self.reference = reference
+        self.result_calls = 0
+
+    def result(self, timeout: float | None = None) -> float:
+        """Return and record the deferred value.
+
+        Args:
+            timeout (float | None): Ignored test timeout.
+
+        Returns:
+            float: Stored value.
+        """
+        self.result_calls += 1
+        return self.value
+
+    def status(self) -> JobStatus:
+        """Return a pending or completed state.
+
+        Returns:
+            JobStatus: State derived from result retrieval.
+        """
+        return JobStatus.COMPLETED if self.result_calls else JobStatus.QUEUED
+
+    def references(self) -> tuple[ExecutionReference, ...]:
+        """Return the optional provider reference.
+
+        Returns:
+            tuple[ExecutionReference, ...]: Empty or one referenced execution.
+        """
+        return () if self.reference is None else (self.reference,)
+
+
+class _DeferredEstimateExecutor(_FakeExecutor):
+    """Return a provider-like handle from expectation submission."""
+
+    def __init__(self, value: float) -> None:
+        """Initialize a deferred executor.
+
+        Args:
+            value (float): Deferred expectation value.
+        """
+        super().__init__()
+        self.handle = _DeferredFloatHandle(value)
+        self.request: EstimateRequest[str] | None = None
+
+    def submit_estimate(
+        self,
+        request: EstimateRequest[str],
+    ) -> ExecutionHandle[float]:
+        """Record a request and return without retrieving its result.
+
+        Args:
+            request (EstimateRequest[str]): Submitted expectation request.
+
+        Returns:
+            ExecutionHandle[float]: Deferred test handle.
+        """
+        self.request = request
+        return self.handle
+
+
+class _RestoringEstimateExecutor(_DeferredEstimateExecutor):
+    """Restore one referenced expectation handle."""
+
+    def __init__(self, value: float) -> None:
+        """Initialize a restorable expectation executor.
+
+        Args:
+            value (float): Deferred expectation value.
+        """
+        super().__init__(value)
+        self.reference = ExecutionReference("test", ("estimate-1",))
+        self.handle = _DeferredFloatHandle(value, self.reference)
+
+    def restore(
+        self,
+        reference: ExecutionReference,
+    ) -> ExecutionHandle[float]:
+        """Restore the referenced expectation handle.
+
+        Args:
+            reference (ExecutionReference): Reference to validate.
+
+        Returns:
+            ExecutionHandle[float]: Restored deferred expectation handle.
+        """
+        assert reference == self.reference
+        return _DeferredFloatHandle(self.handle.value, reference)
+
+
+class _RestorableCountsHandle(ExecutionHandle[dict[str, int]]):
+    """Expose restorable raw counts for typed restoration tests."""
+
+    def __init__(
+        self,
+        counts: dict[str, int],
+        reference: ExecutionReference,
+    ) -> None:
+        """Initialize a referenced counts handle.
+
+        Args:
+            counts (dict[str, int]): Counts returned on retrieval.
+            reference (ExecutionReference): Stable provider reference.
+        """
+        self._counts = counts
+        self._reference = reference
+
+    def result(self, timeout: float | None = None) -> dict[str, int]:
+        """Return stored counts.
+
+        Args:
+            timeout (float | None): Ignored test timeout.
+
+        Returns:
+            dict[str, int]: Stored raw counts.
+        """
+        return dict(self._counts)
+
+    def status(self) -> JobStatus:
+        """Return a completed test status.
+
+        Returns:
+            JobStatus: Always completed.
+        """
+        return JobStatus.COMPLETED
+
+    def references(self) -> tuple[ExecutionReference, ...]:
+        """Return the stable provider reference.
+
+        Returns:
+            tuple[ExecutionReference, ...]: One test reference.
+        """
+        return (self._reference,)
+
+
+class _RestoringExecutor(_FakeExecutor):
+    """Submit and restore referenced counts handles."""
+
+    def __init__(self, counts: dict[str, int]) -> None:
+        """Initialize original and restored test handles.
+
+        Args:
+            counts (dict[str, int]): Counts returned by both handles.
+        """
+        super().__init__(counts=counts)
+        self.reference = ExecutionReference("test", ("job-1",))
+
+    def submit_sample(
+        self,
+        request: SampleRequest[str],
+    ) -> ExecutionHandle[dict[str, int]]:
+        """Return a referenced sampling handle.
+
+        Args:
+            request (SampleRequest[str]): Sampling request ignored by the test
+                executor.
+
+        Returns:
+            ExecutionHandle[dict[str, int]]: Original referenced handle.
+        """
+        return _RestorableCountsHandle(self._counts, self.reference)
+
+    def restore(
+        self,
+        reference: ExecutionReference,
+    ) -> ExecutionHandle[dict[str, int]]:
+        """Recreate the counts handle from its reference.
+
+        Args:
+            reference (ExecutionReference): Reference to validate.
+
+        Returns:
+            ExecutionHandle[dict[str, int]]: Restored counts handle.
+        """
+        assert reference == self.reference
+        return _RestorableCountsHandle(self._counts, reference)
 
 
 class TestClassicalExecutorControlFlow:
@@ -250,6 +453,48 @@ class TestClassicalExecutorControlFlow:
 
 
 class TestExecutableProgramRuntime:
+    def test_sample_snapshot_restores_typed_public_result(self) -> None:
+        """Restoration reapplies the executable program's result conversion."""
+        quantum_segment = QuantumSegment()
+        executable = ExecutableProgram[str](
+            compiled_quantum=[
+                CompiledQuantumSegment(
+                    segment=quantum_segment,
+                    circuit="quantum",
+                    implicit_output_qubit_indices=(0,),
+                )
+            ]
+        )
+        executor = _RestoringExecutor({"0": 2, "1": 3})
+
+        snapshot = executable.sample(executor, shots=5).snapshot()
+        restored = executable.restore(executor, snapshot)
+
+        assert snapshot.kind is JobKind.SAMPLE
+        assert snapshot.shots == 5
+        assert restored.result().results == [((0,), 2), ((1,), 3)]
+
+    def test_run_snapshot_restores_typed_public_result(self) -> None:
+        """A restored one-shot run returns the kernel-level output type."""
+        quantum_segment = QuantumSegment()
+        executable = ExecutableProgram[str](
+            compiled_quantum=[
+                CompiledQuantumSegment(
+                    segment=quantum_segment,
+                    circuit="quantum",
+                    implicit_output_qubit_indices=(0,),
+                )
+            ]
+        )
+        executor = _RestoringExecutor({"1": 1})
+
+        snapshot = executable.run(executor).snapshot()
+        restored = executable.restore(executor, snapshot)
+
+        assert snapshot.kind is JobKind.RUN
+        assert snapshot.shots is None
+        assert restored.result() == (1,)
+
     def test_sample_projects_implicit_outputs_and_aggregates_hidden_bits(self) -> None:
         """Internal ancilla states do not leak into implicit sample outputs."""
         quantum_segment = QuantumSegment()
@@ -457,6 +702,99 @@ class TestExecutableProgramRuntime:
 
         job = executable.run(_FakeExecutor(expval=0.25))
         assert job.result() == pytest.approx(1.25)
+
+    def test_run_defers_expval_result_and_propagates_accuracy(self) -> None:
+        """Orchestration submits first and performs host work on retrieval."""
+        exp_result = Value(type=FloatType(), name="exp_result")
+        output = Value(type=FloatType(), name="output")
+        quantum_segment = QuantumSegment()
+        classical_segment = ClassicalSegment(
+            operations=[
+                BinOp(
+                    kind=BinOpKind.ADD,
+                    operands=[exp_result, _float_const(1.0)],
+                    results=[output],
+                )
+            ]
+        )
+        exp_segment = ExpvalSegment(
+            hamiltonian_value=None,
+            qubits_value=None,
+            result_ref=exp_result.uuid,
+        )
+        executable = ExecutableProgram[str](
+            plan=ProgramPlan(
+                steps=[
+                    QuantumStep(segment=quantum_segment),
+                    ExpvalStep(segment=exp_segment),
+                    ClassicalStep(segment=classical_segment, role="post"),
+                ],
+                abi=ProgramABI(output_values=[output]),
+            ),
+            compiled_quantum=[
+                CompiledQuantumSegment(
+                    segment=quantum_segment,
+                    circuit="quantum",
+                    parameter_metadata=ParameterMetadata(),
+                )
+            ],
+            compiled_classical=[CompiledClassicalSegment(segment=classical_segment)],
+            compiled_expval=[
+                CompiledExpvalSegment(
+                    segment=exp_segment,
+                    hamiltonian=qm_o.Hamiltonian(),
+                    result_ref=exp_result.uuid,
+                )
+            ],
+            output_values=[output],
+        )
+        executor = _DeferredEstimateExecutor(0.25)
+
+        job = executable.run(executor, estimation=Exact())
+
+        assert executor.handle.result_calls == 0
+        assert job.status() is JobStatus.QUEUED
+        assert executor.request is not None
+        assert isinstance(executor.request.accuracy, Exact)
+        assert job.result() == pytest.approx(1.25)
+        assert executor.handle.result_calls == 1
+
+    def test_expval_snapshot_restores_float_job(self) -> None:
+        """A restored pure expectation execution remains an ExpvalJob."""
+        quantum_segment = QuantumSegment()
+        exp_segment = ExpvalSegment(
+            hamiltonian_value=None,
+            qubits_value=None,
+            result_ref="expval",
+        )
+        executable = ExecutableProgram[str](
+            plan=ProgramPlan(
+                steps=[
+                    QuantumStep(segment=quantum_segment),
+                    ExpvalStep(segment=exp_segment),
+                ],
+            ),
+            compiled_quantum=[
+                CompiledQuantumSegment(
+                    segment=quantum_segment,
+                    circuit="quantum",
+                    parameter_metadata=ParameterMetadata(),
+                )
+            ],
+            compiled_expval=[
+                CompiledExpvalSegment(
+                    segment=exp_segment,
+                    hamiltonian=qm_o.Hamiltonian(),
+                    result_ref="expval",
+                )
+            ],
+        )
+        executor = _RestoringEstimateExecutor(0.375)
+
+        snapshot = executable.run(executor).snapshot()
+        restored = executable.restore(executor, snapshot)
+
+        assert restored.result() == pytest.approx(0.375)
 
     def test_sample_rejects_expval_programs(self) -> None:
         quantum_segment = QuantumSegment()

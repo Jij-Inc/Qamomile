@@ -47,6 +47,7 @@ from qamomile.circuit.ir.serialize.encode import (
 from qamomile.circuit.ir.types import ValueType
 from qamomile.circuit.ir.value import ValueBase
 
+from ._opaque_cost import OpaqueCostEncoder
 from .canonical import canonicalize_graph
 from .schema import QAMOMILE_VERSION
 from .validation import validate_qkernel_ir
@@ -67,6 +68,8 @@ def to_dict(kernel: QKernelLike) -> dict[str, Any]:
             frontend type or process-local emitter.
         ValueError: If the body is specialized, non-hierarchical, or its
             interface disagrees with the signature.
+        RuntimeError: If an opaque resource estimate contains public metrics or
+            metadata that disagree with retained canonical provenance.
     """
     _validate_kernel_surface(kernel)
     block = kernel.block
@@ -114,7 +117,7 @@ def to_dict(kernel: QKernelLike) -> dict[str, Any]:
         raise ValueError("qkernel return annotations do not match Block outputs")
     validate_qkernel_ir(block)
 
-    ctx = _EncodeContext()
+    ctx = _EncodeContext(opaque_cost_encoder=OpaqueCostEncoder())
     parameters: list[dict[str, Any]] = []
     slots = {slot.name: slot for slot in block.param_slots}
     formals = dict(zip(block.label_args, block.input_values, strict=True))
@@ -243,7 +246,11 @@ def _encode_kernel_type(annotation: Any, value: ValueBase) -> dict[str, Any]:
 
 
 def _resolve_return_annotation(kernel: QKernelLike) -> Any:
-    """Resolve one qkernel return annotation without losing its type family.
+    """Return one qkernel's stable resolved return annotation.
+
+    Live kernels cache the complete annotation when decorated so later global
+    rebinding cannot alter their serialized interface. Deserialized or legacy
+    qkernel-like objects fall back to their stored signature.
 
     Args:
         kernel (QKernelLike): QKernel-like object whose resolved return
@@ -256,6 +263,12 @@ def _resolve_return_annotation(kernel: QKernelLike) -> Any:
         TypeError: If a deferred annotation cannot be resolved exactly.
         ValueError: If the qkernel signature has no return annotation.
     """
+    cached_annotation = getattr(kernel, "return_type", inspect.Signature.empty)
+    if cached_annotation is not inspect.Signature.empty and not isinstance(
+        cached_annotation, str
+    ):
+        return cached_annotation
+
     annotation = kernel.signature.return_annotation
     if annotation is inspect.Signature.empty:
         raise ValueError("qkernel signature has no return annotation")

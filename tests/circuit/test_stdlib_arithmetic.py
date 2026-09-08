@@ -365,9 +365,15 @@ def test_modular_add_resources_are_derived_symbolically() -> None:
         ).degree()
         == 1
     )
-    assert estimate.qubits == 3 * size + 3
+    assert estimate.width.allocated_qubits == 3 * size + 3
+    assert estimate.qubits == 3 * size + 5
     concrete = _symbolic_modular_add.estimate_resources(inputs={"size": 2048})
     assert concrete.gates.total == estimate.gates.total.subs(size, 2048)
+    assert concrete.width.clean_ancilla_qubits == 2
+
+    for concrete_size in range(1, 5):
+        direct = qmc.estimate_resources(_symbolic_modular_add.build(size=concrete_size))
+        assert estimate.substitute(size=concrete_size).depth == direct.depth
 
 
 def test_const_modular_add_uses_no_quantum_constant_registers() -> None:

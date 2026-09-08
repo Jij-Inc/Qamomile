@@ -7,6 +7,13 @@ import pytest
 from qiskit import QuantumCircuit
 
 from qamomile.circuit.transpiler.errors import ExecutionError
+from qamomile.circuit.transpiler.execution_handle import JobStatus
+from qamomile.circuit.transpiler.execution_request import (
+    CircuitInvocation,
+    SampleRequest,
+    ShotBased,
+)
+from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
 from qamomile.qbraid.executor import QBraidExecutor
 
 # ---------------------------------------------------------------------------
@@ -24,7 +31,11 @@ def _mock_device(counts: dict[str, int] | None = None):
     result = MagicMock()
     result.data.get_counts.return_value = counts
 
+    device.id = "qbraid:test:device"
     device.run.return_value = job
+    job.id = "job-1"
+    job.status.return_value = "QUEUED"
+    job.metadata.return_value = {"cost_usd": 0.0}
     job.wait_for_final_state.return_value = None
     job.result.return_value = result
 
@@ -126,6 +137,21 @@ class TestConstructor:
         assert executor.poll_interval == 10
         assert executor.run_kwargs == {"name": "test"}
 
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"expval_shots": 0}, "expval_shots"),
+            ({"poll_interval": 0}, "poll_interval"),
+            ({"timeout": 0}, "timeout"),
+        ],
+    )
+    def test_invalid_execution_policy_rejected(self, kwargs, message):
+        """Invalid wait and estimation policies fail during construction."""
+        device, _, _ = _mock_device()
+
+        with pytest.raises(ValueError, match=message):
+            QBraidExecutor(device=device, **kwargs)
+
     def test_run_kwargs_shots_rejected(self):
         """run_kwargs must not contain 'shots' — it collides with execute()."""
         device, _, _ = _mock_device()
@@ -199,6 +225,78 @@ class TestSubmitAndWait:
         qc.measure_all()
         with pytest.raises(ValueError, match="reserved key"):
             executor._submit_and_wait(qc, shots=5)
+
+
+class TestSubmitSample:
+    def test_submission_returns_before_waiting(self):
+        """submit_sample exposes the qBraid job before result retrieval."""
+        device, job, _ = _mock_device({"0": 10})
+        executor = QBraidExecutor(device=device)
+        circuit = QuantumCircuit(1)
+
+        handle = executor.submit_sample(
+            SampleRequest(
+                CircuitInvocation(circuit, {}, ParameterMetadata()),
+                shots=10,
+            )
+        )
+
+        job.wait_for_final_state.assert_not_called()
+        assert handle.status() is JobStatus.QUEUED
+        assert handle.native is job
+        assert handle.references()[0].job_ids == ("job-1",)
+        assert handle.references()[0].target == "qbraid:test:device"
+        assert handle.metadata() == {"cost_usd": 0.0}
+
+    def test_result_waits_once_and_caches_counts(self):
+        """Result retrieval waits lazily and avoids duplicate provider calls."""
+        device, job, _ = _mock_device({"1": 10})
+        executor = QBraidExecutor(device=device, timeout=30, poll_interval=2)
+        circuit = QuantumCircuit(1)
+        handle = executor.submit_sample(
+            SampleRequest(
+                CircuitInvocation(circuit, {}, ParameterMetadata()),
+                shots=10,
+            )
+        )
+
+        assert handle.result() == {"1": 10}
+        assert handle.result() == {"1": 10}
+
+        job.wait_for_final_state.assert_called_once_with(
+            timeout=30,
+            poll_interval=2,
+        )
+        job.result.assert_called_once()
+
+    def test_cancel_reaches_native_job(self):
+        """Cancellation is delegated to the qBraid job."""
+        device, job, _ = _mock_device()
+        executor = QBraidExecutor(device=device)
+        circuit = QuantumCircuit(1)
+        handle = executor.submit_sample(
+            SampleRequest(
+                CircuitInvocation(circuit, {}, ParameterMetadata()),
+                shots=1,
+            )
+        )
+
+        handle.cancel()
+
+        job.cancel.assert_called_once_with()
+
+    def test_capabilities_distinguish_sampling_and_estimation_async_paths(self):
+        """qBraid advertises both implemented asynchronous execution paths."""
+        device, _, _ = _mock_device()
+
+        capabilities = QBraidExecutor(device=device).capabilities
+
+        assert capabilities.supports_async_sampling
+        assert capabilities.supports_async_estimation
+        assert capabilities.supports_estimation
+        assert capabilities.supports_cancellation
+        assert not capabilities.supports_restoration
+        assert capabilities.estimation_accuracy == frozenset({ShotBased})
 
 
 # ---------------------------------------------------------------------------

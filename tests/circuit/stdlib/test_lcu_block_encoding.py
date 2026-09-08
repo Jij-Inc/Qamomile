@@ -12,6 +12,7 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
+from qamomile.circuit.frontend.qkernel_callable import qkernel_callable_attrs
 from qamomile.linalg import PeriodicShiftLCU
 
 
@@ -338,6 +339,59 @@ def test_descriptor_and_term_reject_invalid_values() -> None:
         qmc.LCUBlockEncodingTerm(True, identity)
     with pytest.raises(TypeError, match="encoding"):
         qmc.LCUBlockEncodingTerm(1.0, object())
+
+
+def test_descriptor_normalizes_reordered_operand_width_contract() -> None:
+    """Equivalent operand-width metadata is independent of entry order."""
+    attrs = qkernel_callable_attrs(_identity_case)
+    attrs["resource_contract"] = {
+        "quantum_operand_widths": [
+            {"index": 1, "name": "system", "width": 2},
+            {"index": 0, "name": "signal", "width": 1},
+        ]
+    }
+    reordered = _identity_case._clone_with_callable_attrs(attrs)
+
+    encoding = qmc.LCUBlockEncoding(reordered, 1.0, 1, 2)
+
+    normalized_attrs = qkernel_callable_attrs(encoding.unitary)
+    assert normalized_attrs["resource_contract"]["quantum_operand_widths"] == [
+        {"index": 0, "name": "signal", "width": 1},
+        {"index": 1, "name": "system", "width": 2},
+    ]
+    assert encoding.unitary.estimate_resources().width.input_qubits == 3
+
+
+def test_descriptor_owned_width_contract_is_replaceable() -> None:
+    """Descriptor reconstruction replaces only its own generated widths."""
+    encoding = qmc.LCUBlockEncoding(_identity_case, 1.0, 1, 2)
+
+    replaced = dataclasses.replace(
+        encoding,
+        num_signal_qubits=2,
+        num_system_qubits=3,
+    )
+    attrs = qkernel_callable_attrs(replaced.unitary)
+    assert attrs["resource_contract"]["quantum_operand_widths"] == [
+        {"index": 0, "name": "signal", "width": 2},
+        {"index": 1, "name": "system", "width": 3},
+    ]
+    assert replaced.unitary.estimate_resources().width.input_qubits == 5
+
+
+def test_descriptor_rejects_reordered_operand_width_conflict() -> None:
+    """Reordering does not hide a conflicting pre-existing register width."""
+    attrs = qkernel_callable_attrs(_identity_case)
+    attrs["resource_contract"] = {
+        "quantum_operand_widths": [
+            {"index": 1, "name": "system", "width": 3},
+            {"index": 0, "name": "signal", "width": 1},
+        ]
+    }
+    reordered = _identity_case._clone_with_callable_attrs(attrs)
+
+    with pytest.raises(ValueError, match="num_system_qubits conflicts"):
+        qmc.LCUBlockEncoding(reordered, 1.0, 1, 2)
 
 
 @pytest.mark.parametrize("exception_type", [TypeError, ValueError])

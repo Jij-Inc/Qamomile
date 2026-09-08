@@ -1,0 +1,7 @@
+# Repository prose paths that do not require test, lint, type-check, or
+# documentation jobs.
+#
+# Markdown files are not safe to skip by extension because documentation pages
+# can affect documentation jobs. Keep this list limited to unconsumed files.
+README.md
+LIMITATIONS.md

@@ -1,3 +1,11 @@
+# Every third-party action below is pinned to a full commit SHA instead of a
+# mutable tag such as v4. A tag can be repointed at malicious code if the
+# action repository is compromised: in March 2025 the tj-actions/changed-files
+# incident retagged existing releases and exfiltrated CI secrets from the
+# repositories that consumed them. A commit SHA is content-addressed and
+# cannot be repointed. The comment on each `uses:` line records the release
+# the SHA was resolved from, with a link for verifying the correspondence.
+
 name: Upload Python Package
 
 on:
@@ -5,30 +13,116 @@ on:
   release:
     types: [published]
 
-permissions:
-  contents: read
+permissions: {}
+
+env:
+  UV_VERSION: "0.11.32"
 
 jobs:
-  deploy:
+  build:
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.repository == 'Jij-Inc/Qamomile' &&
+          github.event_name == 'release' &&
+          github.event.release.draft == false
+        )
+      }}
     runs-on: ubuntu-latest
-
+    timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out the release source
+        # v4.4.0 = https://github.com/actions/checkout/releases/tag/v4.4.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Set up Python
+        # v5.6.0 = https://github.com/actions/setup-python/releases/tag/v5.6.0
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        # v5.4.2 = https://github.com/astral-sh/setup-uv/releases/tag/v5.4.2
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
 
-      - name: Build package
-        run: uv build
+      - name: Fetch the main branch
+        if: ${{ github.event_name == 'release' }}
+        run: git fetch --no-tags origin main:refs/remotes/origin/main
 
-      - name: Publish (dry-run)
-        if: github.event_name != 'release'
-        run: uv publish --dry-run
+      - name: Validate tag and export version
+        if: ${{ github.event_name == 'release' }}
+        shell: bash
+        env:
+          EVENT_REF: ${{ github.ref }}
+          EVENT_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        # The release commit is not trusted until this validation succeeds.
+        # Load the validator from the main branch fetched above.
+        run: git show "refs/remotes/origin/main:.github/scripts/release/validate-tag-and-export-version.sh" | bash -s
+
+      - name: Build distributions without workspace sources
+        run: uv build --no-sources
+
+      - name: Check distribution metadata
+        run: uvx twine check --strict dist/*
+
+      - name: Verify distributions
+        run: .github/scripts/verify-distributions.sh
+
+      - name: Upload verified distributions
+        # v4.6.2 = https://github.com/actions/upload-artifact/releases/tag/v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: python-distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    if: >-
+      ${{
+        github.repository == 'Jij-Inc/Qamomile' &&
+        github.event_name == 'release' &&
+        github.event.release.draft == false
+      }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {}
+    environment:
+      name: pypi
+      url: https://pypi.org/project/qamomile/
+    concurrency:
+      group: pypi-production
+      cancel-in-progress: false
+    steps:
+      # The build job verified the files before creating this immutable artifact.
+      - name: Download verified distributions
+        # v4.3.0 = https://github.com/actions/download-artifact/releases/tag/v4.3.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: python-distributions
+          path: dist
+
+      - name: Install uv
+        # v5.4.2 = https://github.com/astral-sh/setup-uv/releases/tag/v5.4.2
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
 
       - name: Publish to PyPI
-        if: github.event_name == 'release'
-        run: uv publish
         env:
           UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: uv publish

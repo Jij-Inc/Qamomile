@@ -61,8 +61,8 @@ def _load_probe(a: int, x: int, n: int, modulus: int, path: str):
 
 def test_modmul_const_non_cyclic_executes(sdk_transpiler, tmp_path) -> None:
     """A small non-rotation instance executes the polynomial reversible body."""
-    if sdk_transpiler.backend_name == "quri_parts":
-        pytest.skip("QURI Parts cannot represent modmul's mid-circuit reset")
+    if sdk_transpiler.backend_name in {"quri_parts", "braket"}:
+        pytest.skip("This backend cannot represent modmul's mid-circuit reset")
 
     probe = _load_probe(3, 2, 3, 7, str(tmp_path / "noncyclic.py"))
     transpiler = sdk_transpiler.transpiler
@@ -88,7 +88,7 @@ def test_modmul_const_non_cyclic_estimates_its_executable_body() -> None:
 
 
 def test_modmul_const_body_growth_is_quadratic_at_fixed_window() -> None:
-    """Specialized body estimates follow quadratic modular-multiply growth."""
+    """The clean-ancilla model retains body width and adds recipe ancillas."""
     cases = [(2, 2, 3), (3, 2, 5), (4, 2, 15)]
     normalized = []
     for width, multiplier, modulus in cases:
@@ -105,7 +105,16 @@ def test_modmul_const_body_growth_is_quadratic_at_fixed_window() -> None:
             )
 
         estimate = mul.estimate_resources()
-        assert estimate.qubits == 3 * width + 2 + 7
+        allocated = 3 * width + 2 + 7
+        assert (
+            estimate.control_decomposition
+            is qmc.ControlDecomposition.CLEAN_ANCILLA_TOFFOLI
+        )
+        assert estimate.width.allocated_qubits == allocated
+        assert estimate.width.clean_ancilla_qubits == 2
+        assert estimate.width.peak_qubits == allocated + 2
+        assert estimate.width.circuit_qubits == allocated + 2
+        assert estimate.qubits == allocated + 2
         normalized.append(float(estimate.gates.total) / (width**2))
 
     assert max(normalized) / min(normalized) < 1.5
@@ -229,8 +238,15 @@ def test_modmul_const_control_is_derived_from_the_controlled_body() -> None:
     plain = uncontrolled.estimate_resources()
     ctrl = controlled.estimate_resources()
 
-    assert plain.assumptions == ()
-    assert ctrl.assumptions == ()
+    assert plain.assumptions == ctrl.assumptions
+    assert plain.assumptions
+    assert plain.quality is qmc.EstimateQuality.CONSERVATIVE
+    assert ctrl.quality is qmc.EstimateQuality.CONSERVATIVE
+    assert any("depth" in assumption.message for assumption in plain.assumptions)
+    assert any(
+        "measurement-derived conditional" in assumption.message
+        for assumption in plain.assumptions
+    )
     assert plain.gates.two_qubit > 0
     assert ctrl.gates.multi_qubit > 0
 

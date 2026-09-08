@@ -1769,14 +1769,12 @@ class TestGlobalPhaseSpecialCases:
 
 
 class TestGlobalPhaseControlledCompositions:
-    """Controlled compositions that earlier slipped through (bug regressions).
+    """Exercise controlled global-phase compositions across SDK backends.
 
-    These cover the cells a second adversarial pass flagged: a controlled
-    ``inverse(global_phase)`` (was dropped on CUDA-Q), a loop whose only
-    loop-variable dependency is the phase angle (was un-unrolled on Qiskit),
-    controlled expectation values, a gate-bearing controlled body, the
-    three-control contract, and a register-size sweep -- all executed on every
-    SDK backend.
+    Covers a controlled ``inverse(global_phase)`` that CUDA-Q must retain, a
+    loop whose only loop-variable dependency is the phase angle, controlled
+    expectation values, a gate-bearing controlled body, the three-control
+    contract, and a register-size sweep.
     """
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
@@ -2433,12 +2431,11 @@ def _control_bearing_body(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qu
     return a, b
 
 
-class TestGlobalPhaseRound3Coverage:
-    """Round-3 regression / gap-filler tests, executed on every SDK backend.
+class TestGlobalPhaseCompositionCoverage:
+    """Exercise global-phase compositions on every SDK backend.
 
-    Covers a found bug (a control-bearing body inside ``inverse(global_phase)``
-    crashed CUDA-Q's adjoint autogeneration) plus deeper compositions and the
-    controlled-expectation-value column the coverage audit flagged.
+    Covers a control-bearing body inside ``inverse(global_phase)``, deeper
+    compositions, and controlled expectation values.
     """
 
     @pytest.mark.parametrize("seed", [0, 1, 2])
@@ -2666,8 +2663,8 @@ class TestGlobalPhaseRound3Coverage:
         assert set(counts) == {1}, f"{sdk_transpiler.backend_name}: {counts}"
 
 
-class TestGlobalPhaseRound5Coverage:
-    """Round-5 regression: a controlled global phase nested in a compile-time ``if``.
+class TestControlledCompileTimeGlobalPhase:
+    """Cover a controlled global phase nested in a compile-time ``if``.
 
     The compile-time branch must be selected before CircuitProgram phase
     aggregation, including when it is nested in a controlled callable. The

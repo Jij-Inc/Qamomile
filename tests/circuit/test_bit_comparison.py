@@ -436,8 +436,10 @@ class TestBitComparisonRuntime:
         expected: int,
     ) -> None:
         """Verify supported dynamic backends execute runtime equality."""
-        if sdk_transpiler.backend_name == "quri_parts":
-            pytest.skip("QuriParts does not support measurement-dependent control flow")
+        if sdk_transpiler.backend_name in {"quri_parts", "braket"}:
+            pytest.skip(
+                "This backend does not support measurement-dependent control flow"
+            )
         transpiler = sdk_transpiler.transpiler
         executable = transpiler.transpile(
             _runtime_bit_eq,
@@ -461,8 +463,10 @@ class TestBitComparisonRuntime:
         expected: int,
     ) -> None:
         """Verify supported dynamic backends execute runtime inequality."""
-        if sdk_transpiler.backend_name == "quri_parts":
-            pytest.skip("QuriParts does not support measurement-dependent control flow")
+        if sdk_transpiler.backend_name in {"quri_parts", "braket"}:
+            pytest.skip(
+                "This backend does not support measurement-dependent control flow"
+            )
         transpiler = sdk_transpiler.transpiler
         executable = transpiler.transpile(
             _runtime_bit_ne,
@@ -494,8 +498,10 @@ class TestBitComparisonRuntime:
         source_one: bool,
     ) -> None:
         """Verify mixed Bit and UInt predicates execute on dynamic backends."""
-        if sdk_transpiler.backend_name == "quri_parts":
-            pytest.skip("QuriParts does not support measurement-dependent control flow")
+        if sdk_transpiler.backend_name in {"quri_parts", "braket"}:
+            pytest.skip(
+                "This backend does not support measurement-dependent control flow"
+            )
         transpiler = sdk_transpiler.transpiler
         executable = transpiler.transpile(
             kernel,

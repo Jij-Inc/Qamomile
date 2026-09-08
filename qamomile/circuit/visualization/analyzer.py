@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation import Operation
@@ -23,8 +23,8 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     NotOp,
 )
 from qamomile.circuit.ir.operation.callable import (
+    CallableBodySelection,
     CallPolicy,
-    CallTransform,
     InvokeOperation,
 )
 from qamomile.circuit.ir.operation.cast import CastOperation
@@ -474,6 +474,33 @@ class CircuitAnalyzer:
         """Return whether legacy call/control blocks expand at this depth."""
         return self.inline and (self.inline_depth is None or depth < self.inline_depth)
 
+    @staticmethod
+    def _visual_invoke_selection(
+        op: InvokeOperation,
+    ) -> CallableBodySelection | None:
+        """Select an invocation body that is safe to expand visually.
+
+        A direct body is not an executable fallback for an inverse invocation.
+        Keeping such a call boxed preserves its dagger label instead of
+        displaying the forward unitary as though it were the inverse.
+
+        Args:
+            op (InvokeOperation): Invocation whose body should be selected.
+
+        Returns:
+            CallableBodySelection | None: Selected body and aligned call-site
+            values, or ``None`` when no body can be expanded faithfully.
+
+        Raises:
+            ValueError: If the selected body violates the invocation contract.
+        """
+        selection = op.select_body()
+        if not isinstance(selection.body, Block):
+            return None
+        if op.transform.is_inverse and not selection.realized_transform.is_inverse:
+            return None
+        return selection
+
     def _should_inline_invoke_at_depth(self, op: InvokeOperation, depth: int) -> bool:
         """Return whether an InvokeOperation should expand visually.
 
@@ -484,12 +511,18 @@ class CircuitAnalyzer:
         Returns:
             bool: True when the invocation has a body and the current drawing
                 options request expansion for that callable class.
+
+        Raises:
+            ValueError: If the selected body violates the invocation contract.
         """
-        if not isinstance(op.effective_body(), Block):
+        should_expand = (
+            self._should_inline_at_depth(depth)
+            if op.default_policy is CallPolicy.INLINE
+            else self.expand_composite
+        )
+        if not should_expand:
             return False
-        if op.default_policy is CallPolicy.INLINE:
-            return self._should_inline_at_depth(depth)
-        return self.expand_composite
+        return self._visual_invoke_selection(op) is not None
 
     @staticmethod
     def _invoke_box_kind(op: InvokeOperation) -> VGateKind:
@@ -505,42 +538,6 @@ class CircuitAnalyzer:
         if op.default_policy is CallPolicy.INLINE:
             return VGateKind.BLOCK_BOX
         return VGateKind.COMPOSITE_BOX
-
-    def _invoke_actual_inputs(
-        self,
-        op: InvokeOperation,
-        block_value: Block,
-    ) -> list[ValueBase]:
-        """Return invoke operands aligned to a body block's formal inputs.
-
-        Args:
-            op (InvokeOperation): Invocation whose operands should be aligned.
-            block_value (Block): Embedded callable body.
-
-        Returns:
-            list[ValueBase]: Actual inputs ordered to match
-                ``block_value.input_values``.
-
-        Raises:
-            ValueError: If composite actuals cannot be aligned to the selected
-                implementation body's formal inputs.
-        """
-        if op.attrs.get("kind") == "composite":
-            selected_impl = op.implementation_for()
-            body_implements_transform = (
-                selected_impl is not None and selected_impl.body is block_value
-            )
-            quantum_actuals = (
-                list(op.control_qubits) + list(op.target_qubits)
-                if body_implements_transform
-                else list(op.target_qubits)
-            )
-            return self._align_actuals_to_formals(
-                block_value.input_values,
-                quantum_actuals=quantum_actuals,
-                classical_actuals=list(op.parameters),
-            )
-        return list(op.operands)
 
     @staticmethod
     def _invoke_qubit_operands(op: InvokeOperation) -> list[Value]:
@@ -571,10 +568,11 @@ class CircuitAnalyzer:
         the same logical_id, so we only need logical_id-based tracking.
 
         Args:
-            graph: Computation block.
+            graph (Block): Computation block.
 
         Returns:
-            Tuple of (qubit_map, qubit_names, num_qubits).
+            tuple[dict[str, int], dict[int, str], int]: Logical-ID-to-wire
+            mapping, display names by wire index, and total wire count.
         """
         qubit_map: dict[str, int] = {}
         qubit_names: dict[int, str] = {}
@@ -807,9 +805,11 @@ class CircuitAnalyzer:
 
                 elif isinstance(op, InvokeOperation):
                     if self._should_inline_invoke_at_depth(op, depth):
-                        block_value = op.effective_body()
+                        selection = self._visual_invoke_selection(op)
+                        assert selection is not None
+                        block_value = selection.body
                         assert isinstance(block_value, Block)
-                        actual_inputs = self._invoke_actual_inputs(op, block_value)
+                        actual_inputs = list(selection.operands)
                         new_remap, child_param_values = (
                             self._build_block_value_mappings(
                                 block_value,
@@ -825,20 +825,9 @@ class CircuitAnalyzer:
                             depth + 1,
                             child_param_values,
                         )
-                        selected_impl = op.implementation_for()
-                        body_implements_transform = (
-                            selected_impl is not None
-                            and selected_impl.body is block_value
-                        )
-                        call_results = (
-                            op.results
-                            if body_implements_transform
-                            or op.transform is not CallTransform.CONTROLLED
-                            else op.results[op.num_control_qubits :]
-                        )
                         map_callable_outputs(
                             block_value.output_values,
-                            call_results,
+                            cast(tuple[ValueLike, ...], selection.results),
                             new_remap,
                         )
                         qubit_operands = self._invoke_qubit_operands(op)
@@ -1572,7 +1561,7 @@ class CircuitAnalyzer:
             label = op.name.upper()
             box_width = self._estimate_block_label_box_width(label)
             control_indices: list[int] = []
-            if op.transform is CallTransform.CONTROLLED:
+            if op.transform.is_controlled:
                 for operand in op.control_qubits:
                     indices = self._resolve_operand_to_qubit_indices(
                         operand, qubit_map, logical_id_remap, param_values
@@ -1598,7 +1587,7 @@ class CircuitAnalyzer:
                         )
                         if indices is not None:
                             qubit_indices.extend(indices)
-            is_controlled = op.transform is CallTransform.CONTROLLED
+            is_controlled = op.transform.is_controlled
             control_pattern = self._control_pattern_for_resolved_wires(
                 op.control_value,
                 op.num_control_qubits,
@@ -1875,7 +1864,8 @@ class CircuitAnalyzer:
         Raises:
             TypeError: If ``op`` is not a supported inline block operation.
             ValueError: If activation metadata cannot align with the resolved
-                control wires or body arguments.
+                control wires or body arguments, or an invocation has no body
+                that can be expanded without changing its transform.
         """
         # Extract block_value, affected_qubits, and actual_inputs based on op type
         control_value: int | None = None
@@ -1923,10 +1913,16 @@ class CircuitAnalyzer:
             u_name = getattr(block_value, "name", "U") or "U"
             block_name = u_name
         elif isinstance(op, InvokeOperation):
-            block_value = op.effective_body()
+            selection = self._visual_invoke_selection(op)
+            if selection is None:
+                raise ValueError(
+                    f"InvokeOperation '{op.name}' has no body that can be "
+                    "expanded without changing its transform."
+                )
+            block_value = selection.body
             assert isinstance(block_value, Block)
             control_qubit_indices = []
-            if op.transform is CallTransform.CONTROLLED:
+            if op.transform.is_controlled:
                 control_value = op.control_value
                 expected_control_width = op.num_control_qubits
                 for operand in op.control_qubits:
@@ -1942,7 +1938,7 @@ class CircuitAnalyzer:
                 )
                 if indices is not None:
                     affected_qubits.extend(indices)
-            actual_inputs = self._invoke_actual_inputs(op, block_value)
+            actual_inputs = list(selection.operands)
             block_name = op.name
         elif isinstance(op, InverseBlockOperation):
             block_value = op.implementation_block

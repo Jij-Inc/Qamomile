@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Callable, Sequence
 import numpy as np
 
 from qamomile.circuit.frontend.handle.primitives import UInt
+from qamomile.circuit.frontend.qkernel_callable import qkernel_callable_attrs
 from qamomile.circuit.frontend.qkernel_specialization import select_specialized_block
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.block import Block
@@ -554,6 +555,9 @@ class SelectGate:
                 num_index_qubits=num_index_qubits.value,
                 num_index_args=len(symbolic_prep.prefix_entries),
                 case_blocks=case_blocks,
+                case_callable_attrs=[
+                    qkernel_callable_attrs(case) for case in self._cases
+                ],
             )
             driver._commit_control_entries(
                 symbolic_prep.prefix_entries,
@@ -602,6 +606,7 @@ class SelectGate:
             results=prep.results,
             num_index_qubits=num_index_qubits,
             case_blocks=case_blocks,
+            case_callable_attrs=[qkernel_callable_attrs(case) for case in self._cases],
         )
         driver._commit_control_entries(
             prep.control_entries,

@@ -24,27 +24,30 @@ def mark_all_ones(reg: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
     Returns:
         qmc.Vector[qmc.Qubit]: Phase-marked search register.
     """
-    top = reg.shape[0] - 1
-    reg[top] = qmc.h(reg[top])
-    reg[0:top], reg[top] = qmc.mcx(reg[0:top], reg[top])
-    reg[top] = qmc.h(reg[top])
+    n = reg.shape[0]
+    if n == 1:
+        reg[0] = qmc.z(reg[0])
+    else:
+        top = n - 1
+        reg[top] = qmc.h(reg[top])
+        reg[0:top], reg[top] = qmc.mcx(reg[0:top], reg[top])
+        reg[top] = qmc.h(reg[top])
     return reg
 
 
 class _QueryCost:
     """Report one opaque query of cost ``l + n`` per oracle call."""
 
-    def __call__(self, ctx: qmc.OpaqueCallContext) -> qmc.ResourceEstimate:
+    def __call__(self, ctx: qmc.OpaqueCostContext) -> qmc.ResourceEstimate:
         """Return an ``O(l + n)`` gate + one-query estimate.
 
         Args:
-            ctx (qmc.OpaqueCallContext): Call-site context; the register width is
-                read from the operand shape.
+            ctx (qmc.OpaqueCostContext): Definition-level cost context.
 
         Returns:
             qmc.ResourceEstimate: One-query gate/call estimate.
         """
-        n = sum(ctx.operand_shapes.values()) if ctx.operand_shapes else sp.Symbol("n")
+        n = ctx.target_qubits
         cost = sp.Symbol("l", positive=True) + n
         return qmc.ResourceEstimate(
             gates=qmc.GateResources(total=cost, non_clifford=cost),
@@ -52,6 +55,7 @@ class _QueryCost:
                 calls_by_name={"query_oracle": sp.Integer(1)},
                 queries_by_name={"query_oracle": sp.Integer(1)},
             ),
+            control_decomposition=ctx.control_decomposition,
         )
 
 
@@ -84,6 +88,14 @@ def _grover_estimate_kernel(n: qmc.UInt, iterations: qmc.UInt) -> qmc.Vector[qmc
     return qmc.measure(reg)
 
 
+@pytest.fixture(scope="module")
+def abstract_symbolic_grover_estimate() -> qmc.ResourceEstimate:
+    """Reuse the control-independent symbolic Grover estimate."""
+    return _grover_estimate_kernel.estimate_resources(
+        control_decomposition=qmc.ControlDecomposition.ABSTRACT,
+    )
+
+
 def _numpy_grover_zexp(n: int, iterations: int) -> float:
     """Compute ``<Z_0>`` after Grover amplification of ``|1...1>``.
 
@@ -108,6 +120,20 @@ def _numpy_grover_zexp(n: int, iterations: int) -> float:
     return float(1 - 2 * p_bit0_one)
 
 
+def _numpy_grover_marked_probability(n: int, iterations: int) -> float:
+    """Compute the marked-state probability after Grover amplification.
+
+    Args:
+        n (int): Number of search qubits.
+        iterations (int): Number of Grover iterations.
+
+    Returns:
+        float: Analytic probability of the single marked state.
+    """
+    theta = np.arcsin(1 / np.sqrt(2**n))
+    return float(np.sin((2 * iterations + 1) * theta) ** 2)
+
+
 def test_grover_iteration_count_concrete_and_symbolic() -> None:
     """The optimal iteration count is floor((pi/4) sqrt(N/m))."""
     assert grover_iteration_count(4, 1) == 3
@@ -125,6 +151,40 @@ def test_grover_iteration_count_accepts_numpy_integers() -> None:
         grover_iteration_count(np.int64(0), 1)
 
 
+def test_grover_iteration_count_rejects_booleans() -> None:
+    """Boolean scalars are not accepted as integer search parameters."""
+    for num_qubits, num_marked in (
+        (True, 1),
+        (4, False),
+        (np.bool_(True), 1),
+        (4, np.bool_(False)),
+    ):
+        with pytest.raises(TypeError, match="must not be booleans"):
+            grover_iteration_count(num_qubits, num_marked)
+
+
+def test_grover_iteration_count_preserves_sympy_integers() -> None:
+    """SymPy integer inputs retain a symbolic result and positivity checks."""
+    count_from_qubits = grover_iteration_count(sp.Integer(4), 1)
+    count_from_marked = grover_iteration_count(4, sp.Integer(1))
+
+    assert isinstance(count_from_qubits, sp.Integer)
+    assert isinstance(count_from_marked, sp.Integer)
+    assert count_from_qubits == count_from_marked == 3
+    with pytest.raises(ValueError, match="must be positive"):
+        grover_iteration_count(sp.Integer(0), 1)
+    with pytest.raises(ValueError, match="must be positive"):
+        grover_iteration_count(4, sp.Integer(0))
+    for num_qubits, num_marked in (
+        (sp.Integer(4), -1),
+        (-1, sp.Integer(1)),
+        (sp.Integer(4), np.int64(0)),
+        (np.int64(0), sp.Integer(1)),
+    ):
+        with pytest.raises(ValueError, match="must be positive"):
+            grover_iteration_count(num_qubits, num_marked)
+
+
 def test_grover_iteration_count_uses_arbitrary_precision() -> None:
     """Large search spaces return exact Python integers without overflow."""
     count = grover_iteration_count(1024, 1)
@@ -133,9 +193,11 @@ def test_grover_iteration_count_uses_arbitrary_precision() -> None:
     assert count.bit_length() > 500
 
 
-def test_grover_symbolic_query_complexity() -> None:
+def test_grover_symbolic_query_complexity(
+    abstract_symbolic_grover_estimate: qmc.ResourceEstimate,
+) -> None:
     """Query count equals the (symbolic) iteration count: O(sqrt(N/m))."""
-    est = _grover_estimate_kernel.estimate_resources()
+    est = abstract_symbolic_grover_estimate
     iterations = est.parameters["iterations"]
     assert est.calls.queries_by_name["query_oracle"] == iterations
 
@@ -150,7 +212,8 @@ def test_grover_optimal_query_complexity_via_inputs() -> None:
     n = sp.Symbol("n", positive=True)
     m = sp.Symbol("m", positive=True)
     est = _grover_estimate_kernel.estimate_resources(
-        inputs={"iterations": grover_iteration_count(n, m)}
+        inputs={"iterations": grover_iteration_count(n, m)},
+        control_decomposition=qmc.ControlDecomposition.ABSTRACT,
     )
     queries = est.calls.queries_by_name["query_oracle"]
     # It is a floor of the optimal continuous count; compare the floor argument
@@ -163,11 +226,29 @@ def test_grover_optimal_query_complexity_via_inputs() -> None:
         assert int(queries.subs({n: nn, m: mm})) == grover_iteration_count(nn, mm)
 
 
-def test_grover_qubit_count_is_linear() -> None:
-    """Grover uses O(n) qubits (the search register width)."""
-    est = _grover_estimate_kernel.estimate_resources()
+def test_grover_qubit_count_includes_clean_control_ancillas(
+    abstract_symbolic_grover_estimate: qmc.ResourceEstimate,
+) -> None:
+    """Grover reports source width and clean control ancillas separately."""
+    est = abstract_symbolic_grover_estimate
     n = est.parameters["n"]
-    assert sp.simplify(est.qubits - n) == 0
+    assert est.width.allocated_qubits == n
+
+    inactive = _grover_estimate_kernel.estimate_resources(
+        inputs={"n": 4, "iterations": 0}
+    )
+    single_qubit = _grover_estimate_kernel.estimate_resources(
+        inputs={"n": 1, "iterations": 1}
+    )
+    active = _grover_estimate_kernel.estimate_resources(
+        inputs={"n": 4, "iterations": 1}
+    )
+    assert inactive.qubits == 4
+    assert single_qubit.width.allocated_qubits == 1
+    assert single_qubit.width.clean_ancilla_qubits == 0
+    assert single_qubit.qubits == 1
+    assert active.width.clean_ancilla_qubits == 2
+    assert active.qubits == 6
 
 
 def test_grover_diffusion_uses_qiskit_native_ccx() -> None:
@@ -187,12 +268,12 @@ def test_grover_diffusion_uses_qiskit_native_ccx() -> None:
     )
 
 
-@pytest.mark.parametrize("n", [2, 3])
-@pytest.mark.parametrize("seed", [0, 3])
-def test_grover_cross_backend_amplifies_marked_state(
+@pytest.mark.parametrize("n", [1, 2, 3, 5])
+@pytest.mark.parametrize("seed", [0, 1, 2, 42])
+def test_grover_cross_backend_matches_marked_probability(
     sdk_transpiler, n: int, seed: int, tmp_path
 ) -> None:
-    """Grover amplifies the marked all-ones state on every SDK backend."""
+    """Grover matches the analytic marked-state probability on every SDK backend."""
     src = (
         "import qamomile.circuit as qmc\n"
         "from tests.circuit.test_grover import mark_all_ones\n"
@@ -227,16 +308,23 @@ def test_grover_cross_backend_amplifies_marked_state(
     result = exe.sample(executor, shots=1024).result()
 
     marked = tuple(1 for _ in range(n))
-    top_bits, top_count = result.most_common(1)[0]
-    assert top_bits == marked, (
-        f"{sdk_transpiler.backend_name}: marked state {marked} not dominant, "
-        f"got {top_bits}"
+    marked_count = dict(result.results).get(marked, 0)
+    observed_probability = marked_count / result.shots
+    expected_probability = _numpy_grover_marked_probability(
+        n, grover_iteration_count(n, 1)
     )
-    # Amplitude amplification should give the marked state a clear majority.
-    assert top_count / result.shots > 0.6
+    assert np.isclose(
+        observed_probability,
+        expected_probability,
+        atol=0.1,
+        rtol=0.0,
+    ), (
+        f"{sdk_transpiler.backend_name} n={n}: expected marked-state "
+        f"probability {expected_probability}, got {observed_probability}"
+    )
 
 
-@pytest.mark.parametrize("n", [2, 3])
+@pytest.mark.parametrize("n", [1, 2, 3, 5])
 def test_grover_cross_backend_expval(sdk_transpiler, n: int, tmp_path) -> None:
     """Grover's amplified state matches the analytic ``<Z_0>`` on each backend."""
     import qamomile.observable as qm_o
@@ -267,6 +355,6 @@ def test_grover_cross_backend_expval(sdk_transpiler, n: int, tmp_path) -> None:
 
     reference = _numpy_grover_zexp(n, grover_iteration_count(n, 1))
     atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
-    assert np.isclose(value, reference, atol=atol), (
+    assert np.isclose(value, reference, atol=atol, rtol=0.0), (
         f"{sdk_transpiler.backend_name} n={n}: expected <Z_0>={reference}, got {value}"
     )

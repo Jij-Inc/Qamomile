@@ -1,39 +1,56 @@
-# Workflow for deploying the RTD redirect page to GitHub Pages
+# Every third-party action below is pinned to a full commit SHA instead of a
+# mutable tag such as v4. A tag can be repointed at malicious code if the
+# action repository is compromised: in March 2025 the tj-actions/changed-files
+# incident retagged existing releases and exfiltrated CI secrets from the
+# repositories that consumed them. A commit SHA is content-addressed and
+# cannot be repointed. The comment on each `uses:` line records the release
+# the SHA was resolved from, with a link for verifying the correspondence.
+
+# Manually deploy the static redirect from GitHub Pages to Read the Docs.
 name: Deploy GitHub Pages redirect
 
 on:
-  push:
-    branches: ["main"]
-    paths:
-      - "docs/github_page/**"
-      - ".github/workflows/deploy-redirect-page.yml"
   workflow_dispatch:
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+permissions: {}
 
 concurrency:
-  group: "pages"
+  group: pages
   cancel-in-progress: false
 
 jobs:
+  build:
+    if: ${{ github.repository == 'Jij-Inc/Qamomile' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the main branch
+        # v4.4.0 = https://github.com/actions/checkout/releases/tag/v4.4.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Upload redirect artifact
+        # v3.0.1 = https://github.com/actions/upload-pages-artifact/releases/tag/v3.0.1
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa
+        with:
+          path: docs/github_page
+
   deploy:
+    needs: build
+    if: ${{ github.repository == 'Jij-Inc/Qamomile' && github.ref == 'refs/heads/main' && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          # Upload only the redirect directory
-          path: 'docs/github_page'
-      - name: Deploy to GitHub Pages
+      - name: Deploy redirect to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v5
+        # v5.0.0 = https://github.com/actions/deploy-pages/releases/tag/v5.0.0
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128

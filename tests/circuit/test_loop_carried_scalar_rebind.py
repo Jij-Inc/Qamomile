@@ -41,6 +41,7 @@ from qamomile.circuit.ir.operation.control_flow import (
 from qamomile.circuit.ir.types.primitives import UIntType
 from qamomile.circuit.ir.value import DictValue, TupleValue, Value
 from qamomile.circuit.transpiler.errors import (
+    FrontendTransformError,
     QamomileCompileError,
     QubitRebindError,
     ValidationError,
@@ -55,6 +56,88 @@ pytest.importorskip("qiskit")
 from qamomile.qiskit import QiskitTranspiler  # noqa: E402
 
 LOOP_CARRIED = "Loop-carried"
+
+
+@qmc.qkernel
+def _recursive_unary_driver(
+    value: qmc.Float,
+    target: qmc.Qubit,
+) -> qmc.Qubit:
+    """Recurse until a unary compile-time expression reaches zero.
+
+    Args:
+        value (qmc.Float): Compile-time recursion driver.
+        target (qmc.Qubit): Qubit updated at the base case.
+
+    Returns:
+        qmc.Qubit: Updated target qubit.
+    """
+    rounded = qmc.ceil(value)
+    if rounded == 0:
+        target = qmc.h(target)
+    else:
+        target = _recursive_unary_driver(value - 1.0, target)
+    return target
+
+
+@qmc.qkernel
+def _recursive_unary_circuit(value: qmc.Float) -> qmc.Bit:
+    """Measure one target after compile-time unary recursion.
+
+    Args:
+        value (qmc.Float): Compile-time recursion driver.
+
+    Returns:
+        qmc.Bit: Measurement of the recursively updated target.
+    """
+    target = _recursive_unary_driver(value, qmc.qubit("target"))
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _recursive_unused_predicate(
+    depth: qmc.UInt,
+    predicate: qmc.Bit,
+    target: qmc.Qubit,
+) -> qmc.Qubit:
+    """Recurse to one gate without reading a forwarded predicate.
+
+    Args:
+        depth (qmc.UInt): Compile-time recursion depth.
+        predicate (qmc.Bit): Deliberately unused caller predicate.
+        target (qmc.Qubit): Qubit updated at the base case.
+
+    Returns:
+        qmc.Qubit: Updated target qubit.
+    """
+    if depth == 0:
+        target = qmc.t(target)
+    else:
+        target = _recursive_unused_predicate(depth - 1, predicate, target)
+    return target
+
+
+@qmc.qkernel
+def _recursive_unused_predicate_circuit(
+    depth: qmc.UInt,
+    iterations: qmc.UInt,
+) -> qmc.Bit:
+    """Refresh an ignored predicate around recursive invocations.
+
+    Args:
+        depth (qmc.UInt): Compile-time recursion depth.
+        iterations (qmc.UInt): Number of loop iterations.
+
+    Returns:
+        qmc.Bit: Final target measurement.
+    """
+    predicate = qmc.bit(False)
+    target = qmc.qubit("target")
+    source = qmc.qubit("source")
+    for _index in qmc.range(iterations):
+        target = _recursive_unused_predicate(depth, predicate, target)
+        predicate = qmc.measure(source)
+    return qmc.measure(target)
 
 
 def test_operation_liveness_is_retained_only_inside_while_bodies() -> None:
@@ -1111,7 +1194,7 @@ class TestSupportedLoopCarriedScalars:
             n = 1
             for _i in qmc.range(2):
                 n = n
-            return n
+            return qmc.uint(n)
 
         @qmc.qkernel
         def divergent() -> qmc.UInt:
@@ -1691,7 +1774,7 @@ class TestRejectedRebinds:
         """A residual endpoint keeps the identity RegionArg that defines it."""
 
         @qmc.qkernel
-        def kernel() -> qmc.Bit:
+        def kernel() -> qmc.UInt:
             selector = qmc.measure(qmc.qubit("selector"))
             base = 1
             flag = qmc.bit(False)
@@ -1906,6 +1989,41 @@ class TestRejectedRebinds:
             return value
 
         assert _sample_single(kernel) == 1
+
+    def test_nested_varying_trip_count_rejects_bit_backedge(self):
+        """Any outer index producing two inner trips requires Bit carry."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            target = qmc.qubit("target")
+            source = qmc.qubit("source")
+            for outer in qmc.range(1, 3):
+                predicate = qmc.bit(False)
+                for _inner in qmc.range(outer):
+                    if predicate:
+                        target = qmc.t(target)
+                    predicate = qmc.measure(source)
+            return qmc.measure(target)
+
+        with pytest.raises(ValidationError, match=LOOP_CARRIED):
+            _transpile(kernel)
+
+    def test_nested_translation_invariant_single_trip_bit_is_allowed(self):
+        """An affine inner range that is always one trip has no backedge."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            target = qmc.qubit("target")
+            source = qmc.qubit("source")
+            for outer in qmc.range(1, 3):
+                predicate = qmc.bit(False)
+                for _inner in qmc.range(outer, outer + 1):
+                    if predicate:
+                        target = qmc.t(target)
+                    predicate = qmc.measure(source)
+            return qmc.measure(target)
+
+        _transpile(kernel)
 
     def test_nested_singleton_outer_index_proves_inner_nonempty(self):
         """A singleton outer range supplies its concrete index to the inner."""
@@ -2342,6 +2460,67 @@ class TestRejectedRebinds:
 
 class TestAllowedPatterns:
     """Legal loop patterns are not rejected and still execute correctly."""
+
+    @pytest.mark.parametrize("value", [0.0, 1.0, 2.0])
+    def test_recursive_compile_time_unary_driver_transpiles(
+        self,
+        value: float,
+    ) -> None:
+        """Unary math remains foldable while recursive calls are unrolled.
+
+        Args:
+            value (float): Concrete recursion depth expressed as a float.
+        """
+        _transpile(_recursive_unary_circuit, bindings={"value": value})
+
+    def test_recursive_unroll_preserves_derived_loop_bit_condition(self) -> None:
+        """A traced constant must not erase a derived loop-backedge read."""
+
+        @qmc.qkernel
+        def kernel(value: qmc.Float) -> qmc.Bit:
+            """Read a carried Bit through a derived condition during recursion.
+
+            Args:
+                value (qmc.Float): Compile-time recursion driver.
+
+            Returns:
+                qmc.Bit: Final target measurement.
+            """
+            predicate = qmc.bit(False)
+            target = qmc.qubit("target")
+            source = qmc.qubit("source")
+            for _index in qmc.range(2):
+                target = _recursive_unary_driver(value, target)
+                derived = ~predicate
+                if derived:
+                    target = qmc.z(target)
+                predicate = qmc.measure(source)
+            return qmc.measure(target)
+
+        with pytest.raises(ValidationError, match=LOOP_CARRIED):
+            _transpile(kernel, bindings={"value": 1.0})
+
+    def test_recursive_unused_predicate_depth_boundary_matches_compiler(self) -> None:
+        """Estimator and compiler share the depth-65 recursion boundary."""
+        supported = {"depth": 65, "iterations": 2}
+        estimate = _recursive_unused_predicate_circuit.estimate_resources(
+            inputs=supported
+        )
+
+        assert estimate.gates.total == 2
+        _transpile(_recursive_unused_predicate_circuit, bindings=supported)
+
+        unsupported = {"depth": 66, "iterations": 2}
+        with pytest.raises(
+            ValueError,
+            match="Recursive resource validation.*supported inline depth",
+        ):
+            _recursive_unused_predicate_circuit.estimate_resources(inputs=unsupported)
+        with pytest.raises(
+            FrontendTransformError,
+            match="Recursive @qkernel did not terminate",
+        ):
+            _transpile(_recursive_unused_predicate_circuit, bindings=unsupported)
 
     def test_loop_invariant_rebind_allowed(self):
         """`last = x + i` re-executes to the correct final value (8)."""

@@ -5,7 +5,7 @@ Verifies that calling a single-qubit gate (``h``, ``x``, ``y``, ``z``,
 `Vector[Qubit]` argument produces the same IR shape and the same backend
 behaviour as a hand-written ``for i in qmc.range(n): qs[i] = gate(qs[i])``
 loop. Cross-backend execution is exercised on every supported SDK
-(Qiskit, QuriParts, CUDA-Q) per ``CLAUDE.md``'s test policy.
+(Qiskit, QuriParts, CUDA-Q) to verify consistent emitted behavior.
 
 Note: Do NOT use ``from __future__ import annotations`` in this file.
 The @qkernel AST transformer relies on resolved type annotations.

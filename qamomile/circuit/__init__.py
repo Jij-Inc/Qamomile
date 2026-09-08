@@ -46,12 +46,17 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .estimator import (
+    ApproximationStatus,
     CallResources,
+    ControlDecomposition,
     DepthResources,
+    EstimateDerivation,
     EstimateQuality,
-    GateBasis,
     GateResources,
-    OpaqueCallContext,
+    MeasurementResources,
+    OpaqueCostContext,
+    ResetResources,
+    ResourceAssumption,
     ResourceEstimate,
     ResourceEstimator,
     UnknownResourcePolicy,
@@ -115,7 +120,7 @@ from .frontend.operation.qubit_gates import (
     z,
 )
 from .frontend.operation.select import select
-from .frontend.oracle import Oracle, opaque
+from .frontend.oracle import Oracle, TransformedOracle, opaque
 from .frontend.qkernel import QKernel, qkernel
 from .frontend.struct import struct
 from .ir.effect import KernelEffect
@@ -158,9 +163,14 @@ from .stdlib import (
 )
 
 # Execution result / job types (return values of ExecutableProgram.sample / run)
+from .transpiler.execution_capability import ExecutionCapabilities
+from .transpiler.execution_handle import ExecutionHandle, ExecutionReference
+from .transpiler.execution_request import Exact, ShotBased, TargetPrecision
 from .transpiler.job import (
     ExpvalJob,
     Job,
+    JobKind,
+    JobSnapshot,
     JobStatus,
     RunJob,
     SampleJob,
@@ -201,14 +211,20 @@ __all__ = [
     "KernelEffect",
     "composite_gate",
     "Oracle",
+    "TransformedOracle",
     "opaque",
     "CallableSignature",
+    "ApproximationStatus",
     "CallResources",
+    "ControlDecomposition",
     "DepthResources",
+    "EstimateDerivation",
     "EstimateQuality",
-    "GateBasis",
     "GateResources",
-    "OpaqueCallContext",
+    "MeasurementResources",
+    "OpaqueCostContext",
+    "ResetResources",
+    "ResourceAssumption",
     "ResourceEstimate",
     "ResourceEstimator",
     "UnknownResourcePolicy",
@@ -310,11 +326,19 @@ __all__ = [
     "QKernel",
     # Job / result types
     "Job",
+    "JobKind",
+    "JobSnapshot",
     "JobStatus",
     "SampleResult",
     "SampleJob",
     "RunJob",
     "ExpvalJob",
+    "ExecutionCapabilities",
+    "ExecutionHandle",
+    "ExecutionReference",
+    "Exact",
+    "ShotBased",
+    "TargetPrecision",
     # Visualization (lazy-loaded)
     "MatplotlibDrawer",
     "CircuitStyle",

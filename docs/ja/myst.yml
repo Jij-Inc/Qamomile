@@ -40,6 +40,8 @@ project:
     - title: リリースノート
       file: release_notes/index.md
       children:
+        - file: release_notes/v0_15_0.md
+        - file: release_notes/v0_14_0.md
         - file: release_notes/v0_13_0.md
         - file: release_notes/v0_12_7.md
         - file: release_notes/v0_12_6.md
@@ -57,6 +59,12 @@ project:
     - title: API Reference
       file: api/index
       children:
+        - file: api/braket/index
+          children:
+            - file: api/braket/execution
+            - file: api/braket/materializer
+            - file: api/braket/observable
+            - file: api/braket/transpiler
         - file: api/circuit/index
           children:
             - file: api/circuit/algorithm
@@ -64,10 +72,9 @@ project:
             - file: api/circuit/frontend
             - file: api/circuit/ir
             - file: api/circuit/multi_controlled_x
-            - file: api/circuit/pauli_lcu_block_encoding
-            - file: api/circuit/periodic_shift_lcu_block_encoding
             - file: api/circuit/qft
             - file: api/circuit/qpe
+            - file: api/circuit/qsvt
             - file: api/circuit/serialization
             - file: api/circuit/stdlib
             - file: api/circuit/transpiler

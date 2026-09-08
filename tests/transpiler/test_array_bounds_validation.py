@@ -13,6 +13,7 @@ from qamomile.circuit.ir.operation.control_flow import (
     IfOperation,
     RegionArg,
 )
+from qamomile.circuit.ir.operation.gate import ConcreteControlledU
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.operation.slice_array import SliceArrayOperation
 from qamomile.circuit.ir.types.primitives import (
@@ -613,6 +614,64 @@ def test_owned_block_output_is_specialized_before_validation() -> None:
     block = Block(operations=[select], kind=BlockKind.AFFINE)
 
     with pytest.raises(ValidationError, match="Index 0.*actual_values"):
+        ArrayBoundsValidationPass().run(block)
+
+
+def test_scalar_quantum_broadcast_rejects_rank_two_empty_target() -> None:
+    """Rank validation precedes emptiness because addressing is one-dimensional."""
+    formal = Value(type=QubitType(), name="formal_target")
+    body = Block(
+        input_values=[formal],
+        output_values=[formal],
+        kind=BlockKind.AFFINE,
+    )
+    control = Value(type=QubitType(), name="control")
+    actual = ArrayValue(
+        type=QubitType(),
+        name="matrix_target",
+        shape=(_uint("rows", 3), _uint("columns", 0)),
+    )
+    controlled = ConcreteControlledU(
+        operands=[control, actual],
+        results=[control.next_version(), actual.next_version()],
+        num_controls=1,
+        block=body,
+    )
+    block = Block(operations=[controlled], kind=BlockKind.AFFINE)
+
+    with pytest.raises(
+        ValidationError,
+        match="rank-2 target array 'matrix_target'",
+    ):
+        ArrayBoundsValidationPass().run(block)
+
+
+def test_scalar_quantum_broadcast_rejects_reachable_rank_two_target() -> None:
+    """A nonempty higher-rank target still rejects scalar broadcasting."""
+    formal = Value(type=QubitType(), name="formal_target")
+    body = Block(
+        input_values=[formal],
+        output_values=[formal],
+        kind=BlockKind.AFFINE,
+    )
+    control = Value(type=QubitType(), name="control")
+    actual = ArrayValue(
+        type=QubitType(),
+        name="matrix_target",
+        shape=(_uint("rows", 3), _uint("columns", 1)),
+    )
+    controlled = ConcreteControlledU(
+        operands=[control, actual],
+        results=[control.next_version(), actual.next_version()],
+        num_controls=1,
+        block=body,
+    )
+    block = Block(operations=[controlled], kind=BlockKind.AFFINE)
+
+    with pytest.raises(
+        ValidationError,
+        match="rank-2 target array 'matrix_target'",
+    ):
         ArrayBoundsValidationPass().run(block)
 
 

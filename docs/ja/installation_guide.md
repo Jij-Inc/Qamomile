@@ -51,6 +51,19 @@ from qamomile.quri_parts import QuriPartsTranspiler, QuriPartsExecutor
 
 :::
 
+:::{tab-item} Amazon Braket
+:sync: braket
+
+```bash
+pip install "qamomile[braket]"
+```
+
+```python
+from qamomile.braket import BraketExecutor, BraketTranspiler
+```
+
+:::
+
 :::{tab-item} qBraid
 :sync: qbraid
 

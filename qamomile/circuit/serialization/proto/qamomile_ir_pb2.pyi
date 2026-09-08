@@ -586,7 +586,7 @@ class CallableEntry(_message.Message):
     def __init__(self, id: _Optional[str] = ..., definition: _Optional[_Union[CallableDefinition, _Mapping]] = ...) -> None: ...
 
 class CallableDefinition(_message.Message):
-    __slots__ = ("ref", "signature", "body", "body_ref", "implementations", "default_policy", "attrs")
+    __slots__ = ("ref", "signature", "body", "body_ref", "implementations", "default_policy", "attrs", "opaque_cost")
     REF_FIELD_NUMBER: _ClassVar[int]
     SIGNATURE_FIELD_NUMBER: _ClassVar[int]
     BODY_FIELD_NUMBER: _ClassVar[int]
@@ -594,6 +594,7 @@ class CallableDefinition(_message.Message):
     IMPLEMENTATIONS_FIELD_NUMBER: _ClassVar[int]
     DEFAULT_POLICY_FIELD_NUMBER: _ClassVar[int]
     ATTRS_FIELD_NUMBER: _ClassVar[int]
+    OPAQUE_COST_FIELD_NUMBER: _ClassVar[int]
     ref: CallableRef
     signature: Signature
     body: Block
@@ -601,7 +602,8 @@ class CallableDefinition(_message.Message):
     implementations: _containers.RepeatedCompositeFieldContainer[CallableImplementation]
     default_policy: str
     attrs: Payload
-    def __init__(self, ref: _Optional[_Union[CallableRef, _Mapping]] = ..., signature: _Optional[_Union[Signature, _Mapping]] = ..., body: _Optional[_Union[Block, _Mapping]] = ..., body_ref: _Optional[_Union[CallableBodyRef, _Mapping]] = ..., implementations: _Optional[_Iterable[_Union[CallableImplementation, _Mapping]]] = ..., default_policy: _Optional[str] = ..., attrs: _Optional[_Union[Payload, _Mapping]] = ...) -> None: ...
+    opaque_cost: Payload
+    def __init__(self, ref: _Optional[_Union[CallableRef, _Mapping]] = ..., signature: _Optional[_Union[Signature, _Mapping]] = ..., body: _Optional[_Union[Block, _Mapping]] = ..., body_ref: _Optional[_Union[CallableBodyRef, _Mapping]] = ..., implementations: _Optional[_Iterable[_Union[CallableImplementation, _Mapping]]] = ..., default_policy: _Optional[str] = ..., attrs: _Optional[_Union[Payload, _Mapping]] = ..., opaque_cost: _Optional[_Union[Payload, _Mapping]] = ...) -> None: ...
 
 class CallableRef(_message.Message):
     __slots__ = ("namespace", "name", "version")

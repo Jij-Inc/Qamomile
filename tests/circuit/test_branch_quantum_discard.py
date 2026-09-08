@@ -27,7 +27,7 @@ Covered here: the LIMITATIONS.md motivating example (adapted to entrypoint
 constraints — qubits are allocated in-kernel and the condition is
 measurement-backed), the symmetric else-branch case, fresh lineage through
 gates, rebinds to external values (one branch, both branches, and gated —
-the review counterexamples), expression-derived runtime conditions
+including gated counterexamples), expression-derived runtime conditions
 (``~bit``, ``a & b``), whole-register ``Vector[Qubit]`` rebinds, compile-time
 conditions (dead and taken branches stay legal, including nested inside
 runtime branches), the consume-then-reallocate pattern, loop-body discards
@@ -52,7 +52,7 @@ from qamomile.circuit.transpiler.errors import (
     QubitRebindError,
 )
 from qamomile.circuit.transpiler.passes.analyze import (
-    _static_loop_trip_count,
+    _static_loop_min_trip_count,
     reject_control_flow_quantum_discard,
 )
 from qamomile.circuit.transpiler.segments import MultipleQuantumSegmentsError
@@ -288,8 +288,7 @@ class TestRejectedDiscards:
             _transpile(kernel, bindings={"dummy": 0})
 
     def test_gated_external_rebind_in_both_branches_rejected(self):
-        """The review counterexample: both branches gate and swap in the
-        same external register.
+        """Reject both branches gating and swapping in one external register.
 
         ``q``'s pre-branch |1> state is unconditionally dropped while both
         merge sides carry the external register's lineage; before the
@@ -1113,8 +1112,8 @@ def _for_op_from(kernel, bindings=None):
     return find(operations)
 
 
-class TestStaticLoopTripCount:
-    """`_static_loop_trip_count` resolves any non-bool Integral bound."""
+class TestStaticLoopMinTripCount:
+    """The minimum trip-count proof resolves non-bool Integral bounds."""
 
     @pytest.mark.parametrize("stop", [0, 5])
     def test_numpy_bound_resolves_like_python_int(self, stop):
@@ -1130,8 +1129,12 @@ class TestStaticLoopTripCount:
             return qmc.measure(q)
 
         for_op = _for_op_from(kernel)
-        py_count = _static_loop_trip_count(for_op, {}, {"n": stop})
-        np_count = _static_loop_trip_count(for_op, {}, {"n": np.int64(stop)})
+        py_count = _static_loop_min_trip_count(for_op, {}, {"n": stop})
+        np_count = _static_loop_min_trip_count(
+            for_op,
+            {},
+            {"n": np.int64(stop)},
+        )
         assert py_count == stop
         assert np_count == py_count
 
@@ -1147,7 +1150,7 @@ class TestStaticLoopTripCount:
             return qmc.measure(q)
 
         for_op = _for_op_from(kernel)
-        assert _static_loop_trip_count(for_op, {}, {"n": True}) is None
+        assert _static_loop_min_trip_count(for_op, {}, {"n": True}) is None
 
 
 class TestRejectedLoopDiscards:
@@ -1162,7 +1165,7 @@ class TestRejectedLoopDiscards:
     """
 
     def test_for_fresh_rebind_rejected(self):
-        """The review repro: a for body rebinding to a fresh allocation.
+        """Reject a for body that rebinds to a fresh allocation.
 
         Before the loop-side check, this transpiled and sampled 0 — the
         X-prepared state was silently dropped and the fresh register
@@ -1185,8 +1188,7 @@ class TestRejectedLoopDiscards:
         assert LOOP_DISCARD in str(excinfo.value)
 
     def test_while_fresh_rebind_rejected(self):
-        """The review repro's while variant: a measurement-conditioned while
-        body rebinding to a fresh allocation is rejected."""
+        """Reject a measurement-conditioned while rebind to a fresh allocation."""
 
         @qmc.qkernel
         def kernel(dummy: qmc.UInt) -> qmc.Bit:
@@ -1254,8 +1256,7 @@ class TestRejectedLoopDiscards:
         element range of the same base array keeps the base reachable
         (carried lineage), but the post-loop read binds to the new
         element range on every path, while the always-live zero-trip
-        path must observe the pre-loop range (Codex-audit counterexample
-        class)."""
+        path must observe the pre-loop range."""
 
         @qmc.qkernel
         def kernel(dummy: qmc.UInt) -> qmc.Vector[qmc.Bit]:
@@ -1469,8 +1470,8 @@ class TestRejectedLoopDiscards:
         the unroll re-instantiates the body without carrying the rebound
         register between iterations, so iteration 2+ re-measures the
         traced pre-loop register instead of the previous iteration's
-        fresh one — review measured this kernel sampling 1 for every n
-        where Python semantics give 0 from n=2 on. In-body consumption
+        fresh one, making the kernel sample 1 for every n where Python
+        semantics give 0 from n=2 on. In-body consumption
         is deliberately not an exemption for unrolled loops."""
 
         @qmc.qkernel
@@ -1838,7 +1839,7 @@ class TestAllowedLoopPatterns:
         should_trace_items_loop guard, mirroring the qmc.range zero-trip
         guard), so a body rebind creates no record, post-loop code keeps
         the pre-loop handles, and the prepared state is measured — the
-        Python zero-pass contract for empty dicts (review repro)."""
+        Python zero-pass contract for empty dicts."""
 
         @qmc.qkernel
         def kernel(angles: qmc.Dict[qmc.UInt, qmc.Float]) -> qmc.Bit:
