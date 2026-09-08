@@ -43,8 +43,8 @@ def _resolve_width(q_input: qmc.Vector[qmc.Qubit]) -> int | None:
     return None
 
 
-def apply_diffusion(q_input: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-    """Apply the reflection about |0...0> to ``q_input`` in place.
+def _apply_diffusion(q_input: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
+    """Apply the reflection about |0...0> to ``q_input``.
 
     Deliberately a plain Python function rather than inline kernel-body code:
     the DSL transformer rewrites an ``if`` inside a qkernel body into an
@@ -357,7 +357,7 @@ def diffusion_op(
         qmc.Vector[qmc.Qubit]: Updated input register.
 
     """
-    return apply_diffusion(q_input)
+    return _apply_diffusion(q_input)
 
 
 @qmc.qkernel
