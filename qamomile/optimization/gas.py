@@ -15,7 +15,7 @@ import numpy as np
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.gas import (
-    apply_diffusion,
+    diffusion_op,
     grover_algorithm,
     qft_encoding,
     zero_degree_qft_encoding,
@@ -499,6 +499,7 @@ class GASConverter(MathematicalProblemConverter):
                 "around in two's complement and inverts the sign bit the "
                 "oracle tests, so the wrong states get marked."
             )
+        # Otherwise the caller's width already fits; use it as given.
 
         if not self.effective_model.higher:
             return self._transpile_quadratic(
@@ -934,27 +935,6 @@ class GASConverter(MathematicalProblemConverter):
             self._make_apply_function_preparation_hubo_dagger(output_bits=output_bits)
         )
 
-        # Local diffusion that writes the slice back after controlled_Z so the
-        # slice borrow is released before the next prep call (which accesses
-        # q_input with concrete indices and would collide with a live borrow).
-        @qmc.qkernel
-        def hubo_diffusion_op(
-            q_input: qmc.Vector[qmc.Qubit],
-        ) -> qmc.Vector[qmc.Qubit]:
-            """Apply the diffusion step for the HUBO Grover operator.
-
-            A single-qubit register uses a bare Z: the X^n C^{n-1}Z X^n
-            identity would otherwise need a controlled gate with no controls.
-
-            Args:
-                q_input (qmc.Vector[qmc.Qubit]): Input register to reflect around the uniform superposition.
-
-            Returns:
-                qmc.Vector[qmc.Qubit]: Updated input register.
-
-            """
-            return apply_diffusion(q_input)
-
         @qmc.qkernel
         def hubo_grover_operator(
             q_output: qmc.Vector[qmc.Qubit],
@@ -984,8 +964,11 @@ class GASConverter(MathematicalProblemConverter):
                 q_output, q_input, y
             )
 
-            # Diffusion
-            q_input = hubo_diffusion_op(q_input)
+            # Diffusion. The shared kernel already writes the slice back
+            # after the controlled-Z, so the borrow is released before the next
+            # prep call (which indexes q_input with concrete indices and would
+            # otherwise collide with a live borrow).
+            q_input = diffusion_op(q_input)
 
             # A_y
             q_output, q_input = apply_function_preparation_hubo(q_output, q_input, y)

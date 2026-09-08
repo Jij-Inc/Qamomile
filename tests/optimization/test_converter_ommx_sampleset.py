@@ -9,6 +9,8 @@ supporting ``binary_sampleset_to_ommx_samples`` module helper.
 
 from __future__ import annotations
 
+import itertools
+
 import numpy as np
 import ommx.v1
 import pytest
@@ -633,6 +635,33 @@ def test_hubo_ommx_instance_builds_spin_model_with_higher_terms():
         f"x0*x1*x2 cubic spin coefficient must be -1/8, "
         f"got {converter.spin_model.higher[cubic_spin_keys[0]]}"
     )
+
+
+def test_hubo_ommx_instance_exposes_matching_binary_model():
+    """Converters expose the normalized BINARY model alongside the SPIN one.
+
+    ``normalize_problem_input`` builds the BINARY model on the way to the SPIN
+    one, so every converter can read it without paying for a BINARY-SPIN-BINARY
+    round trip. The two must describe the same objective: same variable count,
+    and equal energies under the x = (1 - s) / 2 correspondence.
+    """
+    instance = _build_hubo_ommx_instance()
+    converter = QAOAConverter(instance)
+
+    assert converter.binary_model.vartype is VarType.BINARY
+    assert converter.spin_model.vartype is VarType.SPIN
+    assert converter.binary_model.num_bits == converter.spin_model.num_bits
+    # The cubic term survives in the BINARY domain with its original coefficient.
+    cubic_keys = [k for k in converter.binary_model.higher if len(k) == 3]
+    assert len(cubic_keys) == 1
+    assert set(cubic_keys[0]) == {0, 1, 2}
+    assert converter.binary_model.higher[cubic_keys[0]] == pytest.approx(1.0)
+
+    for bits in itertools.product([0, 1], repeat=converter.binary_model.num_bits):
+        spins = [1 - 2 * b for b in bits]
+        assert converter.binary_model.calc_energy(list(bits)) == pytest.approx(
+            converter.spin_model.calc_energy(spins)
+        )
 
 
 def test_hubo_ommx_instance_rejected_by_qrac_with_clear_error():
