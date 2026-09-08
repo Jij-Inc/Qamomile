@@ -822,7 +822,7 @@ def test_hubo_prep_dagger_restores_state(make_transpiler):
     @qmc.qkernel
     def wrap_prep_then_dagger(
         n: qmc.UInt, m: qmc.UInt, y: qmc.Float
-    ) -> qmc.Tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
+    ) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
         """Apply forward preparation then its dagger and measure both registers.
 
         Args:
@@ -831,7 +831,7 @@ def test_hubo_prep_dagger_restores_state(make_transpiler):
             y (qmc.Float): Threshold offset handed to both kernels.
 
         Returns:
-            qmc.Tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]: Measurement
+            tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]: Measurement
                 outcomes of the output and input registers.
         """
         q_output = qmc.qubit_array(m, name="q_output")

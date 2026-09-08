@@ -167,7 +167,7 @@ def _wrap_apply_then_dagger(
     y: qmc.Float,
     linear: qmc.Dict[qmc.UInt, qmc.Float],
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-) -> qmc.Tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
+) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
     """Apply preparation then its dagger and measure both registers.
 
     Args:
@@ -179,7 +179,7 @@ def _wrap_apply_then_dagger(
             QUBO coefficients indexed by variable pairs.
 
     Returns:
-        qmc.Tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]: Measurement
+        tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]: Measurement
             outcomes of the output and input registers.
     """
     q_output = qmc.qubit_array(m, name="q_output")
