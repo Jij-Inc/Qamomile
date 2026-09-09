@@ -1,14 +1,15 @@
-# -*- coding: utf-8 -*-
 # ---
 # jupyter:
 #   jupytext:
-#     cell_metadata_filter: -all
-#     custom_cell_magics: kql
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.11.2
+#       jupytext_version: 1.19.1
+#   kernelspec:
+#     display_name: Python 3
+#     language: python
+#     name: python3
 # ---
 
 # %% [markdown]
@@ -20,7 +21,14 @@
 #
 # Grover適応探索（GAS）は、二値変数上の多項式目的関数を最小化する手法です。Groverオラクルに「どの $x$ が $f(x) < y$ を満たすか」という1つの問いを繰り返し投げ、より良い解が見つかるたびに閾値 $y$ を下げていきます {cite:p}`10.22331/q-2021-04-08-428`。
 #
-# このページでは、Qamomileの`GASConverter`を使って制約なしの**ポートフォリオ選択**問題を解きます。[JijModeling](https://jij-inc-jijmodeling-tutorials-en.readthedocs-hosted.com/en/latest/introduction.html)で問題を定式化し、現在の閾値に対応するGrover回路を構築し、改善が止まるまで最良の候補を保持する古典ループの中でサンプリングします。
+# このページでは、Qamomileの`GASConverter`を使って制約なしの**ポートフォリオ選択**問題を解きます。
+#
+# このチュートリアルは次の構成で進めます。
+#
+# 1. [JijModeling](https://jij-inc-jijmodeling-tutorials-en.readthedocs-hosted.com/en/latest/introduction.html)で問題を定式化します。
+# 2. 具体的なデータからインスタンスを作成します。
+# 3. `GASConverter`で現在の閾値に対応するGrover回路を構築します。
+# 4. サンプリングして最良の候補を保持し、停止条件を満たすまで繰り返します。GASは単一の回路ではなくハイブリッドなループです。
 
 # %%
 # 最新のQamomileをpipでインストールしましょう！
@@ -142,8 +150,8 @@ assert np.isclose(empty_portfolio, 0.0, atol=1e-9, rtol=0.0)
 #
 # ここでの $y$ は候補解ではなく、目的関数値に対する閾値です。GASは $f(x) < y$ を満たすすべての入力を標識します。Groverアンザッツは次の3つの要素から構成されます。
 #
-# - $A_y$：$\sum_x \ket{x, f(x) - y}$ を準備する演算子で、{cite:p}`10.22331/q-2021-04-08-428` のQFTによる構成に従って実装しています。レジスタは $f(x) - y$ を2の補数で保持するため、標識すべき入力は最上位ビット（MSB）が $1$ になるものとして識別できます。
-# - $O_y$：そのMSBに作用する1つの $Z$ ゲートです。
+# - $A_y$：準備演算子です。量子辞書の状態 $\sum_x \ket{x, f(x) - y}$ を構築することで、各入力に $f(x) - y$ を対応付けます。この状態は {cite:p}`10.22331/q-2021-04-08-428` のQFTによる構成に従って実装しています。レジスタは $f(x) - y$ を2の補数で保持するため、標識すべき入力は最上位ビット（MSB）が $1$ になるものとして識別できます。
+# - $O_y$：標識演算子です。符号化された値が負である候補の位相を反転させるもので、そのMSBに作用する1つの $Z$ ゲートで構成されます。
 # - $D$：拡散演算子で、標識された状態の振幅を増幅します。$X$ 層に挟まれた1つの多重制御 $Z$ ゲートで構成されます。
 #
 # 1回の反復では $O_y$ を適用し、続いて $A_y^\dagger$、$D$、$A_y$ を適用します。位相反転だけでは測定確率は変わりません。それを振幅へ変換するのが反射 $A_y D A_y^\dagger$ です。入力レジスタを測定すると改善した候補が得られ、古典レイヤーが $y$ をその目的関数値まで下げます。
