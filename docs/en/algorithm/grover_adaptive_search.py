@@ -24,7 +24,10 @@
 # solution turns up {cite:p}`10.22331/q-2021-04-08-428`.
 #
 # This page solves an unconstrained **portfolio selection** problem with
-# Qamomile's `GASConverter`.
+# Qamomile's `GASConverter`: model it with
+# [JijModeling](https://jij-inc-jijmodeling-tutorials-en.readthedocs-hosted.com/en/latest/introduction.html), build the Grover circuit
+# for the current threshold, and sample it inside a classical loop that keeps the
+# best candidate until it stops improving.
 
 # %%
 # Install the latest Qamomile through pip!
@@ -52,14 +55,14 @@ from qamomile.qiskit import QiskitTranspiler
 # %% [markdown]
 # ## Background
 #
-# GAS is a hybrid loop, not a single circuit. The quantum half answers one
-# fixed question at a time, and a classical layer drives the threshold down:
+# Grover search takes an oracle that marks target states and uses amplitude
+# amplification to raise their measurement probability. That solves a decision
+# problem: a fixed predicate says which states qualify, not which one is best.
 #
-# 1. Formulate the problem with [JijModeling](https://jij-inc-jijmodeling-tutorials-en.readthedocs-hosted.com/en/latest/introduction.html).
-# 2. Create an instance with concrete data.
-# 3. Use `GASConverter` to build the Grover circuit for the current threshold.
-# 4. Sample it, keep the best candidate, and repeat until a stopping criterion
-#    is reached.
+# GAS turns it into minimization by making the predicate movable. It marks the
+# states with $f(x) < y$, samples an improving candidate, lowers $y$ to that
+# candidate's objective value, and repeats. The quantum circuit answers one
+# fixed question at a time; the classical layer drives $y$ down.
 
 # %% [markdown]
 # ## Problem Settings
@@ -152,16 +155,23 @@ assert np.isclose(empty_portfolio, 0.0, atol=1e-9, rtol=0.0)
 # %% [markdown]
 # ## Algorithm
 #
-# Given a reference solution $y$, GAS marks every input whose objective value
-# is lower, i.e. $f(x) < y$. The Grover ansatz is built from three components:
+# Here $y$ is a threshold on the objective value, not a candidate solution: GAS
+# marks every input with $f(x) < y$. The Grover ansatz is built from three
+# components:
 #
 # - $A_y$, the preparation operator producing $\sum_x \ket{x, f(x) - y}$, built
-#   from QFT phase encoding. Because the register holds $f(x) - y$ in two's
-#   complement, the marked inputs are exactly those whose Most Significant Bit
-#   (MSB) is $1$.
+#   from QFT phase encoding following {cite:p}`10.22331/q-2021-04-08-428`.
+#   Because the register holds $f(x) - y$ in two's complement, the marked inputs
+#   are exactly those whose Most Significant Bit (MSB) is $1$.
 # - $O_y$, the marker: a single $Z$ on that MSB.
 # - $D$, the diffusion operator, which amplifies the amplitude of the marked
 #   states. It is a single multi-controlled-$Z$ sandwiched between $X$ layers.
+#
+# One iteration applies $O_y$, then $A_y^\dagger$, $D$, $A_y$. The phase flip on
+# its own leaves every measurement probability unchanged; the reflection
+# $A_y D A_y^\dagger$ is what converts it into amplitude. Measuring the input
+# register then returns an improving candidate, and the classical layer lowers
+# $y$ to its objective value.
 #
 # The remaining question is how many times to apply the Grover operator. GAS
 # answers it by sampling the iteration count from a range that grows slowly
