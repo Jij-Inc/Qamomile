@@ -12,6 +12,7 @@ from qamomile.circuit.algorithm.gas import (
     first_degree_qft_encoding,
     function_preparation_qubo,
     grover_algorithm,
+    grover_operator,
     qft_encoding,
     second_degree_qft_encoding,
     zero_degree_qft_encoding,
@@ -432,6 +433,118 @@ def test_qft_encoding_expval_matches_analytic_phase(make_transpiler, coef, expec
     result = exe.run(tr.executor()).result()
 
     np.testing.assert_allclose(result, expected_x, atol=1e-6, rtol=0.0)
+
+
+@qmc.qkernel
+def _wrap_preparation_sign_bit_expval(
+    n: qmc.UInt,
+    m: qmc.UInt,
+    y: qmc.Float,
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    H: qmc.Observable,
+) -> qmc.Float:
+    """Prepare the quantum dictionary and estimate ``H`` on the output register.
+
+    Args:
+        n (qmc.UInt): Number of input (decision-variable) qubits.
+        m (qmc.UInt): Number of output (objective-value) qubits.
+        y (qmc.Float): Objective threshold offset encoded as a constant term.
+        linear (qmc.Dict[qmc.UInt, qmc.Float]): Linear QUBO coefficients.
+        quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): Quadratic
+            QUBO coefficients indexed by variable pairs.
+        H (qmc.Observable): Observable to estimate on the output register.
+
+    Returns:
+        qmc.Float: The expectation value <H> on the output register.
+    """
+    q_output, q_input = function_preparation_qubo(n, m, y, linear, quad)
+    _ = q_input
+    return qmc.expval(q_output, H)
+
+
+@qmc.qkernel
+def _wrap_one_grover_iteration_sign_bit_expval(
+    n: qmc.UInt,
+    m: qmc.UInt,
+    y: qmc.Float,
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    H: qmc.Observable,
+) -> qmc.Float:
+    """Apply one Grover iteration and estimate ``H`` on the output register.
+
+    Composes ``grover_operator`` once explicitly rather than going through
+    ``grover_algorithm``: the latter wraps the iteration in a ``qmc.range``
+    loop, and the Qiskit estimator's statevector path cannot execute a circuit
+    that still carries a ``for_loop`` instruction. The unrolled form emits the
+    same operator sequence, and mirrors the concrete-count branch of
+    ``qamomile.circuit.stdlib.grover.grover_search``.
+
+    Args:
+        n (qmc.UInt): Number of input (decision-variable) qubits.
+        m (qmc.UInt): Number of output (objective-value) qubits.
+        y (qmc.Float): Objective threshold offset encoded as a constant term.
+        linear (qmc.Dict[qmc.UInt, qmc.Float]): Linear QUBO coefficients.
+        quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): Quadratic
+            QUBO coefficients indexed by variable pairs.
+        H (qmc.Observable): Observable to estimate on the output register.
+
+    Returns:
+        qmc.Float: The expectation value <H> on the output register.
+    """
+    q_output, q_input = function_preparation_qubo(n, m, y, linear, quad)
+    q_output, q_input = grover_operator(q_output, q_input, y, linear, quad)
+    _ = q_input
+    return qmc.expval(q_output, H)
+
+
+@pytest.mark.parametrize("make_transpiler", _BACKENDS)
+@pytest.mark.parametrize(
+    "kernel,expected_z",
+    [
+        (_wrap_preparation_sign_bit_expval, 0.5),
+        (_wrap_one_grover_iteration_sign_bit_expval, -1.0),
+    ],
+    ids=["before-grover", "after-one-iteration"],
+)
+def test_grover_sign_bit_expval_matches_analytic_value(
+    make_transpiler, kernel, expected_z
+):
+    """<Z> on the oracle's sign bit matches the analytic value for a known QUBO.
+
+    Model: f(x0,x1) = 2 - x0 - x1 - x0*x1, threshold y = 0, so the kernel offset
+    is constant - y = 2. The objective takes the values
+
+        f(0,0) = 2,  f(1,0) = 1,  f(0,1) = 1,  f(1,1) = -1,
+
+    and a three-qubit output register holds each of them in two's complement
+    (2 -> 010, 1 -> 001, -1 -> 111). The oracle reads the sign bit q_output[2].
+
+    Before any Grover iteration the preparation operator leaves the four inputs
+    in uniform superposition, so the sign bit is 1 for exactly one of them and
+    <Z> = 3/4 - 1/4 = 1/2. With one marked state out of four the Grover angle is
+    arcsin(1/2), so a single iteration reaches sin^2(3 * arcsin(1/2)) = 1
+    exactly: the sign bit is then 1 with certainty and <Z> = -1.
+
+    This exercises the estimator path on a full Grover state rather than on
+    standalone phase encoding, on every supported backend.
+    """
+    tr = make_transpiler()
+    output_bits = 3
+    bindings = {
+        "n": 2,
+        "m": output_bits,
+        # Internal circuit threshold: model constant (2) minus the caller's y (0).
+        "y": 2.0,
+        "linear": {0: -1.0, 1: -1.0},
+        "quad": {(0, 1): -1.0},
+        "H": qm_o.Z(output_bits - 1),
+    }
+    exe = tr.transpile(kernel, bindings=bindings)
+    result = exe.run(tr.executor()).result()
+
+    np.testing.assert_allclose(result, expected_z, atol=1e-6, rtol=0.0)
 
 
 # ---------------------------------------------------------------------------
