@@ -1,14 +1,15 @@
-# -*- coding: utf-8 -*-
 # ---
 # jupyter:
 #   jupytext:
-#     cell_metadata_filter: -all
-#     custom_cell_magics: kql
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.11.2
+#       jupytext_version: 1.19.1
+#   kernelspec:
+#     display_name: Python 3
+#     language: python
+#     name: python3
 # ---
 
 # %% [markdown]
@@ -24,10 +25,15 @@
 # solution turns up {cite:p}`10.22331/q-2021-04-08-428`.
 #
 # This page solves an unconstrained **portfolio selection** problem with
-# Qamomile's `GASConverter`: model it with
-# [JijModeling](https://jij-inc-jijmodeling-tutorials-en.readthedocs-hosted.com/en/latest/introduction.html), build the Grover circuit
-# for the current threshold, and sample it inside a classical loop that keeps the
-# best candidate until it stops improving.
+# Qamomile's `GASConverter`.
+#
+# The tutorial is built on the following structure:
+#
+# 1. Formulate the problem with [JijModeling](https://jij-inc-jijmodeling-tutorials-en.readthedocs-hosted.com/en/latest/introduction.html).
+# 2. Create an instance with concrete data.
+# 3. Use `GASConverter` to build the Grover circuit for the current threshold.
+# 4. Sample it, keep the best candidate, and repeat until a stopping criterion
+#    is reached. GAS is a hybrid loop, not a single circuit.
 
 # %%
 # Install the latest Qamomile through pip!
@@ -159,11 +165,14 @@ assert np.isclose(empty_portfolio, 0.0, atol=1e-9, rtol=0.0)
 # marks every input with $f(x) < y$. The Grover ansatz is built from three
 # components:
 #
-# - $A_y$, the preparation operator producing $\sum_x \ket{x, f(x) - y}$, built
-#   from QFT phase encoding following {cite:p}`10.22331/q-2021-04-08-428`.
-#   Because the register holds $f(x) - y$ in two's complement, the marked inputs
-#   are exactly those whose Most Significant Bit (MSB) is $1$.
-# - $O_y$, the marker: a single $Z$ on that MSB.
+# - $A_y$, the preparation operator. It associates each input with $f(x) - y$
+#   by building the quantum dictionary state $\sum_x \ket{x, f(x) - y}$. That
+#   state is built from QFT phase encoding following
+#   {cite:p}`10.22331/q-2021-04-08-428`. Because the register holds $f(x) - y$
+#   in two's complement, the marked inputs are exactly those whose Most
+#   Significant Bit (MSB) is $1$.
+# - $O_y$, the marker operator. It reverses the phase of candidates with
+#   negative encoded values, using a single $Z$ on that MSB.
 # - $D$, the diffusion operator, which amplifies the amplitude of the marked
 #   states. It is a single multi-controlled-$Z$ sandwiched between $X$ layers.
 #
