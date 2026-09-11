@@ -35,6 +35,17 @@ from qamomile.circuit.ir.types import ObservableType, QFixedType
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType
 from qamomile.circuit.ir.value import Value
 
+# A module-level global deliberately sharing the name of a kernel-local used in
+# ``TestIfModuleGlobalShadowing``. Its presence in the kernel's ``__globals__``
+# used to make the transform treat the same-named local as a global and silently
+# drop assignments to it inside ``if`` branches.
+_shadowed_count = 123
+
+# A second module-level global shadowed by a kernel-local that is *captured by a
+# nested function*, making it a cell variable (``co_cellvars``) rather than a
+# plain local (``co_varnames``) in ``TestIfModuleGlobalShadowing``.
+_cell_shadowed_count = 999
+
 
 def _collect_emit_if_bindings(source: str) -> list[tuple[list[str], list[str]]]:
     """Return transformed emit_if assignment targets and input variable names."""
@@ -1972,3 +1983,108 @@ class TestBoolBindingWithDynamicIf:
             "Expected m0/m1 to vary across shots; the dynamic IfOperations "
             "may not be executing."
         )
+
+
+class TestIfModuleGlobalShadowing:
+    """A function-local shadowing a module global must thread through ``if``."""
+
+    def test_module_global_shadowing_local_threads_through_if(self):
+        """A local assigned in an ``if`` branch survives when a global shadows it.
+
+        ``_shadowed_count`` exists at module scope, so before the fix the
+        transform excluded the same-named kernel-local from the branch dataflow
+        and discarded ``_shadowed_count = 1.0``, leaving the returned value at
+        the pre-branch ``0.0``.
+        """
+
+        @qkernel
+        def circuit(flag: qm.UInt) -> Float:
+            _shadowed_count = 0.0
+            if flag == 1:
+                _shadowed_count = 1.0
+            return _shadowed_count
+
+        block = circuit.build(flag=1)
+        if_ops = [op for op in block.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+
+        # The shadowed local is threaded: it is a block output and the branch
+        # produces a merge result for it.
+        assert block.output_names == ["_shadowed_count"]
+        assert len(block.output_values) == 1
+        assert len(if_ops[0].results) >= 1
+
+        # The true branch yields 1.0 and the pre-branch 0.0 flows through the
+        # false side, i.e. the assignment is no longer discarded.
+        true_consts = [
+            v.metadata.scalar.const_value
+            for v in if_ops[0].true_yields
+            if v.metadata and v.metadata.scalar
+        ]
+        false_consts = [
+            v.metadata.scalar.const_value
+            for v in if_ops[0].false_yields
+            if v.metadata and v.metadata.scalar
+        ]
+        assert 1.0 in true_consts
+        assert 0.0 in false_consts
+
+    def test_cell_variable_shadowing_global_threads_through_if(self):
+        """A cell-variable local (captured by a nested def) also threads through.
+
+        ``_cell_shadowed_count`` is assigned in the kernel and captured by a
+        nested function, so it is a cell variable (``co_cellvars``) rather than
+        a plain local (``co_varnames``). The fix subtracts both sets from the
+        globals, so this shadowed local is threaded through the ``if`` too.
+        """
+
+        @qkernel
+        def circuit(flag: qm.UInt) -> Float:
+            _cell_shadowed_count = 0.0
+
+            def _capture() -> Float:
+                # Referencing the local here makes it a cell variable.
+                return _cell_shadowed_count
+
+            if flag == 1:
+                _cell_shadowed_count = 1.0
+            return _cell_shadowed_count
+
+        block = circuit.build(flag=1)
+        if_ops = [op for op in block.operations if isinstance(op, IfOperation)]
+        assert len(if_ops) == 1
+        assert block.output_names == ["_cell_shadowed_count"]
+        assert len(block.output_values) == 1
+        assert len(if_ops[0].results) >= 1
+
+    def test_shadowed_local_resolves_to_branch_value_after_lowering(self):
+        """End-to-end: the compile-time ``if`` resolves to the branch value.
+
+        With ``flag`` bound at compile time the ``if`` folds to a single value;
+        the fix ensures that value is the branch assignment (``1.0``) rather than
+        the pre-branch default (``0.0``).
+        """
+        qiskit = pytest.importorskip("qamomile.qiskit")
+
+        @qkernel
+        def circuit(flag: qm.UInt) -> Float:
+            _shadowed_count = 0.0
+            if flag == 1:
+                _shadowed_count = 1.0
+            return _shadowed_count
+
+        transpiler = qiskit.QiskitTranspiler()
+        for flag_value, expected in ((1, 1.0), (0, 0.0)):
+            bindings = {"flag": flag_value}
+            block = transpiler.to_block(circuit, bindings=bindings)
+            block = transpiler.inline(transpiler.substitute(block))
+            block = transpiler.affine_validate(block)
+            block = transpiler.constant_fold(block, bindings=bindings)
+            block = transpiler.lower_compile_time_ifs(block, bindings=bindings)
+            block = transpiler.constant_fold(block, bindings=bindings)
+            outputs = [
+                v.metadata.scalar.const_value
+                for v in block.output_values
+                if v.metadata and v.metadata.scalar
+            ]
+            assert outputs == [expected]
