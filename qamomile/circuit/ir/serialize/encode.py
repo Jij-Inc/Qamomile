@@ -5,7 +5,7 @@ Walks a :class:`Block` and produces the internal graph records consumed by
 definitions are deduplicated into module-wide tables and referenced elsewhere
 by stable IDs. Keeping those registries outside individual blocks preserves
 recursive call graphs and shared callable identity without expanding the
-high-level IR into backend-specific instructions.
+high-level IR into engine-specific instructions.
 
 Every encoder branch is dispatched through a hard-coded table keyed
 on the runtime class; there is no dynamic resolution, no ``getattr``
@@ -36,6 +36,7 @@ from qamomile.circuit.ir.operation import (
     InvokeOperation,
     MeasureOperation,
     MeasureQFixedOperation,
+    MeasureQIntOperation,
     MeasureVectorOperation,
     Operation,
     ProjectOperation,
@@ -54,6 +55,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
+    DecodeQIntOperation,
     DictGetItemOperation,
     ReturnQuantumArrayElementOperation,
     StoreArrayElementOperation,
@@ -375,7 +377,10 @@ def _encode_value(v: ValueBase, ctx: _EncodeContext) -> dict[str, Any]:
 
     Raises:
         TypeError: If ``v`` is an unrecognized ValueBase subclass.
+        ValueError: If a referenced type-width value conflicts with another
+            value carrying the same UUID.
     """
+    _register_type_values(v.type, ctx)
     if isinstance(v, TupleValue):
         for elem in v.elements:
             ctx.register_value(elem)
@@ -445,6 +450,34 @@ def _encode_value(v: ValueBase, ctx: _EncodeContext) -> dict[str, Any]:
         f"Cannot encode value of type {type(v).__name__}; "
         f"expected Value / ArrayValue / TupleValue / DictValue"
     )
+
+
+def _register_type_values(value_type: ValueType, ctx: _EncodeContext) -> None:
+    """Register scalar values referenced only by parametric type fields.
+
+    Args:
+        value_type (ValueType): Type whose width dependencies are registered.
+        ctx (_EncodeContext): Active context owning the value table.
+
+    Raises:
+        ValueError: If one dependency UUID denotes conflicting value structures.
+    """
+    if isinstance(value_type, TupleType):
+        for element_type in value_type.element_types:
+            _register_type_values(element_type, ctx)
+    elif isinstance(value_type, DictType):
+        for item_type in (value_type.key_type, value_type.value_type):
+            if item_type is not None:
+                _register_type_values(item_type, ctx)
+    elif isinstance(value_type, (QUIntType, QFixedType)):
+        widths = (
+            (value_type.width,)
+            if isinstance(value_type, QUIntType)
+            else (value_type.integer_bits, value_type.fractional_bits)
+        )
+        for width in widths:
+            if isinstance(width, Value):
+                ctx.register_value(width)
 
 
 def _value_structures_match(
@@ -1107,6 +1140,36 @@ def _encode_decode_qfixed(
     return d
 
 
+def _encode_measure_qint(
+    op: MeasureQIntOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode :class:`MeasureQIntOperation`.
+
+    Args:
+        op (MeasureQIntOperation): The operation to encode.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base operation dictionary. The carrier width is not
+            encoded because it is derived from the register operand.
+    """
+    return _base_op_dict("MeasureQIntOperation", op)
+
+
+def _encode_decode_qint(op: DecodeQIntOperation, ctx: _EncodeContext) -> dict[str, Any]:
+    """Encode :class:`DecodeQIntOperation`.
+
+    Args:
+        op (DecodeQIntOperation): The operation to encode.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base operation dictionary. The bit count is not
+            encoded because it is derived from the bit-array operand.
+    """
+    return _base_op_dict("DecodeQIntOperation", op)
+
+
 def _encode_store_array_element(
     op: StoreArrayElementOperation, ctx: _EncodeContext
 ) -> dict[str, Any]:
@@ -1732,12 +1795,12 @@ def _encode_callable_implementation(
         raise TypeError(
             "CallableImplementation.emitter contains a process-local extension "
             "object and cannot be represented in semantic Qamomile IR. Standard "
-            "Qamomile backend emitters are registered outside the serialized "
-            "module. Store a backend/strategy/body_ref contract instead."
+            "Qamomile engine emitters are registered outside the serialized "
+            "module. Store an engine/strategy/body_ref contract instead."
         )
     return {
         "transform": impl.transform.name,
-        "backend": impl.backend,
+        "engine": impl.engine,
         "strategy": impl.strategy,
         "body": _encode_block(impl.body, ctx) if impl.body is not None else None,
         "body_ref": _encode_callable_body_ref(impl.body_ref),
@@ -1893,6 +1956,8 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     MeasureVectorOperation: _encode_measure_vector,
     MeasureQFixedOperation: _encode_measure_qfixed,
     DecodeQFixedOperation: _encode_decode_qfixed,
+    MeasureQIntOperation: _encode_measure_qint,
+    DecodeQIntOperation: _encode_decode_qint,
     DictGetItemOperation: _encode_dict_getitem,
     StoreArrayElementOperation: _encode_store_array_element,
     ReturnQuantumArrayElementOperation: _encode_return_quantum_array_element,

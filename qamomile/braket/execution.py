@@ -16,6 +16,10 @@ from qamomile.circuit.transpiler.execution_handle import (
     ExecutionReference,
     JobStatus,
 )
+from qamomile.circuit.transpiler.execution_snapshot import (
+    ExecutionSnapshot,
+    ExecutionSnapshotKind,
+)
 
 ResultT = TypeVar("ResultT")
 
@@ -173,7 +177,7 @@ class BraketExecutionHandle(ExecutionHandle[ResultT], Generic[ResultT]):
             addressable.
         result_loader (Callable[[], Sequence[Any]]): Blocking raw-result
             loader that does not perform implicit retries unless configured.
-        decoder (Callable[[Sequence[Any]], ResultT]): Backend result decoder.
+        decoder (Callable[[Sequence[Any]], ResultT]): Engine result decoder.
         reference (ExecutionReference | None): Serializable AWS reference.
         reference_factory (Callable[[], ExecutionReference | None] | None):
             Dynamic reference builder for batches that explicitly resubmit
@@ -257,7 +261,7 @@ class BraketExecutionHandle(ExecutionHandle[ResultT], Generic[ResultT]):
                 cancel remote tasks.
 
         Returns:
-            ResultT: Decoded backend-neutral result.
+            ResultT: Decoded engine-neutral result.
 
         Raises:
             TimeoutError: If ``timeout`` expires before terminal state.
@@ -375,8 +379,8 @@ class BraketExecutionHandle(ExecutionHandle[ResultT], Generic[ResultT]):
         """Return the logical Braket execution reference.
 
         Returns:
-            tuple[ExecutionReference, ...]: Empty for non-restorable local
-                tasks, otherwise one reference containing every task ARN.
+            tuple[ExecutionReference, ...]: Empty for local tasks, otherwise
+                one reference containing every task ARN.
         """
         reference = (
             self._reference_factory()
@@ -384,6 +388,33 @@ class BraketExecutionHandle(ExecutionHandle[ResultT], Generic[ResultT]):
             else self._reference
         )
         return () if reference is None else (reference,)
+
+    def snapshot(self) -> ExecutionSnapshot:
+        """Capture an AWS reference or an already retrieved local result.
+
+        AWS tasks retain their provider references after result retrieval.
+        Local tasks require a successful ``result()`` call first; this method
+        never retrieves results or waits for another result caller.
+
+        Returns:
+            ExecutionSnapshot: One remote reference or a detached local value.
+
+        Raises:
+            TypeError: If a cached local result contains unsupported objects.
+            ValueError: If no reference or cached result exists, or the cached
+                value is nonfinite, cyclic, or nested too deeply.
+        """
+        references = self.references()
+        if references:
+            return ExecutionSnapshot(
+                ExecutionSnapshotKind.REMOTE, reference=references[0]
+            )
+        if not self._has_result:
+            raise ValueError(
+                "This Braket execution has no restorable reference or cached "
+                "result; call result() successfully before snapshot()"
+            )
+        return ExecutionSnapshot(ExecutionSnapshotKind.LOCAL, value=self._result)
 
     def metadata(self) -> Mapping[str, Any]:
         """Return cached-or-provider metadata for every task.

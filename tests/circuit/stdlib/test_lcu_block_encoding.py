@@ -121,8 +121,8 @@ def _single_static_encoding_template(
 
 
 def _executor(case: Any) -> Any:
-    """Return a local executor for one cross-backend fixture case."""
-    if case.backend_name == "qiskit":
+    """Return a local executor for one cross-engine fixture case."""
+    if case.engine_name == "qiskit":
         from qiskit.providers.basic_provider import BasicSimulator
 
         return case.transpiler.executor(backend=BasicSimulator())
@@ -525,7 +525,7 @@ def test_zero_terms_are_removed_before_multi_and_single_term_lowering() -> None:
 def test_zero_encoding_samples_and_estimates_on_every_sdk(
     sdk_transpiler: Any,
 ) -> None:
-    """The generic all-zero composition executes on every circuit backend."""
+    """The generic all-zero composition executes on every circuit engine."""
     encoding = qmc.lcu_block_encoding(
         (qmc.LCUBlockEncodingTerm(0.0, qmc.identity_block_encoding(1)),)
     )
@@ -567,7 +567,7 @@ def test_zero_encoding_samples_and_estimates_on_every_sdk(
         bindings={"observable": qm_o.Z(0)},
     )
     observed = float(expval.run(_executor(sdk_transpiler)).result())
-    atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    atol = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed == pytest.approx(-1.0, abs=atol)
 
 
@@ -926,14 +926,14 @@ def test_recursive_inverse_round_trip_samples_and_estimates_on_every_sdk(
         bindings={"observable": qm_o.Z(0)},
     )
     observed = float(expval.run(_executor(sdk_transpiler)).result())
-    atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    atol = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed == pytest.approx(-1.0, abs=atol)
 
 
 def test_recursive_lcu_control_samples_and_estimates_on_every_sdk(
     sdk_transpiler: Any,
 ) -> None:
-    """Serialized two-level LCU control executes through every backend path."""
+    """Serialized two-level LCU control executes through every engine path."""
     from qamomile.circuit.serialization import deserialize, serialize
 
     encoding, matrix = _recursive_encoding()
@@ -974,7 +974,7 @@ def test_recursive_lcu_control_samples_and_estimates_on_every_sdk(
         bindings={"observable": qm_o.Y(0)},
     )
     observed = float(expval.run(_executor(sdk_transpiler)).result())
-    atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    atol = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed == pytest.approx(float(np.imag(overlap)), abs=atol)
 
 
@@ -1047,7 +1047,7 @@ def test_random_recursive_lcu_samples_and_estimates_on_every_sdk(
         bindings={"observable": qm_o.Y(0)},
     )
     observed = float(expval.run(_executor(sdk_transpiler)).result())
-    atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    atol = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed == pytest.approx(float(np.imag(overlap)), abs=atol)
 
 
@@ -1102,5 +1102,5 @@ def test_outer_select_of_lcu_samples_and_estimates_phase_on_every_sdk(
         bindings={"observable": qm_o.Y(0)},
     )
     observed = float(expval.run(_executor(sdk_transpiler)).result())
-    atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    atol = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed == pytest.approx(math.sin(phase), abs=atol)

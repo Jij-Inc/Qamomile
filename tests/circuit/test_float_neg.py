@@ -3,15 +3,15 @@
 ``Float.__neg__`` lets users write the natural ``-x`` inside a ``@qkernel``
 instead of the awkward ``0 - x`` idiom (GitHub issue #329). Negation is
 lowered to the existing ``MUL`` IR op as ``self * -1.0``, so it adds no new
-IR node and rides on every backend's existing multiplication support. When
+IR node and rides on every engine's existing multiplication support. When
 the operand is a compile-time-bound Float, ``partial_eval`` folds the
 ``MUL`` into the literal negated constant baked into the emitted circuit.
 
 These tests exercise three layers of evidence:
 
-1. **Build / transpile**: a kernel using ``-theta`` compiles on each backend.
+1. **Build / transpile**: a kernel using ``-theta`` compiles on each engine.
 2. **Execute**: both ``sample`` and ``run`` (expval) paths produce results
-   matching an analytic baseline. Sampling and expval use different backend
+   matching an analytic baseline. Sampling and expval use different engine
    primitives, so both execution paths are covered.
 3. **Equivalence**: ``-theta`` is numerically identical to ``0.0 - theta``.
 
@@ -21,7 +21,7 @@ unsupported path — plain ``theta - 0.5`` collapses to ``Rx(0)`` the same
 way. ``__neg__`` is consistent with that existing behaviour, so these
 tests bind ``theta`` at compile time, which is the supported path.
 
-Cross-backend coverage spans Qiskit, QuriParts (Qulacs), and CUDA-Q with
+Cross-engine coverage spans Qiskit, QuriParts (Qulacs), and CUDA-Q with
 ``skipif`` guards so a missing SDK skips rather than errors.
 
 Note: Do NOT use ``from __future__ import annotations`` in this file.
@@ -37,7 +37,7 @@ import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 
 # ---------------------------------------------------------------------------
-# Backend matrix
+# Engine matrix
 # ---------------------------------------------------------------------------
 
 _HAS_QISKIT = True
@@ -66,7 +66,7 @@ except ImportError:  # pragma: no cover - covered when cudaq is absent
     _HAS_CUDAQ = False
     CudaqTranspiler = None  # type: ignore[assignment]
 
-BACKENDS = [
+ENGINES = [
     pytest.param(
         QiskitTranspiler,
         id="qiskit",
@@ -181,7 +181,7 @@ def test_vector_float_slice_element_helper_transpiles_with_bindings():
 class TestVectorFloatSliceElementRegression:
     """Sliced bound ``Vector[qmc.Float]`` elements compile and execute."""
 
-    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", ENGINES)
     def test_sliced_vector_float_element_expval_runs(self, transpiler_factory):
         """A main-regression slice element emits the expected rotation angle.
 
@@ -189,7 +189,7 @@ class TestVectorFloatSliceElementRegression:
         ``-view[0] / 2``. On main, the sliced element does not resolve to
         the root bound value before transpilation; this test pins the
         fixed path by executing the emitted circuit on every available
-        SDK backend.
+        SDK engine.
         """
 
         @qmc.qkernel
@@ -210,7 +210,7 @@ class TestVectorFloatSliceElementRegression:
             f"[{transpiler_factory.__name__}] expected <Z>={expected}, got {got}"
         )
 
-    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", ENGINES)
     def test_sliced_vector_float_element_sampling_runs(self, transpiler_factory):
         """The same slice-element regression deterministically samples all-zero."""
 
@@ -234,7 +234,7 @@ class TestVectorFloatSliceElementRegression:
 class TestNegCancelsRotation:
     """``ry(theta)`` followed by ``ry(-theta)`` is the identity."""
 
-    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", ENGINES)
     @pytest.mark.parametrize("seed", [0, 1, 42])
     def test_cancellation_expval(self, transpiler_factory, seed):
         """``RY(theta)`` then ``RY(-theta)`` returns the register to |0>, so <Z> == 1.
@@ -264,7 +264,7 @@ class TestNegCancelsRotation:
                 f"expected <Z>=1.0 after RY(theta)+RY(-theta), got {out}"
             )
 
-    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", ENGINES)
     @pytest.mark.parametrize("seed", [0, 7])
     def test_cancellation_sampling(self, transpiler_factory, seed):
         """Sampling the cancelling circuit yields outcome 0 on every shot.
@@ -298,7 +298,7 @@ class TestNegCancelsRotation:
 class TestNegMatchesZeroMinusX:
     """``-theta`` is numerically identical to the old ``0.0 - theta`` idiom."""
 
-    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", ENGINES)
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_neg_equals_zero_minus_x_and_analytic(self, transpiler_factory, seed):
         """``rx(q, -theta)`` matches ``rx(q, 0.0 - theta)`` and the analytic <Y>.

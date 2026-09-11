@@ -94,7 +94,8 @@ is_docs_path() {
   local path="$1"
 
   case "${path}" in
-    docs/*)
+    # Read the Docs controls the documentation build and published output.
+    docs/* | .readthedocs.yaml)
       return 0
       ;;
     *.ipynb)

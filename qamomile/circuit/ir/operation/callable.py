@@ -154,19 +154,19 @@ class CallableImplementation:
 
     Args:
         transform (CallTransform): Transform this implementation realizes.
-        backend (str | None): Backend name for native implementations.
+        engine (str | None): Engine name for native implementations.
         strategy (str | None): Strategy name such as ``"standard"``.
         body (Block | None): IR implementation body. A transform-specific body
             realizes that transform completely; a controlled body therefore
             includes control operands in its signature.
         body_ref (CallableBodyRef | None): Reference to a body that should be
             materialized by a later resolver. Defaults to ``None``.
-        emitter (Any): Backend-native emitter object.
+        emitter (Any): Engine-native emitter object.
         attrs (dict[str, Any]): Serializer-friendly implementation metadata.
     """
 
     transform: CallTransform = CallTransform.DIRECT
-    backend: str | None = None
+    engine: str | None = None
     strategy: str | None = None
     body: Block | None = None
     body_ref: CallableBodyRef | None = None
@@ -428,7 +428,7 @@ class CallableDef:
         self,
         *,
         transform: CallTransform = CallTransform.DIRECT,
-        backend: str | None = None,
+        engine: str | None = None,
         strategy: str | None = None,
         require_body: bool = False,
     ) -> CallableImplementation | None:
@@ -436,7 +436,7 @@ class CallableDef:
 
         Args:
             transform (CallTransform): Requested call transform.
-            backend (str | None): Requested backend name.
+            engine (str | None): Requested engine name.
             strategy (str | None): Requested strategy name.
             require_body (bool): Whether candidates without an IR body should
                 be excluded before ranking. Defaults to False.
@@ -450,8 +450,8 @@ class CallableDef:
             if impl.transform == transform
             and (not require_body or impl.body is not None)
             and (
-                (backend is None and impl.backend is None)
-                or (backend is not None and impl.backend in (None, backend))
+                (engine is None and impl.engine is None)
+                or (engine is not None and impl.engine in (None, engine))
             )
             and (
                 (strategy is None and impl.strategy is None)
@@ -462,7 +462,7 @@ class CallableDef:
             return None
 
         def score(impl: CallableImplementation) -> int:
-            """Score exact backend and strategy matches above generic ones.
+            """Score exact engine and strategy matches above generic ones.
 
             Args:
                 impl (CallableImplementation): Candidate implementation.
@@ -470,7 +470,7 @@ class CallableDef:
             Returns:
                 int: Match score.
             """
-            return int(impl.backend == backend) + int(impl.strategy == strategy)
+            return int(impl.engine == engine) + int(impl.strategy == strategy)
 
         return max(candidates, key=score)
 
@@ -1326,11 +1326,11 @@ class InvokeOperation(Operation):
     def measurement_result_indices(self) -> frozenset[int]:
         """Return a conservative union of measurement-derived results.
 
-        A backend- or strategy-specific implementation may expose different
+        An engine- or strategy-specific implementation may expose different
         measurement provenance from the direct fallback body. This property
         enumerates every distinct implementation-selection context recorded by
         the callable and unions the exact caller-local result mappings. Use
-        :meth:`measurement_result_indices_for` when the backend and strategy
+        :meth:`measurement_result_indices_for` when the engine and strategy
         are known.
 
         Returns:
@@ -1338,10 +1338,10 @@ class InvokeOperation(Operation):
                 measurement in any applicable implementation selection.
         """
         indices: set[int] = set()
-        for backend, strategy in self._measurement_selection_contexts():
+        for engine, strategy in self._measurement_selection_contexts():
             indices.update(
                 self.measurement_result_indices_for(
-                    backend=backend,
+                    engine=engine,
                     strategy=strategy,
                 )
             )
@@ -1350,13 +1350,13 @@ class InvokeOperation(Operation):
     def measurement_result_indices_for(
         self,
         *,
-        backend: str | None = None,
+        engine: str | None = None,
         strategy: str | None = None,
     ) -> frozenset[int]:
         """Return measurement-derived results for one selected implementation.
 
         Args:
-            backend (str | None): Backend name used for implementation
+            engine (str | None): Engine name used for implementation
                 selection. Defaults to ``None``.
             strategy (str | None): Strategy name used for implementation
                 selection. Defaults to the invocation's ``strategy_name``.
@@ -1369,7 +1369,7 @@ class InvokeOperation(Operation):
             ValueError: If the selected body disagrees with the invocation's
                 input or output contract.
         """
-        selection = self.select_body(backend=backend, strategy=strategy)
+        selection = self.select_body(engine=engine, strategy=strategy)
         if selection.body is None:
             return frozenset()
         return selection.map_result_indices(
@@ -1382,25 +1382,25 @@ class InvokeOperation(Operation):
     ) -> tuple[tuple[str | None, str | None], ...]:
         """Return selector pairs covering every possible body selection.
 
-        Implementation ranking can change only when a requested backend or
+        Implementation ranking can change only when a requested engine or
         strategy equals metadata declared by an implementation. A synthetic
         unmatched strategy also represents compiler overrides that select only
         strategy-generic implementations or the direct fallback body.
 
         Returns:
-            tuple[tuple[str | None, str | None], ...]: Backend and strategy
+            tuple[tuple[str | None, str | None], ...]: Engine and strategy
                 pairs whose union conservatively covers every selection.
         """
         implementations = (
             self.definition.implementations if self.definition is not None else ()
         )
-        backends: list[str | None] = [None]
-        backends.extend(
+        engines: list[str | None] = [None]
+        engines.extend(
             sorted(
                 {
-                    implementation.backend
+                    implementation.engine
                     for implementation in implementations
-                    if implementation.backend is not None
+                    if implementation.engine is not None
                 }
             )
         )
@@ -1416,7 +1416,7 @@ class InvokeOperation(Operation):
                 unmatched += "_"
             strategies.append(unmatched)
         return tuple(
-            (backend, strategy) for backend in backends for strategy in strategies
+            (engine, strategy) for engine in engines for strategy in strategies
         )
 
     @body.setter
@@ -1551,7 +1551,7 @@ class InvokeOperation(Operation):
             list[Value]: Quantum target operands after any controls, preserving
             their relative order even when classical parameters are interleaved
             in the callable signature. A vector target counts as one operand even when
-            ``num_target_qubits`` records its scalar backend width.
+            ``num_target_qubits`` records its scalar engine width.
         """
         start = self.num_control_qubits
         return [
@@ -1622,15 +1622,15 @@ class InvokeOperation(Operation):
     def implementation_for(
         self,
         *,
-        backend: str | None = None,
+        engine: str | None = None,
         strategy: str | None = None,
         require_body: bool = False,
     ) -> CallableImplementation | None:
         """Return the selected implementation for this invocation.
 
         Args:
-            backend (str | None): Backend name to match. Defaults to ``None``,
-                which only selects backend-generic implementations.
+            engine (str | None): Engine name to match. Defaults to ``None``,
+                which only selects engine-generic implementations.
             strategy (str | None): Strategy name to match. Defaults to
                 ``None``, meaning the invocation's ``strategy_name`` attribute
                 is used.
@@ -1646,7 +1646,7 @@ class InvokeOperation(Operation):
         requested_strategy = self.strategy_name if strategy is None else strategy
         return self.definition.implementation_for(
             transform=self.transform,
-            backend=backend,
+            engine=engine,
             strategy=requested_strategy,
             require_body=require_body,
         )
@@ -1654,13 +1654,13 @@ class InvokeOperation(Operation):
     def effective_body(
         self,
         *,
-        backend: str | None = None,
+        engine: str | None = None,
         strategy: str | None = None,
     ) -> Block | None:
         """Return the implementation body selected for this invocation.
 
         Args:
-            backend (str | None): Backend name to match. Defaults to ``None``.
+            engine (str | None): Engine name to match. Defaults to ``None``.
             strategy (str | None): Strategy name to match. Defaults to the
                 invocation's ``strategy_name`` attribute.
 
@@ -1671,7 +1671,7 @@ class InvokeOperation(Operation):
             fallback body.
         """
         impl = self.implementation_for(
-            backend=backend,
+            engine=engine,
             strategy=strategy,
             require_body=True,
         )
@@ -1682,7 +1682,7 @@ class InvokeOperation(Operation):
     def body_for_transform(
         self,
         *,
-        backend: str | None = None,
+        engine: str | None = None,
         strategy: str | None = None,
     ) -> tuple[Block | None, CallTransform]:
         """Select a body and report the transform it already realizes.
@@ -1694,7 +1694,7 @@ class InvokeOperation(Operation):
         remaining coherent controls in its own representation.
 
         Args:
-            backend (str | None): Backend name to match. Defaults to ``None``.
+            engine (str | None): Engine name to match. Defaults to ``None``.
             strategy (str | None): Strategy name to match. Defaults to the
                 invocation's ``strategy_name`` attribute.
 
@@ -1707,13 +1707,13 @@ class InvokeOperation(Operation):
             ValueError: If the selected body disagrees with the invocation's
                 input or output contract.
         """
-        selection = self.select_body(backend=backend, strategy=strategy)
+        selection = self.select_body(engine=engine, strategy=strategy)
         return selection.body, selection.realized_transform
 
     def select_body(
         self,
         *,
-        backend: str | None = None,
+        engine: str | None = None,
         strategy: str | None = None,
     ) -> CallableBodySelection:
         """Select and validate the composable body for this invocation.
@@ -1724,7 +1724,7 @@ class InvokeOperation(Operation):
         belongs to the selected implementation ABI.
 
         Args:
-            backend (str | None): Backend name to match. Defaults to ``None``.
+            engine (str | None): Engine name to match. Defaults to ``None``.
             strategy (str | None): Strategy name to match. Defaults to the
                 invocation's ``strategy_name`` attribute.
 
@@ -1737,7 +1737,7 @@ class InvokeOperation(Operation):
                 input or output contract.
         """
         implementation = self.implementation_for(
-            backend=backend,
+            engine=engine,
             strategy=strategy,
             require_body=True,
         )
@@ -1751,7 +1751,7 @@ class InvokeOperation(Operation):
             requested_strategy = self.strategy_name if strategy is None else strategy
             inverse_implementation = self.definition.implementation_for(
                 transform=CallTransform.INVERSE,
-                backend=backend,
+                engine=engine,
                 strategy=requested_strategy,
                 require_body=True,
             )

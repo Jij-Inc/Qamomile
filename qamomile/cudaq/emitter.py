@@ -1,6 +1,6 @@
 """CUDA-Q emitter implementation.
 
-This module provides a unified emitter for the CUDA-Q backend:
+This module provides a unified emitter for the CUDA-Q engine:
 
 - ``CudaqKernelEmitter``: Generates ``@cudaq.kernel`` decorated Python source
   code for all circuits.  The emitter supports two execution modes:
@@ -288,7 +288,7 @@ class CudaqKernelEmitter:
         The ``_parametric`` flag is late-bound by ``CudaqMaterializer``: after
         all operations have been emitted, the flag is updated to
         ``_param_count > 0`` so that the kernel signature reflects the
-        actual surviving backend parameters, not the originally requested
+        actual surviving engine parameters, not the originally requested
         parameter list.
 
     Args:

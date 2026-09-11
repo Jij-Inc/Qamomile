@@ -27,11 +27,11 @@ def collect_measurements() -> qmc.Vector[qmc.Bit]:
     return output
 
 
-def test_bit_array_store_return_and_order_across_backends(
+def test_bit_array_store_return_and_order_across_engines(
     sdk_transpiler: Any,
 ) -> None:
-    """Measured values preserve element order on every installed backend."""
-    name = sdk_transpiler.backend_name
+    """Measured values preserve element order on every installed engine."""
+    name = sdk_transpiler.engine_name
     transpiler = sdk_transpiler.transpiler
     executor = transpiler.executor()
     executable = transpiler.transpile(collect_measurements)

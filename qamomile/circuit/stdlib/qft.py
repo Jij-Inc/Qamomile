@@ -15,7 +15,7 @@ def qft(qubits: Vector[Qubit]) -> Vector[Qubit]:
     """Apply the standard quantum Fourier transform.
 
     The Qamomile body remains attached to the named invocation for every
-    register width. Backends may emit a native QFT, while other backends lower
+    register width. Engines may emit a native QFT, while other engines lower
     this same body during emission.
 
     Args:

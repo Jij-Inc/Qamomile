@@ -44,19 +44,31 @@ from qamomile.circuit.ir.operation.callable import (
     InvokeOperation,
 )
 from qamomile.circuit.ir.operation.classical_ops import (
+    DecodeQIntOperation,
     ReturnQuantumArrayElementOperation,
 )
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps
-from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
+from qamomile.circuit.ir.operation.gate import (
+    GateOperation,
+    GateOperationType,
+    MeasureQFixedOperation,
+    MeasureQIntOperation,
+)
 from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.select import SelectOperation
+from qamomile.circuit.ir.serialize.decode import _decode_block, _DecodeContext
 from qamomile.circuit.ir.serialize.encode import (
     _OP_ENCODERS,
     _encode_block,
     _EncodeContext,
 )
-from qamomile.circuit.ir.types.primitives import FloatType, QubitType, UIntType
+from qamomile.circuit.ir.types.primitives import (
+    BitType,
+    FloatType,
+    QubitType,
+    UIntType,
+)
 from qamomile.circuit.ir.types.q_register import QFixedType, QUIntType
 from qamomile.circuit.ir.uuid_remapper import UUIDRemapper
 from qamomile.circuit.ir.value import ArrayValue, Value
@@ -66,9 +78,15 @@ from qamomile.circuit.serialization import (
     deserialize,
     serialize,
 )
+from qamomile.circuit.serialization.canonical import canonicalize_graph
 from qamomile.circuit.serialization.decode import from_dict as kernel_from_dict
 from qamomile.circuit.serialization.encode import to_dict as kernel_to_dict
-from qamomile.circuit.serialization.graph_protobuf import _OPERATION_TO_PROTO
+from qamomile.circuit.serialization.graph_protobuf import (
+    _OPERATION_TO_PROTO,
+    _operation_from_proto,
+    _operation_to_proto,
+    _validate_operation_fields,
+)
 from qamomile.circuit.serialization.kernel import _StaticBindingResolver
 from qamomile.circuit.serialization.proto import qamomile_ir_pb2 as pb
 from qamomile.circuit.serialization.validation import validate_qkernel_ir
@@ -92,6 +110,136 @@ def _array_shaped(values: qmc.Vector[qmc.Float]) -> qmc.Bit:
     for i in qmc.range(values.shape[0]):
         q[i] = qmc.rx(q[i], values[i])
     return qmc.measure(q[0])
+
+
+@qmc.qkernel
+def _qint_register() -> qmc.QInt:
+    """Return a three-carrier unsigned quantum integer."""
+    return qmc.cast(qmc.qubit_array(3, "qint"), qmc.QInt)
+
+
+@qmc.qkernel
+def _qint_measurement() -> qmc.UInt:
+    """Measure a three-carrier unsigned quantum integer."""
+    register = qmc.cast(qmc.qubit_array(3, "qint"), qmc.QInt)
+    return qmc.measure(register)
+
+
+@qmc.qkernel
+def _asymmetric_qint_measurement() -> qmc.UInt:
+    """Measure an endian-sensitive QInt value after serialization."""
+    register = qmc.qubit_array(3, "qint")
+    register[0] = qmc.x(register[0])
+    register[1] = qmc.x(register[1])
+    return qmc.measure(qmc.cast(register, qmc.QInt))
+
+
+@qmc.qkernel
+def _sliced_qint_measurement() -> qmc.UInt:
+    """Measure a strided carrier view after serialization."""
+    register = qmc.qubit_array(4, "qint")
+    register[1] = qmc.x(register[1])
+    return qmc.measure(qmc.cast(register[1::2], qmc.QInt))
+
+
+@qmc.qkernel
+def _zero_width_qint_measurement() -> qmc.UInt:
+    """Measure the unique value represented by an empty QInt register."""
+    register = qmc.cast(qmc.qubit_array(0, "qint"), qmc.QInt)
+    return qmc.measure(register)
+
+
+@qmc.qkernel
+def _symbolic_width_qint_measurement(
+    register: qmc.Vector[qmc.Qubit],
+) -> qmc.UInt:
+    """Measure a QInt whose carrier width is supplied by the caller."""
+    return qmc.measure(qmc.cast(register, qmc.QInt))
+
+
+@qmc.qkernel
+def _merged_symbolic_width_qint_measurement(n: qmc.UInt) -> qmc.UInt:
+    """Measure a symbolic-width QInt merged from equivalent runtime branches."""
+    register = qmc.qubit_array(n, "register")
+    register[0] = qmc.x(register[0])
+    selector = qmc.measure(qmc.qubit("selector"))
+    if selector:
+        value = qmc.cast(register, qmc.QInt)
+    else:
+        value = qmc.cast(register, qmc.QInt)
+    return qmc.measure(value)
+
+
+@qmc.qkernel
+def _merged_symbolic_width_qfixed_measurement(n: qmc.UInt) -> qmc.Float:
+    """Measure a symbolic-width QFixed merged from equivalent runtime branches."""
+    register = qmc.qubit_array(n, "register")
+    register[0] = qmc.x(register[0])
+    selector = qmc.measure(qmc.qubit("selector"))
+    if selector:
+        value = qmc.cast(register, qmc.QFixed)
+    else:
+        value = qmc.cast(register, qmc.QFixed)
+    return qmc.measure(value)
+
+
+@qmc.qkernel
+def _qfixed_measurement() -> qmc.Float:
+    """Measure a three-carrier fixed-point register reading 0.75."""
+    register = qmc.qubit_array(3, "qfixed")
+    register[0] = qmc.x(register[0])
+    register[1] = qmc.x(register[1])
+    return qmc.measure(qmc.cast(register, qmc.QFixed, int_bits=1))
+
+
+@qmc.qkernel
+def _sliced_qfixed_measurement() -> qmc.Float:
+    """Measure a strided QFixed carrier view after serialization."""
+    register = qmc.qubit_array(4, "qfixed")
+    register[1] = qmc.x(register[1])
+    return qmc.measure(qmc.cast(register[1::2], qmc.QFixed, int_bits=1))
+
+
+@qmc.qkernel
+def _symbolic_width_qfixed_measurement(
+    register: qmc.Vector[qmc.Qubit],
+) -> qmc.Float:
+    """Measure a QFixed whose carrier width is supplied by the caller."""
+    return qmc.measure(qmc.cast(register, qmc.QFixed))
+
+
+@qmc.qkernel
+def _zero_width_qfixed_measurement() -> qmc.Float:
+    """Measure the unique value represented by an empty QFixed register."""
+    register = qmc.cast(qmc.qubit_array(0, "qfixed"), qmc.QFixed)
+    return qmc.measure(register)
+
+
+@qmc.qkernel
+def _merged_qfixed_measurement() -> qmc.Float:
+    """Measure a QFixed merged from equivalent runtime-if branches."""
+    register = qmc.qubit_array(2, "qfixed")
+    register[1] = qmc.x(register[1])
+    selector = qmc.measure(qmc.qubit("selector"))
+    if selector:
+        value = qmc.cast(register, qmc.QFixed, int_bits=1)
+    else:
+        value = qmc.cast(register, qmc.QFixed, int_bits=1)
+    return qmc.measure(value)
+
+
+@qmc.qkernel
+def _qfixed_register() -> qmc.QFixed:
+    """Return a two-carrier fixed-point register built by a sub-kernel."""
+    register = qmc.qubit_array(2, "qfixed")
+    register[1] = qmc.x(register[1])
+    return qmc.cast(register, qmc.QFixed, int_bits=1)
+
+
+@qmc.qkernel
+def _invoked_qfixed_measurement() -> qmc.Float:
+    """Measure a QFixed returned by an invoked sub-kernel."""
+    return qmc.measure(_qfixed_register())
 
 
 @qmc.qkernel
@@ -495,7 +643,7 @@ configure_composite(
     implementations=(
         CallableImplementation(
             transform=CallTransform.DIRECT,
-            backend="test-backend",
+            engine="test-engine",
             strategy="named-strategy",
             body_ref=CallableBodyRef(
                 ref=CallableRef("tests.serialization", "custom_rotation_body"),
@@ -947,7 +1095,7 @@ def _calls_deserialized_qft(n: qmc.UInt) -> qmc.Bit:
 
 @qmc.qkernel
 def _calls_original_qft(n: qmc.UInt) -> qmc.Bit:
-    """Invoke the original QFT for backend-output comparison."""
+    """Invoke the original QFT for engine-output comparison."""
     qubits = qmc.qubit_array(n, "q")
     qubits = qmc.qft(qubits)
     return qmc.measure(qubits[0])
@@ -955,7 +1103,7 @@ def _calls_original_qft(n: qmc.UInt) -> qmc.Bit:
 
 @qmc.qkernel
 def _calls_original_iqft(n: qmc.UInt) -> qmc.Bit:
-    """Invoke the original IQFT for backend-output comparison."""
+    """Invoke the original IQFT for engine-output comparison."""
     qubits = qmc.qubit_array(n, "q")
     qubits = qmc.iqft(qubits)
     return qmc.measure(qubits[0])
@@ -985,7 +1133,7 @@ def _circuit(kernel: object, **kwargs: object):
         **kwargs (object): Keyword arguments forwarded to ``transpile``.
 
     Returns:
-        object: First backend circuit.
+        object: First engine circuit.
     """
     executable = QiskitTranspiler().transpile(kernel, **kwargs)  # type: ignore[arg-type]
     circuit = executable.get_first_circuit()
@@ -1062,6 +1210,479 @@ def test_unary_math_operation_type_is_appended_to_wire_enum() -> None:
     """Adding unary math leaves every previously assigned enum value intact."""
     assert pb.RETURN_QUANTUM_ARRAY_ELEMENT_OPERATION == 33
     assert pb.UNARY_MATH_OPERATION == 34
+
+
+def test_qint_wire_enums_are_appended() -> None:
+    """QInt additions leave every previously assigned enum value intact."""
+    assert pb.QAMOMILE_QINT == 16
+    assert pb.MEASURE_QINT_OPERATION == 35
+    assert pb.DECODE_QINT_OPERATION == 36
+
+
+def test_qint_frontend_annotation_roundtrips() -> None:
+    """Preserve the QInt annotation and its concrete carrier width."""
+    message = _message(_qint_register)
+
+    assert message.results[0].annotation.kind == pb.QAMOMILE_QINT
+
+    restored = _restore(message)
+    assert restored.output_types == [qmc.QInt]
+    assert restored.block.output_values[0].type == QUIntType(width=3)
+
+
+def test_measure_qint_operation_roundtrips() -> None:
+    """Derive QInt measurement width from the operand after a protobuf roundtrip."""
+    message = _message(_qint_measurement)
+    encoded = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.MEASURE_QINT_OPERATION
+    )
+
+    assert not encoded.HasField("num_bits")
+
+    restored = _restore(message)
+    decoded = next(
+        operation
+        for operation in restored.block.operations
+        if isinstance(operation, MeasureQIntOperation)
+    )
+    assert decoded.num_bits == 3
+    assert decoded.operands[0].type == QUIntType(width=3)
+    assert decoded.results[0].type == UIntType()
+
+
+def test_qint_roundtrip_executes_with_preserved_carrier_order() -> None:
+    """Public protobuf roundtrip retains QInt carrier identities and order."""
+    restored = deserialize(serialize(_asymmetric_qint_measurement))
+    transpiler = QiskitTranspiler()
+
+    result = (
+        transpiler.transpile(restored).sample(transpiler.executor(), shots=16).result()
+    )
+
+    assert result.results == [(3, 16)]
+
+
+def test_decode_qint_semantic_operation_roundtrips() -> None:
+    """Preserve the integer decoder in the closed semantic IR codec."""
+    width = Value(type=UIntType(), name="width").with_const(3)
+    bits = ArrayValue(type=BitType(), name="bits", shape=(width,))
+    result = Value(type=UIntType(), name="result")
+    block = Block(
+        operations=[DecodeQIntOperation(operands=[bits], results=[result])],
+        output_values=[result],
+    )
+    encode_context = _EncodeContext()
+
+    encoded = _encode_block(block, encode_context)
+    restored = _decode_block(
+        encoded,
+        _DecodeContext(encode_context.value_table_dicts),
+    )
+
+    decoded = restored.operations[0]
+    assert isinstance(decoded, DecodeQIntOperation)
+    assert decoded.num_bits == 3
+    assert isinstance(decoded.operands[0], ArrayValue)
+    assert decoded.operands[0].type == BitType()
+    assert decoded.results[0].type == UIntType()
+
+
+def test_decode_qint_protobuf_operation_roundtrips() -> None:
+    """Preserve the integer decoder through its typed protobuf mapping."""
+    record = {
+        "$type": "DecodeQIntOperation",
+        "operand_refs": ["bits"],
+        "result_refs": ["result"],
+    }
+
+    message = _operation_to_proto(record)
+
+    assert message.operation_type == pb.DECODE_QINT_OPERATION
+    assert not message.HasField("num_bits")
+    assert _operation_from_proto(message) == record
+
+
+def test_qint_operations_reject_stored_num_bits_field() -> None:
+    """Reject a stored num_bits on QInt operations; the width is derived."""
+    message = _message(_qint_measurement)
+    encoded = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.MEASURE_QINT_OPERATION
+    )
+    encoded.num_bits = 3
+
+    with pytest.raises(ValueError, match="has unrelated fields"):
+        _restore(message)
+
+    decode_message = _operation_to_proto(
+        {
+            "$type": "DecodeQIntOperation",
+            "operand_refs": ["bits"],
+            "result_refs": ["result"],
+        }
+    )
+    decode_message.num_bits = 3
+
+    with pytest.raises(ValueError, match="has unrelated fields"):
+        _validate_operation_fields(decode_message)
+
+
+def test_qint_cast_rejects_reordered_carrier_metadata() -> None:
+    """Reject carrier metadata whose order diverges from the cast operation."""
+    message = _message(_asymmetric_qint_measurement)
+    encoded_cast = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.CAST_OPERATION
+    )
+    result = next(
+        value
+        for value in message.value_table
+        if value.uuid == encoded_cast.result_refs[0]
+    )
+    reordered = list(reversed(result.metadata.cast.qubit_uuids))
+    del result.metadata.cast.qubit_uuids[:]
+    result.metadata.cast.qubit_uuids.extend(reordered)
+
+    with pytest.raises(
+        ValueError,
+        match="QInt qubit_mapping disagrees with cast metadata",
+    ):
+        _restore(message)
+
+
+def test_qint_cast_rejects_jointly_reordered_mapping_and_metadata() -> None:
+    """Reject a self-consistent carrier list that disagrees with source order."""
+    message = _message(_asymmetric_qint_measurement)
+    encoded_cast = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.CAST_OPERATION
+    )
+    result = next(
+        value
+        for value in message.value_table
+        if value.uuid == encoded_cast.result_refs[0]
+    )
+    reordered_uuids = list(reversed(encoded_cast.qubit_mapping))
+    reordered_logical_ids = list(reversed(result.metadata.cast.qubit_logical_ids))
+    del encoded_cast.qubit_mapping[:]
+    encoded_cast.qubit_mapping.extend(reordered_uuids)
+    del result.metadata.cast.qubit_uuids[:]
+    result.metadata.cast.qubit_uuids.extend(reordered_uuids)
+    del result.metadata.cast.qubit_logical_ids[:]
+    result.metadata.cast.qubit_logical_ids.extend(reordered_logical_ids)
+
+    with pytest.raises(
+        ValueError,
+        match="QInt carrier order disagrees with its source",
+    ):
+        _restore(message)
+
+
+def test_qint_slice_roundtrip_executes_with_source_order() -> None:
+    """Preserve a strided QInt carrier order through public protobuf bytes."""
+    restored = deserialize(serialize(_sliced_qint_measurement))
+    transpiler = QiskitTranspiler()
+
+    result = (
+        transpiler.transpile(restored).sample(transpiler.executor(), shots=16).result()
+    )
+
+    assert result.results == [(1, 16)]
+
+
+def test_decode_qint_rejects_symbolic_bit_array_width() -> None:
+    """Reject a decoder whose lowered bit-array width remains unresolved."""
+    width = Value(type=UIntType(), name="width").with_parameter("width")
+    bits = ArrayValue(type=BitType(), name="bits", shape=(width,))
+    result = Value(type=UIntType(), name="result")
+    block = Block(
+        input_values=[bits, width],
+        operations=[DecodeQIntOperation(operands=[bits], results=[result])],
+        output_values=[result],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="QInt decoder bit-array width must be concrete",
+    ):
+        validate_qkernel_ir(block)
+
+
+def test_zero_width_qint_measurement_roundtrips() -> None:
+    """Preserve the empty QInt whose unsigned value is necessarily zero."""
+    restored = _restore(_message(_zero_width_qint_measurement))
+    measurement = next(
+        operation
+        for operation in restored.block.operations
+        if isinstance(operation, MeasureQIntOperation)
+    )
+
+    assert measurement.num_bits == 0
+    assert measurement.operands[0].type == QUIntType(width=0)
+
+
+def test_symbolic_width_qint_measurement_roundtrips() -> None:
+    """Preserve deferred QInt width until a caller supplies its register."""
+    restored = _restore(_message(_symbolic_width_qint_measurement))
+    measurement = next(
+        operation
+        for operation in restored.block.operations
+        if isinstance(operation, MeasureQIntOperation)
+    )
+
+    assert measurement.num_bits is None
+    assert isinstance(measurement.operands[0].type, QUIntType)
+    assert isinstance(measurement.operands[0].type.width, Value)
+
+
+def _sample(kernel: object, **bindings: object) -> list[tuple[object, int]]:
+    """Sample a kernel returning one measured scalar on the Qiskit simulator.
+
+    Args:
+        kernel (object): QKernel-like object returning a measured scalar.
+        **bindings (object): Compile-time bindings forwarded to ``transpile``.
+
+    Returns:
+        list[tuple[object, int]]: Sampled ``(value, count)`` pairs.
+    """
+    transpiler = QiskitTranspiler()
+    return (
+        transpiler.transpile(kernel, bindings=bindings)  # type: ignore[arg-type]
+        .sample(transpiler.executor(), shots=16)
+        .result()
+        .results
+    )
+
+
+def _qfixed_sample(kernel: object) -> list[tuple[float, int]]:
+    """Sample a QFixed-measuring kernel on the Qiskit simulator.
+
+    Args:
+        kernel (object): QKernel-like object returning a measured ``Float``.
+
+    Returns:
+        list[tuple[float, int]]: Sampled ``(value, count)`` pairs.
+    """
+    return _sample(kernel)  # type: ignore[return-value]
+
+
+def test_symbolic_width_qint_merged_by_runtime_if_roundtrips() -> None:
+    """A runtime-if merged symbolic-width QInt decodes its bound register.
+
+    At trace time the carrier list is empty, so after serialization the
+    measurement operand is the branch merge result whose casts live inside
+    the ``IfOperation`` bodies. Plan-time lowering must resolve the source
+    vector through the cast metadata instead of decoding an empty register.
+    """
+    restored = deserialize(serialize(_merged_symbolic_width_qint_measurement))
+
+    assert _sample(_merged_symbolic_width_qint_measurement, n=3) == [(1, 16)]
+    assert _sample(restored, n=3) == [(1, 16)]
+
+
+def test_symbolic_width_qfixed_merged_by_runtime_if_roundtrips() -> None:
+    """A runtime-if merged symbolic-width QFixed decodes its bound register."""
+    restored = deserialize(serialize(_merged_symbolic_width_qfixed_measurement))
+
+    assert _sample(_merged_symbolic_width_qfixed_measurement, n=3) == [(0.125, 16)]
+    assert _sample(restored, n=3) == [(0.125, 16)]
+
+
+def _tampered_qfixed_cast(
+    kernel: object,
+) -> tuple[pb.QKernel, pb.Operation, pb.Value]:
+    """Serialize a kernel and locate its QFixed cast for protobuf tampering.
+
+    Args:
+        kernel (object): QKernel-like object containing one cast operation.
+
+    Returns:
+        tuple[pb.QKernel, pb.Operation, pb.Value]: The parsed message, its
+            cast operation, and the cast result's value-table entry.
+    """
+    message = _message(kernel)
+    encoded_cast = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.CAST_OPERATION
+    )
+    result = next(
+        value
+        for value in message.value_table
+        if value.uuid == encoded_cast.result_refs[0]
+    )
+    return message, encoded_cast, result
+
+
+def _reverse_repeated(field: object) -> None:
+    """Reverse a repeated protobuf field in place.
+
+    Args:
+        field (object): Repeated scalar container to reverse.
+    """
+    reordered = list(reversed(field))  # type: ignore[call-overload]
+    del field[:]  # type: ignore[index]
+    field.extend(reordered)  # type: ignore[attr-defined]
+
+
+def test_qfixed_measurement_roundtrip_executes() -> None:
+    """A QFixed measurement survives serialization and reads the same Float."""
+    restored = deserialize(serialize(_qfixed_measurement))
+
+    assert _qfixed_sample(restored) == _qfixed_sample(_qfixed_measurement)
+    assert _qfixed_sample(restored) == [(0.75, 16)]
+
+
+def test_qfixed_slice_roundtrip_executes_with_source_order() -> None:
+    """Preserve a strided QFixed carrier order through public protobuf bytes."""
+    restored = deserialize(serialize(_sliced_qfixed_measurement))
+
+    # Carrier 0 of the view is ``register[1]``, the fractional (LSB) bit.
+    assert _qfixed_sample(restored) == _qfixed_sample(_sliced_qfixed_measurement)
+    assert _qfixed_sample(restored) == [(0.5, 16)]
+
+
+def test_symbolic_width_qfixed_measurement_roundtrips() -> None:
+    """Preserve deferred QFixed width until a caller supplies its register."""
+    restored = _restore(_message(_symbolic_width_qfixed_measurement))
+    measurement = next(
+        operation
+        for operation in restored.block.operations
+        if isinstance(operation, MeasureQFixedOperation)
+    )
+
+    assert measurement.num_bits == 0
+    assert measurement.int_bits == 0
+    assert isinstance(measurement.operands[0].type, QFixedType)
+    assert isinstance(measurement.operands[0].type.fractional_bits, Value)
+
+
+def test_zero_width_qfixed_measurement_roundtrips() -> None:
+    """Preserve the empty QFixed whose measured value is necessarily zero."""
+    restored = _restore(_message(_zero_width_qfixed_measurement))
+    measurement = next(
+        operation
+        for operation in restored.block.operations
+        if isinstance(operation, MeasureQFixedOperation)
+    )
+
+    assert measurement.num_bits == 0
+    assert measurement.operands[0].type == QFixedType(0, 0)
+
+
+def test_merged_qfixed_measurement_roundtrips() -> None:
+    """A runtime-if merged QFixed keeps its carriers through serialization."""
+    restored = deserialize(serialize(_merged_qfixed_measurement))
+
+    assert _qfixed_sample(restored) == _qfixed_sample(_merged_qfixed_measurement)
+    assert _qfixed_sample(restored) == [(1.0, 16)]
+
+
+def test_invoked_qfixed_measurement_roundtrips() -> None:
+    """A QFixed returned across a qkernel call boundary restores cleanly."""
+    restored = _restore(_message(_invoked_qfixed_measurement))
+
+    assert any(
+        isinstance(operation, MeasureQFixedOperation)
+        for operation in restored.block.operations
+    )
+
+
+def test_qfixed_measurement_rejects_num_bits_mismatch() -> None:
+    """Reject a stored QFixed num_bits that disagrees with the operand type."""
+    message = _message(_qfixed_measurement)
+    encoded = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.MEASURE_QFIXED_OPERATION
+    )
+    encoded.num_bits = 2
+
+    with pytest.raises(
+        ValueError, match="num_bits disagrees with its QFixedType width"
+    ):
+        _restore(message)
+
+
+def test_qfixed_measurement_rejects_int_bits_mismatch() -> None:
+    """Reject a stored QFixed int_bits that disagrees with the operand type."""
+    message = _message(_qfixed_measurement)
+    encoded = next(
+        operation
+        for operation in message.body.operations
+        if operation.operation_type == pb.MEASURE_QFIXED_OPERATION
+    )
+    encoded.int_bits = 2
+
+    with pytest.raises(ValueError, match="int_bits disagrees"):
+        _restore(message)
+
+
+def test_qfixed_cast_rejects_reordered_carrier_metadata() -> None:
+    """Reject QFixed carrier metadata whose order diverges from the cast."""
+    message, _, result = _tampered_qfixed_cast(_qfixed_measurement)
+    _reverse_repeated(result.metadata.cast.qubit_uuids)
+
+    with pytest.raises(
+        ValueError,
+        match="QFixed qubit_mapping disagrees with cast metadata",
+    ):
+        _restore(message)
+
+
+def test_qfixed_cast_rejects_jointly_reordered_mapping_and_metadata() -> None:
+    """Reject a self-consistent QFixed carrier list that disagrees with source."""
+    message, encoded_cast, result = _tampered_qfixed_cast(_qfixed_measurement)
+    _reverse_repeated(encoded_cast.qubit_mapping)
+    _reverse_repeated(result.metadata.cast.qubit_uuids)
+    _reverse_repeated(result.metadata.cast.qubit_logical_ids)
+    _reverse_repeated(result.metadata.qfixed.qubit_uuids)
+
+    with pytest.raises(
+        ValueError,
+        match="QFixed carrier order disagrees with its source",
+    ):
+        _restore(message)
+
+
+def test_qfixed_cast_rejects_missing_cast_metadata() -> None:
+    """Reject a QFixed cast result that carries only layout metadata."""
+    message, _, result = _tampered_qfixed_cast(_qfixed_measurement)
+    result.metadata.ClearField("cast")
+
+    with pytest.raises(ValueError, match="QFixed carrier requires cast metadata"):
+        _restore(message)
+
+
+def test_qfixed_cast_rejects_duplicate_carriers() -> None:
+    """Reject a QFixed cast whose carriers alias one physical qubit."""
+    message, encoded_cast, result = _tampered_qfixed_cast(_qfixed_measurement)
+    first = result.metadata.cast.qubit_uuids[0]
+    count = len(result.metadata.cast.qubit_uuids)
+    del result.metadata.cast.qubit_uuids[:]
+    result.metadata.cast.qubit_uuids.extend([first] * count)
+    del encoded_cast.qubit_mapping[:]
+    encoded_cast.qubit_mapping.extend([first] * count)
+
+    with pytest.raises(ValueError, match="must be unique"):
+        _restore(message)
+
+
+def test_qfixed_cast_rejects_layout_carriers_disagreeing_with_cast() -> None:
+    """Reject QFixed layout metadata whose carriers differ from cast metadata."""
+    message, _, result = _tampered_qfixed_cast(_qfixed_measurement)
+    _reverse_repeated(result.metadata.qfixed.qubit_uuids)
+
+    with pytest.raises(
+        ValueError,
+        match="QFixed layout carriers disagree with cast metadata",
+    ):
+        _restore(message)
 
 
 def test_every_encodable_operation_has_a_protobuf_mapping() -> None:
@@ -1871,7 +2492,7 @@ def test_inverse_deserialized_qft_family_uses_known_counterpart(
     round_tripped_kernel: object,
     original_kernel: object,
 ) -> None:
-    """Restored QFT/IQFT preserve inverse mapping and backend emission."""
+    """Restored QFT/IQFT preserve inverse mapping and engine emission."""
     assert qmc.inverse(restored) is expected
 
     original = _circuit(original_kernel, bindings={"n": 3})
@@ -1889,7 +2510,7 @@ def test_root_callable_implementations_and_semantic_arguments_round_trip() -> No
     assert len(restored._callable_implementations) == 1
     implementation = restored._callable_implementations[0]
     assert implementation.transform is CallTransform.DIRECT
-    assert implementation.backend == "test-backend"
+    assert implementation.engine == "test-engine"
     assert implementation.strategy == "named-strategy"
     assert implementation.attrs == {"priority": 2}
     assert implementation.body_ref is not None
@@ -2022,6 +2643,51 @@ def test_independent_equivalent_traces_have_canonical_bytes() -> None:
 
     assert left.block.input_values[0].uuid != right.block.input_values[0].uuid
     assert serialize(left) == serialize(right)
+
+
+def test_canonical_graph_preserves_indexed_carrier_suffixes() -> None:
+    """Canonicalization remaps carrier roots without losing their indices."""
+    envelope = {
+        "value_table": [{"uuid": "root", "logical_id": "logical"}],
+        "body": {
+            "metadata": {
+                "cast": {
+                    "source_uuid": "root",
+                    "source_logical_id": "logical",
+                    "qubit_uuids": ["root_0", "root_2"],
+                    "qubit_logical_ids": ["logical_0", "logical_2"],
+                },
+                "qfixed": {
+                    "qubit_uuids": ["root_0", "root_2"],
+                },
+            },
+            "qubit_mapping": ["root_0", "root_2"],
+        },
+    }
+
+    canonical = canonicalize_graph(envelope)
+    canonical_root = canonical["value_table"][0]["uuid"]
+    canonical_logical = canonical["value_table"][0]["logical_id"]
+    metadata = canonical["body"]["metadata"]
+
+    assert metadata["cast"]["source_uuid"] == canonical_root
+    assert metadata["cast"]["source_logical_id"] == canonical_logical
+    assert metadata["cast"]["qubit_uuids"] == [
+        f"{canonical_root}_0",
+        f"{canonical_root}_2",
+    ]
+    assert metadata["cast"]["qubit_logical_ids"] == [
+        f"{canonical_logical}_0",
+        f"{canonical_logical}_2",
+    ]
+    assert metadata["qfixed"]["qubit_uuids"] == [
+        f"{canonical_root}_0",
+        f"{canonical_root}_2",
+    ]
+    assert canonical["body"]["qubit_mapping"] == [
+        f"{canonical_root}_0",
+        f"{canonical_root}_2",
+    ]
 
 
 def test_canonical_payload_is_idempotent_across_round_trip() -> None:

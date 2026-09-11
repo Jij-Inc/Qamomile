@@ -35,6 +35,7 @@ from qamomile.circuit.ir.operation import (
     InvokeOperation,
     MeasureOperation,
     MeasureQFixedOperation,
+    MeasureQIntOperation,
     MeasureVectorOperation,
     Operation,
     ProjectOperation,
@@ -58,6 +59,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
+    DecodeQIntOperation,
     DictGetItemOperation,
     ReturnQuantumArrayElementOperation,
     StoreArrayElementOperation,
@@ -1338,6 +1340,36 @@ def _decode_decode_qfixed(
     )
 
 
+def _decode_measure_qint(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> MeasureQIntOperation:
+    """Decode :class:`MeasureQIntOperation`.
+
+    Args:
+        d (dict[str, Any]): The operation dictionary.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        MeasureQIntOperation: The reconstructed operation.
+    """
+    operands, results = _operands_results(d, ctx)
+    return MeasureQIntOperation(operands=operands, results=results)
+
+
+def _decode_decode_qint(d: dict[str, Any], ctx: _DecodeContext) -> DecodeQIntOperation:
+    """Decode :class:`DecodeQIntOperation`.
+
+    Args:
+        d (dict[str, Any]): The operation dictionary.
+        ctx (_DecodeContext): The active decode context.
+
+    Returns:
+        DecodeQIntOperation: The reconstructed operation.
+    """
+    operands, results = _operands_results(d, ctx)
+    return DecodeQIntOperation(operands=operands, results=results)
+
+
 def _decode_store_array_element(
     d: dict[str, Any], ctx: _DecodeContext
 ) -> StoreArrayElementOperation:
@@ -2228,7 +2260,7 @@ def _decode_callable_implementation(
         raise ValueError("CallableImplementation attrs must decode to a dict")
     return CallableImplementation(
         transform=_enum_by_name(CallTransform, d.get("transform"), "CallTransform"),
-        backend=d.get("backend"),
+        engine=d.get("engine"),
         strategy=d.get("strategy"),
         body=(_decode_block(d["body"], ctx) if d.get("body") is not None else None),
         body_ref=_decode_callable_body_ref(d.get("body_ref")),
@@ -2451,6 +2483,8 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "MeasureVectorOperation": _decode_measure_vector,
     "MeasureQFixedOperation": _decode_measure_qfixed,
     "DecodeQFixedOperation": _decode_decode_qfixed,
+    "MeasureQIntOperation": _decode_measure_qint,
+    "DecodeQIntOperation": _decode_decode_qint,
     "DictGetItemOperation": _decode_dict_getitem,
     "StoreArrayElementOperation": _decode_store_array_element,
     "ReturnQuantumArrayElementOperation": _decode_return_quantum_array_element,

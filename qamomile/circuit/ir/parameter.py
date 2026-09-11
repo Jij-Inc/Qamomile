@@ -47,7 +47,7 @@ class ParamKind(enum.Enum):
 
     Values:
         RUNTIME_PARAMETER: The argument is intended to be bound at
-            execution time by the backend (or, more generally, by the
+            execution time by the engine (or, more generally, by the
             outer caller in a hybrid loop). It survives the
             compilation pipeline as a symbolic parameter.
         COMPILE_TIME_BOUND: The argument was provided as a binding

@@ -325,10 +325,10 @@ class TestValidation:
 #
 # The Suzuki-Trotter sequencing lives in the @qkernel and is lowered by
 # the standard ``pauli_evolve`` emitter (CNOT ladder + RZ phase gadget)
-# that every backend inherits.  The tests below pin down that the same
+# that every engine inherits.  The tests below pin down that the same
 # kernel produces physically identical circuits across supported SDKs:
 #
-#   * Qiskit       — native ``pauli_evolve`` backend.
+#   * Qiskit       — native ``pauli_evolve`` engine.
 #   * QURI Parts   — consumes the default decomposition.
 #   * CUDA-Q       — emits a Python ``@cudaq.kernel`` source artifact.
 #   * Amazon Braket — emits primitive Pauli phase gadgets.
@@ -368,7 +368,7 @@ def _braket_statevector(braket_circuit: Any) -> np.ndarray:
 
     Returns:
         np.ndarray: Statevector in the little-endian convention used by the
-        other backend helpers.
+        other engine helpers.
     """
     from braket.devices import LocalSimulator
 
@@ -378,28 +378,28 @@ def _braket_statevector(braket_circuit: Any) -> np.ndarray:
     return state.reshape((2,) * braket_circuit.qubit_count).transpose(axes).reshape(-1)
 
 
-def _backend_statevector(sdk_transpiler: Any, circuit: Any) -> np.ndarray:
-    """Simulate one emitted circuit with its owning backend.
+def _engine_statevector(sdk_transpiler: Any, circuit: Any) -> np.ndarray:
+    """Simulate one emitted circuit with its owning engine.
 
     Args:
-        sdk_transpiler (Any): Supported backend fixture case.
-        circuit (Any): Backend circuit artifact.
+        sdk_transpiler (Any): Supported engine fixture case.
+        circuit (Any): Engine circuit artifact.
 
     Returns:
-        np.ndarray: Backend statevector.
+        np.ndarray: Engine statevector.
 
     Raises:
-        AssertionError: If the fixture identifies an unsupported backend.
+        AssertionError: If the fixture identifies an unsupported engine.
     """
-    if sdk_transpiler.backend_name == "qiskit":
+    if sdk_transpiler.engine_name == "qiskit":
         return _statevector(circuit)
-    if sdk_transpiler.backend_name == "quri_parts":
+    if sdk_transpiler.engine_name == "quri_parts":
         return _qulacs_statevector_from_quri_parts(circuit)
-    if sdk_transpiler.backend_name == "cudaq":
+    if sdk_transpiler.engine_name == "cudaq":
         return _cudaq_statevector(circuit)
-    if sdk_transpiler.backend_name == "braket":
+    if sdk_transpiler.engine_name == "braket":
         return _braket_statevector(circuit)
-    raise AssertionError(f"Unsupported backend {sdk_transpiler.backend_name!r}")
+    raise AssertionError(f"Unsupported engine {sdk_transpiler.engine_name!r}")
 
 
 def _pauli_evolution_count_qiskit(qc: Any) -> int:
@@ -442,7 +442,7 @@ def _exp_pauli_count_cudaq(cudaq_circuit: Any) -> int:
     """Count ``exp_pauli(`` call sites in the CUDA-Q kernel source.
 
     CUDA-Q lowers each ``pauli_evolve`` term to a native ``exp_pauli``
-    rather than a gate gadget. The cross-backend per-step invariant is one
+    rather than a gate gadget. The cross-engine per-step invariant is one
     high-level evolution operation per formula term: ``PauliEvolutionGate``
     in Qiskit, ``PauliRotation`` in QURI Parts, and ``exp_pauli`` in CUDA-Q.
 
@@ -455,11 +455,11 @@ def _exp_pauli_count_cudaq(cudaq_circuit: Any) -> int:
     return cudaq_circuit.source.count("exp_pauli(")
 
 
-class TestCrossBackendCompilation:
+class TestCrossEngineCompilation:
     """Trotter kernel transpiles across every available SDK.
 
     Per-step semantic evolution count is formula-dependent and must agree
-    between backends: order=1 emits one operation per term, order=2 uses the
+    between engines: order=1 emits one operation per term, order=2 uses the
     merged palindrome (three operations for two terms), and higher orders
     unfold recursively through the product-formula construction.
     """
@@ -469,7 +469,7 @@ class TestCrossBackendCompilation:
 
     @pytest.mark.parametrize("order", [1, 2, 4])
     def test_native_evolution_count(self, sdk_transpiler: Any, order: int) -> None:
-        """Every backend emits one native phase rotation per formula term."""
+        """Every engine emits one native phase rotation per formula term."""
         exe = sdk_transpiler.transpiler.transpile(
             _rabi_trotter,
             bindings={
@@ -481,17 +481,17 @@ class TestCrossBackendCompilation:
         )
         circuit = exe.compiled_quantum[0].circuit
         expected = self._EXPECTED_EVOLUTIONS_PER_STEP[order]
-        if sdk_transpiler.backend_name == "qiskit":
+        if sdk_transpiler.engine_name == "qiskit":
             assert circuit.num_qubits == 1
             assert _pauli_evolution_count_qiskit(circuit) == expected
-        elif sdk_transpiler.backend_name == "quri_parts":
+        elif sdk_transpiler.engine_name == "quri_parts":
             assert circuit.qubit_count == 1
             assert _pauli_rotation_count_quri_parts(circuit) == expected
-        elif sdk_transpiler.backend_name == "cudaq":
+        elif sdk_transpiler.engine_name == "cudaq":
             assert circuit.num_qubits == 1
             assert _exp_pauli_count_cudaq(circuit) == expected
         else:
-            assert sdk_transpiler.backend_name == "braket"
+            assert sdk_transpiler.engine_name == "braket"
             assert circuit.qubit_count == 1
             assert (
                 sum(
@@ -502,20 +502,20 @@ class TestCrossBackendCompilation:
             )
 
 
-class TestCrossBackendStatevector:
+class TestCrossEngineStatevector:
     """Every SDK must reproduce the exact state to within Trotter error.
 
     For a symmetric S_4 step with 8 Trotter slices on the Rabi
     Hamiltonian, the fidelity error drops below 1e-10 in double
     precision — deep enough that any SDK-specific rotation-sign or
-    gate-ordering bug surfaces as a cross-backend mismatch.
+    gate-ordering bug surfaces as a cross-engine mismatch.
     """
 
     _STEP = 8
     _TOLERANCE = 1e-10
 
     def test_matches_exact_propagator(self, sdk_transpiler: Any) -> None:
-        """Each selected backend reproduces the exact one-qubit propagator."""
+        """Each selected engine reproduces the exact one-qubit propagator."""
         exe = sdk_transpiler.transpiler.transpile(
             _rabi_trotter,
             bindings={
@@ -525,7 +525,7 @@ class TestCrossBackendStatevector:
                 "step": self._STEP,
             },
         )
-        sv = _backend_statevector(
+        sv = _engine_statevector(
             sdk_transpiler,
             exe.compiled_quantum[0].circuit,
         )
@@ -539,7 +539,7 @@ class TestCrossBackendStatevector:
 # ``sample()`` counts are the end-to-end observable: a mistake anywhere
 # in the pipeline (parameter binding, emitter sign, classical readout)
 # shifts the observed |0> / |1> ratio.  We use a scalar-Bit wrapper so
-# that the sampling backend reports concrete 0/1 values (measuring a
+# that the sampling engine reports concrete 0/1 values (measuring a
 # one-element ``Vector[Qubit]`` currently yields ``value=None`` in the
 # sample result, independent of this module).
 # -----------------------------------------------------------------------
@@ -558,13 +558,13 @@ def _rabi_trotter_scalar_bit(
     return qmc.measure(q[0])
 
 
-class TestCrossBackendDistribution:
+class TestCrossEngineDistribution:
     """Observed sample distribution matches the exact Born probabilities.
 
     A well-converged Trotter circuit on a single qubit must reproduce
     ``|<1|psi>|^2`` within a few standard deviations of the binomial
     error.  ``STD_TOLERANCE`` is deliberately wide (5 sigma) so the
-    test does not flake in CI; a genuine backend bug moves the mean by
+    test does not flake in CI; a genuine engine bug moves the mean by
     orders of magnitude, not by fractions of a sigma.
     """
 
@@ -603,8 +603,8 @@ class TestCrossBackendDistribution:
             f"std = {std:.4f}"
         )
 
-    def test_selected_backend(self, sdk_transpiler: Any) -> None:
-        """The selected backend's samples match the exact Born probabilities."""
+    def test_selected_engine(self, sdk_transpiler: Any) -> None:
+        """The selected engine's samples match the exact Born probabilities."""
         n0, n1 = self._sample(sdk_transpiler.transpiler)
         self._assert_matches_exact(n0, n1)
 
@@ -688,8 +688,8 @@ def _rabi_trotter_2q(
 class TestRandomHamiltonianConvergence:
     """Fidelity against the exact propagator on a random 2-qubit Hamiltonian."""
 
-    def test_selected_backend_converges(self, sdk_transpiler: Any) -> None:
-        """Each backend matches a representative exact two-qubit evolution."""
+    def test_selected_engine_converges(self, sdk_transpiler: Any) -> None:
+        """Each engine matches a representative exact two-qubit evolution."""
         hs, mat = _random_two_part_hamiltonian()
         exact = expm(-1j * _RANDOM_T * mat) @ np.array(
             [1.0, 0.0, 0.0, 0.0], dtype=complex
@@ -703,12 +703,12 @@ class TestRandomHamiltonianConvergence:
                 "step": 16,
             },
         )
-        state = _backend_statevector(
+        state = _engine_statevector(
             sdk_transpiler,
             exe.compiled_quantum[0].circuit,
         )
         state = state.reshape((2,) * _RANDOM_N_QUBITS).transpose().reshape(-1)
         overlap = abs(np.vdot(exact, state))
         assert 1.0 - overlap < 1e-7, (
-            f"{sdk_transpiler.backend_name} overlap {overlap:.15f}"
+            f"{sdk_transpiler.engine_name} overlap {overlap:.15f}"
         )

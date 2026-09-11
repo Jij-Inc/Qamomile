@@ -1,4 +1,4 @@
-"""Rich Qiskit frontend-to-backend test suite.
+"""Rich Qiskit frontend-to-engine test suite.
 
 Tests the full pipeline: @qkernel definition -> QiskitTranspiler -> execution.
 Covers every frontend gate, gate combinations, control flow, transpiler passes,
@@ -4694,7 +4694,7 @@ class TestTranspilerPassesPipeline:
         assert any(isinstance(s, QuantumStep) for s in separated.steps)
 
     def test_emit(self, transpiler):
-        """emit() generates backend-specific circuit."""
+        """emit() generates engine-specific circuit."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -4980,7 +4980,7 @@ class TestTranspilerConfigAndSubstitution:
         assert exe.get_first_circuit() is exe.quantum_circuit
 
     def test_to_circuit_convenience_method(self):
-        """to_circuit() convenience method returns backend circuit directly."""
+        """to_circuit() convenience method returns engine circuit directly."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:

@@ -2,7 +2,7 @@
 
 These tests cover the frontend behaviour (length, indexing, nesting,
 borrow tracking, error cases) and the end-to-end execution path on every
-supported quantum SDK backend for the canonical alternating-qubit
+supported quantum SDK engine for the canonical alternating-qubit
 pattern — the use case the slicing feature was introduced to support.
 """
 
@@ -66,12 +66,12 @@ def _slice_array(
 
 
 # ---------------------------------------------------------------------------
-# Frontend-only behavioural tests (no backend required)
+# Frontend-only behavioural tests (no engine required)
 # ---------------------------------------------------------------------------
 
 
 class TestVectorViewFrontend:
-    """Behaviour that should hold regardless of any backend being installed."""
+    """Behaviour that should hold regardless of any engine being installed."""
 
     def test_slice_returns_vector_view_with_block(self):
         """Slicing a Vector inside a qkernel produces a VectorView handle."""
@@ -251,7 +251,7 @@ class TestVectorViewFrontend:
 
 
 # ---------------------------------------------------------------------------
-# Cross-backend execution tests for the alternating-qubit pattern
+# Cross-engine execution tests for the alternating-qubit pattern
 # ---------------------------------------------------------------------------
 
 
@@ -262,11 +262,11 @@ class TestVectorViewFrontend:
         pytest.param("cudaq", marks=pytest.mark.cudaq),
     ]
 )
-def backend(request):
-    """Yield ``(transpiler, executor)`` for each installed backend.
+def engine(request):
+    """Yield ``(transpiler, executor)`` for each installed engine.
 
     Tests parametrized over this fixture run independently on each
-    backend and are skipped when the corresponding SDK is not
+    engine and are skipped when the corresponding SDK is not
     installed.
     """
     name = request.param
@@ -288,7 +288,7 @@ def backend(request):
 
         transpiler = CudaqTranspiler()
         return name, transpiler, transpiler.executor()
-    raise AssertionError(f"unknown backend {name}")
+    raise AssertionError(f"unknown engine {name}")
 
 
 # -- Sampling path ----------------------------------------------------------
@@ -296,15 +296,15 @@ def backend(request):
 
 @pytest.mark.parametrize("seed", [0, 1, 42])
 @pytest.mark.parametrize("n", [2, 3, 4, 5, 6, 7])
-def test_slice_even_hadamard_sampling(backend, seed, n):
-    """``q[0::2]`` + H hits exactly the even qubits across every backend.
+def test_slice_even_hadamard_sampling(engine, seed, n):
+    """``q[0::2]`` + H hits exactly the even qubits across every engine.
 
     Applies H on ``q[0::2]`` only, leaving the odd qubits in |0>.  After
     measurement every odd bit must be 0; the even bits are uniformly
     random.  Parametrized over register sizes and seeds so the assertion
     holds for varied shapes.
     """
-    name, transpiler, executor = backend
+    name, transpiler, executor = engine
     rng = np.random.default_rng(seed)
     del rng  # reserved for future randomised variants; keep the plumbing
 
@@ -321,7 +321,7 @@ def test_slice_even_hadamard_sampling(backend, seed, n):
     job = exe.sample(executor, shots=1024)
     result = job.result()
 
-    # Normalise across backend result shapes: results is iterable of
+    # Normalise across engine result shapes: results is iterable of
     # (bits, count) where ``bits`` is a tuple of 0/1 in little-endian
     # kernel-order, matching the Vector indexing convention.
     total = 0
@@ -338,7 +338,7 @@ def test_slice_even_hadamard_sampling(backend, seed, n):
 
 @pytest.mark.parametrize("seed", [0, 1, 42])
 @pytest.mark.parametrize("n_pairs", [1, 2, 3])
-def test_slice_xy_brick_sampling(backend, seed, n_pairs):
+def test_slice_xy_brick_sampling(engine, seed, n_pairs):
     """Alternating CX on even/odd pairs produces perfect Bell-like pairs.
 
     This is the XY-mixer-style construction from the Alternating Operator
@@ -347,7 +347,7 @@ def test_slice_xy_brick_sampling(backend, seed, n_pairs):
     ``(|00> + |11>)/sqrt(2)``, so every measured outcome must have
     ``bits[2i] == bits[2i+1]`` — independent of the random seed.
     """
-    name, transpiler, executor = backend
+    name, transpiler, executor = engine
     rng = np.random.default_rng(seed)
     del rng
 
@@ -388,7 +388,7 @@ def test_slice_xy_brick_sampling(backend, seed, n_pairs):
 
 @pytest.mark.parametrize("seed", [0, 1, 2, 42])
 @pytest.mark.parametrize("n", [2, 3, 4])
-def test_slice_even_rx_expval(backend, seed, n):
+def test_slice_even_rx_expval(engine, seed, n):
     """``<Z_k>`` on an RX-even-only circuit matches ``cos(theta)`` or ``1``.
 
     Apply ``rx(theta)`` to ``q[0::2]``, leave odd qubits alone, then
@@ -397,13 +397,13 @@ def test_slice_even_rx_expval(backend, seed, n):
     Randomised over ``theta`` and varied over ``n`` and ``target`` so the
     test covers a spread of shapes.
     """
-    name, transpiler, executor = backend
+    name, transpiler, executor = engine
     rng = np.random.default_rng(seed)
     theta = float(rng.uniform(-np.pi, np.pi))
 
     for target in range(n):
         expected = np.cos(theta) if target % 2 == 0 else 1.0
-        # Pad the observable to span the whole register so every backend's
+        # Pad the observable to span the whole register so every engine's
         # estimator sees a matching num_qubits.
         H = qm_o.Z(target) + 0.0 * qm_o.Z(n - 1)
 
@@ -2775,7 +2775,7 @@ class TestWholeViewEmit:
         assert qc.num_qubits == 4
 
         # The controlled gate should touch exactly physical qubits {1, 3}.
-        # Names are backend-dependent (``ccircuit-N`` etc.); filter by
+        # Names are engine-dependent (``ccircuit-N`` etc.); filter by
         # non-measure and expect 2-qubit instruction spanning {1, 3}.
         controlled_qubits: set[int] = set()
         for inst in qc.data:
@@ -2796,7 +2796,7 @@ class TestWholeViewEmit:
         ``qubit_map`` is empty, ``remap_qubits`` returns ``self``
         verbatim, so the user's ``H`` got poisoned to the first
         circuit's width and subsequent runs with smaller circuits
-        crashed inside the backend estimator.  The fix clones the
+        crashed inside the engine estimator.  The fix clones the
         Hamiltonian before padding ``_num_qubits``.
         """
         pytest.importorskip("qiskit")

@@ -822,12 +822,12 @@ def _executor(case: Any) -> Any:
     """Return a local simulator executor for one SDK fixture case.
 
     Args:
-        case (Any): Fixture carrying a backend name and transpiler.
+        case (Any): Fixture carrying an engine name and transpiler.
 
     Returns:
-        Any: Backend-specific local executor.
+        Any: Engine-specific local executor.
     """
-    if case.backend_name == "qiskit":
+    if case.engine_name == "qiskit":
         from qiskit.providers.basic_provider import BasicSimulator
 
         return case.transpiler.executor(backend=BasicSimulator())
@@ -1841,7 +1841,7 @@ def test_same_serialized_payload_rebinds_expval_on_every_sdk(
             bindings={"encoding": encoding, "observable": qm_o.Z(0)},
         )
         expval = expval_executable.run(executor).result()
-        tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+        tolerance = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
         assert float(expval) == pytest.approx(expected_expval, abs=tolerance)
 
 
@@ -1861,7 +1861,7 @@ def test_serialized_tuple_expval_executes_on_every_sdk(
     )
 
     observed = float(executable.run(_executor(sdk_transpiler)).result())
-    tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    tolerance = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed == pytest.approx(-1.0, abs=tolerance)
 
 
@@ -1978,7 +1978,7 @@ def test_serialized_complex_transforms_execute_on_every_sdk(
         bindings={"encoding": encoding, "observable": qm_o.Y(0)},
     )
     observed_expval = float(expval_executable.run(executor).result())
-    expval_tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    expval_tolerance = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed_expval == pytest.approx(expected_expval, abs=expval_tolerance)
 
 
@@ -2072,7 +2072,7 @@ def test_serialized_recursive_lcu_transforms_execute_on_every_sdk(
         bindings={"encoding": encoding, "observable": qm_o.Y(0)},
     )
     observed_expval = float(expval_executable.run(executor).result())
-    expval_tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    expval_tolerance = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed_expval == pytest.approx(expected_expval, abs=expval_tolerance)
 
 

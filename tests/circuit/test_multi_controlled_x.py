@@ -1,4 +1,4 @@
-"""Cross-backend execution tests for the semantic multi-controlled X."""
+"""Cross-engine execution tests for the semantic multi-controlled X."""
 
 from __future__ import annotations
 
@@ -81,7 +81,7 @@ def _mcx_expval(
 
 @pytest.mark.parametrize("size,seed", [(1, 0), (2, 1), (3, 2), (5, 42)])
 @pytest.mark.parametrize("all_enabled", [False, True])
-def test_multi_controlled_x_cross_backend(
+def test_multi_controlled_x_cross_engine(
     sdk_transpiler: Any,
     size: int,
     seed: int,
@@ -111,7 +111,7 @@ def test_multi_controlled_x_cross_backend(
         .result()
     )
     expected = -1.0 if all_enabled else 1.0
-    tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    tolerance = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert np.isclose(actual, expected, atol=tolerance)
 
 

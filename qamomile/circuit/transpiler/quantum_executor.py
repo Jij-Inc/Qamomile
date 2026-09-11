@@ -72,7 +72,7 @@ from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
 if TYPE_CHECKING:
     import qamomile.observable as qm_o
 
-T = TypeVar("T")  # Backend circuit type
+T = TypeVar("T")  # Engine circuit type
 
 
 class QuantumExecutor(ABC, Generic[T]):
@@ -109,7 +109,7 @@ class QuantumExecutor(ABC, Generic[T]):
 
     Example (With Parameter Binding):
         def bind_parameters(self, circuit, bindings, metadata):
-            # metadata.to_binding_dict() converts indexed names to backend params
+            # metadata.to_binding_dict() converts indexed names to engine params
             return circuit.assign_parameters(metadata.to_binding_dict(bindings))
     """
 
@@ -228,7 +228,7 @@ class QuantumExecutor(ABC, Generic[T]):
 
         Args:
             invocation (CircuitInvocation[T]): Circuit, flattened bindings,
-                and backend parameter metadata.
+                and engine parameter metadata.
 
         Returns:
             T: Bound circuit, or the original circuit when it has no runtime

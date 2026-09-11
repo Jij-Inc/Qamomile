@@ -1,7 +1,7 @@
 """Handle type system: user-facing typed wrappers around IR ``Value``s.
 
 Handles are what qkernel code manipulates: quantum primitives (``Qubit``,
-``QFixed``), classical scalars (``UInt``, ``Float``, ``Bit``), arrays
+``QInt``, ``QFixed``), classical scalars (``UInt``, ``Float``, ``Bit``), arrays
 (``Vector``, ``VectorView``, ``Matrix``, ``Tensor``), structural
 containers (``Tuple``, ``Dict``), and ``Observable`` (Hamiltonian). Each
 handle wraps one IR ``Value`` and forwards Python operators (arithmetic,
@@ -17,7 +17,7 @@ Design constraints:
   compile-time constants; otherwise a symbolic ``BinOp`` / ``CompOp`` is
   traced for ``partial_eval`` to resolve later.
 - Handles are trace-time objects only — they never survive into the
-  transpiled program and carry no backend or layout information. The IR
+  transpiled program and carry no engine or layout information. The IR
   ``Value`` (with its type and metadata) is the durable representation.
 """
 
@@ -25,12 +25,13 @@ from .array import Matrix, Tensor, Vector, VectorView
 from .containers import Dict, Tuple
 from .hamiltonian import Observable
 from .handle import Handle
-from .primitives import Bit, Float, QFixed, Qubit, UInt
+from .primitives import Bit, Float, QFixed, QInt, Qubit, UInt
 from .utils import get_size
 
 __all__ = [
     "Handle",
     "Qubit",
+    "QInt",
     "QFixed",
     "UInt",
     "Float",

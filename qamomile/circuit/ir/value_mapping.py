@@ -7,6 +7,7 @@ from typing import Any, Mapping, cast
 
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.cast import CastOperation
+from qamomile.circuit.ir.types import QUIntType
 from qamomile.circuit.ir.value import (
     ArrayRuntimeMetadata,
     ArrayValue,
@@ -174,7 +175,7 @@ class ValueSubstitutor:
             resolved = resolve_root_array_index(mapped, int(suffix))
             if resolved is None:
                 raise ValueError(
-                    "Cannot remap a QFixed carrier key onto a slice view with "
+                    "Cannot remap a packed-register carrier key onto a slice view with "
                     "symbolic slice bounds: the carrier index cannot be folded "
                     "into root-array space, so the measurement would be "
                     "silently dropped at emit. Use literal-bounded slicing for "
@@ -520,11 +521,11 @@ class ValueSubstitutor:
         return value
 
     def _substitute_value_fields(self, value: Value) -> ValueBase:
-        """Substitute metadata fields on a scalar or array value.
+        """Substitute metadata and packed-integer widths on a value.
 
         Args:
-            value (Value): Value whose parent, index, shape, and slice
-                metadata should be inspected.
+            value (Value): Value whose parent, index, shape, slice metadata,
+                and QInt width should be inspected.
 
         Returns:
             ValueBase: Rebuilt value when any field changes; otherwise the
@@ -533,7 +534,14 @@ class ValueSubstitutor:
         new_parent_array = value.parent_array
         new_element_indices = value.element_indices
         new_shape: tuple[Value, ...] | None = None
+        new_type = value.type
         changed = False
+
+        if isinstance(value.type, QUIntType) and isinstance(value.type.width, Value):
+            width = self.substitute_value(value.type.width)
+            if isinstance(width, Value) and width is not value.type.width:
+                new_type = dataclasses.replace(value.type, width=width)
+                changed = True
 
         if value.parent_array is not None:
             sub_parent = self.substitute_value(value.parent_array)
@@ -608,6 +616,7 @@ class ValueSubstitutor:
         if changed:
             if isinstance(value, ArrayValue):
                 replace_kwargs: dict[str, Any] = dict(
+                    type=new_type,
                     parent_array=new_parent_array,
                     element_indices=new_element_indices,
                 )
@@ -621,6 +630,7 @@ class ValueSubstitutor:
                 return dataclasses.replace(value, **replace_kwargs)
             return dataclasses.replace(
                 value,
+                type=new_type,
                 parent_array=new_parent_array,
                 element_indices=new_element_indices,
                 metadata=new_metadata,

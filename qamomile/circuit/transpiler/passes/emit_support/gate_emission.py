@@ -40,15 +40,15 @@ def reject_duplicate_physical_indices(
     indices — ``cx(qs[i], qs[j])`` where ``i == j`` only at runtime, or two
     loop-variable indices that coincide after unrolling — resolve to the same
     physical qubit only at emit time. Without this check the duplicate reaches
-    the backend as a raw, backend-specific failure (Qiskit ``CircuitError:
-    'duplicate qubit arguments'``, a CUDA-Q simulator crash, or — on a backend
+    the engine as a raw, engine-specific failure (Qiskit ``CircuitError:
+    'duplicate qubit arguments'``, a CUDA-Q simulator crash, or — on an engine
     that does not validate — a silently ill-defined gate). Raising a Qamomile
-    ``QubitAliasError`` gives one actionable, backend-independent diagnostic.
+    ``QubitAliasError`` gives one actionable, engine-independent diagnostic.
 
     This is the shared checker used both for native gates (``emit_gate`` via
     ``_reject_aliased_operands``) and for controlled / composite blocks (the
     ``append_gate`` sites in ``controlled_emission``), so the same diagnostic
-    covers every multi-qubit emission path on every backend.
+    covers every multi-qubit emission path on every engine.
 
     Args:
         gate_label (str): Human-readable name of the gate for the message
@@ -284,7 +284,7 @@ def _theta_is_param_array_element(
 ) -> bool:
     """True when theta is ``arr[idx]`` and ``arr`` is a declared parameter.
 
-    Used by ``resolve_angle`` to prioritise backend-parameter creation
+    Used by ``resolve_angle`` to prioritise engine-parameter creation
     over concrete binding lookup — users pass a concrete array for an
     array parameter as a shape hint, and those elements must remain
     symbolic for runtime binding.
@@ -312,7 +312,7 @@ def resolve_angle(
         bindings (dict[str, Any]): Active compile-time bindings.
 
     Returns:
-        float | Any: Concrete angle or backend parameter expression.
+        float | Any: Concrete angle or engine parameter expression.
 
     Raises:
         EmitError: If the rotation angle is missing or cannot be resolved.
@@ -325,24 +325,24 @@ def resolve_angle_value(
     theta: Any,
     bindings: dict[str, Any],
 ) -> float | Any:
-    """Resolve a bare angle Value to a concrete float or backend parameter.
+    """Resolve a bare angle Value to a concrete float or engine parameter.
 
     Shared core of :func:`resolve_angle` so operations carrying a standalone
     angle Value reuse the exact same resolution order as rotation-gate thetas.
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass providing the
-            resolver and backend-parameter factory.
+            resolver and engine-parameter factory.
         theta (Any): Angle ``Value`` to resolve.
         bindings (dict[str, Any]): Active compile-time bindings.
 
     Returns:
         float | Any: A concrete ``float`` when the angle is bound, or a
-            backend parameter expression when it stays symbolic.
+            engine parameter expression when it stays symbolic.
 
     Raises:
         EmitError: If the angle is missing or cannot be resolved to a concrete
-            value or backend parameter. Emitting ``0.0`` in this case would
+            value or engine parameter. Emitting ``0.0`` in this case would
             silently change the requested unitary.
     """
     if theta is None:
@@ -353,7 +353,7 @@ def resolve_angle_value(
 
     # Shape-hint fast path: if theta is an element of a declared
     # parameter array (``gamma[p]`` with ``parameters=['gamma']``),
-    # skip bindings lookup and go straight to backend parameter
+    # skip bindings lookup and go straight to engine parameter
     # creation. Otherwise the concrete shape-hint binding would
     # short-circuit the symbolic path.
     if _theta_is_param_array_element(theta, emit_pass._resolver.parameters):

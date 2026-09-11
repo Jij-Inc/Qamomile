@@ -1,6 +1,6 @@
 # Known Limitations
 
-This file collects known limitations of the Qamomile compiler. Unless a heading is explicitly marked **Maintainer debt** or **Internal / latent**, it describes a public unsupported or restricted behavior. Maintainer-debt entries describe architectural or typing costs that do not by themselves make a supported user program fail. Internal / latent entries document representation gaps whose current public reproduction is blocked by another earlier restriction. Each entry describes the affected shape, when it matters, why it remains, a workaround where one is available, and the intended direction for support.
+This file collects known limitations of the Qamomile compiler and execution adapters. Unless a heading is explicitly marked **Maintainer debt** or **Internal / latent**, it describes a public unsupported or restricted behavior. Maintainer-debt entries describe architectural or typing costs that do not by themselves make a supported user program fail. Internal / latent entries document representation gaps whose current public reproduction is blocked by another earlier restriction. Each entry describes the affected shape, when it matters, why it remains, a workaround where one is available, and the intended direction for support.
 
 ## Recursive LCU coefficients are construction-time constants
 
@@ -22,15 +22,15 @@ construct PREPARE amplitudes $\sqrt{|c_j|\alpha_j/\Lambda}$, and attach the rela
 
 ## Whole-QSVT native composite selection is not yet available
 
-`qmc.qsvt` currently emits its portable alternating sequence directly into the enclosing qkernel. The all-zero projector phase rotation is already a `NATIVE_FIRST` named composite, but the complete QSVT transformation has no preserved callable identity or target-capability key. A backend therefore cannot register and select a native implementation for the whole transformation; even if an SDK adds a native QSVT operation, Qamomile will continue to lower the call through the portable projector-rotation and block-encoding sequence.
+`qmc.qsvt` currently emits its portable alternating sequence directly into the enclosing qkernel. The all-zero projector phase rotation is already a `NATIVE_FIRST` named composite, but the complete QSVT transformation has no preserved callable identity or target-capability key. An engine therefore cannot register and select a native implementation for the whole transformation; even if an SDK adds a native QSVT operation, Qamomile will continue to lower the call through the portable projector-rotation and block-encoding sequence.
 
-**When it bites**: a target can implement the entire QSVT sequence more efficiently than the portable decomposition, or a user expects one retained QSVT operation that a backend can recognize, replace, estimate, or draw as a unit. The emitted sequence remains semantically correct, and targets may still optimize its primitive operations or provide native implementations for nested composites such as the projector rotation. The missing capability is whole-sequence native selection and fallback through one QSVT composite boundary, not QSVT execution itself.
+**When it bites**: a target can implement the entire QSVT sequence more efficiently than the portable decomposition, or a user expects one retained QSVT operation that an engine can recognize, replace, estimate, or draw as a unit. The emitted sequence remains semantically correct, and targets may still optimize its primitive operations or provide native implementations for nested composites such as the projector rotation. The missing capability is whole-sequence native selection and fallback through one QSVT composite boundary, not QSVT execution itself.
 
-**Why this trade-off was chosen**: the whole transformation is a higher-order composite whose body depends on the unresolved `LCUBlockEncoding.unitary`, a phase vector, and a compile-time-resolved phase count. `LCUBlockEncoding` reaches tracing as a static-binding proxy rather than an ordinary qkernel `Handle`, so the normal direct composite-call path cannot pass it as an operand. The public `phase_count: int | qmc.UInt | None` contract also requires host-side validation and normalization before a composite ABI can use a plain `qmc.UInt`. In addition, the clean projector auxiliary cannot be allocated as a hidden wire inside a reusable backend gate and must be allocated by an outer wrapper and passed explicitly. Ordinary retained calls already preserve differently named runtime-array actual/formal bindings by IR identity; that generic provenance is not the blocker here.
+**Why this trade-off was chosen**: the whole transformation is a higher-order composite whose body depends on the unresolved `LCUBlockEncoding.unitary`, a phase vector, and a compile-time-resolved phase count. `LCUBlockEncoding` reaches tracing as a static-binding proxy rather than an ordinary qkernel `Handle`, so the normal direct composite-call path cannot pass it as an operand. The public `phase_count: int | qmc.UInt | None` contract also requires host-side validation and normalization before a composite ABI can use a plain `qmc.UInt`. In addition, the clean projector auxiliary cannot be allocated as a hidden wire inside a reusable engine gate and must be allocated by an outer wrapper and passed explicitly. Ordinary retained calls already preserve differently named runtime-array actual/formal bindings by IR identity; that generic provenance is not the blocker here.
 
-**Workaround**: use `qmc.qsvt` and let every target execute the portable decomposition. Backend-specific post-processing may replace the materialized sequence outside Qamomile, but that gives up Qamomile's portable tracing, serialization, deserialization, and fallback contract and is not an equivalent native-composite hook.
+**Workaround**: use `qmc.qsvt` and let every target execute the portable decomposition. Engine-specific post-processing may replace the materialized sequence outside Qamomile, but that gives up Qamomile's portable tracing, serialization, deserialization, and fallback contract and is not an equivalent native-composite hook.
 
-**Future fix**: keep public `qmc.qsvt` as the validation and allocation wrapper, then define a private `NATIVE_FIRST` composite ABI that carries the static block-encoding descriptor identity, normalized phase count, runtime phase vector, and clean auxiliary explicitly, with the current portable body as fallback. Target capability declarations can then register whole-QSVT implementations while unsupported targets decompose the same serialized body. Regression coverage must include serialization round trips, differently named encoding and phase arguments, multiple encoding slots, runtime phases, native selection, portable fallback, and execution on every supported backend.
+**Future fix**: keep public `qmc.qsvt` as the validation and allocation wrapper, then define a private `NATIVE_FIRST` composite ABI that carries the static block-encoding descriptor identity, normalized phase count, runtime phase vector, and clean auxiliary explicitly, with the current portable body as fallback. Target capability declarations can then register whole-QSVT implementations while unsupported targets decompose the same serialized body. Regression coverage must include serialization round trips, differently named encoding and phase arguments, multiple encoding slots, runtime phases, native selection, portable fallback, and execution on every supported engine.
 
 ## The public resource estimator currently exposes only the logical algorithmic model
 
@@ -246,6 +246,70 @@ Element-granularity consumption (`if sel: _ = qmc.measure(qs[0])` followed by re
 
 **Future fix**: remove the executor-side lowering once Qiskit and Aer agree on a memory-safe representation for inverse-derived multiplexers, either by keeping the generic empty-parameter form away from Aer-native basis instructions or by having Aer reject/decompose it through the gate definition instead of entering native assembly.
 
+## IBM Runtime execution does not expose every native primitive feature
+
+These restrictions concern the IBM Runtime path of `QiskitExecutor`, not its default local Aer path or IBM hardware instruction support. Ordinary sampling, scalar Hamiltonian expectations, asynchronous execution, cancellation, and restoration with an available service are supported. Error mitigation, dynamical decoupling, and other compatible Runtime options can be supplied through `QiskitExecutionOptions`; the result-format restrictions below still apply. Fixed `for` loops are unrolled when the target does not advertise `for_loop`.
+
+### Expectation requests reject the shared shot-based accuracy policy
+
+**When it bites**: an expectation request uses `ShotBased(...)`, which the Braket executor accepts for QPUs. The Runtime adapter accepts only `TargetPrecision` or an omitted accuracy policy and raises `NotImplementedError` for `ShotBased`. Sampling still accepts an explicit shot count.
+
+**Current cause**: `_RuntimeExecutor.submit_estimate()` maps the shared accuracy policy only to EstimatorV2's `precision` argument; it has no per-request shot-policy mapping.
+
+**Workaround**: use `TargetPrecision`, or configure `QiskitExecutionOptions(estimator_options={"default_shots": 1024})` and omit request accuracy. IBM's setting is per circuit per configuration, not a total Hamiltonian shot budget; explicit precision and twirling settings can take precedence. This does not provide the same per-request contract as Braket's `ShotBased`.
+
+**Future fix**: define and implement the Runtime mapping for `ShotBased`, including its interaction with precision, measurement configurations, and twirling, without changing shared executor options when a single request overrides accuracy.
+
+### Parameter values are bound before every hardware compilation
+
+**When it bites**: VQE iterations or parameter sweeps reuse a Qamomile executable with different runtime values. They can execute, but each nontrivial quantum submission binds those values and runs the hardware pass manager again. The adapter does not reuse a parameterized ISA circuit across values.
+
+**Current cause**: `bind_invocation()` precedes `_compile()`, which rejects remaining parameters. The Runtime call receives a concrete circuit instead of a parameterized circuit with separate values. Braket's adapter already passes supported native parameter inputs separately through `inputs`.
+
+**Workaround**: keep using the executable for individual evaluations and accept the repeated compilation, or manage parameterized ISA compilation and submission directly with the IBM SDK.
+
+**Future fix**: preserve native parameters through hardware compilation and reuse the compiled circuit and observable layout when only runtime values change, with invalidation when the circuit, target, or compilation settings change.
+
+### Multiple circuits, observables, and parameter sets are not packed into one Runtime job
+
+**When it bites**: a caller wants a vectorized sweep, several independent observable expectations, or multiple circuits in one native job. IBM primitives accept multiple PUBs (Primitive Unified Blocs) and parameter arrays, but the adapter sends one scalar PUB per quantum request. The inherited `submit_samples()` and `submit_estimates()` methods submit requests individually. One Hamiltonian may still contain many Pauli terms; those terms are already passed together to EstimatorV2.
+
+**Current cause**: submission and decoding assume a single circuit invocation and scalar expectation or counts result. The Runtime adapter does not override the shared collection submission methods to pack requests.
+
+**Workaround**: evaluate requests individually, optionally in a caller-owned Runtime `Batch` or `Session`, or use the SDK directly for native PUB packing. Runtime `Batch` groups jobs and is distinct from packing multiple PUBs into one job. Braket's native batching of term circuits during expectation evaluation is also not a general guarantee that all shared collection requests are packed.
+
+**Future fix**: add native collection submission and parameter sweeps while preserving result ordering, shapes, cancellation, and restoration semantics.
+
+### Standard results omit uncertainty, mitigation diagnostics, and shot order
+
+**When it bites**: a caller needs Estimator standard errors, ZNE noise-factor results, PUB metadata, or Sampler bitstrings in their original shot order. `_expectation_value()` retains only a scalar `float` from `data.evs`; `_sample_counts()` aggregates classified bitstrings into counts. Job metadata exposes provider metrics rather than the full primitive result.
+
+**Current cause**: the shared execution result contract represents expectations as floats and sampling as counts, without typed fields for these native details.
+
+**Workaround**: inspect the underlying SDK job through `job.native` (a tuple of native handles for composite jobs) and retrieve its primitive result. This requires provider-specific result handling; the standard Qamomile result has already discarded those details.
+
+**Future fix**: expose optional structured uncertainty, diagnostics, and shot data while preserving existing scalar and counts workflows.
+
+### IQ measurement modes are incompatible with sampling result decoding
+
+**When it bites**: Runtime sampler options select `execution.meas_type="kerneled"` or `"avg_kerneled"`. Those modes return complex IQ arrays, but `_sample_counts()` requires classified `BitArray` data and raises `TypeError`. Accepting the options does not mean Qamomile can decode the resulting job.
+
+**Current cause**: the sampler decoder implements only classified bit counts; it has no IQ result contract or conversion.
+
+**Workaround**: retain the default `"classified"` mode for Qamomile sampling, or retrieve IQ results through the underlying SDK job and handle them separately.
+
+**Future fix**: introduce an explicit IQ result path, or reject incompatible measurement modes before submitting a job until such a path exists.
+
+### Named-device construction does not manage Session or Batch lifetimes
+
+**When it bites**: a caller wants to create and manage a Runtime `Session` or `Batch` using only a device name, API key, and instance CRN. The named-backend constructor rejects `mode`; it does not create or close these execution contexts.
+
+**Current cause**: execution contexts are caller-owned SDK objects, accepted through `mode` only alongside a backend object.
+
+**Workaround**: create the backend and `Session` or `Batch` with the IBM SDK, then pass `backend=backend_object` and `mode=context` to `QiskitExecutor`. Session and Batch execution are supported through this route, subject to IBM account and service availability.
+
+**Future fix**: add Qamomile-owned context configuration with explicit lifetime and cleanup semantics for the named-device workflow.
+
 ## Symbolic control widths support only the all-ones activation pattern
 
 When `qmc.control(..., num_controls=width)` receives a qkernel `UInt` as `width`, the controlled operation can activate only when every control qubit is `|1>`. A non-default `control_value` requires a concrete control count. The same restriction applies when nested controlled operations are flattened and their combined width remains symbolic: every control group must use the ordinary all-ones pattern. Opaque `Oracle` transforms are stricter and do not currently accept a symbolic `num_controls` at all.
@@ -264,11 +328,11 @@ An opaque `Oracle` declared with one `Vector[Qubit]` target operand can be calle
 
 **When it bites**: an application declares an Oracle with `CallableSignature(inputs=[Vector[Qubit]], outputs=[Vector[Qubit]])` and then calls `qmc.control(oracle, ...)`, or declares `num_control_qubits > 0` and tries to use the Oracle's vector call form. Added control is rejected while composing the transform with `TypeError`; a direct vector call on an Oracle that declares controls raises `ValueError` because that call form has no separate control argument.
 
-**Why this trade-off was chosen**: controlled scalar Oracles currently use the positional calling convention `[added controls][definition-declared controls][scalar targets]`. A vector Oracle instead consumes and returns one array value. The mixed form `[added controls][definition-declared controls][vector target]` has not yet been implemented consistently across frontend ownership transfer, control metadata and activation-value ordering, IR signature validation, serialization, resource estimation, and backend emission. Guessing this layout at only one stage could misclassify a target as a control, lose ownership of the returned vector, or make the emitted circuit disagree with its stored signature.
+**Why this trade-off was chosen**: controlled scalar Oracles currently use the positional calling convention `[added controls][definition-declared controls][scalar targets]`. A vector Oracle instead consumes and returns one array value. The mixed form `[added controls][definition-declared controls][vector target]` has not yet been implemented consistently across frontend ownership transfer, control metadata and activation-value ordering, IR signature validation, serialization, resource estimation, and engine emission. Guessing this layout at only one stage could misclassify a target as a control, lose ownership of the returned vector, or make the emitted circuit disagree with its stored signature.
 
 **Workaround**: when the Oracle width is known, declare it with concrete `num_qubits` and use the scalar call form, passing each target qubit positionally after the controls. Otherwise, call or invert the vector-signature Oracle without coherent controls. A body-backed qkernel can use the separate controlled-vector qkernel path when the vector operation can be represented explicitly.
 
-**Future fix**: define the mixed Oracle calling convention explicitly as `[added controls][definition-declared controls][vector target]`, with results in the same group order. Then implement control-pattern partitioning, `Vector` and `VectorView` ownership transfer, dynamic target-width validation, serialization, resource projection, and emission for every backend as one cross-layer change.
+**Future fix**: define the mixed Oracle calling convention explicitly as `[added controls][definition-declared controls][vector target]`, with results in the same group order. Then implement control-pattern partitioning, `Vector` and `VectorView` ownership transfer, dynamic target-width validation, serialization, resource projection, and emission for every engine as one cross-layer change.
 
 ## `qmc.control` rejects a self-recursive qkernel before the fixed-point loop can converge
 
@@ -370,11 +434,11 @@ The concrete-index cases (`q[1]`, `q[1::2]`, or a slice bound that has already b
 
 **Future fix**: extend array-runtime metadata to carry a symbolic affine root expression, for example `(root_uuid, offset_value, stride_value, local_index_value)` or an equivalent small expression tree, and teach emit-time qubit-map construction to resolve that expression with the same binding resolver used for runtime slice chains. Once that exists, the xfail test should be flipped to a normal passing test and this limitation entry can be removed.
 
-## QFixed cast over a non-constant-bound slice view is rejected, not lowered
+## QInt and QFixed casts over a non-constant-bound slice view are rejected, not lowered
 
-**When it bites**: `qmc.cast(q[lo:hi], qmc.QFixed, ...)` is applied to a slice whose bounds are not compile-time constants; the frontend raises `ValueError` with a symbolic-slice diagnostic. The same root-address gap appears when a sub-qkernel casts a plain `Vector[Qubit]` parameter and the caller later supplies a symbolic-bound view such as `sub(q[lo:hi])`, or when a compile-time branch selects such a view before substitution.
+**When it bites**: `qmc.cast(q[lo:hi], qmc.QInt)` or `qmc.cast(q[lo:hi], qmc.QFixed, ...)` is applied to a slice whose bounds are not compile-time constants; the frontend raises `ValueError` with a symbolic-slice diagnostic. The same root-address gap appears when a sub-qkernel casts a plain `Vector[Qubit]` parameter and the caller later supplies a symbolic-bound view such as `sub(q[lo:hi])`, or when a compile-time branch selects such a view before substitution.
 
-**Why this trade-off was chosen**: QFixed carrier qubits are recorded as composite keys `"<root_uuid>_<index>"` indexing into the root array's element space, and `QInitOperation` registers physical qubits under `QubitAddress(root_uuid, index)` in that same space. `resolve_root_array_index()` folds a view-local index through the `slice_of` chain (`start + step * i`) into root space, but only when every slice bound on the chain is a compile-time constant; a symbolic affine bound makes it return `None`. With no constant root index the carrier cannot be mapped to a physical qubit, and emitting a verbatim view-local key (`"<view_uuid>_<i>"`) would leave the carrier unregistered and silently drop the measurement at emit. Rather than fail silently, the inline value-substitution path raises `ValueError` (`ValueSubstitutor._resolve_mapped_carrier` in `qamomile/circuit/ir/value_mapping.py`, which lives in the IR layer and therefore cannot depend on the transpiler's `ValidationError`, so it mirrors the frontend's `ValueError`), and the compile-time-`if` lowering path raises `ValidationError` (`qamomile/circuit/transpiler/passes/compile_time_if_lowering.py`). This is the same `(array_uuid: str, index: int)` root-address representation gap described in "Tuple-form expval metadata cannot encode symbolic root indices" above, surfaced for QFixed carrier keys.
+**Why this trade-off was chosen**: packed-register (QInt / QFixed) carrier qubits are recorded as composite keys `"<root_uuid>_<index>"` indexing into the root array's element space — `composite_carrier_key` and `root_carrier_keys` in `qamomile/circuit/ir/value.py` build these keys for casts, while value mapping regenerates them and the visualization analyzer resolves them independently — and `QInitOperation` registers physical qubits under `QubitAddress(root_uuid, index)` in that same space. `resolve_root_array_index()` folds a view-local index through the `slice_of` chain (`start + step * i`) into root space, but only when every slice bound on the chain is a compile-time constant; a symbolic affine bound makes it return `None`. With no constant root index the carrier cannot be mapped to a physical qubit, and emitting a verbatim view-local key (`"<view_uuid>_<i>"`) would leave the carrier unregistered and silently drop the measurement at emit. Rather than fail silently, the inline value-substitution path raises `ValueError` (`ValueSubstitutor._resolve_mapped_carrier` in `qamomile/circuit/ir/value_mapping.py`, which lives in the IR layer and therefore cannot depend on the transpiler's `ValidationError`, so it mirrors the frontend's `ValueError`), and the compile-time-`if` lowering path raises `ValidationError` (`qamomile/circuit/transpiler/passes/compile_time_if_lowering.py`) for either target type, QInt or QFixed. This is the same `(array_uuid: str, index: int)` root-address representation gap described in "Tuple-form expval metadata cannot encode symbolic root indices" above, surfaced for packed-register carrier keys.
 
 **Workaround**: cast an unsliced fixed-size vector, or make every slice bound a literal or compile-time binding before the cast or sub-qkernel substitution occurs.
 
@@ -424,14 +488,14 @@ The frontend may attach an identity merge for a captured quantum array to an `if
 
 **Future fix**: make HUGR lowering liveness-aware enough to remove a dead implicit quantum merge, or represent a partially consumed aggregate explicitly so only still-live array elements cross the conditional boundary.
 
-## QFixed measurements cannot remain inside control-flow regions after partial evaluation
+## QInt and QFixed measurements cannot remain inside control-flow regions after partial evaluation
 
-`MeasureQFixedOperation` is split before segmentation into one abstract vector measurement in the quantum segment and one `DecodeQFixedOperation` in the host-side classical segment. That split is well-defined at block scope, but a measurement that remains nested inside `if`, `for`, `qmc.items`, or `while` after compile-time partial evaluation has no explicit branch/loop yield that can carry the selected or last-iteration decoded Float to the host. Segmentation therefore raises `SeparationError` instead of exposing the raw carrier-bit tuple as if it were the declared Float output.
+`MeasureQFixedOperation` and `MeasureQIntOperation` are split before segmentation into one abstract vector measurement in the quantum segment and one `DecodeQFixedOperation` / `DecodeQIntOperation` in the host-side classical segment. That split is well-defined at block scope, but a measurement that remains nested inside `if`, `for`, `qmc.items`, or `while` after compile-time partial evaluation has no explicit branch/loop yield that can carry the selected or last-iteration decoded Float / UInt to the host. Segmentation therefore raises `SeparationError` — its message names `QFixed measurement inside control flow` or `QInt measurement inside control flow` — instead of exposing the raw carrier-bit tuple as if it were the declared Float / UInt output.
 
-**When it bites**: measuring a `QFixed` value inside any control-flow region that survives partial evaluation. This includes dynamic `if` / `while`, unresolved loops, and concrete static loops whose two or more iterations remain represented as a region; it is not limited to runtime control flow. A compile-time branch that is selected away, or a zero-/single-trip loop that is removed or flattened before segmentation, can avoid the restriction. Rejection does not depend on whether the decoded result is eventually returned.
+**When it bites**: measuring a `QFixed` or `QInt` value inside any control-flow region that survives partial evaluation. This includes dynamic `if` / `while`, unresolved loops, and concrete static loops whose two or more iterations remain represented as a region; it is not limited to runtime control flow. A compile-time branch that is selected away, or a zero-/single-trip loop that is removed or flattened before segmentation, can avoid the restriction. Rejection does not depend on whether the decoded result is eventually returned. Casting inside the branches and measuring after them is a different, supported shape: a runtime `if` whose branches each cast the same register and merge the packed `QInt` / `QFixed` handles is accepted (both branches must produce identical carriers), A compile-time `if` may select quantum arrays of different widths before a cast; lowering rebuilds the cast type, ordered carriers, and QFixed layout from the selected source. The selected QFixed width must accommodate `int_bits`. A measurement-backed runtime branch that selects different-width arrays remains unsupported by segmentation on both direct and serialized paths.
 
 **Why this trade-off was chosen**: recursively replacing the nested operation with a vector measurement plus an in-body decode would leave a host-only decode inside the quantum segment. Moving only the decode outside would lose branch selection, zero-trip behavior, and last-iteration semantics. A loud plan-time rejection preserves the typed-output contract until control-flow yields can express those semantics.
 
-**Workaround**: move the QFixed measurement outside control flow, arrange for compile-time specialization to eliminate the enclosing region when that preserves program meaning, or return raw measured bits and decode them in ordinary Python outside the qkernel.
+**Workaround**: move the `QFixed` / `QInt` measurement outside control flow, arrange for compile-time specialization to eliminate the enclosing region when that preserves program meaning, or return raw measured bits and decode them in ordinary Python outside the qkernel.
 
 **Future fix**: once segmented control flow can carry yielded values across the quantum/host boundary, lower the nested carrier measurement in place and route its selected or loop-carried decode through the post-quantum classical segment.

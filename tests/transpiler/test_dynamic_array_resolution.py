@@ -39,7 +39,7 @@ pytest.importorskip("qiskit")
 
 from qamomile.qiskit.transpiler import QiskitTranspiler
 
-Backend = tuple[str, Any, Any]
+Engine = tuple[str, Any, Any]
 
 # ==============================================================================
 # Kernel definitions at module level (required for inspect.getsource to work)
@@ -311,19 +311,19 @@ def kernel_qaoa(
         pytest.param("cudaq", marks=pytest.mark.cudaq),
     ]
 )
-def sdk_backend(request) -> Backend:
-    """Yield an installed SDK backend for cross-backend execution.
+def sdk_engine(request) -> Engine:
+    """Yield an installed SDK engine for cross-engine execution.
 
     Args:
         request (pytest.FixtureRequest): Parametrized pytest request whose
-            value selects the backend name.
+            value selects the engine name.
 
     Returns:
-        Backend: Tuple of backend name, transpiler, and executor. Optional
+        Engine: Tuple of engine name, transpiler, and executor. Optional
             SDK dependencies are skipped with ``pytest.importorskip``.
 
     Raises:
-        AssertionError: If the fixture parameter is not a known backend name.
+        AssertionError: If the fixture parameter is not a known engine name.
     """
     name = request.param
     if name == "qiskit":
@@ -345,14 +345,14 @@ def sdk_backend(request) -> Backend:
 
         transpiler = CudaqTranspiler()
         return name, transpiler, transpiler.executor()
-    raise AssertionError(f"Unknown backend: {name}")
+    raise AssertionError(f"Unknown engine: {name}")
 
 
 def _counts(result: Any) -> dict[tuple[int, ...], int]:
     """Convert a sample result into counts keyed by bit tuples.
 
     Args:
-        result (Any): Backend sample result exposing ``results`` as
+        result (Any): Engine sample result exposing ``results`` as
             bitstring/count pairs.
 
     Returns:
@@ -375,7 +375,7 @@ def _assert_all_zero_counts(
     """Assert that deterministic all-zero sampling returned every shot.
 
     Args:
-        name (str): Backend name used in the assertion message.
+        name (str): Engine name used in the assertion message.
         counts (dict[tuple[int, ...], int]): Observed counts keyed by bit
             tuples.
         width (int): Expected bitstring width.
@@ -545,15 +545,15 @@ class TestDynamicArraySizeResolution:
             ),
         ],
     )
-    def test_bound_uint_vector_element_executes_on_sdk_backends(
+    def test_bound_uint_vector_element_executes_on_sdk_engines(
         self,
-        sdk_backend: Backend,
+        sdk_engine: Engine,
         kernel: Any,
         sizes: np.ndarray,
         width: int,
     ):
-        """Test UInt vector-element size allocation on every SDK backend."""
-        name, transpiler, executor = sdk_backend
+        """Test UInt vector-element size allocation on every SDK engine."""
+        name, transpiler, executor = sdk_engine
 
         executable = transpiler.transpile(
             kernel,

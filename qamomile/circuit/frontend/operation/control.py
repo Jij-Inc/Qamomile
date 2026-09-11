@@ -25,7 +25,7 @@ from typing import (
 
 from qamomile._utils import coerce_nonnegative_integral
 from qamomile.circuit.frontend.handle import Handle, Observable
-from qamomile.circuit.frontend.handle.primitives import Float, Qubit, UInt
+from qamomile.circuit.frontend.handle.primitives import Float, QInt, Qubit, UInt
 from qamomile.circuit.frontend.param_validation import (
     _array_element_type,
     _is_classical_param_decl,
@@ -1221,6 +1221,8 @@ class ControlledGate:
                 deferred transfer.
 
         Raises:
+            TypeError: If a QInt handle is supplied because controlled and
+                SELECT calls do not support packed-register result handles.
             QubitConsumedError: If any handle or covered slot was consumed.
             UnreturnedBorrowError: If an array has a live borrow.
         """
@@ -1228,6 +1230,11 @@ class ControlledGate:
 
         entries: list[_ControlEntry] = []
         for handle in handles:
+            if isinstance(handle, QInt):
+                raise TypeError(
+                    f"{operation_name}: control() and select() do not support "
+                    "QInt arguments. Use a direct qkernel call instead."
+                )
             if handle._should_enforce_linear():
                 handle.validate_consumable(operation_name)
             if isinstance(handle, VectorView):
@@ -2052,7 +2059,7 @@ class ControlledGate:
                 ``global_phase`` is not a number / ``Float``, a
                 ``control_indices`` entry is not ``int`` / ``UInt``, or a
                 sub-kernel kwarg does not match the wrapped kernel's
-                signature.
+                signature. QInt target handles are also unsupported.
             QubitConsumedError / QubitBorrowConflictError: Duplicate
                 physical qubits across the control and sub-kernel arguments,
                 or a quantum argument that was already consumed. Overlap is
@@ -2815,7 +2822,7 @@ def _qkernel_for_callable(
                 cached = _synthesized_kernel_cache_strong.get(fn)
             except TypeError:
                 # Non-hashable callables (extremely rare) cannot be cached
-                # in either backend; we just synthesize a fresh wrapper.
+                # in either cache; we just synthesize a fresh wrapper.
                 cached = None
         if cached is not None:
             return cast("QKernel", cached)

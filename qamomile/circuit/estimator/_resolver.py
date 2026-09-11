@@ -94,6 +94,7 @@ class ExprResolver:
         "_context",
         "_loop_var_names",
         "_parent_blocks",
+        "_quantum_size_context",
         "_structural_scope",
     )
 
@@ -107,6 +108,7 @@ class ExprResolver:
         structural_scope: tuple[tuple[int, int], ...] | None = None,
         array_context: dict[str, _ArrayState] | None = None,
         classical_fact_context: dict[str, _ResolvedClassicalFact] | None = None,
+        quantum_size_context: dict[str, sp.Expr] | None = None,
     ):
         """Initialise an ExprResolver.
 
@@ -135,11 +137,16 @@ class ExprResolver:
             classical_fact_context (dict[str, _ResolvedClassicalFact] | None):
                 Scalar or whole-array UUID to its resolved value and guarded
                 scheduler dependencies. Defaults to ``None``.
+            quantum_size_context (dict[str, sp.Expr] | None): Quantum SSA
+                result UUID to its selected width. Kept separate from shared
+                shape dimension values so a merge cannot rebind an input.
+                Defaults to ``None``.
         """
         self._block = block
         self._block_index = block_index or _ResolverBlockIndex()
         self._classical_fact_context = dict(classical_fact_context or {})
         self._context: dict[str, sp.Expr] = dict(context or {})
+        self._quantum_size_context = dict(quantum_size_context or {})
         self._loop_var_names: dict[str, sp.Expr] = dict(loop_var_names or {})
         self._parent_blocks: list[Any] = list(parent_blocks or [])
         self._structural_scope = structural_scope or ()
@@ -368,6 +375,7 @@ class ExprResolver:
             structural_scope=self._structural_scope,
             array_context=self._array_context.shared_states(),
             classical_fact_context=self._classical_fact_context,
+            quantum_size_context=self._quantum_size_context,
         )
 
     def isolated_scope(
@@ -431,7 +439,7 @@ class ExprResolver:
                 method, or an ``InvokeOperation.body`` field, plus
                 ``operands`` containing actual arguments.
             called_block (Block | None): Already-selected callable body.
-                Pass this when another resolver has selected a backend- or
+                Pass this when another resolver has selected an engine- or
                 strategy-specific implementation. Defaults to ``None``.
             body_implements_transform (bool): Whether ``called_block`` is a
                 transform-specific implementation whose formal inputs include
@@ -474,8 +482,14 @@ class ExprResolver:
         extra: dict[str, sp.Expr] = {}
         array_inputs: list[tuple[ArrayValue, ArrayValue]] = []
         classical_inputs: list[tuple[Value, Value]] = []
+        quantum_inputs: list[tuple[Value, sp.Expr]] = []
         for formal, actual in pair_block_operands(called_block, actual_operands):
             extra[formal.uuid] = self.resolve(actual)
+            selected_size = (
+                self.quantum_size(actual) if isinstance(actual, Value) else None
+            )
+            if isinstance(formal, Value) and selected_size is not None:
+                quantum_inputs.append((formal, selected_size))
             if (
                 isinstance(formal, Value)
                 and isinstance(actual, Value)
@@ -489,7 +503,11 @@ class ExprResolver:
                 if not formal.type.is_quantum():
                     array_inputs.append((formal, actual))
                 for df, da in zip(formal.shape, actual.shape):
-                    extra[df.uuid] = self.resolve(da)
+                    extra[df.uuid] = (
+                        selected_size
+                        if len(formal.shape) == 1 and selected_size is not None
+                        else self.resolve(da)
+                    )
 
         # Callee gets fresh scope — no parent blocks from caller.
         child = self.isolated_scope(
@@ -497,6 +515,8 @@ class ExprResolver:
             extra,
             structural_scope=self.call_structural_scope(call_op, called_block),
         )
+        for formal, size in quantum_inputs:
+            child.bind_quantum_size(formal, size)
         for formal, actual in classical_inputs:
             child.bind_classical_fact(
                 formal,
@@ -527,6 +547,31 @@ class ExprResolver:
         self._classical_fact_context[value.uuid] = _ResolvedClassicalFact.create(
             expression
         )
+
+    def bind_quantum_size(self, value: Value, size: sp.Expr) -> None:
+        """Bind a quantum SSA result's width without changing its dimensions.
+
+        Branch results can share dimension Values with their inputs. A
+        separate per-result binding preserves those input sizes while carrying
+        the selected or Piecewise result width through subsequent operations.
+
+        Args:
+            value (Value): Quantum result receiving the width provenance.
+            size (sp.Expr): Concrete or symbolic number of represented qubits.
+        """
+        self._quantum_size_context[value.uuid] = size
+
+    def quantum_size(self, value: Value) -> sp.Expr | None:
+        """Return a quantum value's explicitly propagated width.
+
+        Args:
+            value (Value): Quantum SSA value whose width is requested.
+
+        Returns:
+            sp.Expr | None: Selected width, including zero, or ``None`` when
+                the declared shape or type remains authoritative.
+        """
+        return self._quantum_size_context.get(value.uuid)
 
     def bind_array_selection(
         self,

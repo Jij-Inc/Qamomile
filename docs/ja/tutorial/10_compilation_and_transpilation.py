@@ -63,7 +63,7 @@
 #    │  plan                        (C→Q→Cにセグメント化)
 #    ▼
 # ProgramPlan
-#    │  emit                        (バックエンド固有のコード生成)
+#    │  emit                        (エンジン固有のコード生成)
 #    ▼
 # ExecutableProgram[T]
 # ```
@@ -113,7 +113,7 @@
 #
 # **`Value`** (`qamomile.circuit.ir.value`) はSSAスタイルの型付き値です。`Qubit`に限らず`Float`、`UInt`、`Bit`などすべての値が`Value`として表現されます。ゲート適用や古典演算でその値が更新されるたびに、`Value.next_version()`が新しい`Value`を生成します。このとき`version`と`uuid`は新しくなりますが、`logical_id`と型・メタデータは保たれます。
 #
-# `logical_id`は「SSAのバージョンをまたいで**同じ論理的な変数**を指す」ための安定した識別子です。たとえば`q = qmc.h(q)`で新しい`Value`が作られても、元の`q`と同じ`logical_id`を持ちます。これは物理量子ビットへのマッピングではなく、IR上で「同じ変数の別バージョン」を結びつけるためのもので、`Float`パラメータや`Bit`などにも同じ仕組みが使われます（バックエンドの物理量子ビット割り当ては後段の`emit`で`ResourceAllocator`が決めます）。
+# `logical_id`は「SSAのバージョンをまたいで**同じ論理的な変数**を指す」ための安定した識別子です。たとえば`q = qmc.h(q)`で新しい`Value`が作られても、元の`q`と同じ`logical_id`を持ちます。これは物理量子ビットへのマッピングではなく、IR上で「同じ変数の別バージョン」を結びつけるためのもので、`Float`パラメータや`Bit`などにも同じ仕組みが使われます（エンジンの物理量子ビット割り当ては後段の`emit`で`ResourceAllocator`が決めます）。
 #
 # メタデータで値をパラメータ（`with_parameter("theta")`）や定数（`with_const(2.0)`）としてタグ付けできます。
 #
@@ -171,7 +171,7 @@ def demo_kernel(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
 
 
 # %% [markdown]
-# `n=3`をコンパイル時にバインドし、`theta`はバックエンドパラメータとして保持してトランスパイルします。
+# `n=3`をコンパイル時にバインドし、`theta`はエンジンパラメータとして保持してトランスパイルします。
 
 
 # %%
@@ -325,11 +325,11 @@ assert len(plan.steps) == 1
 assert list(plan.parameters) == ["theta"]
 
 # %% [markdown]
-# 量子セグメントは`qubit_values`と`num_qubits`も持ちます。これにより`emit`はゲートを配置する前に、バックエンド回路が必要とする量子ビット本数を把握できます。
+# 量子セグメントは`qubit_values`と`num_qubits`も持ちます。これにより`emit`はゲートを配置する前に、エンジン回路が必要とする量子ビット本数を把握できます。
 #
-# ### 4.6 `emit` — バックエンド固有のコード生成
+# ### 4.6 `emit` — エンジン固有のコード生成
 #
-# `emit`はプランを対象バックエンドの`EmitPass`に渡します。emitパスは具体的な量子ビットインデックスを割り当て、量子セグメントを辿ってバックエンドの`GateEmitter`プロトコルのメソッド（`emit_h`、`emit_rx`、…）を呼び出してネイティブ回路を構築します。
+# `emit`はプランを対象エンジンの`EmitPass`に渡します。emitパスは具体的な量子ビットインデックスを割り当て、量子セグメントを辿ってエンジンの`GateEmitter`プロトコルのメソッド（`emit_h`、`emit_rx`、…）を呼び出してネイティブ回路を構築します。
 
 # %%
 executable = transpiler.emit(plan, bindings=bindings, parameters=parameters)
@@ -359,7 +359,7 @@ print(executable.quantum_circuit)
 # %% [markdown]
 # ## 5. 制御フロー (`if` / `for` / `while`) の取り扱い
 #
-# パイプラインが制御フローをどう扱うかは、フロントエンドで何を受け付けるかから、各パスがそれをどう変形するか、そしてバックエンドが実行時分岐をサポートするかまで、複数のレイヤーに関わります。ここではその全体像を整理します。ユーザー向けの書き方は[チュートリアル07](07_classical_flow_patterns)にあり、本章はコンパイラ側の視点に絞ります。
+# パイプラインが制御フローをどう扱うかは、フロントエンドで何を受け付けるかから、各パスがそれをどう変形するか、そしてエンジンが実行時分岐をサポートするかまで、複数のレイヤーに関わります。ここではその全体像を整理します。ユーザー向けの書き方は[チュートリアル07](07_classical_flow_patterns)にあり、本章はコンパイラ側の視点に絞ります。
 #
 # ### 5.1 フロントエンドで受け付ける形
 #
@@ -402,7 +402,7 @@ print(executable.quantum_circuit)
 # | `analyze` | マージが依存グラフに反映される | `loop_var`が本体の依存に入る | 測定結果条件を量子オペランドと同様に扱う |
 # | `validate_symbolic_shapes` | — | 未解決の`Vector`shape次元が境界にあると拒否 | — |
 # | `plan` | `OperationKind.CONTROL`としてセグメント境界を作る | 同左 | 同左 |
-# | `emit` | 実行時`if`として出力（バックエンドが対応していれば） | `LoopAnalyzer.should_unroll()`で判定し、必要ならアンロール | 実行時`while`として出力 |
+# | `emit` | 実行時`if`として出力（エンジンが対応していれば） | `LoopAnalyzer.should_unroll()`で判定し、必要ならアンロール | 実行時`while`として出力 |
 #
 # **`LoopAnalyzer.should_unroll()`** （`transpiler/passes/emit_support/loop_analyzer.py`）の判定基準は:
 #
@@ -410,7 +410,7 @@ print(executable.quantum_circuit)
 # 2. 本体で配列を`loop_var`でインデックスしている（例: `q[i]`）
 # 3. `loop_var`が`BinOp`に現れる（例: `i + 1`、`2 * i`）
 #
-# 本チュートリアルの`demo_kernel`は`q[i]`と`q[i + 1]`の両方を使うので、条件1, 2, 3に該当して`emit`時にアンロールされます。これが`executable.quantum_circuit`がフラットな2量子ビット分のCX列になっている理由です。上記のどれにも該当しないループは、バックエンドが対応している限り実行時ループとして回路に残ります。
+# 本チュートリアルの`demo_kernel`は`q[i]`と`q[i + 1]`の両方を使うので、条件1, 2, 3に該当して`emit`時にアンロールされます。これが`executable.quantum_circuit`がフラットな2量子ビット分のCX列になっている理由です。上記のどれにも該当しないループは、エンジンが対応している限り実行時ループとして回路に残ります。
 #
 # ### 5.4 量子と古典の依存関係ルール (`analyze`)
 #
@@ -430,9 +430,9 @@ print(executable.quantum_circuit)
 #
 # 前者は測定結果`Bit`を`IfOperation`の条件として直接使うだけで、量子オペランドの型は変わりません（位相キックバック的な制御は行いません）。後者はJITコンパイルが必要になり、現時点ではサポートしていません。`plan`ステージが量子セグメントを1つに制限することがこの保証の裏返しです。
 #
-# ### 5.5 バックエンドの実行時分岐サポート
+# ### 5.5 エンジンの実行時分岐サポート
 #
-# 実行時の`if`/`while`（=測定結果に依存する分岐）が回路まで落ちてくるかはバックエンドの`MeasurementMode`に依存します（`qamomile/circuit/transpiler/gate_emitter.py`）:
+# 実行時の`if`/`while`（=測定結果に依存する分岐）が回路まで落ちてくるかはエンジンの`MeasurementMode`に依存します（`qamomile/circuit/transpiler/gate_emitter.py`）:
 #
 # | モード | 実行時if/while | 用例 |
 # |------|--------------|------|
@@ -440,14 +440,14 @@ print(executable.quantum_circuit)
 # | `STATIC` | 非サポート。測定前の状態ベクトル・演算子を返す | QURI Parts |
 # | `RUNNABLE` | フルサポート。実行時ループ/分岐も含む | CUDA-Q (`cudaq.run()`経由) |
 #
-# 非対応モードのバックエンドで`IfOperation`/`WhileOperation`を含むカーネルをtranspileしようとすると、emitパスがエラーを送出します。モードを意識してカーネル側で実行時分岐を書くかどうか決めるのがコントリビュータの責任です。
+# 非対応モードのエンジンで`IfOperation`/`WhileOperation`を含むカーネルをtranspileしようとすると、emitパスがエラーを送出します。モードを意識してカーネル側で実行時分岐を書くかどうか決めるのがコントリビュータの責任です。
 #
 # ### 5.6 よくあるエラー
 #
 # - **`ValidationError` (analyze)** — 測定から派生した古典値を量子ゲートの引数に使った。パターンを書き換えるか、測定の代わりに状態を保つように設計を見直してください。
 # - **`ValidateWhileContractPass`エラー** — `while`の条件が測定結果`Bit`でない。Pythonの古典変数や定数条件でのループは未サポートです。
 # - **`QamomileCompileError` (validate_symbolic_shapes)** — `ForOperation`の境界に未解決の`Vector` shape次元が届いた。該当する`Vector`を`bindings`で具体化するか、`qmc.items`を使う設計に変えてください。
-# - **emit時エラー** — `MeasurementMode.STATIC`のバックエンドに実行時`if`が到達した。バックエンドを変えるか、カーネルを別の等価表現で書き直します。
+# - **emit時エラー** — `MeasurementMode.STATIC`のエンジンに実行時`if`が到達した。エンジンを変えるか、カーネルを別の等価表現で書き直します。
 
 # %% [markdown]
 # ## 6. ケーススタディ: `MeasureQFixed`はどうコンパイルされるか
@@ -488,7 +488,7 @@ qfixed_block = transpiler.analyze(qfixed_block)
 print(pretty_print_block(qfixed_block))
 
 # %% [markdown]
-# 末尾は`measure_qfixed`という1行です — `Vector[Qubit]`を`QFixed`型へ`cast`した値にそのまま`measure`が掛かっています。このOperationは`operation_kind=HYBRID`を持っていますが、**実際のバックエンドには量子測定命令しかない**ので、どこかで「量子側の測定」と「古典側のデコード」に切り分ける必要があります。
+# 末尾は`measure_qfixed`という1行です — `Vector[Qubit]`を`QFixed`型へ`cast`した値にそのまま`measure`が掛かっています。このOperationは`operation_kind=HYBRID`を持っていますが、**実際のエンジンには量子測定命令しかない**ので、どこかで「量子側の測定」と「古典側のデコード」に切り分ける必要があります。
 #
 # ### 6.2 どこで切り分けるか — `plan`段の事前ローワリング
 #
@@ -514,10 +514,10 @@ print(pretty_print_block(lowered))
 #
 # ローワリング後、ProgramPlanは概念的に以下のようなステップを並べます:
 #
-# - **QuantumStep**（量子セグメント）: 回路本体のゲート列 + `MeasureVectorOperation`。バックエンドの`emit_measure_vector`が展開し、各量子ビットごとに`emit_measure`が呼ばれてビットがクラシカルレジスタに書かれます。
+# - **QuantumStep**（量子セグメント）: 回路本体のゲート列 + `MeasureVectorOperation`。エンジンの`emit_measure_vector`が展開し、各量子ビットごとに`emit_measure`が呼ばれてビットがクラシカルレジスタに書かれます。
 # - **ClassicalStep (role=post)**（古典セグメント）: `DecodeQFixedOperation`が1つだけ。`qamomile/circuit/transpiler/classical_executor.py`のランタイムが、量子実行で得たビット列を受け取ってFloatに変換します。
 #
-# つまり量子ハードウェア側に届くのはあくまで**通常の測定命令**です。「QFixed測定」というAPIは**コンパイル時の抽象化**であって、実行時のバックエンドが何か特殊な命令を解釈するわけではありません。
+# つまり量子ハードウェア側に届くのはあくまで**通常の測定命令**です。「QFixed測定」というAPIは**コンパイル時の抽象化**であって、実行時のエンジンが何か特殊な命令を解釈するわけではありません。
 #
 # ### 6.4 どのパスがどのIRを触るかのまとめ
 #
@@ -526,25 +526,25 @@ print(pretty_print_block(lowered))
 # | `to_block` | 生成 | — | — |
 # | `inline` / `partial_eval` / `analyze` | そのまま通過 | — | — |
 # | `plan` (pre-segmentation lowering) | **2つに分解して消える** | **ここで生成** | **ここで生成** |
-# | `emit` | — | 各量子ビットへ`emit_measure` | 触らない（古典ステップ用のIRなのでバックエンドコード生成対象外） |
-# | 実行時 | — | バックエンド実行器で測定 | `classical_executor`がFloatにデコード |
+# | `emit` | — | 各量子ビットへ`emit_measure` | 触らない（古典ステップ用のIRなのでエンジンコード生成対象外） |
+# | 実行時 | — | エンジン実行器で測定 | `classical_executor`がFloatにデコード |
 #
 # この構図は、CastOperation（型の再解釈だけで物理量子ビット割り当てを変えない）と合わせて、「**量子リソースを触らずに古典的意味付けだけを変える**」Qamomileの型設計パターンの良い例になっています。
 
 # %% [markdown]
-# ## 7. バックエンドemission: Qiskit vs QURI Parts
+# ## 7. エンジンemission: Qiskit vs QURI Parts
 #
-# どのバックエンドも、`qamomile/circuit/transpiler/`で定義された2つのプロトコルを実装することでパイプラインに接続します:
+# どのエンジンも、`qamomile/circuit/transpiler/`で定義された2つのプロトコルを実装することでパイプラインに接続します:
 #
 # - **`GateEmitter[T]`** (`gate_emitter.py`): 「ゲートをどう描くか」のAPIです。`create_circuit(num_qubits, num_clbits) -> T`、`create_parameter(name) -> Any`、ゲートごとの約40個のエントリポイント（`emit_h`、`emit_rx`、`emit_cx`、…）を持ちます。加えて`measurement_mode: MeasurementMode`を告知します:
 #
-#   | モード | 意味 | 利用バックエンド |
+#   | モード | 意味 | 利用エンジン |
 #   |------|---------|---------|
-#   | `NATIVE` | emitパスが呼ぶ明示的な測定命令をバックエンドが持つ。 | Qiskit |
-#   | `STATIC` | バックエンドは測定前の状態ベクトル・演算子を受け取り、samplerが測定を外部で処理する。 | QURI Parts |
-#   | `RUNNABLE` | バックエンドがランタイム制御フロー付きのmid-circuit測定をサポートする。 | CUDA-Q (`cudaq.run()`経由) |
+#   | `NATIVE` | emitパスが呼ぶ明示的な測定命令をエンジンが持つ。 | Qiskit |
+#   | `STATIC` | エンジンは測定前の状態ベクトル・演算子を受け取り、samplerが測定を外部で処理する。 | QURI Parts |
+#   | `RUNNABLE` | エンジンがランタイム制御フロー付きのmid-circuit測定をサポートする。 | CUDA-Q (`cudaq.run()`経由) |
 #
-# - **`CompositeGateEmitter[C]`** (`passes/emit.py`): オプションです。バックエンドが複合ゲート（QFT、QPE、…）をネイティブ実装でショートカットできるようにします。`can_emit(gate_type) -> bool` / `emit(...) -> bool`のコントラクトで、オプトアウトするには`False`を返します。その場合emitパスはライブラリレベルの分解にフォールバックします。
+# - **`CompositeGateEmitter[C]`** (`passes/emit.py`): オプションです。エンジンが複合ゲート（QFT、QPE、…）をネイティブ実装でショートカットできるようにします。`can_emit(gate_type) -> bool` / `emit(...) -> bool`のコントラクトで、オプトアウトするには`False`を返します。その場合emitパスはライブラリレベルの分解にフォールバックします。
 #
 # `Transpiler`のサブクラスは`_create_segmentation_pass`と`_create_emit_pass`をオーバーライドし、ランタイム側のために`executor()`も実装することでこれらを接続します。`qamomile/qiskit/transpiler.py`は約50行の標準的なリファレンス実装です。
 #
@@ -559,7 +559,7 @@ try:
         demo_kernel, bindings=bindings, parameters=parameters
     )
 
-    print("backend circuit type: ", type(quri_exe.quantum_circuit).__name__)
+    print("engine circuit type: ", type(quri_exe.quantum_circuit).__name__)
     assert type(quri_exe.quantum_circuit).__name__ == "LinearMappedParametricQuantumCircuit"
     print("parameter_names:      ", quri_exe.parameter_names)
     assert list(quri_exe.parameter_names) == ["theta"]
@@ -593,7 +593,7 @@ except ModuleNotFoundError:
 #     return new_ops
 # ```
 #
-# **新しいバックエンドの追加。** 最低限のチェックリスト:
+# **新しいエンジンの追加。** 最低限のチェックリスト:
 #
 # 1. 対象SDK向けに`GateEmitter[T]`を実装します（`T`はSDKの回路型）。`qamomile/qiskit/emitter.py`から始めるとよいでしょう。
 # 2. `Transpiler[T]`をサブクラス化し、`_create_segmentation_pass`（他に必要がなければ`NisqSegmentationStrategy`を使用）と、`StandardEmitPass(your_emitter)`を返す`_create_emit_pass`を実装します。
@@ -612,11 +612,11 @@ except ModuleNotFoundError:
 # - `ANALYZED` — 検証済み、依存グラフ化済み、セグメント化可能
 # - `ProgramPlan` → `ExecutableProgram[T]` — セグメント化されemit済み
 #
-# 各パスは限定的な仕事を持ち、`BlockKind`に対する事前条件を持ちます。`Transpiler`のステップ実行用APIはすべてのパスを公開しています。カーネルが期待通りに動かないときの主たるデバッグツールとして、またパスやバックエンドを追加するときの拡張点として活用してください。
+# 各パスは限定的な仕事を持ち、`BlockKind`に対する事前条件を持ちます。`Transpiler`のステップ実行用APIはすべてのパスを公開しています。カーネルが期待通りに動かないときの主たるデバッグツールとして、またパスやエンジンを追加するときの拡張点として活用してください。
 #
 # 制御フローの要点:
 #
 # - `if`/`for`はトレース時にASTが書き換えられ、`IfOperation` / `ForOperation` / `ForItemsOperation` / `WhileOperation`というIRに変換される
 # - `partial_eval`はコンパイル時`if`を除去するが、`for`のアンロールは`emit`の`LoopAnalyzer`が判定する
 # - `analyze`は「量子Operationが測定由来の古典値に依存しないこと」を保証する
-# - 実行時分岐を回路まで落とせるかはバックエンドの`MeasurementMode`次第（`NATIVE`か`RUNNABLE`が必要）
+# - 実行時分岐を回路まで落とせるかはエンジンの`MeasurementMode`次第（`NATIVE`か`RUNNABLE`が必要）

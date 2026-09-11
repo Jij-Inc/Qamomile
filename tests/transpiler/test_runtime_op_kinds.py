@@ -1,9 +1,9 @@
-"""Cell-by-cell coverage tests for ``RuntimeOpKind`` × Qiskit backend.
+"""Cell-by-cell coverage tests for ``RuntimeOpKind`` × Qiskit engine.
 
 The IR contract is that every variant of ``RuntimeOpKind`` reaches
 ``StandardEmitPass._emit_runtime_classical_expr`` and is dispatched to a
-backend-native runtime expression. Earlier this contract had a gap: the
-backend implemented every match arm but the frontend only emitted
+engine-native runtime expression. Earlier this contract had a gap: the
+engine implemented every match arm but the frontend only emitted
 AND/OR/NOT, so the comparison and arithmetic arms were dead code that
 hid an incorrect ``bool(...)`` coercion.
 
@@ -16,7 +16,7 @@ These tests pin every cell:
 2. **Synthetic IR** for kinds the frontend cannot currently produce
    (``measure(QFixed) → Float`` participates here as the only numeric
    measurement path; Float arithmetic on tainted values is constructed
-   manually). This drives the Qiskit backend's ``expr.add``/``mul``/
+   manually). This drives the Qiskit engine's ``expr.add``/``mul``/
    ``equal``/``less``/... arms, exercising numeric preservation.
 
 3. **NotImplementedError** for kinds without a Qiskit equivalent
@@ -107,7 +107,7 @@ class TestFrontendReachableKinds:
 
 
 # ---------------------------------------------------------------------------
-# Layer 2: synthetic IR — drives every backend match arm directly
+# Layer 2: synthetic IR — drives every engine match arm directly
 # ---------------------------------------------------------------------------
 
 

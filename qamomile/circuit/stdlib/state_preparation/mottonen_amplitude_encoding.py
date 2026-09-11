@@ -28,12 +28,12 @@ complex amplitudes work end-to-end.
     ``qmc.qubit_array(n, ...)`` inside a kernel.
 
 The generic :func:`amplitude_encoding` API specifies the prepared state but not
-the synthesis algorithm. Backends may therefore replace it with a native state
+the synthesis algorithm. Engines may therefore replace it with a native state
 preparation implementation. Its portable Qamomile body currently uses the
 Möttönen construction described below.
 
 The :func:`mottonen_amplitude_encoding` API makes that construction part of the
-callable identity, so a backend cannot replace it with a generic state
+callable identity, so an engine cannot replace it with a generic state
 preparation implementation. The parametric companion
 :func:`mottonen_amplitude_encoding_from_angles` emits the Möttönen Gray walk
 directly. :func:`amplitude_encoding_from_angles` remains as a compatibility
@@ -410,7 +410,7 @@ def _mottonen_composite(
     Args:
         amplitudes (Sequence[float] | Sequence[complex] | np.ndarray): Target
             amplitude vector.
-        name (str): Stable callable name used by backend semantic matching.
+        name (str): Stable callable name used by engine semantic matching.
         policy (CallPolicy): Default lowering policy for the callable.
 
     Returns:
@@ -470,7 +470,7 @@ def _apply_amplitude_encoding(
     This shared implementation validates frontend values and creates a
     QKernel-backed Möttönen body. ``composite_name`` and ``policy`` determine
     whether that body represents generic state preparation or the explicit
-    Möttönen algorithm at backend materialization time.
+    Möttönen algorithm at engine materialization time.
 
     .. important::
 
@@ -519,7 +519,7 @@ def _apply_amplitude_encoding(
             complex amplitudes via a kernel parameter must instead go
             through :func:`mottonen_amplitude_encoding_from_angles`.
         api_name (str): Public API name used in validation errors.
-        composite_name (str): Stable callable name used by backend matching.
+        composite_name (str): Stable callable name used by engine matching.
         policy (CallPolicy): Default lowering policy for the callable.
 
     Returns:
@@ -602,11 +602,11 @@ def amplitude_encoding(
     qubits: Vector[Qubit],
     amplitudes: Sequence[float] | Sequence[complex] | np.ndarray | Vector[Float],
 ) -> Vector[Qubit]:
-    """Prepare an amplitude-encoded state with a backend-selected synthesis.
+    """Prepare an amplitude-encoded state with an engine-selected synthesis.
 
     The semantic contract is that an all-zero ``n``-qubit register becomes the
     normalized state :math:`\\sum_i a_i |i\\rangle`. The synthesis algorithm is
-    intentionally unspecified: a backend may use its native state-preparation
+    intentionally unspecified: an engine may use its native state-preparation
     implementation. Qamomile's portable fallback currently uses the Möttönen
     construction.
 
@@ -660,7 +660,7 @@ def mottonen_amplitude_encoding(
     """Prepare an amplitude-encoded state with the Möttönen construction.
 
     This API makes Möttönen's uniformly controlled Ry/Rz construction part
-    of the callable identity. Backends therefore use Qamomile's Möttönen body
+    of the callable identity. Engines therefore use Qamomile's Möttönen body
     instead of replacing it with a generic native state-preparation operation.
     The input register must be in :math:`|0\\rangle^{\\otimes n}`.
 
@@ -760,7 +760,7 @@ def mottonen_amplitude_encoding_from_angles(
             ``get_size`` cannot reduce to a concrete integer.  When the
             angle argument is a ``Vector[Float]`` handle the length check
             is skipped (the shape may be symbolic at trace time); a
-            runtime mismatch then surfaces as a backend bind-time error
+            runtime mismatch then surfaces as an engine bind-time error
             instead.
 
     Example::
@@ -796,7 +796,7 @@ def mottonen_amplitude_encoding_from_angles(
     # trace time, so a static check would either spuriously fail (symbolic
     # shape resolves to 0) or require resolving bindings inside this helper.
     # In the parametric case the user contracts to bind exactly ``2**n - 1``
-    # values; a mismatch surfaces at backend bind time.
+    # values; a mismatch surfaces at engine bind time.
     if not isinstance(ry_angles, Vector):
         ry_len = len(ry_angles)
         if ry_len != expected_len:

@@ -270,10 +270,10 @@ def test_grover_diffusion_uses_qiskit_native_ccx() -> None:
 
 @pytest.mark.parametrize("n", [1, 2, 3, 5])
 @pytest.mark.parametrize("seed", [0, 1, 2, 42])
-def test_grover_cross_backend_matches_marked_probability(
+def test_grover_cross_engine_matches_marked_probability(
     sdk_transpiler, n: int, seed: int, tmp_path
 ) -> None:
-    """Grover matches the analytic marked-state probability on every SDK backend."""
+    """Grover matches the analytic marked-state probability on every SDK engine."""
     src = (
         "import qamomile.circuit as qmc\n"
         "from tests.circuit.test_grover import mark_all_ones\n"
@@ -295,7 +295,7 @@ def test_grover_cross_backend_matches_marked_probability(
     spec.loader.exec_module(module)
 
     transpiler = sdk_transpiler.transpiler
-    if sdk_transpiler.backend_name == "qiskit":
+    if sdk_transpiler.engine_name == "qiskit":
         from qiskit.providers.basic_provider import BasicSimulator
 
         backend = BasicSimulator()
@@ -319,14 +319,14 @@ def test_grover_cross_backend_matches_marked_probability(
         atol=0.1,
         rtol=0.0,
     ), (
-        f"{sdk_transpiler.backend_name} n={n}: expected marked-state "
+        f"{sdk_transpiler.engine_name} n={n}: expected marked-state "
         f"probability {expected_probability}, got {observed_probability}"
     )
 
 
 @pytest.mark.parametrize("n", [1, 2, 3, 5])
-def test_grover_cross_backend_expval(sdk_transpiler, n: int, tmp_path) -> None:
-    """Grover's amplified state matches the analytic ``<Z_0>`` on each backend."""
+def test_grover_cross_engine_expval(sdk_transpiler, n: int, tmp_path) -> None:
+    """Grover's amplified state matches the analytic ``<Z_0>`` on each engine."""
     import qamomile.observable as qm_o
 
     src = (
@@ -354,7 +354,7 @@ def test_grover_cross_backend_expval(sdk_transpiler, n: int, tmp_path) -> None:
     value = exe.run(transpiler.executor()).result()
 
     reference = _numpy_grover_zexp(n, grover_iteration_count(n, 1))
-    atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    atol = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert np.isclose(value, reference, atol=atol, rtol=0.0), (
-        f"{sdk_transpiler.backend_name} n={n}: expected <Z_0>={reference}, got {value}"
+        f"{sdk_transpiler.engine_name} n={n}: expected <Z_0>={reference}, got {value}"
     )

@@ -266,7 +266,7 @@ class PCEConverter:
     :math:`s_i = \\operatorname{sgn}\\langle P_i \\rangle`.
 
     PCE does not prescribe a specific ansatz — users build their own
-    variational circuit and transpile it directly with their backend's
+    variational circuit and transpile it directly with their engine's
     :class:`~qamomile.circuit.transpiler.transpiler.Transpiler` (this
     converter does not wrap that step). The classical cost that the
     outer optimizer should minimize is
@@ -278,7 +278,7 @@ class PCEConverter:
 
     evaluated from the per-variable expectation values produced by the
     user's ansatz. Use :meth:`get_encoded_pauli_list` to obtain the
-    observables to feed into the backend's estimator.
+    observables to feed into the engine's estimator.
 
     The encoding is built once at construction (parametrized by
     ``correlator_order``) and cached on the encoder. To re-encode with a
@@ -311,7 +311,7 @@ class PCEConverter:
     Example:
         >>> converter = PCEConverter(instance, correlator_order=2)
         >>> observables = converter.get_encoded_pauli_list()
-        >>> # Transpile the user's ansatz directly with the backend
+        >>> # Transpile the user's ansatz directly with the engine
         >>> # transpiler (PCEConverter does not wrap this step):
         >>> executable = transpiler.transpile(
         ...     my_ansatz,
@@ -481,7 +481,7 @@ class PCEConverter:
         """Return the per-variable Pauli correlator observables.
 
         Returns the encoding as a list indexed by variable, suitable for
-        passing to a backend estimator to obtain :math:`\\langle P_i \\rangle`
+        passing to an engine estimator to obtain :math:`\\langle P_i \\rangle`
         for each variable.
 
         Returns:

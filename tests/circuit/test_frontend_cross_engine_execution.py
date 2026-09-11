@@ -1,8 +1,8 @@
-"""Cross-backend execution tests for frontend quantum patterns.
+"""Cross-engine execution tests for frontend quantum patterns.
 
 This module exercises user-facing frontend constructs through the full
 ``transpile -> sample`` and ``transpile -> run`` paths on every supported
-local SDK backend (Qiskit, QURI Parts, CUDA-Q, Amazon Braket). Backend emitter tests
+local SDK engine (Qiskit, QURI Parts, CUDA-Q, Amazon Braket). Engine emitter tests
 already validate low-level gate matrices; these tests instead pin the
 combinations users can write in qkernels: native gates, qkernel calls,
 broadcasts, controlled calls, composite gates, and Pauli evolution.
@@ -22,7 +22,7 @@ import qamomile.observable as qm_o
 from qamomile.circuit.transpiler.errors import EmitError
 from qamomile.circuit.transpiler.segments import MultipleQuantumSegmentsError
 
-Backend = tuple[str, Any, Any]
+Engine = tuple[str, Any, Any]
 SampleMode = Literal["deterministic", "uniform", "bell"]
 
 
@@ -34,8 +34,8 @@ SampleMode = Literal["deterministic", "uniform", "bell"]
         pytest.param("braket", marks=pytest.mark.braket),
     ]
 )
-def backend(request) -> Backend:
-    """Yield ``(name, transpiler, executor)`` for each installed SDK backend."""
+def engine(request) -> Engine:
+    """Yield ``(name, transpiler, executor)`` for each installed SDK engine."""
     name = request.param
     if name == "qiskit":
         pytest.importorskip("qiskit")
@@ -62,11 +62,11 @@ def backend(request) -> Backend:
 
         transpiler = BraketTranspiler()
         return name, transpiler, transpiler.executor()
-    raise AssertionError(f"unknown backend {name}")
+    raise AssertionError(f"unknown engine {name}")
 
 
 def _counts(result: Any) -> dict[tuple[int, ...], int]:
-    """Convert backend sample results to a bit-tuple count map.
+    """Convert engine sample results to a bit-tuple count map.
 
     Args:
         result (Any): Qamomile ``SampleResult``-like object whose
@@ -89,7 +89,7 @@ def _assert_deterministic(
     """Assert all sampled shots equal ``expected``.
 
     Args:
-        name (str): Backend name for assertion context.
+        name (str): Engine name for assertion context.
         counts (dict[tuple[int, ...], int]): Sample counts.
         expected (tuple[int, ...]): Expected deterministic bit tuple.
     """
@@ -109,7 +109,7 @@ def _assert_uniform(
     """Assert a small uniform distribution has the right support and balance.
 
     Args:
-        name (str): Backend name for assertion context.
+        name (str): Engine name for assertion context.
         counts (dict[tuple[int, ...], int]): Sample counts.
         expected_support (set[tuple[int, ...]]): Expected support.
         shots (int): Number of requested shots.
@@ -134,7 +134,7 @@ def _assert_bell(
     """Assert Bell-state sampling has only correlated outcomes.
 
     Args:
-        name (str): Backend name for assertion context.
+        name (str): Engine name for assertion context.
         counts (dict[tuple[int, ...], int]): Sample counts.
         expected_support (set[tuple[int, ...]]): The two correlated
             outcomes expected from the Bell-producing circuit.
@@ -390,7 +390,7 @@ def controlled_if_comparison_sample(sel: qmc.UInt) -> qmc.Vector[qmc.Bit]:
     """Sample a controlled body whose compile-time ``if sel == 0`` picks a branch.
 
     The wrapped unitary contains a comparison-conditioned compile-time ``if``;
-    it must be lowered inside the controlled block so every backend sees a
+    it must be lowered inside the controlled block so every engine sees a
     plain controlled-X (true branch) or controlled-identity (false branch),
     rather than an unresolved ``CompOp`` that QURI Parts / CUDA-Q reject.
     """
@@ -1069,7 +1069,7 @@ def sliced_pauli_evolve_run(
 # ``MultipleQuantumSegmentsError`` even though the kernel has no
 # measurement-dependent control flow. These kernels reproduce that shape
 # (a quantum op precedes the negated-angle gate so the ``BinOp`` is genuinely
-# interleaved) and check both sample and expval paths across backends.
+# interleaved) and check both sample and expval paths across engines.
 
 
 @qmc.qkernel
@@ -1095,7 +1095,7 @@ def interleaved_param_expr_run(phase: qmc.Float, obs: qmc.Observable) -> qmc.Flo
 # ``angle = -phase`` is computed before ``qmc.qubit_array`` (before any quantum
 # op). Its ``BinOp`` lands before the quantum segment, so a position-naive
 # absorption (only firing while already inside the quantum segment) would leave
-# it stranded in a classical prep segment, where the backend has no gate to bind
+# it stranded in a classical prep segment, where the engine has no gate to bind
 # the parameter expression to and silently emits a zero angle. The segmentation
 # holds such a leading parameter-expression op and prepends it to the quantum
 # segment, so the gate gets the real angle regardless of where it was written.
@@ -1284,7 +1284,7 @@ def nested_classical_output_run(
 # ``i % 2`` into an RX angle (``(i % 2) * pi``) rather than an ``if``: CUDA-Q
 # marks any ``if``-containing kernel as RUNNABLE, and ``cudaq.observe()`` (the
 # expval path) rejects RUNNABLE artifacts, so the angle form keeps the kernel
-# STATIC and exercises ``%`` through the estimator on every backend. RX(pi)
+# STATIC and exercises ``%`` through the estimator on every engine. RX(pi)
 # flips the odd-indexed qubits, so Z0+Z1+Z2+Z3 sums to +1-1+1-1 = 0.
 
 
@@ -1320,7 +1320,7 @@ class FrontendExecutionCase:
     expected_expval: float
     sample_bindings: dict[str, Any] = dataclasses.field(default_factory=dict)
     run_bindings: dict[str, Any] = dataclasses.field(default_factory=dict)
-    unsupported_backends: frozenset[str] = dataclasses.field(default_factory=frozenset)
+    unsupported_engines: frozenset[str] = dataclasses.field(default_factory=frozenset)
 
 
 FRONTEND_EXECUTION_CASES = [
@@ -1386,7 +1386,7 @@ FRONTEND_EXECUTION_CASES = [
     # Compile-time ``if sel == 0`` inside a controlled body must be lowered
     # before emit. ``sel=0`` selects the true branch (controlled-X -> |11>);
     # ``sel=1`` selects the empty false branch (controlled-identity -> |10>).
-    # Both must succeed on every backend, including QURI Parts / CUDA-Q whose
+    # Both must succeed on every engine, including QURI Parts / CUDA-Q whose
     # controlled-emission walks reject an unresolved ``CompOp``.
     FrontendExecutionCase(
         name="controlled-if-comparison-true",
@@ -1737,12 +1737,12 @@ def _case_id(case: FrontendExecutionCase) -> str:
 
 @pytest.mark.parametrize("case", FRONTEND_EXECUTION_CASES, ids=_case_id)
 def test_frontend_pattern_sample_execution(
-    backend: Backend, case: FrontendExecutionCase
+    engine: Engine, case: FrontendExecutionCase
 ) -> None:
-    """Sample frontend patterns through every supported SDK backend."""
-    name, transpiler, executor = backend
+    """Sample frontend patterns through every supported SDK engine."""
+    name, transpiler, executor = engine
     shots = 512
-    if name in case.unsupported_backends:
+    if name in case.unsupported_engines:
         with pytest.raises(EmitError):
             transpiler.transpile(case.sample_kernel, bindings=case.sample_bindings)
         return
@@ -1762,11 +1762,11 @@ def test_frontend_pattern_sample_execution(
 
 @pytest.mark.parametrize("case", FRONTEND_EXECUTION_CASES, ids=_case_id)
 def test_frontend_pattern_run_execution(
-    backend: Backend, case: FrontendExecutionCase
+    engine: Engine, case: FrontendExecutionCase
 ) -> None:
-    """Run expval frontend patterns through every supported SDK backend."""
-    name, transpiler, executor = backend
-    if name in case.unsupported_backends:
+    """Run expval frontend patterns through every supported SDK engine."""
+    name, transpiler, executor = engine
+    if name in case.unsupported_engines:
         with pytest.raises(EmitError):
             transpiler.transpile(case.run_kernel, bindings=case.run_bindings)
         return
@@ -1778,9 +1778,9 @@ def test_frontend_pattern_run_execution(
     )
 
 
-def test_vector_view_qpe_controlled_u_parameter_sample(backend: Backend) -> None:
+def test_vector_view_qpe_controlled_u_parameter_sample(engine: Engine) -> None:
     """Execute QPE with controlled-U theta bound from ``gammas[1:3][0]``."""
-    name, transpiler, executor = backend
+    name, transpiler, executor = engine
     shots = 32
     executable = transpiler.transpile(
         vector_view_qpe_parameter_sample,
@@ -1799,10 +1799,10 @@ def test_vector_view_qpe_controlled_u_parameter_sample(backend: Backend) -> None
 
 
 def test_controlled_parameterized_composite_runtime_parameter(
-    backend: Backend,
+    engine: Engine,
 ) -> None:
     """Execute a controlled custom composite with a runtime angle parameter."""
-    name, transpiler, executor = backend
+    name, transpiler, executor = engine
 
     sample_executable = transpiler.transpile(
         controlled_parameterized_composite_sample,
@@ -1827,9 +1827,9 @@ def test_controlled_parameterized_composite_runtime_parameter(
 
 
 @pytest.mark.parametrize("seed", [0, 1, 2, 42])
-def test_controlled_random_rotation_sample_and_run(backend: Backend, seed: int) -> None:
+def test_controlled_random_rotation_sample_and_run(engine: Engine, seed: int) -> None:
     """Check randomized controlled-rotation probabilities and expval."""
-    name, transpiler, executor = backend
+    name, transpiler, executor = engine
     rng = np.random.default_rng(seed)
     theta = float(rng.uniform(0.25, math.pi - 0.25))
     shots = 2048
@@ -1864,11 +1864,11 @@ def test_controlled_random_rotation_sample_and_run(backend: Backend, seed: int) 
 
 @pytest.mark.parametrize("seed", [0, 1, 2, 42])
 def test_powered_controlled_random_rotation_sample_and_run(
-    backend: Backend,
+    engine: Engine,
     seed: int,
 ) -> None:
     """Check powered randomized controlled-rotation probabilities and expval."""
-    name, transpiler, executor = backend
+    name, transpiler, executor = engine
     rng = np.random.default_rng(seed)
     theta = float(rng.uniform(0.15, (math.pi / 2) - 0.15))
     shots = 2048
@@ -1902,9 +1902,9 @@ def test_powered_controlled_random_rotation_sample_and_run(
     )
 
 
-def test_bound_control_indices_duplicate_rejected(backend: Backend) -> None:
+def test_bound_control_indices_duplicate_rejected(engine: Engine) -> None:
     """Reject ``UInt`` control-index entries that bind to duplicates."""
-    _name, transpiler, _executor = backend
+    _name, transpiler, _executor = engine
     with pytest.raises(EmitError, match="duplicate"):
         transpiler.transpile(
             bound_control_indices_sample,
@@ -1913,9 +1913,7 @@ def test_bound_control_indices_duplicate_rejected(backend: Backend) -> None:
 
 
 @pytest.mark.parametrize("seed", [0, 1, 2, 42])
-def test_interleaved_param_expr_angle_sample_and_run(
-    backend: Backend, seed: int
-) -> None:
+def test_interleaved_param_expr_angle_sample_and_run(engine: Engine, seed: int) -> None:
     """A runtime-parameter angle expression must not split quantum segments.
 
     Regression for the spurious ``MultipleQuantumSegmentsError`` raised when a
@@ -1923,7 +1921,7 @@ def test_interleaved_param_expr_angle_sample_and_run(
     interleaved between quantum operations. Checks the negated angle is applied
     with the correct sign on both the sample and expval paths.
     """
-    name, transpiler, executor = backend
+    name, transpiler, executor = engine
     rng = np.random.default_rng(seed)
     # Include boundary angles (0, pi, 2*pi) alongside a random one.
     angles = [0.0, math.pi, 2 * math.pi, float(rng.uniform(0.1, 2 * math.pi - 0.1))]
@@ -1961,7 +1959,7 @@ def test_interleaved_param_expr_angle_sample_and_run(
 
 
 @pytest.mark.parametrize("seed", [0, 1, 2, 42])
-def test_pre_init_param_expr_angle_sample_and_run(backend: Backend, seed: int) -> None:
+def test_pre_init_param_expr_angle_sample_and_run(engine: Engine, seed: int) -> None:
     """A gate-angle expression computed before quantum init must still apply.
 
     Regression for the silent miscompile where ``angle = -phase`` written before
@@ -1969,7 +1967,7 @@ def test_pre_init_param_expr_angle_sample_and_run(backend: Backend, seed: int) -
     received a zero angle. Checks the negated angle is applied with the correct
     sign on both the sample and expval paths, identical to the interleaved case.
     """
-    name, transpiler, executor = backend
+    name, transpiler, executor = engine
     rng = np.random.default_rng(seed)
     angles = [0.0, math.pi, 2 * math.pi, float(rng.uniform(0.1, 2 * math.pi - 0.1))]
     shots = 2048
@@ -2007,7 +2005,7 @@ def test_pre_init_param_expr_angle_sample_and_run(backend: Backend, seed: int) -
 
 @pytest.mark.parametrize("seed", [0, 1, 2, 42])
 def test_symbolic_multi_control_phase_in_loop_matches_cp(
-    backend: Backend, seed: int
+    engine: Engine, seed: int
 ) -> None:
     """Reported symbolic multi-control phase in a loop matches its cp equivalent.
 
@@ -2016,7 +2014,7 @@ def test_symbolic_multi_control_phase_in_loop_matches_cp(
     ``qmc.range`` loop must transpile to a single quantum segment and produce
     the same expectation value as the concrete ``qmc.cp`` circuit.
     """
-    name, transpiler, executor = backend
+    name, transpiler, executor = engine
     rng = np.random.default_rng(seed)
     obs = qm_o.X(0) * qm_o.X(1)
     angles = [0.0, math.pi, 2 * math.pi, float(rng.uniform(0.1, 2 * math.pi - 0.1))]
@@ -2039,7 +2037,7 @@ def test_symbolic_multi_control_phase_in_loop_matches_cp(
         )
 
 
-def test_classical_output_after_quantum_op_is_preserved(backend: Backend) -> None:
+def test_classical_output_after_quantum_op_is_preserved(engine: Engine) -> None:
     """A classical block output computed after a quantum op must be returned.
 
     Guards the segmentation carve-out: a non-measurement classical op whose
@@ -2047,7 +2045,7 @@ def test_classical_output_after_quantum_op_is_preserved(backend: Backend) -> Non
     segment so the executor runs it, rather than being absorbed into the quantum
     segment and silently dropped (returning ``None``).
     """
-    name, transpiler, executor = backend
+    name, transpiler, executor = engine
     executable = transpiler.transpile(
         classical_output_after_quantum_run, parameters=["phase"]
     )
@@ -2057,7 +2055,7 @@ def test_classical_output_after_quantum_op_is_preserved(backend: Backend) -> Non
 
 
 def test_value_feeding_gate_and_classical_is_not_miscompiled(
-    backend: Backend,
+    engine: Engine,
 ) -> None:
     """A value used by both a gate and later classical work is not absorbed.
 
@@ -2067,12 +2065,12 @@ def test_value_feeding_gate_and_classical_is_not_miscompiled(
     read a value that never executed). The kernel must raise an explicit
     ``MultipleQuantumSegmentsError`` rather than silently miscompiling.
     """
-    _name, transpiler, _executor = backend
+    _name, transpiler, _executor = engine
     with pytest.raises(MultipleQuantumSegmentsError):
         transpiler.transpile(value_feeding_gate_and_classical_run, parameters=["phase"])
 
 
-def test_nested_classical_output_is_not_miscompiled(backend: Backend) -> None:
+def test_nested_classical_output_is_not_miscompiled(engine: Engine) -> None:
     """A nested classical op that is also a block output is not absorbed.
 
     Guards against silent data corruption: a top-level value feeding both a gate
@@ -2082,12 +2080,12 @@ def test_nested_classical_output_is_not_miscompiled(backend: Backend) -> None:
     ``MultipleQuantumSegmentsError`` rather than transpiling and returning
     ``None`` for the classical output field.
     """
-    _name, transpiler, _executor = backend
+    _name, transpiler, _executor = engine
     with pytest.raises(MultipleQuantumSegmentsError):
         transpiler.transpile(nested_classical_output_run, parameters=["phase"])
 
 
-def test_pre_init_gate_and_classical_is_not_miscompiled(backend: Backend) -> None:
+def test_pre_init_gate_and_classical_is_not_miscompiled(engine: Engine) -> None:
     """A dual-use value built before quantum init must not silently miscompile.
 
     A value used as both a gate angle and a classical output, computed before
@@ -2096,7 +2094,7 @@ def test_pre_init_gate_and_classical_is_not_miscompiled(backend: Backend) -> Non
     otherwise receive a stranded zero parameter, so the transpiler must reject
     it explicitly instead of returning a wrong result.
     """
-    _name, transpiler, _executor = backend
+    _name, transpiler, _executor = engine
     with pytest.raises(MultipleQuantumSegmentsError):
         transpiler.transpile(
             pre_init_gate_and_classical_run,
@@ -2107,7 +2105,7 @@ def test_pre_init_gate_and_classical_is_not_miscompiled(backend: Backend) -> Non
 
 @pytest.mark.parametrize("seed", [0, 1, 2, 42])
 def test_nested_classical_chain_in_loop_sample_and_run(
-    backend: Backend, seed: int
+    engine: Engine, seed: int
 ) -> None:
     """A classical chain split across a loop boundary must not split segments.
 
@@ -2117,7 +2115,7 @@ def test_nested_classical_chain_in_loop_sample_and_run(
     absorbed into the single quantum segment. Both qubits end up in
     ``rx(2 * phase + 1) |0>``, checked on the sample and expval paths.
     """
-    name, transpiler, executor = backend
+    name, transpiler, executor = engine
     rng = np.random.default_rng(seed)
     angles = [0.0, math.pi, 2 * math.pi, float(rng.uniform(0.1, 2 * math.pi - 0.1))]
     shots = 2048

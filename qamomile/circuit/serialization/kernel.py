@@ -259,7 +259,7 @@ class SerializedQKernel:
         IR values; runtime parameters remain symbolic.
 
         Args:
-            parameters (list[str] | None): Names retained as backend runtime
+            parameters (list[str] | None): Names retained as engine runtime
                 parameters. ``None`` auto-detects unbound parameterizable
                 arguments.
             **kwargs (Any): Compile-time bindings keyed by qkernel argument.

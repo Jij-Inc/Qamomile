@@ -24,6 +24,7 @@ from qamomile.circuit.ir.operation import (
     InvokeOperation,
     MeasureOperation,
     MeasureQFixedOperation,
+    MeasureQIntOperation,
     MeasureVectorOperation,
     ProjectOperation,
     ResetOperation,
@@ -51,6 +52,7 @@ from qamomile.circuit.ir.operation.callable import (
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
+    DecodeQIntOperation,
     DictGetItemOperation,
     ReturnQuantumArrayElementOperation,
     StoreArrayElementOperation,
@@ -87,7 +89,7 @@ from qamomile.circuit.ir.types.primitives import (
     UIntType,
     ValueType,
 )
-from qamomile.circuit.ir.types.q_register import QFixedType
+from qamomile.circuit.ir.types.q_register import QFixedType, QUIntType
 from qamomile.circuit.ir.value import (
     ArrayValue,
     DictValue,
@@ -95,9 +97,11 @@ from qamomile.circuit.ir.value import (
     Value,
     ValueBase,
     ValueLike,
+    array_static_length,
     collect_value_like_uuids,
     resolve_root_qubit_address,
     resolve_root_qubit_array,
+    root_carrier_keys,
 )
 from qamomile.circuit.transpiler.block_parameter_binding import pair_block_operands
 
@@ -129,7 +133,19 @@ _TWO_QUBIT_ROTATIONS = frozenset({GateOperationType.CP, GateOperationType.RZZ})
 
 @dataclasses.dataclass
 class _ValidationState:
-    """Mutable state shared while validating a complete callable graph."""
+    """Share validation state across a complete callable graph.
+
+    Args:
+        seen_blocks (set[int]): Block identities already visited.
+        seen_definitions (set[int]): Callable definitions already visited.
+        static_bindings (dict[str, tuple[StaticBindingSlot, StaticBindingSpec]]):
+            Registered static-binding slots and their specifications.
+        static_field_uuids (set[str]): UUIDs owned by root static fields.
+        static_field_logical_ids (dict[str, str]): Root static-field identities.
+        root_block_id (int | None): Root block identity, or ``None`` initially.
+        qint_carriers_by_block (dict[int, frozenset[str]]): Proven QInt carrier
+            producers for completed blocks. In-progress blocks have no entry.
+    """
 
     seen_blocks: set[int] = dataclasses.field(default_factory=set)
     seen_definitions: set[int] = dataclasses.field(default_factory=set)
@@ -140,6 +156,9 @@ class _ValidationState:
     static_field_uuids: set[str] = dataclasses.field(default_factory=set)
     static_field_logical_ids: dict[str, str] = dataclasses.field(default_factory=dict)
     root_block_id: int | None = None
+    qint_carriers_by_block: dict[int, frozenset[str]] = dataclasses.field(
+        default_factory=dict
+    )
 
 
 def validate_qkernel_ir(block: Block) -> None:
@@ -229,12 +248,21 @@ def _validate_block(block: Block, state: _ValidationState, location: str) -> Non
         for slot in block.static_bindings
         for field in slot.fields
     }
+    qint_inputs = {
+        value.uuid
+        for value in block.input_values
+        if type(value) is Value and isinstance(value.type, QUIntType)
+    }
+    qint_carriers = set(qint_inputs)
 
     for index, operation in enumerate(block.operations):
         op_location = f"{location} operation {index} ({type(operation).__name__})"
-        _validate_operation(operation, state, producers, op_location)
+        _validate_operation(
+            operation, state, producers, op_location, qint_inputs, qint_carriers
+        )
     if state.static_bindings:
         _validate_value_producer_completeness(block, state, location)
+    state.qint_carriers_by_block[id(block)] = frozenset(qint_carriers)
 
 
 def _validate_value_producer_completeness(
@@ -862,6 +890,8 @@ def _validate_operation(
     state: _ValidationState,
     producers: dict[str, str],
     location: str,
+    qint_inputs: set[str],
+    qint_carriers: set[str],
 ) -> None:
     """Validate one operation before following its nested graph edges.
 
@@ -870,6 +900,10 @@ def _validate_operation(
         state (_ValidationState): Shared graph-validation state.
         producers (dict[str, str]): SSA producers in the owning block scope.
         location (str): Human-readable operation location.
+        qint_inputs (set[str]): Formal QInt input UUIDs and validated direct-call
+            results in the owning scope. Updated after callable validation.
+        qint_carriers (set[str]): Proven QInt producers in the owning scope,
+            including validated cast results that still require cast metadata.
 
     Raises:
         ValueError: If the operation is structurally or semantically invalid.
@@ -895,13 +929,22 @@ def _validate_operation(
             )
         producers[result.uuid] = location
 
-    _validate_operation_contract(operation, location)
+    _validate_operation_contract(operation, location, qint_inputs)
+    if isinstance(operation, CastOperation):
+        qint_carriers.update(
+            value.uuid
+            for value in operation.results
+            if type(value) is Value and isinstance(value.type, QUIntType)
+        )
     _validate_quantum_operand_uniqueness(operation, location)
     if isinstance(operation, InvokeOperation):
+        _validate_qint_call_inputs(operation, qint_inputs, qint_carriers, location)
         _validate_static_binding_invoke(operation, state, location)
 
     if isinstance(operation, HasNestedOps):
         for region_index, region in enumerate(operation.nested_regions()):
+            region_qint_inputs = set(qint_inputs)
+            region_qint_carriers = set(qint_carriers)
             for child_index, child in enumerate(region.operations):
                 _validate_operation(
                     child,
@@ -909,9 +952,12 @@ def _validate_operation(
                     producers,
                     f"{location} region {region_index} operation {child_index} "
                     f"({type(child).__name__})",
+                    region_qint_inputs,
+                    region_qint_carriers,
                 )
     if isinstance(operation, InvokeOperation) and operation.definition is not None:
         _validate_definition(operation.definition, state, location)
+        _register_qint_call_results(operation, state, qint_inputs, qint_carriers)
     if isinstance(operation, (ConcreteControlledU, SymbolicControlledU)):
         if operation.block is not None:
             _validate_block(operation.block, state, f"{location} unitary block")
@@ -962,12 +1008,93 @@ def _validate_definition(
             )
 
 
-def _validate_operation_contract(operation: Operation, location: str) -> None:
+def _validate_qint_call_inputs(
+    operation: InvokeOperation,
+    qint_inputs: set[str],
+    qint_carriers: set[str],
+    location: str,
+) -> None:
+    """Require packed call arguments to have an established quantum carrier.
+
+    Args:
+        operation (InvokeOperation): Invocation whose QInt arguments are checked.
+        qint_inputs (set[str]): Formal inputs and validated direct-call results.
+        qint_carriers (set[str]): Proven packed producers in the current scope.
+        location (str): Human-readable invocation location.
+
+    Raises:
+        ValueError: If a QInt argument has neither an established callable
+            carrier nor valid cast metadata, or its width is invalid.
+    """
+    for value in operation.operands:
+        if not isinstance(value.type, QUIntType):
+            continue
+        width = _validate_quint_width(value.type.width, location)
+        if (
+            type(value) is Value
+            and value.uuid in qint_carriers
+            and value.uuid in qint_inputs
+            and value.metadata.cast is None
+        ):
+            continue
+        _validate_packed_carrier_metadata(value, width, location, "QInt")
+
+
+def _register_qint_call_results(
+    operation: InvokeOperation,
+    state: _ValidationState,
+    qint_inputs: set[str],
+    qint_carriers: set[str],
+) -> None:
+    """Register validated QInt results at a direct callable boundary.
+
+    A callable returns an abstract packed carrier, whether it forwards an
+    input or allocates its own qubits. Its caller needs no cast metadata for
+    that carrier; the validated callee body owns the physical layout.
+
+    Args:
+        operation (InvokeOperation): Already validated direct invocation.
+        state (_ValidationState): Carrier summaries for completed callee bodies.
+        qint_inputs (set[str]): Known callable-boundary QInt UUIDs to extend.
+        qint_carriers (set[str]): Proven QInt producers in the caller to extend.
+    """
+    definition = operation.definition
+    if (
+        operation.transform is not CallTransform.DIRECT
+        or definition is None
+        or definition.body is None
+        or definition.body_ref is not None
+        or definition.implementations
+    ):
+        return
+    body = definition.body
+    output_carriers = state.qint_carriers_by_block.get(id(body), frozenset())
+    if len(body.input_values) != len(operation.operands) or len(
+        body.output_values
+    ) != len(operation.results):
+        return
+    for output, result in zip(body.output_values, operation.results, strict=True):
+        if (
+            type(output) is Value
+            and type(result) is Value
+            and isinstance(output.type, QUIntType)
+            and output.uuid in output_carriers
+            and result.type == output.type
+        ):
+            qint_inputs.add(result.uuid)
+            qint_carriers.add(result.uuid)
+
+
+def _validate_operation_contract(
+    operation: Operation, location: str, qint_inputs: set[str]
+) -> None:
     """Dispatch operation-specific arity, type, and region checks.
 
     Args:
         operation (Operation): Operation to inspect.
         location (str): Human-readable operation location.
+        qint_inputs (set[str]): Formal QInt inputs and validated direct-call
+            results whose physical carriers are described across the boundary.
 
     Raises:
         ValueError: If a concrete operation contract is violated.
@@ -997,13 +1124,7 @@ def _validate_operation_contract(operation: Operation, location: str) -> None:
         _require_array_type(operation.results[0], BitType(), location)
     elif isinstance(operation, MeasureQFixedOperation):
         _require_arity(operation, 1, 1, location)
-        _validate_fixed_point_layout(
-            operation.num_bits,
-            operation.int_bits,
-            location,
-        )
-        _require_types(operation.operands, [QFixedType()], location, "operand")
-        _require_types(operation.results, [FloatType()], location, "result")
+        _validate_measure_qfixed(operation, location)
     elif isinstance(operation, DecodeQFixedOperation):
         _require_arity(operation, 1, 1, location)
         _validate_fixed_point_layout(
@@ -1013,6 +1134,30 @@ def _validate_operation_contract(operation: Operation, location: str) -> None:
         )
         _require_array_type(operation.operands[0], BitType(), location)
         _require_types(operation.results, [FloatType()], location, "result")
+    elif isinstance(operation, MeasureQIntOperation):
+        _require_arity(operation, 1, 1, location)
+        operand = operation.operands[0]
+        operand_type = operand.type
+        if not isinstance(operand_type, QUIntType):
+            raise ValueError(f"{location} operand 0 must have QUIntType")
+        concrete_width = _validate_quint_width(operand_type.width, location)
+        if not (
+            type(operand) is Value
+            and operand.uuid in qint_inputs
+            and operand.metadata.cast is None
+        ):
+            _validate_packed_carrier_metadata(
+                operand,
+                concrete_width,
+                location,
+                "QInt",
+            )
+        _require_types(operation.results, [UIntType()], location, "result")
+    elif isinstance(operation, DecodeQIntOperation):
+        _require_arity(operation, 1, 1, location)
+        _require_array_type(operation.operands[0], BitType(), location)
+        _validate_qint_decode_layout(cast(ArrayValue, operation.operands[0]), location)
+        _require_types(operation.results, [UIntType()], location, "result")
     elif isinstance(operation, StoreArrayElementOperation):
         _validate_array_store(operation, location)
     elif isinstance(operation, ReturnQuantumArrayElementOperation):
@@ -1035,6 +1180,8 @@ def _validate_operation_contract(operation: Operation, location: str) -> None:
             location,
             "result",
         )
+        if isinstance(operation.target_type, (QUIntType, QFixedType)):
+            _validate_packed_register_cast(operation, location)
     elif isinstance(operation, (QInitOperation, CInitOperation)):
         _require_arity(operation, 0, 1, location)
         if (
@@ -1217,6 +1364,349 @@ def _validate_fixed_point_layout(
         raise ValueError(f"{location} num_bits must be positive")
     if int_bits < 0 or int_bits > num_bits:
         raise ValueError(f"{location} int_bits must be between 0 and num_bits")
+
+
+def _validate_quint_width(
+    width: int | Value,
+    location: str,
+    label: str = "QUIntType width",
+) -> int | None:
+    """Validate a packed-register width and return its compile-time value.
+
+    Serves both packed register types: the ``QUIntType`` width and the
+    ``QFixedType`` fractional-bit count share the same ``int | Value``
+    contract, and ``label`` names the field in every message.
+
+    Args:
+        width (int | Value): Concrete width or symbolic unsigned scalar.
+        location (str): Human-readable operation location.
+        label (str): Field name used in error messages. Defaults to
+            ``"QUIntType width"``.
+
+    Returns:
+        int | None: Non-negative concrete width, or ``None`` when the width
+            remains symbolic.
+
+    Raises:
+        ValueError: If the width is negative, non-integral, array-valued, or
+            carried by a non-``UInt`` scalar.
+    """
+    if is_plain_int(width):
+        concrete_width = cast(int, width)
+        if concrete_width < 0:
+            raise ValueError(f"{location} {label} must be non-negative")
+        return concrete_width
+    if type(width) is not Value or width.type != UIntType():
+        raise ValueError(f"{location} {label} must be an integer or UInt Value")
+    if not width.is_constant():
+        return None
+    concrete_width = width.get_const()
+    if not is_plain_int(concrete_width) or cast(int, concrete_width) < 0:
+        raise ValueError(f"{location} constant {label} must be a non-negative integer")
+    return cast(int, concrete_width)
+
+
+def _packed_register_name(register_type: QUIntType | QFixedType) -> str:
+    """Return the frontend handle name of a packed register type.
+
+    Args:
+        register_type (QUIntType | QFixedType): Packed register type.
+
+    Returns:
+        str: ``"QInt"`` for ``QUIntType`` and ``"QFixed"`` for ``QFixedType``.
+    """
+    return "QInt" if isinstance(register_type, QUIntType) else "QFixed"
+
+
+def _packed_register_width(
+    register_type: QUIntType | QFixedType,
+    location: str,
+) -> int | None:
+    """Validate a packed register (QInt / QFixed) type and return its width.
+
+    A ``QFixedType`` width is ``integer_bits + fractional_bits``. Constant
+    unsigned scalar fields are normalized to integers; only the fractional
+    part may remain symbolic in the current fixed-point metadata schema.
+
+    Args:
+        register_type (QUIntType | QFixedType): Packed register type.
+        location (str): Human-readable operation location.
+
+    Returns:
+        int | None: Non-negative concrete carrier count, or ``None`` when the
+            width remains symbolic.
+
+    Raises:
+        ValueError: If a width field is negative, non-integral, array-valued,
+            carried by a non-``UInt`` scalar, or if ``QFixedType.integer_bits``
+            remains symbolic and cannot be represented by layout metadata.
+    """
+    if isinstance(register_type, QUIntType):
+        return _validate_quint_width(register_type.width, location)
+    integer_bits = _qfixed_integer_bits(register_type, location)
+    fractional = _validate_quint_width(
+        register_type.fractional_bits,
+        location,
+        "QFixedType fractional_bits",
+    )
+    if fractional is None:
+        return None
+    return integer_bits + fractional
+
+
+def _qfixed_integer_bits(register_type: QFixedType, location: str) -> int:
+    """Resolve the integer-bit count representable by fixed-point metadata.
+
+    Args:
+        register_type (QFixedType): Type whose integer-bit field is resolved.
+        location (str): Human-readable operation location.
+
+    Returns:
+        int: Non-negative integer-bit count, including constant UInt values.
+
+    Raises:
+        ValueError: If the field is invalid or remains symbolic, which the
+            current fixed-point metadata schema does not support.
+    """
+    integer_bits = _validate_quint_width(
+        register_type.integer_bits, location, "QFixedType integer_bits"
+    )
+    if integer_bits is None:
+        raise ValueError(
+            f"{location} unsupported symbolic QFixedType integer_bits: "
+            "fixed-point layout metadata requires a concrete integer"
+        )
+    return integer_bits
+
+
+def _validate_packed_carrier_metadata(
+    value: ValueBase,
+    concrete_width: int | None,
+    location: str,
+    type_name: str,
+) -> None:
+    """Validate the carrier metadata attached to a packed register value.
+
+    Both packed register handles (QInt / QFixed) record their ordered
+    physical carriers in ``metadata.cast``; this checks that channel.
+
+    Args:
+        value (ValueBase): Scalar packed register value whose carrier aliases
+            are checked.
+        concrete_width (int | None): Statically known register width, if any.
+        location (str): Human-readable operation location.
+        type_name (str): Handle name (``"QInt"`` or ``"QFixed"``) used in
+            error messages.
+
+    Raises:
+        ValueError: If cast metadata is absent, incomplete, duplicated, or
+            inconsistent with a concrete register width.
+    """
+    if type(value) is not Value:
+        raise ValueError(f"{location} {type_name} carrier must be a scalar Value")
+    metadata = value.metadata.cast
+    if metadata is None:
+        raise ValueError(f"{location} {type_name} carrier requires cast metadata")
+    if not metadata.source_uuid or not metadata.source_logical_id:
+        raise ValueError(f"{location} {type_name} cast source identity is incomplete")
+    carrier_count = len(metadata.qubit_uuids)
+    if len(metadata.qubit_logical_ids) != carrier_count:
+        raise ValueError(f"{location} {type_name} carrier identity lists disagree")
+    if (
+        len(set(metadata.qubit_uuids)) != carrier_count
+        or len(set(metadata.qubit_logical_ids)) != carrier_count
+    ):
+        raise ValueError(f"{location} {type_name} carrier identities must be unique")
+    if concrete_width is not None and carrier_count != concrete_width:
+        raise ValueError(
+            f"{location} {type_name} carrier count disagrees with its width"
+        )
+
+
+def _validate_qfixed_layout_metadata(
+    value: ValueBase,
+    register_type: QFixedType,
+    concrete_width: int | None,
+    location: str,
+) -> None:
+    """Validate the fixed-point layout metadata attached to a QFixed value.
+
+    The ``metadata.qfixed`` channel duplicates the carrier list held in
+    ``metadata.cast`` and adds the bit layout; both must agree with the
+    validated cast metadata and with the value's ``QFixedType``. A symbolic
+    width is recorded as ``num_bits == 0`` by the frontend.
+
+    Args:
+        value (ValueBase): Scalar QFixed value whose layout metadata is
+            checked; its cast metadata must already be validated.
+        register_type (QFixedType): Declared type of ``value``.
+        concrete_width (int | None): Statically known carrier count, if any.
+        location (str): Human-readable operation location.
+
+    Raises:
+        ValueError: If the layout metadata is missing, lists carriers that
+            differ from the cast metadata, or records a width or integer-bit
+            count that disagrees with the type.
+    """
+    assert type(value) is Value
+    cast_metadata = value.metadata.cast
+    assert cast_metadata is not None
+    qfixed = value.metadata.qfixed
+    if qfixed is None:
+        raise ValueError(f"{location} QFixed layout metadata is missing")
+    if qfixed.qubit_uuids != cast_metadata.qubit_uuids:
+        raise ValueError(
+            f"{location} QFixed layout carriers disagree with cast metadata"
+        )
+    expected_num_bits = concrete_width if concrete_width is not None else 0
+    if qfixed.num_bits != expected_num_bits or qfixed.int_bits != _qfixed_integer_bits(
+        register_type, location
+    ):
+        raise ValueError(f"{location} QFixed layout width disagrees with its type")
+
+
+def _validate_measure_qfixed(operation: MeasureQFixedOperation, location: str) -> None:
+    """Validate a fixed-point register measurement against its operand type.
+
+    Args:
+        operation (MeasureQFixedOperation): Measurement to validate.
+        location (str): Human-readable operation location.
+
+    Raises:
+        ValueError: If the operand is not a ``QFixedType`` value, if the stored
+            ``num_bits`` / ``int_bits`` disagree with that type, or if the
+            operand's carrier or layout metadata is inconsistent.
+    """
+    operand = operation.operands[0]
+    operand_type = operand.type
+    if not isinstance(operand_type, QFixedType):
+        raise ValueError(f"{location} operand 0 must have QFixedType")
+    concrete_width = _packed_register_width(operand_type, location)
+    if concrete_width:
+        _validate_fixed_point_layout(operation.num_bits, operation.int_bits, location)
+    # Unknown total widths retain the stored zero sentinel while preserving
+    # their independently known integer-bit layout until specialization.
+    if operation.num_bits != (concrete_width if concrete_width is not None else 0):
+        raise ValueError(f"{location} num_bits disagrees with its QFixedType width")
+    if operation.int_bits != _qfixed_integer_bits(operand_type, location):
+        raise ValueError(
+            f"{location} int_bits disagrees with its QFixedType integer bits"
+        )
+    _validate_packed_carrier_metadata(operand, concrete_width, location, "QFixed")
+    _validate_qfixed_layout_metadata(operand, operand_type, concrete_width, location)
+    _require_types(operation.results, [FloatType()], location, "result")
+
+
+def _validate_packed_register_cast(operation: CastOperation, location: str) -> None:
+    """Validate a vector or packed-register cast into QInt or QFixed.
+
+    Args:
+        operation (CastOperation): Cast whose packed register result is
+            checked.
+        location (str): Human-readable operation location.
+
+    Raises:
+        ValueError: If the source kind, target width, carrier metadata,
+            fixed-point layout metadata, or physical carrier order is
+            inconsistent, or a packed-to-packed cast has unresolved widths.
+    """
+    source = operation.operands[0]
+    result = operation.results[0]
+    target = operation.target_type
+    assert isinstance(target, (QUIntType, QFixedType))
+    type_name = _packed_register_name(target)
+    concrete_width = _packed_register_width(target, location)
+    _validate_packed_carrier_metadata(result, concrete_width, location, type_name)
+    metadata = result.metadata.cast
+    assert metadata is not None
+    if (
+        metadata.source_uuid != source.uuid
+        or metadata.source_logical_id != source.logical_id
+    ):
+        raise ValueError(
+            f"{location} {type_name} cast metadata disagrees with its source"
+        )
+    if tuple(operation.qubit_mapping) != metadata.qubit_uuids:
+        raise ValueError(
+            f"{location} {type_name} qubit_mapping disagrees with cast metadata"
+        )
+    if isinstance(target, QFixedType):
+        _validate_qfixed_layout_metadata(result, target, concrete_width, location)
+
+    if isinstance(source.type, (QUIntType, QFixedType)):
+        source_width = _packed_register_width(source.type, location)
+        _validate_packed_carrier_metadata(
+            source, source_width, location, _packed_register_name(source.type)
+        )
+        if isinstance(source.type, QFixedType):
+            _validate_qfixed_layout_metadata(
+                source, source.type, source_width, location
+            )
+        if concrete_width is None or source_width is None:
+            raise ValueError(
+                f"{location} unsupported symbolic packed-to-packed cast width"
+            )
+        if source_width != concrete_width:
+            raise ValueError(
+                f"{location} {type_name} width disagrees with its source register"
+            )
+        source_metadata = source.metadata.cast
+        assert source_metadata is not None
+        expected = source_metadata.qubit_uuids, source_metadata.qubit_logical_ids
+    else:
+        _require_array_type(source, QubitType(), location)
+        source_width = array_static_length(cast(ArrayValue, source))
+        expected = (
+            root_carrier_keys(cast(ArrayValue, source), concrete_width)
+            if concrete_width is not None and source_width == concrete_width
+            else None
+        )
+    if concrete_width is None:
+        if source_width is not None or operation.qubit_mapping:
+            raise ValueError(
+                f"{location} symbolic {type_name} cast must defer its carrier mapping"
+            )
+        return
+    if source_width != concrete_width:
+        raise ValueError(
+            f"{location} {type_name} width disagrees with its source vector"
+        )
+
+    if expected is None:
+        raise ValueError(f"{location} {type_name} source carrier order is unresolved")
+    expected_uuids, expected_logical_ids = expected
+    if (
+        tuple(expected_uuids) != metadata.qubit_uuids
+        or tuple(expected_logical_ids) != metadata.qubit_logical_ids
+    ):
+        raise ValueError(
+            f"{location} {type_name} carrier order disagrees with its source"
+        )
+
+
+def _validate_qint_decode_layout(bits: ArrayValue, location: str) -> None:
+    """Validate the bit-array shape consumed by an unsigned integer decoder.
+
+    The decoder has no stored width; its bit count is the array's static
+    length, so that length must be a concrete non-negative integer.
+
+    Args:
+        bits (ArrayValue): One-dimensional measured bit array to decode.
+        location (str): Human-readable operation location.
+
+    Raises:
+        ValueError: If the array is not one-dimensional, if its length remains
+            symbolic after lowering, or if the length is not a non-negative
+            plain integer.
+    """
+    if len(bits.shape) != 1:
+        raise ValueError(f"{location} QInt decoder requires a one-dimensional array")
+    width = bits.shape[0]
+    if not width.is_constant():
+        raise ValueError(f"{location} QInt decoder bit-array width must be concrete")
+    concrete_width = width.get_const()
+    if not is_plain_int(concrete_width) or cast(int, concrete_width) < 0:
+        raise ValueError(f"{location} bit-array width must be a non-negative integer")
 
 
 def _validate_binop(operation: BinOp, location: str) -> None:

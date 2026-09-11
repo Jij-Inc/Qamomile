@@ -1,4 +1,4 @@
-"""Helpers for asserting generated CUDA-Q source in backend tests."""
+"""Helpers for asserting generated CUDA-Q source in engine tests."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ _TRACE_ATTR = "_cudaq_source_trace"
 
 @dataclass(frozen=True)
 class EmissionAction:
-    """A backend-level emission event captured during code generation."""
+    """An engine-level emission event captured during code generation."""
 
     kind: str
     args: tuple[Any, ...]

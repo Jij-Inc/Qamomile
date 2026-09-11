@@ -7,7 +7,7 @@ samples) and refines them purely classically. ``LocalSearch``
 with the step strategy selected by ``LocalSearchMethod``.
 
 Constraints and extension points:
-- No quantum or backend imports; this package must stay importable and
+- No quantum or engine imports; this package must stay importable and
   runnable without any quantum SDK installed.
 - New refinement strategies (tabu, simulated annealing, ...) belong here
   as sibling modules operating on the same ``BinaryModel``/sample-set

@@ -1,4 +1,4 @@
-"""Shared materialization boundary for circuit-family backend artifacts."""
+"""Shared materialization boundary for circuit-family engine artifacts."""
 
 from __future__ import annotations
 
@@ -31,11 +31,11 @@ ArtifactT = TypeVar("ArtifactT")
 
 @dataclasses.dataclass(frozen=True)
 class MaterializedCircuit(Generic[ArtifactT]):
-    """Package a circuit artifact and backend-specific binding metadata.
+    """Package a circuit artifact and engine-specific binding metadata.
 
     Args:
-        artifact (Any): Backend-native circuit object.
-        parameters (Mapping[str, Any]): Backend parameters keyed by public
+        artifact (Any): Engine-native circuit object.
+        parameters (Mapping[str, Any]): Engine parameters keyed by public
             parameter name.
         measurement_qubit_map (Mapping[int, int] | None): Static-measurement
             mapping from classical output slot to physical qubit slot. ``None``
@@ -57,7 +57,7 @@ class MaterializedCircuit(Generic[ArtifactT]):
 
 
 class CircuitMaterializer(Protocol[ArtifactT]):
-    """Convert one target-legal circuit program to a backend artifact.
+    """Convert one target-legal circuit program to an engine artifact.
 
     A materializer owns two things: a declaration of what it accepts
     (:attr:`capabilities`) and a mechanical conversion of programs that
@@ -86,22 +86,22 @@ class CircuitMaterializer(Protocol[ArtifactT]):
             program (CircuitProgram): Target-legal circuit-family program.
 
         Returns:
-            MaterializedCircuit: Artifact plus backend binding metadata.
+            MaterializedCircuit: Artifact plus engine binding metadata.
         """
         ...
 
 
-class CircuitBackendEmitPass(EmitPass[ArtifactT]):
+class CircuitEngineEmitPass(EmitPass[ArtifactT]):
     """Lower, legalize, verify, and materialize a circuit-family plan.
 
     The pass runs the three phases in order and never interleaves them:
-    shared lowering produces backend-neutral circuit IR, target legalization
+    shared lowering produces engine-neutral circuit IR, target legalization
     rewrites it under the materializer's declared capabilities and the
     compilation policy, target verification proves the result, and only then
     does the materializer convert it mechanically.
 
     Args:
-        materializer (CircuitMaterializer[ArtifactT]): Backend artifact
+        materializer (CircuitMaterializer[ArtifactT]): Engine artifact
             materializer owning the target capability declaration.
         bindings (dict[str, Any] | None): Compile-time bindings. Defaults to
             ``None``.
@@ -121,7 +121,7 @@ class CircuitBackendEmitPass(EmitPass[ArtifactT]):
         """Initialize a circuit-family lowering and materialization pass.
 
         Args:
-            materializer (CircuitMaterializer[ArtifactT]): Backend artifact
+            materializer (CircuitMaterializer[ArtifactT]): Engine artifact
                 materializer owning the target capability declaration.
             bindings (dict[str, Any] | None): Compile-time bindings. Defaults
                 to ``None``.
@@ -142,7 +142,7 @@ class CircuitBackendEmitPass(EmitPass[ArtifactT]):
             input (ProgramPlan): Circuit-family execution plan.
 
         Returns:
-            ExecutableProgram[ArtifactT]: Backend-native executable structure.
+            ExecutableProgram[ArtifactT]: Engine-native executable structure.
 
         Raises:
             TargetCapabilityError: If a legalized segment still requires a
@@ -185,7 +185,7 @@ class CircuitBackendEmitPass(EmitPass[ArtifactT]):
             RuntimeError: Always, because :meth:`run` owns the new path.
         """
         del operations, bindings
-        raise RuntimeError("Circuit backends must materialize CircuitProgram")
+        raise RuntimeError("Circuit engines must materialize CircuitProgram")
 
 
 def materialize_executable(
@@ -197,11 +197,11 @@ def materialize_executable(
     Args:
         executable (ExecutableProgram[CircuitProgram]): Lowered circuit-family
             execution structure.
-        materializer (CircuitMaterializer[ArtifactT]): Backend materializer.
+        materializer (CircuitMaterializer[ArtifactT]): Engine materializer.
 
     Returns:
         ExecutableProgram[ArtifactT]: Execution structure containing native
-            backend circuits and unchanged ABI, classical, expectation-value,
+            engine circuits and unchanged ABI, classical, expectation-value,
             mapping, and parameter metadata.
     """
     quantum_segments = []
@@ -234,9 +234,9 @@ def materialize_executable(
             parameters=[
                 dataclasses.replace(
                     parameter,
-                    backend_param=materialized.parameters.get(
+                    engine_param=materialized.parameters.get(
                         parameter.name,
-                        parameter.backend_param,
+                        parameter.engine_param,
                     ),
                 )
                 for parameter in segment.parameter_metadata.parameters

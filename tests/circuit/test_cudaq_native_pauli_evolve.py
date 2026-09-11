@@ -2,7 +2,7 @@
 
 CUDA-Q realizes each Hamiltonian term ``coeff * P`` of ``exp(-i*gamma*H)``
 with a single ``exp_pauli`` call instead of the ``h`` / ``rz`` + CX-ladder
-gadget the other backends use.  The risk in that lowering is the Pauli
+gadget the other engines use.  The risk in that lowering is the Pauli
 word / qubit ordering: an asymmetric multi-qubit term such as ``X0 Z1``
 silently computes the wrong operator if the word is reversed relative to
 the qubit list.  These statevector checks against Qiskit's
@@ -138,11 +138,11 @@ def _fidelity_error(kernel, bindings) -> float:
     """Return ``1 - |<psi_qiskit|psi_cudaq>|`` for ``kernel`` at ``bindings``.
 
     Args:
-        kernel: The qkernel to transpile on both backends.
+        kernel: The qkernel to transpile on both engines.
         bindings (dict): Transpile bindings (``ham``, ``gamma``, ``n``).
 
     Returns:
-        float: The fidelity error (``0`` when the backends agree).
+        float: The fidelity error (``0`` when the engines agree).
     """
     from qamomile.cudaq import CudaqTranspiler
 

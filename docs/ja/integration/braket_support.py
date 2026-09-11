@@ -155,7 +155,7 @@ print("<X> =", energy)
 # %% [markdown]
 # ## 制約
 #
-# 現在のBraketバックエンドは静的なgate-model回路を対象としています。測定結果に依存する`if`や`while`のcontrol flow、mid-circuit reset、およびそれらの操作を必要とするアルゴリズムには対応していません。これには、modular算術やShorアルゴリズムのうちresetに依存する実行経路が含まれます。そのようなプログラムは静的回路へ書き換えるか、必要なdynamic-circuit primitiveを提供するbackendを選択してください。
+# 現在のBraketエンジンは静的なgate-model回路を対象としています。測定結果に依存する`if`や`while`のcontrol flow、mid-circuit reset、およびそれらの操作を必要とするアルゴリズムには対応していません。これには、modular算術やShorアルゴリズムのうちresetに依存する実行経路が含まれます。そのようなプログラムは静的回路へ書き換えるか、必要なdynamic-circuit primitiveを提供するエンジンを選択してください。
 
 # %% [markdown]
 # ## まとめ

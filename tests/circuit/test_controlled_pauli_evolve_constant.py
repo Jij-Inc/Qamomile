@@ -244,12 +244,12 @@ def _fidelity_error(kernel: Any, ham: Any, gamma: float) -> float:
     lower the fidelity.
 
     Args:
-        kernel (Any): The qkernel to transpile on both backends.
+        kernel (Any): The qkernel to transpile on both engines.
         ham (Any): Hamiltonian binding for ``ham``.
         gamma (float): Evolution time binding for ``gamma``.
 
     Returns:
-        float: The fidelity error (``0`` when the backends agree).
+        float: The fidelity error (``0`` when the engines agree).
     """
     from qamomile.cudaq import CudaqTranspiler
 

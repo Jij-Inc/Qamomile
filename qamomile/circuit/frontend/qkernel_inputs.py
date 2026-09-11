@@ -21,7 +21,14 @@ from qamomile.circuit.frontend.func_to_block import (
 from qamomile.circuit.frontend.handle import Observable
 from qamomile.circuit.frontend.handle.array import Vector
 from qamomile.circuit.frontend.handle.containers import Dict, Tuple
-from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, Qubit, UInt
+from qamomile.circuit.frontend.handle.primitives import (
+    Bit,
+    Float,
+    Handle,
+    QInt,
+    Qubit,
+    UInt,
+)
 from qamomile.circuit.frontend.qkernel_utils import get_array_element_type
 from qamomile.circuit.frontend.static_binding import (
     is_static_binding_annotation,
@@ -38,7 +45,7 @@ def is_parameterizable_type(param_type: Any) -> bool:
         param_type (Any): Frontend type annotation to inspect.
 
     Returns:
-        bool: ``True`` when the type can be represented by backend runtime
+        bool: ``True`` when the type can be represented by engine runtime
         parameters.
     """
     if param_type in (float, Float, int, UInt):
@@ -70,7 +77,7 @@ def auto_detect_parameters(
     for name, param in signature.parameters.items():
         param_type = input_types.get(name, param.annotation)
 
-        if param_type is Qubit:
+        if param_type in (Qubit, QInt):
             continue
         if is_array_type(param_type) and get_array_element_type(param_type) is Qubit:
             continue
@@ -190,7 +197,7 @@ def validate_kwargs(
         if name in parameters:
             continue
 
-        if param_type is Qubit:
+        if param_type in (Qubit, QInt):
             continue
         if is_array_type(param_type):
             element_type = get_array_element_type(param_type)

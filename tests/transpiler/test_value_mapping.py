@@ -27,7 +27,7 @@ from qamomile.circuit.ir.types.primitives import (
     QubitType,
     UIntType,
 )
-from qamomile.circuit.ir.types.q_register import QFixedType
+from qamomile.circuit.ir.types.q_register import QFixedType, QUIntType
 from qamomile.circuit.ir.value import (
     ArrayRuntimeMetadata,
     ArrayValue,
@@ -568,7 +568,10 @@ class TestCarrierMetadataMapping:
             f"{root.uuid}_3",
         ]
 
-    def test_value_substitutor_symbolic_view_carrier_raises(self) -> None:
+    @pytest.mark.parametrize("result_type", [QFixedType(0, 2), QUIntType(2)])
+    def test_value_substitutor_symbolic_view_carrier_raises(
+        self, result_type: QFixedType | QUIntType
+    ) -> None:
         """Substituting a carrier onto a symbolic-bound slice view fails fast.
 
         When the mapped view's ``slice_start`` / ``slice_step`` are not
@@ -587,24 +590,21 @@ class TestCarrierMetadataMapping:
             slice_start=_make_value("start"),
             slice_step=_make_const_value("step", 2),
         )
-        result_type = QFixedType(integer_bits=0, fractional_bits=2)
-        cast_result = (
-            Value(type=result_type, name="qf")
-            .with_cast_metadata(
-                source_uuid=formal.uuid,
-                source_logical_id=formal.logical_id,
-                qubit_uuids=[f"{formal.uuid}_0", f"{formal.uuid}_1"],
-                qubit_logical_ids=[
-                    f"{formal.logical_id}_0",
-                    f"{formal.logical_id}_1",
-                ],
-            )
-            .with_qfixed_metadata(
+        cast_result = Value(type=result_type, name="qf").with_cast_metadata(
+            source_uuid=formal.uuid,
+            source_logical_id=formal.logical_id,
+            qubit_uuids=[f"{formal.uuid}_0", f"{formal.uuid}_1"],
+            qubit_logical_ids=[
+                f"{formal.logical_id}_0",
+                f"{formal.logical_id}_1",
+            ],
+        )
+        if isinstance(result_type, QFixedType):
+            cast_result = cast_result.with_qfixed_metadata(
                 qubit_uuids=[f"{formal.uuid}_0", f"{formal.uuid}_1"],
                 num_bits=2,
                 int_bits=0,
             )
-        )
         op = CastOperation(
             operands=[formal],
             results=[cast_result],
@@ -613,7 +613,9 @@ class TestCarrierMetadataMapping:
             qubit_mapping=[f"{formal.uuid}_0", f"{formal.uuid}_1"],
         )
 
-        with pytest.raises(ValueError, match="symbolic slice bounds"):
+        with pytest.raises(
+            ValueError, match="packed-register carrier key.*symbolic slice bounds"
+        ):
             ValueSubstitutor({formal.uuid: view}).substitute_operation(op)
 
     def test_uuid_remapper_clones_merge_output_carriers_from_branch_body(

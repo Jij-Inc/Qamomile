@@ -1,4 +1,4 @@
-"""Cross-backend tests for the ``qmc.global_phase`` combinator.
+"""Cross-engine tests for the ``qmc.global_phase`` combinator.
 
 ``qmc.global_phase(qkernel, theta)`` applies an ordinary qkernel call and then
 records ``e^{i*theta}``, without imposing a separate reversibility contract.
@@ -7,8 +7,8 @@ values do not change, while every target must still preserve it exactly or
 reject it explicitly. Coherently controlling a reversible qkernel containing
 the phase turns it into an observable relative phase on the control subspace.
 
-Backends are exercised through the shared ``sdk_transpiler`` fixture
-(``importorskip``-guarded per backend), so the QURI Parts and CUDA-Q legs
+Engines are exercised through the shared ``sdk_transpiler`` fixture
+(``importorskip``-guarded per engine), so the QURI Parts and CUDA-Q legs
 skip automatically when those SDKs are absent. The Qiskit-only unitary
 checks use ``qiskit_transpiler`` because only Qiskit exposes the exact
 global phase in ``QuantumCircuit.global_phase``.
@@ -118,13 +118,13 @@ def _executor(case: Any, seed: int = 901) -> Any:
     """Build a (seeded, for Qiskit) executor for an ``SdkTranspilerCase``.
 
     Args:
-        case (Any): Backend label plus transpiler instance.
+        case (Any): Engine label plus transpiler instance.
         seed (int): Simulator seed for the Qiskit leg.
 
     Returns:
-        Any: A backend executor suitable for ``exe.sample`` / ``exe.run``.
+        Any: An engine executor suitable for ``exe.sample`` / ``exe.run``.
     """
-    if case.backend_name == "qiskit":
+    if case.engine_name == "qiskit":
         from qiskit.providers.basic_provider import BasicSimulator
 
         backend = BasicSimulator()
@@ -525,11 +525,11 @@ class TestGlobalPhaseStandalone:
             exe.sample(_executor(sdk_transpiler, seed), shots=512).result()
         )
         # X|0> = |1>; the global phase must not change the outcome.
-        assert set(counts) == {1}, f"{sdk_transpiler.backend_name}: {counts}"
+        assert set(counts) == {1}, f"{sdk_transpiler.engine_name}: {counts}"
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_expval_unaffected_by_phase(self, sdk_transpiler, seed):
-        """Standalone phase leaves ``<Z>`` unchanged on every backend."""
+        """Standalone phase leaves ``<Z>`` unchanged on every engine."""
         import qamomile.observable as qm_o
 
         rng = np.random.default_rng(seed)
@@ -557,9 +557,9 @@ class TestGlobalPhaseStandalone:
             tr.transpile(phased, bindings={"obs": obs}).run(tr.executor()).result()
         )
         v_plain = tr.transpile(plain, bindings={"obs": obs}).run(tr.executor()).result()
-        atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+        atol = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
         assert np.isclose(v_phase, v_plain, rtol=0.0, atol=atol), (
-            f"{sdk_transpiler.backend_name}: {v_phase} vs {v_plain}"
+            f"{sdk_transpiler.engine_name}: {v_phase} vs {v_plain}"
         )
 
     @pytest.mark.parametrize("seed", [0, 42])
@@ -611,7 +611,7 @@ class TestGlobalPhaseStandalone:
             .result()
         )
 
-        assert set(counts) == {1}, f"{sdk_transpiler.backend_name}: {counts}"
+        assert set(counts) == {1}, f"{sdk_transpiler.engine_name}: {counts}"
         assert np.isclose(expectation, -1.0, rtol=0.0, atol=1e-8)
 
 
@@ -623,7 +623,7 @@ class TestGlobalPhaseControlled:
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_hadamard_test_phase_kickback(self, sdk_transpiler, seed):
-        """A Hadamard test reads back ``cos^2(θ/2)`` on every backend.
+        """A Hadamard test reads back ``cos^2(θ/2)`` on every engine.
 
         Controlling a pure global phase puts ``P(θ)`` on the control qubit,
         so the standard Hadamard test (H, controlled-phase, H, measure)
@@ -657,7 +657,7 @@ class TestGlobalPhaseControlled:
         )
         p0 = counts.get(0, 0) / shots
         assert np.isclose(p0, np.cos(theta / 2) ** 2, rtol=0.0, atol=0.03), (
-            f"{sdk_transpiler.backend_name} θ={theta}: P(0)={p0}"
+            f"{sdk_transpiler.engine_name} θ={theta}: P(0)={p0}"
         )
 
     @pytest.mark.parametrize("power", [1, 3])
@@ -701,7 +701,7 @@ class TestGlobalPhaseControlled:
         probability_zero = counts.get(0, 0) / shots
         expected = np.cos(power * theta / 2) ** 2
         assert np.isclose(probability_zero, expected, rtol=0.0, atol=0.035), (
-            f"{sdk_transpiler.backend_name} power={power}: "
+            f"{sdk_transpiler.engine_name} power={power}: "
             f"P(0)={probability_zero} vs {expected}"
         )
 
@@ -749,7 +749,7 @@ class TestGlobalPhaseControlled:
                 bindings={"angle": theta},
             ).result()
         )
-        assert set(counts) == {0}, f"{sdk_transpiler.backend_name}: {counts}"
+        assert set(counts) == {0}, f"{sdk_transpiler.engine_name}: {counts}"
 
     @pytest.mark.parametrize("seed", [0, 1])
     def test_nested_control_call_global_phase_kickback(
@@ -806,8 +806,7 @@ class TestGlobalPhaseControlled:
         probability_zero_zero = counts.get((0, 0), 0) / shots
         expected = (5 + 3 * np.cos(theta)) / 8
         assert np.isclose(probability_zero_zero, expected, rtol=0.0, atol=0.035), (
-            f"{sdk_transpiler.backend_name}: "
-            f"P(00)={probability_zero_zero} vs {expected}"
+            f"{sdk_transpiler.engine_name}: P(00)={probability_zero_zero} vs {expected}"
         )
 
     def test_control_call_global_phase_binds_after_target_parameters(
@@ -1361,7 +1360,7 @@ class TestGlobalPhaseArgShapes:
 
     Each body deterministically maps |0...0> to a known Z-basis bitstring, so
     a correct (phase-invisible, body-applied) emission yields exactly that
-    bitstring on every backend. Executed on Qiskit + QURI Parts (+ CUDA-Q via
+    bitstring on every engine. Executed on Qiskit + QURI Parts (+ CUDA-Q via
     importorskip) through ``sdk_transpiler``; theta is a runtime parameter, so
     the symbolic-phase path is exercised too.
     """
@@ -1384,7 +1383,7 @@ class TestGlobalPhaseArgShapes:
                 _executor(sdk_transpiler, seed), shots=512, bindings={"angle": theta}
             ).result()
         )
-        assert set(counts) == {(1, 1)}, f"{sdk_transpiler.backend_name}: {counts}"
+        assert set(counts) == {(1, 1)}, f"{sdk_transpiler.engine_name}: {counts}"
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_two_vector_qubit_args(self, sdk_transpiler, seed):
@@ -1408,7 +1407,7 @@ class TestGlobalPhaseArgShapes:
                 _executor(sdk_transpiler, seed), shots=512, bindings={"angle": theta}
             ).result()
         )
-        assert set(counts) == {(1, 1, 1, 1)}, f"{sdk_transpiler.backend_name}: {counts}"
+        assert set(counts) == {(1, 1, 1, 1)}, f"{sdk_transpiler.engine_name}: {counts}"
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_vector_plus_sliceview_mixed(self, sdk_transpiler, seed):
@@ -1432,7 +1431,7 @@ class TestGlobalPhaseArgShapes:
                 _executor(sdk_transpiler, seed), shots=512, bindings={"angle": theta}
             ).result()
         )
-        assert set(counts) == {(0, 1, 1, 0)}, f"{sdk_transpiler.backend_name}: {counts}"
+        assert set(counts) == {(0, 1, 1, 0)}, f"{sdk_transpiler.engine_name}: {counts}"
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_strided_sliceview(self, sdk_transpiler, seed):
@@ -1454,7 +1453,7 @@ class TestGlobalPhaseArgShapes:
                 _executor(sdk_transpiler, seed), shots=512, bindings={"angle": theta}
             ).result()
         )
-        assert set(counts) == {(1, 0, 1, 0)}, f"{sdk_transpiler.backend_name}: {counts}"
+        assert set(counts) == {(1, 0, 1, 0)}, f"{sdk_transpiler.engine_name}: {counts}"
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_interleaved_quantum_classical_args(self, sdk_transpiler, seed):
@@ -1482,7 +1481,7 @@ class TestGlobalPhaseArgShapes:
                 bindings={"angle": theta, "inner_ang": inner},
             ).result()
         )
-        assert set(counts) == {(1, 1)}, f"{sdk_transpiler.backend_name}: {counts}"
+        assert set(counts) == {(1, 1)}, f"{sdk_transpiler.engine_name}: {counts}"
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_vector_float_param_body(self, sdk_transpiler, seed):
@@ -1510,7 +1509,7 @@ class TestGlobalPhaseArgShapes:
                 bindings={"angle": theta},
             ).result()
         )
-        assert set(counts) == {(1, 1)}, f"{sdk_transpiler.backend_name}: {counts}"
+        assert set(counts) == {(1, 1)}, f"{sdk_transpiler.engine_name}: {counts}"
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_expval_invariant_vector_body(self, sdk_transpiler, seed):
@@ -1543,9 +1542,9 @@ class TestGlobalPhaseArgShapes:
             tr.transpile(phased, bindings={"obs": obs}).run(tr.executor()).result()
         )
         v_plain = tr.transpile(plain, bindings={"obs": obs}).run(tr.executor()).result()
-        atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+        atol = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
         assert np.isclose(v_phase, v_plain, rtol=0.0, atol=atol), (
-            f"{sdk_transpiler.backend_name}: {v_phase} vs {v_plain}"
+            f"{sdk_transpiler.engine_name}: {v_phase} vs {v_plain}"
         )
 
 
@@ -1580,7 +1579,7 @@ class TestGlobalPhaseSpecialCases:
             ).result()
         )
         assert set(counts) == {tuple(1 for _ in range(n))}, (
-            f"{sdk_transpiler.backend_name} n={n}: {counts}"
+            f"{sdk_transpiler.engine_name} n={n}: {counts}"
         )
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
@@ -1627,7 +1626,7 @@ class TestGlobalPhaseSpecialCases:
         p00 = counts.get((0, 0), 0) / shots
         expected = abs(3 + np.exp(1j * theta)) ** 2 / 16
         assert np.isclose(p00, expected, rtol=0.0, atol=0.03), (
-            f"{sdk_transpiler.backend_name} θ={theta}: P(00)={p00} vs {expected}"
+            f"{sdk_transpiler.engine_name} θ={theta}: P(00)={p00} vs {expected}"
         )
 
     @pytest.mark.parametrize("seed", [0, 1, 2])
@@ -1656,7 +1655,7 @@ class TestGlobalPhaseSpecialCases:
                 _executor(sdk_transpiler, seed), shots=512, bindings={"angle": theta}
             ).result()
         )
-        assert set(counts) == {1}, f"{sdk_transpiler.backend_name}: {counts}"
+        assert set(counts) == {1}, f"{sdk_transpiler.engine_name}: {counts}"
 
     @pytest.mark.parametrize("seed", [0, 1, 2])
     def test_inverse_unitary_negates_phase(self, qiskit_transpiler, seed):
@@ -1728,7 +1727,7 @@ class TestGlobalPhaseSpecialCases:
         )
         p0 = counts.get(0, 0) / shots
         assert np.isclose(p0, np.cos(phases[idx] / 2) ** 2, rtol=0.0, atol=0.03), (
-            f"{sdk_transpiler.backend_name}: P(0)={p0}"
+            f"{sdk_transpiler.engine_name}: P(0)={p0}"
         )
 
     @pytest.mark.parametrize("seed", [0, 1, 2])
@@ -1769,7 +1768,7 @@ class TestGlobalPhaseSpecialCases:
 
 
 class TestGlobalPhaseControlledCompositions:
-    """Exercise controlled global-phase compositions across SDK backends.
+    """Exercise controlled global-phase compositions across SDK engines.
 
     Covers a controlled ``inverse(global_phase)`` that CUDA-Q must retain, a
     loop whose only loop-variable dependency is the phase angle, controlled
@@ -1818,7 +1817,7 @@ class TestGlobalPhaseControlledCompositions:
         )
         p0 = counts.get(0, 0) / shots
         assert np.isclose(p0, np.cos(theta / 2) ** 2, rtol=0.0, atol=0.03), (
-            f"{sdk_transpiler.backend_name} θ={theta}: P(0)={p0}"
+            f"{sdk_transpiler.engine_name} θ={theta}: P(0)={p0}"
         )
 
     @pytest.mark.parametrize("seed", [0, 1, 2])
@@ -1827,7 +1826,7 @@ class TestGlobalPhaseControlledCompositions:
 
         Pins the *sign* of the controlled inverse phase: the forward ``+θ`` and
         inverse ``-θ`` kickbacks must cancel exactly, so the Hadamard test
-        returns the control to ``|0>`` on every backend.
+        returns the control to ``|0>`` on every engine.
         """
         theta = float(np.random.default_rng(seed).uniform(0.3, np.pi - 0.3))
 
@@ -1858,7 +1857,7 @@ class TestGlobalPhaseControlledCompositions:
                 _executor(sdk_transpiler, seed), shots=4000, bindings={"angle": theta}
             ).result()
         )
-        assert set(counts) == {0}, f"{sdk_transpiler.backend_name}: {counts}"
+        assert set(counts) == {0}, f"{sdk_transpiler.engine_name}: {counts}"
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_loop_phase_only_depends_on_loop_var(self, sdk_transpiler, seed):
@@ -1884,7 +1883,7 @@ class TestGlobalPhaseControlledCompositions:
         counts = _counts(
             exe.sample(_executor(sdk_transpiler, seed), shots=512).result()
         )
-        assert set(counts) == {0}, f"{sdk_transpiler.backend_name}: {counts}"
+        assert set(counts) == {0}, f"{sdk_transpiler.engine_name}: {counts}"
 
     @pytest.mark.parametrize("seed", [0, 1])
     def test_control_call_phase_from_loop_element_kickback(
@@ -1924,7 +1923,7 @@ class TestGlobalPhaseControlledCompositions:
         probability_zero = counts.get(0, 0) / shots
         expected = np.cos(float(np.sum(angles)) / 2) ** 2
         assert np.isclose(probability_zero, expected, rtol=0.0, atol=0.035), (
-            f"{sdk_transpiler.backend_name}: P(0)={probability_zero} vs {expected}"
+            f"{sdk_transpiler.engine_name}: P(0)={probability_zero} vs {expected}"
         )
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
@@ -1966,7 +1965,7 @@ class TestGlobalPhaseControlledCompositions:
         probability_zero = counts.get(0, 0) / shots
         assert np.isclose(
             probability_zero, np.cos(3.0 * step) ** 2, rtol=0.0, atol=0.03
-        ), f"{sdk_transpiler.backend_name} step={step}: P(0)={probability_zero}"
+        ), f"{sdk_transpiler.engine_name} step={step}: P(0)={probability_zero}"
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_controlled_loop_carried_pauli_identity_phase(self, sdk_transpiler, seed):
@@ -2005,7 +2004,7 @@ class TestGlobalPhaseControlledCompositions:
         probability_zero = counts.get(0, 0) / shots
         assert np.isclose(
             probability_zero, np.cos(3.0 * step) ** 2, rtol=0.0, atol=0.04
-        ), f"{sdk_transpiler.backend_name} step={step}: P(0)={probability_zero}"
+        ), f"{sdk_transpiler.engine_name} step={step}: P(0)={probability_zero}"
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_controlled_phase_expectation_value(self, sdk_transpiler, seed):
@@ -2039,9 +2038,9 @@ class TestGlobalPhaseControlledCompositions:
             .run(tr.executor())
             .result()
         )
-        atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+        atol = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
         assert np.isclose(val, np.cos(theta), rtol=0.0, atol=atol), (
-            f"{sdk_transpiler.backend_name} θ={theta}: <Z>={val} vs {np.cos(theta)}"
+            f"{sdk_transpiler.engine_name} θ={theta}: <Z>={val} vs {np.cos(theta)}"
         )
 
     @pytest.mark.parametrize("power", [1, 3])
@@ -2082,7 +2081,7 @@ class TestGlobalPhaseControlledCompositions:
         # its Y expectation is sin(N*p*pi/2).
         expected_y = np.sin(target_width * power * np.pi / 2.0)
         assert np.isclose(value, expected_y, rtol=0.0, atol=1e-6), (
-            f"{sdk_transpiler.backend_name} width={target_width} "
+            f"{sdk_transpiler.engine_name} width={target_width} "
             f"power={power}: <Y>={value}"
         )
 
@@ -2211,7 +2210,7 @@ class TestGlobalPhaseControlledCompositions:
         # Coherent X uncomputation leaves relative phase N*pi/2 on the control.
         expected_y = np.sin(target_width * np.pi / 2.0)
         assert np.isclose(value, expected_y, rtol=0.0, atol=1e-6), (
-            f"{sdk_transpiler.backend_name} width={target_width}: <Y>={value}"
+            f"{sdk_transpiler.engine_name} width={target_width}: <Y>={value}"
         )
 
     @pytest.mark.parametrize("target_width", [1, 2, 3])
@@ -2323,14 +2322,14 @@ class TestGlobalPhaseControlledCompositions:
                 _executor(sdk_transpiler, seed), shots=512, bindings={"angle": theta}
             ).result()
         )
-        assert set(counts) == {(1, 1)}, f"{sdk_transpiler.backend_name}: {counts}"
+        assert set(counts) == {(1, 1)}, f"{sdk_transpiler.engine_name}: {counts}"
 
     @pytest.mark.parametrize("seed", [0, 1, 2])
-    def test_three_control_phase_cross_backend(self, sdk_transpiler, seed):
-        """Three-control global phase executes on every supported backend.
+    def test_three_control_phase_cross_engine(self, sdk_transpiler, seed):
+        """Three-control global phase executes on every supported engine.
 
         Qiskit and CUDA-Q use native control support. QURI Parts uses the
-        shared clean-ancilla Toffoli-cascade decomposition. Every backend must
+        shared clean-ancilla Toffoli-cascade decomposition. Every engine must
         match the analytic 3-control kickback ``|7 + e^{iθ}|² / 64``.
         """
         theta = float(np.random.default_rng(seed).uniform(0.3, np.pi - 0.3))
@@ -2367,7 +2366,7 @@ class TestGlobalPhaseControlledCompositions:
         p000 = counts.get((0, 0, 0), 0) / shots
         expected = abs(7 + np.exp(1j * theta)) ** 2 / 64
         assert np.isclose(p000, expected, rtol=0.0, atol=0.03), (
-            f"{sdk_transpiler.backend_name} θ={theta}: P(000)={p000} vs {expected}"
+            f"{sdk_transpiler.engine_name} θ={theta}: P(000)={p000} vs {expected}"
         )
 
     @pytest.mark.parametrize("seed", [0, 1, 2])
@@ -2399,7 +2398,7 @@ class TestGlobalPhaseControlledCompositions:
             ).result()
         )
         assert set(counts) == {tuple(1 for _ in range(n))}, (
-            f"{sdk_transpiler.backend_name} n={n}: {counts}"
+            f"{sdk_transpiler.engine_name} n={n}: {counts}"
         )
 
 
@@ -2432,7 +2431,7 @@ def _control_bearing_body(a: qmc.Qubit, b: qmc.Qubit) -> tuple[qmc.Qubit, qmc.Qu
 
 
 class TestGlobalPhaseCompositionCoverage:
-    """Exercise global-phase compositions on every SDK backend.
+    """Exercise global-phase compositions on every SDK engine.
 
     Covers a control-bearing body inside ``inverse(global_phase)``, deeper
     compositions, and controlled expectation values.
@@ -2480,7 +2479,7 @@ class TestGlobalPhaseCompositionCoverage:
                 _executor(sdk_transpiler, seed), shots=512, bindings={"ang": theta}
             ).result()
         )
-        assert set(counts) == {(1, 0)}, f"{sdk_transpiler.backend_name}: {counts}"
+        assert set(counts) == {(1, 0)}, f"{sdk_transpiler.engine_name}: {counts}"
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_double_inverse_phase_kickback(self, sdk_transpiler, seed):
@@ -2521,7 +2520,7 @@ class TestGlobalPhaseCompositionCoverage:
         )
         p0 = counts.get(0, 0) / shots
         assert np.isclose(p0, np.cos(theta / 2) ** 2, rtol=0.0, atol=0.03), (
-            f"{sdk_transpiler.backend_name} θ={theta}: P(0)={p0}"
+            f"{sdk_transpiler.engine_name} θ={theta}: P(0)={p0}"
         )
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
@@ -2555,7 +2554,7 @@ class TestGlobalPhaseCompositionCoverage:
         # Two P(θ) kickbacks compose to P(2θ): P(0) = cos^2(θ).
         p0 = counts.get(0, 0) / shots
         assert np.isclose(p0, np.cos(theta) ** 2, rtol=0.0, atol=0.03), (
-            f"{sdk_transpiler.backend_name} θ={theta}: P(0)={p0} vs {np.cos(theta) ** 2}"
+            f"{sdk_transpiler.engine_name} θ={theta}: P(0)={p0} vs {np.cos(theta) ** 2}"
         )
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
@@ -2596,17 +2595,17 @@ class TestGlobalPhaseCompositionCoverage:
             .result()
         )
         expected = (1 + np.cos(theta)) / 2
-        atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+        atol = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
         assert np.isclose(val, expected, rtol=0.0, atol=atol), (
-            f"{sdk_transpiler.backend_name} θ={theta}: <Z0 Z1>={val} vs {expected}"
+            f"{sdk_transpiler.engine_name} θ={theta}: <Z0 Z1>={val} vs {expected}"
         )
 
     @pytest.mark.parametrize("seed", [0, 1, 2])
-    def test_classical_param_body_executes_cross_backend(self, sdk_transpiler, seed):
-        """A classical-Float-param phased body samples on every backend.
+    def test_classical_param_body_executes_cross_engine(self, sdk_transpiler, seed):
+        """A classical-Float-param phased body samples on every engine.
 
         Promotes the formerly Qiskit-unitary-only classical-param body to a
-        cross-backend execution check. ``rz`` is invisible in the Z basis, so
+        cross-engine execution check. ``rz`` is invisible in the Z basis, so
         ``X`` then a phased ``rz`` deterministically yields ``|1>``.
         """
         rng = np.random.default_rng(seed)
@@ -2631,14 +2630,14 @@ class TestGlobalPhaseCompositionCoverage:
                 bindings={"angle": theta, "inner_ang": inner},
             ).result()
         )
-        assert set(counts) == {1}, f"{sdk_transpiler.backend_name}: {counts}"
+        assert set(counts) == {1}, f"{sdk_transpiler.engine_name}: {counts}"
 
     @pytest.mark.parametrize("seed", [0, 1, 2])
-    def test_phase_composition_executes_cross_backend(self, sdk_transpiler, seed):
-        """A nested ``global_phase`` composition samples on every backend.
+    def test_phase_composition_executes_cross_engine(self, sdk_transpiler, seed):
+        """A nested ``global_phase`` composition samples on every engine.
 
         Promotes the formerly Qiskit-unitary-only composition body to a
-        cross-backend execution check; the inner X is the observable effect.
+        cross-engine execution check; the inner X is the observable effect.
         """
         rng = np.random.default_rng(seed)
         alpha = float(rng.uniform(-np.pi, np.pi))
@@ -2660,7 +2659,7 @@ class TestGlobalPhaseCompositionCoverage:
         counts = _counts(
             exe.sample(_executor(sdk_transpiler, seed), shots=512).result()
         )
-        assert set(counts) == {1}, f"{sdk_transpiler.backend_name}: {counts}"
+        assert set(counts) == {1}, f"{sdk_transpiler.engine_name}: {counts}"
 
 
 class TestControlledCompileTimeGlobalPhase:
@@ -2705,7 +2704,7 @@ class TestControlledCompileTimeGlobalPhase:
         )
         p0 = counts.get(0, 0) / shots
         assert np.isclose(p0, np.cos(theta / 2) ** 2, rtol=0.0, atol=0.03), (
-            f"{sdk_transpiler.backend_name} θ={theta}: P(0)={p0}"
+            f"{sdk_transpiler.engine_name} θ={theta}: P(0)={p0}"
         )
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
@@ -2748,7 +2747,7 @@ class TestControlledCompileTimeGlobalPhase:
         )
         p0 = counts.get(0, 0) / shots
         assert np.isclose(p0, np.cos(theta / 2) ** 2, rtol=0.0, atol=0.03), (
-            f"{sdk_transpiler.backend_name} θ={theta}: P(0)={p0}"
+            f"{sdk_transpiler.engine_name} θ={theta}: P(0)={p0}"
         )
 
     @pytest.mark.parametrize("take_true", [True, False], ids=["true", "else"])
@@ -2801,7 +2800,7 @@ class TestControlledCompileTimeGlobalPhase:
         expected = {(0, 0): 0.5, (1, 0): 0.25, (1, 1): 0.25}
         for outcome, want in expected.items():
             assert np.isclose(probs.get(outcome, 0.0), want, rtol=0.0, atol=0.03), (
-                f"{sdk_transpiler.backend_name} take_true={take_true}: "
+                f"{sdk_transpiler.engine_name} take_true={take_true}: "
                 f"{outcome}={probs.get(outcome, 0.0)} (want {want}); full={probs}"
             )
 
@@ -2859,11 +2858,11 @@ class TestGlobalPhaseDeepControlRegressions:
             .result()
         )
         assert np.isclose(p0, np.cos(theta / 2) ** 2, rtol=0.0, atol=0.035), (
-            f"{sdk_transpiler.backend_name} theta={theta}: P(0)={p0}"
+            f"{sdk_transpiler.engine_name} theta={theta}: P(0)={p0}"
         )
-        atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+        atol = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
         assert np.isclose(value, np.cos(theta), rtol=0.0, atol=atol), (
-            f"{sdk_transpiler.backend_name} theta={theta}: <Z>={value}"
+            f"{sdk_transpiler.engine_name} theta={theta}: <Z>={value}"
         )
 
     @pytest.mark.parametrize("seed", [0, 42])
@@ -2928,11 +2927,11 @@ class TestGlobalPhaseDeepControlRegressions:
             .result()
         )
         assert np.isclose(p0, np.cos(theta / 2) ** 2, rtol=0.0, atol=0.035), (
-            f"{sdk_transpiler.backend_name} theta={theta}: P(0)={p0}"
+            f"{sdk_transpiler.engine_name} theta={theta}: P(0)={p0}"
         )
-        atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+        atol = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
         assert np.isclose(value, np.cos(theta), rtol=0.0, atol=atol), (
-            f"{sdk_transpiler.backend_name} theta={theta}: <Z>={value}"
+            f"{sdk_transpiler.engine_name} theta={theta}: <Z>={value}"
         )
 
     @pytest.mark.parametrize("seed", [0, 42])
@@ -3008,11 +3007,11 @@ class TestGlobalPhaseDeepControlRegressions:
             .result()
         )
         assert np.isclose(p0, np.cos(theta / 2) ** 2, rtol=0.0, atol=0.035), (
-            f"{sdk_transpiler.backend_name} theta={theta}: P(0)={p0}"
+            f"{sdk_transpiler.engine_name} theta={theta}: P(0)={p0}"
         )
-        atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+        atol = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
         assert np.isclose(value, np.cos(theta), rtol=0.0, atol=atol), (
-            f"{sdk_transpiler.backend_name} theta={theta}: <Z>={value}"
+            f"{sdk_transpiler.engine_name} theta={theta}: <Z>={value}"
         )
 
     @pytest.mark.parametrize("seed", [0, 42])
@@ -3022,7 +3021,7 @@ class TestGlobalPhaseDeepControlRegressions:
         """A controlled loop folds ``i == 0`` with each iteration binding.
 
         The controlled body retains ``ForOperation -> CompOp -> IfOperation``
-        until backend emission. Exactly the first iteration contributes the
+        until engine emission. Exactly the first iteration contributes the
         phase, so sampling and expectation values both read back ``theta``.
         """
         import qamomile.observable as qm_o
@@ -3082,11 +3081,11 @@ class TestGlobalPhaseDeepControlRegressions:
             .result()
         )
         assert np.isclose(p0, np.cos(theta / 2) ** 2, rtol=0.0, atol=0.035), (
-            f"{sdk_transpiler.backend_name} theta={theta}: P(0)={p0}"
+            f"{sdk_transpiler.engine_name} theta={theta}: P(0)={p0}"
         )
-        atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+        atol = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
         assert np.isclose(value, np.cos(theta), rtol=0.0, atol=atol), (
-            f"{sdk_transpiler.backend_name} theta={theta}: <Z>={value}"
+            f"{sdk_transpiler.engine_name} theta={theta}: <Z>={value}"
         )
 
 
@@ -3293,7 +3292,7 @@ class TestGlobalPhaseArgumentValidation:
                 bindings={"angle": theta},
             ).result()
         )
-        assert set(counts) == {1}, f"{sdk_transpiler.backend_name}: {counts}"
+        assert set(counts) == {1}, f"{sdk_transpiler.engine_name}: {counts}"
 
     def test_specialized_hidden_allocation_is_accepted(self):
         """The selected specialization may allocate internal qubits.
@@ -3763,7 +3762,7 @@ class TestGlobalPhaseArgumentValidation:
         assert circuit.block is not None
 
     def test_concrete_full_reslice_body_preserves_register(self, sdk_transpiler):
-        """Treat ``qs[:]`` as the same ordered register on every backend."""
+        """Treat ``qs[:]`` as the same ordered register on every engine."""
 
         @qkernel
         def full_reslice(
@@ -3784,7 +3783,7 @@ class TestGlobalPhaseArgumentValidation:
         counts = _counts(
             executable.sample(_executor(sdk_transpiler), shots=128).result()
         )
-        assert set(counts) == {(0, 1, 0)}, f"{sdk_transpiler.backend_name}: {counts}"
+        assert set(counts) == {(0, 1, 0)}, f"{sdk_transpiler.engine_name}: {counts}"
 
 
 class TestGlobalPhaseOperationInvariants:

@@ -1,6 +1,6 @@
 """Tests for partial/selective measurement correctness.
 
-Verifies that backends correctly decode measurement results when only a subset
+Verifies that engines correctly decode measurement results when only a subset
 of qubits are measured.  This is a regression test for a bug where QURI Parts
 (whose emit_measure is a no-op) returned bits indexed by qubit position rather
 than by the actually-measured qubit.
@@ -23,7 +23,7 @@ import pytest
 import qamomile.circuit as qmc
 
 # ---------------------------------------------------------------------------
-# Skip if backends are not installed
+# Skip if engines are not installed
 # ---------------------------------------------------------------------------
 pytest.importorskip("quri_parts")
 pytest.importorskip("quri_parts.qulacs")

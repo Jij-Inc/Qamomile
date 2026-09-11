@@ -314,10 +314,16 @@ class ArrayBase(Handle, Generic[T]):
 
         Returns:
             ArrayBase[T]: A fresh array handle of this handle's concrete
-                type wrapping ``value`` with this handle's shape.
+                type wrapping the selected shape dimensions on ``value``.
         """
         assert isinstance(value, ArrayValue)
-        return type(self)._create_from_value(value=value, shape=self._shape)
+        shape = tuple(
+            int(dimension.get_const())
+            if dimension.is_constant()
+            else UInt(value=dimension)
+            for dimension in value.shape
+        )
+        return type(self)._create_from_value(value=value, shape=shape)
 
     def _check_no_consumed_slots(self, operation_name: str) -> None:
         """Raise if any slot has been destroyed by a prior destructive op.
@@ -330,7 +336,7 @@ class ArrayBase(Handle, Generic[T]):
         ``measure(q[1::2])``) must call this guard before emitting IR
         so that the frontend detects the invalid reuse immediately —
         at trace time — rather than letting the program reach the
-        backend and fail at runtime.
+        engine and fail at runtime.
 
         For a :class:`VectorView`, the consumed-slot markers live on the
         view's *parent*'s borrow table (a destructive view consume marks
@@ -2701,7 +2707,11 @@ class VectorView(Vector[T]):
         view = VectorView._wrap_unregistered(
             parent=self._slice_parent,
             sliced_av=value,
-            length=self._shape[0],
+            length=(
+                int(value.shape[0].get_const())
+                if value.shape[0].is_constant()
+                else UInt(value=value.shape[0])
+            ),
             start_uint=self._slice_start,
             step_uint=self._slice_step,
         )

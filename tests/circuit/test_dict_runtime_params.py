@@ -1,7 +1,7 @@
 """Tests for Dict kernel arguments kept as runtime parameters.
 
 Covers declaring ``Dict[K, Float]`` in ``transpile(parameters=[...])``:
-per-key backend parameter creation from constant-key subscript lookups
+per-key engine parameter creation from constant-key subscript lookups
 (``d[key]``, including tuple keys, ``qmc.range`` loop variables that
 unrolling makes constant, and lookups inside sub-kernels the dict is
 forwarded to), execution-time decomposition of
@@ -429,10 +429,10 @@ class TestDictBindingKeyNormalization:
 
 
 class TestDictParameterEmit:
-    """Backend-parameter creation from Dict lookups on the Qiskit backend."""
+    """Engine-parameter creation from Dict lookups on the Qiskit engine."""
 
     def test_parameter_names_scalar_and_tuple_keys(self, qiskit_transpiler):
-        """Each looked-up key becomes one backend parameter with the shared naming."""
+        """Each looked-up key becomes one engine parameter with the shared naming."""
         exe = qiskit_transpiler.transpile(
             ising_chain_layer,
             bindings={"n": 3},
@@ -457,7 +457,7 @@ class TestDictParameterEmit:
         }
 
     def test_same_key_shares_one_parameter(self, qiskit_transpiler):
-        """Repeated lookups of one key reuse a single backend parameter."""
+        """Repeated lookups of one key reuse a single engine parameter."""
 
         @qmc.qkernel
         def repeated(coeffs: qmc.Dict[qmc.UInt, qmc.Float]) -> qmc.Vector[qmc.Bit]:
@@ -533,7 +533,7 @@ class TestDictParameterEmit:
 
 
 # ---------------------------------------------------------------------------
-# Cross-backend execution
+# Cross-engine execution
 # ---------------------------------------------------------------------------
 
 

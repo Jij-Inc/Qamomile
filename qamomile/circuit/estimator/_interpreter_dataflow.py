@@ -18,7 +18,10 @@ from qamomile.circuit.estimator._constants import (
 from qamomile.circuit.estimator._estimate import (
     ResourceEstimate,
 )
-from qamomile.circuit.estimator._quantum_values import _quantum_allocation_owner
+from qamomile.circuit.estimator._quantum_values import (
+    _quantum_allocation_owner,
+    _qubit_value_size,
+)
 from qamomile.circuit.estimator._resolver import (
     ExprResolver,
 )
@@ -41,6 +44,7 @@ from qamomile.circuit.ir.operation.operation import (
     QInitOperation,
     Signature,
 )
+from qamomile.circuit.ir.types.q_register import QFixedType, QUIntType
 from qamomile.circuit.ir.value import (
     ArrayValue,
     DictValue,
@@ -231,12 +235,13 @@ def _publish_invoke_classical_results(
     body_resolver: ExprResolver,
     caller_resolver: ExprResolver,
 ) -> None:
-    """Publish selected-body classical results into the caller resolver.
+    """Publish selected-body value and quantum-width results into the caller resolver.
 
     A call is a dataflow boundary, so the caller resolver cannot discover a
     scalar result by scanning the callee block. Explicitly carrying the selected
     body's expression across that boundary keeps later compile-time branches,
-    loop bounds, and array dimensions equivalent to an inlined body.
+    loop bounds, and array dimensions equivalent to an inlined body. Quantum
+    widths use result-local provenance rather than rebinding aliased dimensions.
 
     Args:
         body_outputs (Sequence[ValueLike]): Selected body outputs in ABI order.
@@ -250,13 +255,18 @@ def _publish_invoke_classical_results(
     """
 
     def needs_publication(value: ValueBase) -> bool:
-        """Return whether one caller output carries classical resolver state.
+        """Return whether one caller output carries publishable resolver state.
+
+        Ordinary scalar qubits have a fixed width of one and need no body
+        output to determine it. Packed registers and arrays may carry a
+        selected width that must cross the call boundary.
 
         Args:
             value (ValueBase): Caller-side output to inspect.
 
         Returns:
-            bool: Whether scalar contents or array dimensions must be copied.
+            bool: Whether classical contents, array dimensions, or packed
+                register width must be copied.
         """
         if isinstance(value, TupleValue):
             return any(needs_publication(element) for element in value.elements)
@@ -267,7 +277,10 @@ def _publish_invoke_classical_results(
             )
         if isinstance(value, ArrayValue):
             return True
-        return isinstance(value, Value) and not value.type.is_quantum()
+        return isinstance(value, Value) and (
+            not value.type.is_quantum()
+            or isinstance(value.type, (QUIntType, QFixedType))
+        )
 
     def publish(body_value: ValueLike, caller_value: ValueBase) -> None:
         """Publish one recursively aligned output value.
@@ -310,6 +323,16 @@ def _publish_invoke_classical_results(
             return
         if not isinstance(body_value, Value) or not isinstance(caller_value, Value):
             raise ValueError("Selected callable output value kinds are inconsistent.")
+        if body_value.type.is_quantum():
+            if isinstance(body_value, ArrayValue) and (
+                not isinstance(caller_value, ArrayValue)
+                or len(body_value.shape) != len(caller_value.shape)
+            ):
+                raise ValueError("Selected callable array output rank is inconsistent.")
+            caller_resolver.bind_quantum_size(
+                caller_value, _qubit_value_size(body_value, body_resolver)
+            )
+            return
         if isinstance(body_value, ArrayValue):
             if not isinstance(caller_value, ArrayValue) or len(body_value.shape) != len(
                 caller_value.shape

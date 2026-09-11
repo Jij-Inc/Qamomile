@@ -120,7 +120,7 @@ def _diffusion(reg: Vector[Qubit]) -> Vector[Qubit]:
     """Apply the Grover diffusion operator ``2|s><s| - I`` in place.
 
     Implements the reflection about the uniform superposition as
-    ``H^n X^n (multi-controlled-Z) X^n H^n`` using a real, backend-emittable
+    ``H^n X^n (multi-controlled-Z) X^n H^n`` using a real, engine-emittable
     body. The multi-controlled Z is realized as ``H . MCX . H`` on the last
     qubit.
 
@@ -191,7 +191,7 @@ def grover_search(
         reg[i] = qmc.h(reg[i])
     if isinstance(iterations, int):
         # Concrete iteration count: unroll so the emitted circuit contains no
-        # runtime control flow (statevector-friendly, backend-portable).
+        # runtime control flow (statevector-friendly, engine-portable).
         for _ in range(iterations):
             reg = _grover_step(reg, oracle)
     else:

@@ -17,9 +17,9 @@ Each test exercises three layers of evidence:
 2. **Transpile**: `transpiler.transpile(...)` returns an executable.
 3. **Execute**: ``executable.sample(...)`` and/or ``executable.run(...)``
    produce results matching an analytic baseline. Sampling and expval use
-   different backend primitives, so both execution paths are covered.
+   different engine primitives, so both execution paths are covered.
 
-Cross-backend coverage spans Qiskit, QuriParts (Qulacs), and CUDA-Q with
+Cross-engine coverage spans Qiskit, QuriParts (Qulacs), and CUDA-Q with
 ``importorskip``-style guards so a missing SDK skips rather than errors.
 
 Note: Do NOT use ``from __future__ import annotations`` in this file.
@@ -39,7 +39,7 @@ from qamomile.circuit.algorithm.basic import (
 )
 
 # ---------------------------------------------------------------------------
-# Backend matrix
+# Engine matrix
 # ---------------------------------------------------------------------------
 
 _HAS_QISKIT = True
@@ -68,7 +68,7 @@ except ImportError:  # pragma: no cover - covered when cudaq is absent
     _HAS_CUDAQ = False
     CudaqTranspiler = None  # type: ignore[assignment]
 
-BACKENDS = [
+ENGINES = [
     pytest.param(
         QiskitTranspiler,
         id="qiskit",
@@ -136,7 +136,7 @@ def _sum_z_hamiltonian(n: int):
 class TestUIntLiteralPromotion:
     """Sub-@qkernel calls accept ``int`` literals where ``UInt`` is declared."""
 
-    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", ENGINES)
     def test_user_reported_hea_with_int_literal_offset(self, transpiler_factory):
         """The exact reported case: ``ry_layer(q, thetas, 0)`` builds + executes.
 
@@ -165,7 +165,7 @@ class TestUIntLiteralPromotion:
         total = sum(count for _val, count in result.results)
         assert total == 512
 
-    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", ENGINES)
     def test_int_literal_sampling_matches_qmc_uint_distribution(
         self, transpiler_factory
     ):
@@ -241,7 +241,7 @@ class TestUIntLiteralPromotion:
             f"int-literal and qmc.uint(0) sampling distributions exceeds 0.1"
         )
 
-    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", ENGINES)
     @pytest.mark.parametrize("seed", [0, 1, 42])
     def test_int_literal_offset_expval_matches_analytic(self, transpiler_factory, seed):
         """End-to-end: HEA with int-literal offset returns the analytic <Z_i>.
@@ -251,7 +251,7 @@ class TestUIntLiteralPromotion:
         is straightforward to derive from the entangled state, so we
         cross-check against the qmc.uint(0)-wrapped variant rather than
         a hand-derived constant. This exercises the ``estimator`` path on
-        each backend in addition to ``sample`` above.
+        each engine in addition to ``sample`` above.
         """
         rng = np.random.default_rng(seed)
         n = 2
@@ -311,7 +311,7 @@ def _ry_only(q: qmc.Vector[qmc.Qubit], theta: qmc.Float) -> qmc.Vector[qmc.Qubit
 class TestFloatLiteralPromotion:
     """Sub-@qkernel calls accept ``float`` literals where ``Float`` is declared."""
 
-    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", ENGINES)
     @pytest.mark.parametrize("theta", [0.0, math.pi, 0.5, -0.7])
     def test_float_literal_matches_qmc_float(self, transpiler_factory, theta):
         """``_ry_only(q, 0.5)`` matches ``_ry_only(q, qmc.float_(0.5))`` exactly.
@@ -344,7 +344,7 @@ class TestFloatLiteralPromotion:
         assert np.isclose(out_lit, expected, atol=1e-6)
         assert np.isclose(out_lit, out_wrap, atol=1e-6)
 
-    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", ENGINES)
     @pytest.mark.parametrize("theta_int", [0, 1, -2, 3])
     def test_int_literal_promotes_to_float_param(self, transpiler_factory, theta_int):
         """``int`` passed to a ``Float`` parameter is promoted via natural ``int → float`` coercion.
@@ -401,7 +401,7 @@ def _maybe_x(q: qmc.Qubit, flag: qmc.Bit) -> qmc.Qubit:
 class TestBitLiteralPromotion:
     """Sub-@qkernel calls accept ``bool`` literals where ``Bit`` is declared."""
 
-    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", ENGINES)
     @pytest.mark.parametrize(
         "flag,expected_outcome",
         [(True, 1), (False, 0)],
@@ -561,7 +561,7 @@ def _h_register(n: qmc.UInt = 4) -> qmc.Vector[qmc.Bit]:
 class TestDefaultValuePromotion:
     """Scalar default values are auto-promoted via the same path as call-site literals."""
 
-    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", ENGINES)
     def test_uint_default_works_without_explicit_wrap(self, transpiler_factory):
         """``def f(n: UInt = 4)`` is callable without explicitly wrapping the default.
 

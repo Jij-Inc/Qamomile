@@ -10,6 +10,26 @@ import sympy as sp
 import qamomile.circuit as qmc
 
 
+def _check_packed_cast_types(
+    integer_register: qmc.Vector[qmc.Qubit],
+    default_fixed_register: qmc.Vector[qmc.Qubit],
+    zero_fixed_register: qmc.Vector[qmc.Qubit],
+    one_fixed_register: qmc.Vector[qmc.Qubit],
+) -> None:
+    """Check packed cast results with default and explicit layout arguments.
+
+    Args:
+        integer_register (qmc.Vector[qmc.Qubit]): Source for the QInt cast.
+        default_fixed_register (qmc.Vector[qmc.Qubit]): Source for default QFixed.
+        zero_fixed_register (qmc.Vector[qmc.Qubit]): Source for zero integer bits.
+        one_fixed_register (qmc.Vector[qmc.Qubit]): Source for one integer bit.
+    """
+    assert_type(qmc.cast(integer_register, qmc.QInt), qmc.QInt)
+    assert_type(qmc.cast(default_fixed_register, qmc.QFixed), qmc.QFixed)
+    assert_type(qmc.cast(zero_fixed_register, qmc.QFixed, int_bits=0), qmc.QFixed)
+    assert_type(qmc.cast(one_fixed_register, qmc.QFixed, int_bits=1), qmc.QFixed)
+
+
 def _check_oracle_result_shapes(
     oracle: qmc.Oracle,
     qubit: qmc.Qubit,

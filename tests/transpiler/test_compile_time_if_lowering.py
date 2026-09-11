@@ -1,11 +1,12 @@
 """Direct tests for CompileTimeIfLoweringPass.
 
-Tests the pass-internal contracts that are not observable from backend
+Tests the pass-internal contracts that are not observable from engine
 circuit success alone: exact Block rewrites, merge substitution, recursive
 lowering, dead-op elimination, and runtime IfOperation preservation.
 """
 
 import numpy as np
+import pytest
 
 import qamomile.circuit as qm
 from qamomile.circuit.ir.block import Block, BlockKind
@@ -618,7 +619,7 @@ class TestControlledBlockIfLowering:
 
         When the controlled operand does not resolve to a compile-time
         constant, the recursion must leave the inner ``if`` in place (as a
-        CompOp + IfOperation pair) rather than folding a branch, so a backend
+        CompOp + IfOperation pair) rather than folding a branch, so an engine
         that cannot handle it fails loudly instead of silently miscompiling.
         """
         x_if_cmp = self._comp_if_body()
@@ -873,7 +874,7 @@ class TestControlledInvokeIfLowering:
             implementations=[
                 CallableImplementation(
                     transform=CallTransform.CONTROLLED,
-                    backend="test-backend",
+                    engine="test-engine",
                     body=controlled_body,
                 )
             ],
@@ -2430,8 +2431,12 @@ class TestCastSourceProvenanceSync:
         from qamomile.circuit.ir.operation.cast import CastOperation
         from qamomile.circuit.ir.types.q_register import QFixedType
 
-        arr_true = ArrayValue(type=QubitType(), name="qa")
-        arr_false = ArrayValue(type=QubitType(), name="qb")
+        arr_true = ArrayValue(
+            type=QubitType(), name="qa", shape=(_uint_val("n", const=2),)
+        )
+        arr_false = ArrayValue(
+            type=QubitType(), name="qb", shape=(_uint_val("m", const=2),)
+        )
         flag = _uint_val("flag", const=1)
 
         merge_arr = ArrayValue(type=QubitType(), name="arr_merge")
@@ -2514,7 +2519,9 @@ class TestCastSourceProvenanceSync:
             slice_start=_uint_val("start", const=1),
             slice_step=_uint_val("step", const=2),
         )
-        arr_false = ArrayValue(type=QubitType(), name="qb")
+        arr_false = ArrayValue(
+            type=QubitType(), name="qb", shape=(_uint_val("m", const=2),)
+        )
         flag = _uint_val("flag", const=1)
 
         merge_arr = ArrayValue(type=QubitType(), name="arr_merge")
@@ -2802,7 +2809,9 @@ class TestCastSourceProvenanceSync:
             slice_start=_uint_val("start"),
             slice_step=_uint_val("step", const=2),
         )
-        arr_false = ArrayValue(type=QubitType(), name="qb")
+        arr_false = ArrayValue(
+            type=QubitType(), name="qb", shape=(_uint_val("m", const=2),)
+        )
         flag = _uint_val("flag", const=1)
 
         merge_arr = ArrayValue(type=QubitType(), name="arr_merge")
@@ -2848,6 +2857,203 @@ class TestCastSourceProvenanceSync:
         with pytest.raises(ValidationError, match="symbolic slice"):
             _run_pass(block)
 
+    @staticmethod
+    def _packed_cast_block(
+        *,
+        true_width: int,
+        false_width: int,
+        flag: int,
+        target: str,
+        declared_width: int | None,
+    ):
+        """Build ``if``-merged root arrays feeding one packed-register cast.
+
+        Args:
+            true_width (int): Static length of the true-branch root array.
+            false_width (int): Static length of the false-branch root array.
+            flag (int): Constant condition selecting the true (1) or false
+                (0) branch.
+            target (str): ``"qint"`` or ``"qfixed"`` cast target.
+            declared_width (int | None): Carrier count recorded on the cast
+                result at trace time; ``None`` records an empty carrier list
+                and a symbolic type width.
+
+        Returns:
+            tuple: ``(block, root_true, root_false)``.
+        """
+        from qamomile.circuit.ir.operation.cast import CastOperation
+        from qamomile.circuit.ir.types.q_register import QFixedType, QUIntType
+
+        root_true = ArrayValue(
+            type=QubitType(),
+            name="large",
+            shape=(_uint_val("true_len", const=true_width),),
+        )
+        root_false = ArrayValue(
+            type=QubitType(),
+            name="small",
+            shape=(_uint_val("false_len", const=false_width),),
+        )
+        merge_arr = ArrayValue(type=QubitType(), name="arr_merge")
+        if_op = IfOperation(
+            operands=[_uint_val("flag", const=flag)],
+            true_operations=[],
+            false_operations=[],
+        )
+        if_op.add_merge(root_true, root_false, merge_arr)
+
+        # Trace-time carriers always name the true branch, mirroring the
+        # frontend merge that takes the true branch as its shape template.
+        carriers = [f"{root_true.uuid}_{i}" for i in range(declared_width or 0)]
+        logical = [f"{root_true.logical_id}_{i}" for i in range(declared_width or 0)]
+        width: int | Value = (
+            declared_width if declared_width is not None else _uint_val("n")
+        )
+        result_type = (
+            QUIntType(width=width)
+            if target == "qint"
+            else QFixedType(integer_bits=0, fractional_bits=width)
+        )
+        cast_result = Value(type=result_type, name="packed").with_cast_metadata(
+            source_uuid=merge_arr.uuid,
+            source_logical_id=merge_arr.logical_id,
+            qubit_uuids=carriers,
+            qubit_logical_ids=logical,
+        )
+        if target == "qfixed":
+            cast_result = cast_result.with_qfixed_metadata(
+                qubit_uuids=carriers,
+                num_bits=declared_width or 0,
+                int_bits=0,
+            )
+        cast_op = CastOperation(
+            operands=[merge_arr],
+            results=[cast_result],
+            source_type=QubitType(),
+            target_type=result_type,
+            qubit_mapping=list(carriers),
+        )
+        block = Block(
+            name="test",
+            operations=[if_op, cast_op],
+            output_values=[],
+            kind=BlockKind.AFFINE,
+        )
+        return block, root_true, root_false
+
+    @pytest.mark.parametrize("target", ["qint", "qfixed"])
+    @pytest.mark.parametrize(
+        ("true_width", "false_width", "flag"),
+        [(4, 2, 0), (2, 4, 0)],
+    )
+    def test_cast_source_width_replaces_traced_layout(
+        self, target, true_width, false_width, flag
+    ):
+        """The selected array width replaces every trace-time width channel."""
+        from qamomile.circuit.ir.operation.cast import CastOperation
+        from qamomile.circuit.ir.types.q_register import QFixedType, QUIntType
+
+        block, root_true, root_false = self._packed_cast_block(
+            true_width=true_width,
+            false_width=false_width,
+            flag=flag,
+            target=target,
+            declared_width=true_width,
+        )
+        source = root_true if flag else root_false
+        width = true_width if flag else false_width
+        lowered = _run_pass(block)
+        cast_op = next(op for op in lowered.operations if isinstance(op, CastOperation))
+        expected_type = (
+            QUIntType(width=width)
+            if target == "qint"
+            else QFixedType(integer_bits=0, fractional_bits=width)
+        )
+        result = cast_op.results[0]
+        carriers = tuple(f"{source.uuid}_{index}" for index in range(width))
+        assert cast_op.operands == [source]
+        assert result.type == expected_type == cast_op.target_type
+        assert result.get_cast_qubit_uuids() == carriers
+        assert cast_op.qubit_mapping == list(carriers)
+        if target == "qfixed":
+            assert result.get_qfixed_num_bits() == width
+            assert result.get_qfixed_qubit_uuids() == carriers
+
+    @pytest.mark.parametrize("target", ["qint", "qfixed"])
+    def test_selected_symbolic_source_discards_stale_concrete_mapping(self, target):
+        """Unresolved selection clears stale carriers and remains fail-closed at plan."""
+        import dataclasses
+
+        from qamomile.circuit.ir.operation.cast import CastOperation
+        from qamomile.circuit.ir.operation.gate import (
+            MeasureQFixedOperation,
+            MeasureQIntOperation,
+        )
+        from qamomile.circuit.transpiler.errors import SeparationError
+        from qamomile.circuit.transpiler.passes.separate import (
+            lower_measure_qfixed,
+            lower_measure_qint,
+        )
+
+        block, _, root_false = self._packed_cast_block(
+            true_width=4, false_width=2, flag=0, target=target, declared_width=4
+        )
+        symbolic = _uint_val("selected_width")
+        selected = dataclasses.replace(root_false, shape=(symbolic,))
+        conditional = block.operations[0]
+        conditional.false_yields = [selected]
+        lowered = _run_pass(block)
+        cast_op = next(op for op in lowered.operations if isinstance(op, CastOperation))
+        result = cast_op.results[0]
+        assert cast_op.operands == [selected]
+        assert cast_op.qubit_mapping == []
+        assert result.get_cast_qubit_uuids() == ()
+        assert result.metadata.cast.qubit_logical_ids == ()
+        assert result.get_cast_source_uuid() == selected.uuid
+        assert result.type == cast_op.target_type
+        if target == "qint":
+            assert result.type.width is symbolic
+            operation = MeasureQIntOperation(operands=[result])
+            lower = lower_measure_qint
+        else:
+            assert result.type.fractional_bits is symbolic
+            assert result.get_qfixed_qubit_uuids() == ()
+            assert result.get_qfixed_num_bits() == 0
+            operation = MeasureQFixedOperation(operands=[result])
+            lower = lower_measure_qfixed
+        with pytest.raises(SeparationError, match="still symbolic at plan"):
+            lower(operation, selected)
+
+    @pytest.mark.parametrize("target", ["qint", "qfixed"])
+    def test_cast_symbolic_result_adopts_selected_source_width(self, target):
+        """An empty-carrier cast with symbolic width adopts the source length."""
+        from qamomile.circuit.ir.operation.cast import CastOperation
+
+        block, _, root_false = self._packed_cast_block(
+            true_width=3,
+            false_width=3,
+            flag=0,
+            target=target,
+            declared_width=None,
+        )
+
+        lowered = _run_pass(block)
+
+        cast_ops = [op for op in lowered.operations if isinstance(op, CastOperation)]
+        assert len(cast_ops) == 1
+        result = cast_ops[0].results[0]
+        expected = (
+            f"{root_false.uuid}_0",
+            f"{root_false.uuid}_1",
+            f"{root_false.uuid}_2",
+        )
+        assert result.get_cast_source_uuid() == root_false.uuid
+        assert result.get_cast_qubit_uuids() == expected
+        assert cast_ops[0].qubit_mapping == list(expected)
+        if target == "qfixed":
+            assert result.get_qfixed_qubit_uuids() == expected
+            assert result.get_qfixed_num_bits() == 3
+
 
 # ---------------------------------------------------------------------------
 # CC6: Cast provenance through separate() (frontend integration)
@@ -2863,8 +3069,12 @@ class TestCastProvenanceThroughSeparate:
         from qamomile.circuit.ir.types.q_register import QFixedType
 
         # Same setup as CC5, but run through separate()
-        arr_true = ArrayValue(type=QubitType(), name="qa")
-        arr_false = ArrayValue(type=QubitType(), name="qb")
+        arr_true = ArrayValue(
+            type=QubitType(), name="qa", shape=(_uint_val("n", const=2),)
+        )
+        arr_false = ArrayValue(
+            type=QubitType(), name="qb", shape=(_uint_val("m", const=2),)
+        )
         flag = _uint_val("flag", const=1)
 
         merge_arr = ArrayValue(type=QubitType(), name="arr_merge")

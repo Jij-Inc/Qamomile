@@ -216,7 +216,7 @@ def test_structural_math_requires_compile_time_binding(sdk_transpiler) -> None:
 
 
 @pytest.mark.parametrize("register_size", [2, 3, 9])
-def test_log2_and_ceil_sample_across_supported_backends(
+def test_log2_and_ceil_sample_across_supported_engines(
     sdk_transpiler,
     register_size: int,
 ) -> None:
@@ -232,7 +232,7 @@ def test_log2_and_ceil_sample_across_supported_backends(
 
 
 @pytest.mark.parametrize("register_size", [2, 3, 9])
-def test_log2_and_ceil_expval_across_supported_backends(
+def test_log2_and_ceil_expval_across_supported_engines(
     sdk_transpiler,
     register_size: int,
 ) -> None:

@@ -95,7 +95,7 @@ def callable_bodies(
         assert implementation.body is not None
         bodies.append(implementation.body)
     if any(
-        implementation.backend is None and implementation.strategy is None
+        implementation.engine is None and implementation.strategy is None
         for implementation in matching_implementations
     ):
         return tuple(bodies)
@@ -110,7 +110,7 @@ def callable_bodies(
             assert implementation.body is not None
             bodies.append(implementation.body)
         if any(
-            implementation.backend is None and implementation.strategy is None
+            implementation.engine is None and implementation.strategy is None
             for implementation in inverse_implementations
         ):
             return tuple(bodies)

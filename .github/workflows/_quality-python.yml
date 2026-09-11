@@ -21,7 +21,7 @@ jobs:
   # CI keeps one end-to-end smoke path per installable transpiler. Quration is
   # omitted because PyQret is not provided by the locked dependency sources.
   # Each matrix job pins UV_PYTHON so `uv run` cannot fall back to the
-  # repository's .python-version. `--no-sync` then preserves the backend extra
+  # repository's .python-version. `--no-sync` then preserves the engine extra
   # installed for that matrix entry instead of recreating its environment.
   base-test:
     name: Qiskit smoke (Python ${{ matrix.python-version }})
@@ -64,7 +64,7 @@ jobs:
         run: >-
           uv run --no-sync pytest
           -m "ci_smoke and not quri_parts and not cudaq"
-          tests/circuit/test_frontend_cross_backend_execution.py
+          tests/circuit/test_frontend_cross_engine_execution.py
           -v
 
   quri-parts-test:
@@ -110,7 +110,7 @@ jobs:
         run: >-
           uv run --no-sync pytest
           -m "ci_smoke and quri_parts"
-          tests/circuit/test_frontend_cross_backend_execution.py
+          tests/circuit/test_frontend_cross_engine_execution.py
           -v
 
   braket-test:
@@ -156,7 +156,7 @@ jobs:
         run: >-
           uv run --no-sync pytest
           -m "ci_smoke and braket"
-          tests/circuit/test_frontend_cross_backend_execution.py
+          tests/circuit/test_frontend_cross_engine_execution.py
           -v
 
   hugr-test:
@@ -196,13 +196,13 @@ jobs:
           --group dev --extra hugr
 
       - name: Verify HUGR dependencies
-        run: uv run --no-sync python -c "import hugr, selene_sim"
+        run: uv run --no-sync python -c "import hugr, selene_sim, qnexus"
 
       - name: Transpile and execute HUGR with Selene
         run: >-
           uv run --no-sync pytest
           -m "ci_smoke and hugr"
-          tests/hugr/test_hugr.py
+          tests/hugr/
           -v
 
   cudaq-test-ubuntu:
@@ -248,5 +248,5 @@ jobs:
         run: >-
           uv run --no-sync pytest
           -m "ci_smoke and cudaq"
-          tests/circuit/test_frontend_cross_backend_execution.py
+          tests/circuit/test_frontend_cross_engine_execution.py
           -v

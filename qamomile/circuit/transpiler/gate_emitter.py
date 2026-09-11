@@ -1,8 +1,8 @@
-"""GateEmitter protocol for backend-agnostic gate emission.
+"""GateEmitter protocol for engine-agnostic gate emission.
 
-This module defines the GateEmitter protocol that backends implement
+This module defines the GateEmitter protocol that engines implement
 to emit individual quantum gates. The StandardEmitPass uses this protocol
-to orchestrate circuit generation without backend-specific code.
+to orchestrate circuit generation without engine-specific code.
 """
 
 from __future__ import annotations
@@ -15,14 +15,14 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 if TYPE_CHECKING:
     from qamomile.circuit.ir.operation.arithmetic_operations import BinOpKind
 
-T = TypeVar("T")  # Backend circuit type
+T = TypeVar("T")  # Engine circuit type
 
 
 class MeasurementMode(Enum):
-    """How a backend handles measurement operations.
+    """How an engine handles measurement operations.
 
     Attributes:
-        NATIVE: Backend emits real measurement gates (e.g. Qiskit).
+        NATIVE: Engine emits real measurement gates (e.g. Qiskit).
         STATIC: No-op; sampler handles measurement (e.g. QURI Parts,
             CUDA-Q static mode).
         RUNNABLE: Emit measurement for mid-circuit use (e.g. CUDA-Q
@@ -131,21 +131,21 @@ GATE_SPECS: dict[GateKind, GateSpec] = {
 
 @runtime_checkable
 class GateEmitter(Protocol[T]):
-    """Protocol for backend-specific gate emission.
+    """Protocol for engine-specific gate emission.
 
-    Each backend implements this protocol to emit individual gates
+    Each engine implements this protocol to emit individual gates
     to their circuit representation.
 
-    Type parameter T is the backend's circuit type (e.g., QuantumCircuit).
+    Type parameter T is the engine's circuit type (e.g., QuantumCircuit).
     """
 
     @property
     @abstractmethod
     def measurement_mode(self) -> MeasurementMode:
-        """Return the measurement mode for this backend.
+        """Return the measurement mode for this engine.
 
         Returns:
-            MeasurementMode indicating how this backend handles
+            MeasurementMode indicating how this engine handles
             measurement operations.
         """
         ...
@@ -159,30 +159,30 @@ class GateEmitter(Protocol[T]):
             num_clbits: Number of classical bits in the circuit
 
         Returns:
-            A new backend-specific circuit object
+            A new engine-specific circuit object
         """
         ...
 
     @abstractmethod
     def create_parameter(self, name: str) -> Any:
-        """Create a symbolic parameter for the backend.
+        """Create a symbolic parameter for the engine.
 
         Args:
             name: Parameter name (e.g., "gammas[0]")
 
         Returns:
-            Backend-specific parameter object
+            Engine-specific parameter object
         """
         ...
 
-    # ``combine_symbolic`` is an *optional* hook. Backends whose
+    # ``combine_symbolic`` is an *optional* hook. Engines whose
     # ``Parameter`` type already supports Python arithmetic (Qiskit
     # ``ParameterExpression``, CUDA-Q parameters) need not implement it
     # — ``evaluate_binop`` falls back to ``default_combine_symbolic``
-    # below via a ``getattr`` lookup. Backends whose ``Parameter`` does
+    # below via a ``getattr`` lookup. Engines whose ``Parameter`` does
     # NOT support Python operators (e.g. QURI Parts' Rust-backed
     # ``Parameter``) MUST define ``combine_symbolic`` on their emitter
-    # class and return a backend-native symbolic angle representation
+    # class and return an engine-native symbolic angle representation
     # (e.g. a linear-combination dict).
 
     # Single-qubit gates (no parameters)
@@ -234,7 +234,7 @@ class GateEmitter(Protocol[T]):
         Args:
             circuit: The circuit to emit to
             qubit: Target qubit index
-            angle: Rotation angle (float or backend parameter)
+            angle: Rotation angle (float or engine parameter)
         """
         ...
 
@@ -341,13 +341,13 @@ class GateEmitter(Protocol[T]):
         """Emit a reset-to-zero operation.
 
         Args:
-            circuit: Backend circuit to emit into.
+            circuit: Engine circuit to emit into.
             qubit: Physical qubit index to reset.
 
         Raises:
-            NotImplementedError: If the backend cannot represent reset.
+            NotImplementedError: If the engine cannot represent reset.
         """
-        raise NotImplementedError("This backend does not support reset emission.")
+        raise NotImplementedError("This engine does not support reset emission.")
 
     # Barrier (optional, for visual separation)
     @abstractmethod
@@ -365,7 +365,7 @@ class GateEmitter(Protocol[T]):
             name: Label for the gate
 
         Returns:
-            Backend-specific gate object, or None if not supported
+            Engine-specific gate object, or None if not supported
         """
         ...
 
@@ -373,9 +373,9 @@ class GateEmitter(Protocol[T]):
         """Return whether ``circuit_to_gate`` can produce reusable gates.
 
         Returns:
-            bool: True when the backend can convert emitted sub-circuits to
+            bool: True when the engine can convert emitted sub-circuits to
                 reusable gate objects. Defaults to False so emit paths can
-                avoid building throwaway sub-circuits for backends that only
+                avoid building throwaway sub-circuits for engines that only
                 support inline fallback emission.
         """
         return False
@@ -384,7 +384,7 @@ class GateEmitter(Protocol[T]):
         """Return whether reusable gates can be inverted natively.
 
         Returns:
-            bool: True when ``gate_inverse`` can return a backend-native
+            bool: True when ``gate_inverse`` can return an engine-native
                 inverse for gates produced by ``circuit_to_gate``. Defaults
                 to False.
         """
@@ -433,21 +433,21 @@ class GateEmitter(Protocol[T]):
         ...
 
     def gate_inverse(self, gate: Any) -> Any:
-        """Create a backend-native inverse gate when supported.
+        """Create an engine-native inverse gate when supported.
 
         Args:
-            gate (Any): Backend-specific gate object returned by
+            gate (Any): Engine-specific gate object returned by
                 `circuit_to_gate`.
 
         Returns:
-            Any: Backend-specific inverse gate object, or None when the
-            backend cannot invert reusable gates natively.
+            Any: Engine-specific inverse gate object, or None when the
+            engine cannot invert reusable gates natively.
         """
         return None
 
-    # Control flow support (optional - backends can return False to fall back)
+    # Control flow support (optional - engines can return False to fall back)
     def supports_for_loop(self) -> bool:
-        """Check if backend supports native for loops."""
+        """Check if engine supports native for loops."""
         return False
 
     def emit_for_loop_start(
@@ -457,16 +457,16 @@ class GateEmitter(Protocol[T]):
     ) -> Any:
         """Start a native for loop context.
 
-        Returns a context manager or loop parameter, depending on backend.
+        Returns a context manager or loop parameter, depending on engine.
         """
-        raise NotImplementedError("Backend does not support native for loops")
+        raise NotImplementedError("Engine does not support native for loops")
 
     def emit_for_loop_end(self, circuit: T, context: Any) -> None:
         """End a native for loop context."""
-        raise NotImplementedError("Backend does not support native for loops")
+        raise NotImplementedError("Engine does not support native for loops")
 
     def supports_if_else(self) -> bool:
-        """Check if backend supports native if/else."""
+        """Check if engine supports native if/else."""
         return False
 
     def emit_if_start(
@@ -479,18 +479,18 @@ class GateEmitter(Protocol[T]):
 
         Returns context for the if/else block.
         """
-        raise NotImplementedError("Backend does not support native if/else")
+        raise NotImplementedError("Engine does not support native if/else")
 
     def emit_else_start(self, circuit: T, context: Any) -> None:
         """Start the else branch."""
-        raise NotImplementedError("Backend does not support native if/else")
+        raise NotImplementedError("Engine does not support native if/else")
 
     def emit_if_end(self, circuit: T, context: Any) -> None:
         """End the if/else block."""
-        raise NotImplementedError("Backend does not support native if/else")
+        raise NotImplementedError("Engine does not support native if/else")
 
     def supports_while_loop(self) -> bool:
-        """Check if backend supports native while loops."""
+        """Check if engine supports native while loops."""
         return False
 
     def emit_while_start(
@@ -500,11 +500,11 @@ class GateEmitter(Protocol[T]):
         value: int = 1,
     ) -> Any:
         """Start a native while loop context."""
-        raise NotImplementedError("Backend does not support native while loops")
+        raise NotImplementedError("Engine does not support native while loops")
 
     def emit_while_end(self, circuit: T, context: Any) -> None:
         """End the while loop context."""
-        raise NotImplementedError("Backend does not support native while loops")
+        raise NotImplementedError("Engine does not support native while loops")
 
 
 def default_combine_symbolic(
@@ -512,20 +512,20 @@ def default_combine_symbolic(
     lhs: Any,
     rhs: Any,
 ) -> Any:
-    """Default ``combine_symbolic`` for backends with arithmetic-capable Parameters.
+    """Default ``combine_symbolic`` for engines with arithmetic-capable Parameters.
 
     Performs Python operator dispatch on the operands. Used by
     ``evaluate_binop`` whenever the active emitter does not define its
     own ``combine_symbolic`` method — the typical case for Qiskit
     (``ParameterExpression`` overloads ``__add__`` etc.) and CUDA-Q
-    parameters. Backends whose Parameter type lacks Python operators
+    parameters. Engines whose Parameter type lacks Python operators
     (e.g. QURI Parts) define their own ``combine_symbolic`` on the
-    emitter class to return a backend-native symbolic representation
+    emitter class to return an engine-native symbolic representation
     instead.
 
     Args:
         kind: The ``BinOpKind`` to apply.
-        lhs: Left operand (numeric or backend Parameter / expression).
+        lhs: Left operand (numeric or engine Parameter / expression).
         rhs: Right operand (same shape).
 
     Returns:

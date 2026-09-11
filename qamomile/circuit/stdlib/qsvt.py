@@ -5,7 +5,7 @@ The public :func:`qsvt` helper composes a static
 Both inputs may remain unresolved while an enclosing qkernel is traced and
 serialized. The block encoding is supplied through Qamomile's static-binding
 contract at transpile time, while phase values may be compile-time bindings or
-backend runtime parameters when an explicit compile-time ``phase_count`` is
+engine runtime parameters when an explicit compile-time ``phase_count`` is
 provided.
 """
 
@@ -140,7 +140,7 @@ def qsvt(
 
     By default, ``phase_count`` comes from ``phases.shape[0]``. This is the
     shortest API when phases are supplied through ``bindings`` at transpile
-    time. To compile once and retain ``phases`` as a backend runtime parameter
+    time. To compile once and retain ``phases`` as an engine runtime parameter
     array, pass a separate ``phase_count`` argument and bind that count at
     transpile time; the phase values can then be supplied when the executable
     runs. For a phase vector resolved through transpile-time ``bindings``, an

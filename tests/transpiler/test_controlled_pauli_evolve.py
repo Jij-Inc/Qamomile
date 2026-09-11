@@ -1,4 +1,4 @@
-"""Cross-backend execution tests for a controlled ``PauliEvolveOp``.
+"""Cross-engine execution tests for a controlled ``PauliEvolveOp``.
 
 These tests pin the controlled-fallback lowering of ``exp(-i * gamma * H)``
 wrapped by ``qmc.control``: the shared walker emits the basis change and CX
@@ -6,14 +6,14 @@ ladder uncontrolled and routes only the central ``RZ`` through the
 multi-control machinery (``emit_crz`` for one control, the shared
 Toffoli-cascade lowering on clean ancillas for two or more).
 
-QURI Parts is the backend that exercises the shared
+QURI Parts is the engine that exercises the shared
 ``emit_controlled_pauli_evolve`` helper through its recursive fallback
 walker (Qiskit uses a native controlled custom gate, CUDA-Q a dedicated
 path).  Correctness is checked against Qiskit's native lowering as the
 reference: the two statevectors must agree up to global phase, and the two
 expectation values must agree to ``atol=1e-8``.  Hamiltonians are kept
 single-term or pairwise-commuting so ``exp(-i * gamma * H)`` is realised
-exactly by both backends and the comparison is independent of Trotter
+exactly by both engines and the comparison is independent of Trotter
 ordering.
 """
 
@@ -590,7 +590,7 @@ def test_controlled_pauli_evolve_expval_matches_qiskit(
 ) -> None:
     """QURI Parts and Qiskit agree on the controlled-evolution expectation value.
 
-    Exercises the estimator primitive on both backends (distinct from the
+    Exercises the estimator primitive on both engines (distinct from the
     statevector path, which reads the compiled circuit directly).
     """
     _id, run_kernel, _sample_kernel, n_controls, n_target, ham_builder = case
@@ -627,7 +627,7 @@ def test_controlled_pauli_evolve_sample_matches_qiskit(
 ) -> None:
     """QURI Parts sampling matches Qiskit sampling within shot noise.
 
-    Exercises the sampler primitive on both backends. Both report counts in
+    Exercises the sampler primitive on both engines. Both report counts in
     identical kernel-order bit tuples, so the two empirical distributions are
     compared directly (no endianness conversion).
     """
@@ -642,7 +642,7 @@ def test_controlled_pauli_evolve_sample_matches_qiskit(
         """Sample ``sample_kernel`` and return kernel-order probabilities.
 
         Args:
-            transpiler (Any): Backend transpiler exposing ``transpile`` /
+            transpiler (Any): Engine transpiler exposing ``transpile`` /
                 ``executor``.
 
         Returns:

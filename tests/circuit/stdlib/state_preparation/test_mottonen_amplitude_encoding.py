@@ -29,7 +29,7 @@ from qamomile.linalg import (
 )
 from tests.circuit.conftest import run_statevector
 
-# Catalogue of REAL amplitudes shared by every backend test.  Each entry is
+# Catalogue of REAL amplitudes shared by every engine test.  Each entry is
 # a list of (id, amplitudes) — keeping it module-level lets all
 # parametrisations stay aligned.
 _FIXED_AMPLITUDES: list[tuple[str, list[float]]] = [
@@ -63,7 +63,7 @@ _WRAPPER_QUBIT_COUNTS = [1, 2, 3]
 
 # Sampling tolerance: 5 sigma binomial bound at the test shot count, matching
 # the convention used elsewhere in the suite (e.g. test_trotter.py's
-# CrossBackendDistribution).
+# CrossEngineDistribution).
 _SHOTS = 8192
 _STD_TOLERANCE = 5.0
 
@@ -171,7 +171,7 @@ def _state_fidelity(got: np.ndarray, expected: np.ndarray) -> float:
 def _pad_observable(num_qubits: int, term: qm_o.Hamiltonian) -> qm_o.Hamiltonian:
     """Pad a single-qubit Pauli to *num_qubits* declared width.
 
-    Several backend emit paths require ``Hamiltonian.num_qubits`` to match
+    Several engine emit paths require ``Hamiltonian.num_qubits`` to match
     the register width. A declared-width zero Hamiltonian preserves that
     metadata even though canonical term normalization removes zero terms.
 
@@ -753,7 +753,7 @@ class TestSymbolicShapeQubitsRejected:
 
 
 # ---------------------------------------------------------------------------
-# Kernel builders shared by every backend
+# Kernel builders shared by every engine
 # ---------------------------------------------------------------------------
 
 
@@ -1143,7 +1143,7 @@ class TestAmplitudeEncodingWrapperBoxing:
             assert abs(observed_probs[i] - p_exp) < _shot_noise_tolerance(
                 p_exp, _SHOTS
             ), (
-                f"{sdk_transpiler.backend_name} bin {i}: "
+                f"{sdk_transpiler.engine_name} bin {i}: "
                 f"got {observed_probs[i]:.4f}, expected {p_exp:.4f} "
                 f"(amplitudes={amplitudes})"
             )
@@ -1195,7 +1195,7 @@ class TestAmplitudeEncodingWrapperBoxing:
             assert abs(observed_probs[i] - p_exp) < _shot_noise_tolerance(
                 p_exp, _SHOTS
             ), (
-                f"{sdk_transpiler.backend_name} bin {i}: "
+                f"{sdk_transpiler.engine_name} bin {i}: "
                 f"got {observed_probs[i]:.4f}, expected {p_exp:.4f}"
             )
 
@@ -1214,12 +1214,12 @@ class TestAmplitudeEncodingWrapperBoxing:
 
 
 # ---------------------------------------------------------------------------
-# Qiskit backend
+# Qiskit engine
 # ---------------------------------------------------------------------------
 
 
 class TestEncodingQiskit:
-    """Statevector / sampler / expval verification on the Qiskit backend."""
+    """Statevector / sampler / expval verification on the Qiskit engine."""
 
     @pytest.mark.parametrize(
         "amplitudes",
@@ -1330,13 +1330,13 @@ class TestEncodingQiskit:
 
 
 # ---------------------------------------------------------------------------
-# QuriParts backend
+# QuriParts engine
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.quri_parts
 class TestEncodingQuriParts:
-    """Sampler / expval verification on the QuriParts backend (via Qulacs).
+    """Sampler / expval verification on the QuriParts engine (via Qulacs).
 
     Statevector verification is implicitly covered by the sampler test
     (the Born probabilities match) and by the expval test (the observable
@@ -1402,13 +1402,13 @@ class TestEncodingQuriParts:
 
 
 # ---------------------------------------------------------------------------
-# CUDA-Q backend
+# CUDA-Q engine
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.cudaq
 class TestEncodingCudaq:
-    """Sampler / expval verification on the CUDA-Q backend.
+    """Sampler / expval verification on the CUDA-Q engine.
 
     Statevector verification is implicitly covered by the sampler test
     (the Born probabilities match) and by the expval test (the observable
@@ -1929,7 +1929,7 @@ class TestParametricEncodingQiskit:
 
 @pytest.mark.quri_parts
 class TestParametricEncodingQuriParts:
-    """Parametric path on the QuriParts backend (sampler + expval)."""
+    """Parametric path on the QuriParts engine (sampler + expval)."""
 
     @pytest.fixture(autouse=True)
     def _setup(self) -> None:
@@ -2034,7 +2034,7 @@ class TestParametricEncodingQuriParts:
 
 @pytest.mark.cudaq
 class TestParametricEncodingCudaq:
-    """Parametric path on the CUDA-Q backend (sampler + expval)."""
+    """Parametric path on the CUDA-Q engine (sampler + expval)."""
 
     @pytest.fixture(autouse=True)
     def _setup(self) -> None:

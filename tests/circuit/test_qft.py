@@ -37,7 +37,7 @@ def test_qft_and_iqft_are_composite_qkernels() -> None:
     ],
 )
 def test_qft_call_stays_named(kernel: QKernel, gate_type: CompositeGateType) -> None:
-    """QFT calls carry a body and their native backend classification."""
+    """QFT calls carry a body and their native engine classification."""
 
     @qmc.qkernel
     def circuit(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
@@ -71,7 +71,7 @@ def test_qft_resource_formula(n_value: int) -> None:
 
 @pytest.mark.parametrize("n", [1, 2, 3, 5])
 def test_qft_round_trip_sdk(sdk_transpiler, n: int) -> None:
-    """QFT followed by IQFT preserves a basis state on every SDK backend."""
+    """QFT followed by IQFT preserves a basis state on every SDK engine."""
     transpiler = sdk_transpiler.transpiler
     executable = transpiler.transpile(qft_round_trip, bindings={"n": n})
     result = executable.sample(transpiler.executor(), shots=128).result()

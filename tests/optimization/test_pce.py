@@ -674,9 +674,9 @@ class TestPCEEndToEnd:
     def _check_transpile_runs(self, transpiler):
         """Transpile the PCE ansatz with ``transpiler`` and verify expval runs.
 
-        Asserts that the backend transpiler returns an executable for which
+        Asserts that the engine transpiler returns an executable for which
         the expectation-value path produces a finite real number for each
-        encoded observable. Common to all backends in the supported matrix.
+        encoded observable. Common to all engines in the supported matrix.
         """
         _, n, observables, ansatz = self._build_pce_setup()
 
@@ -720,13 +720,13 @@ class TestPCEEndToEnd:
         self._check_transpile_runs(CudaqTranspiler())
 
     @pytest.mark.cudaq
-    def test_cross_backend_expval_consistency(self):
-        """The same ansatz/observable produces matching ⟨P⟩ across backends.
+    def test_cross_engine_expval_consistency(self):
+        """The same ansatz/observable produces matching ⟨P⟩ across engines.
 
-        Builds one ansatz, runs it through every available backend (Qiskit,
-        QuriParts, CUDA-Q), and checks that all backends agree on the
-        expectation values to within numerical tolerance. Backends that are
-        not installed are silently skipped; if fewer than two backends are
+        Builds one ansatz, runs it through every available engine (Qiskit,
+        QuriParts, CUDA-Q), and checks that all engines agree on the
+        expectation values to within numerical tolerance. Engines that are
+        not installed are silently skipped; if fewer than two engines are
         available, the test itself is skipped.
 
         Marked ``cudaq`` because the CUDA-Q leg imports cudaq whenever it is
@@ -740,14 +740,14 @@ class TestPCEEndToEnd:
 
         from qamomile.circuit.transpiler.transpiler import Transpiler
 
-        # Probe for the underlying SDKs first. ``qamomile.{backend}`` packages
+        # Probe for the underlying SDKs first. ``qamomile.{engine}`` packages
         # often defer the SDK import until the first ``transpile`` /
         # ``executor`` call (e.g. ``quri_parts.circuit`` is imported lazily
         # inside ``QuriPartsGateEmitter.create_circuit``), so a try/except
-        # around ``from qamomile.<backend> import ...`` does not catch a
+        # around ``from qamomile.<engine> import ...`` does not catch a
         # missing SDK — the ImportError fires later, mid-test. Use
         # ``find_spec`` to check existence without importing.
-        backends: list[tuple[str, Transpiler, Any]] = []
+        engines: list[tuple[str, Transpiler, Any]] = []
         if importlib.util.find_spec("qiskit") is not None:
             from qiskit.providers.basic_provider import BasicSimulator
 
@@ -756,9 +756,9 @@ class TestPCEEndToEnd:
             # An explicit BasicSimulator keeps qiskit-aer out of this
             # cudaq-marked test's process (see tests/_cudaq_isolation.py);
             # the expval path uses the pure StatevectorEstimator and never
-            # runs the sampling backend anyway.
+            # runs the sampling engine anyway.
             qiskit_transpiler = QiskitTranspiler()
-            backends.append(
+            engines.append(
                 (
                     "qiskit",
                     qiskit_transpiler,
@@ -769,23 +769,23 @@ class TestPCEEndToEnd:
             from qamomile.quri_parts import QuriPartsTranspiler
 
             quri_parts_transpiler = QuriPartsTranspiler()
-            backends.append(
+            engines.append(
                 ("quri_parts", quri_parts_transpiler, quri_parts_transpiler.executor())
             )
         if importlib.util.find_spec("cudaq") is not None:
             from qamomile.cudaq import CudaqTranspiler
 
             cudaq_transpiler = CudaqTranspiler()
-            backends.append(("cudaq", cudaq_transpiler, cudaq_transpiler.executor()))
+            engines.append(("cudaq", cudaq_transpiler, cudaq_transpiler.executor()))
 
-        if len(backends) < 2:
-            pytest.skip("Need at least two installed backends to cross-check.")
+        if len(engines) < 2:
+            pytest.skip("Need at least two installed engines to cross-check.")
 
-        # Use a fixed, non-trivial ``thetas`` so each backend computes the
+        # Use a fixed, non-trivial ``thetas`` so each engine computes the
         # same physical expectation value.
         thetas = [0.3, 0.7]
-        per_backend: dict[str, list[float]] = {}
-        for name, transpiler, executor in backends:
+        per_engine: dict[str, list[float]] = {}
+        for name, transpiler, executor in engines:
             results: list[float] = []
             for P_i in observables:
                 executable = transpiler.transpile(
@@ -796,10 +796,10 @@ class TestPCEEndToEnd:
                 results.append(
                     executable.run(executor, bindings={"thetas": thetas}).result()
                 )
-            per_backend[name] = results
+            per_engine[name] = results
 
-        reference_name, reference = next(iter(per_backend.items()))
-        for name, values in per_backend.items():
+        reference_name, reference = next(iter(per_engine.items()))
+        for name, values in per_engine.items():
             if name == reference_name:
                 continue
             assert np.allclose(values, reference, atol=1e-6), (

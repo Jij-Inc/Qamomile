@@ -6,14 +6,14 @@ import typing
 
 from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.operation.callable import CallableRef
-from qamomile.circuit.ir.types import QFixedType
+from qamomile.circuit.ir.types import QFixedType, QUIntType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
     FloatType,
     QubitType,
     UIntType,
 )
-from qamomile.circuit.ir.value import Value, ValueBase
+from qamomile.circuit.ir.value import Value, ValueBase, static_quantum_width
 
 from .control_value import normalize_control_value
 from .operation import Operation, OperationKind, ParamHint, Signature
@@ -564,3 +564,54 @@ class MeasureQFixedOperation(Operation):
     @property
     def operation_kind(self) -> OperationKind:
         return OperationKind.HYBRID  # Quantum measurement + classical decode
+
+
+@dataclasses.dataclass
+class MeasureQIntOperation(Operation):
+    """Measure an unsigned quantum integer as one abstract hybrid operation.
+
+    The carrier sequence is least-significant-bit first: carrier ``i`` has
+    integer weight ``2**i``. Planning lowers this operation to one vector
+    measurement followed by a host-side ``DecodeQIntOperation``.
+
+    The carrier width is not stored on the operation: it is derived from the
+    register operand's type and carrier metadata through ``num_bits``.
+
+    Args:
+        operands (list[Value]): Single ``QUIntType`` register operand.
+        results (list[Value]): Single decoded ``UIntType`` result.
+    """
+
+    @property
+    def num_bits(self) -> int | None:
+        """Return the carrier count derived from the register operand.
+
+        Returns:
+            int | None: Carrier count, including zero for an empty register;
+                ``None`` when the width is symbolic or the operand is missing.
+        """
+        if not self.operands:
+            return None
+        return static_quantum_width(self.operands[0])
+
+    @property
+    def signature(self) -> Signature:
+        """Return the packed-register measurement signature.
+
+        Returns:
+            Signature: One quantum unsigned-integer operand and one classical
+                unsigned-integer result.
+        """
+        return Signature(
+            operands=[ParamHint(name="qint", type=QUIntType(width=0))],
+            results=[ParamHint(name="uint_out", type=UIntType())],
+        )
+
+    @property
+    def operation_kind(self) -> OperationKind:
+        """Classify QInt measurement as a quantum-to-classical bridge.
+
+        Returns:
+            OperationKind: ``OperationKind.HYBRID``.
+        """
+        return OperationKind.HYBRID

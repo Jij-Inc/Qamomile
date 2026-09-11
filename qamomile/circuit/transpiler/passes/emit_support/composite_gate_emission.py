@@ -86,7 +86,7 @@ def emit_composite_gate(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         op (InvokeOperation): Composite or Oracle invocation to emit.
         qubit_map (QubitMap): Logical-to-physical map, mutated with results.
         bindings (dict[str, Any]): Bindings visible at the call site.
@@ -143,14 +143,14 @@ def emit_composite_gate(
         return
 
     if op.transform.is_inverse:
-        selection = op.select_body(backend=getattr(emit_pass, "backend_name", None))
+        selection = op.select_body(engine=getattr(emit_pass, "engine_name", None))
         if (
             selection.body is None
             or selection.realized_transform is not CallTransform.INVERSE
         ):
             raise EmitError(
                 f"Inverse callable '{op.target.name}' has no inverse "
-                "implementation body for this backend. Bind structural "
+                "implementation body for this engine. Bind structural "
                 "parameters at compile time so the inverse can be "
                 "materialized, or register an inverse implementation.",
                 operation=f"InvokeOperation[{op.target.name}]",
@@ -165,7 +165,7 @@ def emit_composite_gate(
         update_composite_result_mapping(op, qubit_groups, qubit_map)
         return
 
-    # Try backend-global native emitters after callable-specific implementations.
+    # Try engine-global native emitters after callable-specific implementations.
     for emitter in emit_pass._composite_emitters:
         if emitter.can_emit(op.gate_type):
             if emitter.emit(circuit, op, qubit_indices, bindings):
@@ -188,7 +188,7 @@ def emit_invoke_operation(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted.
+        circuit (Any): Engine circuit being emitted.
         op (InvokeOperation): Invocation to emit.
         qubit_map (QubitMap): Current qubit allocation map.
         bindings (dict[str, Any]): Active emit bindings.
@@ -197,9 +197,9 @@ def emit_invoke_operation(
         EmitError: If the invocation is opaque and has neither an executable
             body nor a selected native emitter.
     """
-    backend_name = getattr(emit_pass, "backend_name", None)
-    body = op.effective_body(backend=backend_name)
-    impl = op.implementation_for(backend=backend_name)
+    engine_name = getattr(emit_pass, "engine_name", None)
+    body = op.effective_body(engine=engine_name)
+    impl = op.implementation_for(engine=engine_name)
     has_native_emitter = impl is not None and impl.emitter is not None
     if body is None and op.attrs.get("kind") == "oracle" and not has_native_emitter:
         raise EmitError(
@@ -219,7 +219,7 @@ def emit_invoke_operation(
     ):
         raise EmitError(
             f"Composite '{op.target.name}' has an opaque cost for estimation "
-            "but no executable body or native emitter for this backend; it "
+            "but no executable body or native emitter for this engine; it "
             "cannot be transpiled to an executable circuit.",
             operation=f"InvokeOperation[{op.target.name}]",
         )
@@ -246,8 +246,8 @@ def emit_composite_fallback(
     elif op.gate_type == CompositeGateType.IQFT:
         emit_iqft_with_strategy(emit_pass, circuit, op, qubit_indices)
     else:
-        backend_name = getattr(emit_pass, "backend_name", None)
-        impl = op.effective_body(backend=backend_name)
+        engine_name = getattr(emit_pass, "engine_name", None)
+        impl = op.effective_body(engine=engine_name)
         if impl is not None:
             # _emit_custom_composite lives in controlled_emission module;
             # call via emit_pass so CudaqEmitPass overrides are respected.
@@ -267,7 +267,7 @@ def emit_callable_implementation_emitter(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted.
+        circuit (Any): Engine circuit being emitted.
         op (InvokeOperation): Invocation to emit.
         qubit_indices (list[int]): Physical qubit indices in operand order.
         bindings (dict[str, Any]): Active emit bindings.
@@ -281,8 +281,8 @@ def emit_callable_implementation_emitter(
         RuntimeError: If a declining emitter removed or replaced circuit state
             that existed before its append-only emission attempt.
     """
-    backend_name = getattr(emit_pass, "backend_name", None)
-    impl = op.implementation_for(backend=backend_name)
+    engine_name = getattr(emit_pass, "engine_name", None)
+    impl = op.implementation_for(engine=engine_name)
     if impl is None or impl.emitter is None:
         return False
 
@@ -333,7 +333,7 @@ def emit_qft_with_strategy(
     Args:
         emit_pass (StandardEmitPass): The active emit pass whose emitter
             should receive decomposed QFT gates.
-        circuit (Any): Backend circuit being emitted.
+        circuit (Any): Engine circuit being emitted.
         op (InvokeOperation): Invocation expected to be a QFT.
         qubit_indices (list[int]): Physical qubit indices for the QFT target
             register.
@@ -364,7 +364,7 @@ def emit_iqft_with_strategy(
     Args:
         emit_pass (StandardEmitPass): The active emit pass whose emitter
             should receive decomposed IQFT gates.
-        circuit (Any): Backend circuit being emitted.
+        circuit (Any): Engine circuit being emitted.
         op (InvokeOperation): Invocation expected to be an IQFT.
         qubit_indices (list[int]): Physical qubit indices for the IQFT target
             register.
@@ -560,7 +560,7 @@ def emit_qpe_manual(
     Args:
         emit_pass (StandardEmitPass): The active emit pass whose emitter
             should receive decomposed QPE gates.
-        circuit (Any): Backend circuit being emitted.
+        circuit (Any): Engine circuit being emitted.
         op (InvokeOperation): Invocation expected to be a QPE.
         qubit_indices (list[int]): Physical qubit indices for counting and
             target registers, in operation operand order.

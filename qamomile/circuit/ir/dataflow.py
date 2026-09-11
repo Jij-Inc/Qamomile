@@ -1,4 +1,4 @@
-"""Backend-independent dataflow utilities for semantic Qamomile IR."""
+"""Engine-independent dataflow utilities for semantic Qamomile IR."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from qamomile.circuit.ir.operation.control_flow import (
 from qamomile.circuit.ir.operation.gate import (
     MeasureOperation,
     MeasureQFixedOperation,
+    MeasureQIntOperation,
     MeasureVectorOperation,
     ProjectOperation,
 )
@@ -123,13 +124,19 @@ def find_measurement_results(operations: Sequence[Operation]) -> set[str]:
         operations (Sequence[Operation]): Top-level semantic operations.
 
     Returns:
-        set[str]: Direct scalar, vector, fixed-point, and projection results.
+        set[str]: Direct scalar, vector, quantum-integer, fixed-point, and
+            projection results.
     """
     results: set[str] = set()
     for operation in walk_operations(operations):
         if isinstance(
             operation,
-            (MeasureOperation, MeasureVectorOperation, MeasureQFixedOperation),
+            (
+                MeasureOperation,
+                MeasureVectorOperation,
+                MeasureQFixedOperation,
+                MeasureQIntOperation,
+            ),
         ):
             results.update(result.uuid for result in operation.results)
         elif isinstance(operation, ProjectOperation):

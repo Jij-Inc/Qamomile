@@ -79,7 +79,7 @@ def emit_measure(
             details.append(f"clbit (uuid: {clbit_uuid[:8]}...) not found in clbit_map")
         raise EmitError(
             f"Measurement could not be emitted: {'; '.join(details)}. "
-            f"A measurement inside a native backend loop indexed by the loop "
+            f"A measurement inside a native engine loop indexed by the loop "
             f"variable (e.g. `measure(q[i])`) must be unrolled; if you reached "
             f"this error the loop was not unrolled or the qubit was never "
             f"allocated.",

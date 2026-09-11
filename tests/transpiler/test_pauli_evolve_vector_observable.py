@@ -174,13 +174,13 @@ class TestTrotterViaVectorObservable:
         assert errors[-1] < 1e-2
 
 
-class TestTrotterBackendPortability:
-    """Vector[Observable] + pauli_evolve must transpile on every backend.
+class TestTrotterEnginePortability:
+    """Vector[Observable] + pauli_evolve must transpile on every engine.
 
-    We only check that each backend produces a non-empty program with the
+    We only check that each engine produces a non-empty program with the
     expected number of per-term quantum operations; the numerical check is
     already covered on Qiskit above. These tests skip when the optional
-    backend package is not installed.
+    engine package is not installed.
     """
 
     def _build_kernel(self):

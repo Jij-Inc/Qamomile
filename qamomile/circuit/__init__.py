@@ -7,7 +7,7 @@ The central abstraction is the ``qkernel`` decorator (``frontend/``):
 users write quantum programs as plain Python functions, the frontend
 traces them into an IR ``Block`` (``ir/``), the transpiler pipeline
 (``transpiler/``) rewrites the IR through staged, ``BlockKind``-gated
-passes, and a backend package emits an executable program. This module
+passes, and an engine package emits an executable program. This module
 re-exports everything a user program needs to be written: the decorator,
 the handle types (``Qubit``, ``Vector``, ``Float``, ...), gate /
 measurement / control-flow builders, meta-operations (``control`` /
@@ -21,13 +21,13 @@ Dependency direction (hard constraint)
 
 ``qamomile.circuit`` is the design center of the whole project: every
 other qamomile module depends on it, never the reverse —
-``optimization → circuit ← backends`` (qiskit / quri_parts / cudaq /
-...). Nothing under this package may import a backend package or SDK.
-Backend-specific concretization (native gate sets, per-qubit instruction
-encoding, runtime control-flow lowering) belongs in each backend's emit
+``optimization → circuit ← engines`` (qiskit / quri_parts / cudaq /
+...). Nothing under this package may import an engine package or SDK.
+Engine-specific concretization (native gate sets, per-qubit instruction
+encoding, runtime control-flow lowering) belongs in each engine's emit
 pass / ``GateEmitter``; this package owns only the abstract IR, the
-backend-agnostic pass pipeline, and the shared decomposition recipes
-that backends may fall back on.
+engine-agnostic pass pipeline, and the shared decomposition recipes
+that engines may fall back on.
 
 Module-local constraints
 ------------------------
@@ -76,6 +76,7 @@ from .frontend.handle import (
     Matrix,
     Observable,
     QFixed,
+    QInt,
     Qubit,
     Tensor,
     Tuple,
@@ -277,6 +278,7 @@ __all__ = [
     "Float",
     "Handle",
     "Qubit",
+    "QInt",
     "QFixed",
     "Tuple",
     "UInt",

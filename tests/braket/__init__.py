@@ -1,1 +1,1 @@
-"""Tests for the optional Amazon Braket backend."""
+"""Tests for the optional Amazon Braket engine."""

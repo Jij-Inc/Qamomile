@@ -25,6 +25,7 @@ from qamomile.circuit.ir.operation.gate import (
 )
 from qamomile.circuit.ir.types import QFixedType
 from qamomile.circuit.ir.value import Value
+from qamomile.circuit.transpiler.errors import SeparationError
 from qamomile.circuit.transpiler.passes.separate import lower_operations
 
 
@@ -285,7 +286,7 @@ def _assert_fallback_qpe_vector_view_phase(transpiler: Any) -> None:
     """Assert fallback QPE resolves and executes a VectorView phase operand.
 
     Args:
-        transpiler (Any): Backend transpiler exposing ``transpile`` and
+        transpiler (Any): Engine transpiler exposing ``transpile`` and
             ``executor`` methods.
     """
     executable = transpiler.transpile(
@@ -304,7 +305,7 @@ def _assert_builtin_qpe_vector_view_phase(transpiler: Any) -> None:
     """Assert public QPE resolves and executes a VectorView phase operand.
 
     Args:
-        transpiler (Any): Backend transpiler exposing ``transpile`` and
+        transpiler (Any): Engine transpiler exposing ``transpile`` and
             ``executor`` methods.
     """
     executable = transpiler.transpile(
@@ -359,7 +360,14 @@ class TestQPEBuiltin:
     """Built-in QPE (qmc.qpe()) tests."""
 
     def test_symbolic_counting_size_keeps_deferred_iqft_and_cast(self):
-        """Symbolic-size QPE keeps IQFT and QFixed cast as deferred aliases."""
+        """Symbolic-size QPE keeps IQFT and QFixed cast as deferred aliases.
+
+        The deferred alias is a trace-time artifact only: plan-time lowering
+        refuses to measure a register whose source length is still symbolic,
+        because the host-side decode would otherwise bake in a zero width.
+        Binding the size first lowers the same program to a concrete vector
+        measurement over the phase register.
+        """
         block = builtin_qpe.block
 
         iqft_ops = [
@@ -379,12 +387,16 @@ class TestQPEBuiltin:
 
         assert any(isinstance(op, MeasureQFixedOperation) for op in block.operations)
 
-        lowered = lower_operations(block)
+        with pytest.raises(SeparationError, match="symbolic at plan time"):
+            lower_operations(block)
+
+        bound_block = builtin_qpe.build(n=3, phase=math.pi / 2)
+        lowered = lower_operations(bound_block)
         measure_vector_ops = [
             op for op in lowered.operations if isinstance(op, MeasureVectorOperation)
         ]
         assert len(measure_vector_ops) == 1
-        assert measure_vector_ops[0].operands[0].uuid == cast_ops[0].operands[0].uuid
+        assert measure_vector_ops[0].operands[0].shape[0].get_const() == 3
 
     def test_qpe_controlled_unitary_carries_callable_ref_and_attrs(self):
         """Built-in QPE records the target unitary identity and attrs in IR.

@@ -22,39 +22,39 @@ from qamomile.circuit.transpiler.passes.emit_support.qubit_address import (
 )
 from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
 
-BACKENDS = [
+ENGINES = [
     pytest.param("qiskit", id="qiskit"),
     pytest.param("quri_parts", marks=pytest.mark.quri_parts, id="quri_parts"),
     pytest.param("cudaq", marks=pytest.mark.cudaq, id="cudaq"),
 ]
 
 
-def _make_transpiler(backend: str) -> Any:
-    """Build one installed backend transpiler or skip its test.
+def _make_transpiler(engine: str) -> Any:
+    """Build one installed engine transpiler or skip its test.
 
     Args:
-        backend (str): One of ``qiskit``, ``quri_parts``, or ``cudaq``.
+        engine (str): One of ``qiskit``, ``quri_parts``, or ``cudaq``.
 
     Returns:
-        Any: Backend transpiler when its optional SDK is installed.
+        Any: Engine transpiler when its optional SDK is installed.
     """
-    if backend == "qiskit":
+    if engine == "qiskit":
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler
 
         return QiskitTranspiler()
-    if backend == "quri_parts":
+    if engine == "quri_parts":
         pytest.importorskip("quri_parts")
         pytest.importorskip("quri_parts.qulacs")
         from qamomile.quri_parts import QuriPartsTranspiler
 
         return QuriPartsTranspiler()
-    if backend == "cudaq":
+    if engine == "cudaq":
         pytest.importorskip("cudaq")
         from qamomile.cudaq import CudaqTranspiler
 
         return CudaqTranspiler()
-    raise AssertionError(f"Unknown backend {backend!r}")
+    raise AssertionError(f"Unknown engine {engine!r}")
 
 
 @qmc.qkernel
@@ -598,14 +598,14 @@ def test_profile_then_real_emission_records_one_parameter() -> None:
 
 
 @pytest.mark.parametrize(
-    "backend",
-    BACKENDS,
+    "engine",
+    ENGINES,
 )
 def test_parameter_abi_tracks_real_use_on_every_engine(
-    backend: str,
+    engine: str,
 ) -> None:
     """Every engine omits probed-only parameters and retains gate inputs."""
-    transpiler = _make_transpiler(backend)
+    transpiler = _make_transpiler(engine)
     parameter_names = []
     for kernel in (
         _controlled_parameterized_identity,

@@ -3321,7 +3321,7 @@ class TestDuplicateQuantumCallArgs:
     ``VectorView`` arguments used to collapse to a single
     ``input_view_metas`` entry in ``QKernel.__call__``, silently aliasing
     both formal registers onto the same physical qubits (or crashing with
-    a raw backend error once the callee entangled them).
+    a raw engine error once the callee entangled them).
     """
 
     @staticmethod
@@ -3359,7 +3359,7 @@ class TestDuplicateQuantumCallArgs:
 
     def test_same_view_twice_entangling_callee_raises(self):
         """An entangling callee with an aliased view pair raises a Qamomile
-        affine error at trace time, not a raw backend error deep in emit."""
+        affine error at trace time, not a raw engine error deep in emit."""
 
         @qkernel
         def entangle(

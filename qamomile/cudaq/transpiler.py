@@ -1,4 +1,4 @@
-"""CUDA-Q backend transpiler implementation.
+"""CUDA-Q engine transpiler implementation.
 
 This module provides CudaqTranspiler for converting Qamomile QKernels
 into CUDA-Q decorator-kernel artifacts, along with CudaqExecutor.
@@ -15,7 +15,7 @@ from __future__ import annotations
 import dataclasses
 from typing import TYPE_CHECKING, Any, Sequence
 
-from qamomile.circuit.transpiler.circuit_ir import CircuitBackendEmitPass
+from qamomile.circuit.transpiler.circuit_ir import CircuitEngineEmitPass
 from qamomile.circuit.transpiler.executable import (
     ParameterMetadata,
     QuantumExecutor,
@@ -42,7 +42,7 @@ class BoundCudaqKernelArtifact:
         kernel_func: Decorated CUDA-Q kernel.
         num_qubits: Number of physical qubits.
         num_clbits: Number of logical measurement bits.
-        param_values: Bound parameter values in backend order.
+        param_values: Bound parameter values in engine order.
         execution_mode: Runtime API required by the kernel.
     """
 
@@ -91,7 +91,7 @@ class CudaqExecutor(QuantumExecutor[CudaqKernelArtifact]):
         any other code) has called ``cudaq.set_target`` since this instance
         was created, the global target may no longer match ``self._target``.
         Calling this method before every ``cudaq.sample`` / ``cudaq.observe``
-        guarantees the correct backend is active.
+        guarantees the correct CUDA-Q target is active.
         """
         if self._target:
             import cudaq
@@ -224,7 +224,7 @@ class CudaqExecutor(QuantumExecutor[CudaqKernelArtifact]):
     ) -> float:
         """Estimate an expectation value using ``cudaq.observe``.
 
-        Expectation-value estimation on the CUDA-Q backend is **static-only**.
+        Expectation-value estimation on the CUDA-Q engine is **static-only**.
         It is supported exclusively for ``STATIC``-mode artifacts, which are
         evaluated with ``cudaq.observe()``.  ``RUNNABLE``-mode artifacts (a
         kernel containing mid-circuit measurement or measurement-dependent
@@ -289,7 +289,7 @@ class CudaqExecutor(QuantumExecutor[CudaqKernelArtifact]):
                 "expectation value, express the state preparation as a static "
                 "kernel without measurement-dependent control flow; "
                 "expectation values cannot be computed for measurement-"
-                "conditioned circuits on the CUDA-Q backend."
+                "conditioned circuits on the CUDA-Q engine."
             )
 
         self._ensure_target()  # type: ignore[unreachable]
@@ -361,7 +361,7 @@ class CudaqTranspiler(Transpiler[CudaqKernelArtifact]):
             EmitPass[CudaqKernelArtifact]: Circuit lowering, legalization,
                 and CUDA-Q materialization pass.
         """
-        return CircuitBackendEmitPass(
+        return CircuitEngineEmitPass(
             CudaqMaterializer(),
             bindings,
             parameters,

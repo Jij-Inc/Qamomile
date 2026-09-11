@@ -70,7 +70,7 @@ docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 # - `mottonen_amplitude_encoding(...)` explicitly requests Qamomile's Möttönen
 #   construction. Use it when the decomposition, resource counts, or synthesis
 #   method are part of the program's intent.
-# - `amplitude_encoding(...)` expresses only the target state. A backend may use
+# - `amplitude_encoding(...)` expresses only the target state. An engine may use
 #   its native state-preparation operation. Qamomile currently uses the
 #   Möttönen construction as the portable fallback, but that fallback is not a
 #   method guarantee of the generic API.
@@ -97,7 +97,7 @@ docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 # - a complex vector $(1, 1+i, 1-i, 2i)$.
 #
 # State fidelity is phase-invariant, so it verifies the intended physical state
-# even if a backend chooses a different global phase.
+# even if an engine chooses a different global phase.
 
 # %%
 transpiler = QiskitTranspiler()
@@ -256,7 +256,7 @@ prepare_from_angles.draw(
 # ### Build kernels for resource checks
 #
 # These helpers create real and complex Möttönen circuits over several register
-# sizes. Using the explicit API ensures that backend-native state preparation
+# sizes. Using the explicit API ensures that engine-native state preparation
 # cannot change the construction whose resources we are measuring.
 
 
@@ -450,14 +450,14 @@ assert np.isclose(float(expval_result), -1.0 / 3.0, atol=ATOL_STATEVECTOR)
 #
 # | Goal | API |
 # |---|---|
-# | Prepare a target state and allow backend-native synthesis | `amplitude_encoding(q, amplitudes)` |
+# | Prepare a target state and allow engine-native synthesis | `amplitude_encoding(q, amplitudes)` |
 # | Require Qamomile's Möttönen construction | `mottonen_amplitude_encoding(q, amplitudes)` |
 # | Bind real amplitudes at transpile time while retaining the Möttönen method | `mottonen_amplitude_encoding(q, amps)` with `bindings={"amps": [...]}` |
 # | Reuse one Möttönen circuit with runtime angle bindings | `mottonen_amplitude_encoding_from_angles(q, ry, rz)` with `parameters=[...]` |
 # | Keep existing code working during migration | `amplitude_encoding_from_angles(...)` (compatibility wrapper) |
 #
 # The generic and explicit amplitude APIs prepare the same target state, but a
-# backend is free to realize only the generic operation with a different
+# engine is free to realize only the generic operation with a different
 # state-preparation synthesis.
 
 

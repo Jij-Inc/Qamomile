@@ -4,6 +4,7 @@ slug: release-notes
 
 # リリースノート
 
+- [v0.15.1](v0_15_1) — Grover Adaptive Searchの探索回路生成、IBM Quantumの実機やHUGRでの実行、`QInt`による符号なし整数の測定、ローカル結果を含むジョブの復元
 - [v0.15.0](v0_15_0) — 回路幅・種類別深さ・推定根拠を追跡するリソース推定、Amazon Braketサポート、Oracle変換の合成とエンジン共通の非同期実行ライフサイクル
 - [v0.14.0](v0_14_0) — 組み合わせ可能なLCU block encodingと`qmc.qsvt`、量子ビット幅を抑えたShorの位数探索とEkerå–Håstad法の量子計算部分、`qmc.struct`、`qmc.bit_array`、レジスタ幅の計算に使える`qmc.log2`と`qmc.ceil`
 - [v0.13.0](v0_13_0) — semanticな`qmc.select`、厳密な`qmc.global_phase`、ループをまたぐscalar、汎用と明示的なMöttönen amplitude encoding。Qiskitを`qiskit` extraへ移動

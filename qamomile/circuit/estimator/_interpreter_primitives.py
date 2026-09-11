@@ -62,6 +62,7 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperation,
     MeasureOperation,
     MeasureQFixedOperation,
+    MeasureQIntOperation,
     MeasureVectorOperation,
     ProjectOperation,
     ResetOperation,
@@ -329,6 +330,8 @@ class _PrimitiveInterpreter(_RegionAnalysisInterpreter):
         Raises:
             TypeError: If ``operation`` is not a supported measurement IR
                 operation.
+            ValueError: If a packed measurement has neither an operand nor a
+                known width.
         """
         if isinstance(operation, MeasureOperation):
             measured_qubits = _ONE
@@ -338,14 +341,21 @@ class _PrimitiveInterpreter(_RegionAnalysisInterpreter):
                 if operation.operands
                 else _ZERO
             )
-        elif isinstance(operation, MeasureQFixedOperation):
+        elif isinstance(operation, (MeasureQFixedOperation, MeasureQIntOperation)):
             type_width = (
                 _qubit_value_size(operation.operands[0], resolver)
                 if operation.operands
                 else _ZERO
             )
+            declared_width = operation.num_bits
+            if not operation.operands and declared_width is None:
+                raise ValueError(
+                    "Cannot estimate a packed measurement with unknown width"
+                )
             measured_qubits = (
-                type_width if type_width != _ZERO else sp.Integer(operation.num_bits)
+                type_width
+                if operation.operands or declared_width is None
+                else sp.Integer(declared_width)
             )
         else:  # pragma: no cover - dispatch admits only measurement operations.
             raise TypeError(
@@ -372,7 +382,7 @@ class _PrimitiveInterpreter(_RegionAnalysisInterpreter):
         The semantic operation consumes the input state, but its concrete gate
         and shot cost depends on observable grouping, basis rotations, and the
         executor's sampling policy. The estimator therefore records one
-        abstract query and one measurement layer without inventing a backend
+        abstract query and one measurement layer without inventing an engine
         decomposition.
 
         Args:

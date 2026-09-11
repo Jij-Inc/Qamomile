@@ -133,7 +133,7 @@ uv sync --group docs
 ```
 
 The `docs` group includes the regular development tools and the
-credential-free backend integrations exercised by the documentation suite.
+credential-free engine integrations exercised by the documentation suite.
 Pages that require external credentials still need their service-specific
 setup.
 

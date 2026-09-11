@@ -35,6 +35,7 @@ from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.gate import (
     MeasureOperation,
     MeasureQFixedOperation,
+    MeasureQIntOperation,
     MeasureVectorOperation,
 )
 from qamomile.circuit.ir.operation.operation import Operation, QInitOperation
@@ -144,6 +145,7 @@ def _liveness_width(
                 MeasureOperation,
                 MeasureVectorOperation,
                 MeasureQFixedOperation,
+                MeasureQIntOperation,
                 ExpvalOp,
             ),
         ):

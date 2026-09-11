@@ -73,7 +73,7 @@ from qamomile.circuit.visualization.style import CircuitStyle
 from tests.circuit.conftest import run_statevector
 
 # ---------------------------------------------------------------------------
-# Backend availability and parametrization tables
+# Engine availability and parametrization tables
 # ---------------------------------------------------------------------------
 
 
@@ -104,7 +104,7 @@ except ImportError:  # pragma: no cover - covered when cudaq is absent.
     CudaqTranspiler = None  # type: ignore[assignment]
 
 
-BACKENDS = [
+ENGINES = [
     pytest.param(
         QiskitTranspiler,
         id="qiskit",
@@ -345,7 +345,7 @@ def _assert_all_zero_samples(
     """Assert that every sampled bitstring is all zero.
 
     Args:
-        sample_result (object): Backend sample result exposing a `results`
+        sample_result (object): Engine sample result exposing a `results`
             iterable of `(bitstring, count)` pairs.
         width (int): Expected bitstring width.
         expected_shots (int): Expected total number of sampled shots.
@@ -646,9 +646,9 @@ def test_inverse_rotation_callable_applies_defaults() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("transpiler_factory", BACKENDS)
+@pytest.mark.parametrize("transpiler_factory", ENGINES)
 @pytest.mark.parametrize("gate_name, angle_case", UNARY_NATIVE_CASES)
-def test_inverse_native_unary_scalar_roundtrip_cross_backend(
+def test_inverse_native_unary_scalar_roundtrip_cross_engine(
     transpiler_factory,
     gate_name: str,
     angle_case: float | tuple[str, int] | None,
@@ -672,9 +672,9 @@ def test_inverse_native_unary_scalar_roundtrip_cross_backend(
     _assert_all_zero_samples(sample_result, 1, 32)
 
 
-@pytest.mark.parametrize("transpiler_factory", BACKENDS)
+@pytest.mark.parametrize("transpiler_factory", ENGINES)
 @pytest.mark.parametrize("gate_name, angle_case", UNARY_NATIVE_CASES)
-def test_inverse_native_unary_vector_broadcast_roundtrip_cross_backend(
+def test_inverse_native_unary_vector_broadcast_roundtrip_cross_engine(
     transpiler_factory,
     gate_name: str,
     angle_case: float | tuple[str, int] | None,
@@ -698,9 +698,9 @@ def test_inverse_native_unary_vector_broadcast_roundtrip_cross_backend(
     _assert_all_zero_samples(sample_result, 3, 32)
 
 
-@pytest.mark.parametrize("transpiler_factory", BACKENDS)
+@pytest.mark.parametrize("transpiler_factory", ENGINES)
 @pytest.mark.parametrize("gate_name, angle_case", UNARY_NATIVE_CASES)
-def test_inverse_native_unary_vector_view_broadcast_roundtrip_cross_backend(
+def test_inverse_native_unary_vector_view_broadcast_roundtrip_cross_engine(
     transpiler_factory,
     gate_name: str,
     angle_case: float | tuple[str, int] | None,
@@ -726,9 +726,9 @@ def test_inverse_native_unary_vector_view_broadcast_roundtrip_cross_backend(
     _assert_all_zero_samples(sample_result, 5, 32)
 
 
-@pytest.mark.parametrize("transpiler_factory", BACKENDS)
+@pytest.mark.parametrize("transpiler_factory", ENGINES)
 @pytest.mark.parametrize("gate_name, angle_case", MULTI_QUBIT_NATIVE_CASES)
-def test_inverse_native_multi_qubit_roundtrip_cross_backend(
+def test_inverse_native_multi_qubit_roundtrip_cross_engine(
     transpiler_factory,
     gate_name: str,
     angle_case: float | tuple[str, int] | None,
@@ -930,7 +930,7 @@ def test_inverse_construction_failure_leaves_input_unconsumed(
 
 
 def test_inverse_qkernel_keeps_inverse_fallback_block() -> None:
-    """inverse(qkernel) stores a backend-native source and fallback block."""
+    """inverse(qkernel) stores an engine-native source and fallback block."""
 
     @qmc.qkernel
     def circuit(rotation_angle: qmc.Float) -> qmc.Qubit:
@@ -1231,11 +1231,11 @@ def test_inverse_of_inverse_restores_source_operations() -> None:
     ]
 
 
-@pytest.mark.parametrize("transpiler_factory", BACKENDS)
-def test_inverse_of_inverse_mixed_order_composite_cross_backend(
+@pytest.mark.parametrize("transpiler_factory", ENGINES)
+def test_inverse_of_inverse_mixed_order_composite_cross_engine(
     transpiler_factory,
 ) -> None:
-    """Double inverse reorders a composite's grouped ABI on every backend."""
+    """Double inverse reorders a composite's grouped ABI on every engine."""
 
     @qmc.qkernel
     def circuit() -> qmc.Bit:
@@ -1385,11 +1385,11 @@ def test_inverse_for_operation_with_bindings_resolved_bound_transpiles_to_identi
     assert np.allclose(statevector, expected, atol=1e-8)
 
 
-@pytest.mark.parametrize("transpiler_factory", BACKENDS)
-def test_inverse_nested_for_operation_roundtrip_cross_backend(
+@pytest.mark.parametrize("transpiler_factory", ENGINES)
+def test_inverse_nested_for_operation_roundtrip_cross_engine(
     transpiler_factory,
 ) -> None:
-    """Nested loop inverse preserves the carried qubit wire across backends."""
+    """Nested loop inverse preserves the carried qubit wire across engines."""
 
     @qmc.qkernel
     def nested_loop_layer(q: qmc.Qubit, rotation_angle: qmc.Float) -> qmc.Qubit:
@@ -2123,11 +2123,11 @@ def test_inverse_block_visual_label_uses_source_name() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Backend-native inverse preference
+# Engine-native inverse preference
 # ---------------------------------------------------------------------------
 
 
-def test_inverse_qkernel_prefers_qiskit_backend_inverse(qiskit_transpiler) -> None:
+def test_inverse_qkernel_prefers_qiskit_engine_inverse(qiskit_transpiler) -> None:
     """inverse(qkernel) uses Qiskit's reusable-gate inverse when available."""
 
     @qmc.qkernel
@@ -2147,7 +2147,7 @@ def test_inverse_qkernel_prefers_qiskit_backend_inverse(qiskit_transpiler) -> No
     assert quantum_ops[0].name.endswith("_dg")
 
 
-def test_inverse_vector_qkernel_prefers_qiskit_backend_inverse(
+def test_inverse_vector_qkernel_prefers_qiskit_engine_inverse(
     qiskit_transpiler,
 ) -> None:
     """inverse(qkernel) keeps Vector inputs atomic for Qiskit inversion."""
@@ -2490,7 +2490,7 @@ def test_inverse_nested_call_implementation_uses_available_wires() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Cross-backend qkernel roundtrip matrices
+# Cross-engine qkernel roundtrip matrices
 # ---------------------------------------------------------------------------
 
 
@@ -2753,16 +2753,16 @@ QKERNEL_ROUNDTRIP_CASES = [
 ]
 
 
-@pytest.mark.parametrize("transpiler_factory", BACKENDS)
+@pytest.mark.parametrize("transpiler_factory", ENGINES)
 @pytest.mark.parametrize("kernel_factory, width", QKERNEL_ROUNDTRIP_CASES)
-def test_inverse_allowed_qkernel_roundtrip_cross_backend(
+def test_inverse_allowed_qkernel_roundtrip_cross_engine(
     transpiler_factory,
     kernel_factory,
     width: int,
 ) -> None:
     """Allowed qkernel inverse roundtrips execute on sampling and expval paths.
 
-    Sampling and expectation values go through different backend primitives
+    Sampling and expectation values go through different engine primitives
     (sampler vs estimator) and regress independently, so both legs run for
     every case: samples must be all-zero and the sum-Z expectation must
     equal the register width.
@@ -2783,10 +2783,10 @@ def test_inverse_allowed_qkernel_roundtrip_cross_backend(
     assert np.isclose(expval_result, float(width), atol=1e-6)
 
 
-@pytest.mark.parametrize("transpiler_factory", BACKENDS)
+@pytest.mark.parametrize("transpiler_factory", ENGINES)
 @pytest.mark.parametrize("num_qubits", [1, 2, 3, 5])
 @pytest.mark.parametrize("angle_case", ANGLE_CASES)
-def test_inverse_roundtrip_cross_backend_sampling_and_expval(
+def test_inverse_roundtrip_cross_engine_sampling_and_expval(
     transpiler_factory,
     num_qubits: int,
     angle_case: float | tuple[str, int],
@@ -3705,25 +3705,25 @@ STDLIB_ALGO_ROUNDTRIP_CASES = [
 ]
 
 
-@pytest.mark.parametrize("transpiler_factory", BACKENDS)
+@pytest.mark.parametrize("transpiler_factory", ENGINES)
 @pytest.mark.parametrize(
     "kernel_factory, width, case_bindings",
     STDLIB_ALGO_ROUNDTRIP_CASES,
 )
-def test_inverse_stdlib_algorithm_roundtrip_cross_backend(
+def test_inverse_stdlib_algorithm_roundtrip_cross_engine(
     transpiler_factory,
     kernel_factory,
     width: int,
     case_bindings: dict[str, object],
 ) -> None:
-    """Stdlib and algorithm qkernel inverse roundtrips execute on backends.
+    """Stdlib and algorithm qkernel inverse roundtrips execute on engines.
 
     This is the execution matrix for inverses of stdlib kernels (qmc.qft /
     qmc.iqft, both qkernel-wrapped and as the direct callable mapping) and
     every invertible algorithm kernel: the basic rotation and entangling
     layers, phase_gadget, the QAOA x_mixer, modular increment/decrement,
     computational_basis_state, Mottonen amplitude encoding, and the FQAOA
-    initial-state/mixer building blocks. Both backend primitives run per
+    initial-state/mixer building blocks. Both engine primitives run per
     case: samples must be all-zero and the sum-Z expectation must equal
     the register width.
     """

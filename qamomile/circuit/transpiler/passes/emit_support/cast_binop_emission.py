@@ -100,7 +100,7 @@ def evaluate_binop(
 
     Tries the shared ``fold_classical_op`` first for a clean concrete
     fold (which already encapsulates the runtime-parameter guard).
-    Falls back to creating backend ``Parameter`` symbols and doing
+    Falls back to creating engine ``Parameter`` symbols and doing
     symbolic arithmetic when one or both operands are runtime
     parameters — that's the path that lets ``rx(q, gamma * 2)`` produce
     a circuit with a single ``Parameter("gamma") * 2`` expression rather
@@ -127,10 +127,10 @@ def evaluate_binop(
         _set_emit_value(bindings, op.results[0].uuid, folded)
         return
 
-    # Phase 2: backend Parameter symbolic path. Operands that are either
+    # Phase 2: engine Parameter symbolic path. Operands that are either
     # runtime-parameter array elements or top-level parameters become
-    # backend Parameter objects; the arithmetic is performed symbolically
-    # using the backend Parameter's overloaded ``__add__`` etc.
+    # engine Parameter objects; the arithmetic is performed symbolically
+    # using the engine Parameter's overloaded ``__add__`` etc.
     lhs = (
         None
         if _is_param_array_element(op.lhs, parameters)
@@ -155,13 +155,13 @@ def evaluate_binop(
 
     # Symbolic arithmetic. Concrete-only operands have already been
     # handled by ``fold_classical_op`` above, so we land here only when
-    # at least one operand is a backend Parameter (or a previously
+    # at least one operand is an engine Parameter (or a previously
     # combined symbolic value). The actual operator dispatch is delegated
-    # to the backend emitter's ``combine_symbolic`` if it provides one,
-    # so that backends whose Parameter type lacks Python operator
+    # to the engine emitter's ``combine_symbolic`` if it provides one,
+    # so that engines whose Parameter type lacks Python operator
     # overloads (e.g. QURI Parts' Rust-backed Parameter, which raises
-    # ``TypeError`` for ``param * float``) can substitute a backend-native
-    # representation such as a linear-combination dict. Backends with
+    # ``TypeError`` for ``param * float``) can substitute an engine-native
+    # representation such as a linear-combination dict. Engines with
     # arithmetic-capable Parameters (Qiskit ``ParameterExpression``,
     # CUDA-Q parameters) need not implement the hook — we fall back to
     # ``default_combine_symbolic`` which performs the original Python

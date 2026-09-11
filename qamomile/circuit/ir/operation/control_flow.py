@@ -435,7 +435,7 @@ class WhileOperation(HasNestedOps, Operation):
     Only measurement-backed conditions are supported: the condition must
     be a ``Bit`` value produced by ``qmc.measure()``.  Non-measurement
     conditions (classical variables, constants, comparisons) are rejected
-    by ``ValidateWhileContractPass`` before reaching backend emit.
+    by ``ValidateWhileContractPass`` before reaching engine emit.
 
     Example::
 
@@ -801,7 +801,7 @@ class ForItemsOperation(HasNestedOps, Operation):
 
     Note:
         This operation is always unrolled at transpile time since quantum
-        backends cannot natively iterate over classical data structures.
+        engines cannot natively iterate over classical data structures.
     """
 
     key_vars: list[str] = dataclasses.field(default_factory=list)

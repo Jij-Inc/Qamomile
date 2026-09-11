@@ -1,4 +1,4 @@
-"""qBraid backend executor for Qamomile.
+"""qBraid executor integration for Qamomile.
 
 This module provides QBraidExecutor, which bridges Qamomile's compiled
 Qiskit circuits to qBraid-supported quantum devices via the qBraid runtime.
@@ -429,7 +429,7 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
         qiskit_bindings = {}
         for param_info in parameter_metadata.parameters:
             if param_info.name in bindings:
-                qiskit_bindings[param_info.backend_param] = bindings[param_info.name]
+                qiskit_bindings[param_info.engine_param] = bindings[param_info.name]
         return circuit.assign_parameters(qiskit_bindings)
 
     def estimate(
@@ -654,7 +654,7 @@ class QBraidExecutor(QuantumExecutor["QuantumCircuit"]):
             counts (dict[str, int]): Big-endian measurement counts.
             terms (list[tuple[tuple[Any, ...], complex]]): Pauli terms sharing
                 the submitted measurement basis.
-            identity (Any): Backend-independent identity Pauli enum value.
+            identity (Any): Engine-independent identity Pauli enum value.
 
         Returns:
             complex: Sum of coefficient-weighted term expectations.

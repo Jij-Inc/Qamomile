@@ -6,7 +6,7 @@ helpers, and :func:`mcx` inside qkernels. Factories that must also expose
 algorithm metadata may return frozen non-callable descriptors; invoke the
 descriptor's documented qkernel field rather than the descriptor itself.
 Internally these functions emit named callables with Qamomile bodies and
-optional backend-native implementations.
+optional engine-native implementations.
 
 Standard composites use the same ``composite_gate`` mechanism as user
 callables; there is no separate class-based gate hierarchy.

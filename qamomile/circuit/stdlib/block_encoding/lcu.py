@@ -67,7 +67,7 @@ class LCUBlockEncoding:
 
     including coefficient phase. ``normalization`` is finite and positive;
     an encoding of the zero operator uses ``1.0``. Implementations allocate no
-    hidden source-level logical qubits. A backend may still use temporary
+    hidden source-level logical qubits. An engine may still use temporary
     decomposition scratch that is resource-accounted, exactly uncomputed for
     every public input, and preserved under inverse and control. Descriptor
     comparison and hashing use object identity rather than field values.

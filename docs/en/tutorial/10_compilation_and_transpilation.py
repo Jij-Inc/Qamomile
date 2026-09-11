@@ -68,7 +68,7 @@
 #    │  plan                        (segment into C→Q→C)
 #    ▼
 # ProgramPlan
-#    │  emit                        (backend-specific code generation)
+#    │  emit                        (engine-specific code generation)
 #    ▼
 # ExecutableProgram[T]
 # ```
@@ -134,7 +134,7 @@
 # `logical_id` is a stable identifier that says "this is still the same
 # logical variable across SSA versions" — e.g. `q = qmc.h(q)` creates a new
 # `Value` whose `logical_id` matches the old one. It is **not** a mapping to
-# a physical qubit; backend qubit allocation happens later in `emit` via the
+# a physical qubit; engine qubit allocation happens later in `emit` via the
 # `ResourceAllocator`. The same mechanism is reused for classical values
 # such as `Float` parameters and `Bit` measurement results.
 #
@@ -202,7 +202,7 @@ def demo_kernel(n: qmc.UInt, theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
 
 # %% [markdown]
 # We will transpile with `n=3` bound at compile time and `theta` kept as a
-# backend parameter.
+# engine parameter.
 
 
 # %%
@@ -370,7 +370,7 @@ assert sum(1 for op in block.operations if isinstance(op, ForOperation)) == 1
 # 2. No **`OperationKind.QUANTUM`** operation receives a **classical-typed
 #    operand** whose value was computed from a measurement — concretely, the
 #    rotation angle in `rx(q, theta)` cannot be a classical value derived
-#    from an earlier measurement, because the backend would have to JIT a
+#    from an earlier measurement, because the engine would have to JIT a
 #    classical computation between measurement and gate.
 #
 # This rule **does not forbid dynamic quantum circuits**: `IfOperation` and
@@ -409,14 +409,14 @@ assert list(plan.parameters) == ["theta"]
 
 # %% [markdown]
 # The quantum segment also carries `qubit_values` and `num_qubits` so `emit`
-# knows how many qubit lines the backend circuit needs before it starts
+# knows how many qubit lines the engine circuit needs before it starts
 # placing gates.
 #
-# ### 4.6 `emit` — backend-specific code generation
+# ### 4.6 `emit` — engine-specific code generation
 #
-# `emit` hands the plan to an `EmitPass` for the target backend. The emit pass
+# `emit` hands the plan to an `EmitPass` for the target engine. The emit pass
 # allocates concrete qubit indices, then walks the quantum segment and calls
-# the backend's `GateEmitter` protocol methods (`emit_h`, `emit_rx`, …) to
+# the engine's `GateEmitter` protocol methods (`emit_h`, `emit_rx`, …) to
 # construct a native circuit.
 
 # %%
@@ -487,7 +487,7 @@ print(executable.quantum_circuit)
 # ## 5. Control Flow (`if` / `for` / `while`) Through the Pipeline
 #
 # How the pipeline handles control flow spans several layers — what the
-# frontend accepts, how each pass transforms it, and whether the backend
+# frontend accepts, how each pass transforms it, and whether the engine
 # supports runtime branching. This section ties those layers together. See
 # [tutorial 07](07_classical_flow_patterns) for the user-facing patterns;
 # here we focus on the compiler's view.
@@ -546,7 +546,7 @@ print(executable.quantum_circuit)
 # | `analyze` | merge edges enter the dependency graph | `loop_var` enters body deps | measurement-condition treated like a quantum operand |
 # | `validate_symbolic_shapes` | — | unresolved `Vector` shape dim as a bound → rejected | — |
 # | `plan` | `OperationKind.CONTROL` — creates a segment boundary | same | same |
-# | `emit` | emitted as runtime `if` if the backend supports it | `LoopAnalyzer.should_unroll()` decides unroll vs native-loop | emitted as runtime `while` |
+# | `emit` | emitted as runtime `if` if the engine supports it | `LoopAnalyzer.should_unroll()` decides unroll vs native-loop | emitted as runtime `while` |
 #
 # **`LoopAnalyzer.should_unroll()`**
 # (`transpiler/passes/emit_support/loop_analyzer.py`) unrolls when:
@@ -559,7 +559,7 @@ print(executable.quantum_circuit)
 # fire and the loop is unrolled at emit time — that's why
 # `executable.quantum_circuit` is a flat sequence of CXs for two iterations.
 # A loop that hits none of these stays in the circuit as a native runtime
-# loop for backends that support it.
+# loop for engines that support it.
 #
 # ### 5.4 Quantum ↔ Classical Dependency Rule (`analyze`)
 #
@@ -583,10 +583,10 @@ print(executable.quantum_circuit)
 # compilation, which Qamomile does not support today. The `plan` stage
 # enforcing a single quantum segment is the other side of this guarantee.
 #
-# ### 5.5 Backend Runtime-Branching Support
+# ### 5.5 Engine Runtime-Branching Support
 #
 # Whether runtime `if` / `while` survives into the emitted circuit depends
-# on the backend's `MeasurementMode`
+# on the engine's `MeasurementMode`
 # (`qamomile/circuit/transpiler/gate_emitter.py`):
 #
 # | Mode | Runtime if/while | Example |
@@ -596,7 +596,7 @@ print(executable.quantum_circuit)
 # | `RUNNABLE` | Fully supported, including runtime loops / branches | CUDA-Q (`cudaq.run()` path) |
 #
 # Compiling a kernel that contains an `IfOperation` / `WhileOperation` on a
-# non-supporting backend will raise at emit time. It is up to the
+# non-supporting engine will raise at emit time. It is up to the
 # contributor to know which mode applies when writing runtime branching.
 #
 # ### 5.6 Common Errors
@@ -611,7 +611,7 @@ print(executable.quantum_circuit)
 #   `Vector` shape dim reached a `ForOperation` bound. Concretise the
 #   `Vector` via `bindings`, or switch to `qmc.items`.
 # - **Emit-time error** — a runtime `if` reached a `MeasurementMode.STATIC`
-#   backend. Switch backend, or express the kernel differently.
+#   engine. Switch engine, or express the kernel differently.
 
 # %% [markdown]
 # ## 6. Case Study: How `MeasureQFixed` Gets Compiled
@@ -660,7 +660,7 @@ print(pretty_print_block(qfixed_block))
 # %% [markdown]
 # The trailing operation is a single `measure_qfixed`, with the
 # `cast %q to QFixed[0.3]` immediately above it. `MeasureQFixedOperation`
-# carries `operation_kind=HYBRID`; real backends only have quantum-side
+# carries `operation_kind=HYBRID`; real engines only have quantum-side
 # measurement instructions, so somewhere in the pipeline the
 # "measure N qubits" and "decode bits to float" halves must be pulled
 # apart.
@@ -704,7 +704,7 @@ print(pretty_print_block(lowered))
 # After lowering, the `ProgramPlan` lays out (conceptually):
 #
 # - **QuantumStep** (quantum segment): the gate sequence plus the
-#   `MeasureVectorOperation`. The backend's `emit_measure_vector` iterates
+#   `MeasureVectorOperation`. The engine's `emit_measure_vector` iterates
 #   the qubits and issues a normal per-qubit `emit_measure`, writing
 #   results into classical registers.
 # - **ClassicalStep (role=`post`)** (classical segment): just the
@@ -712,7 +712,7 @@ print(pretty_print_block(lowered))
 #   `qamomile/circuit/transpiler/classical_executor.py` takes the
 #   measured bit string and decodes it to a Float.
 #
-# From the backend's point of view there is no "QFixed measurement"
+# From the engine's point of view there is no "QFixed measurement"
 # instruction; the abstraction exists only in Qamomile's IR. The
 # quantum hardware only ever sees ordinary measurement instructions.
 #
@@ -724,7 +724,7 @@ print(pretty_print_block(lowered))
 # | `inline` / `partial_eval` / `analyze` | passes through | — | — |
 # | `plan` (pre-segmentation lowering) | **split and removed** | **created here** | **created here** |
 # | `emit` | — | per-qubit `emit_measure` | not touched (lives in the classical step) |
-# | runtime | — | backend runner executes measurements | `classical_executor` decodes bits to Float |
+# | runtime | — | engine runner executes measurements | `classical_executor` decodes bits to Float |
 #
 # Together with `CastOperation` (which re-labels a value's type without
 # allocating fresh qubits), this is a clean illustration of Qamomile's
@@ -732,9 +732,9 @@ print(pretty_print_block(lowered))
 # disturbing the quantum resources" design pattern.
 
 # %% [markdown]
-# ## 7. Backend Emission: Qiskit vs QURI Parts
+# ## 7. Engine Emission: Qiskit vs QURI Parts
 #
-# Every backend plugs into the pipeline by implementing two protocols defined
+# Every engine plugs into the pipeline by implementing two protocols defined
 # in `qamomile/circuit/transpiler/`:
 #
 # - **`GateEmitter[T]`** (`gate_emitter.py`): the "how do I draw a gate" API.
@@ -745,12 +745,12 @@ print(pretty_print_block(lowered))
 #
 #   | Mode | Meaning | Used by |
 #   |------|---------|---------|
-#   | `NATIVE` | Backend has an explicit measurement instruction the emit pass should call. | Qiskit |
-#   | `STATIC` | Backend takes the unmeasured state vector/operator; the sampler handles measurement externally. | QURI Parts |
-#   | `RUNNABLE` | Backend supports mid-circuit measurement with runtime control flow. | CUDA-Q (`cudaq.run()` path) |
+#   | `NATIVE` | Engine has an explicit measurement instruction the emit pass should call. | Qiskit |
+#   | `STATIC` | Engine takes the unmeasured state vector/operator; the sampler handles measurement externally. | QURI Parts |
+#   | `RUNNABLE` | Engine supports mid-circuit measurement with runtime control flow. | CUDA-Q (`cudaq.run()` path) |
 #
 # - **`CompositeGateEmitter[C]`** (`passes/emit.py`): optional. Lets a
-#   backend short-circuit composite gates (QFT, QPE, …) with a native
+#   engine short-circuit composite gates (QFT, QPE, …) with a native
 #   implementation. The `can_emit(gate_type) -> bool` / `emit(...) -> bool`
 #   contract returns `False` to opt out, in which case the emit pass falls
 #   back to the library-level decomposition.
@@ -773,7 +773,7 @@ try:
         demo_kernel, bindings=bindings, parameters=parameters
     )
 
-    print("backend circuit type: ", type(quri_exe.quantum_circuit).__name__)
+    print("engine circuit type: ", type(quri_exe.quantum_circuit).__name__)
     assert type(quri_exe.quantum_circuit).__name__ == "LinearMappedParametricQuantumCircuit"
     print("parameter_names:      ", quri_exe.parameter_names)
     assert list(quri_exe.parameter_names) == ["theta"]
@@ -798,7 +798,7 @@ except ModuleNotFoundError:
 #    (`measurement_mode=STATIC`).
 # 3. **Composite gates.** If the kernel used `qmc.qft(...)`, Qiskit's
 #    `QiskitQFTEmitter` would drop in a `QFTGate` box, whereas the QURI Parts
-#    backend decomposes via the library pass — same IR, different realised
+#    engine decomposes via the library pass — same IR, different realised
 #    circuit. You can override this per kernel via
 #    `TranspilerConfig.with_strategies({"qft": "approximate_k2"})`.
 
@@ -821,7 +821,7 @@ except ModuleNotFoundError:
 #     return new_ops
 # ```
 #
-# **Adding a new backend.** Minimum checklist:
+# **Adding a new engine.** Minimum checklist:
 #
 # 1. Implement `GateEmitter[T]` for your target SDK (`T` is the SDK's circuit
 #    type). Start from `qamomile/qiskit/emitter.py`.
@@ -853,7 +853,7 @@ except ModuleNotFoundError:
 # Each pass has a narrow job and a precondition on `BlockKind`. The step-by-step
 # API on `Transpiler` exposes every pass publicly — treat it as your primary
 # debugging tool when a kernel misbehaves, and as the extension surface when
-# adding a pass or a backend.
+# adding a pass or an engine.
 #
 # Control-flow highlights:
 #
@@ -864,4 +864,4 @@ except ModuleNotFoundError:
 # - `analyze` guarantees that quantum operations do not depend on classical
 #   values derived from measurements
 # - Whether runtime branching survives into the circuit depends on the
-#   backend's `MeasurementMode` (`NATIVE` or `RUNNABLE` required)
+#   engine's `MeasurementMode` (`NATIVE` or `RUNNABLE` required)

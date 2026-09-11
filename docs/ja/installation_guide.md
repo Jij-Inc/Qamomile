@@ -6,7 +6,7 @@ Qamomileは、pipなどの標準的なパッケージマネージャでインス
 pip install qamomile
 ```
 
-オプションの連携機能は明示的にインストールします。チュートリアルで使うQiskitバックエンドと回路描画を利用する場合は、次を実行してください。
+オプションの連携機能は明示的にインストールします。チュートリアルで使うQiskitエンジンと回路描画を利用する場合は、次を実行してください。
 
 ```bash
 pip install "qamomile[qiskit,visualization]"

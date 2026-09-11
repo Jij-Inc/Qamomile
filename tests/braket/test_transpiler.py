@@ -93,14 +93,14 @@ def test_expectation_execution_uses_native_braket_circuit() -> None:
     assert type(executable.quantum_circuit).__module__.startswith("braket.")
 
 
-def test_indexed_parameter_uses_openqasm_safe_backend_name() -> None:
+def test_indexed_parameter_uses_openqasm_safe_native_name() -> None:
     """Indexed public names remain native inputs without QASM ambiguity."""
     transpiler = BraketTranspiler()
     executable = transpiler.transpile(_indexed_parameter, parameters=["phases"])
     parameter = executable.compiled_quantum[0].parameter_metadata.parameters[0]
 
     assert parameter.name == "phases[0]"
-    assert str(parameter.backend_param).startswith("_qamomile_parameter_")
+    assert str(parameter.engine_param).startswith("_qamomile_parameter_")
     result = executable.run(
         transpiler.executor(),
         bindings={"phases": [math.pi]},

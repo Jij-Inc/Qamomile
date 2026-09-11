@@ -19,12 +19,12 @@ from qamomile.circuit.transpiler.segments import (
 if TYPE_CHECKING:
     import qamomile.observable as qm_o
 
-T = TypeVar("T")  # Backend circuit type
+T = TypeVar("T")  # Engine circuit type
 
 
 @dataclasses.dataclass
 class CompiledQuantumSegment(Generic[T]):
-    """A quantum segment with emitted backend circuit."""
+    """A quantum segment with emitted engine circuit."""
 
     segment: QuantumSegment
     circuit: T
@@ -36,7 +36,7 @@ class CompiledQuantumSegment(Generic[T]):
     clbit_map: ClbitMap = dataclasses.field(default_factory=dict)
 
     # Mapping from classical bit index to physical qubit index.
-    # Used by backends where emit_measure is a no-op (e.g., QURI Parts)
+    # Used by engines where emit_measure is a no-op (e.g., QURI Parts)
     # and the sampler returns an all-qubit bitstring ordered by qubit index.
     # When non-empty, convert_counts uses bits[measurement_qubit_map[clbit_idx]]
     # instead of bits[clbit_idx] to correctly decode selective measurements.
@@ -48,7 +48,7 @@ class CompiledQuantumSegment(Generic[T]):
     )
 
     # Physical qubit indices returned for a qkernel without explicit outputs.
-    # None preserves the complete backend bitstring. An explicit tuple lets a
+    # None preserves the complete engine bitstring. An explicit tuple lets a
     # materializer hide internal ancillas while retaining logical wire order.
     implicit_output_qubit_indices: tuple[int, ...] | None = None
 

@@ -527,8 +527,8 @@ class MeasureVectorInstruction:
     """Measure an ordered group of wires into classical bits.
 
     This instruction preserves vector measurement as one semantic operation
-    until target materialization. A backend with a vector measurement
-    primitive can consume it directly; scalar-only backends expand it at
+    until target materialization. An engine with a vector measurement
+    primitive can consume it directly; scalar-only engines expand it at
     their own boundary.
 
     Args:
@@ -596,7 +596,7 @@ class PauliEvolutionInstruction:
 
 @dataclasses.dataclass(frozen=True, order=True)
 class SemanticOpKey:
-    """Identify an abstract operation independently of any backend.
+    """Identify an abstract operation independently of any engine.
 
     The key is deliberately open rather than an enum. Standard-library,
     algorithm, provider, and user callables can therefore participate in
@@ -773,7 +773,7 @@ class ReusableCircuit:
             selected during legalization. ``None`` keeps the reusable body as
             the fallback implementation. Defaults to ``None``.
         operand_widths (tuple[int, ...]): Flattened width of each semantic
-            quantum operand before backend lowering. A vector contributes its
+            quantum operand before engine lowering. A vector contributes its
             element count and a scalar qubit contributes one. An empty tuple
             means the source boundary did not expose operand grouping.
     """
@@ -942,10 +942,10 @@ def has_mid_circuit_measurement(
 ) -> bool:
     """Return whether measured quantum state is consumed again in a region.
 
-    Static-sampling backends may defer terminal measurements to the end of a
+    Static-sampling engines may defer terminal measurements to the end of a
     shot, but doing so is incorrect when a later gate, reset, call, or control
     region consumes the post-measurement wire. The circuit IR uses versioned
-    wires, so this scan can distinguish those two cases without backend SDK
+    wires, so this scan can distinguish those two cases without engine SDK
     knowledge.
 
     Args:
@@ -1007,7 +1007,7 @@ def has_mid_circuit_measurement(
 
 @dataclasses.dataclass(frozen=True)
 class CircuitProgram:
-    """Store one immutable backend-neutral circuit program.
+    """Store one immutable engine-neutral circuit program.
 
     Args:
         name (str): Circuit entrypoint name.

@@ -1,12 +1,12 @@
-"""Amazon Braket backend for Qamomile.
+"""Amazon Braket engine for Qamomile.
 
-Design intent: this package concretizes the backend-neutral circuit IR as
+Design intent: this package concretizes the engine-neutral circuit IR as
 native Amazon Braket ``Circuit`` objects. The transpiler and executor depend
 only on Qamomile's public circuit and observable APIs plus the optional
 ``amazon-braket-sdk`` dependency; the compiler core never depends on Braket.
 
 Static terminal measurements are retained as Qamomile mapping metadata and
-performed by the executor. Backend-specific gate control, inversion, global
+performed by the executor. Engine-specific gate control, inversion, global
 phase, parameter binding, and Pauli-evolution lowering stay at this emit
 boundary rather than leaking into the shared IR.
 """

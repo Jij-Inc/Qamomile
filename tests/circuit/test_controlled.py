@@ -1190,10 +1190,10 @@ class TestControlledGateRandomState:
 # synthesized @qkernel.  These tests cover (a) the acceptance/rejection
 # rules of the wrapper-synthesis path, (b) IR parity between the built-in
 # call form and a hand-written @qkernel wrapper, and (c) end-to-end
-# execution on each supported backend.
+# execution on each supported engine.
 
 
-# -- Backend availability (mirrors test_gate_broadcast.py) --------------------
+# -- Engine availability (mirrors test_gate_broadcast.py) --------------------
 
 _HAS_QISKIT = True
 try:  # pragma: no cover - presence check
@@ -1239,7 +1239,7 @@ def _cudaq_transpiler_factory():
     return CudaqTranspiler()
 
 
-_BUILTIN_BACKENDS = [
+_BUILTIN_ENGINES = [
     pytest.param(
         _qiskit_transpiler_factory,
         id="qiskit",
@@ -1264,7 +1264,7 @@ _BUILTIN_BACKENDS = [
     ),
 ]
 
-_QISKIT_CUDAQ_BACKENDS = [
+_QISKIT_CUDAQ_ENGINES = [
     pytest.param(
         _qiskit_transpiler_factory,
         id="qiskit",
@@ -1434,7 +1434,7 @@ class TestControlledAcceptsBuiltinGate:
                 ),
                 CallableImplementation(
                     transform=CallTransform.INVERSE,
-                    backend="circuit_ir",
+                    engine="circuit_ir",
                 ),
             ],
         )
@@ -2902,7 +2902,7 @@ def _make_controlled_circuit_with_measure(
     raise ValueError(f"unsupported (num_controls, num_targets)=({nc}, {nt})")
 
 
-@pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+@pytest.mark.parametrize("transpiler_factory", _BUILTIN_ENGINES)
 @pytest.mark.parametrize("spec", _GATE_SPECS)
 @pytest.mark.parametrize("seed", [0])
 class TestControlledBuiltinCrossSDKSample:
@@ -3016,7 +3016,7 @@ def _make_expval_circuit(
     raise ValueError(f"unsupported (num_controls, num_targets)=({nc}, {nt})")
 
 
-@pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+@pytest.mark.parametrize("transpiler_factory", _BUILTIN_ENGINES)
 @pytest.mark.parametrize("spec", _GATE_SPECS)
 @pytest.mark.parametrize("seed", [0, 42])
 class TestControlledBuiltinCrossSDKExpval:
@@ -3119,7 +3119,7 @@ def _rotate_first_two(
     return qs
 
 
-@pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+@pytest.mark.parametrize("transpiler_factory", _BUILTIN_ENGINES)
 class TestControlledVectorInnerKernelCrossSDK:
     """``Vector[Qubit]``-input inner kernel + concrete-mode VectorView sub arg.
 
@@ -3128,7 +3128,7 @@ class TestControlledVectorInnerKernelCrossSDK:
     new ``cg(scalar_control, qs[a:b])`` API instead of the deprecated
     ``cg(qs, target_indices=[...])`` / ``cg(qs, control_indices=[...])``
     forms.  Sampling and expectation-value paths are exercised
-    independently so the two backend primitives regress separately.
+    independently so the two engine primitives regress separately.
     """
 
     def test_target_partition_sampling(self, transpiler_factory):
@@ -3457,21 +3457,21 @@ def _scalar_control_expval_kernel(theta, num_controls):
     raise ValueError(f"unsupported num_controls={num_controls}")
 
 
-@pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+@pytest.mark.parametrize("transpiler_factory", _BUILTIN_ENGINES)
 @pytest.mark.parametrize("num_controls", [2, 3])
 @pytest.mark.parametrize("seed", [0, 1, 2, 42])
 class TestControlledWholeVectorControlOutput:
     """Measure / expval the returned whole-Vector control output, per SDK.
 
     Cross-SDK execution coverage for the fixed bug: the regression is
-    parametrized over every supported quantum SDK (`_BUILTIN_BACKENDS`:
+    parametrized over every supported quantum SDK (`_BUILTIN_ENGINES`:
     Qiskit, QuriParts, CUDA-Q) and exercises both the sampling and the
     expectation-value primitives (they regress independently).  The
     minimal reproducing case is `num_controls == 2`; transpilation +
     execution there is mandatory on every supported SDK (an `EmitError`
     is re-raised, not skipped), so the fix stays verified end-to-end on
-    all backends.  Only the orthogonal `num_controls >= 3` multi-control
-    decomposition gap — a pre-existing per-backend limitation unrelated
+    all engines.  Only the orthogonal `num_controls >= 3` multi-control
+    decomposition gap — a pre-existing per-engine limitation unrelated
     to this fix — is skipped gracefully.
     """
 
@@ -3503,9 +3503,9 @@ class TestControlledWholeVectorControlOutput:
             # num_controls == 2, which every supported SDK can emit and
             # execute, so an EmitError there must fail loudly — the whole
             # point of this regression is that the fix runs end-to-end on
-            # every backend.  Only the orthogonal multi-control
+            # every engine.  Only the orthogonal multi-control
             # (num_controls >= 3) decomposition gap, a pre-existing
-            # per-backend limitation, is skipped gracefully.
+            # per-engine limitation, is skipped gracefully.
             if num_controls <= 2:
                 raise
             pytest.skip(
@@ -3754,7 +3754,7 @@ def _counts_dict(results):
     return counts
 
 
-@pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+@pytest.mark.parametrize("transpiler_factory", _BUILTIN_ENGINES)
 class TestControlledVectorViewControlCrossSDK:
     """``cg(qs[0:N], target)`` — VectorView ``N``-control + scalar target.
 
@@ -3858,7 +3858,7 @@ class TestControlledVectorViewControlCrossSDK:
         )
 
 
-@pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+@pytest.mark.parametrize("transpiler_factory", _BUILTIN_ENGINES)
 class TestControlledVectorSubArgCrossSDK:
     """``cg(c, qs)`` — scalar control + ``Vector[Qubit]`` sub-kernel argument.
 
@@ -3906,7 +3906,7 @@ class TestControlledVectorSubArgCrossSDK:
         )
 
 
-@pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+@pytest.mark.parametrize("transpiler_factory", _BUILTIN_ENGINES)
 class TestControlledNativeMixedControlCrossSDK:
     """Native controlled gates with scalar + sliced-vector controls."""
 
@@ -3959,7 +3959,7 @@ class TestControlledVectorClassicalParameter:
 
         _ = kernel.block
 
-    @pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", _BUILTIN_ENGINES)
     def test_vector_float_parameter_sampling_runs(self, transpiler_factory):
         """Bound ``Vector[Float]`` parameter survives controlled-U emission."""
 
@@ -4144,7 +4144,7 @@ class TestControlledBroadcastWithVectorFloatParameter:
 
         assert dict(executable.quantum_circuit.count_ops()) == {"measure": 1}
 
-    @pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", _BUILTIN_ENGINES)
     def test_broadcast_slice_sampling_runs(self, transpiler_factory):
         """Controlled broadcast over ``qs[1:3]`` samples on supported SDKs."""
 
@@ -4233,7 +4233,7 @@ class TestControlledBroadcastWithVectorFloatParameter:
 class TestControlledMixedQuantumClassicalSignature:
     """Controlled custom kernels mixing scalar/vector quantum and classical args."""
 
-    @pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", _BUILTIN_ENGINES)
     def test_noncontiguous_slice_target_sample_and_run(self, transpiler_factory):
         """Mix scalar target, stepped VectorView target, Float, and Vector[Float]."""
         import qamomile.observable as qm_o
@@ -4298,7 +4298,7 @@ class TestControlledMixedQuantumClassicalSignature:
         got = run_exe.run(t.executor()).result()
         assert np.isclose(got, -3.0, atol=1e-6)
 
-    @pytest.mark.parametrize("transpiler_factory", _QISKIT_CUDAQ_BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", _QISKIT_CUDAQ_ENGINES)
     def test_scalar_plus_vectorview_controls_custom_kernel(self, transpiler_factory):
         """Mix scalar and VectorView controls around a mixed-signature custom kernel."""
 
@@ -4508,7 +4508,7 @@ class TestControlledMixedQuantumClassicalSignature:
             build_block()
 
 
-@pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+@pytest.mark.parametrize("transpiler_factory", _BUILTIN_ENGINES)
 class TestControlledCompositeGateCrossSDK:
     """Controlled custom kernels whose body contains CompositeGate operations."""
 
@@ -4547,7 +4547,7 @@ class TestControlledCompositeGateCrossSDK:
         assert total == 128
 
 
-@pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+@pytest.mark.parametrize("transpiler_factory", _BUILTIN_ENGINES)
 class TestNestedControlledUCrossSDK:
     """Outer controlled custom kernel around an inner controlled operation."""
 
@@ -4627,7 +4627,7 @@ class TestNestedControlledUQiskit:
         assert _counts_dict(result.results) == {(1, 1, 1, 1): 128}
 
 
-@pytest.mark.parametrize("transpiler_factory", _QISKIT_CUDAQ_BACKENDS)
+@pytest.mark.parametrize("transpiler_factory", _QISKIT_CUDAQ_ENGINES)
 class TestDeepNestedControlledUQiskitCudaq:
     """Positive checks for deeply nested controls on Qiskit and CUDA-Q."""
 
@@ -4701,7 +4701,7 @@ class TestControlledVectorSubArgQuriParts:
     """QURI Parts recursively emits supported multi-target controlled blocks.
 
     QURI Parts cannot convert a sub-circuit to a reusable controlled
-    custom-gate object. Its backend-specific fallback therefore walks
+    custom-gate object. Its engine-specific fallback therefore walks
     supported primitive gate bodies itself, preserving each inner gate's
     target mapping instead of delegating to the shared single-target
     fallback.
@@ -5029,8 +5029,8 @@ class TestControlledVectorSubArgFollowUpOps:
 
         assert circuit == [("cx", 0, 1)]
 
-    def test_controlled_slice_normalization_cross_backend(self, sdk_transpiler):
-        """Execute sliced controlled sub-kernels on each SDK backend."""
+    def test_controlled_slice_normalization_cross_engine(self, sdk_transpiler):
+        """Execute sliced controlled sub-kernels on each SDK engine."""
 
         @qmc.qkernel
         def sliced_x(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
@@ -5538,7 +5538,7 @@ class TestControlledPassThroughWrapperInlined:
             "the identity (the original bug)."
         )
 
-    @pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", _BUILTIN_ENGINES)
     @pytest.mark.parametrize(
         "wrapper",
         [
@@ -5551,7 +5551,7 @@ class TestControlledPassThroughWrapperInlined:
 
         With the control driven to |1> the outcome is deterministic:
         ``(1, 1)``. The pre-fix bug would instead yield ``(1, 0)`` because
-        the inner X was dropped. Sampling exercises the backend sampler
+        the inner X was dropped. Sampling exercises the engine sampler
         primitive independently of the estimator path below.
         """
 
@@ -5573,7 +5573,7 @@ class TestControlledPassThroughWrapperInlined:
                 f"count={count} on SDK={transpiler_factory.__name__}"
             )
 
-    @pytest.mark.parametrize("transpiler_factory", _BUILTIN_BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", _BUILTIN_ENGINES)
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     def test_cross_sdk_expval_matches_leaf(self, transpiler_factory, seed):
         """``control(wrapper)`` expval == ``control(leaf)`` expval, per SDK.
@@ -5693,7 +5693,7 @@ def _nested_symbolic_zero_power_probe() -> qmc.Vector[qmc.Bit]:
 
 
 def test_symbolic_controlled_power_zero_is_identity(sdk_transpiler) -> None:
-    """A power resolving to zero emits identity on every SDK backend."""
+    """A power resolving to zero emits identity on every SDK engine."""
     transpiler = sdk_transpiler.transpiler
     result = (
         transpiler.transpile(_symbolic_zero_power_probe)

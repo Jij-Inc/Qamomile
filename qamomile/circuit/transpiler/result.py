@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import Generic, TypeVar, Union
 
-T = TypeVar("T")  # Backend circuit type
+T = TypeVar("T")  # Engine circuit type
 
 
 @dataclass
@@ -41,7 +41,7 @@ class OutputMapping:
 class EmitResult(Generic[T]):
     """Structured result from Transpiler.emit().
 
-    Contains the backend-specific circuit along with mapping information
+    Contains the engine-specific circuit along with mapping information
     that tracks the correspondence between logical Values and physical
     qubit/clbit indices.
     """

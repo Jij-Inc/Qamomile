@@ -1,5 +1,5 @@
-# Repository metadata that is not consumed by the current test, lint,
-# type-check, or documentation jobs.
+# Repository metadata eligible to skip quality checks.
+# Changes to .gitignore may defer linting newly included files until the next full run.
 .gitattributes
 .gitignore
 LICENSE.txt

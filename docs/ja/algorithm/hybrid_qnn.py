@@ -120,7 +120,7 @@ variational_ansatz.draw(
 # 各量子ビットのオブザーバブル ($\langle Z_i \rangle$) を定義し、それぞれに対する executable を作成します。
 # Qiskit の estimator は回路と同じ量子ビット数のオブザーバブルを要求するため、
 # `Hamiltonian(num_qubits=...)` で回路幅に合わせてパディングします。
-# `estimate_resources()` を使い、バックエンド回路に直接アクセスせずにゲート数を確認できます。
+# `estimate_resources()` を使い、エンジン回路に直接アクセスせずにゲート数を確認できます。
 
 # %%
 observables = []

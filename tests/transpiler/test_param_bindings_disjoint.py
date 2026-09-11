@@ -245,7 +245,7 @@ class TestStepByStepDisjointness:
         ``EmitPass.__init__`` is the innermost emit-side choke point: it guards
         even the advanced path that builds a pass directly via
         ``Transpiler._create_emit_pass``, skipping the ``transpile`` / ``emit``
-        wrappers. The concrete backend pass reaches the base ``__init__`` via
+        wrappers. The concrete engine pass reaches the base ``__init__`` via
         ``super().__init__``, so the check fires here too.
         """
         with pytest.raises(ValueError, match=r"appear in both"):

@@ -22,10 +22,10 @@ def is_exact_real_zero(value: Any) -> bool:
     """Return whether a value is a concrete real scalar equal to zero.
 
     The comparison intentionally has no tolerance: a tiny nonzero value must
-    remain observable, while backend parameter expressions remain unresolved.
+    remain observable, while engine parameter expressions remain unresolved.
 
     Args:
-        value (Any): Concrete numeric value or backend parameter expression.
+        value (Any): Concrete numeric value or engine parameter expression.
 
     Returns:
         bool: ``True`` only for a non-boolean real scalar exactly equal to
@@ -168,12 +168,12 @@ def emit_controlled_global_phase(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         control_indices (list[int]): Physical controls gating the phase.
         angle (Any): Resolved phase angle.
 
     Raises:
-        EmitError: If three or more controls are requested but the backend
+        EmitError: If three or more controls are requested but the engine
             provides neither a native primitive nor the shared clean-ancilla
             decomposition.
     """

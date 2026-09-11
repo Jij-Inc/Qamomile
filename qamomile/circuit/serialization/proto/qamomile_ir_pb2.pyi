@@ -33,6 +33,7 @@ class FrontendAnnotationKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     QAMOMILE_TUPLE: _ClassVar[FrontendAnnotationKind]
     QAMOMILE_DICT: _ClassVar[FrontendAnnotationKind]
     PYTHON_TUPLE: _ClassVar[FrontendAnnotationKind]
+    QAMOMILE_QINT: _ClassVar[FrontendAnnotationKind]
 
 class ValueKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -93,6 +94,8 @@ class OperationType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     SELECT_OPERATION: _ClassVar[OperationType]
     RETURN_QUANTUM_ARRAY_ELEMENT_OPERATION: _ClassVar[OperationType]
     UNARY_MATH_OPERATION: _ClassVar[OperationType]
+    MEASURE_QINT_OPERATION: _ClassVar[OperationType]
+    DECODE_QINT_OPERATION: _ClassVar[OperationType]
 PARAMETER_KIND_UNSPECIFIED: ParameterKind
 POSITIONAL_ONLY: ParameterKind
 POSITIONAL_OR_KEYWORD: ParameterKind
@@ -115,6 +118,7 @@ QAMOMILE_TENSOR: FrontendAnnotationKind
 QAMOMILE_TUPLE: FrontendAnnotationKind
 QAMOMILE_DICT: FrontendAnnotationKind
 PYTHON_TUPLE: FrontendAnnotationKind
+QAMOMILE_QINT: FrontendAnnotationKind
 VALUE_KIND_UNSPECIFIED: ValueKind
 VALUE: ValueKind
 ARRAY_VALUE: ValueKind
@@ -166,6 +170,8 @@ GLOBAL_PHASE_OPERATION: OperationType
 SELECT_OPERATION: OperationType
 RETURN_QUANTUM_ARRAY_ELEMENT_OPERATION: OperationType
 UNARY_MATH_OPERATION: OperationType
+MEASURE_QINT_OPERATION: OperationType
+DECODE_QINT_OPERATION: OperationType
 
 class QKernel(_message.Message):
     __slots__ = ("qamomile_version", "name", "parameters", "results", "body", "value_table", "callable_table", "callable_definition", "return_annotation")
@@ -626,20 +632,20 @@ class CallableBodyRef(_message.Message):
     def __init__(self, ref: _Optional[_Union[CallableRef, _Mapping]] = ..., kind: _Optional[str] = ..., attrs: _Optional[_Union[Payload, _Mapping]] = ...) -> None: ...
 
 class CallableImplementation(_message.Message):
-    __slots__ = ("transform", "backend", "strategy", "body", "body_ref", "attrs")
+    __slots__ = ("transform", "engine", "strategy", "body", "body_ref", "attrs")
     TRANSFORM_FIELD_NUMBER: _ClassVar[int]
-    BACKEND_FIELD_NUMBER: _ClassVar[int]
+    ENGINE_FIELD_NUMBER: _ClassVar[int]
     STRATEGY_FIELD_NUMBER: _ClassVar[int]
     BODY_FIELD_NUMBER: _ClassVar[int]
     BODY_REF_FIELD_NUMBER: _ClassVar[int]
     ATTRS_FIELD_NUMBER: _ClassVar[int]
     transform: str
-    backend: str
+    engine: str
     strategy: str
     body: Block
     body_ref: CallableBodyRef
     attrs: Payload
-    def __init__(self, transform: _Optional[str] = ..., backend: _Optional[str] = ..., strategy: _Optional[str] = ..., body: _Optional[_Union[Block, _Mapping]] = ..., body_ref: _Optional[_Union[CallableBodyRef, _Mapping]] = ..., attrs: _Optional[_Union[Payload, _Mapping]] = ...) -> None: ...
+    def __init__(self, transform: _Optional[str] = ..., engine: _Optional[str] = ..., strategy: _Optional[str] = ..., body: _Optional[_Union[Block, _Mapping]] = ..., body_ref: _Optional[_Union[CallableBodyRef, _Mapping]] = ..., attrs: _Optional[_Union[Payload, _Mapping]] = ...) -> None: ...
 
 class Signature(_message.Message):
     __slots__ = ("operands", "results")

@@ -2,6 +2,6 @@
 # documentation jobs.
 #
 # Markdown files are not safe to skip by extension because documentation pages
-# can affect documentation jobs. Keep this list limited to unconsumed files.
-README.md
+# can affect documentation jobs. Keep this list limited to repository prose.
 LIMITATIONS.md
+README.md

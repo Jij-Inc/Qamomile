@@ -40,6 +40,7 @@ combine-as-imports = true
 qiskit = [
     "qiskit>=2.3.0",
     "qiskit-aer>=0.17.2",
+    "qiskit-ibm-runtime>=0.40,<1",
 ]
 visualization = [
     "matplotlib>=3.10.8",
@@ -65,6 +66,7 @@ hugr = [
     "hugr>=0.16,<0.17",
     "selene-sim>=0.2,<0.3",
     "tket-exts>=0.12,<0.13",
+    "qnexus>=0.49,<0.50",
 ]
 braket = [
     "amazon-braket-sdk>=1.125,<2",
@@ -77,6 +79,7 @@ dev = [
     "pytest>=9.0.2",
     "qiskit>=2.3.0",
     "qiskit-aer>=0.17.2",
+    "qiskit-ibm-runtime>=0.40,<1",
     "pytest-mpl>=0.17.0",
     "pytest-mock>=3.14.0",
     "ruff>=0.14.11",
@@ -98,7 +101,7 @@ docs = [
     "openfermionpyscf>=0.5",
     "pyscf>=2.5.0",
     "ommx-quantum-benchmarks>=0.0.2",
-    # Keep backend constraints aligned with project.optional-dependencies.
+    # Keep engine constraints aligned with project.optional-dependencies.
     "quri-parts-core>=0.21.1",
     "quri-parts-circuit>=0.21.1",
     "quri-parts-qulacs>=0.21.1",

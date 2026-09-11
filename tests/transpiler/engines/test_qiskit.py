@@ -1,6 +1,6 @@
 """Qiskit transpiler test configuration.
 
-This module configures the transpiler test suite for the Qiskit backend.
+This module configures the transpiler test suite for the Qiskit engine.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ class TestQiskitTranspiler(TranspilerTestSuite):
     statevector method and need to be transpiled to basis gates first.
     """
 
-    backend_name = "qiskit"
+    engine_name = "qiskit"
     # CH is not directly supported by AerSimulator statevector method
     unsupported_gates: set[str] = {"CH"}
 

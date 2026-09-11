@@ -2,7 +2,7 @@
 
 The pass identifies measurement-derived classical ops (CompOp / CondOp /
 NotOp / BinOp) and rewrites them to ``RuntimeClassicalExpr`` so emit can
-dispatch them through a dedicated backend hook instead of the legacy
+dispatch them through a dedicated engine hook instead of the legacy
 fold-or-translate path. Non-measurement-derived classical ops are left
 unchanged so the existing fold paths continue to handle them.
 
@@ -47,10 +47,13 @@ from qamomile.circuit.ir.operation.control_flow import (
     HasNestedOps,
     RegionArg,
 )
+from qamomile.circuit.ir.operation.gate import MeasureQIntOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.types import QUIntType
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, TupleValue, Value
 from qamomile.circuit.transpiler.errors import (
+    EmitError,
     ExecutionError,
     SeparationError,
     ValidationError,
@@ -59,7 +62,9 @@ from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
 from qamomile.circuit.transpiler.passes.classical_lowering import (
     ClassicalLoweringPass,
 )
+from qamomile.circuit.transpiler.passes.emit_support import measurement_emission
 from qamomile.circuit.transpiler.passes.inline import InlinePass
+from qamomile.circuit.transpiler.passes.standard_emit import StandardEmitPass
 from qamomile.circuit.transpiler.quantum_executor import QuantumExecutor
 
 
@@ -78,13 +83,13 @@ def _count_ops_of_type(operations, op_type) -> int:
 
 
 class _CountsExecutor(QuantumExecutor[object]):
-    """Return fixed raw counts while ignoring the backend circuit."""
+    """Return fixed raw counts while ignoring the engine circuit."""
 
     def __init__(self, counts: dict[str, int]) -> None:
         """Store fixed counts returned by ``execute``.
 
         Args:
-            counts (dict[str, int]): Raw backend bitstring counts.
+            counts (dict[str, int]): Raw engine bitstring counts.
         """
         self._counts = counts
 
@@ -92,11 +97,11 @@ class _CountsExecutor(QuantumExecutor[object]):
         """Return the fixed raw counts.
 
         Args:
-            circuit (object): Ignored backend circuit.
+            circuit (object): Ignored engine circuit.
             shots (int): Ignored shot count.
 
         Returns:
-            dict[str, int]: Fixed raw backend bitstring counts.
+            dict[str, int]: Fixed raw engine bitstring counts.
         """
         return self._counts
 
@@ -109,7 +114,7 @@ class _CountsExecutor(QuantumExecutor[object]):
         """Return the circuit unchanged.
 
         Args:
-            circuit (object): Backend circuit to bind.
+            circuit (object): Engine circuit to bind.
             bindings (dict[str, float]): Runtime parameter bindings.
             parameter_metadata (ParameterMetadata): Parameter metadata for
                 ``bindings``.
@@ -443,7 +448,7 @@ class TestClassicalLoweringEndToEnd:
     )
     def test_runtime_logical_executes(self, transpiler, kernel):
         """Runtime ``&`` / ``|`` / ``~`` over measurements lower to
-        RuntimeClassicalExpr and emit via the new backend hook.
+        RuntimeClassicalExpr and emit via the new engine hook.
 
         Each kernel sets the gating measurement(s) so the predicate is
         guaranteed true, then applies ``X`` to the target qubit and
@@ -712,7 +717,7 @@ class TestVectorBitElementProvenance:
 
     @pytest.mark.cudaq
     def test_flat_if_on_measured_vector_element_cudaq(self):
-        """The same ``if s[i]:`` pattern compiles on the CUDA-Q backend.
+        """The same ``if s[i]:`` pattern compiles on the CUDA-Q engine.
 
         CUDA-Q's emit pass goes through both the shared
         ``control_flow_emission.emit_if`` path (the inner condition
@@ -790,7 +795,7 @@ class TestVectorBitElementProvenance:
         test measures ``anc = |00>`` so ``s[0] == 0`` and the loop body
         never runs (a measured ``Vector[Bit]`` element is fixed for the
         loop's lifetime, so a body-entering form cannot terminate). Even
-        so the predicate is a runtime measurement value, so a backend
+        so the predicate is a runtime measurement value, so an engine
         ``while_loop`` op is genuinely emitted and its condition resolved
         — exercising both the validation and emit paths. ``q`` stays
         ``|0>`` every shot.
@@ -917,7 +922,7 @@ class TestVectorBitElementProvenance:
 
         ``for j in qmc.range(3): if s[j]: q[0] = x(q[0])`` reads the loop
         variable ``j`` only inside the ``if`` condition — the body indexes
-        ``q[0]``, not ``q[j]``. A native backend for-loop would keep ``j``
+        ``q[0]``, not ``q[j]``. A native engine for-loop would keep ``j``
         as a loop parameter that classical-register indexing cannot
         consume, so ``LoopAnalyzer`` must detect the condition's loop-var
         dependency and unroll. Setup: ``anc = (1, 0, 1)``, so ``q[0]`` is
@@ -1216,7 +1221,7 @@ class TestMeasurementDerivedOutput:
 
     def test_condop_output_sample_aggregates_postprocessed_values(self, transpiler):
         """``sample()`` aggregates counts by the postprocessed return value,
-        not by the raw backend bitstring that produced that value."""
+        not by the raw engine bitstring that produced that value."""
 
         @qmc.qkernel
         def kernel() -> qmc.Bit:
@@ -1294,6 +1299,75 @@ class TestMeasurementDerivedOutput:
         )
         assert counts == (2, 3, 5, 7)
 
+    def test_qint_output_uses_qfixed_carrier_order(self, transpiler):
+        """QInt decodes the same carrier order as QFixed with bit zero as LSB."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.UInt:
+            qs = qmc.qubit_array(2, name="qs")
+            return qmc.measure(qmc.cast(qs, qmc.QInt))
+
+        result = (
+            transpiler.transpile(kernel)
+            .sample(
+                _CountsExecutor({"00": 2, "01": 3, "10": 5, "11": 7}),
+                shots=17,
+            )
+            .result()
+        )
+        assert result.results == [(0, 2), (1, 3), (2, 5), (3, 7)]
+
+    def test_qint_output_can_feed_host_side_arithmetic(self, transpiler):
+        """QInt decoding remains measurement-derived through UInt arithmetic."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.UInt:
+            qs = qmc.qubit_array(2, name="qs")
+            return qmc.measure(qmc.cast(qs, qmc.QInt)) + 1
+
+        result = (
+            transpiler.transpile(kernel)
+            .sample(
+                _CountsExecutor({"00": 2, "01": 3, "10": 5, "11": 7}),
+                shots=17,
+            )
+            .result()
+        )
+        assert result.results == [(1, 2), (2, 3), (3, 5), (4, 7)]
+
+    def test_zero_width_qint_decodes_to_zero(self, transpiler):
+        """The empty QInt carrier sequence represents the unique value zero."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.UInt:
+            qs = qmc.qubit_array(0, name="qs")
+            return qmc.measure(qmc.cast(qs, qmc.QInt))
+
+        result = (
+            transpiler.transpile(kernel)
+            .sample(_CountsExecutor({"": 4}), shots=4)
+            .result()
+        )
+        assert result.results == [(0, 4)]
+
+    def test_inlined_symbolic_qint_width_decodes_after_specialization(self, transpiler):
+        """Inlining resolves a vector parameter's symbolic QInt width."""
+
+        @qmc.qkernel
+        def read(register: qmc.Vector[qmc.Qubit]) -> qmc.UInt:
+            return qmc.measure(qmc.cast(register, qmc.QInt))
+
+        @qmc.qkernel
+        def kernel() -> qmc.UInt:
+            return read(qmc.qubit_array(3, name="qs"))
+
+        result = (
+            transpiler.transpile(kernel)
+            .sample(_CountsExecutor({"001": 4, "100": 5}), shots=9)
+            .result()
+        )
+        assert result.results == [(1, 4), (4, 5)]
+
     def test_qfixed_measurement_inside_static_loop_decodes_output(self, transpiler):
         """A one-trip loop preserves QFixed carrier decoding host-side."""
 
@@ -1338,6 +1412,52 @@ class TestMeasurementDerivedOutput:
 
         with pytest.raises(SeparationError, match="QFixed measurement inside"):
             transpiler.transpile(kernel)
+
+    def test_qint_measurement_inside_dynamic_if_is_rejected(self, transpiler):
+        """A branch-local QInt value cannot cross the segmented boundary."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.UInt:
+            qs = qmc.qubit_array(2, name="qs")
+            selector = qmc.measure(qmc.qubit("selector"))
+            out = qmc.uint(0)
+            if selector:
+                out = qmc.measure(qmc.cast(qs, qmc.QInt))
+            else:
+                out = qmc.measure(qmc.cast(qs, qmc.QInt))
+            return out
+
+        with pytest.raises(SeparationError, match="QInt measurement inside"):
+            transpiler.transpile(kernel)
+
+    def test_qint_measurement_reaching_emit_is_rejected(self):
+        """A QInt measurement handed to emit fails loudly.
+
+        Planning splits QInt measurement into a vector measurement and
+        host-side decode. An unlowered QInt measurement must be rejected
+        because it has no direct carrier or clbit allocation at emit time.
+        """
+        register = Value(type=QUIntType(width=1), name="register").with_cast_metadata(
+            "source", ["source_0"]
+        )
+        op = MeasureQIntOperation(
+            operands=[register],
+            results=[Value(type=UIntType(), name="value")],
+        )
+        emit_pass = StandardEmitPass(object())
+        with pytest.raises(EmitError, match="must be lowered") as excinfo:
+            emit_pass._emit_operations(
+                circuit=object(),
+                operations=[op],
+                qubit_map={},
+                clbit_map={},
+                bindings={},
+            )
+        assert excinfo.value.operation == type(op).__name__
+
+    def test_emit_has_no_qint_measurement_helper(self):
+        """QInt measurement uses plan-time lowering without a direct emit helper."""
+        assert not hasattr(measurement_emission, "emit_measure_qint")
 
     def test_slice_output_resolves_measured_vector_view(self, transpiler):
         """A whole sliced ``Vector[Bit]`` output reconstructs from the root
@@ -2129,7 +2249,7 @@ class TestMeasurementDerivedOutput:
     )
     def test_expr_as_condition_and_output(self, transpiler, flip_second, expected):
         """An expression consumed by an in-circuit ``if`` *and* returned is
-        placed in both worlds: the runtime if fires on the backend
+        placed in both worlds: the runtime if fires on the engine
         expression while the returned value is recomputed host-side."""
 
         @qmc.qkernel
@@ -2182,7 +2302,7 @@ class TestMeasurementDerivedOutput:
     @pytest.mark.quri_parts
     def test_condop_output_sample_quri_parts(self):
         """Host-side evaluation makes measurement-derived outputs work on a
-        backend without dynamic-circuit (runtime classical expression)
+        engine without dynamic-circuit (runtime classical expression)
         support — previously the expr stranded in the quantum segment made
         this kernel unexecutable on QURI Parts."""
         pytest.importorskip("quri_parts")
@@ -2252,7 +2372,7 @@ class TestMeasurementDerivedOutputSegmentation:
 
     def test_condition_and_output_expr_duplicated(self, transpiler):
         """An expr consumed by a runtime if *and* returned appears in both
-        the quantum segment (for backend emission) and a classical segment
+        the quantum segment (for engine emission) and a classical segment
         (for host-side evaluation). Duplication is safe: the op is pure."""
         from qamomile.circuit.transpiler.segments import (
             ClassicalSegment,

@@ -158,7 +158,7 @@ class QuriPartsMaterializer:
             raise EmitError(
                 "QURI Parts static sampling cannot represent a mid-circuit "
                 "measurement whose post-measurement qubit is used again. "
-                "Use a backend with dynamic measurement support or make the "
+                "Use an engine with dynamic measurement support or make the "
                 "measurement terminal."
             )
         ancilla_count = _ancilla_demand(program.operations)

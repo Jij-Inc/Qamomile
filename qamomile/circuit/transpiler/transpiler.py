@@ -1,4 +1,4 @@
-"""Base transpiler class for backend-specific compilation."""
+"""Base transpiler class for engine-specific compilation."""
 
 from __future__ import annotations
 
@@ -53,11 +53,11 @@ from qamomile.circuit.transpiler.segments import ProgramPlan
 if TYPE_CHECKING:
     pass
 
-T = TypeVar("T")  # Backend circuit type
+T = TypeVar("T")  # Engine circuit type
 
 
 class Transpiler(ABC, Generic[T]):
-    """Base class for backend-specific transpilers.
+    """Base class for engine-specific transpilers.
 
     Provides the full compilation pipeline from qkernel-like frontend objects
     to executable programs.
@@ -100,10 +100,10 @@ class Transpiler(ABC, Generic[T]):
 
     @abstractmethod
     def _create_segmentation_pass(self) -> SegmentationPass:
-        """Create the backend-specific segmentation pass.
+        """Create the engine-specific segmentation pass.
 
         Subclasses must implement this to provide a SegmentationPass
-        configured with the backend's capabilities.
+        configured with the engine's capabilities.
         """
         pass
 
@@ -113,17 +113,17 @@ class Transpiler(ABC, Generic[T]):
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
     ) -> EmitPass[T]:
-        """Create the backend-specific emit pass.
+        """Create the engine-specific emit pass.
 
         Args:
             bindings: Parameter values to bind at compile time
-            parameters: Parameter names to preserve as backend parameters
+            parameters: Parameter names to preserve as engine parameters
         """
         pass
 
     @abstractmethod
     def executor(self, **kwargs: Any) -> QuantumExecutor[T]:
-        """Create a quantum executor for this backend."""
+        """Create a quantum executor for this engine."""
         pass
 
     # === Conversion Methods ===
@@ -527,12 +527,12 @@ class Transpiler(ABC, Generic[T]):
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
     ) -> ExecutableProgram[T]:
-        """Pass 4: Generate backend-specific code.
+        """Pass 4: Generate engine-specific code.
 
         Args:
             separated: The separated program to emit
             bindings: Parameter values to bind at compile time
-            parameters: Parameter names to preserve as backend parameters
+            parameters: Parameter names to preserve as engine parameters
 
         Raises:
             ValueError: If a name appears in both ``bindings`` and
@@ -604,9 +604,9 @@ class Transpiler(ABC, Generic[T]):
                 ``parameters`` must be disjoint — a name is either
                 compile-time bound or runtime symbolic, never both.
             parameters (list[str] | None): Parameter names to preserve as
-                backend parameters. Scalars/arrays of float/int/UInt are
+                engine parameters. Scalars/arrays of float/int/UInt are
                 supported, plus ``Dict[K, Float]``: each constant-key
-                subscript lookup (``d[key]``) becomes one backend
+                subscript lookup (``d[key]``) becomes one engine
                 parameter named ``"d[<key>]"``, and the execution-time
                 binding ``bindings={"d": {...}}`` is decomposed per key
                 onto those parameters. A Dict runtime parameter is
@@ -617,7 +617,7 @@ class Transpiler(ABC, Generic[T]):
                 ``ExecutableProgram.parameter_names``.
 
         Returns:
-            ExecutableProgram[T]: Executable wrapping the backend circuit
+            ExecutableProgram[T]: Executable wrapping the engine circuit
                 and the parameter metadata needed to re-bind runtime
                 parameters, ready for execution.
 
@@ -644,12 +644,12 @@ class Transpiler(ABC, Generic[T]):
                compile-time structure, analyze dependencies, and segment the
                program into the host-orchestrated C-to-Q-to-C model.
             3. lower: Convert each quantum segment to immutable,
-               backend-neutral ``CircuitProgram`` IR.
+               engine-neutral ``CircuitProgram`` IR.
             4. legalize: Select native intrinsics and Pauli-evolution
                realizations from target capabilities and compilation policy.
             5. verify: Prove circuit structure and target legality before
-               constructing backend objects.
-            6. materialize: Convert the legalized circuit IR to backend-native
+               constructing engine objects.
+            6. materialize: Convert the legalized circuit IR to engine-native
                artifacts and preserve the executable ABI.
         """
         validate_bindings_parameters_disjoint(bindings, parameters)
@@ -668,7 +668,7 @@ class Transpiler(ABC, Generic[T]):
         """Compile and extract just the quantum circuit.
 
         This is a convenience method for when you just want the
-        backend circuit without the full executable.
+        engine circuit without the full executable.
 
         Args:
             kernel (QKernelLike): QKernel or qkernel-like frontend object to
@@ -676,7 +676,7 @@ class Transpiler(ABC, Generic[T]):
             bindings (dict[str, Any] | None): Parameter values to bind.
 
         Returns:
-            T: Backend-specific quantum circuit.
+            T: Engine-specific quantum circuit.
 
         Note:
             ``kernel`` is treated as a top-level executable entrypoint and

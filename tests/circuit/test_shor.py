@@ -139,13 +139,13 @@ def test_small_shor_order_finding_recovers_period_two(sdk_transpiler) -> None:
     Order finding is sample-only by design: its mid-circuit measurements are
     the algorithm output, so an expectation-value execution path is invalid.
     """
-    if sdk_transpiler.backend_name in {"quri_parts", "braket"}:
-        pytest.skip("This backend cannot represent Shor's mid-circuit reset")
+    if sdk_transpiler.engine_name in {"quri_parts", "braket"}:
+        pytest.skip("This engine cannot represent Shor's mid-circuit reset")
 
     kernel = qmc.shor_order_finding(base=2, modulus=3)
     transpiler = sdk_transpiler.transpiler
     executable = transpiler.transpile(kernel)
-    shots = 16 if sdk_transpiler.backend_name == "cudaq" else 128
+    shots = 16 if sdk_transpiler.engine_name == "cudaq" else 128
     result = executable.sample(transpiler.executor(), shots=shots).result()
 
     counts = {_basis_value(bits): count for bits, count in result.results}
@@ -154,7 +154,7 @@ def test_small_shor_order_finding_recovers_period_two(sdk_transpiler) -> None:
 
     assert on_peak / result.shots > 0.9
     assert all(counts.get(value, 0) > 0 for value in targets)
-    if sdk_transpiler.backend_name == "qiskit":
+    if sdk_transpiler.engine_name == "qiskit":
         assert all(counts.get(value, 0) / result.shots > 0.3 for value in targets)
 
 
@@ -168,10 +168,10 @@ def test_four_bit_shor_transpiles_without_statevector_execution(
     additionally reserves two ancillas for its controlled-gate decomposition.
 
     Args:
-        sdk_transpiler: Parametrized SDK backend fixture.
+        sdk_transpiler: Parametrized SDK engine fixture.
     """
-    if sdk_transpiler.backend_name in {"quri_parts", "braket"}:
-        pytest.skip("This backend cannot represent Shor's mid-circuit reset")
+    if sdk_transpiler.engine_name in {"quri_parts", "braket"}:
+        pytest.skip("This engine cannot represent Shor's mid-circuit reset")
 
     kernel = qmc.shor_order_finding(base=2, modulus=15)
     executable = sdk_transpiler.transpiler.transpile(kernel)
@@ -210,12 +210,12 @@ def test_small_ekera_hastad_schedule_executes(sdk_transpiler) -> None:
     The schedule is sample-only because its measurement record is the
     factoring output; expectation-value execution is intentionally rejected.
     """
-    if sdk_transpiler.backend_name in {"quri_parts", "braket"}:
-        pytest.skip("This backend cannot represent Ekerå–Håstad's mid-circuit reset")
+    if sdk_transpiler.engine_name in {"quri_parts", "braket"}:
+        pytest.skip("This engine cannot represent Ekerå–Håstad's mid-circuit reset")
 
     kernel = qmc.ekera_hastad_factoring(generator=2, modulus=3, window_size=2)
     transpiler = sdk_transpiler.transpiler
-    shots = 16 if sdk_transpiler.backend_name == "cudaq" else 64
+    shots = 16 if sdk_transpiler.engine_name == "cudaq" else 64
     result = (
         transpiler.transpile(kernel).sample(transpiler.executor(), shots=shots).result()
     )

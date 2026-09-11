@@ -4,7 +4,7 @@ Extracted from ``standard_emit.py`` to isolate the Hamiltonian
 decomposition logic from the main emit dispatch.
 
 The ``emit_pauli_evolve`` function is the **default** implementation.
-Backend-specific emit passes (e.g., ``QiskitEmitPass``) may override
+Engine-specific emit passes (e.g., ``QiskitEmitPass``) may override
 the corresponding ``_emit_pauli_evolve`` method; calling
 ``super()._emit_pauli_evolve(...)`` will ultimately delegate here.
 """
@@ -40,17 +40,17 @@ def _resolve_gamma(
 
     Pauli evolution accepts the same concrete, declared-parameter, and
     emit-time symbolic expressions as rotation gates and global phase. In
-    particular, a loop-carried gamma may already be a backend expression and
+    particular, a loop-carried gamma may already be an engine expression and
     must not be rejected merely because it is not a Python ``float``.
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass providing angle
-            resolution and backend parameter construction.
+            resolution and engine parameter construction.
         op (PauliEvolveOp): Pauli evolution whose gamma is resolved.
         bindings (dict[str, Any]): Active emit-time bindings.
 
     Returns:
-        Any: Concrete float or backend symbolic angle expression.
+        Any: Concrete float or engine symbolic angle expression.
 
     Raises:
         EmitError: If gamma cannot be represented as an angle.
@@ -61,12 +61,12 @@ def _resolve_gamma(
 def is_zero_evolution_time(gamma: Any) -> bool:
     """Return whether a resolved evolution time is the numeric identity.
 
-    Python and NumPy real scalars share the same rule. Backend parameter
+    Python and NumPy real scalars share the same rule. Engine parameter
     objects deliberately remain nonzero here: their runtime value is unknown
     even if they support comparison with Python numbers.
 
     Args:
-        gamma (Any): Concrete float or backend-native parameter expression.
+        gamma (Any): Concrete float or engine-native parameter expression.
 
     Returns:
         bool: ``True`` only for a concrete numeric zero.
@@ -157,9 +157,9 @@ def validate_hamiltonian_within_register(
     into the register's qubit space (identity on the untouched qubits)
     by acting only on its declared qubits; only a Hamiltonian *larger*
     than the register is a genuine error. Every ``PauliEvolveOp`` emit
-    path (shared, backend-native, and controlled) must apply this same
+    path (shared, engine-native, and controlled) must apply this same
     rule through this helper so the size contract cannot drift between
-    backends.
+    engines.
 
     Args:
         num_h_qubits (int): Number of qubits the Hamiltonian acts on
@@ -240,7 +240,7 @@ def emit_pauli_evolve(
     2. CNOT ladder + RZ
     3. Undo basis change
 
-    Subclasses can override this for backend-native implementations
+    Subclasses can override this for engine-native implementations
     (e.g., Qiskit PauliEvolutionGate).
     """
     import qamomile.observable as qm_o
@@ -256,8 +256,8 @@ def emit_pauli_evolve(
         )
 
     # Resolve gamma. When gamma is a parameter (scalar or array element),
-    # obtain a backend Parameter so that the per-term RZ angles are
-    # emitted as parametric expressions (`2 * coeff * backend_param`),
+    # obtain an engine Parameter so that the per-term RZ angles are
+    # emitted as parametric expressions (`2 * coeff * engine_param`),
     # matching how ``ising_cost`` handles parametric gamma directly.
     gamma = _resolve_gamma(emit_pass, op, bindings)
 
@@ -328,7 +328,7 @@ def emit_pauli_evolve(
         # RZ(theta) = exp(-i*theta*Z/2), so to get exp(-i*gamma*c*P)
         # we need theta = 2*gamma*c. Works for both concrete gamma
         # (float * float) and parametric gamma (float * Parameter),
-        # relying on backend Parameter arithmetic.
+        # relying on engine Parameter arithmetic.
         angle = _scale_gamma(gamma, 2.0 * float(coeff.real))
         term_qubit_indices = [qubit_indices[op_item.index] for op_item in operators]
         pauli_types = [op_item.pauli for op_item in operators]

@@ -641,7 +641,7 @@ class TestSupportedLoopCarriedScalars:
                 q = qmc.x(q)
             return qmc.measure(q)
 
-        with pytest.raises(QamomileCompileError, match="backend-representable"):
+        with pytest.raises(QamomileCompileError, match="engine-representable"):
             _transpile(kernel)
 
     def test_huge_static_region_range_raises_typed_compile_error(self):
@@ -656,7 +656,7 @@ class TestSupportedLoopCarriedScalars:
                 angle = angle + 1.0
             return qmc.measure(q)
 
-        with pytest.raises(QamomileCompileError, match="backend-representable"):
+        with pytest.raises(QamomileCompileError, match="engine-representable"):
             _transpile(kernel)
 
     def test_swap_rotation(self):
@@ -2384,7 +2384,7 @@ class TestRejectedRebinds:
         While bodies get no RegionArg promotion, and the always-live
         zero-trip path means no trip-count proof can surface the traced
         body value. Accepting this shape compiles and then fails at
-        sampling with an unbound backend parameter (the traced
+        sampling with an unbound engine parameter (the traced
         ``x + 1`` lives only in the per-iteration emit scope).
         """
 
@@ -2885,23 +2885,23 @@ class TestAllowedPatterns:
 
 
 # ---------------------------------------------------------------------------
-# Cross-backend execution: carried scalars drive identical circuits everywhere
+# Cross-engine execution: carried scalars drive identical circuits everywhere
 # ---------------------------------------------------------------------------
 
 
-def _make_transpiler(backend: str):
-    """Build the requested backend transpiler, skipping if the SDK is absent.
+def _make_transpiler(engine: str):
+    """Build the requested engine transpiler, skipping if the SDK is absent.
 
     Args:
-        backend (str): One of ``"qiskit"``, ``"quri_parts"``, ``"cudaq"``.
+        engine (str): One of ``"qiskit"``, ``"quri_parts"``, ``"cudaq"``.
 
     Returns:
-        Any: The backend transpiler instance.
+        Any: The engine transpiler instance.
     """
-    if backend == "qiskit":
+    if engine == "qiskit":
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler as T
-    elif backend == "quri_parts":
+    elif engine == "quri_parts":
         pytest.importorskip("quri_parts")
         from qamomile.quri_parts import QuriPartsTranspiler as T
     else:
@@ -2910,12 +2910,12 @@ def _make_transpiler(backend: str):
     return T()
 
 
-class TestCarriedScalarCrossBackend:
-    """The carried-angle kernel samples identically on every backend."""
+class TestCarriedScalarCrossEngine:
+    """The carried-angle kernel samples identically on every engine."""
 
-    @pytest.mark.parametrize("backend", ["qiskit", "quri_parts", "cudaq"])
+    @pytest.mark.parametrize("engine", ["qiskit", "quri_parts", "cudaq"])
     @pytest.mark.parametrize("n_expected", [(2, 0), (3, 1), (4, 0)])
-    def test_carried_angle_rotation(self, backend, n_expected):
+    def test_carried_angle_rotation(self, engine, n_expected):
         """n accumulated pi-rotations flip the qubit iff n is odd."""
         n, expected = n_expected
 
@@ -2928,7 +2928,7 @@ class TestCarriedScalarCrossBackend:
             q = qmc.rx(q, total * 3.141592653589793)
             return qmc.measure(q)
 
-        transpiler = _make_transpiler(backend)
+        transpiler = _make_transpiler(engine)
         executable = transpiler.transpile(kernel, bindings={"n": n})
         result = executable.sample(transpiler.executor(), shots=100).result()
         assert len(result.results) == 1, f"expected deterministic result: {result}"

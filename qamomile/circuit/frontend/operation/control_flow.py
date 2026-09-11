@@ -24,6 +24,14 @@ from qamomile.circuit.frontend.qkernel_utils import (
     is_full_reslice_of_input,
 )
 from qamomile.circuit.frontend.tracer import Tracer, get_current_tracer, trace
+from qamomile.circuit.ir.classical_eval import FoldPolicy, fold_classical_op
+from qamomile.circuit.ir.operation.arithmetic_operations import (
+    BinOp,
+    CompOp,
+    CondOp,
+    NotOp,
+    UnaryMathOp,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     BranchRebind,
     ForItemsOperation,
@@ -100,7 +108,7 @@ def while_loop(
 
     Classical scalar updates (``count = count + 1``) are represented as
     explicit region arguments and yields. Target validation may still reject
-    a carry when the selected backend cannot thread that classical type
+    a carry when the selected engine cannot thread that classical type
     through a runtime measurement-controlled loop.
     """
     # 1. Get the PARENT tracer (the one active before entering the while loop)
@@ -1489,6 +1497,85 @@ def _common_slice_merge_template(
     return (true_ancestor, identity) if identity is not None else None
 
 
+# Ancestor traces remain available while both branch bodies are captured.
+# Shape specialization checks these only when it needs a concrete dimension.
+_ACTIVE_SHAPE_BRANCHES: contextvars.ContextVar[
+    tuple[tuple[typing.Any, bool, Tracer], ...]
+] = contextvars.ContextVar("qamomile_shape_branches", default=())
+
+
+def _resolve_trace_condition(
+    condition: typing.Any, tracer: Tracer | None
+) -> bool | None:
+    """Resolve a predicate using only proven scalar constants in one trace.
+
+    Args:
+        condition (typing.Any): Predicate IR value or concrete Python scalar.
+        tracer (Tracer | None): Trace containing the predicate's producers,
+            or ``None`` to resolve only a directly constant predicate.
+
+    Returns:
+        bool | None: Selected branch, or ``None`` when the predicate depends
+            on unresolved values or operations outside the supplied trace.
+    """
+    concrete_values: dict[str, typing.Any] = {}
+
+    def resolve(value: typing.Any) -> typing.Any | None:
+        """Read a scalar constant without consulting placeholder handle values.
+
+        Args:
+            value (typing.Any): Scalar operand or concrete Python value.
+
+        Returns:
+            typing.Any | None: Proven scalar value, or ``None`` if unresolved.
+        """
+        if isinstance(value, ValueBase):
+            return concrete_values.get(value.uuid, value.get_const())
+        return value if isinstance(value, (bool, int, float)) else None
+
+    resolved = resolve(condition)
+    if resolved is not None:
+        return bool(resolved)
+    if tracer is None:
+        return None
+    for operation in tracer.operations:
+        if isinstance(operation, (BinOp, CompOp, CondOp, NotOp, UnaryMathOp)):
+            result = fold_classical_op(
+                operation, resolve, parameters=set(), policy=FoldPolicy.COMPILE_TIME
+            )
+            if result is not None:
+                concrete_values[operation.results[0].uuid] = result
+    resolved = resolve(condition)
+    return bool(resolved) if resolved is not None else None
+
+
+def _resolve_shape_merge_condition(if_operation: IfOperation) -> bool | None:
+    """Resolve a shape predicate unless its enclosing branch is unreachable.
+
+    This only exposes proven scalar constants to Python shape consumers. Both
+    branches still trace, so an unreachable ancestor must suppress eager shape
+    specialization: the selected width could otherwise trigger a cast error in
+    code that compile-time lowering will discard. Conditional operations and
+    independent shape merge slots remain in the IR to preserve provenance.
+
+    Args:
+        if_operation (IfOperation): Conditional whose array dimensions merge.
+
+    Returns:
+        bool | None: Selected branch, or ``None`` when its predicate cannot
+            resolve or an enclosing branch is provably unreachable.
+    """
+    for condition, branch, ancestor in _ACTIVE_SHAPE_BRANCHES.get():
+        selected = _resolve_trace_condition(condition, ancestor)
+        if selected is not None and selected != branch:
+            return None
+    try:
+        tracer = get_current_tracer()
+    except RuntimeError:
+        tracer = None
+    return _resolve_trace_condition(if_operation.condition, tracer)
+
+
 def _create_merge_for_values(
     true_val: typing.Any,
     false_val: typing.Any,
@@ -1550,10 +1637,50 @@ def _create_merge_for_values(
     # Create merge output value (indexed to avoid name collisions)
     merge_index = len(if_operation.results)
     if isinstance(template_v, ArrayValue):
+        merged_shape = template_v.shape
+        if (
+            isinstance(true_v, ArrayValue)
+            and isinstance(false_v, ArrayValue)
+            and true_v.type.is_quantum()
+            and len(true_v.shape) == len(false_v.shape)
+        ):
+            dimensions = []
+            selected_branch: bool | None = None
+            condition_resolved = False
+            for axis, (true_dim, false_dim) in enumerate(
+                zip(true_v.shape, false_v.shape)
+            ):
+                if true_dim.uuid == false_dim.uuid or (
+                    true_dim.is_constant()
+                    and false_dim.is_constant()
+                    and true_dim.get_const() == false_dim.get_const()
+                ):
+                    dimensions.append(true_dim)
+                    continue
+                # Shape reads must name the selected dimension without
+                # rewriting an input size shared with either branch.
+                dimension = Value(
+                    type=UIntType(), name=f"{template_v.name}_size_{merge_index}_{axis}"
+                )
+                if not condition_resolved:
+                    selected_branch = _resolve_shape_merge_condition(if_operation)
+                    condition_resolved = True
+                if selected_branch is not None:
+                    selected_dim = true_dim if selected_branch else false_dim
+                    selected_size = selected_dim.get_const()
+                    if selected_size is not None:
+                        dimension = dimension.with_const(selected_size)
+                        selected_val = true_val if selected_branch else false_val
+                        if isinstance(selected_val, ArrayBase):
+                            template_val = selected_val
+                            template_v = selected_val.value
+                if_operation.add_merge(true_dim, false_dim, dimension)
+                dimensions.append(dimension)
+            merged_shape = tuple(dimensions)
         merge_output = ArrayValue(
             type=template_v.type,
             name=f"{template_v.name}_merge_{merge_index}",
-            shape=template_v.shape,
+            shape=merged_shape,
             slice_of=template_v.slice_of,
             slice_start=template_v.slice_start,
             slice_step=template_v.slice_step,
@@ -1571,9 +1698,9 @@ def _create_merge_for_values(
         )
 
     # Wrap the merge output in the true-branch handle's family. The wrap
-    # may rebuild the output value with copied metadata (QFixed carriers),
-    # so the handle's value — not the bare merge_output — is what the merge
-    # must record.
+    # may rebuild the output value with copied metadata (packed-register
+    # QInt / QFixed carriers), so the handle's value — not the bare
+    # merge_output — is what the merge must record.
     if not isinstance(template_val, Handle):
         raise TypeError(
             "Unsupported Handle type for if-else merge: "
@@ -1582,7 +1709,6 @@ def _create_merge_for_values(
         )
     other_v = true_v if template_val is false_val else false_v
     merged_handle = template_val._wrap_merge_result(merge_output, other_v)
-
     # Store the merge in the IfOperation through its official accessor
     if_operation.add_merge(true_v, false_v, merged_handle.value)
     _refresh_slice_merge_owner(true_val, false_val, merged_handle)
@@ -1871,19 +1997,33 @@ def _canonical_branch_handles(
 def _trace_branch(
     branch_func: typing.Callable,
     variables: list,
+    condition: typing.Any,
+    selected_branch: bool,
 ) -> typing.Tuple[Tracer, tuple]:
     """Trace a conditional branch and return its tracer and results.
 
     Args:
-        branch_func: Function to execute for this branch
-        variables: List of variables passed to the function
+        branch_func (typing.Callable): Function to execute for this branch.
+        variables (list): Variables passed to the branch function.
+        condition (typing.Any): Predicate evaluated in the enclosing trace.
+        selected_branch (bool): Whether this is the predicate's true branch.
 
     Returns:
-        Tuple of (tracer, normalized_result_tuple)
+        tuple[Tracer, tuple]: Branch trace and normalized result tuple.
+
+    Raises:
+        RuntimeError: If no enclosing tracer is active.
     """
     tracer = Tracer()
-    with trace(tracer):
-        result = branch_func(*variables)
+    token = _ACTIVE_SHAPE_BRANCHES.set(
+        _ACTIVE_SHAPE_BRANCHES.get()
+        + ((condition, selected_branch, get_current_tracer()),)
+    )
+    try:
+        with trace(tracer):
+            result = branch_func(*variables)
+    finally:
+        _ACTIVE_SHAPE_BRANCHES.reset(token)
 
     # Normalize result to tuple
     if not isinstance(result, tuple):
@@ -2448,8 +2588,12 @@ def emit_if(
         _ACTIVE_REBIND_PRE_BINDINGS.get() + (dict(rebind_pre_bindings or {}),)
     )
     try:
-        true_tracer, true_result = _trace_branch(true_func, true_vars)
-        false_tracer, false_result = _trace_branch(false_func, false_vars)
+        true_tracer, true_result = _trace_branch(
+            true_func, true_vars, condition_value, True
+        )
+        false_tracer, false_result = _trace_branch(
+            false_func, false_vars, condition_value, False
+        )
     finally:
         _ACTIVE_REBIND_PRE_BINDINGS.reset(stack_token)
 
@@ -2705,7 +2849,7 @@ def for_items(
 
     This context manager creates a ForItemsOperation that iterates over
     dictionary (key, value) pairs. The operation is always unrolled at
-    transpile time since quantum backends cannot natively iterate over
+    transpile time since quantum engines cannot natively iterate over
     classical data structures.
 
     Args:

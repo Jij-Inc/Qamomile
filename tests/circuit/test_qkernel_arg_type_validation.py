@@ -10,7 +10,7 @@ parameter emitting ``Rx(0.0)``).
 The one asymmetry is intentional: a quantum array bound to a *scalar*
 ``Qubit`` parameter is a legitimate per-element broadcast in the control
 path (one controlled application per target qubit, exercised end-to-end by
-``controlled_native_broadcast_target`` in ``test_frontend_cross_backend_
+``controlled_native_broadcast_target`` in ``test_frontend_cross_engine_
 execution.py``), so it is accepted there. The same shape on a plain qkernel
 call does not broadcast -- it would silently drop qubits -- so it is
 rejected.

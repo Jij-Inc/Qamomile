@@ -1,4 +1,4 @@
-"""CUDA-Q backend for Qamomile.
+"""CUDA-Q engine for Qamomile.
 
 Design intent: this package concretizes circuit's abstract IR through an
 internal ``CudaqMaterializer`` and exposes only the transpiler, executor, and
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     )
 
 _CUDAQ_MISSING_MSG = """\
-CUDA-Q backend requires the `cudaq` package.
+CUDA-Q engine requires the `cudaq` package.
 Install with `pip install qamomile[cudaq-cu12]` for CUDA 12 or `pip install qamomile[cudaq-cu13]` for CUDA 13.
 CUDA-Q currently supports Linux, macOS ARM64 (Apple silicon), and Windows via WSL2.
 Native Windows is not supported.

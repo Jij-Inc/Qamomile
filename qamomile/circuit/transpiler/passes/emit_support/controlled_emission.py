@@ -246,21 +246,21 @@ def _checked_append_gate(
 ) -> None:
     """Append a controlled / composite gate after rejecting qubit aliasing.
 
-    Every controlled or composite block reaches the backend through
+    Every controlled or composite block reaches the engine through
     ``append_gate`` with a combined physical-index list (``control_phys +
     target_indices``). A controlled block is defined only on distinct qubits;
     when a symbolic control and target index coincide at runtime (e.g.
     ``qmc.control(x)(qs[i], qs[j])`` on the diagonal) the duplicate is visible
     only here at emit time. This wrapper runs the shared aliasing check before
-    delegating to the backend, so the controlled path gets the same Qamomile
+    delegating to the engine, so the controlled path gets the same Qamomile
     ``QubitAliasError`` the native ``emit_gate`` path already raises, on every
-    backend, instead of a raw ``CircuitError`` (Qiskit) or a silent
+    engine, instead of a raw ``CircuitError`` (Qiskit) or a silent
     compile-then-crash (CUDA-Q).
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass (for its emitter).
-        circuit (Any): Backend circuit being emitted into.
-        gate (Any): The already-controlled/powered backend gate to append.
+        circuit (Any): Engine circuit being emitted into.
+        gate (Any): The already-controlled/powered engine gate to append.
         qubit_indices (list[int]): Combined physical qubit indices the gate
             acts on (controls followed by targets).
         gate_label (str): Human-readable label for the aliasing diagnostic.
@@ -337,7 +337,7 @@ def emit_controlled_block(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         block_value (Any): Inner block whose operations are controlled.
             Objects without ``operations`` are silently skipped.
         control_idx (int): Physical control qubit index.
@@ -445,7 +445,7 @@ def allocate_controlled_workspaces(
 ) -> None:
     """Reserve parent-circuit wires for fresh allocations in controlled bodies.
 
-    A reusable backend gate can only act on wires supplied by its call site.
+    A reusable engine gate can only act on wires supplied by its call site.
     When a controlled qkernel allocates private workspace, its body must
     therefore be decomposed on the parent circuit and the workspace wires
     must be included before that circuit's width is fixed. This pre-emission
@@ -599,7 +599,7 @@ def _allocate_selected_invoke_workspaces(
     """
     selection = _controlled_invoke_selection(
         operation,
-        getattr(emit_pass, "backend_name", None),
+        getattr(emit_pass, "engine_name", None),
     )
     body = selection.body
     if body is None or not body.operations:
@@ -896,10 +896,10 @@ def _batch_op_profile(
         )
         return profile
     if isinstance(op, InvokeOperation):
-        backend_name = getattr(emit_pass, "backend_name", None)
+        engine_name = getattr(emit_pass, "engine_name", None)
         selection = _controlled_invoke_selection(
             op,
-            backend_name,
+            engine_name,
         )
         block = selection.body
         if block is None:
@@ -1184,7 +1184,7 @@ def _controlled_body_batch_profile(
 
 def _controlled_invoke_selection(
     operation: InvokeOperation,
-    backend_name: str | None,
+    engine_name: str | None,
 ) -> CallableBodySelection:
     """Select the body that generic controlled emission may execute.
 
@@ -1197,7 +1197,7 @@ def _controlled_invoke_selection(
     Args:
         operation (InvokeOperation): Invocation whose controlled fallback body
             should be selected.
-        backend_name (str | None): Active backend name.
+        engine_name (str | None): Active engine name.
 
     Returns:
         CallableBodySelection: Executable exact/partial selection, or a
@@ -1206,7 +1206,7 @@ def _controlled_invoke_selection(
     Raises:
         ValueError: If the selected body violates the invocation contract.
     """
-    selection = operation.select_body(backend=backend_name)
+    selection = operation.select_body(engine=engine_name)
     if selection.realized_transform is operation.transform:
         return selection
     if (
@@ -1469,7 +1469,7 @@ def try_emit_batched_controlled_operations(
     Args:
         emit_pass (StandardEmitPass): Active emit pass (must hold a
             ``_mc_ancilla_pool``).
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         operations (list[Operation]): Controlled block body operations.
         control_indices (list[int]): Composed physical control qubits.
         qubit_map (QubitMap): Mutable block-local qubit map.
@@ -1552,7 +1552,7 @@ def emit_controlled_operations(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         operations (list[Operation]): Block operations to walk.
         control_indices (list[int]): Accumulated physical control
             qubits.
@@ -1807,13 +1807,13 @@ def replay_controlled_for(
     ``RegionArg`` protocol, so a scalar recurrence such as ``index += 1``
     either stayed pinned to its initial value or became unresolved.  This
     helper shares the canonical emit-time carry primitives with ordinary
-    loop emission and accepts the backend-specific controlled walker as a
+    loop emission and accepts the engine-specific controlled walker as a
     callback.  Nested range loops therefore replay recursively with the same
-    ``init -> block_arg -> yielded -> result`` semantics on every backend.
+    ``init -> block_arg -> yielded -> result`` semantics on every engine.
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass and value resolver.
-        circuit (Any): Backend circuit being constructed.
+        circuit (Any): Engine circuit being constructed.
         op (ForOperation): Static range loop to replay.
         control_indices (list[int]): Physical controls accumulated from the
             enclosing controlled operations.
@@ -1894,12 +1894,12 @@ def emit_static_controlled_if(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         op (IfOperation): Static branch to resolve and emit.
         control_indices (list[int]): Accumulated physical control qubits.
         qubit_map (QubitMap): Mutable block-local qubit map.
         bindings (dict[str, Any]): Bindings visible in the current iteration.
-        walker (Callable[..., None]): Backend controlled-body walker used to
+        walker (Callable[..., None]): Engine controlled-body walker used to
             emit the selected branch.
 
     Raises:
@@ -2287,13 +2287,13 @@ def _emit_nested_controlled_u(
 
     Resolves the nested operation's own controls and targets through
     the block-local ``qubit_map``, prepends the outer controls, and
-    lowers the result. Backends whose ``circuit_to_gate`` works get a
+    lowers the result. Engines whose ``circuit_to_gate`` works get a
     single native multi-controlled gate; others recurse through the
     mapped walker with the composed control set.
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         op (ControlledUOperation): Nested controlled-U operation.
         outer_control_indices (list[int]): Physical controls accumulated
             from enclosing controlled-U operations.
@@ -2454,7 +2454,7 @@ def emit_controlled_pauli_evolve(
     The basis-change (``H`` / ``SDG`` / ``S``) and CX-ladder gates are
     emitted uncontrolled through ``emit_pass._emitter``; the central
     ``RZ`` is routed through :func:`_emit_mc_rotation`, which dispatches
-    to ``emit_crz`` for a single control and to the backend's
+    to ``emit_crz`` for a single control and to the engine's
     ``_emit_irreducible_multi_controlled_gate`` hook for two or more.
 
     A constant (identity) Hamiltonian term ``c * I`` is the standalone phase
@@ -2470,7 +2470,7 @@ def emit_controlled_pauli_evolve(
         emit_pass (StandardEmitPass): Active emit pass; provides the
             value resolver, gate emitter, and the multi-controlled
             rotation hook.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         op (PauliEvolveOp): The Pauli evolution operation inside the
             controlled block.
         control_indices (list[int]): Accumulated physical control
@@ -2487,7 +2487,7 @@ def emit_controlled_pauli_evolve(
             Hamiltonian is non-Hermitian (a term or the constant has a
             non-real coefficient), the Hamiltonian is larger than the
             register, a term qubit cannot be resolved, or gamma is
-            runtime-parametric and the backend's runtime parameter type
+            runtime-parametric and the engine's runtime parameter type
             does not support the required angle scaling (e.g. QURI
             Parts' ``Parameter``).
     """
@@ -2520,7 +2520,7 @@ def emit_controlled_pauli_evolve(
         """Scale ``gamma`` by a real ``factor`` for a controlled rotation angle.
 
         ``gamma`` is either a concrete ``float`` (compile-time bound) or a
-        backend runtime-parameter expression. ``factor`` is the term-specific
+        engine runtime-parameter expression. ``factor`` is the term-specific
         real scale: ``2 * coeff`` for a Pauli term's central RZ, or
         ``-constant`` for the identity-term phase.
 
@@ -2529,10 +2529,10 @@ def emit_controlled_pauli_evolve(
 
         Returns:
             Any: ``factor * gamma`` — a Python ``float`` for concrete gamma,
-                or a backend parameter expression for a runtime-parametric one.
+                or an engine parameter expression for a runtime-parametric one.
 
         Raises:
-            EmitError: If ``gamma`` is a runtime parameter whose backend type
+            EmitError: If ``gamma`` is a runtime parameter whose engine type
                 exposes no Python arithmetic (e.g. QURI Parts' Rust-backed
                 ``Parameter``), so the scaling cannot be expressed. The raw
                 ``TypeError`` is converted into a clear compile-time error
@@ -2544,7 +2544,7 @@ def emit_controlled_pauli_evolve(
         except TypeError as exc:
             raise EmitError(
                 "Controlled Pauli evolution requires a compile-time-numeric "
-                "gamma on this backend: its runtime parameter type does not "
+                "gamma on this engine: its runtime parameter type does not "
                 "support the angle scaling needed for the controlled "
                 "rotations. Bind gamma to a concrete value before "
                 "transpilation.",
@@ -2758,14 +2758,14 @@ def emit_controlled_u_with_symbolic_indices(
     sub-kernel quantum operands via
     ``_expand_quantum_operands_to_phys`` for the target side, and
     threads the rest through the standard ``gate_controlled`` +
-    ``append_gate`` pipeline (with the per-gate fallback for backends
+    ``append_gate`` pipeline (with the per-gate fallback for engines
     whose ``circuit_to_gate`` returns ``None``).
 
     Args:
         emit_pass (StandardEmitPass): The emit pass driving the
             conversion; provides ``_resolver``, ``_emitter``,
             ``_blockvalue_to_gate``, and ``_emit_controlled_fallback``.
-        circuit (Any): The backend circuit being built.
+        circuit (Any): The engine circuit being built.
         op (SymbolicControlledU): The IR op with ``control_indices``
             **not** ``None``.  Callers must guarantee this; the
             ``control_indices is None`` branch is handled by the
@@ -3085,13 +3085,13 @@ def emit_controlled_u_multi_arg(
     matches the resolved ``num_controls``, expands the target side
     the same way, and threads the rest through the standard
     ``gate_controlled`` + ``append_gate`` pipeline (with the
-    per-gate fallback for backends whose ``circuit_to_gate`` returns
+    per-gate fallback for engines whose ``circuit_to_gate`` returns
     ``None``).
 
     Args:
         emit_pass (StandardEmitPass): The emit pass driving the
             conversion.
-        circuit (Any): The backend circuit being built.
+        circuit (Any): The engine circuit being built.
         op (SymbolicControlledU): The IR op with
             ``num_control_args > 1`` and ``control_indices is
             None``.
@@ -3324,14 +3324,14 @@ def emit_controlled_u(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         op (ControlledUOperation): Concrete or symbolic controlled operation.
         qubit_map (QubitMap): Logical-to-physical map, mutated with results.
         bindings (dict[str, Any]): Bindings visible at the call site.
 
     Raises:
         EmitError: If controls, targets, power, or body parameters cannot be
-            resolved, or the backend cannot lower the controlled operation.
+            resolved, or the engine cannot lower the controlled operation.
     """
     if isinstance(op, SymbolicControlledU):
         if op.control_indices is not None:
@@ -3609,7 +3609,7 @@ def _emit_single_target_block_per_vector_element(
 
     Args:
         emit_pass (StandardEmitPass): Driving emit pass.
-        circuit (Any): Backend circuit being emitted.
+        circuit (Any): Engine circuit being emitted.
         block_value (Any): Single-target inner block.
         num_controls (int): Number of control qubits.
         control_indices (list[int]): Physical control qubits.
@@ -3622,7 +3622,7 @@ def _emit_single_target_block_per_vector_element(
             ``None``, which lets each fallback resolve it.
 
     Raises:
-        EmitError: If the backend cannot convert the block to a gate and
+        EmitError: If the engine cannot convert the block to a gate and
             the fallback controlled decomposition does not support the
             block shape.
     """
@@ -3683,14 +3683,14 @@ def emit_controlled_fallback(
     qubit its operand resolves to — multi-target inner blocks are
     supported. Nested ``ControlledUOperation``s compose their controls
     with the outer ones; irreducible multi-controlled single-qubit
-    gates route through the backend's
+    gates route through the engine's
     ``_emit_irreducible_multi_controlled_gate`` hook. Subclasses may
     still override this method to emit controlled blocks natively
     (e.g. CUDA-Q's ``cudaq.control`` helper kernels).
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being built.
+        circuit (Any): Engine circuit being built.
         block_value (Any): Block whose operations should be controlled.
         num_controls (int): Number of control qubits.
         control_indices (list[int]): Physical indices of control qubits.
@@ -3706,7 +3706,7 @@ def emit_controlled_fallback(
             ``control_indices``, the block's quantum inputs cannot be
             mapped onto ``target_indices``, or an inner operation
             cannot be lowered under the accumulated controls (e.g. an
-            irreducible multi-controlled gate on a backend without the
+            irreducible multi-controlled gate on an engine without the
             multi-control hook).
     """
     if not hasattr(block_value, "operations"):
@@ -3772,14 +3772,14 @@ def emit_custom_composite(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         op (Any): Composite gate operation.
         impl (Any): Fallback implementation block to emit.
         qubit_indices (list[int]): Physical qubits for the operation.
         bindings (dict[str, Any]): Active emit bindings.
 
     Raises:
-        EmitError: If body inputs, workspace addresses, or backend gate
+        EmitError: If body inputs, workspace addresses, or engine gate
             operands cannot be resolved safely.
     """
     num_qubits = len(qubit_indices)
@@ -3842,7 +3842,7 @@ def emit_controlled_composite_at_indices(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         op (InvokeOperation): Composite or oracle invocation to emit.
         control_indices (list[int]): Physical outer control qubits.
         qubit_indices (list[int]): Physical qubits occupied by ``op``'s
@@ -3860,7 +3860,7 @@ def emit_controlled_composite_at_indices(
     """
     selection = _controlled_invoke_selection(
         op,
-        getattr(emit_pass, "backend_name", None),
+        getattr(emit_pass, "engine_name", None),
     )
     body = selection.body
     if body is not None:
@@ -3933,7 +3933,7 @@ def _emit_all_ones_controlled_composite_at_indices(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         op (InvokeOperation): Composite or oracle invocation to emit.
         control_indices (list[int]): Physical outer control qubits.
         qubit_indices (list[int]): Physical qubits occupied by ``op``'s own
@@ -3956,7 +3956,7 @@ def _emit_all_ones_controlled_composite_at_indices(
     """
     selection = _controlled_invoke_selection(
         op,
-        getattr(emit_pass, "backend_name", None),
+        getattr(emit_pass, "engine_name", None),
     )
     impl = selection.body
     body_implements_transform = selection.realized_transform is op.transform
@@ -3989,7 +3989,7 @@ def _emit_all_ones_controlled_composite_at_indices(
     elif op.transform.is_inverse:
         raise EmitError(
             f"Inverse callable '{op.target.name}' has no inverse "
-            "implementation body for this backend. Bind structural "
+            "implementation body for this engine. Bind structural "
             "parameters at compile time so the inverse can be "
             "materialized, or register an inverse implementation.",
             operation=f"InvokeOperation[{op.target.name}]",

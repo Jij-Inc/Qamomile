@@ -310,7 +310,7 @@ def _qiskit_circuit(
     """Transpile a kernel and return the first Qiskit circuit.
 
     Args:
-        kernel (qmc.QKernel): QKernel to transpile with the Qiskit backend.
+        kernel (qmc.QKernel): QKernel to transpile with the Qiskit engine.
         bindings (dict[str, Any] | None): Compile-time bindings passed to
             ``transpile``. Defaults to None.
 
@@ -331,7 +331,7 @@ def _quri_parts_width(
     """Transpile a kernel and return the QURI Parts circuit width.
 
     Args:
-        kernel (qmc.QKernel): QKernel to transpile with the QURI Parts backend.
+        kernel (qmc.QKernel): QKernel to transpile with the QURI Parts engine.
         bindings (dict[str, Any] | None): Compile-time bindings passed to
             ``transpile``. Defaults to None.
 
@@ -352,7 +352,7 @@ def _cudaq_width(
     """Transpile a kernel and return the CUDA-Q artifact width.
 
     Args:
-        kernel (qmc.QKernel): QKernel to transpile with the CUDA-Q backend.
+        kernel (qmc.QKernel): QKernel to transpile with the CUDA-Q engine.
         bindings (dict[str, Any] | None): Compile-time bindings passed to
             ``transpile``. Defaults to None.
 

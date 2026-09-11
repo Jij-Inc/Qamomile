@@ -1,4 +1,4 @@
-"""Describe backend-neutral quantum execution requests."""
+"""Describe engine-neutral quantum execution requests."""
 
 from __future__ import annotations
 
@@ -79,15 +79,15 @@ EstimationAccuracy: TypeAlias = Exact | ShotBased | TargetPrecision
 class CircuitInvocation(Generic[CircuitT]):
     """Keep an emitted circuit and runtime parameter values together.
 
-    Backends may bind the values into a new circuit or submit them through a
+    Engines may bind the values into a new circuit or submit them through a
     native parameter-input API. Keeping both forms available preserves native
     parameter sweeps and provider-side compilation caches.
 
     Args:
-        circuit (CircuitT): Emitted backend circuit or kernel artifact.
+        circuit (CircuitT): Emitted engine circuit or kernel artifact.
         bindings (Mapping[str, Any]): Flattened Qamomile runtime bindings.
         parameter_metadata (ParameterMetadata): Mapping from public parameter
-            names to backend parameter objects.
+            names to engine parameter objects.
     """
 
     circuit: CircuitT

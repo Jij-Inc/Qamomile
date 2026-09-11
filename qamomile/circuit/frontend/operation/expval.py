@@ -154,7 +154,7 @@ def expval(
         # (e.g. ``measure(q[1::2])``), using the whole array in
         # ``expval`` would try to estimate over a partially-collapsed
         # quantum state.  Detect this at trace time so the error is
-        # surfaced before reaching the backend.
+        # surfaced before reaching the engine.
         #
         # We only call this on ``Vector`` (which is an ``ArrayBase``
         # subclass and has ``_check_no_consumed_slots``).  A bare

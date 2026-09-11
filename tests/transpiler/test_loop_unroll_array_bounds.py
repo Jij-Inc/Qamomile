@@ -25,7 +25,7 @@ from qamomile.circuit.transpiler.passes.emit_support.value_resolver import (
 )
 from qamomile.qiskit.transpiler import QiskitTranspiler
 
-# The end-to-end tests transpile and execute on the Qiskit backend; skip the
+# The end-to-end tests transpile and execute on the Qiskit engine; skip the
 # whole module cleanly when Qiskit is unavailable rather than erroring at
 # runtime. ``executor()`` falls back to ``BasicSimulator`` when ``qiskit_aer``
 # is absent, so only ``qiskit`` itself is required here.

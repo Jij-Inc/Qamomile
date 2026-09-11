@@ -48,7 +48,7 @@ from qamomile.circuit.transpiler.segments import (
         pytest.param("cudaq", marks=pytest.mark.cudaq),
     ]
 )
-def backend_transpiler(request):
+def engine_transpiler(request):
     """Yield each installed target name and transpiler."""
     if request.param == "qiskit":
         pytest.importorskip("qiskit")
@@ -66,7 +66,7 @@ def backend_transpiler(request):
         from qamomile.cudaq import CudaqTranspiler
 
         return request.param, CudaqTranspiler()
-    raise AssertionError(f"Unknown backend {request.param!r}")
+    raise AssertionError(f"Unknown engine {request.param!r}")
 
 
 @qmc.qkernel
@@ -246,7 +246,7 @@ def _sample(kernel, *, transpiler=None, bindings=None, parameters=None):
 
     Args:
         kernel (QKernel): Kernel to compile.
-        transpiler (Transpiler | None): Backend transpiler/executor provider.
+        transpiler (Transpiler | None): Engine transpiler/executor provider.
             Defaults to a fresh Qiskit transpiler.
         bindings (dict[str, object] | None): Compile-time bindings. Defaults
             to None.
@@ -296,9 +296,9 @@ def _sample(kernel, *, transpiler=None, bindings=None, parameters=None):
         (_loop_final_element, 1),
     ],
 )
-def test_structural_bit_outputs_resolve(backend_transpiler, kernel, expected):
+def test_structural_bit_outputs_resolve(engine_transpiler, kernel, expected):
     """Elements, nested views, stores, and loop-final selections stay live."""
-    target, transpiler = backend_transpiler
+    target, transpiler = engine_transpiler
     if target == "quri_parts" and kernel in _DYNAMIC_IF_OUTPUT_KERNELS:
         with pytest.raises(
             TargetCapabilityError,
@@ -324,12 +324,12 @@ def test_typed_constant_wins_over_same_named_parameter():
     [(0, 9), (1, 1)],
 )
 def test_runtime_classical_expr_executes_inside_loop_carry(
-    backend_transpiler,
+    engine_transpiler,
     set_condition,
     expected,
 ):
     """Lowered arithmetic executes for both measurement-selected branches."""
-    _, transpiler = backend_transpiler
+    _, transpiler = engine_transpiler
     assert (
         _sample(
             _runtime_expr_loop_carry,

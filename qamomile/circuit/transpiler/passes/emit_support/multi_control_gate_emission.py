@@ -36,7 +36,7 @@ def emit_controlled_gate(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         op (GateOperation): Gate operation to control.
         control_idx (int): Physical control qubit.
         target_indices (list[int]): Physical qubits for the gate's own
@@ -101,13 +101,13 @@ def emit_single_controlled_primitive(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         gate_type (GateOperationType | None): Single-qubit gate kind.
             None (a gate operation without a type) is rejected like any
             other unsupported kind.
         control_idx (int): Physical control qubit.
         target_idx (int): Physical target qubit.
-        angle (Any): Resolved rotation angle (concrete number or backend
+        angle (Any): Resolved rotation angle (concrete number or engine
             parameter expression) for ``P`` / ``RX`` / ``RY`` / ``RZ``;
             ignored for fixed gates.
 
@@ -185,8 +185,8 @@ def _emit_toffoli_steps(
     """Emit a sequence of Toffoli gates for the given ``(a, b, target)`` steps.
 
     Args:
-        emitter (Any): Backend gate emitter.
-        circuit (Any): Backend circuit being emitted into.
+        emitter (Any): Engine gate emitter.
+        circuit (Any): Engine circuit being emitted into.
         steps (Iterable[tuple[int, int, int]]): Toffoli triples, in the
             order they should be emitted (pass ``reversed(steps)`` to
             uncompute a ladder built by :func:`_and_ladder_steps`).
@@ -224,13 +224,13 @@ def emit_multi_controlled_on_clean_ancillas(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         gate_type (GateOperationType): Single-qubit gate kind to apply
             under the controls.
         control_indices (list[int]): Physical control qubits; at least
             two.
         target_idx (int): Physical target qubit.
-        angle (Any): Resolved rotation angle (concrete number or backend
+        angle (Any): Resolved rotation angle (concrete number or engine
             parameter expression) for rotation-like gates, or ``None``
             for fixed gates.
         ancilla_indices (list[int]): Clean (``|0>``) ancilla qubits;
@@ -289,7 +289,7 @@ def emit_multi_controlled_gate(
     - one control: via :func:`emit_controlled_gate` (the existing
       single-control dispatch),
     - two controls on X / Z: via ``emit_toffoli`` (Z conjugated by H),
-    - anything else: via the backend's
+    - anything else: via the engine's
       ``_emit_irreducible_multi_controlled_gate`` hook, whose base
       implementation raises a descriptive ``EmitError``.
 
@@ -297,7 +297,7 @@ def emit_multi_controlled_gate(
         emit_pass (StandardEmitPass): Active emit pass. Subclass
             overrides of ``_emit_irreducible_multi_controlled_gate``
             are respected for the irreducible tail.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         op (GateOperation): Gate operation whose operands are already
             resolved to ``target_indices``.
         control_indices (list[int]): Physical control qubits. Must be
@@ -310,7 +310,7 @@ def emit_multi_controlled_gate(
     Raises:
         EmitError: If ``control_indices`` is empty, the gate has fewer
             resolved targets than its type requires, or the reduction
-            bottoms out on a backend without multi-control support.
+            bottoms out on an engine without multi-control support.
     """
     gate_type = op.gate_type
     if not control_indices:
@@ -500,13 +500,13 @@ def _emit_mc_x(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         control_indices (list[int]): Physical control qubits (>= 1).
         target_idx (int): Physical target qubit.
 
     Raises:
         EmitError: If three or more controls are required and the
-            backend has no multi-controlled gate hook.
+            engine has no multi-controlled gate hook.
     """
     if len(control_indices) == 1:
         emit_pass._emitter.emit_cx(circuit, control_indices[0], target_idx)
@@ -533,13 +533,13 @@ def _emit_mc_z(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         control_indices (list[int]): Physical control qubits (>= 1).
         target_idx (int): Physical target qubit.
 
     Raises:
         EmitError: If three or more controls are required and the
-            backend has no multi-controlled gate hook.
+            engine has no multi-controlled gate hook.
     """
     if len(control_indices) == 1:
         emit_pass._emitter.emit_cz(circuit, control_indices[0], target_idx)
@@ -567,16 +567,16 @@ def _emit_mc_rotation(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         gate_type (GateOperationType): One of ``P`` / ``RX`` / ``RY`` /
             ``RZ``.
         control_indices (list[int]): Physical control qubits (>= 1).
         target_idx (int): Physical target qubit.
-        angle (Any): Resolved rotation angle (concrete float or backend
+        angle (Any): Resolved rotation angle (concrete float or engine
             parameter expression).
 
     Raises:
-        EmitError: If two or more controls are required and the backend
+        EmitError: If two or more controls are required and the engine
             has no multi-controlled gate hook, or ``gate_type`` is not
             rotation-like.
     """
@@ -608,14 +608,14 @@ def _emit_irreducible(
     target_idx: int,
     angle: Any,
 ) -> None:
-    """Dispatch an irreducible multi-controlled gate to the backend hook.
+    """Dispatch an irreducible multi-controlled gate to the engine hook.
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass. Its
             ``_emit_irreducible_multi_controlled_gate`` method (base
-            implementation raises; backends may override) receives the
+            implementation raises; engines may override) receives the
             gate.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         gate_type (GateOperationType | None): Single-qubit gate kind.
         control_indices (list[int]): Physical control qubits.
         target_idx (int): Physical target qubit.
@@ -623,7 +623,7 @@ def _emit_irreducible(
             gates.
 
     Raises:
-        EmitError: If ``gate_type`` is missing or the backend's hook
+        EmitError: If ``gate_type`` is missing or the engine's hook
             rejects the gate.
     """
     if gate_type is None:

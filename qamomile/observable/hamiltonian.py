@@ -43,7 +43,7 @@ from typing import Iterator
 import numpy as np
 
 # Numerical tolerances for interpreting Hamiltonian coefficients. They live
-# with the Hamiltonian (rather than in any backend / emit module) because they
+# with the Hamiltonian (rather than in any engine / emit module) because they
 # describe properties of the operator itself and are shared across consumers:
 # Hamiltonian arithmetic here, observable conversion, and the Pauli-evolution
 # emit paths.

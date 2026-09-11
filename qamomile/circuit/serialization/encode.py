@@ -19,6 +19,7 @@ from qamomile.circuit.frontend.handle import (
     Matrix,
     Observable,
     QFixed,
+    QInt,
     Qubit,
     Tensor,
     Tuple,
@@ -229,13 +230,11 @@ def _encode_kernel_type(annotation: Any, value: ValueBase) -> dict[str, Any]:
         TypeError: If the annotation cannot be represented by static IR.
     """
     ndim = _array_ndim(annotation)
-    try:
+    if annotation in {QFixed, QInt}:
+        # Packed widths belong to the body value, including symbolic identity.
+        value_type = value.type
+    else:
         value_type = handle_type_map(annotation)
-    except TypeError:
-        if annotation is QFixed and hasattr(value, "type"):
-            value_type = value.type
-        else:
-            raise
     if not isinstance(value_type, ValueType):
         raise TypeError(f"Unsupported qkernel type annotation {annotation!r}")
     return {
@@ -318,6 +317,7 @@ def _encode_frontend_annotation(annotation: Any) -> dict[str, Any]:
         bool: "PYTHON_BOOL",
         Qubit: "QAMOMILE_QUBIT",
         QFixed: "QAMOMILE_QFIXED",
+        QInt: "QAMOMILE_QINT",
         Observable: "QAMOMILE_OBSERVABLE",
     }
     if annotation in scalar_kinds:

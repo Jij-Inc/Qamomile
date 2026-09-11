@@ -11,6 +11,7 @@ from qamomile.circuit.frontend.handle import (
     Handle,
     Observable,
     QFixed,
+    QInt,
     Qubit,
     UInt,
     Vector,
@@ -31,7 +32,7 @@ from qamomile.circuit.ir.operation.gate import (
     MeasureOperation,
     MeasureVectorOperation,
 )
-from qamomile.circuit.ir.types import ObservableType, QFixedType
+from qamomile.circuit.ir.types import ObservableType, QFixedType, QUIntType
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, QubitType
 from qamomile.circuit.ir.value import Value
 
@@ -373,20 +374,35 @@ class TestIfElseErrorHandling:
             _ = invalid_alias_use.block
 
     def test_merge_preserves_qfixed_handle_type_and_metadata(self):
-        """QFixed merge should keep the QFixed handle and carrier metadata."""
+        """QFixed merge should keep the QFixed handle and both metadata channels."""
         condition = Value(type=BitType(), name="cond")
         if_op = IfOperation(operands=[condition])
         qfixed_type = QFixedType(integer_bits=1, fractional_bits=2)
         carriers = ("q0", "q1", "q2")
+        logical_ids = ("l0", "l1", "l2")
         true_val = QFixed(
-            value=Value(type=qfixed_type, name="qf_true").with_qfixed_metadata(
+            value=Value(type=qfixed_type, name="qf_true")
+            .with_cast_metadata(
+                source_uuid="src",
+                source_logical_id="src_l",
+                qubit_uuids=carriers,
+                qubit_logical_ids=logical_ids,
+            )
+            .with_qfixed_metadata(
                 qubit_uuids=carriers,
                 num_bits=3,
                 int_bits=1,
             )
         )
         false_val = QFixed(
-            value=Value(type=qfixed_type, name="qf_false").with_qfixed_metadata(
+            value=Value(type=qfixed_type, name="qf_false")
+            .with_cast_metadata(
+                source_uuid="src",
+                source_logical_id="src_l",
+                qubit_uuids=carriers,
+                qubit_logical_ids=logical_ids,
+            )
+            .with_qfixed_metadata(
                 qubit_uuids=carriers,
                 num_bits=3,
                 int_bits=1,
@@ -396,12 +412,51 @@ class TestIfElseErrorHandling:
         merged = _create_merge_for_values(true_val, false_val, if_op)
 
         assert isinstance(merged, QFixed)
+        assert merged.value.get_cast_qubit_uuids() == carriers
+        assert merged.value.get_cast_source_uuid() == "src"
         assert merged.value.get_qfixed_qubit_uuids() == carriers
         assert merged.value.get_qfixed_num_bits() == 3
         assert merged.value.get_qfixed_int_bits() == 1
 
     def test_merge_rejects_qfixed_with_different_carriers(self):
         """QFixed merge should reject condition-dependent carrier layouts."""
+        condition = Value(type=BitType(), name="cond")
+        if_op = IfOperation(operands=[condition])
+        qfixed_type = QFixedType(integer_bits=0, fractional_bits=2)
+        true_val = QFixed(
+            value=Value(type=qfixed_type, name="qf_true")
+            .with_cast_metadata(
+                source_uuid="src_true",
+                source_logical_id="src_true_l",
+                qubit_uuids=("q0", "q1"),
+                qubit_logical_ids=("l0", "l1"),
+            )
+            .with_qfixed_metadata(
+                qubit_uuids=("q0", "q1"),
+                num_bits=2,
+                int_bits=0,
+            )
+        )
+        false_val = QFixed(
+            value=Value(type=qfixed_type, name="qf_false")
+            .with_cast_metadata(
+                source_uuid="src_false",
+                source_logical_id="src_false_l",
+                qubit_uuids=("q2", "q3"),
+                qubit_logical_ids=("l2", "l3"),
+            )
+            .with_qfixed_metadata(
+                qubit_uuids=("q2", "q3"),
+                num_bits=2,
+                int_bits=0,
+            )
+        )
+
+        with pytest.raises(TypeError, match="identical carrier qubits"):
+            _create_merge_for_values(true_val, false_val, if_op)
+
+    def test_merge_rejects_qfixed_without_cast_metadata(self):
+        """QFixed values carrying only qfixed metadata are not mergeable."""
         condition = Value(type=BitType(), name="cond")
         if_op = IfOperation(operands=[condition])
         qfixed_type = QFixedType(integer_bits=0, fractional_bits=2)
@@ -414,14 +469,77 @@ class TestIfElseErrorHandling:
         )
         false_val = QFixed(
             value=Value(type=qfixed_type, name="qf_false").with_qfixed_metadata(
-                qubit_uuids=("q2", "q3"),
+                qubit_uuids=("q0", "q1"),
                 num_bits=2,
                 int_bits=0,
             )
         )
 
-        with pytest.raises(TypeError, match="identical carrier qubits"):
+        with pytest.raises(TypeError, match="requires cast metadata"):
             _create_merge_for_values(true_val, false_val, if_op)
+
+    @pytest.mark.parametrize("mismatched_branch", ["true", "false", "both"])
+    def test_merge_rejects_qfixed_cross_channel_carrier_mismatch(
+        self, mismatched_branch
+    ):
+        """Equal branch layouts cannot conceal cast/QFixed carrier disagreement."""
+        qfixed_type = QFixedType(integer_bits=0, fractional_bits=2)
+        branches = []
+        for branch in ("true", "false"):
+            value = (
+                Value(type=qfixed_type, name=branch)
+                .with_cast_metadata(
+                    source_uuid="source",
+                    source_logical_id="source_logical",
+                    qubit_uuids=("q0", "q1"),
+                    qubit_logical_ids=("l0", "l1"),
+                )
+                .with_qfixed_metadata(
+                    qubit_uuids=("wrong0", "wrong1")
+                    if mismatched_branch in (branch, "both")
+                    else ("q0", "q1"),
+                    num_bits=2,
+                    int_bits=0,
+                )
+            )
+            branches.append(QFixed(value=value))
+        if_op = IfOperation(operands=[Value(type=BitType(), name="condition")])
+        with pytest.raises(TypeError, match="matching cast and QFixed metadata"):
+            _create_merge_for_values(*branches, if_op)
+
+    def test_merge_rejects_qint_without_cast_metadata(self):
+        """QInt values without cast metadata are not mergeable."""
+        condition = Value(type=BitType(), name="cond")
+        if_op = IfOperation(operands=[condition])
+        true_val = QInt(value=Value(type=QUIntType(2), name="qi_true"))
+        false_val = QInt(value=Value(type=QUIntType(2), name="qi_false"))
+
+        with pytest.raises(TypeError, match="requires cast metadata"):
+            _create_merge_for_values(true_val, false_val, if_op)
+
+    def test_runtime_branch_merge_keeps_qfixed_cast_metadata(self):
+        """A traced runtime-if QFixed merge keeps cast and qfixed metadata aligned."""
+
+        @qkernel
+        def kernel() -> qm.Float:
+            register = qm.qubit_array(2, "register")
+            selector = qm.measure(qm.qubit("selector"))
+            if selector:
+                value = qm.cast(register, qm.QFixed)
+            else:
+                value = qm.cast(register, qm.QFixed)
+            return qm.measure(value)
+
+        block = kernel.build()
+        branch = next(op for op in block.operations if isinstance(op, IfOperation))
+        merged = next(
+            result for result in branch.results if isinstance(result.type, QFixedType)
+        )
+
+        assert merged.metadata.cast is not None
+        assert merged.metadata.qfixed is not None
+        assert merged.get_cast_qubit_uuids() == merged.get_qfixed_qubit_uuids()
+        assert merged.get_cast_qubit_uuids()
 
     def test_merge_preserves_observable_handle_type(self):
         """Observable merge should keep the Observable frontend handle."""

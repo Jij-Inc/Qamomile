@@ -981,7 +981,7 @@ def _check_loop_carried_rebinds(
         # The frontend now represents non-condition while state explicitly,
         # but the circuit emit contract has no target-independent runtime
         # storage model for these values yet. Reject at analysis rather than
-        # letting segmentation or a backend fail ambiguously. Compile-time
+        # letting segmentation or an engine fail ambiguously. Compile-time
         # branch pruning can collapse a provisional carry to an identity,
         # which the normal identity-carry lowering removes later.
         collapsed = {result.uuid: source.uuid for result, source in body_merge_aliases}
@@ -2970,7 +2970,7 @@ def _check_loop_quantum_discards(
     the body, and it is not read after the loop. That is exactly the
     repeat-until-success pattern where ``qmc.qubit()`` denotes a fresh
     logical ``|0>`` per iteration; nested ``QInitOperation`` emission is
-    responsible for preparing/resetting the persistent backend wire.
+    responsible for preparing/resetting the persistent engine wire.
     In-body consumption of the incoming value itself remains NOT an
     exemption: the read re-executes against the traced register every
     iteration and matches Python semantics only for the first one.
@@ -3684,7 +3684,7 @@ class AnalyzePass(Pass[Block, Block]):
 
         Store operations retain the exact source value and destination index,
         which is sufficient for host-side materialization and return values.
-        Backends do not yet allocate or alias a destination clbit for a
+        Engines do not yet allocate or alias a destination clbit for a
         user-created Bit array, so using a stored slot as an in-circuit
         condition would otherwise risk reading the wrong physical clbit.
 

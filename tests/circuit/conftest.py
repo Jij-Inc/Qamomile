@@ -17,9 +17,9 @@ _SIMULATOR_SEED = 901
 
 @dataclass(frozen=True)
 class SdkTranspilerCase:
-    """Bundle a backend label with its transpiler instance."""
+    """Bundle an engine label with its transpiler instance."""
 
-    backend_name: str
+    engine_name: str
     transpiler: Any
 
 
@@ -42,28 +42,28 @@ def qiskit_transpiler():
 )
 def sdk_transpiler(request):
     """Return a supported SDK transpiler or skip when unavailable."""
-    backend = request.param
-    if backend == "qiskit":
+    engine = request.param
+    if engine == "qiskit":
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler
 
-        return SdkTranspilerCase(backend, QiskitTranspiler())
-    if backend == "quri_parts":
+        return SdkTranspilerCase(engine, QiskitTranspiler())
+    if engine == "quri_parts":
         pytest.importorskip("quri_parts.qulacs")
         from qamomile.quri_parts import QuriPartsTranspiler
 
-        return SdkTranspilerCase(backend, QuriPartsTranspiler())
-    if backend == "cudaq":
+        return SdkTranspilerCase(engine, QuriPartsTranspiler())
+    if engine == "cudaq":
         pytest.importorskip("cudaq")
         from qamomile.cudaq import CudaqTranspiler
 
-        return SdkTranspilerCase(backend, CudaqTranspiler())
-    if backend == "braket":
+        return SdkTranspilerCase(engine, CudaqTranspiler())
+    if engine == "braket":
         pytest.importorskip("braket")
         from qamomile.braket import BraketTranspiler
 
-        return SdkTranspilerCase(backend, BraketTranspiler())
-    raise AssertionError(f"Unsupported SDK backend fixture value: {backend}")
+        return SdkTranspilerCase(engine, BraketTranspiler())
+    raise AssertionError(f"Unsupported SDK engine fixture value: {engine}")
 
 
 @pytest.fixture

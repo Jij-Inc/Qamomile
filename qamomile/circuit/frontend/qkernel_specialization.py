@@ -9,7 +9,7 @@ from qamomile.circuit.frontend.func_to_block import (
     is_dict_type,
     is_tuple_type,
 )
-from qamomile.circuit.frontend.handle import Observable, Qubit
+from qamomile.circuit.frontend.handle import Observable, QInt, Qubit
 from qamomile.circuit.frontend.handle.array import Vector
 from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, UInt
 from qamomile.circuit.frontend.handle.utils import get_size
@@ -21,6 +21,8 @@ from qamomile.circuit.frontend.static_binding import (
     validate_static_binding_argument,
 )
 from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.types import QUIntType
+from qamomile.circuit.ir.value import packed_register_type_width
 
 
 def extract_calltime_specialization(
@@ -38,13 +40,14 @@ def extract_calltime_specialization(
 
     Returns:
         tuple[list[str], dict[str, Any], dict[str, int]] | None: Runtime
-        parameter names, compile-time bindings, and concrete qubit-array
-        sizes when specialization would change the callee trace; otherwise
+        parameter names, compile-time bindings, and concrete qubit-array or
+        QInt widths when specialization would change the callee trace; otherwise
         ``None``.
     """
     parameters: list[str] = []
     bindings: dict[str, Any] = {}
     qubit_sizes: dict[str, int] = {}
+    has_qint = False
 
     for name, param in kernel.signature.parameters.items():
         param_type = kernel.input_types.get(name, param.annotation)
@@ -63,6 +66,12 @@ def extract_calltime_specialization(
         )
 
         if param_type is Qubit:
+            continue
+        if param_type is QInt:
+            has_qint = True
+            width = packed_register_type_width(handle.value.type)
+            if width is not None:
+                qubit_sizes[name] = width
             continue
         if param_type is Observable:
             continue
@@ -112,7 +121,7 @@ def extract_calltime_specialization(
 
         return None
 
-    if not bindings and not qubit_sizes:
+    if not bindings and not qubit_sizes and not has_qint:
         return None
 
     return parameters, bindings, qubit_sizes
@@ -130,8 +139,9 @@ def select_specialized_block(
     calls, and inverse calls use the same rule. When concrete argument values
     would change the callee trace (for example a concrete ``Vector[Qubit]``
     size or a bound structural classical value), the function returns a
-    temporary specialized block. Otherwise it returns the kernel's cached
-    block.
+    temporary specialized block. QInt inputs also retain the caller's width
+    type so symbolic dimensions stay connected across callable boundaries.
+    Otherwise it returns the kernel's cached block.
 
     Args:
         kernel (Any): ``QKernel``-like object whose block should be selected.
@@ -152,10 +162,17 @@ def select_specialized_block(
         return kernel.block
 
     spec = extract_calltime_specialization(kernel, arguments)
-    if spec is None:
+    qint_types = {
+        name: argument.value.type
+        for name, argument in arguments.items()
+        if kernel.input_types.get(name) is QInt
+        and isinstance(argument, QInt)
+        and isinstance(argument.value.type, QUIntType)
+    }
+    if spec is None and not qint_types:
         return kernel.block
 
-    sub_parameters, sub_bindings, sub_qubit_sizes = spec
+    sub_parameters, sub_bindings, sub_qubit_sizes = spec or ([], {}, {})
     kernel._specializing = True
     try:
         return build_specialized_block(
@@ -163,6 +180,7 @@ def select_specialized_block(
             parameters=sub_parameters,
             bindings=sub_bindings,
             qubit_sizes=sub_qubit_sizes,
+            qint_types=qint_types,
         )
     finally:
         kernel._specializing = False

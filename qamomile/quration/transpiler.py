@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from qamomile.circuit.transpiler.circuit_ir import (
-    CircuitBackendEmitPass,
+    CircuitEngineEmitPass,
 )
 from qamomile.circuit.transpiler.passes.emit import EmitPass
 from qamomile.circuit.transpiler.passes.separate import SegmentationPass
@@ -185,7 +185,7 @@ class QurationTranspiler(Transpiler[Any]):
         Returns:
             EmitPass[Any]: Quration emission pass.
         """
-        return CircuitBackendEmitPass(
+        return CircuitEngineEmitPass(
             PyQretMaterializer(self.rotation_precision),
             bindings,
             parameters,

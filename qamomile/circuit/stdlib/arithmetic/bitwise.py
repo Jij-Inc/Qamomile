@@ -69,7 +69,7 @@ def _phase_shift_if(
 ) -> Qubit:
     """Apply a phase shift selected by a prior measurement.
 
-    Keeping the condition measurement-backed lets FTQC backends lower this
+    Keeping the condition measurement-backed lets FTQC engines lower this
     semiclassical inverse-QFT correction to dynamic control flow.
 
     Args:
