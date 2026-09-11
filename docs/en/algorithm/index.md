@@ -81,6 +81,12 @@ Sample bitstrings from a quantum state, build an effective Hamiltonian, and diag
 :::
 
 :::{card}
+:header: **Quantum Phase Estimation (QPE)**
+:link: qpe
+This example implements quantum phase estimation with Qamomile. It introduces two approaches for a 4x4 unitary matrix: a from-scratch implementation and the built-in `qpe` helper. It also compares the precision and required gate count as the number of counting qubits increases.
+:::
+
+:::{card}
 :header: **Quantum Kernel Classification**
 :link: quantum_kernel_classification
 Use quantum feature maps and kernel methods for classification on the make_circles dataset.
