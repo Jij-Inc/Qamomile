@@ -98,4 +98,10 @@ CSS construction, syndrome decoding, and transversal Hadamard.
 Build a molecular Hamiltonian with OpenFermion and find the ground state energy via VQE.
 :::
 
+:::{card}
+:header: **Warm-Starting QAOA**
+:link: warm_starting_QAOA
+Prepare a relaxation-informed initial state and a matching mixer so QAOA can reach lower energies.
+:::
+
 ::::

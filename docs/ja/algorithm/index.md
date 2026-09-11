@@ -98,4 +98,10 @@ Hamming [7,4,3]符号からのCSS構成、6スタビライザー、横断的Hada
 OpenFermionで分子ハミルトニアンを構築し、VQEで基底状態エネルギーを求めます。
 :::
 
+:::{card}
+:header: **ウォームスタート QAOA**
+:link: warm_starting_QAOA
+適切な初期状態とミキサーを準備することで、より低エネルギーに到達可能な QAOA 手法です。
+:::
+
 ::::
