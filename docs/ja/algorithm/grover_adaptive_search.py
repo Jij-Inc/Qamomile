@@ -56,12 +56,14 @@ from qamomile.qiskit import QiskitTranspiler
 # %% [markdown]
 # ## 背景
 #
-# Grover探索は、目的の状態を標識するオラクルを受け取り、振幅増幅によってその測定確率を高めます。これは判定問題を解く手続きです。固定された述語はどの状態が条件を満たすかを示すだけで、どれが最良かは示しません。
+# Grover探索は、目的の状態の位相を反転させて区別するオラクルを受け取り、振幅増幅によってその測定確率を高めます。これは判定問題を解く手続きです。固定された判定条件はどの状態が条件を満たすかを示すだけで、どれが最良かは示しません。
 #
-# GASは述語を動かせるようにすることで、これを最小化に変えます。$f(x) < y$ を満たす状態を標識し、改善した候補をサンプリングし、$y$ をその候補の目的関数値まで下げ、これを繰り返します。量子回路は一度に1つの固定された問いに答え、古典レイヤーが $y$ を下げていきます。
+# GASは判定条件を変更することで、これを最小化に応用します。$f(x) < y$ を満たす候補に対応する量子状態の位相を反転させて区別し、候補をサンプリングします。候補の目的関数値が現在の閾値を下回る場合、古典レイヤーが $y$ をその値に更新します。量子回路が一度に1つの固定された問いに答え、古典レイヤーが閾値を更新するという処理を繰り返します。
 
 # %% [markdown]
 # ## 問題設定
+#
+# このチュートリアルでは、GASを適用する問題例としてポートフォリオ選択問題を扱います。
 #
 # $n$ 個の資産（株式、債券など）があり、それぞれを購入するかどうかという二値の選択をします。リターンを最大化しつつリスクを最小化したいのですが、次のような対立があります。
 #
@@ -81,14 +83,14 @@ from qamomile.qiskit import QiskitTranspiler
 def portfolio_problem(problem: jm.DecoratedProblem):
     n = problem.Length(description="資産の数")
     q = problem.Float("q", description="リスク回避係数")
-    μ = problem.Float("μ", shape=(n,), description="期待収益ベクトル")
-    Σ = problem.Float("Σ", shape=(n, n), description="共分散行列")
+    mu = problem.Float("mu", shape=(n,), description="期待収益ベクトル")
+    Sigma = problem.Float("Sigma", shape=(n, n), description="共分散行列")
 
     x = problem.BinaryVar("x", shape=(n,), description="資産iを選ぶ場合は1")
 
     problem += (
-        q * jm.sum(Σ[i, j] * x[i] * x[j] for i in n for j in n)
-        - jm.sum(μ[i] * x[i] for i in n)
+        q * jm.sum(Sigma[i, j] * x[i] * x[j] for i in n for j in n)
+        - jm.sum(mu[i] * x[i] for i in n)
     )
 
 
@@ -112,8 +114,8 @@ portfolio_problem
 # %%
 num_assets = 9
 q = 1
-μ = np.array([22, 4, 19, 3, 23, 2, 5, 25, 3], dtype=int)
-Σ = np.array([
+mu = np.array([22, 4, 19, 3, 23, 2, 5, 25, 3], dtype=int)
+Sigma = np.array([
     [12, -3,  4,  0, -2,  3,  0,  2, -1],
     [-3, 15,  0,  5,  1, -4,  2,  0,  3],
     [ 4,  0, 10, -6,  3,  2, -1,  4,  0],
@@ -125,9 +127,9 @@ q = 1
     [-1,  3,  0,  5,  2,  1, -2, -4, 13],
 ], dtype=int)
 
-assert μ.shape == (num_assets,)
-assert Σ.shape == (num_assets, num_assets)
-assert np.array_equal(Σ, Σ.T), "共分散行列は対称でなければなりません"
+assert mu.shape == (num_assets,)
+assert Sigma.shape == (num_assets, num_assets)
+assert np.array_equal(Sigma, Sigma.T), "共分散行列は対称でなければなりません"
 
 # %% [markdown]
 # JijModelingの問題を上記のデータで評価すると、OMMXインスタンスが得られます。
@@ -136,8 +138,8 @@ assert np.array_equal(Σ, Σ.T), "共分散行列は対称でなければなり�
 instance = portfolio_problem.eval({
     "n": num_assets,
     "q": int(q),
-    "μ": μ.tolist(),
-    "Σ": Σ.tolist(),
+    "mu": mu.tolist(),
+    "Sigma": Sigma.tolist(),
 })
 
 assert len(instance.decision_variables) == num_assets
@@ -148,20 +150,22 @@ assert np.isclose(empty_portfolio, 0.0, atol=1e-9, rtol=0.0)
 # %% [markdown]
 # ## アルゴリズム
 #
-# ここでの $y$ は候補解ではなく、目的関数値に対する閾値です。GASは $f(x) < y$ を満たすすべての入力を標識します。Groverアンザッツは次の3つの要素から構成されます。
+# GASでは、候補解の目的関数値を閾値 $y$ として設定し、それを下回る候補をGrover探索で探します。量子回路から得られた候補を古典計算で評価し、より良い候補が見つかれば閾値を更新するという処理を、停止条件を満たすまで繰り返します。ここでの $y$ は候補解ではなく、目的関数値に対する閾値です。GASは、判定条件 $f(x) < y$ を満たす候補に対応する量子状態の位相を反転させ、ほかの候補と区別します。Groverアンザッツは次の3つの要素から構成されます。
 #
-# - $A_y$：準備演算子です。量子辞書の状態 $\sum_x \ket{x, f(x) - y}$ を構築することで、各入力に $f(x) - y$ を対応付けます。この状態は {cite:p}`10.22331/q-2021-04-08-428` のQFTによる構成に従って実装しています。レジスタは $f(x) - y$ を2の補数で保持するため、標識すべき入力は最上位ビット（MSB）が $1$ になるものとして識別できます。
-# - $O_y$：標識演算子です。符号化された値が負である候補の位相を反転させるもので、そのMSBに作用する1つの $Z$ ゲートで構成されます。
-# - $D$：拡散演算子で、標識された状態の振幅を増幅します。$X$ 層に挟まれた1つの多重制御 $Z$ ゲートで構成されます。
+# - $A_y$：準備演算子です。量子辞書の状態 $\sum_x \ket{x, f(x) - y}$ を構築することで、各入力に $f(x) - y$ を対応付けます。回路実装は {cite:p}`10.22331/q-2021-04-08-428` により、QFTを用いる方法で与えられています。レジスタは $f(x) - y$ を2の補数で保持するため、判定条件を満たす候補は、最上位ビット（MSB）が $1$ になるものとして識別できます。
+# - $O_y$：位相オラクルです。判定条件 $f(x) < y$ を満たす候補の位相を反転させます。符号化された値 $f(x) - y$ が負かどうかは最上位ビット（MSB）で判別できるため、そのMSBに作用する1つの $Z$ ゲートで実装できます。
+# - $D$：拡散演算子で、位相を反転させて区別した状態の振幅を増幅します。$X$ 層に挟まれた1つの多重制御 $Z$ ゲートで構成されます。
 #
-# 1回の反復では $O_y$ を適用し、続いて $A_y^\dagger$、$D$、$A_y$ を適用します。位相反転だけでは測定確率は変わりません。それを振幅へ変換するのが反射 $A_y D A_y^\dagger$ です。入力レジスタを測定すると改善した候補が得られ、古典レイヤーが $y$ をその目的関数値まで下げます。
+# 1回の反復では $O_y$ を適用し、続いて $A_y^\dagger$、$D$、$A_y$ を適用します。位相反転 $O_y$ だけでは測定確率は変わりません。それを振幅へ変換するのが反射 $A_y D A_y^\dagger$ です。入力レジスタの測定で得られた候補を古典レイヤーで評価し、その目的関数値が現在の閾値を下回る場合にのみ、$y$ をその値に更新します。
 #
 # 残る問題は、Grover演算子を何回適用するかです。GASはこれに対して、改善が得られなかったラウンドのたびに少しずつ広がる範囲から繰り返し回数をサンプリングすることで答えます。
 
 # %% [markdown]
 # ## 実装
 #
-# `GASConverter`はOMMXインスタンスを受け取り、問題をBINARY領域のQUBO/HUBOへ変換します。`transpile()`メソッドを使うと、指定したtranspilerに対して適応探索で使うGrover回路を構築できます。
+# Qamomileは、GASに用いる量子回路の実装を`GASConverter`として提供しています。このセクションでは、その使い方と回路を構成する演算を紹介し、最後に古典計算のループと組み合わせてGASを実装します。
+#
+# `GASConverter`はOMMXインスタンスを受け取り、QUBO/HUBO形式の問題へ変換します。`transpile()`メソッドを使うと、指定したtranspilerに対して適応探索で使うGrover回路を構築できます。
 
 # %%
 converter = GASConverter(instance)
@@ -170,7 +174,7 @@ transpiler = QiskitTranspiler()
 assert converter.binary_model.num_bits == num_assets
 
 # %% [markdown]
-# ### Grover回路の可視化
+# ### Grover回路の実装
 #
 # `GASConverter.transpile()`は内部で以下のサンプリング用量子カーネルを構築し、transpilerに渡します。可視化するには、同じ量子カーネルに対して`Transpiler.to_block`と`MatplotlibDrawer.draw`を使います。
 #
@@ -204,7 +208,7 @@ block = transpiler.to_block(
         "n": converter.binary_model.num_bits,
         # 出力量子ビット数（コンバータが計算した値）
         "m": output_bits,
-        # オラクルの閾値：f(x) < y となる状態を標識します
+        # オラクルの閾値：f(x) < y を満たす候補に対応する状態の位相を反転させて区別します
         "y": 0,
         "linear": converter.binary_model.linear,
         "quad": converter.binary_model.quad,
@@ -255,9 +259,11 @@ diffusion_figure
 # %% [markdown]
 # ### 古典レイヤー
 #
-# 以下の関数はQamomileには含まれていません。`converter.transpile()`と`converter.decode()`を量子プリミティブとして使い、GASの古典的な外側ループを実装しています。ランダムな候補 $x$ と $y = f(x)$ から始め、Grover回路をサンプリングし、より良いサンプルが得られるたびに暫定解を更新します。改善のないラウンドが`max_no_improvement`回続いた時点で探索を終了します。
+# Qamomileの`GASConverter`は、指定した閾値に対するGrover回路の構築と、測定結果を候補解に変換する機能を提供します。一方、候補解の評価や閾値の更新、Grover反復回数の調整、停止条件の判定といった、探索全体を制御する古典計算部分は含まれていません。そのため、GASによる最適化を行うには、これらの処理を自分で実装する必要があります。以下の関数は、その実装例です。
 #
-# - `converter.transpile(transpiler, y=y, num_iterations=num_iterations)`は、現在の閾値 $y$ とGrover深度に対するGrover回路を構築します。
+# `converter.transpile()`と`converter.decode()`を量子プリミティブとして使い、GASの古典的な外側ループを実装しています。ランダムな候補 $x$ と $y = f(x)$ から始め、Grover回路をサンプリングし、より良いサンプルが得られるたびに暫定解を更新します。改善のないラウンドが`max_no_improvement`回続いた時点で探索を終了します。
+#
+# - `converter.transpile(transpiler, y=y, num_iterations=num_iterations)`は、現在の閾値 $y$ と指定したGrover反復回数に対応するGrover回路を構築します。
 # - `executable.sample(executor, shots=256)`はバックエンド上で回路を実行します。Groverであっても、NISQデバイスはノイジーであるため複数ショットが必要です。
 # - `converter.decode(result)`は生のビット列カウントを決定変数の割り当てにマッピングして返します。
 
@@ -352,6 +358,8 @@ def grover_adaptive_search(
 # %% [markdown]
 # ## 結果
 #
+# このセクションでは、ポートフォリオ選択問題にGASを実行し、得られた目的関数値を全探索による最適値と比較して結果を検証します。
+#
 # `lamb`はGrover繰り返し回数のサンプリング範囲が広がる速さを、`max_no_improvement`は停止条件を決めます。
 
 # %%
@@ -374,7 +382,7 @@ assert np.isclose(
 ), "報告された目的関数値は返された割り当てと一致しなければなりません"
 
 # %% [markdown]
-# 探索は`max_no_improvement`回続けて解が改善しなくなった時点で停止します。これはヒューリスティックな規則であり、それ自体が返された解の最適性を保証するものではありません。今回は資産が $9$ 個だけなので $2^9 = 512$ 通りの割り当てをすべて列挙できます。最適性を思い込みで主張する代わりに、厳密な全探索の結果と照合して確認しましょう。
+# 探索は`max_no_improvement`回続けて解が改善しなくなった時点で停止します。これはヒューリスティックな規則であり、それ自体が返された解の最適性を保証するものではありません。今回は資産が $9$ 個であり、$2^9 = 512$ 通りの割り当てをすべて列挙できるため、厳密な全探索の結果と照合して確認しましょう。
 
 # %%
 brute_force_x, brute_force_y = min(
@@ -398,6 +406,6 @@ print("\nGASは全探索の最適解と一致しました。")
 #
 # このノートブックでは、次のことを行いました。
 #
-# - 制約なしのポートフォリオ問題をGrover適応探索で解きました。量子回路が「どの $x$ が $f(x) < y$ を満たすか」に答え、古典ループが $y$ を下げていきます。
-# - 量子側を`GASConverter`に任せました。`transpile()`が現在の閾値と深さに対応するGrover回路を構築し、`decode()`がビット列カウントをOMMXを通じて決定変数に戻します。
-# - 算術レジスタの幅を`required_output_bits()`で決めました。すべての $x$ について $f(x) - y$ を保持する必要があるためです。最後にヒューリスティックの答えを全探索の最適値と照合しました。
+# - 制約なしのポートフォリオ問題をGrover適応探索で解きました。量子回路が「どの $x$ が $f(x) < y$ を満たすか」に答え、古典ループがより良い候補を得たときに閾値 $y$ を更新します。
+# - GASをQamomileで実装する例を紹介しました。量子側の処理は`GASConverter`として提供されています。`transpile()`が現在の閾値とGrover反復回数に対応するGrover回路を構築し、`decode()`がビット列カウントをOMMXを通じて決定変数に戻します。
+# - ポートフォリオ選択問題を例にGASを実行し、得られた目的関数値が全探索による最適値と一致することを確認しました。
