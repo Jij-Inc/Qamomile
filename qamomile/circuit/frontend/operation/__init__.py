@@ -16,5 +16,5 @@ gate), construct one abstract IR ``Operation`` with next-version output
 handles. Builders must not pre-expand into lower-level operations — one
 user call maps to one abstract IR operation (a vector measurement stays
 a single ``MeasureVectorOperation``); decomposition and lowering are the
-transpiler's and the backends' job.
+transpiler's and the engines' job.
 """

@@ -73,21 +73,21 @@ class _ResolverOnlyEmitPass:
         self._resolver = ValueResolver()
 
     def _get_or_create_parameter(self, name: str, value_uuid: str) -> Any:
-        """Reject unexpected backend-parameter creation in resolver-only tests.
+        """Reject unexpected engine-parameter creation in resolver-only tests.
 
         Args:
-            name (str): Requested backend parameter name.
+            name (str): Requested engine parameter name.
             value_uuid (str): IR value identity for the parameter.
 
         Returns:
-            Any: This stand-in never creates a backend parameter.
+            Any: This stand-in never creates an engine parameter.
 
         Raises:
             AssertionError: Always, because these tests supply no runtime
                 parameters.
         """
         raise AssertionError(
-            f"unexpected backend parameter request: {name} ({value_uuid})"
+            f"unexpected engine parameter request: {name} ({value_uuid})"
         )
 
 
@@ -117,23 +117,23 @@ def _controlled_u_with_power(
 
 
 class _GateWithoutQubitCount:
-    """Backend-gate stand-in with no qubit-count attribute."""
+    """Engine-gate stand-in with no qubit-count attribute."""
 
 
 class _GateWithQubitCount:
-    """Backend-gate stand-in with a qubit-count attribute."""
+    """Engine-gate stand-in with a qubit-count attribute."""
 
     def __init__(self, num_qubits: int | None) -> None:
         """Initialize the fake gate.
 
         Args:
-            num_qubits (int | None): Fake backend gate width.
+            num_qubits (int | None): Fake engine gate width.
         """
         self.num_qubits = num_qubits
 
 
 def test_gate_matches_qubit_count_rejects_unknown_width() -> None:
-    """Unknown backend-gate width should force fallback emission."""
+    """Unknown engine-gate width should force fallback emission."""
     assert not _gate_matches_qubit_count(_GateWithoutQubitCount(), 2)
     assert not _gate_matches_qubit_count(_GateWithQubitCount(None), 2)
     assert _gate_matches_qubit_count(_GateWithQubitCount(2), 2)
@@ -948,7 +948,7 @@ def test_selected_controlled_implementation_keeps_outer_controls() -> None:
     class EmitPass:
         """Provide the reusable-gate surface used by controlled invocation emit."""
 
-        backend_name = "test"
+        engine_name = "test"
 
         def __init__(self) -> None:
             """Initialize a recording emitter."""
@@ -1407,7 +1407,7 @@ class _MultiControlEmitPass:
             AssertionError: Always, because the tests use no parameters.
         """
         raise AssertionError(
-            f"unexpected backend parameter request: {name} ({value_uuid})"
+            f"unexpected engine parameter request: {name} ({value_uuid})"
         )
 
     def _resolve_angle(self, op: Any, bindings: dict[str, Any]) -> Any:
@@ -1810,7 +1810,7 @@ def test_multi_controlled_rotation_routes_to_hook_with_angle() -> None:
 
 
 def test_multi_controlled_irreducible_without_hook_raises() -> None:
-    """Three-controlled X on a backend without an ancilla pool raises EmitError."""
+    """Three-controlled X on an engine without an ancilla pool raises EmitError."""
     import pytest
 
     from qamomile.circuit.transpiler.errors import EmitError

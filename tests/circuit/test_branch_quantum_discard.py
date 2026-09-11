@@ -1231,7 +1231,7 @@ class TestRejectedLoopDiscards:
     def test_while_rebind_repeat_until_success_allowed(self):
         """A measured-and-released name may be rebound to loop-local fresh state.
 
-        Nested QInit emission now prepares the persistent backend wire at
+        Nested QInit emission now prepares the persistent engine wire at
         each runtime iteration, so this repeat-until-success shape has
         fresh logical |0> semantics instead of stale wire reuse.
         """

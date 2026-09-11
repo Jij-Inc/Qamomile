@@ -5,11 +5,11 @@ The frontend rejects the scalar ``cx(q, q)`` alias at trace time by comparing
 and ``j`` are loop variables that coincide only at runtime, or after loop
 unrolling — resolve to the same physical qubit only at emit time. Before this
 check the duplicate escaped Qamomile entirely and surfaced as a raw,
-backend-specific failure: Qiskit ``CircuitError: 'duplicate qubit arguments'``,
-a CUDA-Q simulator crash, or (on a backend that does not validate) a silently
+engine-specific failure: Qiskit ``CircuitError: 'duplicate qubit arguments'``,
+a CUDA-Q simulator crash, or (on an engine that does not validate) a silently
 ill-defined gate. ``emit_gate`` now raises a Qamomile ``QubitAliasError`` naming
 the gate, both operands, and the shared physical index — one actionable,
-backend-independent diagnostic.
+engine-independent diagnostic.
 
 Note: Do NOT use ``from __future__ import annotations`` here — the @qkernel AST
 transformer relies on resolved type annotations.
@@ -173,7 +173,7 @@ _controlled_x = qmc.control(_x_gate)
 def test_controlled_block_diagonal_alias_is_rejected():
     """``qmc.control(x)(qs[i], qs[j])`` on the diagonal is rejected.
 
-    Before the controlled-path fix this reached the backend as a raw Qiskit
+    Before the controlled-path fix this reached the engine as a raw Qiskit
     ``CircuitError`` and, on CUDA-Q, transpiled silently and crashed the
     simulator at run time.
     """
@@ -251,7 +251,7 @@ _inverse_cx = qmc.inverse(_cx_block)
 def test_inverse_block_diagonal_alias_is_rejected():
     """``qmc.inverse(u)(qs[i], qs[j])`` on the diagonal is rejected.
 
-    Before the inverse-path fix this reached the backend as a raw Qiskit
+    Before the inverse-path fix this reached the engine as a raw Qiskit
     ``CircuitError`` and, on CUDA-Q, transpiled silently then crashed the
     simulator at run time.
     """
@@ -324,8 +324,8 @@ def test_reject_duplicate_physical_indices_unit():
 
 
 # ---------------------------------------------------------------------------
-# CUDA-Q / QuriParts cross-backend: the check lives in the shared emit_gate,
-# so every backend routed through StandardEmitPass gets the same diagnostic.
+# CUDA-Q / QuriParts cross-engine: the check lives in the shared emit_gate,
+# so every engine routed through StandardEmitPass gets the same diagnostic.
 # ---------------------------------------------------------------------------
 
 

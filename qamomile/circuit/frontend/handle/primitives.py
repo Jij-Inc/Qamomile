@@ -8,14 +8,14 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOpKind,
     CondOpKind,
 )
-from qamomile.circuit.ir.types import QFixedType
+from qamomile.circuit.ir.types import QFixedType, QUIntType
 from qamomile.circuit.ir.types.primitives import (
     BitType,
     FloatType,
     QubitType,
     UIntType,
 )
-from qamomile.circuit.ir.value import Value
+from qamomile.circuit.ir.value import CastMetadata, Value
 
 from .handle import (
     ArithmeticMixin,
@@ -25,6 +25,54 @@ from .handle import (
     _emit_condop,
     _emit_notop,
 )
+
+
+def _merge_cast_carriers(
+    true_value: Value,
+    false_value: Value,
+    handle_name: str,
+) -> CastMetadata:
+    """Validate that two packed-register branch values share one carrier layout.
+
+    Both ``QInt`` and ``QFixed`` casts record their ordered physical carriers
+    in ``metadata.cast``; this helper is the single if-else merge rule for
+    that channel so the two handle families cannot drift apart. It never
+    falls back to ``metadata.qfixed`` — a value without cast metadata is not
+    a well-formed packed-register value.
+
+    Args:
+        true_value (Value): True-branch packed-register IR value.
+        false_value (Value): False-branch packed-register IR value.
+        handle_name (str): Handle family name used in error messages.
+
+    Returns:
+        CastMetadata: The shared cast metadata (taken from the true branch)
+            to re-attach to the merge output.
+
+    Raises:
+        TypeError: If either branch lacks cast metadata, if the ordered
+            carrier UUIDs or logical IDs differ, or if both carrier lists are
+            empty (symbolic width) and the cast sources differ.
+    """
+    true_meta = true_value.metadata.cast
+    false_meta = false_value.metadata.cast
+    if true_meta is None or false_meta is None:
+        raise TypeError(
+            f"{handle_name} if-else merge requires cast metadata on both branches."
+        )
+    if (
+        true_meta.qubit_uuids != false_meta.qubit_uuids
+        or true_meta.qubit_logical_ids != false_meta.qubit_logical_ids
+        or (
+            not true_meta.qubit_uuids
+            and true_meta.source_uuid != false_meta.source_uuid
+        )
+    ):
+        raise TypeError(
+            f"{handle_name} if-else merge requires identical carrier qubits "
+            "across branches."
+        )
+    return true_meta
 
 
 @dataclasses.dataclass
@@ -47,15 +95,23 @@ class Qubit(Handle):
 
 @dataclasses.dataclass
 class QFixed(Handle):
+    """Represent a fixed-point number encoded by ordered quantum carriers.
+
+    Args:
+        value (Value[QFixedType]): Register value with matching cast carrier
+            and fixed-point layout metadata.
+    """
+
     value: Value[QFixedType]
 
     def _wrap_merge_result(self, value: Value, counterpart: Value) -> "QFixed":
         """Wrap a merged value, copying validated QFixed carrier metadata.
 
-        QFixed is a scalar quantum handle backed by multiple physical
-        qubit carriers recorded in metadata. A merged QFixed can only
-        reuse that metadata when both branches describe the exact same
-        carrier layout; otherwise the frontend cannot represent the
+        QFixed is a scalar quantum handle backed by multiple physical qubit
+        carriers recorded in ``metadata.cast`` (shared with ``QInt``) plus a
+        fixed-point layout recorded in ``metadata.qfixed``. A merged QFixed
+        can only reuse that metadata when both branches describe the exact
+        same carrier layout; otherwise the frontend cannot represent the
         condition-dependent carrier set safely.
 
         Args:
@@ -64,33 +120,94 @@ class QFixed(Handle):
                 carrier layout must match this handle's.
 
         Returns:
-            QFixed: Handle wrapping ``value`` rebuilt with the shared
-                carrier metadata.
+            QFixed: Handle wrapping ``value`` rebuilt with both the shared
+                cast metadata and the shared fixed-point layout metadata.
 
         Raises:
-            TypeError: If either branch lacks QFixed metadata or the
-                branch carrier layouts differ.
+            TypeError: If either branch lacks cast or QFixed layout metadata,
+                if its cast and QFixed carrier channels disagree, or if the
+                branch carrier layouts or fixed-point layouts differ.
         """
-        true_meta = self.value.metadata.qfixed
-        false_meta = counterpart.metadata.qfixed
-        if true_meta is None or false_meta is None:
+        true_qfixed = self.value.metadata.qfixed
+        false_qfixed = counterpart.metadata.qfixed
+        if true_qfixed is None or false_qfixed is None:
             raise TypeError(
-                "QFixed if-else merge requires QFixed metadata on both branches."
+                "QFixed if-else merge requires QFixed layout metadata on both branches."
             )
+        for branch_value, layout in (
+            (self.value, true_qfixed),
+            (counterpart, false_qfixed),
+        ):
+            carriers = branch_value.metadata.cast
+            if carriers is None:
+                raise TypeError(
+                    "QFixed if-else merge requires cast metadata on both branches."
+                )
+            if carriers.qubit_uuids != layout.qubit_uuids:
+                raise TypeError(
+                    "QFixed if-else merge requires matching cast and QFixed "
+                    "metadata carrier qubits within each branch."
+                )
+            if len(carriers.qubit_uuids) != layout.num_bits:
+                raise TypeError(
+                    "QFixed if-else merge requires num_bits to match its carrier count."
+                )
+        meta = _merge_cast_carriers(self.value, counterpart, "QFixed")
         if (
-            true_meta.qubit_uuids != false_meta.qubit_uuids
-            or true_meta.num_bits != false_meta.num_bits
-            or true_meta.int_bits != false_meta.int_bits
+            true_qfixed.num_bits != false_qfixed.num_bits
+            or true_qfixed.int_bits != false_qfixed.int_bits
         ):
             raise TypeError(
-                "QFixed if-else merge requires identical carrier qubits and "
-                "fixed-point layout across branches."
+                "QFixed if-else merge requires identical fixed-point layout "
+                "across branches."
             )
         return QFixed(
-            value=value.with_qfixed_metadata(
-                qubit_uuids=true_meta.qubit_uuids,
-                num_bits=true_meta.num_bits,
-                int_bits=true_meta.int_bits,
+            value=value.with_cast_metadata(
+                source_uuid=meta.source_uuid,
+                source_logical_id=meta.source_logical_id,
+                qubit_uuids=meta.qubit_uuids,
+                qubit_logical_ids=meta.qubit_logical_ids,
+            ).with_qfixed_metadata(
+                qubit_uuids=meta.qubit_uuids,
+                num_bits=true_qfixed.num_bits,
+                int_bits=true_qfixed.int_bits,
+            )
+        )
+
+
+@dataclasses.dataclass
+class QInt(Handle):
+    """Represent an unsigned integer encoded by a quantum register.
+
+    Args:
+        value (Value[QUIntType]): IR value carrying the register width and
+            physical-qubit alias metadata.
+    """
+
+    value: Value[QUIntType]
+
+    def _wrap_merge_result(self, value: Value, counterpart: Value) -> "QInt":
+        """Wrap a merged value, copying validated QInt carrier metadata.
+
+        Args:
+            value (Value): Fresh IR value produced for the merge output.
+            counterpart (Value): False-branch QInt value whose carrier layout
+                must match this handle's layout.
+
+        Returns:
+            QInt: Handle wrapping ``value`` with the shared cast metadata.
+
+        Raises:
+            TypeError: If either branch lacks cast-carrier metadata or the
+                branch carrier layouts differ.
+        """
+        meta = _merge_cast_carriers(self.value, counterpart, "QInt")
+        return QInt(
+            value=value.with_cast_metadata(
+                source_uuid=meta.source_uuid,
+                source_logical_id=meta.source_logical_id,
+                qubit_uuids=meta.qubit_uuids,
+                qubit_logical_ids=meta.qubit_logical_ids,
             )
         )
 
@@ -574,7 +691,7 @@ class Float(ArithmeticMixin, Handle):
         of the awkward ``0 - x`` idiom (GitHub issue #329). The negation
         is lowered to the existing ``MUL`` IR op as ``self * -1.0`` —
         multiplication by ``-1`` is the direct expression of unary minus
-        — so it carries no new IR node and every backend that already
+        — so it carries no new IR node and every engine that already
         supports multiplication emits it unchanged. When ``self`` is a
         compile-time constant the result is folded eagerly by
         ``_emit_binop``.

@@ -64,7 +64,7 @@ from qamomile.observable.hamiltonian import Hamiltonian, Pauli, PauliOperator
 
 
 def _to_affine(kernel: qmc.QKernel) -> Block:
-    """Return an AFFINE block for ``kernel`` without instantiating a backend.
+    """Return an AFFINE block for ``kernel`` without instantiating an engine.
 
     Args:
         kernel (qmc.QKernel): A ``@qkernel``-decorated function.

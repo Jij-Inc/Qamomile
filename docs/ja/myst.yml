@@ -40,6 +40,7 @@ project:
     - title: リリースノート
       file: release_notes/index.md
       children:
+        - file: release_notes/v0_15_1.md
         - file: release_notes/v0_15_0.md
         - file: release_notes/v0_14_0.md
         - file: release_notes/v0_13_0.md
@@ -85,7 +86,12 @@ project:
             - file: api/cudaq/materializer
             - file: api/cudaq/observable
             - file: api/cudaq/transpiler
-        - file: api/hugr
+        - file: api/hugr/index
+          children:
+            - file: api/hugr/executable
+            - file: api/hugr/execution
+            - file: api/hugr/lowerer
+            - file: api/hugr/transpiler
         - file: api/linalg/index
           children:
             - file: api/linalg/hermitian
@@ -108,8 +114,11 @@ project:
         - file: api/qiskit/index
           children:
             - file: api/qiskit/emitter
+            - file: api/qiskit/execution
             - file: api/qiskit/materializer
             - file: api/qiskit/observable
+            - file: api/qiskit/runtime
+            - file: api/qiskit/runtime_execution
             - file: api/qiskit/transpiler
         - file: api/quration
         - file: api/quri_parts/index

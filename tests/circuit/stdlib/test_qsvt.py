@@ -341,10 +341,10 @@ def _reference_qsvt(
 
 
 def _all_zero(value: Any) -> bool:
-    """Return whether a backend-independent sampled value is all zero.
+    """Return whether an engine-independent sampled value is all zero.
 
     Args:
-        value (Any): Scalar or nested tuple returned by a backend sampler.
+        value (Any): Scalar or nested tuple returned by an engine sampler.
 
     Returns:
         bool: Whether every sampled bit is zero.
@@ -395,7 +395,7 @@ def _assert_serialized_runtime_qsvt_results(
     """Execute serialized runtime QSVT sampling and estimation on one SDK.
 
     Args:
-        sdk_transpiler (Any): Cross-backend transpiler fixture case.
+        sdk_transpiler (Any): Cross-engine transpiler fixture case.
         encoding (qmc.LCUBlockEncoding): Static block encoding to bind.
         phases (list[float]): Runtime QSVT phase values.
         initial_bits (list[int]): Compile-time system basis bits.
@@ -448,7 +448,7 @@ def _assert_serialized_runtime_qsvt_results(
         expected_zero_probability,
         abs=sampling_tolerance,
     )
-    expval_tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    expval_tolerance = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed == pytest.approx(expected_observable, abs=expval_tolerance)
     assert serialize(sample_template) == sample_payload
     assert serialize(expval_template) == expval_payload
@@ -637,7 +637,7 @@ def test_serialized_qsvt_samples_and_estimates_on_every_sdk(
     seed: int,
     phase_count: int,
 ) -> None:
-    """Random phases, weights, states, and widths execute on every backend."""
+    """Random phases, weights, states, and widths execute on every engine."""
     rng = np.random.default_rng(seed + 101 * system_width)
     identity_weight = rng.uniform(0.4, 1.2) * np.exp(
         1j * rng.uniform(-math.pi, math.pi)

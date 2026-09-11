@@ -1,4 +1,4 @@
-"""Describe backend execution features without exposing provider SDK types."""
+"""Describe engine execution features without exposing provider SDK types."""
 
 from __future__ import annotations
 

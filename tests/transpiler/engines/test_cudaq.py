@@ -1,6 +1,6 @@
 """CUDA-Q transpiler test configuration.
 
-This module configures the transpiler test suite for the CUDA-Q backend.
+This module configures the transpiler test suite for the CUDA-Q engine.
 Tests are automatically skipped if the ``cudaq`` package is not installed.
 """
 
@@ -29,12 +29,12 @@ from qamomile.cudaq.emitter import (  # noqa: E402
     ExecutionMode,
 )
 from qamomile.cudaq.materializer import CudaqMaterializer  # noqa: E402
-from tests.transpiler.backends._cudaq_source_assertions import (  # noqa: E402
+from tests.transpiler.base_test import TranspilerTestSuite  # noqa: E402
+from tests.transpiler.engines._cudaq_source_assertions import (  # noqa: E402
     TracingCudaqKernelEmitter,
     ValidatingCudaqTranspiler as CudaqTranspiler,
     assert_inspect_source_matches_artifact,
 )
-from tests.transpiler.base_test import TranspilerTestSuite  # noqa: E402
 
 
 def _phase_only_program(
@@ -384,7 +384,7 @@ class TestCudaqTranspiler(TranspilerTestSuite):
     - CH and CY are decomposed
     """
 
-    backend_name = "cudaq"
+    engine_name = "cudaq"
     unsupported_gates: set[str] = {"MEASURE"}
 
     # Shared emitter instance for finalization in run_circuit_statevector

@@ -31,6 +31,7 @@ from qamomile.circuit.ir.operation.gate import ControlledUOperation
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.types import BitType, UIntType
 from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.transpiler import CompiledProgram
 from qamomile.circuit.transpiler.errors import EmitError, ValidationError
 from qamomile.hugr import HugrTranspiler
 from qamomile.hugr.lowerer import (
@@ -114,7 +115,7 @@ def _hugr_identity(qubit: qmc.Qubit) -> qmc.Qubit:
 
 @qmc.qkernel
 def _hugr_select() -> tuple[qmc.Bit, qmc.Bit]:
-    """Keep SELECT visible at HUGR's explicit support boundary."""
+    """Exercise native SELECT lowering with scalar operands."""
     index = qmc.qubit("index")
     target = qmc.qubit("target")
     index, target = qmc.select([_hugr_identity, _hugr_helper])(index, target)
@@ -123,7 +124,7 @@ def _hugr_select() -> tuple[qmc.Bit, qmc.Bit]:
 
 @qmc.qkernel
 def _hugr_explicit_overwide_select() -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
-    """Keep an explicit over-wide SELECT visible at HUGR's boundary."""
+    """Exercise an over-wide index with native SELECT lowering."""
     index = qmc.qubit_array(2, "index")
     target = qmc.qubit("target")
     index, target = qmc.select(
@@ -137,7 +138,7 @@ def _hugr_explicit_overwide_select() -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
 def _hugr_symbolic_width_select(
     width: qmc.UInt,
 ) -> tuple[qmc.Vector[qmc.Bit], qmc.Bit]:
-    """Resolve a symbolic SELECT width before HUGR's support boundary."""
+    """Resolve a symbolic SELECT width before native lowering."""
     index = qmc.qubit_array(2, "index")
     target = qmc.qubit("target")
     index, target = qmc.select(
@@ -1753,15 +1754,19 @@ def _explicit_controlled_inverse_pauli_kernel() -> SimpleNamespace:
 
 @pytest.mark.hugr
 def test_hugr_compiles_bound_quantum_program_and_validates() -> None:
-    """A bound quantum program produces a validator-clean HUGR package."""
-    compiled = HugrTranspiler().transpile(
+    """Compilation exposes metadata while raw HUGR export returns a package."""
+    transpiler = HugrTranspiler()
+    compiled = transpiler.compile(
         _hugr_bell,
         bindings={"theta": math.pi / 2},
     )
 
+    assert isinstance(compiled, CompiledProgram)
     assert isinstance(compiled.artifact, Package)
     assert compiled.metadata.target == "hugr"
     assert compiled.metadata.pipeline == "program_graph"
+    package = transpiler.to_hugr(_hugr_bell, bindings={"theta": math.pi / 2})
+    assert isinstance(package, Package)
 
 
 @pytest.mark.parametrize(
@@ -1772,20 +1777,19 @@ def test_hugr_compiles_bound_quantum_program_and_validates() -> None:
         (_hugr_symbolic_width_select, {"width": 2}),
     ],
 )
-def test_hugr_rejects_select_at_prepared_module_boundary(
+def test_hugr_lowers_select_at_prepared_module_boundary(
     kernel: qmc.QKernel,
     bindings: dict[str, int] | None,
 ) -> None:
-    """SELECT fails explicitly instead of disappearing from direct lowering.
+    """SELECT produces validator-clean native conditional unitary operations.
 
     Args:
         kernel (qmc.QKernel): SELECT program reaching direct HUGR lowering.
         bindings (dict[str, int] | None): Compile-time width bindings.
     """
-    with pytest.raises(EmitError, match=r"does not support qmc\.select") as error:
-        HugrTranspiler().to_hugr(kernel, bindings=bindings)
-
-    assert error.value.operation == "SelectOperation"
+    package = HugrTranspiler().to_hugr(kernel, bindings=bindings)
+    assert isinstance(package, Package)
+    assert any("CZ" in name for name in _hugr_operation_names(package))
 
 
 @pytest.mark.hugr

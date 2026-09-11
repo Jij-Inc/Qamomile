@@ -237,7 +237,7 @@ def test_symbolic_composite_transforms_remain_estimable() -> None:
 
 
 def test_custom_composite_retains_a_decomposable_named_body() -> None:
-    """A generic backend gate keeps identity and an equivalent fallback body."""
+    """A generic engine gate keeps identity and an equivalent fallback body."""
     pytest.importorskip("qiskit")
     from qamomile.qiskit import QiskitTranspiler
 

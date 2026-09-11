@@ -65,7 +65,7 @@ Qamomileを基礎から学ぶステップバイステップガイドです。
 :::{card}
 :header: **10. コンパイルとトランスパイル**
 :link: 10_compilation_and_transpilation
-パイプライン段階ごとの解説、IRの語彙、バックエンドemissionを扱います。
+パイプライン段階ごとの解説、IRの語彙、エンジンemissionを扱います。
 :::
 
 ::::

@@ -181,7 +181,7 @@ def test_invoke_measurement_provenance_tracks_selected_implementation() -> None:
         implementations=[
             CallableImplementation(
                 transform=CallTransform.CONTROLLED,
-                backend="qiskit",
+                engine="qiskit",
                 strategy="native",
                 body=native_body,
             )
@@ -207,9 +207,9 @@ def test_invoke_measurement_provenance_tracks_selected_implementation() -> None:
         ("quri_parts", "native"): frozenset({1}),
         ("qiskit", "portable"): frozenset({1}),
     }
-    for (backend, strategy), expected in exact_indices.items():
+    for (engine, strategy), expected in exact_indices.items():
         selected = operation.measurement_result_indices_for(
-            backend=backend,
+            engine=engine,
             strategy=strategy,
         )
         assert selected == expected
@@ -219,14 +219,14 @@ def test_invoke_measurement_provenance_tracks_selected_implementation() -> None:
 
 
 @pytest.mark.parametrize(
-    ("backend", "strategy"),
+    ("engine", "strategy"),
     [
         ("qiskit", None),
         (None, "native"),
     ],
 )
 def test_context_specific_implementation_keeps_fallback_effects(
-    backend: str | None,
+    engine: str | None,
     strategy: str | None,
 ) -> None:
     """A specialized unitary body does not hide a measured fallback body."""
@@ -255,7 +255,7 @@ def test_context_specific_implementation_keeps_fallback_effects(
         implementations=[
             CallableImplementation(
                 transform=CallTransform.DIRECT,
-                backend=backend,
+                engine=engine,
                 strategy=strategy,
                 body=specialized_body,
             )
@@ -464,7 +464,7 @@ def test_generic_transforms_reject_effects_during_frontend_build(
     effect: str,
     alternative: str,
 ) -> None:
-    """Generic control and inverse fail before analysis or backend emission."""
+    """Generic control and inverse fail before analysis or engine emission."""
     with pytest.raises(
         ValueError,
         match=rf"non-unitary kernel effects \[{effect}\].*{alternative}",
@@ -472,10 +472,10 @@ def test_generic_transforms_reject_effects_during_frontend_build(
         _ = kernel.block
 
 
-def test_backend_transpilers_report_the_same_effect_diagnostic(
+def test_engine_transpilers_report_the_same_effect_diagnostic(
     sdk_transpiler: object,
 ) -> None:
-    """Qiskit, QURI Parts, and CUDA-Q reject effects before backend emission."""
+    """Qiskit, QURI Parts, and CUDA-Q reject effects before engine emission."""
     with pytest.raises(
         ValueError,
         match=r"qmc\.control\(\).*_projected_layer.*MEASUREMENT",
@@ -486,7 +486,7 @@ def test_backend_transpilers_report_the_same_effect_diagnostic(
 def test_measurement_plus_expval_is_rejected_as_sample_only(
     sdk_transpiler: object,
 ) -> None:
-    """Every backend reports the shared early sample-only constraint."""
+    """Every engine reports the shared early sample-only constraint."""
     import qamomile.observable as qmo
 
     with pytest.raises(
@@ -500,10 +500,10 @@ def test_measurement_plus_expval_is_rejected_as_sample_only(
 
 
 def test_explicit_modmul_control_path_still_executes(sdk_transpiler: object) -> None:
-    """Explicit stdlib control executes on reset-capable SDK backends."""
+    """Explicit stdlib control executes on reset-capable SDK engines."""
     _ = _explicit_controlled_modmul.block
-    if sdk_transpiler.backend_name in {"quri_parts", "braket"}:
-        pytest.skip("This backend cannot represent modmul's mid-circuit reset")
+    if sdk_transpiler.engine_name in {"quri_parts", "braket"}:
+        pytest.skip("This engine cannot represent modmul's mid-circuit reset")
 
     transpiler = sdk_transpiler.transpiler
     result = (

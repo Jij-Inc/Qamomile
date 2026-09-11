@@ -7,7 +7,7 @@ process-local UUID and logical-ID spellings are replaced by canonical
 graph-local identities. Fixed resource estimates attached to bodyless opaque
 callables are preserved, while process-local resource-cost callbacks are
 rejected explicitly. Invocation bindings, runtime values, prepared compiler
-modules, backend artifacts, standalone resource reports, and Python evaluation
+modules, engine artifacts, standalone resource reports, and Python evaluation
 performed during tracing are outside the format.
 
 After :func:`deserialize`, pass the returned :class:`SerializedQKernel` to an

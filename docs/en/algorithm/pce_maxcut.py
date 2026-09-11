@@ -327,7 +327,7 @@ pce_ansatz.draw(n=3, depth=1, P=observables[0], fold_loops=False)
 # Each $P_i$ must be fixed at transpile time, so we transpile the kernel
 # once per observable and cache the resulting executables. Each
 # `transpiler.transpile(...)` returns an `ExecutableProgram` containing
-# the transpiled backend circuit and the metadata needed to rebind
+# the transpiled engine circuit and the metadata needed to rebind
 # runtime parameters. The transpile-time `bindings` fix the structural
 # inputs (`n`, `depth`, `P`);
 # `parameters=["thetas"]` leaves the variational angles as runtime

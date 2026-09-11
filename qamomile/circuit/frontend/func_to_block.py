@@ -9,6 +9,7 @@ from qamomile.circuit.frontend.handle.primitives import (
     Float,
     Handle,
     QFixed,
+    QInt,
     Qubit,
     UInt,
 )
@@ -155,7 +156,7 @@ def build_param_slots(
 
         # Skip pure-quantum arguments. These do not participate in the
         # classical parameter contract.
-        if param_type is Qubit:
+        if param_type in (Qubit, QInt):
             continue
         if name in qubit_sizes_set:
             continue
@@ -263,7 +264,17 @@ def is_dict_type(t: typing.Any) -> bool:
 
 
 def handle_type_map(handle_type: type[Handle] | type) -> ValueType:
-    """Map Handle type to ValueType."""
+    """Map a frontend annotation to its abstract IR type.
+
+    Args:
+        handle_type (type[Handle] | type): Handle or supported Python annotation.
+
+    Returns:
+        ValueType: Corresponding type, with a symbolic width for bare ``QInt``.
+
+    Raises:
+        TypeError: If the annotation or its required element types are unsupported.
+    """
     # Handle Array types
     if is_array_type(handle_type):
         # For generic aliases like Vector[Bit], get element type from __args__
@@ -309,6 +320,8 @@ def handle_type_map(handle_type: type[Handle] | type) -> ValueType:
         return BitType()
     elif handle_type is Qubit:
         return ir_types.QubitType()
+    elif handle_type is QInt:
+        return ir_types.QUIntType(width=Value(type=UIntType(), name="qint_width"))
     elif handle_type is Observable:
         return ObservableType()
     else:
@@ -321,11 +334,18 @@ def create_dummy_handle(
     """Create a dummy Handle instance based on ValueType.
 
     Args:
-        value_type: The IR type for the value.
-        name: Name for the value.
-        emit_init: If True, emit QInitOperation for qubit types (requires active tracer).
+        value_type (ValueType): IR type for the value.
+        name (str): Value name. Defaults to ``"dummy"``.
+        emit_init (bool): Whether to allocate a scalar qubit through the active
+            tracer. Defaults to ``True``. Packed quantum registers always
+            represent caller-owned inputs and do not allocate qubits here.
 
-    Used for creating input parameters during tracing.
+    Returns:
+        Handle: Typed symbolic input for tracing.
+
+    Raises:
+        TypeError: If the IR type has no supported input handle.
+        RuntimeError: If qubit initialization is requested without a tracer.
     """
     if isinstance(value_type, ir_types.UIntType):
         # Mark as parameter so it can be bound at emit time
@@ -342,6 +362,8 @@ def create_dummy_handle(
             tracer = get_current_tracer()
             tracer.add_operation(qinit_op)
         return Qubit(value=value)
+    elif isinstance(value_type, ir_types.QUIntType):
+        return QInt(value=Value(type=value_type, name=name))
     elif isinstance(value_type, ObservableType):
         # Observable parameters are provided via bindings
         return Observable(value=Value(type=value_type, name=name).with_parameter(name))
@@ -371,8 +393,9 @@ def create_dummy_input(
             Used by call-time sub-kernel specialization so that
             shape-dependent stdlib helpers (qft / iqft / qpe) resolve
             ``get_size`` to a concrete integer and emit the correct gate
-            sequence. Ignored for non-array types. Default: None
-            (symbolic shape).
+            sequence. A singleton shape also supplies the width of a ``QInt``
+            input, including width zero. Ignored for other non-array types.
+            Defaults to ``None`` (symbolic shape or packed-register width).
 
     Returns:
         Handle: A frontend Handle wrapping a dummy Value or ArrayValue
@@ -516,6 +539,11 @@ def create_dummy_input(
         instance.element_type = element_type  # Set element type for array access
         return instance
 
+    if param_type is QInt and shape is not None:
+        if len(shape) != 1 or type(shape[0]) is not int or shape[0] < 0:
+            raise TypeError("QInt input shape must contain one non-negative width")
+        return create_dummy_handle(ir_types.QUIntType(width=shape[0]), name, False)
+
     # Scalar Handle types: map to ValueType first, then create dummy
     value_type = handle_type_map(param_type)
     return create_dummy_handle(value_type, name, emit_init)
@@ -593,7 +621,7 @@ def _return_annotations_match(expected: typing.Any, actual: typing.Any) -> bool:
         return False
     if expected_is_array and _get_ndim(expected) != _get_ndim(actual):
         return False
-    if expected is QFixed or actual is QFixed:
+    if expected in (QFixed, QInt) or actual in (QFixed, QInt):
         return expected is actual
     try:
         return handle_type_map(expected) == handle_type_map(actual)
@@ -814,6 +842,16 @@ def _validate_return_type(
         ):
             raise TypeError(
                 f"{path} annotation declares QFixed, but the kernel returned "
+                f"{_describe_return_value(result)}."
+            )
+        return
+
+    if annotation is QInt:
+        if not isinstance(result, QInt) or not isinstance(
+            result.value.type, ir_types.QUIntType
+        ):
+            raise TypeError(
+                f"{path} annotation declares QInt, but the kernel returned "
                 f"{_describe_return_value(result)}."
             )
         return

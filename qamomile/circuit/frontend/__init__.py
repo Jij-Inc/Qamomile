@@ -19,7 +19,7 @@ Design constraints:
 - The frontend owns tracing, the handle type system, and Python-syntax
   lowering (control-flow rewriting, loop region args). It emits abstract
   IR only; whole-block validation, IR rewriting, segmentation, and
-  backend concretization belong to ``qamomile.circuit.transpiler``.
+  engine concretization belong to ``qamomile.circuit.transpiler``.
 - Calls to nested qkernels stay as ``InvokeOperation`` boxes carrying a
   ``CallPolicy``; the frontend never inlines — ``inline`` is a
   transpiler pass.

@@ -13,7 +13,7 @@ def struct(cls: type[_T]) -> type[_T]:
     """Decorate a class as an immutable trace-time record.
 
     Structs group related frontend handles without introducing a new IR value
-    or changing a qkernel's backend ABI. They are ordinary Python objects that
+    or changing a qkernel's engine ABI. They are ordinary Python objects that
     exist only while the frontend traces a kernel body. The record is shallowly
     frozen so a field cannot be rebound in place; quantum operations must build
     a successor record from the handles they return. Affine ownership remains

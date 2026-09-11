@@ -39,7 +39,7 @@ def _emitter_supports_reusable_gates(emitter: Any) -> bool:
     """Return whether an emitter can build reusable gates.
 
     Args:
-        emitter (Any): Backend gate emitter.
+        emitter (Any): Engine gate emitter.
 
     Returns:
         bool: True when ``emitter`` advertises reusable-gate support.
@@ -56,7 +56,7 @@ def blockvalue_to_gate(
     input_operands: list[Any] | None = None,
     operation_name: str = "ControlledUOperation",
 ) -> Any:
-    """Convert a Block to a backend gate.
+    """Convert a Block to an engine gate.
 
     Pre-populates ``local_qubit_map`` with one entry per quantum input in
     declaration order, then runs the allocator over the block's body.
@@ -92,7 +92,7 @@ def blockvalue_to_gate(
             input binding fails. Defaults to ``"ControlledUOperation"``.
 
     Returns:
-        Any: A backend gate object produced by
+        Any: An engine gate object produced by
             ``emit_pass._emitter.circuit_to_gate``, or ``None`` when the
             conversion is unable to proceed (missing ``operations``,
             allocator / emitter exception, etc.) so the caller can fall
@@ -133,7 +133,7 @@ def blockvalue_to_gate(
                 max(local_qubit_map.values()) + 1 if local_qubit_map else num_qubits
             )
             if qubit_count != num_qubits:
-                # A backend gate cannot allocate private wires when it is
+                # An engine gate cannot allocate private wires when it is
                 # appended to its parent circuit: every wire in the gate
                 # arity must be supplied by the call site.  Nested QInit
                 # operations can make the temporary circuit wider than the
@@ -355,14 +355,14 @@ def _remap_local_qubit_map(
 
 
 def _gate_matches_qubit_count(gate: Any, num_qubits: int) -> bool:
-    """Return whether a backend gate can be appended at the call site.
+    """Return whether an engine gate can be appended at the call site.
 
     Args:
-        gate (Any): Backend gate candidate.
+        gate (Any): Engine gate candidate.
         num_qubits (int): Number of qubits supplied by the call site.
 
     Returns:
-        bool: True when the backend exposes a qubit-count field and the
+        bool: True when the engine exposes a qubit-count field and the
             field matches `num_qubits`.
     """
     gate_num_qubits = getattr(gate, "num_qubits", None)
@@ -382,7 +382,7 @@ def _resolve_call_operand(
         bindings (dict[str, Any]): Parent emit bindings.
 
     Returns:
-        Any: Concrete value, backend parameter, or backend expression.
+        Any: Concrete value, engine parameter, or engine expression.
     """
     if not hasattr(actual, "uuid"):
         return actual
@@ -452,7 +452,7 @@ def _prepare_nested_block_for_emit(
     ``Block`` as an operation field rather than as regular control-flow
     children. Generic pass visitors therefore do not descend into that
     nested block. Apply the same invariant here before any nested block
-    with slice markers is converted to a backend gate or emitted through
+    with slice markers is converted to an engine gate or emitted through
     a fallback path.
 
     Args:

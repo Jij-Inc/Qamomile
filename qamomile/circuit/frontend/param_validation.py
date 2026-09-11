@@ -23,7 +23,7 @@ from qamomile.circuit.frontend.func_to_block import (
     is_tuple_type,
 )
 from qamomile.circuit.frontend.handle import Handle, Observable
-from qamomile.circuit.frontend.handle.primitives import Bit, Float, Qubit, UInt
+from qamomile.circuit.frontend.handle.primitives import Bit, Float, QInt, Qubit, UInt
 from qamomile.circuit.ir.types.hamiltonian import ObservableType
 from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
 
@@ -119,10 +119,10 @@ def _is_quantum_param_decl(param_type: Any) -> bool:
         param_type (Any): A resolved qkernel input annotation.
 
     Returns:
-        bool: ``True`` for ``Qubit`` and ``Vector[Qubit]``-like
+        bool: ``True`` for ``Qubit``, ``QInt``, and ``Vector[Qubit]``-like
             declarations, otherwise ``False``.
     """
-    if param_type is Qubit:
+    if param_type in (Qubit, QInt):
         return True
     return _array_element_type(param_type) is Qubit
 
@@ -156,12 +156,12 @@ def _is_quantum_handle(value: Any) -> bool:
         value (Any): A caller argument or bound qkernel argument.
 
     Returns:
-        bool: ``True`` for scalar ``Qubit`` handles and arrays whose
+        bool: ``True`` for ``Qubit`` or ``QInt`` handles and arrays whose
             element IR type is quantum.
     """
     from qamomile.circuit.frontend.handle.array import ArrayBase
 
-    if isinstance(value, Qubit):
+    if isinstance(value, (Qubit, QInt)):
         return True
     if isinstance(value, ArrayBase):
         return value.value.type.is_quantum()
@@ -287,8 +287,8 @@ def _validate_quantum_param_handle(
 
     Args:
         param_name (str): Kernel parameter name, used in error messages.
-        declared (Any): Resolved kernel input annotation. Either scalar
-            ``Qubit`` or an array form such as ``Vector[Qubit]``.
+        declared (Any): Resolved kernel input annotation: ``Qubit``, ``QInt``,
+            or an array form such as ``Vector[Qubit]``.
         param_value (Handle): Caller-supplied handle value.
         context (str): Call-site label used to prefix the error message,
             e.g. ``"control()"`` or ``"my_kernel()"``. Defaults to
@@ -305,6 +305,14 @@ def _validate_quantum_param_handle(
             parameter kind under the active broadcast contract.
     """
     from qamomile.circuit.frontend.handle.array import ArrayBase, Vector
+
+    if declared is QInt:
+        if isinstance(param_value, QInt):
+            return
+        raise TypeError(
+            f"{context}: parameter {param_name!r} is declared as QInt but "
+            f"received {type(param_value).__name__}. Pass a QInt handle instead."
+        )
 
     if not _is_quantum_handle(param_value):
         raise TypeError(
@@ -371,6 +379,8 @@ def _annotations_match(expected: Any, actual: Any) -> bool:
     Returns:
         bool: ``True`` when both annotations map to the same IR value type.
     """
+    if expected is QInt or actual is QInt:
+        return expected is actual
     try:
         return handle_type_map(expected) == handle_type_map(actual)
     except (NotImplementedError, TypeError):
@@ -541,7 +551,7 @@ def validate_bindings_parameters_disjoint(
 
     A kernel argument name must be resolved exactly one way: compile-time bound
     (in ``bindings``, baked into the emitted circuit) or runtime symbolic (in
-    ``parameters``, surviving as a backend parameter). Listing the same name in
+    ``parameters``, surviving as an engine parameter). Listing the same name in
     both is ambiguous and historically caused silent miscompilation — the
     binding won the resolution race and the runtime parameter was silently
     dropped from the emitted circuit (see #354). This is the single shared

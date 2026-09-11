@@ -3,6 +3,9 @@
 Covers bind_parameters (including error case) and estimate_expectation.
 """
 
+import json
+from unittest.mock import Mock
+
 import numpy as np
 import pytest
 
@@ -13,6 +16,9 @@ pytest.importorskip("quri_parts.circuit")
 pytest.importorskip("quri_parts.core.operator")
 pytest.importorskip("quri_parts.qulacs")
 
+import qamomile.circuit as qmc  # noqa: E402
+import qamomile.observable as qm_o  # noqa: E402
+from qamomile.circuit.transpiler import JobSnapshot  # noqa: E402
 from qamomile.circuit.transpiler.executable import (  # noqa: E402
     ParameterInfo,
     ParameterMetadata,
@@ -20,8 +26,50 @@ from qamomile.circuit.transpiler.executable import (  # noqa: E402
 from qamomile.quri_parts import (  # noqa: E402
     QuriPartsExecutor,
     QuriPartsGateEmitter,
+    QuriPartsTranspiler,
 )
 from qamomile.quri_parts.exceptions import QamomileQuriPartsTranspileError  # noqa: E402
+
+
+def test_constant_public_job_snapshot_restores_without_executor_calls(monkeypatch):
+    """Synchronous QURI results restore locally without rerunning the estimator."""
+
+    @qmc.qkernel
+    def constant_expectation(observable: qmc.Observable) -> qmc.Float:
+        """Return an observable expectation over the zero state.
+
+        Args:
+            observable (qmc.Observable): Observable evaluated on one zero qubit.
+
+        Returns:
+            qmc.Float: Expectation value of the supplied observable.
+        """
+        qubits = qmc.qubit_array(1, "qubits")
+        return qmc.expval(qubits, observable)
+
+    observable = qm_o.Hamiltonian()
+    observable.constant = 0.25
+    executable = QuriPartsTranspiler().transpile(
+        constant_expectation, bindings={"observable": observable}
+    )
+    executor = QuriPartsExecutor()
+    job = executable.run(executor)
+    saved = JobSnapshot.from_dict(json.loads(json.dumps(job.snapshot().to_dict())))
+    submit = Mock(side_effect=AssertionError("Restore must not rerun estimation"))
+    retrieve = Mock(side_effect=AssertionError("Local values need no retrieval"))
+    monkeypatch.setattr(executor, "submit_estimate", submit)
+    monkeypatch.setattr(executor, "restore", retrieve)
+
+    restored = executable.restore(executor, saved)
+
+    assert saved.executions == ()
+    assert type(restored) is type(job)
+    assert type(restored.result()) is float
+    np.testing.assert_allclose(
+        [restored.result(), job.result()], [0.25, 0.25], atol=1e-12, rtol=1e-12
+    )
+    submit.assert_not_called()
+    retrieve.assert_not_called()
 
 
 class TestBindParameters:
@@ -43,7 +91,7 @@ class TestBindParameters:
                     name="theta",
                     array_name="theta",
                     index=None,
-                    backend_param=param,
+                    engine_param=param,
                 )
             ]
         )

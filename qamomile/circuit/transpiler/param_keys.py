@@ -1,8 +1,8 @@
-"""Shared naming for per-key backend parameters of runtime-parameter Dicts.
+"""Shared naming for per-key engine parameters of runtime-parameter Dicts.
 
 A ``Dict[K, Float]`` kernel argument kept as a runtime parameter
 (``transpile(..., parameters=["coeffs"])``) is decomposed into one
-backend parameter per looked-up key. The emit pass creates each backend
+engine parameter per looked-up key. The emit pass creates each engine
 parameter from the key it resolves (``coeffs[3]``, ``coeffs[(0, 1)]``),
 and the program orchestrator decomposes the execution-time binding
 ``{"coeffs": {...}}`` into the same names. Both sides MUST agree on the
@@ -15,7 +15,7 @@ import typing
 
 
 def dict_param_key(dict_name: str, key: typing.Any) -> str:
-    """Format the backend-parameter name for one entry of a Dict parameter.
+    """Format the engine-parameter name for one entry of a Dict parameter.
 
     The key is formatted with ``repr`` rather than ``str`` so the helper is
     collision-proof on its own: ``str("0")`` and ``str(0)`` both yield
@@ -32,7 +32,7 @@ def dict_param_key(dict_name: str, key: typing.Any) -> str:
             :func:`normalize_dict_binding_key`).
 
     Returns:
-        str: The backend parameter name, e.g. ``"coeffs[3]"`` for an int
+        str: The engine parameter name, e.g. ``"coeffs[3]"`` for an int
             key or ``"coeffs[(0, 1)]"`` for a tuple key.
     """
     return f"{dict_name}[{key!r}]"

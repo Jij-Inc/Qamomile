@@ -2,12 +2,21 @@
 
 from typing import Union, overload
 
-from qamomile.circuit.frontend.handle import Bit, Float, QFixed, Qubit, Vector
+from qamomile.circuit.frontend.handle import (
+    Bit,
+    Float,
+    QFixed,
+    QInt,
+    Qubit,
+    UInt,
+    Vector,
+)
 from qamomile.circuit.frontend.handle.array import Vector as VectorClass
 from qamomile.circuit.frontend.tracer import get_current_tracer
 from qamomile.circuit.ir.operation.gate import (
     MeasureOperation as IRMeasureOperation,
     MeasureQFixedOperation,
+    MeasureQIntOperation,
     MeasureVectorOperation,
     ProjectOperation,
     ResetOperation,
@@ -26,28 +35,35 @@ def measure(target: QFixed) -> Float: ...
 
 
 @overload
+def measure(target: QInt) -> UInt: ...
+
+
+@overload
 def measure(target: Vector[Qubit]) -> Vector[Bit]: ...
 
 
 def measure(
-    target: Union[Qubit, QFixed, Vector[Qubit]],
-) -> Union[Bit, Float, Vector[Bit]]:
-    """Measure a qubit or QFixed in the computational basis.
+    target: Union[Qubit, QInt, QFixed, Vector[Qubit]],
+) -> Union[Bit, UInt, Float, Vector[Bit]]:
+    """Measure a quantum handle in the computational basis.
 
     Performs a projective measurement in the Z-basis.
     The quantum resource is consumed by this operation and cannot be used afterwards.
 
     Args:
-        target (Qubit | QFixed | Vector[Qubit]): Quantum resource to measure.
-            - Qubit: Returns a classical Bit
-            - QFixed: Returns a Float (decoded from measured bits)
+        target (Qubit | QInt | QFixed | Vector[Qubit]): Quantum resource to
+            measure. ``QInt`` produces ``UInt`` and ``QFixed`` produces
+            ``Float`` after host-side decoding.
 
     Returns:
-        Bit | Float | Vector[Bit]: Classical result matching the input shape.
+        Bit | UInt | Float | Vector[Bit]: Classical result matching the input
+            handle.
 
     Raises:
         TypeError: If ``target`` is not a supported quantum handle.
         QubitConsumedError: If the quantum resource was already consumed.
+        UnreturnedBorrowError: If a borrowed element of a target vector has
+            not been returned.
         RuntimeError: If no tracer is active.
 
     Example:
@@ -63,7 +79,9 @@ def measure(
             return measure(qf)
         ```
     """
-    if isinstance(target, QFixed):
+    if isinstance(target, QInt):
+        return _measure_qint(target)
+    elif isinstance(target, QFixed):
         return _measure_qfixed(target)
     elif isinstance(target, VectorClass) and target.element_type == Qubit:
         return _measure_vector_qubit(target)
@@ -72,7 +90,7 @@ def measure(
     else:
         raise TypeError(
             f"Unsupported type for measurement: {type(target)}. "
-            "Expected Qubit, QFixed, or Vector[Qubit]."
+            "Expected Qubit, QInt, QFixed, or Vector[Qubit]."
         )
 
 
@@ -262,6 +280,32 @@ def _measure_qfixed(qfixed: QFixed) -> Float:
     qfixed.consume(operation_name="measure")
     tracer.add_operation(measure_op)
     return float_out
+
+
+def _measure_qint(qint: QInt) -> UInt:
+    """Measure a QInt and decode its little-endian carriers to UInt.
+
+    Carrier position zero is the least-significant bit, matching ``QFixed``.
+
+    Args:
+        qint (QInt): Unsigned quantum integer register to measure.
+
+    Returns:
+        UInt: Decoded unsigned integer measurement result.
+
+    Raises:
+        QubitConsumedError: If ``qint`` was already consumed.
+        RuntimeError: If no tracer is active.
+    """
+    tracer = get_current_tracer()
+    qint.validate_consumable("measure")
+    uint_out_value = Value(type=UIntType(), name="qint_measured")
+    uint_out = UInt(value=uint_out_value)
+    tracer.add_operation(
+        MeasureQIntOperation(operands=[qint.value], results=[uint_out_value])
+    )
+    qint.consume(operation_name="measure")
+    return uint_out
 
 
 def _measure_vector_qubit(qubits: Vector[Qubit]) -> Vector[Bit]:

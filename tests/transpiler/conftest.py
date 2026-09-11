@@ -21,9 +21,7 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "hamiltonian: mark test as Hamiltonian transpilation test"
     )
-    config.addinivalue_line(
-        "markers", "backend(name): mark test for a specific backend"
-    )
+    config.addinivalue_line("markers", "engine(name): mark test for a specific engine")
 
 
 def pytest_collection_modifyitems(config, items):
@@ -45,9 +43,9 @@ def pytest_collection_modifyitems(config, items):
         if "hamiltonian" in item.name.lower():
             item.add_marker(pytest.mark.hamiltonian)
 
-        # Add backend markers based on parent class name
+        # Add engine markers based on parent class name
         parent = item.parent
         if parent and hasattr(parent, "cls"):
             cls = parent.cls
-            if cls and hasattr(cls, "backend_name"):
-                item.add_marker(pytest.mark.backend(cls.backend_name))
+            if cls and hasattr(cls, "engine_name"):
+                item.add_marker(pytest.mark.engine(cls.engine_name))

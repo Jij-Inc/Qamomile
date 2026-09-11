@@ -1,4 +1,4 @@
-"""Emit pass: Generate backend-specific code from separated program."""
+"""Emit pass: Generate engine-specific code from separated program."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from qamomile.circuit.ir.operation.callable import (
 from qamomile.circuit.ir.operation.gate import (
     MeasureOperation,
     MeasureQFixedOperation,
+    MeasureQIntOperation,
     MeasureVectorOperation,
     ProjectOperation,
     ResetOperation,
@@ -59,7 +60,7 @@ from qamomile.circuit.transpiler.segments import (
     QuantumStep,
 )
 
-T = TypeVar("T")  # Backend circuit type
+T = TypeVar("T")  # Engine circuit type
 C = TypeVar("C", contravariant=True)  # Circuit type for emitter
 
 
@@ -70,7 +71,7 @@ class CompositeGateEmitter(Protocol[C]):
     The concrete compiler installs a semantic emitter that boxes every
     executable callable into circuit IR with its identity and fallback body.
     Native SDK selection happens later, through target capabilities and
-    legalization; this traversal hook must not import or select a backend.
+    legalization; this traversal hook must not import or select an engine.
     """
 
     def can_emit(self, gate_type: CompositeGateType) -> bool:
@@ -107,10 +108,10 @@ class CompositeGateEmitter(Protocol[C]):
 
 
 class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
-    """Base class for backend-specific emission passes.
+    """Base class for engine-specific emission passes.
 
     Subclasses implement _emit_quantum_segment() to generate
-    backend-specific quantum circuits.
+    engine-specific quantum circuits.
 
     Input: ProgramPlan
     Output: ExecutableProgram with compiled segments
@@ -130,7 +131,7 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
         Args:
             bindings: Values to bind parameters to. If not provided,
                      parameters must be bound at execution time.
-            parameters: List of parameter names to preserve as backend parameters.
+            parameters: List of parameter names to preserve as engine parameters.
 
         Raises:
             ValueError: If a name appears in both ``bindings`` and
@@ -165,7 +166,7 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
         self._resolver = ValueResolver(self.parameters)
 
     def run(self, input: ProgramPlan) -> ExecutableProgram[T]:
-        """Emit backend code from a program plan.
+        """Emit engine code from a program plan.
 
         Args:
             input (ProgramPlan): Segmented plan whose quantum and classical
@@ -175,12 +176,16 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
             ExecutableProgram[T]: Executable program containing all compiled
                 segments and the public output contract.
 
+        Raises:
+            EmitError: If expectation-value evaluation is combined with a
+                measurement, projection, or reset operation, or if a planned
+                segment cannot be emitted.
         """
         # ``Block.parameters`` includes special values such as Observable
         # inputs even when they are supplied as compile-time bindings. The
         # public bindings/parameters disjointness check has already rejected
         # genuine user overlap; subtract bound manifest entries here so only
-        # unbound symbols are promoted into the backend runtime ABI.
+        # unbound symbols are promoted into the engine runtime ABI.
         planned_parameters = set(input.parameters) - set(self.bindings)
         if not planned_parameters.issubset(self.parameters):
             self.parameters.update(planned_parameters)
@@ -203,6 +208,7 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
             nonunitary_types = (
                 MeasureOperation,
                 MeasureQFixedOperation,
+                MeasureQIntOperation,
                 MeasureVectorOperation,
                 ProjectOperation,
                 ResetOperation,
@@ -256,7 +262,7 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
         self,
         segment: QuantumSegment,
     ) -> CompiledQuantumSegment[T]:
-        """Compile a quantum segment to a backend circuit.
+        """Compile a quantum segment to an engine circuit.
 
         Args:
             segment (QuantumSegment): Segment whose operations and live
@@ -601,7 +607,7 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
                 # Sliced view: let ``EmitError`` propagate.  Catching
                 # here used to silently downgrade the lookup to the
                 # element_uuid path, which then produced an empty
-                # qubit_map and a backend-side observable / circuit
+                # qubit_map and an engine-side observable / circuit
                 # width mismatch far away from the real cause.  When
                 # slice bounds genuinely cannot be resolved under the
                 # active bindings the user needs the EmitError that
@@ -689,7 +695,7 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
         operations: list[Operation],
         bindings: dict[str, Any],
     ) -> tuple[T, QubitMap, ClbitMap]:
-        """Generate backend-specific quantum circuit.
+        """Generate engine-specific quantum circuit.
 
         Args:
             operations: List of quantum operations to emit
@@ -697,7 +703,7 @@ class EmitPass(Pass[ProgramPlan, ExecutableProgram[T]], Generic[T]):
 
         Returns:
             Tuple of (circuit, qubit_map, clbit_map) where:
-            - circuit: Backend-specific circuit object
+            - circuit: Engine-specific circuit object
             - qubit_map: Value UUID -> physical qubit index
             - clbit_map: Value UUID -> physical clbit index
         """

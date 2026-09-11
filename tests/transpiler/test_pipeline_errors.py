@@ -134,7 +134,7 @@ class TestMultipleQuantumSegmentsErrorContract:
         """Expval mixed with measurement fails during effect validation.
 
         The first-class effect summary identifies the entrypoint as sample-only
-        before segmentation, replacing the backend-shaped multi-segment error.
+        before segmentation, replacing the engine-shaped multi-segment error.
         """
 
         @qmc.qkernel

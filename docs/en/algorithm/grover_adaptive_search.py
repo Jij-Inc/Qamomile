@@ -41,6 +41,7 @@
 
 # %%
 import itertools
+import os
 import random
 from typing import Any
 
@@ -128,7 +129,8 @@ portfolio_problem
 # | Asset 9 | 3               | 13         |
 
 # %%
-num_assets = 9
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+num_assets = 3 if docs_test_mode else 9
 q = 1
 mu = np.array([22, 4, 19, 3, 23, 2, 5, 25, 3], dtype=int)
 Sigma = np.array([
@@ -142,6 +144,8 @@ Sigma = np.array([
     [ 2,  0,  4, -2,  0, -3,  2, 16, -4],
     [-1,  3,  0,  5,  2,  1, -2, -4, 13],
 ], dtype=int)
+mu = mu[:num_assets]
+Sigma = Sigma[:num_assets, :num_assets]
 
 assert mu.shape == (num_assets,)
 assert Sigma.shape == (num_assets, num_assets)
@@ -433,7 +437,9 @@ x, y = grover_adaptive_search(
     converter=converter,
     transpiler=transpiler,
     lamb=1.2,
-    max_no_improvement=5,
+    max_no_improvement=2 if docs_test_mode else 5,
+    shots=16 if docs_test_mode else 256,
+    seed=0 if docs_test_mode else 900,
 )
 selected = [i + 1 for i, xi in enumerate(x) if xi == 1]
 print(f"Selected assets: {selected}, objective value: {y}")

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 from qamomile.braket.execution import BraketExecutionHandle, BraketExecutionOptions
 from qamomile.braket.materializer import BraketMaterializer
 from qamomile.circuit.transpiler.circuit_ir import (
-    CircuitBackendEmitPass,
+    CircuitEngineEmitPass,
     CompilationPolicy,
 )
 from qamomile.circuit.transpiler.executable import ParameterMetadata, QuantumExecutor
@@ -466,7 +466,7 @@ class BraketExecutor(QuantumExecutor["Circuit"]):
         for parameter in invocation.parameter_metadata.parameters:
             if parameter.name not in invocation.bindings:
                 raise ValueError(f"Missing binding for parameter {parameter.name!r}")
-            values[str(parameter.backend_param)] = float(
+            values[str(parameter.engine_param)] = float(
                 invocation.bindings[parameter.name]
             )
         return values
@@ -495,7 +495,7 @@ class BraketExecutor(QuantumExecutor["Circuit"]):
         for parameter in parameter_metadata.parameters:
             if parameter.name not in bindings:
                 raise ValueError(f"Missing binding for parameter {parameter.name!r}")
-            values[str(parameter.backend_param)] = float(bindings[parameter.name])
+            values[str(parameter.engine_param)] = float(bindings[parameter.name])
         return circuit.make_bound_circuit(cast(dict[str, Any], values), strict=False)
 
     def estimate(
@@ -569,7 +569,7 @@ class BraketTranspiler(Transpiler["Circuit"]):
         Returns:
             EmitPass[Circuit]: Capability-driven Braket emit pass.
         """
-        return CircuitBackendEmitPass(
+        return CircuitEngineEmitPass(
             BraketMaterializer(),
             bindings,
             parameters,

@@ -1,4 +1,4 @@
-"""Rich QURI Parts frontend-to-backend test suite.
+"""Rich QURI Parts frontend-to-engine test suite.
 
 Tests the full pipeline: @qkernel definition -> QuriPartsTranspiler -> execution.
 Covers every available frontend gate, gate combinations, transpiler passes,
@@ -1776,7 +1776,7 @@ class TestControlFlowRange:
     """Test qmc.range loop through the QuriParts frontend pipeline.
 
     qmc.range() is trace-time unrolled (Python-level loop), NOT circuit-level
-    control flow.  These tests therefore work identically on any backend.
+    control flow.  These tests therefore work identically on any engine.
     """
 
     @pytest.mark.parametrize("n_qubits", [2, 3, 5, 10, 20])
@@ -2063,7 +2063,7 @@ class TestControlFlowRange:
 class TestControlFlowItems:
     """Test qmc.items loop through the QuriParts frontend pipeline.
 
-    qmc.items() is trace-time unrolled, so it works with any backend.
+    qmc.items() is trace-time unrolled, so it works with any engine.
     """
 
     @pytest.mark.parametrize(
@@ -2658,7 +2658,7 @@ class TestTranspilerPassesPipeline:
         assert any(isinstance(s, QuantumStep) for s in separated.steps)
 
     def test_emit(self, transpiler):
-        """emit() generates backend-specific circuit."""
+        """emit() generates engine-specific circuit."""
 
         @qmc.qkernel
         def circuit() -> qmc.Bit:
@@ -2736,7 +2736,7 @@ class TestTranspilerPassesPipeline:
 class TestTranspilerConfigPortable:
     """Test TranspilerConfig, substitute(), and segment structure on QuriParts.
 
-    These tests verify the backend-agnostic transpiler pipeline stages
+    These tests verify the engine-agnostic transpiler pipeline stages
     (to_block, substitute, inline, constant_fold, analyze, separate).
     """
 
@@ -3839,7 +3839,7 @@ class TestControlledGate:
         assert statevectors_equal(sv, expected)
 
     def test_inverse_block_with_multi_control_uncomputes_ancillas(self):
-        """A backend-inverse block holding a 3-control X runs on the cascade.
+        """An engine-inverse block holding a 3-control X runs on the cascade.
 
         QURI Parts inverts a block by emitting it into a temporary
         sub-circuit and inverting that circuit. The sub-circuit is only as

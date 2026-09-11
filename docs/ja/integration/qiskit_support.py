@@ -23,11 +23,11 @@
 # このページでは、具体的な最適化問題を通して、Qamomileの[Qiskit](https://quantum-computing.ibm.com/docs/)量子SDK連携を紹介します。
 # Qiskit連携はオプションです。`QiskitTranspiler`と`QiskitExecutor`を使うには`qiskit` extraをインストールします。
 # このチュートリアルでは、小さなMaxCutインスタンスに対するQAOA最適化を例に、Qamomileの量子カーネルをQiskit回路へトランスパイルし、Qiskitシミュレータ上でサンプリングと期待値評価を行います。
-# さらに、Qiskitの高度な回路機能も紹介します。
+# さらに、Qiskitの高度な回路機能と、同じ`QiskitExecutor`のAPIによるIBM Quantum実行も紹介します。
 
 # %%
 # 最新のQamomileをpipからインストールします。
-# 以下で使うQiskitバックエンドと回路描画の依存関係をインストールします。
+# 以下で使うQiskitエンジンと回路描画の依存関係をインストールします。
 # # !pip install "qamomile[qiskit,visualization]"
 
 # %%
@@ -358,7 +358,7 @@ assert np.isfinite(energy_via_run)
 # %% [markdown]
 # QamomileのAPIだけで扱う場合は、`ExecutableProgram.run(...)`を使うのがおすすめです。
 # Qiskit回路を自分で扱いたい場合には`executor.estimate(...)`も使えますが、その場合はQiskitのパラメータ順や回路のバインド状態をユーザー側で管理する必要があります。
-# `QiskitExecutor`は、利用可能な場合にはデフォルトでQiskitの`StatevectorEstimator`を生成するため、現在のQiskit環境ではV2 primitiveインターフェースを使います。
+# ローカル実行では、`QiskitExecutor`は利用可能な場合にデフォルトでQiskitの`StatevectorEstimator`を生成するため、現在のQiskit環境ではV2 primitiveインターフェースを使います。
 # カスタムestimatorや古いQiskit / AerのestimatorがV2形式の`run([(circuit, observable, params)])`呼び出しを受け付けない場合、QamomileはV1形式の`run(circuits, observables, parameter_values)`へフォールバックします。
 
 # %% [markdown]
@@ -524,7 +524,7 @@ assert len(qft_native.data) < len(decomposed_ops)
 #
 # `QiskitExecutor`では、トランスパイル済み回路と、それを実行するQiskitの実行対象を分けて扱います。
 # そのため、`transpiler.executor(backend=...)`でQiskitの実行対象を差し替えるだけで、同じ回路をさまざまなQiskit実行対象で実行できます。
-# 例えば、ノイズなしのローカルシミュレータやAerノイズモデルに加えて、IBM Quantumが提供する実機も利用できます。
+# 例えば、ノイズなしのローカルシミュレータ、Aerノイズモデル、後述するIBM Quantumの実機を、同じ`QiskitExecutor`で利用できます。
 #
 # ここでは、脱分極ノイズを持つAerノイズモデルを作り、`AerSimulator`へ渡す例を示します。
 # 同じ最適化済みパラメータで、ノイズなしとノイズありのサンプル平均エネルギーを比較します。
@@ -567,12 +567,90 @@ assert np.isfinite(clean_energy)
 assert np.isfinite(noisy_energy)
 
 # %% [markdown]
+# ## IBM Quantum実機での実行
+#
+# `pip install "qamomile[qiskit]"`でQiskit用のextraをインストールすると、実機実行用のQiskit IBM Runtimeも導入されます。デバイス名、IBM QuantumのAPI key、instance CRNを`transpiler.executor(...)`へ渡します。
+# ローカルシミュレーションと同じ`QiskitExecutor`が返ります。引数を省略するとローカルのAerを使い、IBMのデバイス名を渡すとQiskit IBM Runtimeで認証して、そのバックエンドを`executable.sample()`と`executable.run()`の実行先にします。
+# 以下の例は手動で実行するとリモートジョブを送信します。このノートブックの実行対象には含まれません。
+#
+# ```python
+# import os
+#
+# from qamomile.qiskit import QiskitExecutionOptions
+#
+# hardware_options = QiskitExecutionOptions(
+#     max_execution_time=300,
+#     resilience_level=1,
+# )
+# hardware_executor = transpiler.executor(
+#     backend="your_backend_name",
+#     api_key=os.environ["IBM_QUANTUM_API_KEY"],
+#     instance_crn=os.environ["IBM_QUANTUM_INSTANCE_CRN"],
+#     options=hardware_options,
+# )
+# runtime_bindings = {"gammas": opt_gammas, "betas": opt_betas}
+#
+# hardware_job = executable.sample(
+#     hardware_executor,
+#     bindings=runtime_bindings,
+#     shots=1024,
+# )
+# print(hardware_job.status())
+# snapshot_data = hardware_job.snapshot().to_dict()
+# hardware_result = hardware_job.result()
+# ```
+#
+# この例を実行する前に、2つの環境変数へAPI keyとinstance CRNを設定します。同じ引数で`QiskitExecutor(backend=..., api_key=..., instance_crn=..., options=hardware_options)`を直接作ることもできます。
+# `QiskitExecutionOptions`を使うと、SDKのオプションクラスをimportせずにQamomileからRuntimeを設定できます。`max_execution_time`はサンプリングと期待値計算の量子実行時間を秒単位で制限します。キュー待ち時間や、ローカルで結果を待つ`.result(timeout=...)`の待機時間とは別の設定です。`resilience_level`（0、1、2）は期待値計算に適用されます。これらの設定にはRuntimeの実行対象が必要です。
+# Qamomileは`ibm_quantum_platform`のchannelを指定して`QiskitRuntimeService`へ認証情報を渡し、そのinstance内で指定した名前のバックエンドを取得します。そのアカウントとinstanceからバックエンドを利用できない場合、Executorの作成時にQiskitのエラーが発生します。別のデバイスやシミュレータへは切り替わりません。
+# `api_key`と`instance_crn`には空でない文字列を指定し、必ずバックエンド名と一緒に両方を渡します。認証情報が片方だけの場合は`ValueError`が発生します。Executorは認証情報をディスクへ保存しません。
+# Qiskit IBM Runtimeですでに保存済みアカウントを設定している場合は、認証情報を両方省略して`transpiler.executor(backend="your_backend_name")`を使えます。
+#
+# IBMバックエンドを指定した`QiskitExecutor`はランタイムパラメータに値を設定し、選んだバックエンドの命令セットへ回路をトランスパイルしてからRuntime V2プリミティブに送信します。
+# 期待値計算では、observableもトランスパイル後の物理量子ビットの配置に合わせて変換するため、実機上の配置が変わっても意図したobservableを評価できます。
+#
+# サンプリングと期待値計算のジョブでは、`status()`、`cancel()`、`snapshot()`が使えます。`.result()`は結果が得られるまで待機します。
+# 後からジョブを取得するには、`snapshot_data`をJSONとして保存します。同じexecutableと元のバックエンド用Executorを再作成し、元のランタイムbindingsを渡すと、量子カーネルの戻り値の型を保った結果を復元できます。
+#
+# ```python
+# from qamomile.circuit.transpiler.job import JobSnapshot
+#
+# restored_job = executable.restore(
+#     hardware_executor,
+#     JobSnapshot.from_dict(snapshot_data),
+#     bindings=runtime_bindings,
+# )
+# restored_result = restored_job.result()
+# ```
+#
+# snapshotにはproviderのジョブ識別子、取得済みのローカル値、結果のメタデータが含まれます。認証情報とランタイムbindingsは呼び出し側で管理します。
+# 定数observableや空回路のようにローカルで結果が確定する処理も、リモートジョブを含むグループと一緒に保存・復元できます。
+# サービス側のジョブ識別子からの復元には、Executorの認証時に作成したRuntime serviceを使います。すでに`QiskitRuntimeService`を管理している場合は、`api_key`と`instance_crn`の代わりに`service=service`とバックエンド名を渡すか、そのserviceの`IBMBackend`オブジェクトを`backend`へ渡せます。
+#
+# 上で作った期待値計算のexecutableもRuntimeで使えます。1回の評価で絶対的な目標精度を指定するには、`TargetPrecision`を使います。
+#
+# ```python
+# from qamomile.circuit.transpiler.execution_request import TargetPrecision
+#
+# energy_job = expval_executable.run(
+#     hardware_executor,
+#     bindings=runtime_bindings,
+#     estimation=TargetPrecision(0.05),
+# )
+# hardware_energy = energy_job.result()
+# ```
+#
+# サンプリングの`shots`と期待値計算の`TargetPrecision`は、引き続き実行ごとに指定します。`TargetPrecision`を省略するとRuntime estimatorの設定済みデフォルト値を使います。
+# その他のRuntime設定は、`QiskitExecutionOptions`を作る際に`sampler_options`と`estimator_options`へ辞書で渡せます。Executorの`sampler_options=...`と`estimator_options=...`へネイティブのオプションを直接渡す方法も使えますが、`options=...`とは併用できません。実機向けトランスパイルを調整する場合は、そのバックエンド用の`pass_manager=...`を渡せます。
+# 既存のRuntime`Session`や`Batch`を使うには、`mode=...`に渡し、設定済みの同じバックエンドオブジェクトを`backend=...`に指定します。バックエンド名と`mode`は併用できません。そのcontextと有効期間は呼び出し側で管理し、Executorは作成や終了を行いません。
+#
+# %% [markdown]
 # ## まとめ
 #
 # - `QiskitTranspiler().transpile(kernel, bindings=..., parameters=[...])`は量子カーネルを`ExecutableProgram[QuantumCircuit]`に変換します。Qiskitエコシステム内で扱いたい場合は、`to_circuit(...)`で生のQiskit`QuantumCircuit`を取得できます。
-# - `QiskitExecutor`は、測定を返す量子カーネル向けの`executable.sample()`と、期待値向けの`executable.run()` / `executor.estimate(...)`の両方をサポートします。デフォルトでは`AerSimulator`を使い、`transpiler.executor(backend=...)`から任意のQiskit実行対象オブジェクトを受け取れます。
+# - `QiskitExecutor`は、測定を返す量子カーネル向けの`executable.sample()`と、期待値向けの`executable.run()` / `executor.estimate(...)`の両方をサポートし、デフォルトでは`AerSimulator`を使います。IBMのバックエンド名と`api_key`、`instance_crn`、または既存の`IBMBackend`を渡すと、同じAPIでRuntime V2による実行ができます。
 # - Qiskit連携は、Qiskitが高い抽象度の回路命令を持つ箇所では、回路途中の測定、動的`for_loop` / `if_else` / `while_loop`、ランタイム古典式、`PauliEvolutionGate`、`QFTGate`をネイティブに出力します。
-# - Aerノイズモデル、providerが提供する実行対象、qBraidでラップしたQiskitデバイスを、qkernelを再トランスパイルせずに使えます。`qamomile.optimization`のヘルパーも、同じQiskit回路を受け渡す仕組みを使っています。
+# - AerからIBM Quantumへ切り替える際もQamomileのexecutableを再利用できます。`QiskitExecutor`が実機向けトランスパイル、observableの配置変換、非同期ジョブの復元を扱います。
 
 # %% [markdown]
 # ### 関連ページ

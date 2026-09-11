@@ -86,7 +86,7 @@ def reconcile_parameter_metadata(
     Lowering may resolve formal runtime arguments before it knows whether the
     callee body uses them. The immutable circuit program is the authoritative
     record of actual use, while the provisional metadata retains ABI ordering,
-    source references, container kinds, and backend parameter placeholders.
+    source references, container kinds, and engine parameter placeholders.
 
     Args:
         program (CircuitProgram): Verified immutable circuit program.

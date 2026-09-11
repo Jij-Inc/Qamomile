@@ -581,7 +581,7 @@ class TestBindParameters:
             name="theta",
             array_name="theta",
             index=None,
-            backend_param=theta,
+            engine_param=theta,
         )
         metadata = ParameterMetadata(parameters=[param_info])
 

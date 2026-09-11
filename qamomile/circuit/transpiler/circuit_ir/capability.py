@@ -230,7 +230,7 @@ class NativeSemanticOpCapabilities:
     """Declare a target-native realization of an abstract operation.
 
     Args:
-        key (SemanticOpKey): Backend-independent semantic operation key.
+        key (SemanticOpKey): Engine-independent semantic operation key.
         realization (str): Target-owned realization identifier passed to the
             materializer after legalization.
         call_transforms (CallTransformCapabilities): Call shapes supported by
@@ -404,4 +404,4 @@ class CompilationPolicy:
 
 
 DEFAULT_POLICY = CompilationPolicy()
-"""Policy used when a backend transpiler does not supply one."""
+"""Policy used when an engine transpiler does not supply one."""

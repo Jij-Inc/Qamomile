@@ -65,7 +65,7 @@ From a dense Hermitian matrix to a Pauli sum and a time-evolution circuit.
 :::{card}
 :header: **10. Compilation and Transpilation**
 :link: 10_compilation_and_transpilation
-The 10-stage pipeline, IR walkthrough, backend emission.
+The 10-stage pipeline, IR walkthrough, engine emission.
 :::
 
 ::::

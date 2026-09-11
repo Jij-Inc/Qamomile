@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Hashable, Mapping
+from collections.abc import Callable, Hashable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Generic, TypeVar, cast
@@ -16,6 +16,7 @@ from qamomile.circuit.transpiler.execution_handle import (
     ExecutionReference,
     JobStatus,
 )
+from qamomile.circuit.transpiler.execution_snapshot import ExecutionSnapshot
 
 T = TypeVar("T")
 
@@ -29,7 +30,7 @@ class JobKind(StrEnum):
 
 @dataclass(frozen=True)
 class JobSnapshot:
-    """Store the public operation and provider references for restoration.
+    """Store operation metadata and lossless raw execution reconstruction.
 
     Runtime bindings are intentionally excluded. They can contain arbitrary
     application data, so callers supply them again to
@@ -37,29 +38,35 @@ class JobSnapshot:
 
     Args:
         kind (JobKind): Public operation that created the job.
-        executions (tuple[ExecutionReference, ...]): Ordered provider
-            references needed to reconstruct the raw execution.
+        executions (tuple[ExecutionReference, ...]): Ordered provider reference
+            inventory. Empty for entirely local structured executions. For
+            legacy snapshots, these references also specify the result layout.
         shots (int | None): Sampling shot count. Required for sample jobs and
             absent for run jobs.
+        execution (ExecutionSnapshot | None): Ordered remote/local execution
+            tree. None denotes the legacy flat-reference format. When present,
+            executions must exactly match its remote leaves.
 
     Raises:
-        ValueError: If references are empty or the shot count is inconsistent
-            with the operation kind.
-        TypeError: If operation kind, references, or shots have incompatible
-            types.
+        ValueError: If legacy references are empty, the reference inventory
+            disagrees with the tree, or shots disagree with the operation kind.
+        TypeError: If operation kind, references, tree, or shots have
+            incompatible types.
     """
 
     kind: JobKind
     executions: tuple[ExecutionReference, ...]
     shots: int | None = None
+    execution: ExecutionSnapshot | None = None
 
     def __post_init__(self) -> None:
         """Validate the operation-specific restoration metadata.
 
         Raises:
-            ValueError: If references are empty, sample shots are not positive,
-                or a run snapshot contains a shot count.
-            TypeError: If operation kind, references, or shots have
+            ValueError: If legacy references are empty, the reference inventory
+                disagrees with the tree, sample shots are not positive, or a
+                run snapshot contains a shot count.
+            TypeError: If operation kind, references, tree, or shots have
                 incompatible types.
         """
         if not isinstance(self.kind, JobKind):
@@ -70,7 +77,16 @@ class JobSnapshot:
             raise TypeError(
                 "JobSnapshot.executions must contain ExecutionReference values"
             )
-        if not self.executions:
+        if self.execution is not None and not isinstance(
+            self.execution, ExecutionSnapshot
+        ):
+            raise TypeError("JobSnapshot.execution must be an ExecutionSnapshot")
+        if self.execution is not None:
+            if tuple(self.executions) != self.execution.references():
+                raise ValueError(
+                    "JobSnapshot.executions disagree with the execution tree"
+                )
+        elif not self.executions:
             raise ValueError("JobSnapshot.executions must not be empty")
         if self.kind is JobKind.SAMPLE:
             if self.shots is not None and not isinstance(self.shots, int):
@@ -86,14 +102,23 @@ class JobSnapshot:
         """Convert the snapshot to JSON-compatible data.
 
         Returns:
-            dict[str, Any]: Operation metadata and serialized provider
-                references without runtime bindings.
+            dict[str, Any]: Version 2 operation metadata and execution tree,
+                or the original legacy format for a flat-reference snapshot.
+
+        Raises:
+            TypeError: If local values were mutated to unsupported types.
+            ValueError: If local values or references were mutated to invalid
+                data.
         """
-        return {
+        data: dict[str, Any] = {
             "kind": self.kind.value,
             "executions": [reference.to_dict() for reference in self.executions],
             "shots": self.shots,
         }
+        if self.execution is not None:
+            data["version"] = 2
+            data["execution"] = self.execution.to_dict()
+        return data
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> JobSnapshot:
@@ -106,21 +131,40 @@ class JobSnapshot:
             JobSnapshot: Validated typed-job restoration snapshot.
 
         Raises:
-            KeyError: If operation kind or execution references are absent.
-            TypeError: If execution references are not a sequence of mappings.
-            ValueError: If operation metadata or references are invalid.
+            KeyError: If operation kind, references, or a version 2 tree is absent.
+            TypeError: If metadata, references, or local values have wrong types.
+            ValueError: If a version, field, tree, or reference is invalid.
         """
+        if not isinstance(data, Mapping):
+            raise TypeError("JobSnapshot must be a mapping")
+        version = data.get("version", 1)
+        if type(version) is not int or version not in (1, 2):
+            raise ValueError(f"Unsupported JobSnapshot version: {version!r}")
+        allowed = {"version", "kind", "executions", "shots"}
+        if version == 2:
+            allowed.add("execution")
+        if set(data) - allowed:
+            raise ValueError("JobSnapshot contains unknown fields")
+        execution = (
+            ExecutionSnapshot.from_dict(data["execution"]) if version == 2 else None
+        )
         raw_executions = data["executions"]
         if not isinstance(raw_executions, (list, tuple)) or not all(
             isinstance(reference, Mapping) for reference in raw_executions
         ):
             raise TypeError("JobSnapshot.executions must be a mapping sequence")
+        reference_fields = {"provider", "job_ids", "target", "group_id", "context"}
+        if version == 2 and any(
+            set(reference) - reference_fields for reference in raw_executions
+        ):
+            raise ValueError("JobSnapshot.executions contain unknown reference fields")
         return cls(
             kind=JobKind(data["kind"]),
             executions=tuple(
                 ExecutionReference.from_dict(reference) for reference in raw_executions
             ),
             shots=data.get("shots"),
+            execution=execution,
         )
 
 
@@ -161,17 +205,17 @@ def _typed_result_key(value: Any) -> Hashable:
     return ("identity", id(value))
 
 
-def _aggregate_typed_results(
-    results: list[tuple[T, int]],
+def aggregate_typed_results(
+    results: Iterable[tuple[T, int]],
 ) -> list[tuple[T, int]]:
     """Combine counts whose converted public result values are equal.
 
-    Backend raw bitstrings can differ only on qubits that are not part of the
+    Engine raw bitstrings can differ only on qubits that are not part of the
     program output. After result conversion those rows represent the same
     public value and must appear as one ``SampleResult`` entry.
 
     Args:
-        results (list[tuple[T, int]]): Converted result values and counts.
+        results (Iterable[tuple[T, int]]): Converted result values and counts.
 
     Returns:
         list[tuple[T, int]]: Stable first-seen values with duplicate counts
@@ -206,7 +250,7 @@ class Job(ABC, Generic[T]):
         """Initialize a public job around an execution handle.
 
         Args:
-            handle (ExecutionHandle[Any]): Raw or mapped backend execution.
+            handle (ExecutionHandle[Any]): Raw or mapped engine execution.
             kind (JobKind): Public operation represented by the job.
             shots (int | None): Sampling shot count. Defaults to ``None`` for
                 run jobs.
@@ -268,7 +312,10 @@ class Job(ABC, Generic[T]):
         self._handle.cancel()
 
     def references(self) -> tuple[ExecutionReference, ...]:
-        """Return secret-free references for later job restoration.
+        """Return the execution handle's legacy provider-reference view.
+
+        Use :meth:`snapshot` for typed restoration of local values or nested
+        groups, which a flat reference list cannot represent completely.
 
         Returns:
             tuple[ExecutionReference, ...]: Provider execution references.
@@ -279,18 +326,20 @@ class Job(ABC, Generic[T]):
         """Capture secret-free information needed for typed restoration.
 
         Returns:
-            JobSnapshot: Public operation metadata and provider references.
+            JobSnapshot: Public metadata, local values, and remote references
+                with ordered execution boundaries. No remote results are read.
 
         Raises:
-            ValueError: If the underlying execution exposes no restorable
-                references.
+            ValueError: If execution grouping or mapping cannot be restored,
+                or a local value is nonfinite or cyclic.
+            TypeError: If a local result contains unsupported objects.
         """
-        references = self.references()
-        if not references:
-            raise ValueError("This job does not expose restorable references")
+        execution = self._handle.snapshot()
         # Bindings stay caller-owned because they may contain application data
         # unrelated to the provider job identity.
-        return JobSnapshot(self._kind, references, self._snapshot_shots)
+        return JobSnapshot(
+            self._kind, execution.references(), self._snapshot_shots, execution
+        )
 
     def metadata(self) -> Mapping[str, Any]:
         """Return provider execution metadata.
@@ -382,13 +431,13 @@ class SampleJob(Job[SampleResult[T]], Generic[T]):
         """Convert raw counts and cache the public sample result.
 
         Args:
-            raw_counts (dict[str, int]): Backend-normalized bitstring counts.
+            raw_counts (dict[str, int]): Engine-normalized bitstring counts.
 
         Returns:
             SampleResult[T]: Aggregated typed sample result.
         """
         if self._result is None:
-            typed_results = _aggregate_typed_results(self._result_converter(raw_counts))
+            typed_results = aggregate_typed_results(self._result_converter(raw_counts))
             self._result = SampleResult(results=typed_results, shots=self._shots)
         return self._result
 
@@ -480,13 +529,13 @@ class RunJob(Job[T], Generic[T]):
         """Convert the first sampled bitstring to the public run value.
 
         Args:
-            raw_counts (dict[str, int]): Single-shot backend counts.
+            raw_counts (dict[str, int]): Single-shot engine counts.
 
         Returns:
             T: Public kernel return value.
 
         Raises:
-            RuntimeError: If the backend returned no counts.
+            RuntimeError: If the engine returned no counts.
         """
         if not raw_counts:
             raise RuntimeError("No results from execution")

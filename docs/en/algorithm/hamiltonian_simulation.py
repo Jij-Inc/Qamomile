@@ -264,7 +264,7 @@ def rabi_s2(
 #
 # - **`order` must be concrete at transpile time.** Without a binding the
 #   base-case `if` never folds and the unroll loop has nothing to terminate
-#   on; the transpiler leaves the self-call in the IR and backend emit
+#   on; the transpiler leaves the self-call in the IR and engine emit
 #   rejects it.
 # - **Non-terminating recursion is caught.** If the body calls itself with
 #   `order + 2` instead of `order - 2`, or never reaches the base case, the

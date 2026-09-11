@@ -237,7 +237,7 @@ pce_ansatz.draw(n=3, depth=1, P=observables[0], fold_loops=False)
 # %% [markdown]
 # ### オブザーバブルごとに1つの`ExecutableProgram`へとトランスパイルする
 #
-# 各$P_i$はトランスパイル時に固定する必要があるため、オブザーバブルごとに1回トランスパイルし、得られた`ExecutableProgram`をリストに保存します。各`transpiler.transpile(...)`は、トランスパイル済みのバックエンド回路とランタイムパラメータの再バインドに必要なメタデータをまとめた`ExecutableProgram`を返します。トランスパイル時の`bindings`は構造的な入力（`n`、`depth`、`P`）を固定し、`parameters=["thetas"]`は変分角度をオプティマイザが呼び出しのたびに変更できるランタイムパラメータとして残します。
+# 各$P_i$はトランスパイル時に固定する必要があるため、オブザーバブルごとに1回トランスパイルし、得られた`ExecutableProgram`をリストに保存します。各`transpiler.transpile(...)`は、トランスパイル済みのエンジン回路とランタイムパラメータの再バインドに必要なメタデータをまとめた`ExecutableProgram`を返します。トランスパイル時の`bindings`は構造的な入力（`n`、`depth`、`P`）を固定し、`parameters=["thetas"]`は変分角度をオプティマイザが呼び出しのたびに変更できるランタイムパラメータとして残します。
 
 # %%
 transpiler = QiskitTranspiler()

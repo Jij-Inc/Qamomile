@@ -61,7 +61,7 @@ docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 # Möttönenの振幅エンコーディングはこの状態準備を実現する一つのアルゴリズムです。一方で、このような状態準備を実現するアルゴリズムは他にも存在するため、Qamomileでは明示的にMöttönenの手法を指定するAPIと、方式は問わないが状態準備を行うAPIの二つを用意しています。
 #
 # - `mottonen_amplitude_encoding(...)`はQamomileのMöttönen構成を明示的に要求します。分解方法、リソース数、または合成方法がプログラムの意図に含まれる場合に使用します。
-# - `amplitude_encoding(...)`は目標状態だけを表します。バックエンドは固有の状態準備操作を利用できます。バックエンド固有の状態準備が使われない場合、Qamomileは現在Möttönen構成を移植可能な実装として使います。ただし、この実装方式は汎用APIの保証ではありません。
+# - `amplitude_encoding(...)`は目標状態だけを表します。エンジンは固有の状態準備操作を利用できます。エンジン固有の状態準備が使われない場合、Qamomileは現在Möttönen構成を移植可能な実装として使います。ただし、この実装方式は汎用APIの保証ではありません。
 #
 # 明示的な実装は、Möttönen、Vartiainen、Bergholm、Salomaaによる一様制御回転の構成{cite:p}`10.48550/arXiv.quant-ph/0407010`に従います。論文では、より一般的な任意状態変換$|a\rangle \to |b\rangle$を扱います。Qamomileでは入力を$|0\rangle^{\otimes n}$に固定し、状態準備に相当する片側を実装しています。
 #
@@ -78,7 +78,7 @@ docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 # - 符号付き実数ベクトル$(1, -1, 1, -1)$
 # - 複素数ベクトル$(1, 1+i, 1-i, 2i)$
 #
-# 状態忠実度は位相に依存しないため、バックエンドが異なるグローバル位相を選んだ場合でも、意図した物理状態を検証できます。
+# 状態忠実度は位相に依存しないため、エンジンが異なるグローバル位相を選んだ場合でも、意図した物理状態を検証できます。
 
 # %%
 transpiler = QiskitTranspiler()
@@ -206,7 +206,7 @@ prepare_from_angles.draw(
 # %% [markdown]
 # ### リソース確認用の量子カーネルを構築する
 #
-# 次のヘルパーは、複数のレジスタサイズに対して実数および複素数のMöttönen回路を作成します。明示的なAPIを使うことで、バックエンド固有の状態準備によって測定対象の構成が変わらないようにします。
+# 次のヘルパーは、複数のレジスタサイズに対して実数および複素数のMöttönen回路を作成します。明示的なAPIを使うことで、エンジン固有の状態準備によって測定対象の構成が変わらないようにします。
 
 
 # %%
@@ -389,13 +389,13 @@ assert np.isclose(float(expval_result), -1.0 / 3.0, atol=ATOL_STATEVECTOR)
 #
 # | 目的 | API |
 # |---|---|
-# | 目標状態を準備し、バックエンド固有の合成を許可する | `amplitude_encoding(q, amplitudes)` |
+# | 目標状態を準備し、エンジン固有の合成を許可する | `amplitude_encoding(q, amplitudes)` |
 # | QamomileのMöttönen構成を要求する | `mottonen_amplitude_encoding(q, amplitudes)` |
 # | Möttönen方式を維持しながら、トランスパイル時に実数振幅をバインドする | `mottonen_amplitude_encoding(q, amps)`と`bindings={"amps": [...]}` |
 # | 実行時の角度バインドにより1つのMöttönen回路を再利用する | `mottonen_amplitude_encoding_from_angles(q, ry, rz)`と`parameters=[...]` |
 # | 移行中も既存コードを動作させる | `amplitude_encoding_from_angles(...)`（互換ラッパー） |
 #
-# 汎用と明示的な振幅APIは同じ目標状態を準備しますが、バックエンドは汎用操作だけを別の状態準備方法で実現できます。
+# 汎用と明示的な振幅APIは同じ目標状態を準備しますが、エンジンは汎用操作だけを別の状態準備方法で実現できます。
 
 
 # %%

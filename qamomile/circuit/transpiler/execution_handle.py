@@ -10,6 +10,11 @@ from collections.abc import Callable, Mapping, Sequence
 from enum import Enum
 from typing import Any, Generic, TypeVar
 
+from qamomile.circuit.transpiler.execution_snapshot import (
+    ExecutionSnapshot,
+    ExecutionSnapshotKind,
+)
+
 ResultT = TypeVar("ResultT")
 MappedT = TypeVar("MappedT")
 
@@ -146,18 +151,18 @@ class ExecutionReference:
 
 
 class ExecutionHandle(ABC, Generic[ResultT]):
-    """Expose a backend execution without forcing immediate result retrieval."""
+    """Expose an engine execution without forcing immediate result retrieval."""
 
     @abstractmethod
     def result(self, timeout: float | None = None) -> ResultT:
-        """Wait for and return the backend-neutral raw result.
+        """Wait for and return the engine-neutral raw result.
 
         Args:
             timeout (float | None): Maximum local wait in seconds. ``None``
                 delegates the wait policy to the provider.
 
         Returns:
-            ResultT: Raw result normalized by the backend executor.
+            ResultT: Raw result normalized by the engine executor.
 
         Raises:
             TimeoutError: If the local wait expires before completion.
@@ -165,14 +170,14 @@ class ExecutionHandle(ABC, Generic[ResultT]):
         raise NotImplementedError
 
     async def result_async(self, timeout: float | None = None) -> ResultT:
-        """Wait asynchronously for the backend-neutral raw result.
+        """Wait asynchronously for the engine-neutral raw result.
 
         Args:
             timeout (float | None): Maximum local wait in seconds. Defaults to
                 provider behavior when ``None``.
 
         Returns:
-            ResultT: Raw result normalized by the backend executor.
+            ResultT: Raw result normalized by the engine executor.
 
         Raises:
             TimeoutError: If the local wait expires before completion.
@@ -212,6 +217,28 @@ class ExecutionHandle(ABC, Generic[ResultT]):
             tuple[ExecutionReference, ...]: Secret-free provider references.
         """
         return ()
+
+    def snapshot(self) -> ExecutionSnapshot:
+        """Capture one remote execution without fetching its result.
+
+        Adapters exposing several logical references must override this method
+        with an explicit reconstruction structure. A provider reference may
+        itself contain multiple physical job IDs.
+
+        Returns:
+            ExecutionSnapshot: One opaque provider execution.
+
+        Raises:
+            ValueError: If references are absent or their grouping is unknown.
+        """
+        references = self.references()
+        if len(references) != 1:
+            raise ValueError(
+                "This execution does not expose one restorable reference; "
+                "provide an explicit execution snapshot for local values or "
+                "multiple references"
+            )
+        return ExecutionSnapshot(ExecutionSnapshotKind.REMOTE, reference=references[0])
 
     def metadata(self) -> Mapping[str, Any]:
         """Return optional provider execution metadata.
@@ -265,6 +292,18 @@ class CompletedExecutionHandle(ExecutionHandle[ResultT]):
         """
         return JobStatus.COMPLETED
 
+    def snapshot(self) -> ExecutionSnapshot:
+        """Capture the already available raw result without waiting.
+
+        Returns:
+            ExecutionSnapshot: Owned, type-preserving local value.
+
+        Raises:
+            TypeError: If the value contains unsupported result objects.
+            ValueError: If the value is nonfinite or cyclic.
+        """
+        return ExecutionSnapshot(ExecutionSnapshotKind.LOCAL, value=self._value)
+
 
 class MappedExecutionHandle(ExecutionHandle[MappedT], Generic[ResultT, MappedT]):
     """Lazily transform another execution handle's result.
@@ -272,21 +311,28 @@ class MappedExecutionHandle(ExecutionHandle[MappedT], Generic[ResultT, MappedT])
     Args:
         source (ExecutionHandle[ResultT]): Underlying execution handle.
         transform (Callable[[ResultT], MappedT]): Result transformation.
+        snapshot_source (bool): Whether the owning executable reconstructs
+            this transformation when restoring the source. Defaults to False.
     """
 
     def __init__(
         self,
         source: ExecutionHandle[ResultT],
         transform: Callable[[ResultT], MappedT],
+        *,
+        snapshot_source: bool = False,
     ) -> None:
         """Initialize a lazy mapped execution.
 
         Args:
             source (ExecutionHandle[ResultT]): Underlying execution handle.
             transform (Callable[[ResultT], MappedT]): Result transformation.
+            snapshot_source (bool): Allow source snapshots only when the owner
+                rebuilds the transformation on restore. Defaults to False.
         """
         self._source = source
         self._transform = transform
+        self._snapshot_source = snapshot_source
         self._has_result = False
         self._result: MappedT | None = None
 
@@ -353,6 +399,26 @@ class MappedExecutionHandle(ExecutionHandle[MappedT], Generic[ResultT, MappedT])
             tuple[ExecutionReference, ...]: Source references.
         """
         return self._source.references()
+
+    def snapshot(self) -> ExecutionSnapshot:
+        """Capture a source whose mapping is rebuilt by its owning executable.
+
+        Python callables are never serialized. Arbitrary mappings must supply
+        an adapter-specific restoration recipe instead of losing conversion.
+
+        Returns:
+            ExecutionSnapshot: Source reconstruction structure.
+
+        Raises:
+            ValueError: If the mapping has no declared restoration contract.
+            TypeError: If a local source value cannot be saved.
+        """
+        if not self._snapshot_source:
+            raise ValueError(
+                "Cannot snapshot an arbitrary mapped execution: its result "
+                "transformation must be reconstructed by the owning executable"
+            )
+        return self._source.snapshot()
 
     def metadata(self) -> Mapping[str, Any]:
         """Return source execution metadata.
@@ -479,23 +545,69 @@ class CompositeExecutionHandle(ExecutionHandle[tuple[ResultT, ...]]):
         return tuple(handle.raw_status() for handle in self._handles)
 
     def cancel(self) -> None:
-        """Request cancellation of every unfinished child execution."""
+        """Attempt cancellation of every child not known to be terminal.
+
+        A status lookup failure leaves the child's state unknown, so cancellation
+        is still attempted. Failures are reported together after all children
+        have been visited, retaining the original exceptions and tracebacks.
+
+        Raises:
+            ExceptionGroup: If any child status lookup or cancellation fails.
+        """
+        failures: list[Exception] = []
         for handle in self._handles:
-            if handle.status() not in {
-                JobStatus.COMPLETED,
-                JobStatus.FAILED,
-                JobStatus.CANCELLED,
-            }:
+            try:
+                status = handle.status()
+            except Exception as error:
+                failures.append(error)
+            else:
+                if status in {
+                    JobStatus.COMPLETED,
+                    JobStatus.FAILED,
+                    JobStatus.CANCELLED,
+                }:
+                    continue
+            try:
                 handle.cancel()
+            except Exception as error:
+                failures.append(error)
+        if failures:
+            raise ExceptionGroup(
+                "Failed to cancel one or more child executions", failures
+            )
 
     def references(self) -> tuple[ExecutionReference, ...]:
-        """Flatten child execution references.
+        """Return the legacy one-reference-per-child view.
+
+        This flat view cannot preserve child boundaries when a child exposes
+        zero or multiple references. Use :meth:`snapshot` to retain local
+        results and nested groups in their original positions.
 
         Returns:
-            tuple[ExecutionReference, ...]: Ordered child references.
+            tuple[ExecutionReference, ...]: Ordered child references, or an
+                empty tuple when any child does not expose exactly one.
         """
-        return tuple(
-            reference for handle in self._handles for reference in handle.references()
+        references = []
+        for handle in self._handles:
+            child_references = handle.references()
+            if len(child_references) != 1:
+                return ()
+            references.append(child_references[0])
+        return tuple(references)
+
+    def snapshot(self) -> ExecutionSnapshot:
+        """Capture all children with their original tuple boundaries.
+
+        Returns:
+            ExecutionSnapshot: Ordered nested execution structure.
+
+        Raises:
+            ValueError: If a child has no supported reconstruction contract.
+            TypeError: If a local child contains unsupported result objects.
+        """
+        return ExecutionSnapshot(
+            ExecutionSnapshotKind.COMPOSITE,
+            children=tuple(handle.snapshot() for handle in self._handles),
         )
 
     def metadata(self) -> Mapping[str, Any]:

@@ -68,6 +68,7 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperationType,
     MeasureOperation,
     MeasureQFixedOperation,
+    MeasureQIntOperation,
     MeasureVectorOperation,
     SymbolicControlledU,
 )
@@ -833,6 +834,7 @@ class _BlockInverter:
                 MeasureOperation,
                 MeasureVectorOperation,
                 MeasureQFixedOperation,
+                MeasureQIntOperation,
             ),
         ):
             raise NotImplementedError(
@@ -2408,7 +2410,7 @@ class InverseGate:
             _as_value(binding.active_handle.value, "inverse qkernel input")
             for binding in quantum_bindings
         ]
-        # `InverseBlockOperation` stores the scalar backend width separately
+        # `InverseBlockOperation` stores the scalar engine width separately
         # from operand/results lists: a Vector[Qubit] contributes many scalar
         # qubits here but remains a single operand/result value.
         static_widths = [static_quantum_width(value) for value in quantum_values]
@@ -2677,7 +2679,7 @@ def inverse(
     `QKernel` objects, then inverted with the same block walker used for
     user-defined kernels. Qkernel-like composite gate callables created by
     ``qmc.composite_gate`` reuse their wrapped qkernel body. Known QFT/IQFT
-    functions map directly to their counterpart so backend-native composite
+    functions map directly to their counterpart so engine-native composite
     emission remains available. Opaque Oracles retain their original
     definition and cost boundary while the call records an inverse transform;
     the result can be passed directly to ``qmc.control``. Inverting an already
@@ -2703,7 +2705,7 @@ def inverse(
             classical values are supported for UInt carries with a constant
             additive recurrence and for unchanged Float carries. Nonzero Float
             recurrences, non-additive recurrences, and coupled carries are
-            rejected uniformly before backend emission.
+            rejected uniformly before engine emission.
 
     Example:
         >>> import qamomile.circuit as qmc

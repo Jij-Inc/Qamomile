@@ -1,5 +1,6 @@
 """Tests for QBraidExecutor.estimate() counts-based expectation value."""
 
+import json
 import math
 from unittest.mock import MagicMock
 
@@ -9,6 +10,8 @@ from qiskit import QuantumCircuit
 from qiskit.circuit.random import random_circuit
 from qiskit.quantum_info import Statevector, random_pauli_list
 
+import qamomile.circuit as qmc
+from qamomile.circuit.transpiler import JobSnapshot
 from qamomile.circuit.transpiler.errors import ExecutionError
 from qamomile.circuit.transpiler.execution_request import (
     CircuitInvocation,
@@ -18,6 +21,7 @@ from qamomile.circuit.transpiler.execution_request import (
 from qamomile.circuit.transpiler.parameter_binding import ParameterMetadata
 from qamomile.observable import Hamiltonian, Pauli, PauliOperator, X, Y, Z
 from qamomile.qbraid.executor import QBraidExecutor
+from qamomile.qiskit import QiskitTranspiler
 from qamomile.qiskit.observable import hamiltonian_to_sparse_pauli_op
 
 # ---------------------------------------------------------------------------
@@ -222,6 +226,50 @@ class TestConstantTerm:
         assert math.isclose(result, 3.14, abs_tol=1e-10)
         # No circuits should have been submitted
         device.run.assert_not_called()
+
+    def test_public_job_snapshot_restores_without_provider_calls(self, monkeypatch):
+        """Local constants restore through the public API without qBraid retrieval."""
+
+        @qmc.qkernel
+        def constant_expectation(observable: qmc.Observable) -> qmc.Float:
+            """Return an observable expectation over the zero state.
+
+            Args:
+                observable (qmc.Observable): Observable evaluated on one zero qubit.
+
+            Returns:
+                qmc.Float: Expectation value of the supplied observable.
+            """
+            qubits = qmc.qubit_array(1, "qubits")
+            return qmc.expval(qubits, observable)
+
+        observable = Hamiltonian()
+        observable.constant = 0.25
+        executable = QiskitTranspiler().transpile(
+            constant_expectation, bindings={"observable": observable}
+        )
+        device = _mock_device_multi([])
+        executor = QBraidExecutor(device=device)
+        job = executable.run(executor)
+        saved = JobSnapshot.from_dict(json.loads(json.dumps(job.snapshot().to_dict())))
+        submit = MagicMock(side_effect=AssertionError("Restore must not submit a job"))
+        retrieve = MagicMock(
+            side_effect=AssertionError("Local values need no retrieval")
+        )
+        monkeypatch.setattr(executor, "submit_estimate", submit)
+        monkeypatch.setattr(executor, "restore", retrieve)
+
+        restored = executable.restore(executor, saved)
+
+        assert saved.executions == ()
+        assert type(restored) is type(job)
+        assert type(restored.result()) is float
+        np.testing.assert_allclose(
+            [restored.result(), job.result()], [0.25, 0.25], atol=1e-12, rtol=1e-12
+        )
+        device.run.assert_not_called()
+        submit.assert_not_called()
+        retrieve.assert_not_called()
 
     def test_constant_plus_pauli(self):
         """H = 2.0 + Z0 on |0>."""

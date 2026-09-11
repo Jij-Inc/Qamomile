@@ -7,7 +7,7 @@ from typing import Any, Generic, TypeVar
 
 from qamomile.circuit.ir.value import ValueLike
 
-# Re-export for backward compatibility (used by backends and passes)
+# Re-export for backward compatibility (used by engines and passes)
 from qamomile.circuit.transpiler.classical_executor import (
     ClassicalExecutor as ClassicalExecutor,  # noqa: F401
 )
@@ -49,7 +49,7 @@ __all__ = [
     "QuantumExecutor",
 ]
 
-T = TypeVar("T")  # Backend circuit type
+T = TypeVar("T")  # Engine circuit type
 
 
 @dataclasses.dataclass
@@ -110,7 +110,7 @@ class ExecutableProgram(Generic[T]):
         This property enforces Qamomile's C->Q->C execution pattern.
 
         Returns:
-            The backend-specific quantum circuit
+            The engine-specific quantum circuit
 
         Raises:
             ExecutionError: If no quantum circuit exists
@@ -142,7 +142,7 @@ class ExecutableProgram(Generic[T]):
         """Submit a multi-shot execution and return its lazy job.
 
         Args:
-            executor (QuantumExecutor[T]): Backend-specific quantum executor.
+            executor (QuantumExecutor[T]): Engine-specific quantum executor.
             shots (int): Number of shots to run.
             bindings (dict[str, Any] | None): Parameter bindings. Supports
                 three formats:
@@ -180,7 +180,7 @@ class ExecutableProgram(Generic[T]):
         """Submit one execution and return its lazy result job.
 
         Args:
-            executor (QuantumExecutor[T]): Backend-specific quantum executor.
+            executor (QuantumExecutor[T]): Engine-specific quantum executor.
             bindings (dict[str, Any] | None): Parameter bindings. Supports
                 three formats:
                 - Vector: {"gammas": [0.1, 0.2], "betas": [0.3, 0.4]}
@@ -217,15 +217,18 @@ class ExecutableProgram(Generic[T]):
         snapshot: JobSnapshot,
         bindings: dict[str, Any] | None = None,
     ) -> SampleJob[Any] | RunJob[Any] | ExpvalJob:
-        """Restore a provider execution with this program's typed result ABI.
+        """Restore saved executions with this program's typed result ABI.
 
-        The snapshot stores only provider identifiers and public operation
-        metadata. Pass the original runtime bindings explicitly so Qamomile can
-        reproduce classical pre- and post-processing without persisting
-        caller-owned application data.
+        Snapshots retain provider identifiers, completed local raw values, and
+        ordered execution groups. Legacy flat provider snapshots remain
+        supported. Reuse the same compiled program and pass the original runtime
+        bindings explicitly to reproduce classical pre- and post-processing.
+        Credentials, arbitrary bindings, and Python callables are not saved.
+        Restoration reconnects to remote jobs without resubmitting or waiting
+        for results; local values need no provider restoration support.
 
         Args:
-            executor (QuantumExecutor[T]): Backend adapter configured with the
+            executor (QuantumExecutor[T]): Engine adapter configured with the
                 provider credentials and target used by the original job.
             snapshot (JobSnapshot): Snapshot returned by the original public
                 job's ``snapshot()`` method.
@@ -265,7 +268,7 @@ class ExecutableProgram(Generic[T]):
         """Submit a pure expectation execution through the compatibility API.
 
         Args:
-            executor (QuantumExecutor[T]): Backend execution adapter.
+            executor (QuantumExecutor[T]): Engine execution adapter.
             bindings (dict[str, Any] | None): Runtime public bindings.
             estimation (EstimationAccuracy | None): Optional accuracy policy.
 

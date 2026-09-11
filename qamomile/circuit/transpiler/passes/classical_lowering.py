@@ -11,23 +11,23 @@ runtime ``IfOperation``s to ``RuntimeClassicalExpr(SELECT)`` expressions
 (``result = true if cond else false``), so branch merges ride the same
 runtime-expression machinery as every other measurement-derived classical
 op: consumer-based segment placement, host-side per-shot evaluation, and
-backend runtime-expression emission. See :meth:`_lower_if_merges`.
+engine runtime-expression emission. See :meth:`_lower_if_merges`.
 
 Why this pass exists:
 
 The pre-``RuntimeClassicalExpr`` design left runtime classical ops in
 their compile-time IR form (``CompOp`` etc.) all the way to emit, where
 the emit pass had to fold-or-translate via ``evaluate_classical_predicate``
-+ ``_build_runtime_predicate_expr``. This put backend-specific lowering
++ ``_build_runtime_predicate_expr``. This put engine-specific lowering
 logic inside the emit pass and used the ``bindings`` dict as a polymorphic
-slot holding either Python scalars (fold result) or backend ``Expr``
+slot holding either Python scalars (fold result) or engine ``Expr``
 objects.
 
 By identifying runtime classical ops at IR level and giving them their
 own node type, we:
 
 - Make "runtime evaluation required" structurally explicit in the IR.
-- Move backend lowering to a dedicated emit hook (``_emit_runtime_classical_expr``).
+- Move engine lowering to a dedicated emit hook (``_emit_runtime_classical_expr``).
 - Preserve the existing fold path for ops that *can* fold at compile or
   emit time (loop-bound or parameter-bound) — those are not measurement-
   derived and stay as ``CompOp``/``CondOp``/``NotOp``/``BinOp``.
@@ -90,7 +90,7 @@ class ClassicalLoweringPass(Pass[Block, Block]):
        as ``AnalyzePass`` (forward propagation from ``MeasureOperation``
        results through the dependency graph).
     2. Walks operations recursively (through ``HasNestedOps``).
-    3. For each backend-expressible ``CompOp`` / ``CondOp`` / ``NotOp`` /
+    3. For each engine-expressible ``CompOp`` / ``CondOp`` / ``NotOp`` /
        ``BinOp`` whose result UUID is in the taint set, replaces it with an
        equivalent ``RuntimeClassicalExpr`` (same operands and result Value,
        only the op type and kind enum change). Internal slice-clamp ``MIN``
@@ -218,7 +218,7 @@ class ClassicalLoweringPass(Pass[Block, Block]):
         it as ``RuntimeClassicalExpr(SELECT)`` right after the ``IfOperation``
         lets every existing ``RuntimeClassicalExpr`` mechanism apply
         unchanged: consumer-based segment placement, host-side evaluation by
-        ``ClassicalExecutor``, and backend runtime-expression emission.
+        ``ClassicalExecutor``, and engine runtime-expression emission.
         Without this, the merge value is only reachable through emit-time
         clbit aliasing, which silently collapses to one branch's bit when
         the branch sources differ.
@@ -714,7 +714,7 @@ def _collect_while_operand_uuids(operations: list[Operation]) -> set[str]:
     of every merge whose output is already protected. The *initial*
     condition (``operands[0]``) is deliberately not protected — a
     merged initial condition lowers to a ``SELECT`` and reaches the
-    backend as an ordinary runtime expression, exactly like an ``if``
+    engine as an ordinary runtime expression, exactly like an ``if``
     condition.
 
     Args:

@@ -776,7 +776,7 @@ controlled_increment_demo.draw(n=4, control_index=3, fold_loops=False)
 # asserting the expected exception with a small `expect_error`
 # helper. It ends with a concrete sliced-QFT case that is supported
 # and worth keeping as a regression example for nested controlled
-# emission on backends that can convert the nested block to a gate
+# emission on engines that can convert the nested block to a gate
 # (Qiskit in this tutorial).
 #
 # | Case | Mode | Exception |
@@ -1016,7 +1016,7 @@ expect_error(
 # it to form a `q[:m]` slice before calling QFT. Qamomile strips the
 # slice marker inside the nested controlled block after borrow
 # checking, so a controlled-U emitter whose block-to-gate conversion
-# succeeds can lower the sliced composite block. Backends without
+# succeeds can lower the sliced composite block. Engines without
 # block-to-gate conversion may still reject this multi-target fallback.
 
 

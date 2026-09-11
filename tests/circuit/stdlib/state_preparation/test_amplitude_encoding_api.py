@@ -1,4 +1,4 @@
-"""Cross-backend tests for the generic and explicit amplitude-encoding APIs."""
+"""Cross-engine tests for the generic and explicit amplitude-encoding APIs."""
 
 from __future__ import annotations
 
@@ -182,10 +182,10 @@ def _assert_sample_and_expval(
     api: EncodingApi,
     amplitudes: list[complex],
 ) -> None:
-    """Transpile and execute sampling and expval paths for one backend.
+    """Transpile and execute sampling and expval paths for one engine.
 
     Args:
-        sdk_transpiler: Supported-backend fixture case.
+        sdk_transpiler: Supported-engine fixture case.
         api (EncodingApi): Public API variant to exercise.
         amplitudes (list[complex]): Unnormalized state amplitudes.
     """
@@ -224,21 +224,19 @@ def _assert_sample_and_expval(
 
 @pytest.mark.parametrize("api", _ENCODING_APIS)
 @pytest.mark.parametrize(("n_qubits", "seed"), _RANDOM_CASES)
-def test_randomized_sampling_and_expval_on_every_backend(
+def test_randomized_sampling_and_expval_on_every_engine(
     sdk_transpiler,
     api: EncodingApi,
     n_qubits: int,
     seed: int,
 ) -> None:
-    """Both APIs execute randomized sampling and expval on every backend."""
+    """Both APIs execute randomized sampling and expval on every engine."""
     amplitudes = _random_complex_amplitudes(n_qubits, seed)
     _assert_sample_and_expval(sdk_transpiler, api, amplitudes)
 
 
 @pytest.mark.parametrize("api", _ENCODING_APIS)
-def test_basis_state_boundary_on_every_backend(
-    sdk_transpiler, api: EncodingApi
-) -> None:
+def test_basis_state_boundary_on_every_engine(sdk_transpiler, api: EncodingApi) -> None:
     """Both APIs execute a sparse computational-basis boundary case."""
     _assert_sample_and_expval(
         sdk_transpiler,

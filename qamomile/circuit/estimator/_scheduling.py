@@ -62,6 +62,7 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperation,
     MeasureOperation,
     MeasureQFixedOperation,
+    MeasureQIntOperation,
     MeasureVectorOperation,
     ProjectOperation,
     ResetOperation,
@@ -279,6 +280,7 @@ def _operation_depth_is_dependency_schedulable(
             MeasureOperation,
             MeasureVectorOperation,
             MeasureQFixedOperation,
+            MeasureQIntOperation,
             ProjectOperation,
             ResetOperation,
             GlobalPhaseOperation,
@@ -288,7 +290,7 @@ def _operation_depth_is_dependency_schedulable(
     if isinstance(operation, InvokeOperation):
         # The selected body or opaque model is scheduled on the invocation's
         # actual operands. ``operation.effects`` is a conservative union over
-        # every backend/strategy implementation and must not serialize an
+        # every engine/strategy implementation and must not serialize an
         # unrelated unitary selection.
         return True
     if isinstance(
@@ -345,6 +347,7 @@ def _operation_has_uniform_intrinsic_completion(
             MeasureOperation,
             MeasureVectorOperation,
             MeasureQFixedOperation,
+            MeasureQIntOperation,
             ProjectOperation,
             ResetOperation,
             GlobalPhaseOperation,

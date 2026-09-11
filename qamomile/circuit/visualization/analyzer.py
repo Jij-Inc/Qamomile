@@ -44,6 +44,7 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperationType,
     MeasureOperation,
     MeasureQFixedOperation,
+    MeasureQIntOperation,
     MeasureVectorOperation,
 )
 from qamomile.circuit.ir.operation.global_phase import GlobalPhaseOperation
@@ -52,7 +53,14 @@ from qamomile.circuit.ir.operation.operation import QInitOperation
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.primitives import QubitType
-from qamomile.circuit.ir.value import ArrayValue, DictValue, Value, ValueBase, ValueLike
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    DictValue,
+    TupleValue,
+    Value,
+    ValueBase,
+    ValueLike,
+)
 from qamomile.circuit.transpiler.block_parameter_binding import (
     align_formal_operands,
 )
@@ -261,6 +269,91 @@ class CircuitAnalyzer:
         self.expand_composite = expand_composite
         self.inline_depth = inline_depth
         self.fold_ifs = fold_ifs
+        self._values_by_uuid = self._collect_source_values(graph)
+
+    @staticmethod
+    def _collect_source_values(graph: Block) -> dict[str, Value]:
+        """Index cast sources without expanding shared or recursive bodies.
+
+        Visit each block, operation, and structural value object once. Callable
+        definitions may be shared or self-referential even when displayed as
+        boxes, so indexing must follow graph identity rather than call paths.
+        Preserve the first encountered object for each SSA UUID.
+
+        Args:
+            graph (Block): Visualization graph whose reachable values to index.
+
+        Returns:
+            dict[str, Value]: Scalar and array values keyed by SSA UUID,
+                including sources nested in callable bodies and view ancestry.
+        """
+        values: dict[str, Value] = {}
+        pending: list[Block | Operation | ValueBase] = [graph]
+        visited: set[int] = set()
+        while pending:
+            node = pending.pop()
+            identity = id(node)
+            if identity in visited:
+                continue
+            visited.add(identity)
+            children: list[Block | Operation | ValueBase] = []
+            if isinstance(node, Block):
+                children.extend(node.input_values)
+                children.extend(
+                    field.value
+                    for slot in node.static_bindings
+                    for field in slot.fields
+                )
+                children.extend(node.parameters.values())
+                children.extend(node.operations)
+                children.extend(node.output_values)
+            elif isinstance(node, Operation):
+                children.extend(node.all_input_values())
+                children.extend(node.results)
+                if isinstance(node, HasNestedOps):
+                    children.extend(
+                        child
+                        for region in node.nested_regions()
+                        for child in region.operations
+                    )
+                if isinstance(node, InvokeOperation) and node.definition is not None:
+                    definition = node.definition
+                    if definition.body is not None:
+                        children.append(definition.body)
+                    children.extend(
+                        implementation.body
+                        for implementation in definition.implementations
+                        if implementation.body is not None
+                    )
+                elif isinstance(node, ControlledUOperation) and node.block is not None:
+                    children.append(node.block)
+                elif isinstance(node, InverseBlockOperation):
+                    if node.source_block is not None:
+                        children.append(node.source_block)
+                    if node.implementation_block is not None:
+                        children.append(node.implementation_block)
+                elif isinstance(node, SelectOperation):
+                    children.extend(node.case_blocks)
+            else:
+                if isinstance(node, Value):
+                    values.setdefault(node.uuid, node)
+                if isinstance(node, TupleValue):
+                    children.extend(node.elements)
+                elif isinstance(node, DictValue):
+                    children.extend(value for entry in node.entries for value in entry)
+                elif isinstance(node, ArrayValue):
+                    children.extend(node.shape)
+                    children.extend(
+                        value
+                        for value in (node.slice_of, node.slice_start, node.slice_step)
+                        if value is not None
+                    )
+                elif isinstance(node, Value):
+                    if node.parent_array is not None:
+                        children.append(node.parent_array)
+                    children.extend(node.element_indices)
+            pending.extend(reversed(children))
+        return values
 
     def _environment_value(
         self,
@@ -1326,7 +1419,7 @@ class CircuitAnalyzer:
                 continue
 
             # Generic: GateOperation, callable/control/inverse boxes,
-            # MeasureOperation, MeasureVectorOperation, MeasureQFixedOperation
+            # MeasureOperation, MeasureVectorOperation, packed-register measures
             if isinstance(
                 op,
                 (
@@ -1334,6 +1427,7 @@ class CircuitAnalyzer:
                     MeasureOperation,
                     MeasureVectorOperation,
                     MeasureQFixedOperation,
+                    MeasureQIntOperation,
                     InverseBlockOperation,
                     ControlledUOperation,
                     InvokeOperation,
@@ -1526,27 +1620,15 @@ class CircuitAnalyzer:
                 terminates_wire=not self._node_key_in_if_branch(node_key),
             )
 
-        if isinstance(op, MeasureQFixedOperation):
-            # ``MeasureQFixedOperation`` is the HYBRID measurement that
-            # ``plan`` later splits into ``MeasureVectorOperation +
-            # DecodeQFixedOperation``.  The visualizer works on the
-            # pre-plan IR so it sees the unsplit form and must resolve
-            # the carrier qubits itself.  The operand is the QFixed
-            # ``Value`` produced by the upstream ``CastOperation``,
-            # which attaches a ``CastMetadata`` whose
-            # ``qubit_logical_ids`` field enumerates the source qubits
-            # in carrier order.  Each entry is of the form
-            # ``f"{root_logical_id}_{idx}"`` (without brackets);
-            # ``QInitOperation`` registers root qubits in
-            # ``qubit_map`` under ``f"{root_logical_id}_[{idx}]"``
-            # (with brackets).  We bridge the two encodings here so
-            # the carrier wires resolve precisely — including the
-            # non-contiguous indices a slice-source cast produces
-            # (e.g. ``cast(q[1::2], QFixed)`` covers root ``{1, 3}``).
+        if isinstance(op, (MeasureQFixedOperation, MeasureQIntOperation)):
+            # Plan later splits packed-register HYBRID operations into vector
+            # measurement plus host-side decode. The pre-plan visualizer
+            # therefore resolves their cast carriers here, including
+            # non-contiguous slice-source layouts.
             qubit_indices = []
             if op.operands:
-                qubit_indices = self._resolve_qfixed_carrier_indices(
-                    op.operands[0], qubit_map, logical_id_remap
+                qubit_indices = self._resolve_cast_carrier_indices(
+                    op.operands[0], qubit_map, logical_id_remap, param_values
                 )
             return VGate(
                 node_key=node_key,
@@ -2456,7 +2538,13 @@ class CircuitAnalyzer:
         self,
         value: ValueBase,
         body_operations: list[Operation],
-    ) -> MeasureOperation | MeasureVectorOperation | MeasureQFixedOperation | None:
+    ) -> (
+        MeasureOperation
+        | MeasureVectorOperation
+        | MeasureQFixedOperation
+        | MeasureQIntOperation
+        | None
+    ):
         """Find a measurement operation that directly produced ``value``.
 
         Args:
@@ -2466,9 +2554,9 @@ class CircuitAnalyzer:
                 scope.
 
         Returns:
-            MeasureOperation | MeasureVectorOperation | MeasureQFixedOperation | None:
-                The direct measurement producer, or None if ``value`` is
-                produced by another operation.
+            MeasureOperation | MeasureVectorOperation | MeasureQFixedOperation |
+                MeasureQIntOperation | None: The direct measurement producer,
+                or None if ``value`` is produced by another operation.
         """
         target_uuid = getattr(value, "uuid", None)
         parent_array = getattr(value, "parent_array", None)
@@ -2476,7 +2564,12 @@ class CircuitAnalyzer:
         for candidate in body_operations:
             if not isinstance(
                 candidate,
-                (MeasureOperation, MeasureVectorOperation, MeasureQFixedOperation),
+                (
+                    MeasureOperation,
+                    MeasureVectorOperation,
+                    MeasureQFixedOperation,
+                    MeasureQIntOperation,
+                ),
             ):
                 continue
             for result in candidate.results:
@@ -2490,7 +2583,12 @@ class CircuitAnalyzer:
     def _measure_condition_qubit_indices(
         self,
         value: ValueBase,
-        op: MeasureOperation | MeasureVectorOperation | MeasureQFixedOperation,
+        op: (
+            MeasureOperation
+            | MeasureVectorOperation
+            | MeasureQFixedOperation
+            | MeasureQIntOperation
+        ),
         qubit_map: dict[str, int],
         logical_id_remap: dict[str, str],
         param_values: dict,
@@ -2499,8 +2597,9 @@ class CircuitAnalyzer:
 
         Args:
             value (ValueBase): IF condition value produced by ``op``.
-            op (MeasureOperation | MeasureVectorOperation | MeasureQFixedOperation):
-                Measurement operation that directly produced ``value``.
+            op (MeasureOperation | MeasureVectorOperation | MeasureQFixedOperation |
+                MeasureQIntOperation): Measurement operation that directly
+                produced ``value``.
             qubit_map (dict[str, int]): Mapping from logical_id to wire index.
             logical_id_remap (dict[str, str]): Mapping from formal-parameter
                 logical_ids to actual-argument logical_ids in scope.
@@ -2633,7 +2732,12 @@ class CircuitAnalyzer:
 
     def _measure_qubit_indices(
         self,
-        op: MeasureOperation | MeasureVectorOperation | MeasureQFixedOperation,
+        op: (
+            MeasureOperation
+            | MeasureVectorOperation
+            | MeasureQFixedOperation
+            | MeasureQIntOperation
+        ),
         qubit_map: dict[str, int],
         logical_id_remap: dict[str, str],
         param_values: dict,
@@ -2641,8 +2745,9 @@ class CircuitAnalyzer:
         """Resolve the qubit wires touched by a measurement operation.
 
         Args:
-            op (MeasureOperation | MeasureVectorOperation | MeasureQFixedOperation):
-                Measurement operation whose quantum operand should be resolved.
+            op (MeasureOperation | MeasureVectorOperation | MeasureQFixedOperation |
+                MeasureQIntOperation): Measurement operation whose quantum
+                operand should be resolved.
             qubit_map (dict[str, int]): Mapping from logical_id to wire index.
             logical_id_remap (dict[str, str]): Mapping from formal-parameter
                 logical_ids to actual-argument logical_ids in scope.
@@ -2654,9 +2759,9 @@ class CircuitAnalyzer:
         """
         if not op.operands:
             return []
-        if isinstance(op, MeasureQFixedOperation):
-            return self._resolve_qfixed_carrier_indices(
-                op.operands[0], qubit_map, logical_id_remap
+        if isinstance(op, (MeasureQFixedOperation, MeasureQIntOperation)):
+            return self._resolve_cast_carrier_indices(
+                op.operands[0], qubit_map, logical_id_remap, param_values
             )
         indices = self._resolve_operand_to_qubit_indices(
             op.operands[0], qubit_map, logical_id_remap, param_values
@@ -4236,42 +4341,51 @@ class CircuitAnalyzer:
             return count
         return None
 
-    def _resolve_qfixed_carrier_indices(
+    def _resolve_cast_carrier_indices(
         self,
         operand: Value,
         qubit_map: dict[str, int],
         logical_id_remap: dict[str, str],
+        param_values: dict,
     ) -> list[int]:
-        """Resolve a QFixed measurement operand to its carrier wire indices.
+        """Resolve a cast-register measurement to its carrier wire indices.
 
-        The operand is the QFixed ``Value`` produced by ``CastOperation``;
-        its ``metadata.cast.qubit_logical_ids`` carries one entry per
-        carrier qubit in measurement order, formatted as
-        ``f"{root_logical_id}_{idx}"``.  ``QInitOperation`` registers
-        each root element in ``qubit_map`` as ``f"{root_logical_id}_[{idx}]"``.
-        This helper bridges the two encodings: it parses each cast
-        carrier string, applies ``logical_id_remap`` to the root prefix
-        (in case the cast lives in an inlined block), reformats with
-        brackets, and looks up the result in ``qubit_map``.
+        Follow the cast metadata's source UUID, which also survives callable
+        returns and branch merges, so bindings applied after serialization can
+        resolve a formerly symbolic width. The ordinary operand resolver keeps
+        the source view's ordered root wires and recognizes an empty view.
+        Fall back to ``metadata.cast.qubit_logical_ids`` when the source is
+        unavailable; these keys use ``root_index`` instead of the visualizer's
+        ``root_[index]`` spelling.
 
         Args:
-            operand (Value): The QFixed-typed operand of a
-                ``MeasureQFixedOperation`` (i.e. the result of a prior
-                ``CastOperation``).
+            operand (Value): QFixed- or QInt-typed value carrying cast source
+                metadata, including a callable result or branch merge.
             qubit_map (dict[str, int]): Mapping from logical_id-derived
                 keys to qubit wire indices.
             logical_id_remap (dict[str, str]): Mapping from formal-
                 parameter logical_ids to actual-argument logical_ids,
                 used when the cast occurs inside an inlined block.
+            param_values (dict): Bound parameter and loop values used to
+                resolve the source's width and slice bounds.
 
         Returns:
-            list[int]: The wire indices the QFixed measurement targets,
-                in carrier (most-significant-bit-first) order.  Empty
-                when the operand carries no cast metadata or when no
-                carrier entry resolves to a known wire.
+            list[int]: Wire indices targeted by the packed-register
+                measurement in carrier (least-significant-bit-first) order.
+                Empty for zero-width sources or when neither the source nor
+                the cast metadata resolves to known wires.
         """
-        cast_meta = getattr(operand.metadata, "cast", None)
-        if cast_meta is None or not cast_meta.qubit_logical_ids:
+        cast_meta = operand.metadata.cast
+        if cast_meta is None:
+            return []
+        source = self._values_by_uuid.get(cast_meta.source_uuid)
+        if source is not None:
+            source_indices = self._resolve_operand_to_qubit_indices(
+                source, qubit_map, logical_id_remap, param_values
+            )
+            if source_indices is not None:
+                return source_indices
+        if not cast_meta.qubit_logical_ids:
             return []
         indices: list[int] = []
         for carrier_key in cast_meta.qubit_logical_ids:

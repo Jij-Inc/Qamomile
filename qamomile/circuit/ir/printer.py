@@ -33,6 +33,7 @@ from qamomile.circuit.ir.operation import (
     InvokeOperation,
     MeasureOperation,
     MeasureQFixedOperation,
+    MeasureQIntOperation,
     MeasureVectorOperation,
     Operation,
     ProjectOperation,
@@ -47,7 +48,10 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     NotOp,
     UnaryMathOp,
 )
-from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
+from qamomile.circuit.ir.operation.classical_ops import (
+    DecodeQFixedOperation,
+    DecodeQIntOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
     IfMerge,
@@ -338,8 +342,12 @@ def _format_flat_op(op: Operation) -> str:
         return _format_measure(op, "measure_vector")
     if isinstance(op, MeasureQFixedOperation):
         return _format_measure(op, "measure_qfixed")
+    if isinstance(op, MeasureQIntOperation):
+        return _format_measure(op, "measure_qint")
     if isinstance(op, DecodeQFixedOperation):
         return _format_simple(op, "decode_qfixed")
+    if isinstance(op, DecodeQIntOperation):
+        return _format_simple(op, "decode_qint")
     if isinstance(op, CastOperation):
         return _format_cast(op)
     if isinstance(op, PauliEvolveOp):

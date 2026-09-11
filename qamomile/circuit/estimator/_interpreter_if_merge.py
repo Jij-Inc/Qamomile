@@ -222,6 +222,19 @@ class _IfMergeInterpreter(_WhileInterpreter):
                     nondeterministic_condition,
                 )
             if merge.result.type.is_quantum():
+                true_size = _qubit_value_size(merge.true_value, true_resolver)
+                false_size = _qubit_value_size(merge.false_value, false_resolver)
+                if taken is True:
+                    selected_size = true_size
+                elif taken is False:
+                    selected_size = false_size
+                else:
+                    selected_size = _piecewise(
+                        sp.Max(true_size, false_size),
+                        _piecewise(true_size, false_size, predicate),
+                        nondeterministic_condition,
+                    )
+                resolver.bind_quantum_size(merge.result, selected_size)
                 resolver.bind(merge.result, cast(sp.Expr, merged))
                 selected_values = (
                     (merge.true_value,)

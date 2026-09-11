@@ -32,6 +32,7 @@ from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.gate import (
     MeasureOperation,
     MeasureQFixedOperation,
+    MeasureQIntOperation,
     MeasureVectorOperation,
     ProjectOperation,
 )
@@ -450,7 +451,13 @@ def _direct_observation_result_uuids(operation: Operation) -> tuple[str, ...]:
     """
     if isinstance(
         operation,
-        (MeasureOperation, MeasureVectorOperation, MeasureQFixedOperation, ExpvalOp),
+        (
+            MeasureOperation,
+            MeasureVectorOperation,
+            MeasureQFixedOperation,
+            MeasureQIntOperation,
+            ExpvalOp,
+        ),
     ):
         return tuple(result.uuid for result in operation.results)
     if isinstance(operation, ProjectOperation) and len(operation.results) > 1:

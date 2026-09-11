@@ -519,7 +519,8 @@ class SelectGate:
                 splitting crosses an argument boundary, no target argument is
                 given, or a specialized case is not a supported unitary on
                 exactly the shared target register.
-            TypeError: On unknown / mistyped forwarded parameters.
+            TypeError: On unknown / mistyped forwarded parameters, or an
+                unsupported QInt target handle.
             QubitConsumedError: If an index or target qubit was already
                 consumed by an earlier operation.
             QubitBorrowConflictError: If index and target array views overlap

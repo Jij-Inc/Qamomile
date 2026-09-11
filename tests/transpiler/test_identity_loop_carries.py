@@ -18,14 +18,14 @@ class _StubEmitPass:
     """Provide the resolver surface used by RegionArg emission helpers."""
 
     def __init__(self) -> None:
-        """Create a stub with no backend runtime parameters."""
+        """Create a stub with no engine runtime parameters."""
         self._resolver = ValueResolver()
 
     def _get_or_create_parameter(self, key: str, value_uuid: str) -> object:
         """Fail if a test unexpectedly takes the symbolic parameter path.
 
         Args:
-            key (str): Requested backend parameter name.
+            key (str): Requested engine parameter name.
             value_uuid (str): Requested IR value identity.
 
         Returns:
@@ -35,7 +35,7 @@ class _StubEmitPass:
             AssertionError: Always; these tests require concrete carries.
         """
         raise AssertionError(
-            f"unexpected backend parameter creation for {key!r} ({value_uuid})"
+            f"unexpected engine parameter creation for {key!r} ({value_uuid})"
         )
 
 

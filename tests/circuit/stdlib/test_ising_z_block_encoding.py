@@ -25,7 +25,7 @@ def _identity_case(
 
 def _executor(case: Any) -> Any:
     """Return a local simulator executor for one SDK fixture case."""
-    if case.backend_name == "qiskit":
+    if case.engine_name == "qiskit":
         from qiskit.providers.basic_provider import BasicSimulator
 
         return case.transpiler.executor(backend=BasicSimulator())
@@ -481,14 +481,14 @@ def test_random_complex_ising_lcu_samples_and_estimates_on_every_sdk(
         bindings={"observable": _zero_projector(encoding.num_signal_qubits)},
     )
     observed = float(expval.run(_executor(sdk_transpiler)).result())
-    atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    atol = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed == pytest.approx(success, abs=atol)
 
 
 def test_zero_encoding_samples_and_estimates_on_every_sdk(
     sdk_transpiler: Any,
 ) -> None:
-    """The explicit zero path flips signal and executes on every backend."""
+    """The explicit zero path flips signal and executes on every engine."""
     encoding = qmc.ising_z_block_encoding({}, 1)
 
     @qmc.qkernel

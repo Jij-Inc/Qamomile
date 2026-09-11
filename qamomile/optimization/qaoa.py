@@ -67,7 +67,7 @@ class QAOAConverter(MathematicalProblemConverter):
         decomposition.
 
         Args:
-            transpiler (Transpiler): Backend transpiler to use.
+            transpiler (Transpiler): Engine transpiler to use.
             p (int): Number of QAOA layers.
 
         Returns:
@@ -86,7 +86,7 @@ class QAOAConverter(MathematicalProblemConverter):
         """Transpile a quadratic-only model using the standard QAOA circuit.
 
         Args:
-            transpiler (Transpiler): Backend transpiler to use.
+            transpiler (Transpiler): Engine transpiler to use.
             p (int): Number of QAOA layers.
 
         Returns:
@@ -133,7 +133,7 @@ class QAOAConverter(MathematicalProblemConverter):
         ``ising_cost`` for quadratic and linear terms.
 
         Args:
-            transpiler (Transpiler): Backend transpiler to use.
+            transpiler (Transpiler): Engine transpiler to use.
             p (int): Number of QAOA layers.
 
         Returns:

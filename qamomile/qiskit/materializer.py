@@ -1,4 +1,4 @@
-"""Materialize backend-neutral circuit programs as Qiskit circuits."""
+"""Materialize engine-neutral circuit programs as Qiskit circuits."""
 
 from __future__ import annotations
 
@@ -354,7 +354,7 @@ def _emit_region(
                 circuit.reset(qubit)
             except (NotImplementedError, TypeError, ValueError) as error:
                 raise EmitError(
-                    "This backend cannot emit a qubit reset",
+                    "This engine cannot emit a qubit reset",
                     operation="ResetInstruction",
                 ) from error
             wires[operation.output] = qubit

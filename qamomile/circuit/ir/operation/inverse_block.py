@@ -32,7 +32,7 @@ class InverseBlockOperation(Operation):
 
     The operation stores both the original forward block and a Qamomile-built
     inverse implementation block. Emitters may use ``source_block`` with a
-    backend-native inverse/adjoint primitive, then fall back to
+    engine-native inverse/adjoint primitive, then fall back to
     ``implementation_block`` when native inversion is unavailable.
 
     Operands are ordered as scalar control qubits, target quantum operands,
@@ -180,7 +180,7 @@ class InverseBlockOperation(Operation):
             list[Value]: Quantum operands consumed by the inverse operation
                 after control operands. A vector operand counts as one
                 operand here even though ``num_target_qubits`` stores its
-                scalar backend width.
+                scalar engine width.
         """
         start = self.num_control_qubits
         targets: list["Value"] = []

@@ -15,6 +15,7 @@ from qamomile.circuit.frontend.handle import (
     Matrix,
     Observable,
     QFixed,
+    QInt,
     Qubit,
     Tensor,
     Tuple,
@@ -32,7 +33,13 @@ from qamomile.circuit.ir.serialize.decode import (
     _decode_value_type,
     _DecodeContext,
 )
-from qamomile.circuit.ir.types import DictType, QFixedType, TupleType, ValueType
+from qamomile.circuit.ir.types import (
+    DictType,
+    QFixedType,
+    QUIntType,
+    TupleType,
+    ValueType,
+)
 from qamomile.circuit.ir.value import ArrayValue, ValueLike
 
 from ._opaque_cost import OpaqueCostDecoder
@@ -59,6 +66,7 @@ _FRONTEND_SCALAR_TYPES: dict[str, Any] = {
     "PYTHON_BOOL": bool,
     "QAMOMILE_QUBIT": Qubit,
     "QAMOMILE_QFIXED": QFixed,
+    "QAMOMILE_QINT": QInt,
     "QAMOMILE_OBSERVABLE": Observable,
 }
 
@@ -293,12 +301,17 @@ def _decode_kernel_type_record(
     value_type = _decode_value_type(raw_value_type, ctx)
     annotation = _decode_frontend_annotation(raw_annotation)
     annotation_ndim = _frontend_annotation_ndim(annotation)
-    try:
-        annotation_value_type = handle_type_map(annotation)
-    except TypeError as exc:
-        if annotation is QFixed and isinstance(value_type, QFixedType):
-            annotation_value_type = value_type
-        else:
+    if (
+        annotation is QFixed
+        and isinstance(value_type, QFixedType)
+        or annotation is QInt
+        and isinstance(value_type, QUIntType)
+    ):
+        annotation_value_type = value_type
+    else:
+        try:
+            annotation_value_type = handle_type_map(annotation)
+        except TypeError as exc:
             raise ValueError(
                 f"frontend annotation {annotation!r} has no matching IR type"
             ) from exc
@@ -490,7 +503,18 @@ def _frontend_annotation_ndim(annotation: Any) -> int:
     ranks = {Vector: 1, Matrix: 2, Tensor: 3}
     if origin in ranks:
         return ranks[origin]
-    if origin in {UInt, int, Float, float, Bit, bool, Qubit, QFixed, Observable}:
+    if origin in {
+        UInt,
+        int,
+        Float,
+        float,
+        Bit,
+        bool,
+        Qubit,
+        QFixed,
+        QInt,
+        Observable,
+    }:
         return 0
     if origin in {Tuple, Dict}:
         return 0

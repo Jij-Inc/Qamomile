@@ -1,7 +1,7 @@
 """QURI Parts GateEmitter implementation.
 
 This module provides QuriPartsGateEmitter, which implements the GateEmitter
-protocol for QURI Parts backends.
+protocol for QURI Parts engines.
 
 QURI Parts uses LinearMappedUnboundParametricQuantumCircuit for parametric
 circuits. Angles are specified as dictionaries: {param: coeff, CONST: offset}.
@@ -237,7 +237,7 @@ class QuriPartsGateEmitter:
                 if _is_pure_const(lf_lhs):
                     return _scale_form(lf_rhs, _const_value(lf_lhs))
                 raise QamomileQuriPartsTranspileError(
-                    "QURI Parts backend supports only linear combinations of "
+                    "QURI Parts engine supports only linear combinations of "
                     "parameters; parameter * parameter is non-linear and "
                     "cannot be expressed as a LinearMappedUnboundParametric "
                     "angle. Bind one side to a concrete value first."
@@ -245,7 +245,7 @@ class QuriPartsGateEmitter:
             case BinOpKind.DIV:
                 if not _is_pure_const(lf_rhs):
                     raise QamomileQuriPartsTranspileError(
-                        "QURI Parts backend supports only linear combinations "
+                        "QURI Parts engine supports only linear combinations "
                         "of parameters; division by a parameter is non-linear "
                         "and cannot be expressed as a LinearMappedUnboundParametric "
                         "angle. Bind the divisor to a concrete value first."
@@ -253,18 +253,18 @@ class QuriPartsGateEmitter:
                 divisor = _const_value(lf_rhs)
                 if divisor == 0:
                     raise QamomileQuriPartsTranspileError(
-                        "QURI Parts backend: division by zero in symbolic angle."
+                        "QURI Parts engine: division by zero in symbolic angle."
                     )
                 return _scale_form(lf_lhs, 1.0 / divisor)
             case BinOpKind.POW | BinOpKind.FLOORDIV | BinOpKind.MOD:
                 raise QamomileQuriPartsTranspileError(
-                    f"QURI Parts backend supports only linear combinations of "
+                    f"QURI Parts engine supports only linear combinations of "
                     f"parameters; '{kind.name}' is not supported on parametric "
                     f"angles. Bind the parameter to a concrete value first."
                 )
             case _:
                 raise QamomileQuriPartsTranspileError(
-                    f"QURI Parts backend: unsupported BinOpKind '{kind}' on "
+                    f"QURI Parts engine: unsupported BinOpKind '{kind}' on "
                     f"parametric angle."
                 )
 
@@ -760,7 +760,7 @@ class QuriPartsGateEmitter:
 
         Returns:
             bool: True because ``gate_inverse`` can invert concrete
-            QURI Parts circuits. The backend still reports no reusable
+            QURI Parts circuits. The engine still reports no reusable
             gate support, so inverse blocks normally use the
             transpiler-level native path rather than the shared
             ``blockvalue_to_gate`` path.

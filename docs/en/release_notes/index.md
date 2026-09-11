@@ -4,6 +4,7 @@ slug: release-notes
 
 # Release Notes
 
+- [v0.15.1](v0_15_1) — Grover Adaptive Search circuits, IBM Quantum hardware and HUGR execution, unsigned integer measurement with `QInt`, and job restoration including local results
 - [v0.15.0](v0_15_0) — expanded resource estimation with circuit width, category-specific depth, and derivation metadata; Amazon Braket support; composable Oracle transformations and an engine-independent asynchronous execution lifecycle
 - [v0.14.0](v0_14_0) — composable LCU block encodings and `qmc.qsvt`, lower-width Shor order finding and the quantum stage of Ekerå–Håstad factoring, plus `qmc.struct`, `qmc.bit_array`, and `qmc.log2`/`qmc.ceil` for register-width calculations
 - [v0.13.0](v0_13_0) — semantic `qmc.select`, exact `qmc.global_phase`, loop-carried scalars, and generic versus explicit Möttönen amplitude encoding; Qiskit moved to the `qiskit` extra

@@ -4,7 +4,7 @@ Extracted from ``standard_emit.py`` to keep the main class focused on
 gate-level dispatch.  Each function mirrors the original method but takes
 an explicit ``emit_pass`` parameter instead of ``self``.
 
-These are the **default** implementations.  Backend-specific emit passes
+These are the **default** implementations.  Engine-specific emit passes
 (e.g., ``QiskitEmitPass``) may override the corresponding methods on
 ``StandardEmitPass``; calling ``super()._emit_for(...)`` etc. will
 ultimately delegate here.
@@ -66,11 +66,11 @@ def resolve_condition_address(
     chain — matching ``ResourceAllocator._resolve_root_qubit_address`` /
     ``ValueResolver.resolve_slice_chain``. Falls back to the scalar
     address when no parent array is set, or when the index or any slice
-    bound cannot be resolved to a concrete int (e.g. a backend runtime
+    bound cannot be resolved to a concrete int (e.g. an engine runtime
     parameter, which cannot index a static classical register, or any
     symbolic value with no ``resolver``), deferring the diagnostic to the
     caller's ``clbit_map`` lookup. Used by both the default if/while
-    emission path and the Qiskit / CUDA-Q backends when looking up a
+    emission path and the Qiskit / CUDA-Q engines when looking up a
     measurement-derived clbit for a runtime predicate.
 
     Args:
@@ -323,12 +323,12 @@ def _seed_region_args(
         bindings (dict[str, Any]): Current emit-time bindings.
 
     Returns:
-        dict[str, Any]: ``block_arg.uuid`` → concrete (or backend
+        dict[str, Any]: ``block_arg.uuid`` → concrete (or engine
             symbolic ``Parameter``) init value for every region argument.
 
     Raises:
         EmitError: If an init value can be neither resolved concretely
-            nor represented as a backend runtime parameter, or if the
+            nor represented as an engine runtime parameter, or if the
             RegionArg identities are inconsistent.
     """
     carried: dict[str, Any] = {}
@@ -453,7 +453,7 @@ def emit_for(
 
     if force_unroll or op.region_args:
         # Region-carried values must be threaded iteration by iteration,
-        # which only the unrolled path can do — a native backend loop
+        # which only the unrolled path can do — a native engine loop
         # re-executes one body and cannot rebind a per-iteration
         # classical carried value.
         emit_for_unrolled(emit_pass, circuit, op, qubit_map, clbit_map, bindings)
@@ -482,7 +482,7 @@ def emit_for(
 
 
 def validated_loop_indexset(start: int, stop: int, step: int) -> range:
-    """Build a backend-safe Python range for resolved loop bounds.
+    """Build an engine-safe Python range for resolved loop bounds.
 
     Args:
         start (int): Inclusive loop start.
@@ -495,7 +495,7 @@ def validated_loop_indexset(start: int, stop: int, step: int) -> range:
 
     Raises:
         EmitError: If ``step`` is zero or the range cardinality exceeds what
-            Python/backend loop APIs can represent without overflow.
+            Python/engine loop APIs can represent without overflow.
     """
     try:
         indexset = range(start, stop, step)
@@ -507,7 +507,7 @@ def validated_loop_indexset(start: int, stop: int, step: int) -> range:
         ) from error
     except OverflowError as error:
         raise EmitError(
-            "ForOperation iteration count exceeds the backend-representable "
+            "ForOperation iteration count exceeds the engine-representable "
             "range; use a smaller bound or restructure the kernel.",
             operation="ForOperation",
         ) from error
@@ -534,7 +534,7 @@ def _bind_loop_var(
         op: The ``ForOperation`` whose iteration variable is being bound.
             ``op.loop_var_value`` must not be None.
         value: The bound iteration value (int / Hamiltonian item /
-            backend loop parameter / etc.).
+            engine loop parameter / etc.).
 
     Raises:
         EmitError: If ``op.loop_var_value`` is None — the IR predates
@@ -573,7 +573,7 @@ def emit_for_unrolled(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass and value resolver.
-        circuit (Any): Backend circuit being constructed.
+        circuit (Any): Engine circuit being constructed.
         op (ForOperation): Range loop to replay.
         qubit_map (QubitMap): Logical-to-physical qubit map.
         clbit_map (ClbitMap): Logical-to-physical classical-bit map.
@@ -677,7 +677,7 @@ def emit_for_items(
 
     Args:
         emit_pass (StandardEmitPass): The emit pass (for resolver access).
-        circuit (Any): The backend circuit being built.
+        circuit (Any): The engine circuit being built.
         op (ForItemsOperation): The for-items loop being unrolled.
         qubit_map (QubitMap): Current qubit address mapping.
         clbit_map (ClbitMap): Current classical bit address mapping.
@@ -927,9 +927,9 @@ def evaluate_dict_getitem(
 
     When the dict is a declared runtime parameter
     (``transpile(..., parameters=["coeffs"])``), there are no entries to
-    look up; the resolved key instead names one backend parameter
+    look up; the resolved key instead names one engine parameter
     (``coeffs[3]`` / ``coeffs[(0, 1)]``) which is stored under the
-    result UUID. Repeated lookups of the same key share one backend
+    result UUID. Repeated lookups of the same key share one engine
     parameter via ``_get_or_create_parameter``.
 
     Args:
@@ -955,7 +955,7 @@ def evaluate_dict_getitem(
     lookup_key: Any = tuple(resolved_key) if op.key_arity > 1 else resolved_key[0]
 
     # Runtime-parameter dict: there is no bound data to look the key up
-    # in — each resolved key becomes one backend parameter instead. The
+    # in — each resolved key becomes one engine parameter instead. The
     # key itself is still fully concrete here (loop unrolling has bound
     # any symbolic components), so the circuit structure stays static
     # while the looked-up value remains symbolic until execution time.
@@ -1002,7 +1002,7 @@ def _is_empty_array_noop(operation: Any) -> bool:
 
     Returns:
         bool: True for a zero-length vector allocation or vector measurement;
-            these operations own no physical qubit/clbit and emit no backend
+            these operations own no physical qubit/clbit and emit no engine
             instruction. All other operation kinds return False.
     """
     if isinstance(operation, QInitOperation):
@@ -1063,9 +1063,9 @@ def emit_if(
        ``@qkernel`` AST transformer closure variables, constant-folded
        Values, or Values resolvable via ``bindings``): the active
        branch is emitted unconditionally, the inactive branch is
-       discarded.  No backend ``c_if`` / ``if_test`` is needed.
+       discarded.  No engine ``c_if`` / ``if_test`` is needed.
     2. **Runtime condition** (measurement ``Value`` that cannot be
-       resolved at compile time): delegates to the backend's
+       resolved at compile time): delegates to the engine's
        ``emit_if_start`` / ``emit_else_start`` / ``emit_if_end``
        protocol.
     """
@@ -1107,10 +1107,10 @@ def emit_if(
         return
 
     # A conditional that only creates/measures empty arrays has no physical
-    # instruction and no backend resource to select. Skipping it keeps the
+    # instruction and no engine resource to select. Skipping it keeps the
     # semantics (all outputs are canonically ``tuple()``), lets static-only
-    # backends accept the no-op, and avoids emitting syntactically empty
-    # runtime branches on source-generating backends.
+    # engines accept the no-op, and avoids emitting syntactically empty
+    # runtime branches on source-generating engines.
     if _is_empty_array_only_if(op):
         return
 
@@ -1165,7 +1165,7 @@ def emit_if(
         register_classical_merge_aliases(emit_pass, op, bindings, None)
     else:
         raise EmitError(
-            "Backend does not support native if/else control flow. "
+            "Engine does not support native if/else control flow. "
             "Cannot emit IfOperation."
         )
 
@@ -1346,7 +1346,7 @@ def emit_while(
     if region_args:
         # Backstop for the transpile-time rejection: a while loop's trip
         # count is a runtime measurement outcome, so the loop must stay
-        # a runtime loop, and no backend can carry a classical value
+        # a runtime loop, and no engine can carry a classical value
         # between runtime-loop iterations.
         raise EmitError(
             "Loop-carried classical values in a while loop cannot be "
@@ -1395,6 +1395,6 @@ def emit_while(
         emit_pass._emitter.emit_while_end(circuit, context)
     else:
         raise EmitError(
-            "Backend does not support native while loop control flow. "
+            "Engine does not support native while loop control flow. "
             "Cannot emit WhileOperation."
         )

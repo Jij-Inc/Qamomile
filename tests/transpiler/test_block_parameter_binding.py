@@ -139,7 +139,7 @@ def test_runtime_parameter_actual_uses_injected_parameter_factory() -> None:
     calls: list[tuple[str, str]] = []
 
     def factory(name: str, uuid: str) -> object:
-        """Record and return one backend-parameter stand-in."""
+        """Record and return one engine-parameter stand-in."""
         calls.append((name, uuid))
         return ("parameter", name, uuid)
 
@@ -220,7 +220,7 @@ def test_generic_block_binder_overrides_outer_same_name() -> None:
             self._resolver = ValueResolver()
 
         def _get_or_create_parameter(self, name: str, uuid: str) -> object:
-            """Return a stable stand-in for an unresolved backend parameter.
+            """Return a stable stand-in for an unresolved engine parameter.
 
             Args:
                 name (str): Parameter name.
@@ -228,7 +228,7 @@ def test_generic_block_binder_overrides_outer_same_name() -> None:
 
             Returns:
                 object: Tuple-shaped stand-in used only if resolution falls
-                through to backend parameter creation.
+                through to engine parameter creation.
             """
             return (name, uuid)
 

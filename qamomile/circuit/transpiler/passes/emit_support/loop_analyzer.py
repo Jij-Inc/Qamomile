@@ -96,7 +96,7 @@ class LoopAnalyzer:
             # native path that cannot bind the loop index correctly.
             return True
         if op.region_args:
-            # A native backend loop keeps one static body per iteration and
+            # A native engine loop keeps one static body per iteration and
             # cannot thread a classical value between iterations.
             return True
         loop_uuid = op.loop_var_value.uuid
@@ -111,7 +111,7 @@ class LoopAnalyzer:
     ) -> bool:
         """Return whether a loop body needs a concrete Python index.
 
-        Preserve native backend-loop parameters for ordinary gate angles,
+        Preserve native engine-loop parameters for ordinary gate angles,
         while forcing unrolling for boxed-call parameters and structural
         decisions: classical expression evaluation, runtime conditions,
         dictionary lookup, operation-owned controlled/inverse bodies, phase
@@ -143,7 +143,7 @@ class LoopAnalyzer:
         op: Operation,
         loop_var_uuid: str | None,
     ) -> bool:
-        """Return whether one operation cannot consume a backend loop value.
+        """Return whether one operation cannot consume an engine loop value.
 
         Args:
             op (Operation): Loop-body operation to inspect.
@@ -224,7 +224,7 @@ class LoopAnalyzer:
         if requires_direct:
             return True
 
-        # Ordinary gate operands may consume a backend-native loop parameter
+        # Ordinary gate operands may consume an engine-native loop parameter
         # directly. Boxed callable bodies are materialized independently and
         # cannot capture the caller's loop-variable scope, so their direct
         # parameters were handled above. Structural descendants (array
@@ -256,7 +256,7 @@ class LoopAnalyzer:
                 the current recursive path. Defaults to an empty set.
             include_direct (bool): Whether ``value`` itself matching the loop
                 variable counts. Defaults to True; callers pass False when a
-                backend may consume a direct loop parameter but not a value
+                engine may consume a direct loop parameter but not a value
                 nested inside an address/container structure.
 
         Returns:

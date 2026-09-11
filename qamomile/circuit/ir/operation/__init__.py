@@ -7,19 +7,20 @@ Every IR node is an ``Operation`` (``operation.py``): a dataclass with
 ``operands`` / ``results`` lists of SSA-like ``Value``s, a declared
 ``Signature``, and an ``OperationKind`` (QUANTUM / CLASSICAL / HYBRID /
 CONTROL) that drives classical/quantum segmentation. Operations are
-data, not behavior — passes rewrite them; backends interpret them at
+data, not behavior — passes rewrite them; engines interpret them at
 emit time.
 
 Design principles
 -----------------
 
 - **Stay as abstract as the program semantics allow.** An operation
-  expresses *what the program means*, never how a backend realizes it.
+  expresses *what the program means*, never how an engine realizes it.
   ``MeasureVectorOperation`` is one op for a whole Vector — never N
   per-qubit ``MeasureOperation``s at IR level; per-qubit expansion is an
-  emit-time backend concern. ``MeasureQFixedOperation`` sits even higher
-  (HYBRID measure + classical decode) and is split only when ``plan``'s
-  segmentation forces it. Pre-expanding an abstract concept into
+  emit-time engine concern. ``MeasureQFixedOperation`` and
+  ``MeasureQIntOperation`` sit even higher (HYBRID measure + classical
+  decode) and are split only when ``plan``'s segmentation forces it.
+  Pre-expanding an abstract concept into
   per-element / per-qubit ops here is a design regression.
 - **Generic value-access protocol.** Passes reach Values only through
   ``Operation.all_input_values()`` / ``replace_values()``. Subclasses
@@ -39,7 +40,7 @@ Design principles
 - **Composite gates and callables stay boxed.** QFT / QPE / user
   kernels are ``InvokeOperation``s referencing a ``CallableDef``
   (``callable.py``) with an optional ``body``, alternative
-  ``implementations``, and an optional bodyless ``opaque_cost``; whether a backend emits
+  ``implementations``, and an optional bodyless ``opaque_cost``; whether an engine emits
   a native gate, the embedded body, or a shared decomposition is
   decided at emit time, not here.
 - **Typed construction over raw operand lists.** ``GateOperation``
@@ -61,6 +62,7 @@ from .callable import (
 from .cast import CastOperation
 from .classical_ops import (
     DecodeQFixedOperation,
+    DecodeQIntOperation,
     DictGetItemOperation,
     ReturnQuantumArrayElementOperation,
     StoreArrayElementOperation,
@@ -82,6 +84,7 @@ from .gate import (
     GateOperationType,
     MeasureOperation,
     MeasureQFixedOperation,
+    MeasureQIntOperation,
     MeasureVectorOperation,
     ProjectOperation,
     ResetOperation,
@@ -112,6 +115,7 @@ __all__ = [
     "MeasureOperation",
     "MeasureVectorOperation",
     "MeasureQFixedOperation",
+    "MeasureQIntOperation",
     "ProjectOperation",
     "ResetOperation",
     "ControlledUOperation",
@@ -119,6 +123,7 @@ __all__ = [
     "SymbolicControlledU",
     "SelectOperation",
     "DecodeQFixedOperation",
+    "DecodeQIntOperation",
     "DictGetItemOperation",
     "ReturnQuantumArrayElementOperation",
     "StoreArrayElementOperation",

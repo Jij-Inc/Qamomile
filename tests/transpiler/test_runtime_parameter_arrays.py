@@ -72,7 +72,7 @@ def test_matrix_runtime_binding_flattens_to_scalar_parameters(binding) -> None:
 
 
 def test_array_parameter_metadata_uses_index_order() -> None:
-    """Positional backend ABIs follow array-index order, not first use."""
+    """Positional engine ABIs follow array-index order, not first use."""
     pytest.importorskip("qiskit")
     from qamomile.qiskit import QiskitTranspiler
 

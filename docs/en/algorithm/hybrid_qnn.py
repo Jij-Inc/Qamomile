@@ -121,7 +121,7 @@ variational_ansatz.draw(
 # We build one observable per qubit ($\langle Z_i \rangle$) and create an executable for each.
 # Each observable must span all qubits in the circuit so that the Qiskit estimator
 # can match qubit counts; we use `Hamiltonian(num_qubits=...)` to ensure proper padding.
-# Qamomile's `estimate_resources()` gives us gate counts without needing to access the backend circuit directly.
+# Qamomile's `estimate_resources()` gives us gate counts without needing to access the engine circuit directly.
 
 # %%
 observables = []

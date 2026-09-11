@@ -104,6 +104,12 @@ class ValueMetadata:
 def split_indexed_identifier(identifier: str) -> tuple[str, str] | None:
     """Split a legacy indexed identifier into base and index suffix.
 
+    This parses the ``"<base>_<index>"`` spelling used by
+    :func:`composite_carrier_key` and by packed-register identity remapping.
+    A numeric suffix alone does not distinguish a carrier key from an
+    ordinary identity; callers with an identity table must prefer exact
+    matches before parsing.
+
     Args:
         identifier (str): Identifier to inspect. Legacy carrier keys use the
             ``"<base>_<index>"`` spelling, where ``index`` is decimal.
@@ -119,6 +125,31 @@ def split_indexed_identifier(identifier: str) -> tuple[str, str] | None:
     if not suffix.isdigit():
         return None
     return identifier[:separator], suffix
+
+
+def composite_carrier_key(root_identity: str, index: int) -> str:
+    """Format a packed-register carrier key for one root-array element.
+
+    This formats the ``"<root>_<index>"`` carrier key spelling used by
+    packed register (QInt and QFixed) cast metadata and
+    ``CastOperation.qubit_mapping``. Value remapping also rebuilds these
+    keys, and the visualization analyzer resolves them independently.
+    It is the formatting counterpart of :func:`split_indexed_identifier`
+    and the IR-side twin of the emit-side
+    ``QubitAddress.__str__`` / ``QubitAddress.from_composite_key`` in
+    ``qamomile.circuit.transpiler.passes.emit_support.qubit_address``, which
+    ``qamomile.circuit.ir`` cannot import without reversing the dependency
+    direction. Both spellings must stay identical.
+
+    Args:
+        root_identity (str): Root array identity, either its ``uuid`` or its
+            ``logical_id``.
+        index (int): Element index in the root array's own index space.
+
+    Returns:
+        str: ``f"{root_identity}_{index}"``.
+    """
+    return f"{root_identity}_{index}"
 
 
 def remap_indexed_identifier(
@@ -608,7 +639,7 @@ class Value(_MetadataValueMixin, ValueBase, typing.Generic[T]):
         after the value is updated (e.g. by a gate application or a
         classical operation).  The ``logical_id`` also stays the same:
         it identifies the same logical variable across SSA versions,
-        independently of backend resource allocation.  This applies to
+        independently of engine resource allocation.  This applies to
         every ``Value`` regardless of its type (``Qubit``, ``Float``,
         ``Bit``, ...) -- it is not specific to qubits.
         """
@@ -732,14 +763,8 @@ def static_quantum_width(value: ValueBase) -> int | None:
         and value.metadata.cast.qubit_uuids
     ):
         element_width = len(value.metadata.cast.qubit_uuids)
-    elif isinstance(value.type, QUIntType):
-        element_width = _static_nonnegative_integer(value.type.width)
-    elif isinstance(value.type, QFixedType):
-        integer_bits = _static_nonnegative_integer(value.type.integer_bits)
-        fractional_bits = _static_nonnegative_integer(value.type.fractional_bits)
-        if integer_bits is None or fractional_bits is None:
-            return None
-        element_width = integer_bits + fractional_bits
+    elif isinstance(value.type, (QUIntType, QFixedType)):
+        element_width = packed_register_type_width(value.type)
     elif isinstance(value.type, QubitType):
         element_width = 1
     else:
@@ -748,6 +773,37 @@ def static_quantum_width(value: ValueBase) -> int | None:
     if element_width is None:
         return None
     return element_count * element_width
+
+
+def packed_register_type_width(value_type: ValueType) -> int | None:
+    """Return the type-declared width of a packed quantum register type.
+
+    Unlike :func:`static_quantum_width`, this helper consults only the type
+    and never runtime carrier or fixed-point metadata, so it distinguishes a
+    register whose width is *known* to be zero (returns ``0``) from one whose
+    width is symbolic (returns ``None``). ``static_quantum_width`` cannot make
+    that distinction for a QFixed whose frontend ``qfixed`` metadata records
+    ``num_bits=0`` for a symbolic layout.
+
+    Args:
+        value_type (ValueType): Type to inspect. Only ``QUIntType`` and
+            ``QFixedType`` describe packed registers.
+
+    Returns:
+        int | None: ``QUIntType.width`` or ``QFixedType.integer_bits +
+            fractional_bits`` when every component is a compile-time
+            non-negative integer; ``None`` when any component is symbolic or
+            when ``value_type`` is not a packed register type.
+    """
+    if isinstance(value_type, QUIntType):
+        return _static_nonnegative_integer(value_type.width)
+    if isinstance(value_type, QFixedType):
+        integer_bits = _static_nonnegative_integer(value_type.integer_bits)
+        fractional_bits = _static_nonnegative_integer(value_type.fractional_bits)
+        if integer_bits is None or fractional_bits is None:
+            return None
+        return integer_bits + fractional_bits
+    return None
 
 
 def _static_nonnegative_integer(value: int | Value) -> int | None:
@@ -818,6 +874,50 @@ def resolve_root_array_index(
         idx = start + step * idx
         current = current.slice_of
     return current, idx
+
+
+def root_carrier_keys(
+    array: "ArrayValue",
+    count: int,
+) -> tuple[list[str], list[str]] | None:
+    """Build root-space carrier keys for the first ``count`` array elements.
+
+    Folds each view-local index through :func:`resolve_root_array_index` and
+    spells the result with :func:`composite_carrier_key`, so packed register
+    (QInt and QFixed) carriers produced by the frontend cast, rebuilt by
+    compile-time ``if`` lowering, and re-derived by serialization validation
+    all share one key producer.
+
+    Callers are responsible for bounding ``count`` by the array's static
+    length: this helper performs no bounds check because its ``None`` result
+    must keep the single meaning "a slice bound on the chain is symbolic or
+    out of contract, defer resolution". Serialization validation compares
+    ``count`` against ``array_static_length`` before calling; compile-time
+    ``if`` lowering does the same whenever the selected source has a static
+    length and otherwise trusts the trace-time carrier count.
+
+    Args:
+        array (ArrayValue): One-dimensional qubit array, either a root array
+            or an arbitrarily nested strided view.
+        count (int): Number of leading elements to key, in ``array``'s own
+            index space.
+
+    Returns:
+        tuple[list[str], list[str]] | None: Parallel ``(uuids, logical_ids)``
+            carrier keys, ``(root.uuid, root_index)`` and
+            ``(root.logical_id, root_index)`` respectively, or ``None`` when
+            any index cannot be folded to the root index space.
+    """
+    uuids: list[str] = []
+    logical_ids: list[str] = []
+    for local_index in range(count):
+        resolved = resolve_root_array_index(array, local_index)
+        if resolved is None:
+            return None
+        root, root_index = resolved
+        uuids.append(composite_carrier_key(root.uuid, root_index))
+        logical_ids.append(composite_carrier_key(root.logical_id, root_index))
+    return uuids, logical_ids
 
 
 def array_static_length(array: "ArrayValue") -> int | None:

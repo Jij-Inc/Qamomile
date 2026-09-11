@@ -1,4 +1,4 @@
-"""Materialize backend-neutral circuit programs as Amazon Braket circuits."""
+"""Materialize engine-neutral circuit programs as Amazon Braket circuits."""
 
 from __future__ import annotations
 
@@ -601,7 +601,7 @@ def _create_parameter(
     Braket serializes free parameters as OpenQASM identifiers. Indexed
     Qamomile names such as ``angles[0]`` would instead be parsed as array
     declarations, and OpenQASM keywords such as ``angle`` are rejected. The
-    mapping remains keyed by the original Qamomile name while unsafe backend
+    mapping remains keyed by the original Qamomile name while unsafe OpenQASM
     spellings use an injective UTF-8 encoding.
 
     Args:
@@ -617,13 +617,13 @@ def _create_parameter(
     """
     if name in parameters:
         return parameters[name]
-    backend_name = name
+    native_name = name
     if not _OPENQASM_IDENTIFIER.fullmatch(name) or name.startswith(
         _ENCODED_PARAMETER_PREFIX
     ):
-        backend_name = _encode_parameter_name(name)
+        native_name = _encode_parameter_name(name)
     try:
-        parameter = parameter_type(backend_name)
+        parameter = parameter_type(native_name)
     except ValueError:
         parameter = parameter_type(_encode_parameter_name(name))
     parameters[name] = parameter
@@ -637,7 +637,7 @@ def _encode_parameter_name(name: str) -> str:
         name (str): Qamomile parameter name.
 
     Returns:
-        str: Backend-safe identifier that cannot collide with unencoded names.
+        str: OpenQASM-safe identifier that cannot collide with unencoded names.
     """
     return f"{_ENCODED_PARAMETER_PREFIX}{name.encode('utf-8').hex()}"
 

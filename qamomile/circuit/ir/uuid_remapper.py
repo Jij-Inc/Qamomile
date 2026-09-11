@@ -412,7 +412,7 @@ class UUIDRemapper:
         # Clone nested bodies BEFORE subclass-extra values and results.
         # IfOperation yields and merge outputs carry metadata that may
         # reference values whose first (and only) appearance is inside
-        # the branch bodies — e.g. QFixed carrier keys pointing at an
+        # the branch bodies — e.g. packed-register carrier keys pointing at an
         # array that is cast inside the ``if``. Cloning the bodies first
         # fills the remap tables so ``_clone_metadata`` can resolve those
         # references; the value cache then hands the loops below the same

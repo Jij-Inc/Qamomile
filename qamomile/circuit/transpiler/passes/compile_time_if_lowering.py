@@ -41,20 +41,24 @@ from qamomile.circuit.ir.operation.control_flow import (
 )
 from qamomile.circuit.ir.operation.gate import (
     ControlledUOperation,
+    MeasureQFixedOperation,
     MeasureVectorOperation,
 )
 from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.operation.operation import OperationKind, QInitOperation
 from qamomile.circuit.ir.operation.select import SelectOperation
 from qamomile.circuit.ir.types.primitives import FloatType, UIntType
+from qamomile.circuit.ir.types.q_register import QFixedType, QUIntType
 from qamomile.circuit.ir.value import (
     ArrayValue,
     DictValue,
     Value,
     ValueBase,
     ValueLike,
+    array_static_length,
     collect_value_like_uuids,
-    resolve_root_array_index,
+    packed_register_type_width,
+    root_carrier_keys,
 )
 from qamomile.circuit.transpiler.block_parameter_binding import (
     pair_block_parameter_operands,
@@ -183,41 +187,6 @@ def evaluate_classical_op_concrete(
     )
     if result is not None:
         concrete_values[op.results[0].uuid] = result
-
-
-def _array_carrier_keys(
-    source: ValueBase,
-    num_bits: int,
-) -> tuple[list[str], list[str]] | None:
-    """Build root-space carrier keys for a selected array source.
-
-    Delegates the slice-chain folding to
-    :func:`~qamomile.circuit.ir.value.resolve_root_array_index` so the keys
-    stay consistent with every other carrier-key producer and resolver.
-
-    Args:
-        source (ValueBase): Selected source value after merge substitution.
-            Array sources may be plain arrays or strided views.
-        num_bits (int): Number of QFixed carrier bits to build.
-
-    Returns:
-        tuple[list[str], list[str]] | None: Parallel UUID and logical-id
-            carrier keys when ``source`` is an array with constant slice
-            metadata, otherwise ``None``.
-    """
-    if not isinstance(source, ArrayValue):
-        return None
-
-    uuids: list[str] = []
-    logical_ids: list[str] = []
-    for i in range(num_bits):
-        resolved = resolve_root_array_index(source, i)
-        if resolved is None:
-            return None
-        root, root_index = resolved
-        uuids.append(f"{root.uuid}_{root_index}")
-        logical_ids.append(f"{root.logical_id}_{root_index}")
-    return uuids, logical_ids
 
 
 class CompileTimeIfLoweringPass(Pass[Block, Block]):
@@ -605,7 +574,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
                 # keyed by outer-namespace UUIDs. Recurse with a binding scope
                 # seeded only from the controlled operands so a compile-time
                 # ``if sel == k`` in the body is resolved here, before emit,
-                # uniformly for every backend. Without this the comparison
+                # uniformly for every engine. Without this the comparison
                 # survives as an unresolved ``CompOp`` inside the controlled
                 # target, which QURI Parts / CUDA-Q reject at emit.
                 op = self._lower_controlled_block(op, concrete_values)
@@ -640,7 +609,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         could collide by parameter name and mis-seed an inner parameter. A
         compile-time ``if`` whose condition depends on a bound classical
         operand (e.g. ``if sel == 0`` with ``sel`` bound) is resolved here so
-        every backend sees an already-selected branch rather than an
+        every engine sees an already-selected branch rather than an
         unresolved ``CompOp`` inside the controlled target.
 
         Args:
@@ -678,10 +647,10 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
     ) -> InvokeOperation:
         """Lower compile-time ifs in bodies selected for an invocation.
 
-        A callable definition can provide a default body plus backend- or
+        A callable definition can provide a default body plus engine- or
         strategy-specific implementations. Emission first looks for a body
         whose transform matches the invocation and otherwise falls back to the
-        default body, so both sets must be lowered before backend selection.
+        default body, so both sets must be lowered before engine selection.
         The definition and implementations are copied per call site to avoid
         mutating a shared callable body when the same callable is invoked with
         different compile-time arguments.
@@ -911,7 +880,7 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         semantically loop-invariant: body reads can use the entry value
         directly and the post-loop result is the same entry value, including
         on a zero-trip path. Removing it is required for runtime ``while``
-        loops, whose backends cannot thread arbitrary classical carry slots.
+        loops, whose engines cannot thread arbitrary classical carry slots.
 
         Args:
             op (ForOperation | ForItemsOperation | WhileOperation): Rebuilt
@@ -1888,12 +1857,17 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
             op (Operation): Operation to rewrite through ``subst``.
             subst (dict[str, ValueBase]): Accumulated merge substitution map.
                 Mutated in place when a CastOperation result is rebuilt with
-                re-synced carrier metadata, so later operations holding the
-                same SSA value pick up the rebuilt metadata.
+                synchronized type and carrier metadata, so later operations
+                holding the same SSA value receive the selected layout.
 
         Returns:
             Operation: The rewritten operation (``op`` itself when nothing
                 changed).
+
+        Raises:
+            ValidationError: If a selected cast source cannot identify its
+                carriers, or its width cannot accommodate the QFixed integer
+                bits. Symbolic widths remain unresolved until planning.
         """
         if not subst:
             return op
@@ -2021,91 +1995,124 @@ class CompileTimeIfLoweringPass(Pass[Block, Block]):
         # substitution above.
 
         # Handle CastOperation source provenance sync.
-        if isinstance(result_op, CastOperation) and changed:
-            new_source = new_operands[0] if new_operands else None
-            if (
-                new_source is not None
-                and hasattr(new_source, "uuid")
-                and result_op.results
-            ):
-                result_val = result_op.results[0]
-                if result_val.is_cast_result():
-                    num_bits = result_val.get_qfixed_num_bits()
-                    carriers: tuple[list[str], list[str]] | None = None
-                    if num_bits is not None:
-                        carriers = _array_carrier_keys(new_source, num_bits)
-                        if (
-                            carriers is None
-                            and isinstance(new_source, ArrayValue)
-                            and new_source.slice_of is not None
-                        ):
-                            # The selected branch is a strided view whose root
-                            # index space is not compile-time resolvable
-                            # (symbolic slice bounds). Synthesizing
-                            # ``f"{view.uuid}_{i}"`` below would emit view-local
-                            # carrier keys that the allocator never registers
-                            # (only root-array addresses are), silently dropping
-                            # the QFixed measurement at emit. Fail fast instead,
-                            # mirroring the frontend's rejection of symbolic
-                            # slice views for casts.
-                            raise ValidationError(
-                                "Compile-time `if` selected a slice-view cast "
-                                "source whose root index space is not "
-                                "compile-time resolvable (symbolic slice "
-                                "bounds). Bind the slice bounds so the QFixed "
-                                "carrier qubits resolve to root-array "
-                                "addresses; leaving them symbolic would "
-                                "silently drop the measurement at emit time."
-                            )
-                    if carriers is None and num_bits is not None:
-                        source_logical_id = getattr(
-                            new_source, "logical_id", new_source.uuid
+        if (
+            isinstance(result_op, CastOperation)
+            and changed
+            and result_op.results
+            and result_op.results[0].is_cast_result()
+        ):
+            new_source = new_operands[0]
+            result_val = result_op.results[0]
+            if isinstance(new_source, ArrayValue):
+                if not new_source.shape:
+                    raise ValidationError(
+                        "Compile-time `if` selected a cast source without a width dimension."
+                    )
+                num_bits = array_static_length(new_source)
+                width = num_bits if num_bits is not None else new_source.shape[0]
+                carriers = (
+                    root_carrier_keys(new_source, num_bits)
+                    if num_bits is not None
+                    else ([], [])
+                )
+                if carriers is None:
+                    raise ValidationError(
+                        "Compile-time `if` selected a slice-view cast "
+                        "source whose root index space is not "
+                        "compile-time resolvable (symbolic slice "
+                        "bounds). Bind the slice bounds so the quantum "
+                        "carrier qubits resolve to root-array addresses."
+                    )
+            elif isinstance(new_source.type, (QUIntType, QFixedType)):
+                num_bits = packed_register_type_width(new_source.type)
+                source_metadata = new_source.metadata.cast
+                if source_metadata is None:
+                    raise ValidationError(
+                        "Compile-time `if` selected a packed-register cast "
+                        "source without cast metadata."
+                    )
+                carriers = (
+                    list(source_metadata.qubit_uuids),
+                    list(source_metadata.qubit_logical_ids),
+                )
+                if num_bits is None:
+                    # An unresolved packed-to-packed layout cannot be represented
+                    # by the concrete layout metadata schema.
+                    raise ValidationError(
+                        "Compile-time `if` selected a symbolic packed-to-packed "
+                        "cast width; bind the register size at compile time."
+                    )
+                width = num_bits
+            else:
+                raise ValidationError(
+                    "Compile-time `if` selected an unsupported packed-register "
+                    "cast source."
+                )
+            carrier_uuids, carrier_logical_ids = carriers
+            new_result = result_val.with_cast_metadata(
+                source_uuid=new_source.uuid,
+                source_logical_id=new_source.logical_id,
+                qubit_uuids=carrier_uuids,
+                qubit_logical_ids=carrier_logical_ids,
+            )
+            selected_type: QUIntType | QFixedType
+            if isinstance(result_val.type, QUIntType):
+                selected_type = QUIntType(width=width)
+            elif isinstance(result_val.type, QFixedType):
+                integer_bits = result_val.type.integer_bits
+                if isinstance(integer_bits, Value):
+                    integer_bits = (
+                        integer_bits.get_const() if integer_bits.is_constant() else None
+                    )
+                if not isinstance(integer_bits, int) or isinstance(integer_bits, bool):
+                    raise ValidationError(
+                        "QFixed cast integer_bits must be resolved at compile time."
+                    )
+                if num_bits is not None and integer_bits > num_bits:
+                    raise ValidationError(
+                        f"QFixed integer_bits={integer_bits} exceeds the selected "
+                        f"source width of {num_bits} qubits."
+                    )
+                selected_type = QFixedType(
+                    integer_bits=integer_bits,
+                    fractional_bits=(
+                        num_bits - integer_bits
+                        if num_bits is not None
+                        else (
+                            width
+                            if integer_bits == 0
+                            else result_val.type.fractional_bits
                         )
-                        carriers = (
-                            [f"{new_source.uuid}_{i}" for i in range(num_bits)],
-                            [f"{source_logical_id}_{i}" for i in range(num_bits)],
-                        )
-                    carrier_uuids = (
-                        carriers[0]
-                        if carriers is not None
-                        else list(result_val.get_cast_qubit_uuids() or ())
-                    )
-                    carrier_logical_ids = (
-                        carriers[1]
-                        if carriers is not None
-                        else list(result_val.get_cast_qubit_logical_ids() or ())
-                    )
-                    new_result = result_val.with_cast_metadata(
-                        source_uuid=new_source.uuid,
-                        source_logical_id=getattr(
-                            new_source, "logical_id", new_source.uuid
-                        ),
-                        qubit_uuids=carrier_uuids,
-                        qubit_logical_ids=carrier_logical_ids,
-                    )
-                    if num_bits is not None:
-                        new_result = new_result.with_qfixed_metadata(
-                            qubit_uuids=carrier_uuids,
-                            num_bits=num_bits,
-                            int_bits=result_val.get_qfixed_int_bits() or 0,
-                        )
-                    new_mapping = (
-                        list(new_result.get_qfixed_qubit_uuids())
-                        or result_op.qubit_mapping
-                    )
-                    result_op = dataclasses.replace(
-                        result_op,
-                        results=[new_result],
-                        qubit_mapping=new_mapping,
-                    )
-                    # Propagate the rebuilt result to downstream consumers.
-                    # The MeasureQFixedOperation operand is the same SSA
-                    # value, and plan-time lowering reads carrier keys from
-                    # that operand's metadata — without this entry it would
-                    # keep the stale trace-time carriers of the unselected
-                    # branch. Self-mapping is safe: ``_mapped_value_for_uuid``
-                    # seeds its cycle guard with the queried UUID.
-                    subst[result_val.uuid] = new_result
+                    ),
+                )
+                new_result = new_result.with_qfixed_metadata(
+                    qubit_uuids=carrier_uuids,
+                    num_bits=num_bits if num_bits is not None else 0,
+                    int_bits=integer_bits,
+                )
+            else:
+                raise ValidationError("Unsupported packed-register cast target type.")
+            new_result = dataclasses.replace(new_result, type=selected_type)
+            result_op = dataclasses.replace(
+                result_op,
+                results=[new_result],
+                source_type=new_source.type,
+                target_type=selected_type,
+                qubit_mapping=list(carrier_uuids),
+            )
+            # Propagate the rebuilt result to downstream consumers.
+            # A packed-register measurement operand is the same SSA
+            # value, and plan-time lowering reads carrier keys from its
+            # metadata. Without this entry it would keep stale
+            # trace-time carriers from the unselected branch.
+            subst[result_val.uuid] = new_result
+
+        if isinstance(result_op, MeasureQFixedOperation) and changed:
+            layout = result_op.operands[0].metadata.qfixed
+            if layout is not None:
+                result_op = dataclasses.replace(
+                    result_op, num_bits=layout.num_bits, int_bits=layout.int_bits
+                )
 
         return result_op
 

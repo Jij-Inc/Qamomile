@@ -2,9 +2,9 @@
 
 Verifies that calling a single-qubit gate (``h``, ``x``, ``y``, ``z``,
 ``s``, ``t``, ``sdg``, ``tdg``, ``rx``, ``ry``, ``rz``, ``p``) with a
-`Vector[Qubit]` argument produces the same IR shape and the same backend
+`Vector[Qubit]` argument produces the same IR shape and the same engine
 behaviour as a hand-written ``for i in qmc.range(n): qs[i] = gate(qs[i])``
-loop. Cross-backend execution is exercised on every supported SDK
+loop. Cross-engine execution is exercised on every supported SDK
 (Qiskit, QuriParts, CUDA-Q) to verify consistent emitted behavior.
 
 Note: Do NOT use ``from __future__ import annotations`` in this file.
@@ -22,7 +22,7 @@ from qamomile.circuit.ir.operation.gate import GateOperation, GateOperationType
 from qamomile.circuit.transpiler.errors import QubitConsumedError
 
 # ---------------------------------------------------------------------------
-# IR-shape assertions (no backend required)
+# IR-shape assertions (no engine required)
 # ---------------------------------------------------------------------------
 
 
@@ -118,12 +118,12 @@ class TestBroadcastIRShape:
 
 
 # ---------------------------------------------------------------------------
-# Backend execution: Qiskit, QuriParts, and CUDA-Q (sampling + expval)
+# Engine execution: Qiskit, QuriParts, and CUDA-Q (sampling + expval)
 # ---------------------------------------------------------------------------
 #
 # Each SDK is imported via a try/except so that environments missing one
-# backend can still run the IR-shape assertions above. Module-level
-# ``importorskip`` would skip the entire file — including backend-free
+# engine can still run the IR-shape assertions above. Module-level
+# ``importorskip`` would skip the entire file — including engine-free
 # tests — which is undesirable for minimal CI environments.
 
 _HAS_QISKIT = True
@@ -159,7 +159,7 @@ except ImportError:  # pragma: no cover - never expected, defensive
     _HAS_OBSERVABLE = False
     qm_o = None  # type: ignore[assignment]
 
-BACKENDS = [
+ENGINES = [
     pytest.param(
         QiskitTranspiler,
         id="qiskit",
@@ -260,7 +260,7 @@ def _sum_z_hamiltonian(n: int) -> "qm_o.Hamiltonian":
 class TestBroadcastSampling:
     """Broadcast-X / broadcast-H produce expected sample distributions."""
 
-    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", ENGINES)
     @pytest.mark.parametrize("n", N_VALUES)
     def test_x_broadcast_flips_all_qubits(self, transpiler_factory, n):
         """X broadcast over n qubits → every shot is the all-ones bitstring."""
@@ -274,7 +274,7 @@ class TestBroadcastSampling:
                 f"[{transpiler_factory.__name__}, n={n}] expected {expected}, got {value}"
             )
 
-    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", ENGINES)
     @pytest.mark.parametrize("n", [3, 5])
     def test_h_broadcast_uniform_distribution(self, transpiler_factory, n):
         """H broadcast over n qubits → roughly uniform over 2^n outcomes."""
@@ -294,7 +294,7 @@ class TestBroadcastSampling:
 class TestBroadcastVsExplicitLoopEquivalence:
     """Broadcast and explicit-loop forms produce statistically identical results."""
 
-    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", ENGINES)
     @pytest.mark.parametrize("n", N_VALUES)
     @pytest.mark.parametrize("seed", SEEDS)
     def test_rx_broadcast_matches_loop_expval(self, transpiler_factory, n, seed):
@@ -343,7 +343,7 @@ class TestBroadcastVsExplicitLoopEquivalence:
 class TestBroadcastExpval:
     """Broadcast-prepared states give the analytic expectation values."""
 
-    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", ENGINES)
     @pytest.mark.parametrize("n", N_VALUES)
     def test_h_broadcast_then_sum_z_expval_is_zero(self, transpiler_factory, n):
         """H broadcast prepares |+>^n; <sum_i Z_i> on |+>^n is 0."""
@@ -354,7 +354,7 @@ class TestBroadcastExpval:
         out = exe.run(t.executor()).result()
         assert np.isclose(out, 0.0, atol=1e-6)
 
-    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", ENGINES)
     @pytest.mark.parametrize("n", N_VALUES)
     @pytest.mark.parametrize("seed", SEEDS)
     def test_rx_broadcast_expval_matches_n_cos(self, transpiler_factory, n, seed):
@@ -443,7 +443,7 @@ class TestAllPrimitivesBroadcastSampling:
     is a uniform superposition and the trailing gate has observable
     effect), then the gate-under-test, then measures. Asserts the
     broadcast and explicit-loop forms produce identical sample sets across
-    every supported backend.
+    every supported engine.
     """
 
     @staticmethod
@@ -496,7 +496,7 @@ class TestAllPrimitivesBroadcastSampling:
 
         return _circuit
 
-    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", ENGINES)
     @pytest.mark.parametrize(
         "gate_func",
         [qmc.h, qmc.x, qmc.y, qmc.z, qmc.s, qmc.sdg, qmc.t, qmc.tdg],
@@ -507,9 +507,9 @@ class TestAllPrimitivesBroadcastSampling:
         """Sampling distribution is identical between broadcast and loop forms.
 
         Compares set-equality of measured bitstrings and per-bitstring
-        shot counts (modulo backend RNG ordering). Uses 1024 shots so
+        shot counts (modulo engine RNG ordering). Uses 1024 shots so
         statistical fluctuation is negligible for the small 3-qubit
-        register on deterministic backends.
+        register on deterministic engines.
         """
         n = 3
         bc = self._bc_kernel_non_parametric(gate_func, n)
@@ -527,7 +527,7 @@ class TestAllPrimitivesBroadcastSampling:
             f"broadcast outcomes={set(bc_results)} vs loop={set(ex_results)}"
         )
 
-    @pytest.mark.parametrize("transpiler_factory", BACKENDS)
+    @pytest.mark.parametrize("transpiler_factory", ENGINES)
     @pytest.mark.parametrize("gate_func", [qmc.rx, qmc.ry, qmc.rz, qmc.p])
     @pytest.mark.parametrize("seed", SEEDS)
     def test_parametric_broadcast_matches_loop_sampling(

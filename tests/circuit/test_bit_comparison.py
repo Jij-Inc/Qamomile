@@ -401,14 +401,14 @@ class TestBitComparisonCompileTimeFold:
             pytest.param(False, 2, (0, 1), id="false-differs-two"),
         ],
     )
-    def test_bit_uint_fold_executes_cross_backend(
+    def test_bit_uint_fold_executes_cross_engine(
         self,
         sdk_transpiler,
         bit: bool,
         integer: int,
         expected: tuple[int, int],
     ) -> None:
-        """Verify every backend executes the folded mixed comparison."""
+        """Verify every engine executes the folded mixed comparison."""
         transpiler = sdk_transpiler.transpiler
         executable = transpiler.transpile(
             _bound_bit_uint_comparison,
@@ -435,10 +435,10 @@ class TestBitComparisonRuntime:
         second_one: bool,
         expected: int,
     ) -> None:
-        """Verify supported dynamic backends execute runtime equality."""
-        if sdk_transpiler.backend_name in {"quri_parts", "braket"}:
+        """Verify supported dynamic engines execute runtime equality."""
+        if sdk_transpiler.engine_name in {"quri_parts", "braket"}:
             pytest.skip(
-                "This backend does not support measurement-dependent control flow"
+                "This engine does not support measurement-dependent control flow"
             )
         transpiler = sdk_transpiler.transpiler
         executable = transpiler.transpile(
@@ -462,10 +462,10 @@ class TestBitComparisonRuntime:
         second_one: bool,
         expected: int,
     ) -> None:
-        """Verify supported dynamic backends execute runtime inequality."""
-        if sdk_transpiler.backend_name in {"quri_parts", "braket"}:
+        """Verify supported dynamic engines execute runtime inequality."""
+        if sdk_transpiler.engine_name in {"quri_parts", "braket"}:
             pytest.skip(
-                "This backend does not support measurement-dependent control flow"
+                "This engine does not support measurement-dependent control flow"
             )
         transpiler = sdk_transpiler.transpiler
         executable = transpiler.transpile(
@@ -497,10 +497,10 @@ class TestBitComparisonRuntime:
         value: int,
         source_one: bool,
     ) -> None:
-        """Verify mixed Bit and UInt predicates execute on dynamic backends."""
-        if sdk_transpiler.backend_name in {"quri_parts", "braket"}:
+        """Verify mixed Bit and UInt predicates execute on dynamic engines."""
+        if sdk_transpiler.engine_name in {"quri_parts", "braket"}:
             pytest.skip(
-                "This backend does not support measurement-dependent control flow"
+                "This engine does not support measurement-dependent control flow"
             )
         transpiler = sdk_transpiler.transpiler
         executable = transpiler.transpile(

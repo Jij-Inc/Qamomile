@@ -566,7 +566,7 @@ class TestExecutableProgramRuntime:
             ]
         )
 
-        with pytest.raises(ExecutionError, match="outside the backend bitstring"):
+        with pytest.raises(ExecutionError, match="outside the engine bitstring"):
             executable.run(_FakeExecutor(counts={"0": 1})).result()
 
     def test_sample_rejects_unresolved_typed_output(self) -> None:
@@ -903,7 +903,7 @@ class TestExecutableProgramRuntime:
                                 name="theta2",
                                 array_name="theta2",
                                 index=None,
-                                backend_param="theta2_backend",
+                                engine_param="theta2_engine",
                                 source_ref=theta2.uuid,
                             )
                         ]

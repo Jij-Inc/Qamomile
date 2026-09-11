@@ -68,6 +68,7 @@ from qamomile.circuit.estimator._product_formula import (
     _apply_product_formula_contract,
     _require_concrete_product_formula_structure,
 )
+from qamomile.circuit.estimator._quantum_values import _qubit_value_size
 from qamomile.circuit.estimator._resolver import (
     ExprResolver,
 )
@@ -130,6 +131,7 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperation,
     MeasureOperation,
     MeasureQFixedOperation,
+    MeasureQIntOperation,
     MeasureVectorOperation,
     ProjectOperation,
     ResetOperation,
@@ -1011,7 +1013,10 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
             case QInitOperation():
                 return self.eval_qinit(operation, resolver)
             case (
-                MeasureOperation() | MeasureVectorOperation() | MeasureQFixedOperation()
+                MeasureOperation()
+                | MeasureVectorOperation()
+                | MeasureQFixedOperation()
+                | MeasureQIntOperation()
             ):
                 _require_uncontrolled_operation(operation, controls)
                 return self.eval_measure(operation, resolver)
@@ -1057,6 +1062,11 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
                     _require_uncontrolled_operation(operation, controls)
                 return self.eval_unary_math(operation, resolver)
             case CastOperation() | ReturnQuantumArrayElementOperation():
+                if operation.operands and operation.results:
+                    resolver.bind_quantum_size(
+                        operation.results[0],
+                        _qubit_value_size(operation.operands[0], resolver),
+                    )
                 return ResourceEstimate.zero()
             case StoreArrayElementOperation():
                 # The enclosing sequential interpreter publishes the updated

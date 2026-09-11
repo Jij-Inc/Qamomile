@@ -998,7 +998,7 @@ class ControlFlowTransformer(ast.NodeTransformer):
         reads go through an explicit region argument (see
         ``loop_region_enter``). Runtime ``while`` carries use the same
         interface; target validation later rejects non-identity state when a
-        circuit backend cannot thread it through a measurement-controlled
+        circuit engine cannot thread it through a measurement-controlled
         loop.
 
         Args:

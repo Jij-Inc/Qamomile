@@ -1,4 +1,4 @@
-"""Cross-backend relative-phase tests for ``qmc.select``."""
+"""Cross-engine relative-phase tests for ``qmc.select``."""
 
 from __future__ import annotations
 
@@ -233,17 +233,17 @@ def _equivalent_representation_broadcast_select(
 
 
 def _executor(case: Any, *, runtime_control: bool = False) -> Any:
-    """Return a simulator executor for one SDK backend case.
+    """Return a simulator executor for one SDK engine case.
 
     Args:
-        case (Any): Backend fixture containing a transpiler and backend name.
+        case (Any): Engine fixture containing a transpiler and engine name.
         runtime_control (bool): Whether Qiskit needs a dynamic-control capable
             simulator. Defaults to ``False``.
 
     Returns:
-        Any: Executor for the selected SDK backend.
+        Any: Executor for the selected SDK engine.
     """
-    if case.backend_name == "qiskit":
+    if case.engine_name == "qiskit":
         if runtime_control:
             from qiskit_aer import AerSimulator
 
@@ -260,10 +260,10 @@ def _only_outcome(
     *,
     runtime_control: bool = False,
 ) -> Any:
-    """Transpile and sample a deterministic kernel on one backend.
+    """Transpile and sample a deterministic kernel on one engine.
 
     Args:
-        case (Any): Backend fixture containing a transpiler and backend name.
+        case (Any): Engine fixture containing a transpiler and engine name.
         kernel (Any): Deterministic qkernel to transpile and execute.
         runtime_control (bool): Whether the kernel uses dynamic control flow.
             Defaults to ``False``.
@@ -278,7 +278,7 @@ def _only_outcome(
     ).result()
     counts = {bits: count for bits, count in result.results}
     assert sum(counts.values()) == 128
-    assert len(counts) == 1, f"{case.backend_name}: got {counts}"
+    assert len(counts) == 1, f"{case.engine_name}: got {counts}"
     return next(iter(counts))
 
 
@@ -453,7 +453,7 @@ def test_symbolic_wide_index_preserves_identity_case_phase(
     )
     result = executable.sample(_executor(sdk_transpiler), shots=128).result()
     counts = {bits: count for bits, count in result.results}
-    assert set(counts) == {(1, 0, 0)}, f"{sdk_transpiler.backend_name}: got {counts}"
+    assert set(counts) == {(1, 0, 0)}, f"{sdk_transpiler.engine_name}: got {counts}"
 
 
 def test_eight_case_phase_select_uses_lsb_zero(sdk_transpiler: Any) -> None:
@@ -542,7 +542,7 @@ def test_inverse_cancels_phased_pauli_case(sdk_transpiler: Any) -> None:
 
 
 def test_runtime_phase_parameter_is_forwarded(sdk_transpiler: Any) -> None:
-    """A case's phase parameter survives as a backend runtime parameter."""
+    """A case's phase parameter survives as an engine runtime parameter."""
 
     @qmc.qkernel
     def circuit(theta: qmc.Float) -> qmc.Bit:
@@ -566,7 +566,7 @@ def test_runtime_phase_parameter_is_forwarded(sdk_transpiler: Any) -> None:
         bindings={"theta": math.pi},
     ).result()
     counts = {bits: count for bits, count in result.results}
-    assert set(counts) == {1}, f"{sdk_transpiler.backend_name}: got {counts}"
+    assert set(counts) == {1}, f"{sdk_transpiler.engine_name}: got {counts}"
 
 
 def test_eight_case_runtime_phase_uses_lsb_zero(
@@ -602,7 +602,7 @@ def test_eight_case_runtime_phase_uses_lsb_zero(
         bindings={"theta": math.pi},
     ).result()
     counts = {bits: count for bits, count in result.results}
-    assert set(counts) == {(1, 0, 0)}, f"{sdk_transpiler.backend_name}: got {counts}"
+    assert set(counts) == {(1, 0, 0)}, f"{sdk_transpiler.engine_name}: got {counts}"
 
 
 def test_eight_case_runtime_phase_preserves_signed_lsb_interference(
@@ -707,8 +707,8 @@ def test_phase_select_survives_mixed_runtime_control_flow(
     sdk_transpiler: Any,
 ) -> None:
     """A phased SELECT survives nested while, if, and for regions."""
-    if sdk_transpiler.backend_name in {"quri_parts", "braket"}:
-        pytest.skip("This backend has no dynamic if or while primitive")
+    if sdk_transpiler.engine_name in {"quri_parts", "braket"}:
+        pytest.skip("This engine has no dynamic if or while primitive")
 
     @qmc.qkernel
     def circuit() -> qmc.Bit:

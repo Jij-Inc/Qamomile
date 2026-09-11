@@ -3,7 +3,7 @@
 Before Layer 5, ``pauli_evolve`` required a concrete ``gamma`` at emit
 time — any symbolic gamma raised ``EmitError``. Now, when gamma is a
 declared parameter (scalar or ``arr[idx]`` with ``arr`` in
-``parameters``), the emitted circuit carries a backend parameter that
+``parameters``), the emitted circuit carries an engine parameter that
 can be bound at run-time, matching how ``ising_cost``/``rz``/``rzz``
 already handle parametric angles.
 
@@ -200,6 +200,6 @@ class TestFullQAOAExecution:
 
         # For |+> ⊗ |+> → ZZ layer → X-mixer, the expval of ZZ can be
         # computed analytically. We only check that it's finite and
-        # within [-1, 1] to keep the test robust against backend drift.
+        # within [-1, 1] to keep the test robust against engine drift.
         assert np.isfinite(r)
         assert -1.0 - 1e-9 <= r <= 1.0 + 1e-9

@@ -313,12 +313,12 @@ class TestUIntFloatCompileTimeFold:
         pytest.param(1.5, 1, id="true"),
     ],
 )
-def test_mixed_comparison_executes_cross_backend(
+def test_mixed_comparison_executes_cross_engine(
     sdk_transpiler,
     threshold: float,
     expected: int,
 ) -> None:
-    """Verify every supported SDK backend executes the folded comparison."""
+    """Verify every supported SDK engine executes the folded comparison."""
     transpiler = sdk_transpiler.transpiler
     executable = transpiler.transpile(
         _mixed_less_than_sample,

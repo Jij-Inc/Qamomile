@@ -160,11 +160,11 @@ print("<X> =", energy)
 # %% [markdown]
 # ## Limitations
 #
-# The Braket backend currently targets static gate-model circuits. It does not
+# The Braket engine currently targets static gate-model circuits. It does not
 # support measurement-dependent `if` or `while` control flow, mid-circuit
 # reset, or algorithms that require those operations. This includes the
 # reset-dependent paths in modular arithmetic and Shor workflows. Refactor
-# such programs into static circuits or choose a backend with the required
+# such programs into static circuits or choose an engine with the required
 # dynamic-circuit primitives.
 
 # %% [markdown]

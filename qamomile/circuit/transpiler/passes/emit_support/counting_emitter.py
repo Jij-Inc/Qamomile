@@ -1,6 +1,6 @@
 """Count-only emitter for measuring multi-control ancilla demand.
 
-A quantum segment's backend circuit is created with a fixed qubit count
+A quantum segment's engine circuit is created with a fixed qubit count
 before emission starts, so the multi-control ancilla pool must be sized in
 advance. Rather than mirror the emit-time control-absorption rules in a
 separate static walk — which has to stay in lockstep with the real
@@ -179,7 +179,7 @@ class _CountingParameter:
 class CountingEmitter:
     """A no-op gate emitter that lets a real emission walk run for counting.
 
-    Wraps the real backend emitter, delegating capability queries so
+    Wraps the real engine emitter, delegating capability queries so
     control-flow lowering matches real emission while turning every gate
     emission into a no-op and every gate/sub-circuit construction into a
     ``None`` that forces the cascade-prone fallback path. Used by isolated
@@ -192,7 +192,7 @@ class CountingEmitter:
         """Wrap a real emitter for a counting run.
 
         Args:
-            real (Any): The backend emitter whose capability answers should
+            real (Any): The engine emitter whose capability answers should
                 be mirrored so the walk makes the same structural choices.
         """
         self._real = real
@@ -585,7 +585,7 @@ class CountingEmitter:
         :class:`_CountingParameter` rather than ``None`` — otherwise a
         body that carries the loop value into an angle or index expression
         during counting would see ``None`` and fail. (No pool-reserving
-        backend supports native for loops today, so this is future-proofing.)
+        engine supports native for loops today, so this is future-proofing.)
 
         Args:
             circuit (Any): Ignored.

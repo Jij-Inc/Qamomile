@@ -950,7 +950,7 @@ class ArrayBoundsValidationPass(Pass[Block, Block]):
         A serialized template can acquire concrete parent and view lengths only
         after binding. When the view descriptor then claims slots beyond its
         parent, a loop-local symbolic index can otherwise hide the invalid
-        access until backend emission. Checking both affine endpoints is
+        access until engine emission. Checking both affine endpoints is
         sufficient because supported slice strides are constant and positive;
         checking both also keeps malformed non-positive strides conservative.
 

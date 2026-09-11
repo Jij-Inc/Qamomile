@@ -1,9 +1,9 @@
-"""Cross-backend execution tests for loop-carried classical values.
+"""Cross-engine execution tests for loop-carried classical values.
 
 Loop-carry slots are resolved by two different executors depending on
 where the loop lands: the classical segment interpreter (block-output
 reductions) and emit-time unrolling (gate parameters). Both paths must
-produce Python semantics on every supported SDK backend, so each case
+produce Python semantics on every supported SDK engine, so each case
 transpiles AND executes, verifying the classical outcome value.
 
 The quri_parts / cudaq variants are marker-gated (deselected by the
@@ -19,32 +19,32 @@ import pytest
 
 import qamomile.circuit as qmc
 
-BACKENDS = [
+ENGINES = [
     pytest.param("qiskit", id="qiskit"),
     pytest.param("quri_parts", marks=pytest.mark.quri_parts, id="quri_parts"),
     pytest.param("cudaq", marks=pytest.mark.cudaq, id="cudaq"),
 ]
-RUNTIME_BACKENDS = [
+RUNTIME_ENGINES = [
     pytest.param("qiskit", id="qiskit"),
     pytest.param("cudaq", marks=pytest.mark.cudaq, id="cudaq"),
 ]
 
 
-def _make_transpiler(backend: str) -> Any:
-    """Build the requested backend transpiler, skipping when unavailable.
+def _make_transpiler(engine: str) -> Any:
+    """Build the requested engine transpiler, skipping when unavailable.
 
     Args:
-        backend (str): One of ``"qiskit"`` / ``"quri_parts"`` / ``"cudaq"``.
+        engine (str): One of ``"qiskit"`` / ``"quri_parts"`` / ``"cudaq"``.
 
     Returns:
-        Any: The backend transpiler instance.
+        Any: The engine transpiler instance.
     """
-    if backend == "qiskit":
+    if engine == "qiskit":
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler
 
         return QiskitTranspiler()
-    if backend == "quri_parts":
+    if engine == "quri_parts":
         pytest.importorskip("quri_parts")
         pytest.importorskip("quri_parts.qulacs")
         from qamomile.quri_parts import QuriPartsTranspiler
@@ -56,18 +56,18 @@ def _make_transpiler(backend: str) -> Any:
     return CudaqTranspiler()
 
 
-def _sample_single(backend: str, kernel: Any, bindings: dict[str, Any]) -> Any:
+def _sample_single(engine: str, kernel: Any, bindings: dict[str, Any]) -> Any:
     """Transpile and sample a kernel, returning the deterministic outcome.
 
     Args:
-        backend (str): Backend name accepted by :func:`_make_transpiler`.
+        engine (str): Engine name accepted by :func:`_make_transpiler`.
         kernel (Any): The qkernel to run.
         bindings (dict[str, Any]): Compile-time bindings.
 
     Returns:
         Any: The single deterministic sampled outcome.
     """
-    transpiler = _make_transpiler(backend)
+    transpiler = _make_transpiler(engine)
     executable = transpiler.transpile(kernel, bindings=bindings)
     result = executable.sample(transpiler.executor(), shots=100).result()
     assert len(result.results) == 1, f"expected deterministic result: {result}"
@@ -262,78 +262,78 @@ def crossed_mixed_merge_kernel(selector: qmc.UInt) -> tuple[qmc.Bit, qmc.Bit]:
     return first, second
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
-class TestLoopCarriedValuesAcrossBackends:
-    """Carried loops execute with Python semantics on every backend."""
+@pytest.mark.parametrize("engine", ENGINES)
+class TestLoopCarriedValuesAcrossEngines:
+    """Carried loops execute with Python semantics on every engine."""
 
-    def test_classical_segment_accumulation(self, backend):
+    def test_classical_segment_accumulation(self, engine):
         """sum(range(4)) == 6 through the classical segment interpreter."""
-        assert _sample_single(backend, sum_kernel, {"n": 4}) == 6
+        assert _sample_single(engine, sum_kernel, {"n": 4}) == 6
 
-    def test_classical_segment_swap(self, backend):
+    def test_classical_segment_swap(self, engine):
         """Three swaps of (1, 2) land on (2, 1)."""
-        assert _sample_single(backend, swap_kernel, {"n": 3}) == (2, 1)
+        assert _sample_single(engine, swap_kernel, {"n": 3}) == (2, 1)
 
-    def test_emit_absorbed_angle_accumulation(self, backend):
+    def test_emit_absorbed_angle_accumulation(self, engine):
         """An accumulated rx angle of 3*pi flips |0> deterministically.
 
         The carried loop feeds a gate parameter, so it is absorbed into
         the quantum segment and evaluated by emit-time unrolling.
         """
-        assert _sample_single(backend, angle_kernel, {"n": 3}) == 1
+        assert _sample_single(engine, angle_kernel, {"n": 3}) == 1
 
 
-@pytest.mark.parametrize("backend", RUNTIME_BACKENDS)
-class TestNestedRuntimeLoopConditionsAcrossBackends:
-    """Static replay preserves runtime condition clbits on capable backends."""
+@pytest.mark.parametrize("engine", RUNTIME_ENGINES)
+class TestNestedRuntimeLoopConditionsAcrossEngines:
+    """Static replay preserves runtime condition clbits on capable engines."""
 
-    def test_range_indexed_while_updates_the_selected_clbit(self, backend):
+    def test_range_indexed_while_updates_the_selected_clbit(self, engine):
         """Each range iteration remeasures its own condition clbit and exits."""
-        assert _sample_single(backend, indexed_while_kernel, {}) == 0
+        assert _sample_single(engine, indexed_while_kernel, {}) == 0
 
-    def test_items_indexed_while_updates_the_selected_clbit(self, backend):
+    def test_items_indexed_while_updates_the_selected_clbit(self, engine):
         """ForItems keys resolve condition aliases independently per entry."""
         assert (
             _sample_single(
-                backend,
+                engine,
                 items_indexed_while_kernel,
                 {"items": {0: 0, 1: 0}},
             )
             == 0
         )
 
-    def test_repeated_indexed_snapshot_is_rejected(self, backend):
+    def test_repeated_indexed_snapshot_is_rejected(self, engine):
         """A later replay cannot reread a snapshot whose clbit was overwritten."""
         from qamomile.circuit.transpiler.errors import EmitError
 
         with pytest.raises(EmitError, match="snapshot is read after"):
-            _make_transpiler(backend).transpile(repeated_indexed_while_kernel)
+            _make_transpiler(engine).transpile(repeated_indexed_while_kernel)
 
-    def test_original_vector_live_out_is_rejected(self, backend):
+    def test_original_vector_live_out_is_rejected(self, engine):
         """The immutable measured vector cannot escape after clbit reuse."""
         from qamomile.circuit.transpiler.errors import EmitError
 
         with pytest.raises(EmitError, match="snapshot remains live"):
-            _make_transpiler(backend).transpile(
+            _make_transpiler(engine).transpile(
                 indexed_while_original_vector_output_kernel
             )
 
-    def test_disjoint_vector_element_live_out_is_allowed(self, backend):
+    def test_disjoint_vector_element_live_out_is_allowed(self, engine):
         """An untouched sibling snapshot remains a valid public output."""
-        assert _sample_single(backend, while_disjoint_element_output_kernel, {}) == 1
+        assert _sample_single(engine, while_disjoint_element_output_kernel, {}) == 1
 
-    def test_same_vector_element_live_out_is_rejected(self, backend):
+    def test_same_vector_element_live_out_is_rejected(self, engine):
         """The exact overwritten element cannot remain a public output."""
         from qamomile.circuit.transpiler.errors import EmitError
 
         with pytest.raises(EmitError, match="snapshot remains live"):
-            _make_transpiler(backend).transpile(while_same_element_output_kernel)
+            _make_transpiler(engine).transpile(while_same_element_output_kernel)
 
     @pytest.mark.parametrize(
         ("selector", "expected"),
         [(0, (1, 0)), (1, (0, 1))],
     )
-    def test_crossed_mixed_bit_merges_execute(self, backend, selector, expected):
+    def test_crossed_mixed_bit_merges_execute(self, engine, selector, expected):
         """Post-quantum SELECTs preserve two crossed Bit merge outputs.
 
         Classical lowering keeps all branch measurements on independent
@@ -342,7 +342,7 @@ class TestNestedRuntimeLoopConditionsAcrossBackends:
         """
         assert (
             _sample_single(
-                backend,
+                engine,
                 crossed_mixed_merge_kernel,
                 {"selector": selector},
             )

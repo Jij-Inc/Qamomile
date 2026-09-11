@@ -1,4 +1,4 @@
-"""Materialize backend-neutral circuit IR through the PyQret builder API."""
+"""Materialize engine-neutral circuit IR through the PyQret builder API."""
 
 from __future__ import annotations
 
@@ -298,7 +298,7 @@ class PyQretMaterializer:
         """Materialize one circuit program through PyQret's definition context.
 
         Args:
-            program (CircuitProgram): Verified backend-neutral circuit program.
+            program (CircuitProgram): Verified engine-neutral circuit program.
             parameter_names (tuple[str, ...]): Public runtime-parameter ABI.
                 Quration currently requires this to be empty. Defaults to an
                 empty tuple.

@@ -37,15 +37,15 @@ _EXPVAL_ATOL = 1e-6
         pytest.param("cudaq", marks=pytest.mark.cudaq),
     ]
 )
-def backend(request):
-    """Yield ``(transpiler, executor)`` for each installed quantum SDK backend.
+def engine(request):
+    """Yield ``(transpiler, executor)`` for each installed quantum SDK engine.
 
     Args:
         request (pytest.FixtureRequest): Parametrization carrier selecting the
-            backend name.
+            engine name.
 
     Returns:
-        tuple: ``(transpiler, executor)`` for the selected backend.
+        tuple: ``(transpiler, executor)`` for the selected engine.
     """
     name = request.param
     if name == "qiskit":
@@ -67,21 +67,21 @@ def backend(request):
 
         t = CudaqTranspiler()
         return t, t.executor()
-    raise AssertionError(f"unknown backend {name}")
+    raise AssertionError(f"unknown engine {name}")
 
 
-def _expval(backend, kernel, bindings) -> float:
+def _expval(engine, kernel, bindings) -> float:
     """Transpile, run, and return the scalar expectation value.
 
     Args:
-        backend (tuple): ``(transpiler, executor)`` pair from the fixture.
+        engine (tuple): ``(transpiler, executor)`` pair from the fixture.
         kernel (qmc.QKernel): The expval kernel to evaluate.
         bindings (dict): Compile-time bindings (observable, bits, angles).
 
     Returns:
         float: The estimated expectation value.
     """
-    transpiler, executor = backend
+    transpiler, executor = engine
     exe = transpiler.transpile(kernel, bindings=bindings)
     return float(exe.run(executor).result())
 
@@ -210,40 +210,40 @@ def _expval_dynamic_vec_elem(
 # ---------------------------------------------------------------------------
 
 
-def test_ungated_vector_element_ancilla_is_plus_one(backend):
+def test_ungated_vector_element_ancilla_is_plus_one(engine):
     """``<Z>`` of an ungated Vector-element ancilla is ``+1`` (clock qubits are |1>).
 
     Before the fix the empty qubit_map left ``Z(0)`` on physical qubit 0 (a ``|1>``
     clock qubit), yielding ``-1``.
     """
-    got = _expval(backend, _ungated_vec_ancilla, {"obs": qm_o.Z(0)})
+    got = _expval(engine, _ungated_vec_ancilla, {"obs": qm_o.Z(0)})
     assert math.isclose(got, 1.0, abs_tol=_EXPVAL_ATOL)
 
 
-def test_gated_vector_element_ancilla_is_minus_one(backend):
+def test_gated_vector_element_ancilla_is_minus_one(engine):
     """A Vector-element ancilla flipped to ``|1>`` gives ``<Z> = -1`` (clock stays |0>).
 
     Together with the ungated case this pins ``Z(0)`` to the ancilla in both
     directions, not to ``clock[0]``.
     """
-    got = _expval(backend, _gated_vec_ancilla, {"obs": qm_o.Z(0)})
+    got = _expval(engine, _gated_vec_ancilla, {"obs": qm_o.Z(0)})
     assert math.isclose(got, -1.0, abs_tol=_EXPVAL_ATOL)
 
 
-def test_bare_ungated_vector_element_ancilla_is_plus_one(backend):
+def test_bare_ungated_vector_element_ancilla_is_plus_one(engine):
     """``expval(anc[0], Z(0))`` (bare Qubit, no tuple) binds to the ancilla -> +1.
 
     The bare single-Qubit form goes through the single-Value branch of
     ``_build_qubit_map``; before the fix it missed the root-address fallback and
     returned ``-1`` (bound to a ``|1>`` clock qubit).
     """
-    got = _expval(backend, _bare_ungated_vec_ancilla, {"obs": qm_o.Z(0)})
+    got = _expval(engine, _bare_ungated_vec_ancilla, {"obs": qm_o.Z(0)})
     assert math.isclose(got, 1.0, abs_tol=_EXPVAL_ATOL)
 
 
-def test_bare_gated_vector_element_ancilla_is_minus_one(backend):
+def test_bare_gated_vector_element_ancilla_is_minus_one(engine):
     """``expval(reg[1], Z(0))`` (bare Qubit) where ``reg[1] = |1>`` -> -1."""
-    got = _expval(backend, _bare_gated_vec_ancilla, {"obs": qm_o.Z(0)})
+    got = _expval(engine, _bare_gated_vec_ancilla, {"obs": qm_o.Z(0)})
     assert math.isclose(got, -1.0, abs_tol=_EXPVAL_ATOL)
 
 
@@ -252,14 +252,14 @@ def test_bare_gated_vector_element_ancilla_is_minus_one(backend):
 # ---------------------------------------------------------------------------
 
 
-def test_qft_result_vector_element(backend):
+def test_qft_result_vector_element(engine):
     """``<Z>`` on a qubit of ``qft(|000>)`` is ``0`` (uniform superposition)."""
-    got = _expval(backend, _qft_result_element, {"obs": qm_o.Z(0)})
+    got = _expval(engine, _qft_result_element, {"obs": qm_o.Z(0)})
     assert math.isclose(got, 0.0, abs_tol=_EXPVAL_ATOL)
 
 
 @pytest.mark.parametrize("seed", [0, 1, 42])
-def test_controlled_u_result_vector_element(backend, seed):
+def test_controlled_u_result_vector_element(engine, seed):
     """``<Z>`` of a controlled-Ry result ancilla matches ``cos(theta)``.
 
     The control is held in ``|1>`` so the rotation always fires; the ancilla is
@@ -270,7 +270,7 @@ def test_controlled_u_result_vector_element(backend, seed):
     obs = qm_o.Z(0)
     angles = [0.0, math.pi, 2.0 * math.pi, float(rng.uniform(0, 2 * math.pi))]
     for theta in angles:
-        got = _expval(backend, _cry_result_ancilla, {"theta": theta, "obs": obs})
+        got = _expval(engine, _cry_result_ancilla, {"theta": theta, "obs": obs})
         assert math.isclose(got, math.cos(theta), abs_tol=_EXPVAL_ATOL), (
             f"theta={theta}"
         )
@@ -282,22 +282,22 @@ def test_controlled_u_result_vector_element(backend, seed):
 
 
 @pytest.mark.parametrize("qubit_idx, expected", [(0, -1.0), (1, 1.0)])
-def test_whole_vector_invariant(backend, qubit_idx, expected):
+def test_whole_vector_invariant(engine, qubit_idx, expected):
     """Whole-Vector expval binds ``Z(k)`` to ``q[k]`` (``q[0]=|1>``, ``q[1]=|0>``)."""
-    got = _expval(backend, _whole_vector, {"obs": qm_o.Z(qubit_idx)})
+    got = _expval(engine, _whole_vector, {"obs": qm_o.Z(qubit_idx)})
     assert math.isclose(got, expected, abs_tol=_EXPVAL_ATOL)
 
 
-def test_sliced_view_invariant(backend):
+def test_sliced_view_invariant(engine):
     """``expval(q[1::2], Z(0))`` observes ``q[1]`` (``=|1>``) -> ``-1``."""
-    got = _expval(backend, _sliced_view, {"obs": qm_o.Z(0)})
+    got = _expval(engine, _sliced_view, {"obs": qm_o.Z(0)})
     assert math.isclose(got, -1.0, abs_tol=_EXPVAL_ATOL)
 
 
 @pytest.mark.parametrize("qubit_idx, expected", [(0, 1.0), (1, -1.0)])
-def test_standalone_qubit_tuple_invariant(backend, qubit_idx, expected):
+def test_standalone_qubit_tuple_invariant(engine, qubit_idx, expected):
     """Standalone-qubit tuple expval: ``q0=|0>`` -> ``+1``, ``q1=|1>`` -> ``-1``."""
-    got = _expval(backend, _standalone_tuple, {"obs": qm_o.Z(qubit_idx)})
+    got = _expval(engine, _standalone_tuple, {"obs": qm_o.Z(qubit_idx)})
     assert math.isclose(got, expected, abs_tol=_EXPVAL_ATOL)
 
 
@@ -685,11 +685,11 @@ RANDOM_CASES = [
 ]
 
 
-def _run_whole_vector_expval(backend, kernel, bindings, target, expected_map):
+def _run_whole_vector_expval(engine, kernel, bindings, target, expected_map):
     """Run a whole-Vector expval and assert the compiled remap.
 
     Args:
-        backend (tuple): ``(transpiler, executor)`` pair from the fixture.
+        engine (tuple): ``(transpiler, executor)`` pair from the fixture.
         kernel (object): Qkernel that accepts ``obs`` through bindings.
         bindings (dict[str, object]): Additional compile-time bindings.
         target (int): Logical observable target index.
@@ -698,7 +698,7 @@ def _run_whole_vector_expval(backend, kernel, bindings, target, expected_map):
     Returns:
         float: Executed expectation value.
     """
-    transpiler, executor = backend
+    transpiler, executor = engine
     exe = transpiler.transpile(
         kernel,
         bindings={**bindings, "obs": qm_o.Z(target)},
@@ -711,7 +711,7 @@ def _run_whole_vector_expval(backend, kernel, bindings, target, expected_map):
     "case_name,kernel,n,expected_map,expected_values", DETERMINISTIC_CASES
 )
 def test_offset_whole_vector_expval_deterministic_forms(
-    backend,
+    engine,
     case_name,
     kernel,
     n,
@@ -721,7 +721,7 @@ def test_offset_whole_vector_expval_deterministic_forms(
     """Deterministic frontend forms remap ``Z(k)`` onto logical ``q[k]``."""
     del case_name
     for target in range(n):
-        got = _run_whole_vector_expval(backend, kernel, {}, target, expected_map)
+        got = _run_whole_vector_expval(engine, kernel, {}, target, expected_map)
         assert np.isclose(got, expected_values[target], atol=1e-6), (
             f"target={target}: got {got}, expected {expected_values[target]}"
         )
@@ -731,7 +731,7 @@ def test_offset_whole_vector_expval_deterministic_forms(
 @pytest.mark.parametrize("seed", [0, 1, 2, 42])
 @pytest.mark.parametrize("n", [2, 4])
 def test_offset_whole_vector_expval_random_ry_forms(
-    backend,
+    engine,
     case_name,
     kernel,
     seed,
@@ -744,7 +744,7 @@ def test_offset_whole_vector_expval_random_ry_forms(
     bindings = {"n": n, "angles": angles}
 
     for target in range(n):
-        got = _run_whole_vector_expval(backend, kernel, bindings, target, expected_map)
+        got = _run_whole_vector_expval(engine, kernel, bindings, target, expected_map)
         expected = math.cos(float(angles[target]))
         assert np.isclose(got, expected, atol=1e-6), (
             f"{case_name} seed={seed} n={n} target={target}: "
@@ -753,7 +753,7 @@ def test_offset_whole_vector_expval_random_ry_forms(
 
 
 @pytest.mark.parametrize("seed", [0, 1, 42])
-def test_offset_whole_vector_expval_random_broadcast(backend, seed):
+def test_offset_whole_vector_expval_random_broadcast(engine, seed):
     """Random whole-Vector broadcast keeps expval on the offset register."""
     rng = np.random.default_rng(seed)
     theta = float(rng.uniform(-math.pi, math.pi))
@@ -761,7 +761,7 @@ def test_offset_whole_vector_expval_random_broadcast(backend, seed):
 
     for target in range(2):
         got = _run_whole_vector_expval(
-            backend,
+            engine,
             _offset_random_broadcast,
             {"theta": theta},
             target,
@@ -774,7 +774,7 @@ def test_offset_whole_vector_expval_random_broadcast(backend, seed):
 
 
 @pytest.mark.parametrize("seed", [0, 1, 42])
-def test_offset_whole_vector_expval_random_view_broadcast(backend, seed):
+def test_offset_whole_vector_expval_random_view_broadcast(engine, seed):
     """Random view broadcast keeps whole expval mapped after slice return."""
     rng = np.random.default_rng(seed)
     theta0 = float(rng.uniform(-math.pi, math.pi))
@@ -784,7 +784,7 @@ def test_offset_whole_vector_expval_random_view_broadcast(backend, seed):
 
     for target in range(3):
         got = _run_whole_vector_expval(
-            backend,
+            engine,
             _offset_random_view_broadcast,
             {"theta0": theta0, "theta_view": theta_view},
             target,
@@ -1125,15 +1125,15 @@ def _random_composite_gate(theta: qmc.Float, obs: qmc.Observable) -> qmc.Float:
 
 
 def _expval_with_qubit_map(
-    backend: tuple[object, object],
+    engine: tuple[object, object],
     kernel: qmc.QKernel,
     bindings: dict[str, object],
 ) -> tuple[float, dict[int, int]]:
     """Transpile and run one expval kernel, returning its qubit map.
 
     Args:
-        backend (tuple[object, object]): Transpiler and executor from the
-            ``backend`` fixture.
+        engine (tuple[object, object]): Transpiler and executor from the
+            ``engine`` fixture.
         kernel (qmc.QKernel): Kernel to transpile and execute.
         bindings (dict[str, object]): Compile-time bindings.
 
@@ -1141,7 +1141,7 @@ def _expval_with_qubit_map(
         tuple[float, dict[int, int]]: Observed expectation value and compiled
             expval Pauli-index to physical-qubit map.
     """
-    transpiler, executor = backend
+    transpiler, executor = engine
     exe = transpiler.transpile(kernel, bindings=bindings)
     value = exe.run(executor).result()
     assert exe.compiled_expval
@@ -1165,22 +1165,22 @@ DETERMINISTIC_INLINE_CASES: tuple[tuple[str, qmc.QKernel, int, float], ...] = (
     ids=[case[0] for case in DETERMINISTIC_INLINE_CASES],
 )
 def test_tuple_expval_inline_frontend_patterns_deterministic(
-    backend,
+    engine,
     case_name: str,
     kernel: qmc.QKernel,
     expected_physical: int,
     expected: float,
 ):
     """Tuple-form expval targets the intended physical qubit deterministically."""
-    value, qubit_map = _expval_with_qubit_map(backend, kernel, {"obs": qm_o.Z(0)})
+    value, qubit_map = _expval_with_qubit_map(engine, kernel, {"obs": qm_o.Z(0)})
     assert qubit_map == {0: expected_physical}, case_name
     assert math.isclose(value, expected, abs_tol=_EXPVAL_ATOL), case_name
 
 
-def test_tuple_expval_inline_scalar_pair_identity(backend):
+def test_tuple_expval_inline_scalar_pair_identity(engine):
     """Tuple metadata roots are rewritten for unchanged scalar arguments."""
     value, qubit_map = _expval_with_qubit_map(
-        backend,
+        engine,
         _deterministic_scalar_pair_identity_qkernel,
         {"obs": qm_o.Z(0)},
     )
@@ -1207,7 +1207,7 @@ RANDOM_INLINE_CASES: tuple[
     ids=[case[0] for case in RANDOM_INLINE_CASES],
 )
 def test_tuple_expval_inline_frontend_patterns_random_angles(
-    backend,
+    engine,
     seed: int,
     case_name: str,
     kernel: qmc.QKernel,
@@ -1218,7 +1218,7 @@ def test_tuple_expval_inline_frontend_patterns_random_angles(
     rng = np.random.default_rng(seed)
     theta = float(rng.uniform(-2.0 * math.pi, 2.0 * math.pi))
     value, qubit_map = _expval_with_qubit_map(
-        backend,
+        engine,
         kernel,
         {"theta": theta, "obs": qm_o.Z(0)},
     )

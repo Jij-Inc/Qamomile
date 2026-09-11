@@ -25,7 +25,7 @@ class StaticBindingField:
 class StaticBindingSlot:
     """Declare one typed compile-time object required by a qkernel.
 
-    The object itself is not an SSA value and never reaches a backend. Only
+    The object itself is not an SSA value and never reaches an engine. Only
     registered scalar projections and deferred callable-member references may
     appear in the hierarchical body. A build must resolve the slot before the
     block advances to a compiler stage.

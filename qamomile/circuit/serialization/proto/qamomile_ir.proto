@@ -61,6 +61,7 @@ enum FrontendAnnotationKind {
   QAMOMILE_TUPLE = 13;
   QAMOMILE_DICT = 14;
   PYTHON_TUPLE = 15;
+  QAMOMILE_QINT = 16;
 }
 
 message FrontendAnnotation {
@@ -240,6 +241,8 @@ enum OperationType {
   SELECT_OPERATION = 32;
   RETURN_QUANTUM_ARRAY_ELEMENT_OPERATION = 33;
   UNARY_MATH_OPERATION = 34;
+  MEASURE_QINT_OPERATION = 35;
+  DECODE_QINT_OPERATION = 36;
 }
 
 message Operation {
@@ -365,7 +368,7 @@ message CallableBodyRef {
 
 message CallableImplementation {
   string transform = 1;
-  optional string backend = 2;
+  optional string engine = 2;
   optional string strategy = 3;
   optional Block body = 4;
   optional CallableBodyRef body_ref = 5;

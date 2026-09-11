@@ -43,7 +43,7 @@ from qamomile.qiskit import QiskitTranspiler
 
 
 def _transpile(kernel, bindings=None):
-    """Transpile a kernel on the Qiskit backend."""
+    """Transpile a kernel on the Qiskit engine."""
     return QiskitTranspiler().transpile(kernel, bindings=bindings or {})
 
 

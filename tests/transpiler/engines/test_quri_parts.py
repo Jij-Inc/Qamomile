@@ -1,6 +1,6 @@
 """QURI Parts transpiler test configuration.
 
-This module configures the transpiler test suite for the QURI Parts backend.
+This module configures the transpiler test suite for the QURI Parts engine.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ class TestQuriPartsTranspiler(TranspilerTestSuite):
     - Controlled gates (CH, CY, CRX, CRY, CRZ, CP) are decomposed
     """
 
-    backend_name = "quri_parts"
+    engine_name = "quri_parts"
     # MEASURE is a no-op in QURI Parts
     unsupported_gates: set[str] = {"MEASURE"}
 

@@ -191,15 +191,15 @@ def _phased_identity(target: Qubit, angle: Float) -> Qubit:
 
 
 def _executor(case: Any) -> Any:
-    """Return an executor for a cross-backend test case.
+    """Return an executor for a cross-engine test case.
 
     Args:
-        case (Any): Backend fixture containing a transpiler and backend name.
+        case (Any): Engine fixture containing a transpiler and engine name.
 
     Returns:
-        Any: Executor for the selected SDK backend.
+        Any: Executor for the selected SDK engine.
     """
-    if case.backend_name == "qiskit":
+    if case.engine_name == "qiskit":
         from qiskit.providers.basic_provider import BasicSimulator
 
         return case.transpiler.executor(backend=BasicSimulator())
@@ -210,7 +210,7 @@ def _sample_outcomes(case: Any, kernel: Any) -> set[Any]:
     """Transpile and sample a deterministic test kernel.
 
     Args:
-        case (Any): Backend fixture containing a transpiler.
+        case (Any): Engine fixture containing a transpiler.
         kernel (Any): Qkernel to transpile and execute.
 
     Returns:
@@ -229,7 +229,7 @@ def test_control_value_truth_table_is_lsb_first(
     """Value two activates exactly the control pattern ``(0, 1)``.
 
     Args:
-        sdk_transpiler (Any): Cross-backend transpiler fixture.
+        sdk_transpiler (Any): Cross-engine transpiler fixture.
         control_state (int): Basis state prepared on the two controls.
     """
     bit_0 = control_state & 1
@@ -262,7 +262,7 @@ def test_control_value_accepts_a_whole_vector(sdk_transpiler: Any) -> None:
     """A whole control Vector uses element zero as integer bit zero.
 
     Args:
-        sdk_transpiler (Any): Cross-backend transpiler fixture.
+        sdk_transpiler (Any): Cross-engine transpiler fixture.
     """
 
     @qmc.qkernel
@@ -291,7 +291,7 @@ def test_control_value_zero_activates_an_all_zero_register(
     """Value zero brackets every control and activates on all zeros.
 
     Args:
-        sdk_transpiler (Any): Cross-backend transpiler fixture.
+        sdk_transpiler (Any): Cross-engine transpiler fixture.
     """
 
     @qmc.qkernel
@@ -319,7 +319,7 @@ def test_control_value_preserves_composite_identity_and_executes(
     """Patterned composite control remains an InvokeOperation and runs.
 
     Args:
-        sdk_transpiler (Any): Cross-backend transpiler fixture.
+        sdk_transpiler (Any): Cross-engine transpiler fixture.
     """
 
     @qmc.qkernel
@@ -357,7 +357,7 @@ def test_control_value_composes_with_an_outer_control(
     """Unconditional X brackets cancel when an outer control is inactive.
 
     Args:
-        sdk_transpiler (Any): Cross-backend transpiler fixture.
+        sdk_transpiler (Any): Cross-engine transpiler fixture.
         outer_state (int): Basis state prepared on the outer control.
     """
 
@@ -389,7 +389,7 @@ def test_control_value_inside_static_for_and_if(sdk_transpiler: Any) -> None:
     """A patterned control survives nested static loop and branch lowering.
 
     Args:
-        sdk_transpiler (Any): Cross-backend transpiler fixture.
+        sdk_transpiler (Any): Cross-engine transpiler fixture.
     """
 
     @qmc.qkernel
@@ -418,7 +418,7 @@ def test_inverse_preserves_control_value(sdk_transpiler: Any) -> None:
     """A patterned controlled layer followed by its inverse is identity.
 
     Args:
-        sdk_transpiler (Any): Cross-backend transpiler fixture.
+        sdk_transpiler (Any): Cross-engine transpiler fixture.
     """
 
     @qmc.qkernel
@@ -454,7 +454,7 @@ def test_inverse_of_patterned_composite_preserves_control_value(
     """InverseBlockOperation retains a composite control activation value.
 
     Args:
-        sdk_transpiler (Any): Cross-backend transpiler fixture.
+        sdk_transpiler (Any): Cross-engine transpiler fixture.
     """
 
     @qmc.qkernel
@@ -485,7 +485,7 @@ def test_inverse_control_value_composes_with_an_outer_control(
     """Only an inverse block's own controls use its activation value.
 
     Args:
-        sdk_transpiler (Any): Cross-backend transpiler fixture.
+        sdk_transpiler (Any): Cross-engine transpiler fixture.
         outer_state (int): Basis state prepared on the outer control.
     """
 
@@ -519,7 +519,7 @@ def test_control_value_keeps_global_phase_relative(sdk_transpiler: Any) -> None:
     """A phase on value two becomes the expected relative phase.
 
     Args:
-        sdk_transpiler (Any): Cross-backend transpiler fixture.
+        sdk_transpiler (Any): Cross-engine transpiler fixture.
     """
     theta = 0.43
 
@@ -551,7 +551,7 @@ def test_control_value_keeps_global_phase_relative(sdk_transpiler: Any) -> None:
         .run(_executor(sdk_transpiler))
         .result()
     )
-    tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    tolerance = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert np.isclose(value, -np.sin(theta), rtol=0.0, atol=tolerance)
 
 

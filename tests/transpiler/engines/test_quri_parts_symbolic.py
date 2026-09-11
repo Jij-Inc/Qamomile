@@ -164,9 +164,9 @@ class TestSymbolicEndToEnd:
 
     Note: a top-level ``rx(q, theta * 2.0)`` pattern (a BinOp gate angle
     between quantum gates, without an enclosing for-items loop) is now
-    supported on every backend — the segmentation pass absorbs such a
+    supported on every engine — the segmentation pass absorbs such a
     non-measurement parameter-expression op into the surrounding quantum
-    segment instead of splitting on it (see the cross-backend
+    segment instead of splitting on it (see the cross-engine
     ``test_interleaved_param_expr_angle_sample_and_run``). The
     BinOp-inside-loop pattern the QAOA tests below exercise is supported too.
     """
@@ -307,8 +307,8 @@ class TestSymbolicEndToEnd:
     def test_qaoa_expval_matches_qiskit(self):
         """QAOA expval through both QURI Parts and Qiskit must agree.
 
-        Sampling and expval use different backend primitives, so the
-        cross-backend checks cover both execution paths.
+        Sampling and expval use different engine primitives, so the
+        cross-engine checks cover both execution paths.
         """
         pytest.importorskip("qiskit")
         import qamomile.observable as qm_o

@@ -2,8 +2,8 @@
 
 The pool's *size* is measured by a count-only dry-run of the real emission
 (``StandardEmitPass._count_multi_control_ancilla_demand``); those
-end-to-end demand checks live in the QURI Parts backend suite
-(``tests/transpiler/backends/test_quri_parts_frontend.py``). This file
+end-to-end demand checks live in the QURI Parts engine suite
+(``tests/transpiler/engines/test_quri_parts_frontend.py``). This file
 covers the pool data structure itself — its offset / hold discipline and
 its counting mode — in isolation.
 """

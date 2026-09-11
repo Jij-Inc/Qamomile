@@ -309,7 +309,7 @@ def test_reconciliation_preserves_used_container_metadata_and_order() -> None:
         array_name="angles",
         index=0,
         indices=(0,),
-        backend_param=object(),
+        engine_param=object(),
         source_ref="angle-zero",
         container_kind=ParameterContainerKind.ARRAY,
     )
@@ -318,7 +318,7 @@ def test_reconciliation_preserves_used_container_metadata_and_order() -> None:
         array_name="angles",
         index=1,
         indices=(1,),
-        backend_param=object(),
+        engine_param=object(),
         source_ref="angle-one",
         container_kind=ParameterContainerKind.ARRAY,
     )
@@ -326,7 +326,7 @@ def test_reconciliation_preserves_used_container_metadata_and_order() -> None:
         name="weights[3]",
         array_name="weights",
         index=None,
-        backend_param=object(),
+        engine_param=object(),
         source_ref="weight-three",
         container_kind=ParameterContainerKind.DICT,
     )
@@ -334,7 +334,7 @@ def test_reconciliation_preserves_used_container_metadata_and_order() -> None:
         name="unused",
         array_name="unused",
         index=None,
-        backend_param=object(),
+        engine_param=object(),
     )
     precise_array = ParameterArrayInfo("angles", 1, (2,))
     metadata = ParameterMetadata(

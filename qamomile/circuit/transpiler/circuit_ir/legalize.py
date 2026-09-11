@@ -69,7 +69,7 @@ def legalize_program(
     semantic identity and recursively legalized fallback body.
 
     Args:
-        program (CircuitProgram): Verified backend-neutral circuit program.
+        program (CircuitProgram): Verified engine-neutral circuit program.
         capabilities (CircuitCapabilities): Declared target capabilities.
         policy (CompilationPolicy): User realization preferences.
 

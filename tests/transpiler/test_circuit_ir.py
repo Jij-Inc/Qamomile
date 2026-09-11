@@ -1,4 +1,4 @@
-"""Tests for backend-neutral circuit code-generation IR."""
+"""Tests for engine-neutral circuit code-generation IR."""
 
 from __future__ import annotations
 
@@ -787,7 +787,7 @@ def test_verifier_rejects_invalid_reusable_call_transforms(
 
 
 def test_materialization_rejects_positional_parameter_order_drift() -> None:
-    """A positional backend cannot silently reorder runtime parameters."""
+    """A positional engine cannot silently reorder runtime parameters."""
     transpiler = QiskitTranspiler()
     prepared = transpiler.prepare(
         _two_parameter_rotation,
@@ -855,7 +855,7 @@ def test_materialization_accepts_legacy_one_argument_materializer() -> None:
     assert executable.compiled_quantum[0].circuit is artifact
 
 
-def test_qamomile_plan_lowers_to_backend_neutral_circuit_ir() -> None:
+def test_qamomile_plan_lowers_to_engine_neutral_circuit_ir() -> None:
     """The full semantic circuit path produces verified circuit IR."""
     transpiler = QiskitTranspiler()
     prepared = transpiler.prepare(_lowered_bell, parameters=["theta"])

@@ -238,5 +238,5 @@ class TestEndToEndTranspile:
             },
             parameters=["gammas", "betas"],
         )
-        # Should succeed; parameters remain symbolic backend-side.
+        # Should succeed; parameters remain symbolic engine-side.
         assert exe.compiled_quantum[0].circuit.num_parameters >= 2

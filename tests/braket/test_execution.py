@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
+from unittest.mock import Mock
 
+import numpy as np
 import pytest
 
 pytestmark = pytest.mark.braket
@@ -15,7 +18,9 @@ import qamomile.observable as qm_o  # noqa: E402
 from qamomile.braket import (  # noqa: E402
     BraketExecutionOptions,
     BraketExecutor,
+    BraketTranspiler,
 )
+from qamomile.circuit.transpiler import JobSnapshot  # noqa: E402
 from qamomile.circuit.transpiler.errors import ExecutionError  # noqa: E402
 from qamomile.circuit.transpiler.execution_handle import (  # noqa: E402
     ExecutionReference,
@@ -31,6 +36,7 @@ from qamomile.circuit.transpiler.parameter_binding import (  # noqa: E402
     ParameterInfo,
     ParameterMetadata,
 )
+from tests.braket.test_transpiler import _plus_expectation  # noqa: E402
 
 
 class _Result:
@@ -191,6 +197,35 @@ def test_sample_submission_is_lazy_and_uses_native_inputs() -> None:
     assert handle.native is task
     assert handle.result() == {"1": 4}
     assert task.result_calls == 1
+
+
+def test_constant_public_job_snapshot_restores_without_provider_calls(monkeypatch):
+    """Identity-only public results remain local through JSON and restoration."""
+    observable = qm_o.Hamiltonian()
+    observable.constant = 0.25
+    executable = BraketTranspiler().transpile(
+        _plus_expectation, bindings={"observable": observable}
+    )
+    device = _Device([])
+    executor = BraketExecutor(device)
+    job = executable.run(executor)
+    saved = JobSnapshot.from_dict(json.loads(json.dumps(job.snapshot().to_dict())))
+    submit = Mock(side_effect=AssertionError("Restore must not submit a task"))
+    retrieve = Mock(side_effect=AssertionError("Local values need no task retrieval"))
+    monkeypatch.setattr(executor, "submit_estimate", submit)
+    monkeypatch.setattr(executor, "restore", retrieve)
+
+    restored = executable.restore(executor, saved)
+
+    assert saved.executions == ()
+    assert type(restored) is type(job)
+    assert type(restored.result()) is float
+    np.testing.assert_allclose(
+        [restored.result(), job.result()], [0.25, 0.25], atol=1e-12, rtol=1e-12
+    )
+    assert device.run_calls == device.batch_calls == []
+    submit.assert_not_called()
+    retrieve.assert_not_called()
 
 
 def test_sampling_handle_delegates_cancellation() -> None:

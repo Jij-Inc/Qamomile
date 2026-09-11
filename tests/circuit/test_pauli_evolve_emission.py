@@ -48,7 +48,7 @@ def test_zero_evolution_time_accepts_real_numeric_scalars(gamma: object) -> None
 def test_zero_evolution_time_rejects_nonzero_or_nonnumeric_values(
     gamma: object,
 ) -> None:
-    """Booleans, nonzero numbers, and backend-like objects are not zero time."""
+    """Booleans, nonzero numbers, and engine-like objects are not zero time."""
     assert not is_zero_evolution_time(gamma)
 
 

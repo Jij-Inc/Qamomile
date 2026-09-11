@@ -5,7 +5,7 @@ Covers the frontend ``Dict.__getitem__`` tracing (symbolic
 emit-time key resolution against bound dict data, value-type wiring
 (``Dict[K, Float]`` / ``Dict[K, UInt]``), the forced unrolling of
 ``qmc.range`` loops whose body looks up a dict with the loop variable,
-and cross-backend execution equivalence for a sparse weighted layer that
+and cross-engine execution equivalence for a sparse weighted layer that
 indexes one dict with the iteration keys of another.
 """
 
@@ -299,7 +299,7 @@ class TestDictGetItemTrace:
 
 
 class TestDictGetItemEmit:
-    """Emit-time resolution checks on the Qiskit backend."""
+    """Emit-time resolution checks on the Qiskit engine."""
 
     def test_emitted_angles_match_reference(self, qiskit_transpiler):
         """Subscript and pre-multiplied kernels emit identical statevectors."""
@@ -426,17 +426,17 @@ class TestDictGetItemEmit:
 
 
 # ---------------------------------------------------------------------------
-# Cross-backend execution
+# Cross-engine execution
 # ---------------------------------------------------------------------------
 
 
-class TestDictGetItemCrossBackend:
-    """Sampling and expval equivalence on every supported SDK backend."""
+class TestDictGetItemCrossEngine:
+    """Sampling and expval equivalence on every supported SDK engine."""
 
     @pytest.mark.parametrize("seed", [0, 1, 2, 42])
     @pytest.mark.parametrize("n", [2, 3, 4])
     def test_expval_matches_reference(self, sdk_transpiler, seed, n):
-        """Subscript and pre-multiplied kernels agree on <H> per backend."""
+        """Subscript and pre-multiplied kernels agree on <H> per engine."""
         transpiler = sdk_transpiler.transpiler
         bindings = _random_problem(np.random.default_rng(seed), n)
         hamiltonian = _ising_hamiltonian(bindings)

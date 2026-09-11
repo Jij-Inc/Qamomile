@@ -30,7 +30,7 @@ pytest.importorskip("qiskit")
 
 from qamomile.qiskit import QiskitTranspiler  # noqa: E402
 
-Backend = tuple[str, Any, Any]
+Engine = tuple[str, Any, Any]
 
 
 @pytest.fixture(
@@ -40,8 +40,8 @@ Backend = tuple[str, Any, Any]
         pytest.param("cudaq", marks=pytest.mark.cudaq),
     ]
 )
-def backend(request) -> Backend:
-    """Yield ``(name, transpiler, executor)`` for each installed SDK backend."""
+def engine(request) -> Engine:
+    """Yield ``(name, transpiler, executor)`` for each installed SDK engine."""
     name = request.param
     if name == "qiskit":
         from qamomile.qiskit import QiskitTranspiler
@@ -61,7 +61,7 @@ def backend(request) -> Backend:
 
         transpiler = CudaqTranspiler()
         return name, transpiler, transpiler.executor()
-    raise AssertionError(f"unknown backend {name}")
+    raise AssertionError(f"unknown engine {name}")
 
 
 def _counts(result: Any) -> dict[Any, int]:
@@ -90,12 +90,12 @@ def copy_bit_kernel() -> qmc.Vector[qmc.Bit]:
     return bits
 
 
-def test_measured_bit_store_repro(backend):
+def test_measured_bit_store_repro(engine):
     """The original silent-drop repro: bits[1] = bits[0] must yield (1, 1).
 
     Before the fix the write was dropped and sampling returned (1, 0).
     """
-    name, transpiler, executor = backend
+    name, transpiler, executor = engine
     exe = transpiler.transpile(copy_bit_kernel)
     counts = _counts(exe.sample(executor, shots=100).result())
     assert counts == {(1, 1): 100}, f"{name}: got {counts}"
@@ -111,9 +111,9 @@ def chained_bit_kernel() -> qmc.Vector[qmc.Bit]:
     return bits
 
 
-def test_measured_bit_chained_stores(backend):
+def test_measured_bit_chained_stores(engine):
     """Chained stores read the post-store contents of the previous store."""
-    name, transpiler, executor = backend
+    name, transpiler, executor = engine
     exe = transpiler.transpile(chained_bit_kernel)
     counts = _counts(exe.sample(executor, shots=100).result())
     assert counts == {(1, 1, 1): 100}, f"{name}: got {counts}"
@@ -127,9 +127,9 @@ def bit_literal_kernel() -> qmc.Vector[qmc.Bit]:
     return bits
 
 
-def test_measured_bit_literal_store(backend):
+def test_measured_bit_literal_store(engine):
     """A Python literal 0/1 can be stored into a measured Vector[Bit]."""
-    name, transpiler, executor = backend
+    name, transpiler, executor = engine
     exe = transpiler.transpile(bit_literal_kernel)
     counts = _counts(exe.sample(executor, shots=100).result())
     assert counts == {(0, 1): 100}, f"{name}: got {counts}"
@@ -148,9 +148,9 @@ def two_register_kernel() -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
     return dst, bits
 
 
-def test_measured_bit_loop_store_between_registers(backend):
+def test_measured_bit_loop_store_between_registers(engine):
     """A loop-indexed store copies one register's readout into another's."""
-    name, transpiler, executor = backend
+    name, transpiler, executor = engine
     exe = transpiler.transpile(two_register_kernel)
     counts = _counts(exe.sample(executor, shots=100).result())
     assert counts == {((1, 1), (1, 1)): 100}, f"{name}: got {counts}"
@@ -265,9 +265,9 @@ def test_compile_time_if_store_folds_into_gate_angle():
     np.testing.assert_allclose(emitted, [float(np.pi)], atol=1e-12)
 
 
-def test_stored_pi_angle_flips_qubit(backend):
+def test_stored_pi_angle_flips_qubit(engine):
     """End-to-end: rx(pi) through a stored element flips the qubit."""
-    name, transpiler, executor = backend
+    name, transpiler, executor = engine
     exe = transpiler.transpile(
         angle_store_kernel, bindings={"vals": [float(np.pi), 0.0]}
     )

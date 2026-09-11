@@ -1,4 +1,4 @@
-"""Structural verifier for backend-neutral circuit programs."""
+"""Structural verifier for engine-neutral circuit programs."""
 
 from __future__ import annotations
 

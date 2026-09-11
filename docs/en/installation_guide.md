@@ -6,7 +6,7 @@ Qamomile can be installed via standard package managers, such as pip.
 pip install qamomile
 ```
 
-Install optional integrations explicitly. For the Qiskit backend and circuit
+Install optional integrations explicitly. For the Qiskit engine and circuit
 drawings used throughout the tutorials:
 
 ```bash

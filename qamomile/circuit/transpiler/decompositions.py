@@ -1,4 +1,4 @@
-"""Shared gate decomposition recipes for backend emitters.
+"""Shared gate decomposition recipes for engine emitters.
 
 This module defines the canonical decomposition of controlled gates (CH, CY,
 CP, CRY, CRZ) into primitive operations (RY, RZ, CNOT, S, SDG).  Each recipe
@@ -9,11 +9,11 @@ is a frozen sequence of :class:`DecompStep` instances that encode:
 * An optional angle expression (e.g. ``"theta/2"``, ``"-pi/4"``).
 
 The recipes are the **single source of truth** for how Qamomile decomposes
-controlled gates when a backend cannot use a native controlled-U operation.
+controlled gates when an engine cannot use a native controlled-U operation.
 
 ## Why data-only (no shared execution helper)
 
-Each backend has its own emission dialect:
+Each engine has its own emission dialect:
 
 * **Qiskit** uses native ``circuit.ch()`` / ``circuit.cy()`` and never needs
   this decomposition.
@@ -25,11 +25,11 @@ Each backend has its own emission dialect:
   ``self.emit_ry`` interacts poorly with the tracing test emitter, which
   wraps every ``emit_*`` method and would double-record each call.
 
-Because no single helper absorbs all three styles cleanly, backends inline
+Because no single helper absorbs all three styles cleanly, engines inline
 their decomposition using their own idiomatic emission, and reference the
 recipe constants below from the ``emit_ch`` / ``emit_cy`` / ... docstrings to
 document equivalence.  When changing a recipe, update the constant here and
-ensure every backend's inline implementation matches.
+ensure every engine's inline implementation matches.
 """
 
 from __future__ import annotations

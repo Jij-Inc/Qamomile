@@ -1,4 +1,4 @@
-"""Lower circuit-family execution plans into backend-neutral circuit IR."""
+"""Lower circuit-family execution plans into engine-neutral circuit IR."""
 
 from __future__ import annotations
 
@@ -350,7 +350,7 @@ class CircuitLoweringPass(StandardEmitPass[CircuitBuilder]):
             CircuitGateEmitter(),
             bindings=bindings,
             parameters=parameters,
-            backend_name="circuit_ir",
+            engine_name="circuit_ir",
         )
         self._composite_emitters.append(_SemanticCompositeEmitter(self))
         self._select_case_cache: dict[
@@ -1337,7 +1337,7 @@ def lower_circuit_plan(
     """Lower every quantum segment in a plan to immutable circuit IR.
 
     Classical and expectation-value orchestration metadata remains in the
-    returned executable container. Only backend-native quantum artifacts are
+    returned executable container. Only engine-native quantum artifacts are
     replaced with verified :class:`CircuitProgram` objects.
 
     Args:
@@ -1349,7 +1349,7 @@ def lower_circuit_plan(
 
     Returns:
         ExecutableProgram[CircuitProgram]: Execution structure containing
-            immutable backend-neutral quantum programs.
+            immutable engine-neutral quantum programs.
 
     Raises:
         EmitError: If the semantic operations cannot be lowered to the

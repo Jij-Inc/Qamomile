@@ -7,7 +7,7 @@
 > This repository is actively developed.
 > APIs may still change, including breaking changes, while active development continues.
 
-Qamomile is a typed quantum programming SDK for writing quantum kernels in Python, inspecting them as Qamomile IR, estimating resources symbolically, and transpiling them to concrete execution quantum SDKs such as Qiskit, QURI Parts, CUDA-Q, and Amazon Braket. Furthermore, as a backend for Qiskit, we support qBraid.
+Qamomile is a typed quantum programming SDK for writing quantum kernels in Python, inspecting them as Qamomile IR, estimating resources symbolically, and transpiling them to concrete execution quantum SDKs such as Qiskit, QURI Parts, CUDA-Q, and Amazon Braket. Qiskit circuits can also be executed through qBraid.
 
 The current workflow is:
 
@@ -52,7 +52,7 @@ uv sync
 
 This installs the default development dependency group.
 In the current `pyproject.toml`, that gives you Qiskit, circuit visualization,
-and test tooling. Optional backend integrations such as QURI Parts, qBraid,
+and test tooling. Optional SDK integrations such as QURI Parts, qBraid,
 and CUDA-Q still need their corresponding extras.
 
 Documentation development environment:
@@ -62,7 +62,7 @@ uv sync --group docs
 ```
 
 The `docs` group includes the default development dependencies and the
-credential-free backend integrations exercised by the documentation suite.
+credential-free SDK integrations exercised by the documentation suite.
 
 Runtime-only environment from source:
 
@@ -70,7 +70,7 @@ Runtime-only environment from source:
 uv sync --no-dev
 ```
 
-The compiler core is backend-independent. To run the Qiskit-based Quick Start
+The compiler core is engine-independent. To run the Qiskit-based Quick Start
 and render `draw()` output in a runtime-only environment, install the matching
 extras:
 

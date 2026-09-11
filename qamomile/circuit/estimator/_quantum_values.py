@@ -365,6 +365,9 @@ def _qubit_value_size(value: Value, resolver: ExprResolver) -> ResourceExpr:
     Returns:
         ResourceExpr: Number of represented qubits.
     """
+    selected_size = resolver.quantum_size(value)
+    if selected_size is not None:
+        return selected_size
     if isinstance(value, ArrayValue) and isinstance(value.type, QubitType):
         runtime = value.metadata.array_runtime
         if runtime is not None and runtime.element_uuids and not value.shape:

@@ -457,6 +457,7 @@ assert np.isclose(energy_via_estimate, energy_unbound, atol=1e-10)
 # QURI Partsのsamplerやestimatorを差し替えたい場合は、`QuriPartsTranspiler.executor(sampler=..., estimator=...)`経由でsamplerやestimatorを渡すか、`QuriPartsExecutor(sampler=..., estimator=...)`を直接インスタンス化します。
 # 差し替えたexecutorは、上で使った`executor`の位置にそのまま当てはめられます。
 # samplerを変えても、量子カーネルをトランスパイルし直す必要はありません。
+# 独自のsampler（測定結果を生成する処理）は0以上の整数として表せる測定回数を返す必要があり、ideal sampler（確率から重みを計算する処理）などの小数の重みは`ValueError`になります。
 # `executable`が回路を持ち、`executor`が実行に使うsamplerやestimatorを持つ、という役割分担になっているためです。
 #
 # 具体例として、QURI PartsのQulacs用`NoiseSimulator`を使ったノイズ込みsamplerを構築します。
