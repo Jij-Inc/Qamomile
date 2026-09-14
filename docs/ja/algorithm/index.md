@@ -69,6 +69,12 @@ QAOA回路をゼロから構築してMaxCutを解き、組み込みの`qaoa_stat
 :::
 
 :::{card}
+:header: **組合せ最適化のための QeMCMC**
+:link: QeMCMC_for_optimization
+QeMCMC を応用し、組合せ最適化問題の最適化を行います。
+:::
+
+:::{card}
 :header: **Quantum Selected Configuration Interaction (QSCI)**
 :link: qsci
 量子状態からビット列をサンプリングして有効ハミルトニアンを構築し、変分原理の保証付きで古典的に対角化します。

@@ -69,6 +69,12 @@ Implement Quantum-enhanced MCMC using Trotter-decomposed time evolution.
 :::
 
 :::{card}
+:header: **QeMCMC for Optimization**
+:link: QeMCMC_for_optimization
+Apply QeMCMC to solve combinatorial optimization problems.
+:::
+
+:::{card}
 :header: **Quantum Selected Configuration Interaction (QSCI)**
 :link: qsci
 Sample bitstrings from a quantum state, build an effective Hamiltonian, and diagonalize it classically with a strict variational guarantee.
