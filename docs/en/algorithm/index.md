@@ -98,4 +98,10 @@ CSS construction, syndrome decoding, and transversal Hadamard.
 Build a molecular Hamiltonian with OpenFermion and find the ground state energy via VQE.
 :::
 
+:::{card}
+:header: **Feedback-based ALgorithm for Quantum OptimizatioN (FALQON)**
+:link: FALQON
+An optimization method that utilizes measurement-based feedback instead of a classical optimizer.
+:::
+
 ::::
