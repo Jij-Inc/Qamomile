@@ -30,13 +30,24 @@
 # # !pip install "qamomile[qiskit]"
 
 # %%
-import numpy as np
+import warnings
+
 import matplotlib.pyplot as plt
 import networkx as nx
+import numpy as np
+
+from scipy.sparse import SparseEfficiencyWarning
 from qiskit_aer import AerSimulator
+
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.qiskit import QiskitTranspiler
+
+
+warnings.filterwarnings(
+    "ignore",
+    category=SparseEfficiencyWarning,
+)
 
 # %% [markdown] vscode={"languageId": "raw"}
 # ## 背景
