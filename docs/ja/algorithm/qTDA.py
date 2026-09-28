@@ -6,11 +6,11 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.5
 #   kernelspec:
-#     display_name: Python (qamomile)
+#     display_name: qamomile (3.11.16)
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
@@ -28,7 +28,7 @@
 
 # %%
 # Install the latest Qamomile through pip! 
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit, visualization]" scipy"
 
 # %%
 import numpy as np
@@ -71,7 +71,7 @@ from qamomile.qiskit import QiskitTranspiler
 # しかしこの研究により、ベッチ数の厳密計算は #P 困難であり、さらに近似計算であっても NP 困難であることが示されました。
 # この結果は、ベッチ数計算の最悪ケースにおいては、量子コンピュータでも多項式的な優位性しか得られないことを意味します。
 # 実際、特殊ケースとして LGZ アルゴリズムを取り上げ、これが二次的な高速化しか達成しないことも示したのです。  
-# そこで [Mazumder & Mazumder (2026)](https://arxiv.org/abs/2607.09906) では、QPE を用いるのでなく、PEC による手法を新たに探求しました。
+# そこで [Mazumder & Mazumder (2026)](https://arxiv.org/abs/2607.09906) では、QPE を用いるのでなく、PCE による手法を新たに探求しました。
 #
 # ### パウリ相関符号化 (PCE)
 #
@@ -104,6 +104,10 @@ from qamomile.qiskit import QiskitTranspiler
 # 同様に $k=3$ では ${}_n C_3 \times 3^3 = \frac{3^2}{2} n (n-1) (n-2)$ であることから、$m = \mathcal{O} (n^3)$ のバイナリ変数を表現することができます。
 # バイナリ変数 $x_i$ を連続緩和した $c_i$ を考えることで、その表現能力を向上させたものと見ることもできます。
 # また [Sciorilli et al. (2025)](https://www.nature.com/articles/s41467-024-55346-z) では、変分量子アルゴリズムでしばしば問題となる不毛のプラトーも、超多項式で抑制されることも示しました。
+#
+# :::{note}
+# ただし後述する qTDA では、その理論保証の対象外となっていることに注意が必要です。
+# :::
 #
 # ## アルゴリズム
 #
@@ -147,7 +151,8 @@ from qamomile.qiskit import QiskitTranspiler
 # $$
 #
 # ここで $\boldsymbol{c} (\boldsymbol{\theta}) = (c_1(\boldsymbol{\theta}), c_2(\boldsymbol{\theta}), \dots, c_{n_k}(\boldsymbol{\theta}))^\top$ です。
-# $\Delta_k$ は対称行列であることから、レイリー商の最小値は $\Delta_k$ の固有値の最小値に一致します (レイリー商において成り立つ min-max 定理)。
+# 一般に、非零ベクトル全体で最小化したレイリー商は、$\Delta_k$ の最小固有値に一致します。
+# ただしこの手法では $\boldsymbol{c}(\boldsymbol{\theta})$ がアンザッツで到達可能な範囲に制限されるため、その最小値は $\lambda_{\min}(\Delta_k)$ 以上となり、対応する固有ベクトルに到達できる場合にのみ一致します。
 # よって式 (5) を最小化し、$\mathcal{L} = 0$ となる $\boldsymbol{\theta}$ を求めることができれば、零ベクトルを見つけたことになります。  
 # ベッチ数を計算するには、複数のゼロ固有値を発見する必要があります。
 # そこで $j$ 番目の零ベクトル $\boldsymbol{c}^{(j)}$ は発見済みであるとして、次の零ベクトル $\boldsymbol{c}^{(j+1)}$ を探索する際には、次のような損失関数を用いることにします。
@@ -210,21 +215,45 @@ def classical_betti1(L1, tol=1e-9):
 
 # %%
 def build_correlator_observables(n_needed, kappa):
-    """n_needed 本の k体 Pauli 相関子を Qamomile Hamiltonian として返す"""
-    n_q = max(kappa, 1)
+    """n_needed 本の k体 Pauli 相関子を Qamomile Hamiltonian として返す。"""
+
+    # 入力値の検証
+    if n_needed < 0:
+        raise ValueError("n_needed must be non-negative")
+    if kappa < 1:
+        raise ValueError("kappa must be at least 1")
+
+    # n_needed 本の k体 Pauli 相関子を表現できる最小量子ビット数を求める
+    n_q = kappa
     while comb(n_q, kappa) * (3**kappa) < n_needed:
         n_q += 1
-    pauli_fn = {"X": qm_o.X, "Y": qm_o.Y, "Z": qm_o.Z}
+
+    # 相関子が不要な場合は空リストを返す
+    if n_needed == 0:
+        return n_q, []
+
+    pauli_fn = {
+        "X": qm_o.X,
+        "Y": qm_o.Y,
+        "Z": qm_o.Z,
+    }
+
     observables = []
+
     for pos in combinations(range(n_q), kappa):
         for ch in product("XYZ", repeat=kappa):
-            H = qm_o.Hamiltonian()
-            H.constant = 1.0
+
+            # observable のレジスタ幅を n_q qubit に固定する
+            H = qm_o.Hamiltonian.identity(num_qubits=n_q)
+
             for p, c in zip(pos, ch):
                 H *= pauli_fn[c](p)
+
             observables.append(H)
+
             if len(observables) == n_needed:
                 return n_q, observables
+
     return n_q, observables
 
 
@@ -438,6 +467,21 @@ for name, (nv, eg, tr) in TOY_COMPLEXES.items():
 # そこで損失関数式 (6) を定義し、変分的に最適化を行う変分デフレーションを実施しましょう。
 
 # %%
+def deflated_objective(c, laplacian, found, lam):
+    """正規化した Rayleigh 商 + deflation penalty を計算する。"""
+    denom = c @ c
+    if denom < 1e-12:
+        return np.inf
+
+    # 候補ベクトルを正規化して、目的関数をスケール不変にする
+    c_unit = c / np.sqrt(denom)
+
+    rayleigh_value = c_unit @ laplacian @ c_unit
+    penalty = lam * sum((c_unit @ v) ** 2 for v in found)
+
+    return rayleigh_value + penalty
+
+
 def run_deflation_history(L1_, correlators, num_thetas,
                           delta=0.01, lam=10.0, maxiter=200,
                           n_restarts=3, seed=1, max_rounds=4):
@@ -448,29 +492,36 @@ def run_deflation_history(L1_, correlators, num_thetas,
 
     for _ in range(max_rounds):
         best_hist, best_val, best_c = None, np.inf, None
+
         for _ in range(n_restarts):
             hist = []
+
             def loss(theta):
-                c = correlators(theta)          # ← Qamomile が評価
-                dn = c @ c
-                R = np.inf if dn < 1e-12 else (c @ L1_ @ c) / dn
-                val = R + lam * sum((c @ v)**2 for v in found)
-                hist.append(val)                # ← 損失履歴を記録
+                c = correlators(theta)  # ← Qamomile が評価
+                val = deflated_objective(c, L1_, found, lam)
+                hist.append(val)        # ← 損失履歴を記録
                 return val
-            res = minimize(loss, rg.uniform(0, 2*np.pi, num_thetas),
-                           method="COBYLA",
-                           options={"maxiter": maxiter, "rhobeg": 0.5})
+
+            res = minimize(
+                loss,
+                rg.uniform(0, 2 * np.pi, num_thetas),
+                method="COBYLA",
+                options={"maxiter": maxiter, "rhobeg": 0.5},
+            )
+
             c = correlators(res.x)
-            dn = c @ c
-            R = np.inf if dn < 1e-12 else (c @ L1_ @ c) / dn
-            final = R + lam * sum((c @ v)**2 for v in found)
+            final = deflated_objective(c, L1_, found, lam)
+
             if final < best_val:
                 best_val, best_hist, best_c = final, hist, c
+
         histories.append(best_hist)
+
         if best_val < delta:
             found.append(best_c / np.linalg.norm(best_c))
         else:
             break
+
     return len(found), histories
 
 
