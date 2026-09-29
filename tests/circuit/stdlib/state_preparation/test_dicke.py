@@ -8,12 +8,12 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
+from qamomile.circuit.stdlib.state_preparation import dicke_state_composition_schedule
 from qamomile.circuit.stdlib.state_preparation.dicke import (
     prepare_dicke,
     scs_gate_2q,
     scs_gate_3q,
 )
-from qamomile.optimization.schedules.dicke import dicke_state_composition_schedule
 
 # ---------------------------------------------------------------------------
 # Backend registry
@@ -318,66 +318,21 @@ def test_prepare_dicke_applies_basis_initialization_and_entangling_gates(
             assert counts.get("cx", 0) >= 1
 
 
-@pytest.mark.parametrize("name,TranspilerCls", BACKENDS)
-def test_prepare_dicke_expval_z_sum_is_zero(name, TranspilerCls):
-    """Tests that <D^2_1|Z_0 + Z_1|D^2_1> = 0 via the estimator (run) path.
+def _dicke_expval(TranspilerCls, n, k, hamiltonian) -> float:
+    """Transpiles prepare_dicke for |D^n_k> and returns <hamiltonian>.
 
-    |D^2_1> = (|01> + |10>) / sqrt(2) is the 2-qubit Dicke state with Hamming
-    weight 1. By symmetry, <Z_0> = <Z_1> = 0, so <Z_0 + Z_1> = 0 exactly.
-    This test exercises the expval / estimator code path that is not covered
-    by the sampling tests.
-    """
-    initial_ones, schedule = dicke_state_composition_schedule(
-        n_qubits=2, block_size=2, hamming_weight=1
-    )
+    Args:
+        TranspilerCls (type): Backend transpiler class to instantiate.
+        n (int): Number of qubits.
+        k (int): Hamming weight of the Dicke state.
+        hamiltonian (qm_o.Hamiltonian): Observable to estimate.
 
-    H = qm_o.Z(0) + qm_o.Z(1)
-
-    transpiler = TranspilerCls()
-    exe = transpiler.transpile(
-        _wrap_prepare_dicke_expval,
-        bindings={
-            "n": 2,
-            "initial_ones": initial_ones,
-            "schedule": schedule,
-            "hamiltonian": H,
-        },
-    )
-
-    job = exe.run(transpiler.executor())
-    result = job.result()
-
-    np.testing.assert_allclose(result, 0.0, atol=1e-6)
-
-
-@pytest.mark.parametrize("name,TranspilerCls", BACKENDS)
-@pytest.mark.parametrize(
-    "n,k",
-    [
-        (2, 0),
-        (2, 1),
-        (3, 1),
-        (3, 2),
-        (4, 1),
-        (4, 2),
-    ],
-)
-def test_prepare_dicke_z_sum_matches_analytic(name, TranspilerCls, n, k):
-    """Tests that prepare_dicke produces the correct Dicke state |D^n_k>.
-
-    For |D^n_k>, the expected value of sum_i Z_i equals n - 2k. This follows
-    from the equal superposition over all weight-k bitstrings: each state
-    contributes (n-k) qubits in |0> (+1 eigenvalue) and k qubits in |1>
-    (-1 eigenvalue), giving <sum Z_i> = (n-k) - k = n - 2k.
+    Returns:
+        float: Expectation value from the backend estimator.
     """
     initial_ones, schedule = dicke_state_composition_schedule(
         n_qubits=n, block_size=n, hamming_weight=k
     )
-
-    H = qm_o.Z(0)
-    for i in range(1, n):
-        H = H + qm_o.Z(i)
-
     transpiler = TranspilerCls()
     exe = transpiler.transpile(
         _wrap_prepare_dicke_expval,
@@ -385,14 +340,76 @@ def test_prepare_dicke_z_sum_matches_analytic(name, TranspilerCls, n, k):
             "n": n,
             "initial_ones": initial_ones,
             "schedule": schedule,
-            "hamiltonian": H,
+            "hamiltonian": hamiltonian,
         },
     )
+    return exe.run(transpiler.executor()).result()
 
-    job = exe.run(transpiler.executor())
-    result = job.result()
 
-    np.testing.assert_allclose(result, float(n - 2 * k), atol=1e-5)
+@pytest.mark.parametrize("name,TranspilerCls", BACKENDS)
+def test_prepare_dicke_expval_xx_shows_coherence(name, TranspilerCls):
+    """Tests that <D^2_1|X_0 X_1|D^2_1> = 1 via the estimator (run) path.
+
+    |D^2_1> = (|01> + |10>) / sqrt(2) is the +1 eigenstate of X_0 X_1, which
+    swaps |01> and |10>. The weight-1 basis states |01> and |10>, and their
+    incoherent mixture, all give 0, so this separates the Dicke superposition
+    from the X-gate initial state that prepare_dicke starts from.
+    """
+    result = _dicke_expval(TranspilerCls, 2, 1, qm_o.X(0) * qm_o.X(1))
+
+    np.testing.assert_allclose(result, 1.0, atol=1e-6)
+
+
+@pytest.mark.parametrize("name,TranspilerCls", BACKENDS)
+@pytest.mark.parametrize(
+    "n,k",
+    [
+        (1, 0),
+        (1, 1),
+        (2, 0),
+        (2, 1),
+        (2, 2),
+        (3, 1),
+        (3, 2),
+        (4, 1),
+        (4, 2),
+        (5, 2),
+    ],
+)
+def test_prepare_dicke_matches_dicke_state_expvals(name, TranspilerCls, n, k):
+    """Tests that prepare_dicke produces |D^n_k> via random Z and XX observables.
+
+    On |D^n_k> every weight-k bitstring has amplitude 1/sqrt(C(n, k)), so:
+
+    - Qubit i is 1 in C(n-1, k-1) / C(n, k) = k/n of the bitstrings, giving
+      <Z_i> = 1 - 2k/n for every i. A single weight-k basis state gives
+      <Z_i> = +/-1 instead, so random weights w_i detect it.
+    - X_i X_j maps a bitstring to one of weight k only when its bits i and j
+      differ, which holds for 2 C(n-2, k-1) bitstrings. With equal real
+      amplitudes, <X_i X_j> = 2 C(n-2, k-1) / C(n, k) = 2k(n-k) / (n(n-1)).
+      This checks the relative phases, which Z observables cannot see.
+
+    The weights are drawn from a seeded RNG per (n, k).
+    """
+    rng = np.random.default_rng(100 * n + k)
+
+    w = rng.uniform(-1.0, 1.0, size=n)
+    H_z = qm_o.Hamiltonian()
+    for i in range(n):
+        H_z = H_z + float(w[i]) * qm_o.Z(i)
+    result_z = _dicke_expval(TranspilerCls, n, k, H_z)
+    np.testing.assert_allclose(result_z, (1 - 2 * k / n) * w.sum(), atol=1e-5)
+
+    if n < 2:
+        return
+    pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
+    v = rng.uniform(-1.0, 1.0, size=len(pairs))
+    H_xx = qm_o.Hamiltonian()
+    for (i, j), v_ij in zip(pairs, v):
+        H_xx = H_xx + float(v_ij) * (qm_o.X(i) * qm_o.X(j))
+    result_xx = _dicke_expval(TranspilerCls, n, k, H_xx)
+    expected_xx = 2 * k * (n - k) / (n * (n - 1)) * v.sum()
+    np.testing.assert_allclose(result_xx, expected_xx, atol=1e-5)
 
 
 @pytest.mark.parametrize("name,TranspilerCls", BACKENDS)

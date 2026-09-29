@@ -1,7 +1,9 @@
 """AOA (Alternating Operator Ansatz) circuit building blocks.
 
-This module provides the quantum circuit components for the Alternating Operator Ansatz (AOA),
-including Dicke state preparation (using Bartschi-Eidenbenz SCS construction) and the XY mixer.
+This module provides the quantum circuit components for the Alternating Operator Ansatz (AOA):
+the XY mixer and the AOA layers and states for Ising and HUBO cost models. The Dicke-state and
+basis-state initializations are composed from
+:mod:`qamomile.circuit.stdlib.state_preparation`.
 
 All functions are decorated with ``@qmc.qkernel`` and use Handle-typed
 parameters so they can be composed inside other ``@qkernel`` functions.
@@ -11,6 +13,9 @@ import numpy as np
 
 import qamomile.circuit as qmc
 
+from ..stdlib.state_preparation.computational_basis_state import (
+    basis_state_preparation,
+)
 from ..stdlib.state_preparation.dicke import prepare_dicke
 from . import basic as _basic
 from .qaoa import hubo_ising_cost, ising_cost
@@ -145,27 +150,6 @@ def aoa_state_superposition(
 
 
 @qmc.qkernel
-def basis_state_preparation(
-    n: qmc.UInt,
-    initial_ones: qmc.Vector[qmc.UInt],
-) -> qmc.Vector[qmc.Qubit]:
-    """Prepare a computational basis state from a list of ``|1>`` indices.
-
-    Args:
-        n (qmc.UInt): Number of qubits.
-        initial_ones (qmc.Vector[qmc.UInt]): Indices initialized to ``|1>``.
-
-    Returns:
-        qmc.Vector[qmc.Qubit]: Qubit register in the requested basis state.
-    """
-    q = qmc.qubit_array(n, name="q")
-    for idx in qmc.range(initial_ones.shape[0]):
-        qubit_index = initial_ones[idx]
-        q[qubit_index] = qmc.x(q[qubit_index])
-    return q
-
-
-@qmc.qkernel
 def aoa_state_basis_state(
     p: qmc.UInt,
     quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
@@ -225,7 +209,7 @@ def aoa_state_dicke(
         initial_ones (qmc.Vector[qmc.UInt]): Indices of the qubits that are initially in the ``|1>`` state for Dicke state preparation.
         schedule_dicke (qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float]):
             Ordered SCS gate schedule from
-            :func:`~qamomile.optimization.schedules.dicke.dicke_state_composition_schedule`.
+            :func:`~qamomile.circuit.stdlib.state_preparation.dicke_schedule.dicke_state_composition_schedule`.
             Pair entries satisfy ``key[1] == key[2]``; triplet entries satisfy
             ``key[1] != key[2]``.
 
@@ -375,7 +359,7 @@ def hubo_aoa_state_dicke(
         initial_ones (qmc.Vector[qmc.UInt]): Indices of the qubits that are initially in the ``|1>`` state for Dicke state preparation.
         schedule_dicke (qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float]):
             Ordered SCS gate schedule from
-            :func:`~qamomile.optimization.schedules.dicke.dicke_state_composition_schedule`.
+            :func:`~qamomile.circuit.stdlib.state_preparation.dicke_schedule.dicke_state_composition_schedule`.
             Pair entries satisfy ``key[1] == key[2]``; triplet entries satisfy
             ``key[1] != key[2]``.
 

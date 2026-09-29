@@ -103,6 +103,38 @@ def test_explicit_pair_indices_warn_when_mixer_is_ignored():
     np.testing.assert_array_equal(resolved, explicit)
 
 
+@pytest.mark.parametrize("via_transpile", [False, True])
+def test_ignored_mixer_warning_points_at_caller(via_transpile):
+    """Tests that the ignored-mixer warning is attributed to the caller's line.
+
+    The warning must name this test file both when ``resolve_pair_indices`` is
+    called directly and when it is reached through ``transpile()``.
+    """
+    converter = AOAConverter(_make_4bit_quadratic_model())
+    explicit = np.asarray([(0, 1), (2, 3)], dtype=np.uint64)
+
+    with pytest.warns(UserWarning, match="mixer=.*ignored") as record:
+        if via_transpile:
+            converter.transpile(
+                BACKENDS[0].values[1](),
+                p=1,
+                initial_state="uniform",
+                mixer="fully-connected",
+                pair_indices_mixer=explicit,
+                block_size=2,
+            )
+        else:
+            converter.resolve_pair_indices(
+                mixer="fully-connected",
+                pair_indices=explicit,
+                block_size=2,
+            )
+
+    ignored = [w for w in record if "ignored" in str(w.message)]
+    assert len(ignored) == 1
+    assert ignored[0].filename == __file__
+
+
 def test_invalid_mixer_error_contains_value():
     """Tests that an unknown mixer string raises ValueError containing the invalid value."""
     converter = AOAConverter(_make_4bit_quadratic_model())

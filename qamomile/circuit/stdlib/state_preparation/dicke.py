@@ -1,7 +1,8 @@
 """General Dicke state preparation algorithm from the Bartschi-Eidenbenz paper.
 
 This module includes the main Dicke state preparation algorithm, as well as the necessary components.
-The method relies on Split & Cyclic Shift (SCS) blocks
+The method relies on Split & Cyclic Shift (SCS) blocks. Their gate schedule is precomputed
+classically in :mod:`qamomile.circuit.stdlib.state_preparation.dicke_schedule`.
 
 All functions are decorated with ``@qmc.qkernel`` and use Handle-typed
 parameters so they can be composed inside other ``@qkernel`` functions.
@@ -12,6 +13,8 @@ References:
 """
 
 import qamomile.circuit as qmc
+
+from .computational_basis_state import apply_x_at_indices
 
 
 @qmc.qkernel
@@ -98,9 +101,9 @@ def prepare_dicke(
     """Prepare a Dicke state using the Bartschi-Eidenbenz SCS construction.
 
     The schedule must be precomputed with
-    :func:`~qamomile.optimization.schedules.dicke.bartschi_eidenbenz_schedule`
+    :func:`~qamomile.circuit.stdlib.state_preparation.dicke_schedule.bartschi_eidenbenz_schedule`
     (single block) or
-    :func:`~qamomile.optimization.schedules.dicke.dicke_state_composition_schedule`
+    :func:`~qamomile.circuit.stdlib.state_preparation.dicke_schedule.dicke_state_composition_schedule`
     (multi-block).  Both functions return a single ordered dict that encodes
     pair gates as ``(t, c, c)`` (``key[1] == key[2]``) and triplet gates as
     ``(t, c1, c2)`` (``key[1] != key[2]``).
@@ -120,17 +123,22 @@ def prepare_dicke(
         qmc.Vector[qmc.Qubit]: Qubit register prepared in the Dicke state.
 
     Example:
-        >>> from qamomile.optimization.schedules.dicke import dicke_state_composition_schedule
+        >>> from qamomile.circuit.stdlib.state_preparation import (
+        ...     dicke_state_composition_schedule,
+        ...     prepare_dicke,
+        ... )
         >>> initial_ones, schedule = dicke_state_composition_schedule(
         ...     n_qubits=4, block_size=4, hamming_weight=1
         ... )
-        >>> q = prepare_dicke(4, initial_ones, schedule)
+        >>> fig = prepare_dicke.draw(
+        ...     n=4, initial_ones=initial_ones, schedule=schedule
+        ... )
+
+        Inside another ``@qmc.qkernel``, call it like any other building
+        block: ``q = prepare_dicke(n, initial_ones, schedule)``.
     """
     q = qmc.qubit_array(n, name="q")
-
-    for idx in qmc.range(initial_ones.shape[0]):
-        qubit_index = initial_ones[idx]
-        q[qubit_index] = qmc.x(q[qubit_index])
+    q = apply_x_at_indices(q, initial_ones)
 
     # Pair entries have key[1] == key[2]; triplet entries have key[1] != key[2].
     # The schedule is compile-time bound so CompileTimeIfLoweringPass resolves

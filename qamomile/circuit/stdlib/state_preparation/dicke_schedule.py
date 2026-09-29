@@ -1,4 +1,10 @@
-"""Helpers to precompute the indices of the SCS blocks for the Dicke state preparation algorithm."""
+"""Classical precomputation of the SCS gate schedule for Dicke state preparation.
+
+The functions here return the ordered gate schedule (and the initial ``|1>``
+indices) consumed by
+:func:`~qamomile.circuit.stdlib.state_preparation.dicke.prepare_dicke`. They are
+plain Python/NumPy helpers and run before the circuit is built.
+"""
 
 import numpy as np
 

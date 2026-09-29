@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from qamomile.optimization.schedules.dicke import (
+from qamomile.circuit.stdlib.state_preparation import (
     bartschi_eidenbenz_schedule,
     dicke_state_composition_schedule,
 )

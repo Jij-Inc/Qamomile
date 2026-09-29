@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import enum
 import warnings
+from typing import Any
 
 import numpy as np
 
@@ -22,9 +23,9 @@ from qamomile.circuit.algorithm.aoa import (
     hubo_aoa_state_dicke,
     hubo_aoa_state_superposition,
 )
+from qamomile.circuit.stdlib.state_preparation import dicke_state_composition_schedule
 from qamomile.circuit.transpiler.executable import ExecutableProgram
 from qamomile.circuit.transpiler.transpiler import Transpiler
-from qamomile.optimization.schedules.dicke import dicke_state_composition_schedule
 
 from .qaoa import QAOAConverter
 
@@ -58,6 +59,281 @@ class MixerName(enum.StrEnum):
 
     RING = "ring"
     FULLY_CONNECTED = "fully-connected"
+
+
+@qmc.qkernel
+def _aoa_sampling(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+    n: qmc.UInt,
+    pair_indices_mixer: qmc.Matrix[qmc.UInt],
+) -> qmc.Vector[qmc.Bit]:
+    """Sample the quadratic Ising AOA state that starts from a uniform superposition.
+
+    Args:
+        p (qmc.UInt): Number of AOA layers.
+        quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): Quadratic
+            Ising coefficients.
+        linear (qmc.Dict[qmc.UInt, qmc.Float]): Linear Ising coefficients.
+        gammas (qmc.Vector[qmc.Float]): Cost-layer angles, one per layer.
+        betas (qmc.Vector[qmc.Float]): Mixer-layer angles, one per layer.
+        n (qmc.UInt): Number of qubits.
+        pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs of the XY
+            mixer schedule, shape ``(num_pairs, 2)``.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement outcomes of the full register.
+    """
+    q = aoa_state_superposition(
+        p=p,
+        quad=quad,
+        linear=linear,
+        n=n,
+        gammas=gammas,
+        betas=betas,
+        pair_indices_mixer=pair_indices_mixer,
+    )
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _aoa_sampling_dicke(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+    n: qmc.UInt,
+    pair_indices_mixer: qmc.Matrix[qmc.UInt],
+    initial_ones: qmc.Vector[qmc.UInt],
+    schedule_dicke: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    """Sample the quadratic Ising AOA state that starts from a Dicke state.
+
+    Args:
+        p (qmc.UInt): Number of AOA layers.
+        quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): Quadratic
+            Ising coefficients.
+        linear (qmc.Dict[qmc.UInt, qmc.Float]): Linear Ising coefficients.
+        gammas (qmc.Vector[qmc.Float]): Cost-layer angles, one per layer.
+        betas (qmc.Vector[qmc.Float]): Mixer-layer angles, one per layer.
+        n (qmc.UInt): Number of qubits.
+        pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs of the XY
+            mixer schedule, shape ``(num_pairs, 2)``.
+        initial_ones (qmc.Vector[qmc.UInt]): Indices of the qubits
+            initialized to ``|1>``.
+        schedule_dicke (qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float]): Ordered
+            SCS gate schedule for the Dicke-state preparation.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement outcomes of the full register.
+    """
+    q = aoa_state_dicke(
+        p=p,
+        quad=quad,
+        linear=linear,
+        n=n,
+        gammas=gammas,
+        betas=betas,
+        pair_indices_mixer=pair_indices_mixer,
+        initial_ones=initial_ones,
+        schedule_dicke=schedule_dicke,
+    )
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _aoa_sampling_basis_state(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+    n: qmc.UInt,
+    pair_indices_mixer: qmc.Matrix[qmc.UInt],
+    initial_ones: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Bit]:
+    """Sample the quadratic Ising AOA state that starts from a computational basis state.
+
+    Args:
+        p (qmc.UInt): Number of AOA layers.
+        quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): Quadratic
+            Ising coefficients.
+        linear (qmc.Dict[qmc.UInt, qmc.Float]): Linear Ising coefficients.
+        gammas (qmc.Vector[qmc.Float]): Cost-layer angles, one per layer.
+        betas (qmc.Vector[qmc.Float]): Mixer-layer angles, one per layer.
+        n (qmc.UInt): Number of qubits.
+        pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs of the XY
+            mixer schedule, shape ``(num_pairs, 2)``.
+        initial_ones (qmc.Vector[qmc.UInt]): Indices of the qubits
+            initialized to ``|1>``.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement outcomes of the full register.
+    """
+    q = aoa_state_basis_state(
+        p=p,
+        quad=quad,
+        linear=linear,
+        n=n,
+        gammas=gammas,
+        betas=betas,
+        pair_indices_mixer=pair_indices_mixer,
+        initial_ones=initial_ones,
+    )
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _hubo_aoa_sampling(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    higher: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+    n: qmc.UInt,
+    pair_indices_mixer: qmc.Matrix[qmc.UInt],
+) -> qmc.Vector[qmc.Bit]:
+    """Sample the HUBO AOA state that starts from a uniform superposition.
+
+    Args:
+        p (qmc.UInt): Number of AOA layers.
+        quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): Quadratic
+            Ising coefficients.
+        linear (qmc.Dict[qmc.UInt, qmc.Float]): Linear Ising coefficients.
+        higher (qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float]): Higher-order
+            Ising coefficients keyed by index vectors.
+        gammas (qmc.Vector[qmc.Float]): Cost-layer angles, one per layer.
+        betas (qmc.Vector[qmc.Float]): Mixer-layer angles, one per layer.
+        n (qmc.UInt): Number of qubits.
+        pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs of the XY
+            mixer schedule, shape ``(num_pairs, 2)``.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement outcomes of the full register.
+    """
+    q = hubo_aoa_state_superposition(
+        p=p,
+        quad=quad,
+        linear=linear,
+        higher=higher,
+        n=n,
+        gammas=gammas,
+        betas=betas,
+        pair_indices_mixer=pair_indices_mixer,
+    )
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _hubo_aoa_sampling_dicke(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    higher: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+    n: qmc.UInt,
+    pair_indices_mixer: qmc.Matrix[qmc.UInt],
+    initial_ones: qmc.Vector[qmc.UInt],
+    schedule_dicke: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+) -> qmc.Vector[qmc.Bit]:
+    """Sample the HUBO AOA state that starts from a Dicke state.
+
+    Args:
+        p (qmc.UInt): Number of AOA layers.
+        quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): Quadratic
+            Ising coefficients.
+        linear (qmc.Dict[qmc.UInt, qmc.Float]): Linear Ising coefficients.
+        higher (qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float]): Higher-order
+            Ising coefficients keyed by index vectors.
+        gammas (qmc.Vector[qmc.Float]): Cost-layer angles, one per layer.
+        betas (qmc.Vector[qmc.Float]): Mixer-layer angles, one per layer.
+        n (qmc.UInt): Number of qubits.
+        pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs of the XY
+            mixer schedule, shape ``(num_pairs, 2)``.
+        initial_ones (qmc.Vector[qmc.UInt]): Indices of the qubits
+            initialized to ``|1>``.
+        schedule_dicke (qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float]): Ordered
+            SCS gate schedule for the Dicke-state preparation.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement outcomes of the full register.
+    """
+    q = hubo_aoa_state_dicke(
+        p=p,
+        quad=quad,
+        linear=linear,
+        higher=higher,
+        n=n,
+        gammas=gammas,
+        betas=betas,
+        pair_indices_mixer=pair_indices_mixer,
+        initial_ones=initial_ones,
+        schedule_dicke=schedule_dicke,
+    )
+    return qmc.measure(q)
+
+
+@qmc.qkernel
+def _hubo_aoa_sampling_basis_state(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    higher: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
+    n: qmc.UInt,
+    pair_indices_mixer: qmc.Matrix[qmc.UInt],
+    initial_ones: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Bit]:
+    """Sample the HUBO AOA state that starts from a computational basis state.
+
+    Args:
+        p (qmc.UInt): Number of AOA layers.
+        quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): Quadratic
+            Ising coefficients.
+        linear (qmc.Dict[qmc.UInt, qmc.Float]): Linear Ising coefficients.
+        higher (qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float]): Higher-order
+            Ising coefficients keyed by index vectors.
+        gammas (qmc.Vector[qmc.Float]): Cost-layer angles, one per layer.
+        betas (qmc.Vector[qmc.Float]): Mixer-layer angles, one per layer.
+        n (qmc.UInt): Number of qubits.
+        pair_indices_mixer (qmc.Matrix[qmc.UInt]): Qubit pairs of the XY
+            mixer schedule, shape ``(num_pairs, 2)``.
+        initial_ones (qmc.Vector[qmc.UInt]): Indices of the qubits
+            initialized to ``|1>``.
+
+    Returns:
+        qmc.Vector[qmc.Bit]: Measurement outcomes of the full register.
+    """
+    q = hubo_aoa_state_basis_state(
+        p=p,
+        quad=quad,
+        linear=linear,
+        higher=higher,
+        n=n,
+        gammas=gammas,
+        betas=betas,
+        pair_indices_mixer=pair_indices_mixer,
+        initial_ones=initial_ones,
+    )
+    return qmc.measure(q)
+
+
+# Sampling qkernel for each (quadratic-only model, initial state) combination.
+_SAMPLING_KERNELS: dict[tuple[bool, InitialState], qmc.QKernel] = {
+    (True, InitialState.UNIFORM): _aoa_sampling,
+    (True, InitialState.DICKE): _aoa_sampling_dicke,
+    (True, InitialState.SINGLE_BASIS_STATE): _aoa_sampling_basis_state,
+    (False, InitialState.UNIFORM): _hubo_aoa_sampling,
+    (False, InitialState.DICKE): _hubo_aoa_sampling_dicke,
+    (False, InitialState.SINGLE_BASIS_STATE): _hubo_aoa_sampling_basis_state,
+}
 
 
 class AOAConverter(QAOAConverter):
@@ -236,6 +512,34 @@ class AOAConverter(QAOAConverter):
                 divisible by ``block_size``; or if ``pair_indices`` has an
                 invalid shape, contains self-pairs, or references qubit
                 indices outside the model.
+        """
+        return self._resolve_pair_indices(
+            mixer=mixer, pair_indices=pair_indices, block_size=block_size
+        )
+
+    def _resolve_pair_indices(
+        self,
+        *,
+        mixer: str | MixerName,
+        pair_indices: np.ndarray | None,
+        block_size: int | None,
+    ) -> np.ndarray:
+        """Implement :meth:`resolve_pair_indices`.
+
+        Both :meth:`resolve_pair_indices` and :meth:`transpile` call this
+        helper directly, so the ``stacklevel=3`` warnings below point at the
+        user's call in either case.
+
+        Args:
+            mixer (str | MixerName): Built-in mixer schedule name.
+            pair_indices (np.ndarray | None): Optional explicit qubit pairs.
+            block_size (int | None): Size of each one-hot block.
+
+        Returns:
+            numpy.ndarray: A validated ``uint64`` array of qubit pairs.
+
+        Raises:
+            ValueError: See :meth:`resolve_pair_indices`.
         """
         if pair_indices is not None:
             try:
@@ -424,7 +728,7 @@ class AOAConverter(QAOAConverter):
             self.spin_model.num_bits if block_size is None else block_size
         )
 
-        resolved_pair_indices_mixer = self.resolve_pair_indices(
+        resolved_pair_indices_mixer = self._resolve_pair_indices(
             mixer=mixer,
             pair_indices=pair_indices_mixer,
             block_size=effective_block_size,
@@ -432,420 +736,38 @@ class AOAConverter(QAOAConverter):
 
         quadratic = not self.spin_model.higher
 
-        if initial_state == InitialState.DICKE:
-            (
-                initial_ones,
-                schedule_dicke,
-            ) = self.compute_dicke_composition_schedule(
-                hamming_weight=hamming_weight,
-                block_size=effective_block_size,
-            )
-        elif initial_state == InitialState.SINGLE_BASIS_STATE:
-            initial_ones = self.compute_basis_state_initial_ones(
-                hamming_weight=hamming_weight,
-                block_size=effective_block_size,
-            )
-        else:
-            # UNIFORM: no extra basis-state setup required
-            assert initial_state == InitialState.UNIFORM
+        bindings: dict[str, Any] = {
+            "linear": self.spin_model.linear,
+            "quad": self.spin_model.quad,
+            "n": self.spin_model.num_bits,
+            "p": p,
+            "pair_indices_mixer": resolved_pair_indices_mixer,
+        }
+        if not quadratic:
+            bindings["higher"] = self.spin_model.higher
 
-        match (quadratic, initial_state):
-            case (True, InitialState.UNIFORM):
-                return self._transpile_aoa_quadratic(
-                    transpiler,
-                    p=p,
-                    pair_indices_mixer=resolved_pair_indices_mixer,
+        match initial_state:
+            case InitialState.DICKE:
+                initial_ones, schedule_dicke = self.compute_dicke_composition_schedule(
+                    hamming_weight=hamming_weight,
+                    block_size=effective_block_size,
                 )
-            case (True, InitialState.DICKE):
-                return self._transpile_aoa_quadratic_dicke(
-                    transpiler,
-                    p=p,
-                    pair_indices_mixer=resolved_pair_indices_mixer,
-                    initial_ones=initial_ones,
-                    schedule_dicke=schedule_dicke,
+                bindings["initial_ones"] = initial_ones
+                bindings["schedule_dicke"] = schedule_dicke
+            case InitialState.SINGLE_BASIS_STATE:
+                bindings["initial_ones"] = self.compute_basis_state_initial_ones(
+                    hamming_weight=hamming_weight,
+                    block_size=effective_block_size,
                 )
-            case (True, InitialState.SINGLE_BASIS_STATE):
-                return self._transpile_aoa_quadratic_basis_state(
-                    transpiler,
-                    p=p,
-                    pair_indices_mixer=resolved_pair_indices_mixer,
-                    initial_ones=initial_ones,
-                )
-            case (False, InitialState.UNIFORM):
-                return self._transpile_aoa_hubo(
-                    transpiler,
-                    p=p,
-                    pair_indices_mixer=resolved_pair_indices_mixer,
-                )
-            case (False, InitialState.DICKE):
-                return self._transpile_aoa_hubo_dicke(
-                    transpiler,
-                    p=p,
-                    pair_indices_mixer=resolved_pair_indices_mixer,
-                    initial_ones=initial_ones,
-                    schedule_dicke=schedule_dicke,
-                )
-            case (False, InitialState.SINGLE_BASIS_STATE):
-                return self._transpile_aoa_hubo_basis_state(
-                    transpiler,
-                    p=p,
-                    pair_indices_mixer=resolved_pair_indices_mixer,
-                    initial_ones=initial_ones,
-                )
+            case InitialState.UNIFORM:
+                pass  # The Hadamard layer needs no extra bindings.
             case _:
                 raise RuntimeError(
-                    f"unreachable: quadratic={quadratic}, initial_state={initial_state!r}"
+                    f"unreachable: unhandled InitialState {initial_state!r}"
                 )
 
-    def _transpile_aoa_quadratic(
-        self,
-        transpiler: Transpiler,
-        *,
-        p: int,
-        pair_indices_mixer: np.ndarray,
-    ) -> ExecutableProgram:
-        """Transpile a quadratic-only model using the AOA circuit.
-
-        Args:
-            transpiler (Transpiler): Backend transpiler to use.
-            p (int): Number of AOA layers.
-            pair_indices_mixer (numpy.ndarray): Explicit mixer schedule as an array of
-                shape ``(num_pairs, 2)``.
-
-        Returns:
-            ExecutableProgram: The compiled circuit program.
-        """
-
-        @qmc.qkernel
-        def aoa_sampling(
-            p: qmc.UInt,
-            quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-            linear: qmc.Dict[qmc.UInt, qmc.Float],
-            gammas: qmc.Vector[qmc.Float],
-            betas: qmc.Vector[qmc.Float],
-            n: qmc.UInt,
-            pair_indices_mixer: qmc.Matrix[qmc.UInt],
-        ) -> qmc.Vector[qmc.Bit]:
-            q = aoa_state_superposition(
-                p=p,
-                quad=quad,
-                linear=linear,
-                n=n,
-                gammas=gammas,
-                betas=betas,
-                pair_indices_mixer=pair_indices_mixer,
-            )
-            return qmc.measure(q)
-
         return transpiler.transpile(
-            aoa_sampling,
-            bindings={
-                "linear": self.spin_model.linear,
-                "quad": self.spin_model.quad,
-                "n": self.spin_model.num_bits,
-                "p": p,
-                "pair_indices_mixer": pair_indices_mixer,
-            },
-            parameters=["gammas", "betas"],
-        )
-
-    def _transpile_aoa_quadratic_dicke(
-        self,
-        transpiler: Transpiler,
-        *,
-        p: int,
-        pair_indices_mixer: np.ndarray,
-        initial_ones: np.ndarray,
-        schedule_dicke: dict[tuple[int, int, int], float],
-    ) -> ExecutableProgram:
-        """Transpile a quadratic-only model using the AOA circuit with Dicke state preparation.
-
-        Args:
-            transpiler (Transpiler): Backend transpiler to use.
-            p (int): Number of AOA layers.
-            pair_indices_mixer (numpy.ndarray): Explicit mixer schedule as an array of
-                shape ``(num_pairs, 2)``.
-            initial_ones (numpy.ndarray): Indices of qubits initialized in ``|1>``.
-            schedule_dicke (dict): Ordered SCS gate schedule from
-                :func:`~qamomile.optimization.schedules.dicke.dicke_state_composition_schedule`.
-
-        Returns:
-            ExecutableProgram: The compiled circuit program.
-        """
-
-        @qmc.qkernel
-        def aoa_sampling_dicke(
-            p: qmc.UInt,
-            quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-            linear: qmc.Dict[qmc.UInt, qmc.Float],
-            gammas: qmc.Vector[qmc.Float],
-            betas: qmc.Vector[qmc.Float],
-            n: qmc.UInt,
-            pair_indices_mixer: qmc.Matrix[qmc.UInt],
-            initial_ones: qmc.Vector[qmc.UInt],
-            schedule_dicke: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
-        ) -> qmc.Vector[qmc.Bit]:
-            q = aoa_state_dicke(
-                p=p,
-                quad=quad,
-                linear=linear,
-                n=n,
-                gammas=gammas,
-                betas=betas,
-                pair_indices_mixer=pair_indices_mixer,
-                initial_ones=initial_ones,
-                schedule_dicke=schedule_dicke,
-            )
-            return qmc.measure(q)
-
-        return transpiler.transpile(
-            aoa_sampling_dicke,
-            bindings={
-                "linear": self.spin_model.linear,
-                "quad": self.spin_model.quad,
-                "n": self.spin_model.num_bits,
-                "p": p,
-                "pair_indices_mixer": pair_indices_mixer,
-                "initial_ones": initial_ones,
-                "schedule_dicke": schedule_dicke,
-            },
-            parameters=["gammas", "betas"],
-        )
-
-    def _transpile_aoa_quadratic_basis_state(
-        self,
-        transpiler: Transpiler,
-        *,
-        p: int,
-        pair_indices_mixer: np.ndarray,
-        initial_ones: np.ndarray,
-    ) -> ExecutableProgram:
-        """Transpile a quadratic-only model with basis-state initialization.
-
-        Args:
-            transpiler (Transpiler): Backend transpiler to use.
-            p (int): Number of AOA layers.
-            pair_indices_mixer (numpy.ndarray): Explicit mixer schedule as an array of
-                shape ``(num_pairs, 2)``.
-            initial_ones (numpy.ndarray): Indices of qubits initialized in ``|1>``.
-
-        Returns:
-            ExecutableProgram: The compiled circuit program.
-        """
-
-        @qmc.qkernel
-        def aoa_sampling_basis_state(
-            p: qmc.UInt,
-            quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-            linear: qmc.Dict[qmc.UInt, qmc.Float],
-            gammas: qmc.Vector[qmc.Float],
-            betas: qmc.Vector[qmc.Float],
-            n: qmc.UInt,
-            pair_indices_mixer: qmc.Matrix[qmc.UInt],
-            initial_ones: qmc.Vector[qmc.UInt],
-        ) -> qmc.Vector[qmc.Bit]:
-            q = aoa_state_basis_state(
-                p=p,
-                quad=quad,
-                linear=linear,
-                n=n,
-                gammas=gammas,
-                betas=betas,
-                pair_indices_mixer=pair_indices_mixer,
-                initial_ones=initial_ones,
-            )
-            return qmc.measure(q)
-
-        return transpiler.transpile(
-            aoa_sampling_basis_state,
-            bindings={
-                "linear": self.spin_model.linear,
-                "quad": self.spin_model.quad,
-                "n": self.spin_model.num_bits,
-                "p": p,
-                "pair_indices_mixer": pair_indices_mixer,
-                "initial_ones": initial_ones,
-            },
-            parameters=["gammas", "betas"],
-        )
-
-    def _transpile_aoa_hubo(
-        self,
-        transpiler: Transpiler,
-        *,
-        p: int,
-        pair_indices_mixer: np.ndarray,
-    ) -> ExecutableProgram:
-        """Transpile a HUBO model using the AOA circuit with uniform superposition.
-
-        Args:
-            transpiler (Transpiler): Backend transpiler to use.
-            p (int): Number of AOA layers.
-            pair_indices_mixer (numpy.ndarray): Mixer schedule as an array of
-                shape ``(num_pairs, 2)``.
-
-        Returns:
-            ExecutableProgram: The compiled circuit program.
-        """
-
-        @qmc.qkernel
-        def aoa_sampling_hubo(
-            p: qmc.UInt,
-            quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-            linear: qmc.Dict[qmc.UInt, qmc.Float],
-            higher: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
-            gammas: qmc.Vector[qmc.Float],
-            betas: qmc.Vector[qmc.Float],
-            n: qmc.UInt,
-            pair_indices_mixer: qmc.Matrix[qmc.UInt],
-        ) -> qmc.Vector[qmc.Bit]:
-            q = hubo_aoa_state_superposition(
-                p=p,
-                quad=quad,
-                linear=linear,
-                higher=higher,
-                n=n,
-                gammas=gammas,
-                betas=betas,
-                pair_indices_mixer=pair_indices_mixer,
-            )
-            return qmc.measure(q)
-
-        return transpiler.transpile(
-            aoa_sampling_hubo,
-            bindings={
-                "linear": self.spin_model.linear,
-                "quad": self.spin_model.quad,
-                "higher": self.spin_model.higher,
-                "n": self.spin_model.num_bits,
-                "p": p,
-                "pair_indices_mixer": pair_indices_mixer,
-            },
-            parameters=["gammas", "betas"],
-        )
-
-    def _transpile_aoa_hubo_dicke(
-        self,
-        transpiler: Transpiler,
-        *,
-        p: int,
-        pair_indices_mixer: np.ndarray,
-        initial_ones: np.ndarray,
-        schedule_dicke: dict[tuple[int, int, int], float],
-    ) -> ExecutableProgram:
-        """Transpile a HUBO model using the AOA circuit with Dicke state preparation.
-
-        Args:
-            transpiler (Transpiler): Backend transpiler to use.
-            p (int): Number of AOA layers.
-            pair_indices_mixer (numpy.ndarray): Mixer schedule as an array of
-                shape ``(num_pairs, 2)``.
-            initial_ones (numpy.ndarray): Indices of qubits initialized in ``|1>``.
-            schedule_dicke (dict): Ordered SCS gate schedule from
-                :func:`~qamomile.optimization.schedules.dicke.dicke_state_composition_schedule`.
-
-        Returns:
-            ExecutableProgram: The compiled circuit program.
-        """
-
-        @qmc.qkernel
-        def aoa_sampling_hubo_dicke(
-            p: qmc.UInt,
-            quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-            linear: qmc.Dict[qmc.UInt, qmc.Float],
-            higher: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
-            gammas: qmc.Vector[qmc.Float],
-            betas: qmc.Vector[qmc.Float],
-            n: qmc.UInt,
-            pair_indices_mixer: qmc.Matrix[qmc.UInt],
-            initial_ones: qmc.Vector[qmc.UInt],
-            schedule_dicke: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
-        ) -> qmc.Vector[qmc.Bit]:
-            q = hubo_aoa_state_dicke(
-                p=p,
-                quad=quad,
-                linear=linear,
-                higher=higher,
-                n=n,
-                gammas=gammas,
-                betas=betas,
-                pair_indices_mixer=pair_indices_mixer,
-                initial_ones=initial_ones,
-                schedule_dicke=schedule_dicke,
-            )
-            return qmc.measure(q)
-
-        return transpiler.transpile(
-            aoa_sampling_hubo_dicke,
-            bindings={
-                "linear": self.spin_model.linear,
-                "quad": self.spin_model.quad,
-                "higher": self.spin_model.higher,
-                "n": self.spin_model.num_bits,
-                "p": p,
-                "pair_indices_mixer": pair_indices_mixer,
-                "initial_ones": initial_ones,
-                "schedule_dicke": schedule_dicke,
-            },
-            parameters=["gammas", "betas"],
-        )
-
-    def _transpile_aoa_hubo_basis_state(
-        self,
-        transpiler: Transpiler,
-        *,
-        p: int,
-        pair_indices_mixer: np.ndarray,
-        initial_ones: np.ndarray,
-    ) -> ExecutableProgram:
-        """Transpile a HUBO model with basis-state initialization.
-
-        Args:
-            transpiler (Transpiler): Backend transpiler to use.
-            p (int): Number of AOA layers.
-            pair_indices_mixer (numpy.ndarray): Mixer schedule as an array of
-                shape ``(num_pairs, 2)``.
-            initial_ones (numpy.ndarray): Indices of qubits initialized in ``|1>``.
-
-        Returns:
-            ExecutableProgram: The compiled circuit program.
-        """
-
-        @qmc.qkernel
-        def aoa_sampling_hubo_basis_state(
-            p: qmc.UInt,
-            quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-            linear: qmc.Dict[qmc.UInt, qmc.Float],
-            higher: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
-            gammas: qmc.Vector[qmc.Float],
-            betas: qmc.Vector[qmc.Float],
-            n: qmc.UInt,
-            pair_indices_mixer: qmc.Matrix[qmc.UInt],
-            initial_ones: qmc.Vector[qmc.UInt],
-        ) -> qmc.Vector[qmc.Bit]:
-            q = hubo_aoa_state_basis_state(
-                p=p,
-                quad=quad,
-                linear=linear,
-                higher=higher,
-                n=n,
-                gammas=gammas,
-                betas=betas,
-                pair_indices_mixer=pair_indices_mixer,
-                initial_ones=initial_ones,
-            )
-            return qmc.measure(q)
-
-        return transpiler.transpile(
-            aoa_sampling_hubo_basis_state,
-            bindings={
-                "linear": self.spin_model.linear,
-                "quad": self.spin_model.quad,
-                "higher": self.spin_model.higher,
-                "n": self.spin_model.num_bits,
-                "p": p,
-                "pair_indices_mixer": pair_indices_mixer,
-                "initial_ones": initial_ones,
-            },
+            _SAMPLING_KERNELS[(quadratic, initial_state)],
+            bindings=bindings,
             parameters=["gammas", "betas"],
         )

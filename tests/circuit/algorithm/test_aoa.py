@@ -534,7 +534,9 @@ def test_aoa_state_dicke_expval_z_sum_is_zero(name, TranspilerCls):
     This test exercises the expval / estimator code path for the AOA Dicke
     initial state.
     """
-    from qamomile.optimization.schedules.dicke import dicke_state_composition_schedule
+    from qamomile.circuit.stdlib.state_preparation import (
+        dicke_state_composition_schedule,
+    )
 
     initial_ones, schedule_dicke = dicke_state_composition_schedule(
         n_qubits=2, block_size=2, hamming_weight=1
@@ -931,7 +933,9 @@ def test_aoa_state_dicke_sample_preserves_hamming_weight(name, TranspilerCls, n,
     identity, so the circuit reduces to bare Dicke state preparation. Every
     measurement outcome must have exactly k set bits.
     """
-    from qamomile.optimization.schedules.dicke import dicke_state_composition_schedule
+    from qamomile.circuit.stdlib.state_preparation import (
+        dicke_state_composition_schedule,
+    )
 
     initial_ones, schedule_dicke = dicke_state_composition_schedule(
         n_qubits=n, block_size=n, hamming_weight=k
@@ -1076,7 +1080,9 @@ def test_hubo_aoa_state_dicke_expval_z_sum_matches_analytic(name, TranspilerCls,
     For any equal superposition over all weight-k bitstrings, <Z_i> = (n-2k)/n
     for each qubit by symmetry, so <sum_i Z_i> = n - 2k.
     """
-    from qamomile.optimization.schedules.dicke import dicke_state_composition_schedule
+    from qamomile.circuit.stdlib.state_preparation import (
+        dicke_state_composition_schedule,
+    )
 
     initial_ones, schedule_dicke = dicke_state_composition_schedule(
         n_qubits=n, block_size=n, hamming_weight=k
@@ -1160,7 +1166,9 @@ def test_hubo_aoa_state_dicke_sample_preserves_hamming_weight(
     With gammas=[0] (cost identity) and betas=[0] (mixer identity) the circuit
     reduces to Dicke state preparation only, so every sample must have exactly k set bits.
     """
-    from qamomile.optimization.schedules.dicke import dicke_state_composition_schedule
+    from qamomile.circuit.stdlib.state_preparation import (
+        dicke_state_composition_schedule,
+    )
 
     initial_ones, schedule_dicke = dicke_state_composition_schedule(
         n_qubits=n, block_size=n, hamming_weight=k

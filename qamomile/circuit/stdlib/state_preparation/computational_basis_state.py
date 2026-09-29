@@ -66,3 +66,51 @@ def computational_basis_state(
         bit = bits[i]
         q[i] = _apply_exact_basis_bit(q[i], bit)
     return q
+
+
+@qmc.qkernel
+def apply_x_at_indices(
+    q: qmc.Vector[qmc.Qubit],
+    indices: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply ``X`` to every qubit of ``q`` listed in ``indices``.
+
+    Takes an existing register rather than allocating one, so callers that
+    allocate their own register (such as
+    :func:`~qamomile.circuit.stdlib.state_preparation.dicke.prepare_dicke`)
+    can share this step.
+
+    Args:
+        q (qmc.Vector[qmc.Qubit]): Qubit register to update.
+        indices (qmc.Vector[qmc.UInt]): Indices of the qubits to flip.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Updated qubit register.
+    """
+    for idx in qmc.range(indices.shape[0]):
+        qubit_index = indices[idx]
+        q[qubit_index] = qmc.x(q[qubit_index])
+    return q
+
+
+@qmc.qkernel
+def basis_state_preparation(
+    n: qmc.UInt,
+    initial_ones: qmc.Vector[qmc.UInt],
+) -> qmc.Vector[qmc.Qubit]:
+    """Prepare a computational basis state from a list of ``|1>`` indices.
+
+    Allocates an ``n``-qubit register in :math:`|0\\rangle^{\\otimes n}` and
+    applies ``X`` to every qubit listed in ``initial_ones``. Unlike
+    :func:`computational_basis_state`, the state is given by the positions
+    of its ones rather than by a dense bit vector.
+
+    Args:
+        n (qmc.UInt): Number of qubits.
+        initial_ones (qmc.Vector[qmc.UInt]): Indices initialized to ``|1>``.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Qubit register in the requested basis state.
+    """
+    q = qmc.qubit_array(n, name="q")
+    return apply_x_at_indices(q, initial_ones)
