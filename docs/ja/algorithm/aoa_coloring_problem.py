@@ -353,12 +353,12 @@ dicke_block = transpiler.inline(
 )
 assert dicke_block.operations
 
-fig = MatplotlibDrawer(dicke_block).draw(fold_loops=False, fold_ifs=True)
+fig = MatplotlibDrawer(dicke_block).draw(fold_loops=False)
 assert fig.get_axes()
 fig
 
 # %% [markdown]
-# 各ボックスは、ブロック内の2つの量子ビットに`scs_gate_2q`を適用します。このゲートはCNOTと$R_Y$ゲートから構成されます。
+# すべてを展開したこの表示では、各ステップについて同じ2つの量子ビット上に2つの破線の枠が表示されます。`if True:`の枠は、回路が実際に適用する2量子ビットゲート`scs_gate_2q`です。`else:`の枠は3量子ビットゲートの側の分岐で、描画には表示されますが、条件がコンパイル時にすでに決まっているため適用されません。`scs_gate_2q`単体は、CNOTと$R_Y$ゲートから構成されます。
 
 # %%
 fig = scs_gate_2q.draw(q=2, t=0, c=1)

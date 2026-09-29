@@ -419,12 +419,16 @@ dicke_block = transpiler.inline(
 )
 assert dicke_block.operations
 
-fig = MatplotlibDrawer(dicke_block).draw(fold_loops=False, fold_ifs=True)
+fig = MatplotlibDrawer(dicke_block).draw(fold_loops=False)
 assert fig.get_axes()
 fig
 
 # %% [markdown]
-# Each box applies `scs_gate_2q` to two qubits of a block. It is made of CNOT
+# In this fully expanded view, each step shows two dashed frames on the same
+# two qubits. The `if True:` frame is the 2-qubit gate `scs_gate_2q` that the
+# circuit applies. The `else:` frame is the 3-qubit alternative, which the
+# drawer also displays but which is not applied, because the condition is
+# already decided at compile time. On its own, `scs_gate_2q` is made of CNOT
 # and $R_Y$ gates:
 
 # %%
