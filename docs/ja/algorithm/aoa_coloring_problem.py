@@ -44,9 +44,10 @@ from qiskit_aer import AerSimulator
 from scipy.optimize import minimize
 
 import qamomile.circuit as qmc
-from qamomile.circuit.algorithm.aoa import xy_mixer
+from qamomile.circuit.algorithm.aoa import aoa_state_dicke, xy_mixer
 from qamomile.circuit.algorithm.qaoa import ising_cost
-from qamomile.circuit.stdlib.state_preparation import prepare_dicke
+from qamomile.circuit.stdlib.state_preparation import prepare_dicke, scs_gate_2q
+from qamomile.circuit.visualization import MatplotlibDrawer
 from qamomile.optimization.aoa import AOAConverter
 from qamomile.qiskit import QiskitTranspiler
 
@@ -259,35 +260,7 @@ assert executable_aoa_dicke.quantum_circuit.num_qubits == num_nodes * num_colors
 # %% [markdown]
 # ### AOA回路の可視化
 #
-# Dicke状態の準備が具体的なゲートに展開された、トランスパイル後のQiskit回路を描画します。見やすさのために`p=1`を使用します。
-
-# %%
-executable = converter.transpile(
-    transpiler,
-    p=1,
-    initial_state="dicke",
-    hamming_weight=1,
-    mixer="fully-connected",
-    block_size=num_colors,
-)
-
-fig = executable.quantum_circuit.draw("mpl", fold=-1, scale=2.2)
-assert executable.quantum_circuit.num_qubits == num_nodes * num_colors
-assert fig.get_axes()
-fig
-
-# %% [markdown]
-# ### 構成要素の確認
-#
-# `aoa_state_dicke`の内部では、コンバーターが複数のqkernelを呼び出しています。
-#
-# - `prepare_dicke(n, initial_ones, ...)`：最初の列の$X$ゲートで、各ブロックに指定されたハミング重みを持つ基底状態を作成します。その後、$R_Y$とCNOTゲートの列で各ブロック内にDicke状態を構築します。
-# - `ising_cost(quad, linear, q, gamma)`：QAOAと同じコスト層です。$R_Z$と$R_{ZZ}$の回転ゲートを使用します。
-# - `xy_mixer(q, betas[layer], pair_indices_mixer)`：ミキサー層です。`pair_indices_mixer`に列挙された量子ビットの各ペアに$U_{ij}^{XY}$を適用します。
-#
-# `aoa_layers(p, ...)`は`ising_cost`と`xy_mixer`を交互に並べ、`p`回繰り返したものです。
-#
-# コンバーターは、`block_size`から計算したDicke状態のスケジュールとミキサーのペアを公開しています。これらは構成要素の描画には便利ですが、通常のワークフローでは必要ありません。
+# `AOAConverter.transpile()`は内部で以下のサンプリング用qkernelを構築し、`block_size`から計算したDicke状態のスケジュールとミキサーのペアとともにトランスパイラに渡します。コンバーターはこの2つの入力を公開しているため、ここで計算できます。これらは描画には便利ですが、通常のワークフローでは必要ありません。
 
 # %%
 initial_ones, schedule_dicke = converter.compute_dicke_composition_schedule(
@@ -303,29 +276,92 @@ assert len(resolved_pair) == num_nodes * num_colors * (num_colors - 1) // 2
 # ミキサーの各ペアは同じブロック内の2つの量子ビットを結合します。
 assert all(i // num_colors == j // num_colors for i, j in resolved_pair)
 
+# %% [markdown]
+# コンバーターのサンプリング用qkernelをそのまま書き直し、`Transpiler.to_block`でIRブロックに変換し、`Transpiler.inline`で内部のqkernel呼び出しを展開してから、`MatplotlibDrawer`で描画します。見やすさのために`p=1`を使用します。
+#
+# Dicke状態の準備は、`if True:`というラベルの付いたボックスの列として表示されます。`prepare_dicke`はスケジュールの各ステップで2量子ビットゲートと3量子ビットゲートのどちらを使うかを選びますが、この選択は回路のコンパイル時に行われます。ハミング重みが1の場合はすべてのステップで2量子ビットゲート`scs_gate_2q`が使われ、各ボックスにはその最初のゲートが表示されます。
 
+
+# %%
 @qmc.qkernel
-def prepare_dicke_measure(
+def aoa_sampling_dicke(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
     n: qmc.UInt,
+    pair_indices_mixer: qmc.Matrix[qmc.UInt],
     initial_ones: qmc.Vector[qmc.UInt],
-    schedule: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+    schedule_dicke: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
 ) -> qmc.Vector[qmc.Bit]:
-    q = prepare_dicke(n, initial_ones, schedule)
+    q = aoa_state_dicke(
+        p=p,
+        quad=quad,
+        linear=linear,
+        n=n,
+        gammas=gammas,
+        betas=betas,
+        pair_indices_mixer=pair_indices_mixer,
+        initial_ones=initial_ones,
+        schedule_dicke=schedule_dicke,
+    )
     return qmc.measure(q)
 
 
-executable_dicke = transpiler.transpile(
-    prepare_dicke_measure,
+block = transpiler.to_block(
+    aoa_sampling_dicke,
     bindings={
+        "linear": converter.spin_model.linear,
+        "quad": converter.spin_model.quad,
         "n": converter.spin_model.num_bits,
+        "p": 1,
+        "pair_indices_mixer": resolved_pair,
         "initial_ones": initial_ones,
-        "schedule": schedule_dicke,
+        "schedule_dicke": schedule_dicke,
     },
+    parameters=["gammas", "betas"],
 )
+block = transpiler.inline(block)
+assert block.operations
 
-assert executable_dicke.quantum_circuit.num_qubits == num_nodes * num_colors
+fig = MatplotlibDrawer(block).draw(fold_loops=False, fold_ifs=True)
+assert fig.get_axes()
+fig
 
-fig = executable_dicke.quantum_circuit.draw("mpl", fold=-1, scale=2.2)
+# %% [markdown]
+# ### 構成要素の確認
+#
+# `aoa_state_dicke`の内部では、コンバーターが複数のqkernelを呼び出しています。
+#
+# - `prepare_dicke(n, initial_ones, schedule)`：まず$X$ゲートで、各ブロックに指定されたハミング重みを持つ基底状態を作成します。その後、スケジュールの各ステップでsplit-and-cyclic-shift（SCS）ゲートを1つ適用し、各ブロック内にDicke状態を構築します。
+# - `ising_cost(quad, linear, q, gamma)`：QAOAと同じコスト層です。$R_Z$と$R_{ZZ}$の回転ゲートを使用します。
+# - `xy_mixer(q, betas[layer], pair_indices_mixer)`：ミキサー層です。`pair_indices_mixer`に列挙された量子ビットの各ペアに$U_{ij}^{XY}$を適用します。
+#
+# `aoa_layers(p, ...)`は`ising_cost`と`xy_mixer`を交互に並べ、`p`回繰り返したものです。
+
+# %%
+dicke_block = transpiler.inline(
+    transpiler.to_block(
+        prepare_dicke,
+        bindings={
+            "n": converter.spin_model.num_bits,
+            "initial_ones": initial_ones,
+            "schedule": schedule_dicke,
+        },
+    )
+)
+assert dicke_block.operations
+
+fig = MatplotlibDrawer(dicke_block).draw(fold_loops=False, fold_ifs=True)
+assert fig.get_axes()
+fig
+
+# %% [markdown]
+# 各ボックスは、ブロック内の2つの量子ビットに`scs_gate_2q`を適用します。このゲートはCNOTと$R_Y$ゲートから構成されます。
+
+# %%
+fig = scs_gate_2q.draw(q=2, t=0, c=1)
 assert fig.get_axes()
 fig
 

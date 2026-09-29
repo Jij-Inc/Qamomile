@@ -46,9 +46,10 @@ from qiskit_aer import AerSimulator
 from scipy.optimize import minimize
 
 import qamomile.circuit as qmc
-from qamomile.circuit.algorithm.aoa import xy_mixer
+from qamomile.circuit.algorithm.aoa import aoa_state_dicke, xy_mixer
 from qamomile.circuit.algorithm.qaoa import ising_cost
-from qamomile.circuit.stdlib.state_preparation import prepare_dicke
+from qamomile.circuit.stdlib.state_preparation import prepare_dicke, scs_gate_2q
+from qamomile.circuit.visualization import MatplotlibDrawer
 from qamomile.optimization.aoa import AOAConverter
 from qamomile.qiskit import QiskitTranspiler
 
@@ -308,45 +309,11 @@ assert executable_aoa_dicke.quantum_circuit.num_qubits == num_nodes * num_colors
 # %% [markdown]
 # ### Visualize the AOA circuit
 #
-# We draw the transpiled Qiskit circuit, in which the Dicke-state preparation
-# is already resolved into concrete gates. For readability we use `p=1`.
-
-# %%
-executable = converter.transpile(
-    transpiler,
-    p=1,
-    initial_state="dicke",
-    hamming_weight=1,
-    mixer="fully-connected",
-    block_size=num_colors,
-)
-
-fig = executable.quantum_circuit.draw("mpl", fold=-1, scale=2.2)
-assert executable.quantum_circuit.num_qubits == num_nodes * num_colors
-assert fig.get_axes()
-fig
-
-# %% [markdown]
-# ### Inspect the building blocks
-#
-# Inside `aoa_state_dicke`, the converter calls several qkernels:
-#
-# - `prepare_dicke(n, initial_ones, ...)`: the $X$ gates in the first column
-#   create a basis state with the given Hamming weight in each block. A
-#   sequence of $R_Y$ and CNOT gates then builds the Dicke state inside each
-#   block.
-# - `ising_cost(quad, linear, q, gamma)`: the cost layer, the same as in QAOA.
-#   It uses $R_Z$ and $R_{ZZ}$ rotation gates.
-# - `xy_mixer(q, betas[layer], pair_indices_mixer)`: the mixer layer, which
-#   applies $U_{ij}^{XY}$ to every pair of qubits listed in
-#   `pair_indices_mixer`.
-#
-# `aoa_layers(p, ...)` alternates `ising_cost` and `xy_mixer`, repeated `p`
-# times.
-#
-# The converter exposes the Dicke schedule and the mixer pairs it computed from
-# `block_size`. They are useful for drawing the building blocks, but are not
-# needed in the normal workflow.
+# `AOAConverter.transpile()` internally builds the sampling qkernel below and
+# feeds it to the transpiler, together with the Dicke schedule and the mixer
+# pairs it computed from `block_size`. The converter exposes these two inputs,
+# so we can compute them here. They are useful for drawing, but are not needed
+# in the normal workflow.
 
 # %%
 initial_ones, schedule_dicke = converter.compute_dicke_composition_schedule(
@@ -362,29 +329,106 @@ assert len(resolved_pair) == num_nodes * num_colors * (num_colors - 1) // 2
 # Every mixer pair couples two qubits of the same block.
 assert all(i // num_colors == j // num_colors for i, j in resolved_pair)
 
+# %% [markdown]
+# We restate the converter's sampling qkernel, lower it into an IR block with
+# `Transpiler.to_block`, expand the sub-qkernel calls with `Transpiler.inline`,
+# and draw the result with `MatplotlibDrawer`. For readability we use `p=1`.
+#
+# The Dicke-state preparation appears as a series of boxes labeled `if True:`.
+# For each step of its schedule, `prepare_dicke` chooses between a 2-qubit and
+# a 3-qubit gate, and this choice is made when the circuit is compiled. With
+# Hamming weight 1, every step uses the 2-qubit gate `scs_gate_2q`, whose first
+# gates are listed in each box.
 
+
+# %%
 @qmc.qkernel
-def prepare_dicke_measure(
+def aoa_sampling_dicke(
+    p: qmc.UInt,
+    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
+    linear: qmc.Dict[qmc.UInt, qmc.Float],
+    gammas: qmc.Vector[qmc.Float],
+    betas: qmc.Vector[qmc.Float],
     n: qmc.UInt,
+    pair_indices_mixer: qmc.Matrix[qmc.UInt],
     initial_ones: qmc.Vector[qmc.UInt],
-    schedule: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
+    schedule_dicke: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
 ) -> qmc.Vector[qmc.Bit]:
-    q = prepare_dicke(n, initial_ones, schedule)
+    q = aoa_state_dicke(
+        p=p,
+        quad=quad,
+        linear=linear,
+        n=n,
+        gammas=gammas,
+        betas=betas,
+        pair_indices_mixer=pair_indices_mixer,
+        initial_ones=initial_ones,
+        schedule_dicke=schedule_dicke,
+    )
     return qmc.measure(q)
 
 
-executable_dicke = transpiler.transpile(
-    prepare_dicke_measure,
+block = transpiler.to_block(
+    aoa_sampling_dicke,
     bindings={
+        "linear": converter.spin_model.linear,
+        "quad": converter.spin_model.quad,
         "n": converter.spin_model.num_bits,
+        "p": 1,
+        "pair_indices_mixer": resolved_pair,
         "initial_ones": initial_ones,
-        "schedule": schedule_dicke,
+        "schedule_dicke": schedule_dicke,
     },
+    parameters=["gammas", "betas"],
 )
+block = transpiler.inline(block)
+assert block.operations
 
-assert executable_dicke.quantum_circuit.num_qubits == num_nodes * num_colors
+fig = MatplotlibDrawer(block).draw(fold_loops=False, fold_ifs=True)
+assert fig.get_axes()
+fig
 
-fig = executable_dicke.quantum_circuit.draw("mpl", fold=-1, scale=2.2)
+# %% [markdown]
+# ### Inspect the building blocks
+#
+# Inside `aoa_state_dicke`, the converter calls several qkernels:
+#
+# - `prepare_dicke(n, initial_ones, schedule)`: $X$ gates first create a basis
+#   state with the given Hamming weight in each block. Each step of the
+#   schedule then applies one split-and-cyclic-shift (SCS) gate, which builds
+#   the Dicke state inside each block.
+# - `ising_cost(quad, linear, q, gamma)`: the cost layer, the same as in QAOA.
+#   It uses $R_Z$ and $R_{ZZ}$ rotation gates.
+# - `xy_mixer(q, betas[layer], pair_indices_mixer)`: the mixer layer, which
+#   applies $U_{ij}^{XY}$ to every pair of qubits listed in
+#   `pair_indices_mixer`.
+#
+# `aoa_layers(p, ...)` alternates `ising_cost` and `xy_mixer`, repeated `p`
+# times.
+
+# %%
+dicke_block = transpiler.inline(
+    transpiler.to_block(
+        prepare_dicke,
+        bindings={
+            "n": converter.spin_model.num_bits,
+            "initial_ones": initial_ones,
+            "schedule": schedule_dicke,
+        },
+    )
+)
+assert dicke_block.operations
+
+fig = MatplotlibDrawer(dicke_block).draw(fold_loops=False, fold_ifs=True)
+assert fig.get_axes()
+fig
+
+# %% [markdown]
+# Each box applies `scs_gate_2q` to two qubits of a block. It is made of CNOT
+# and $R_Y$ gates:
+
+# %%
+fig = scs_gate_2q.draw(q=2, t=0, c=1)
 assert fig.get_axes()
 fig
 
