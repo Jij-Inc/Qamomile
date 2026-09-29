@@ -9,6 +9,12 @@ Qamomileで実装した具体的な量子アルゴリズム例です。
 ::::{grid} 1 1 1 1
 
 :::{card}
+:header: **グラフ彩色のための量子交互演算子アンザッツ**
+:link: aoa_coloring_problem
+Dicke状態による初期状態とXYミキサーを使い、グラフ彩色問題の解を実行可能な解の空間上で探索します。
+:::
+
+:::{card}
 :header: **組合せ多項式二値最適化のためのGrover Adaptive Search**
 :link: grover_adaptive_search
 `GASConverter`でポートフォリオ選択問題を解く例です。古典的な外側ループからGroverの閾値を更新し、結果を全探索と比較して検証します。

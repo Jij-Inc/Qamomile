@@ -20,6 +20,15 @@ Available routines:
   sequences or ``Vector[Float]`` kernel parameters.
 * :func:`amplitude_encoding_from_angles`: compatibility name for
   :func:`mottonen_amplitude_encoding_from_angles`.
+* :func:`prepare_dicke`: prepare a Dicke state :math:`|D^n_k\\rangle` (an
+  equal superposition of all computational basis states of Hamming weight
+  ``k``) via the deterministic split-and-cyclic-shift construction, built
+  from the :func:`scs_gate_2q` / :func:`scs_gate_3q` primitives. Its gate
+  schedule is precomputed classically with
+  :func:`dicke_state_composition_schedule` (one Dicke state per block) or
+  :func:`bartschi_eidenbenz_schedule` (a single register).
+* :func:`basis_state_preparation`: prepare a basis state from the indices of
+  its ``|1>`` qubits, using :func:`apply_x_at_indices` on a fresh register.
 
 The classical Möttönen angle precomputation
 (``compute_mottonen_amplitude_encoding_ry_angles`` /
@@ -34,7 +43,16 @@ to feed pre-computed angles into
     )
 """
 
-from .computational_basis_state import computational_basis_state
+from .computational_basis_state import (
+    apply_x_at_indices,
+    basis_state_preparation,
+    computational_basis_state,
+)
+from .dicke import prepare_dicke, scs_gate_2q, scs_gate_3q
+from .dicke_schedule import (
+    bartschi_eidenbenz_schedule,
+    dicke_state_composition_schedule,
+)
 from .mottonen_amplitude_encoding import (
     amplitude_encoding,
     amplitude_encoding_from_angles,
@@ -43,9 +61,16 @@ from .mottonen_amplitude_encoding import (
 )
 
 __all__ = [
+    "apply_x_at_indices",
+    "basis_state_preparation",
+    "bartschi_eidenbenz_schedule",
     "computational_basis_state",
+    "dicke_state_composition_schedule",
     "amplitude_encoding",
     "amplitude_encoding_from_angles",
     "mottonen_amplitude_encoding",
     "mottonen_amplitude_encoding_from_angles",
+    "prepare_dicke",
+    "scs_gate_2q",
+    "scs_gate_3q",
 ]

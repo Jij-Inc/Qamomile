@@ -9,6 +9,12 @@ Concrete quantum algorithm examples built with Qamomile.
 ::::{grid} 1 1 1 1
 
 :::{card}
+:header: **Alternating Operator Ansatz for Graph Coloring**
+:link: aoa_coloring_problem
+Solve the graph coloring problem with the Alternating Operator Ansatz, using a Dicke-state initial state and an XY mixer to stay within the one-hot feasible subspace.
+:::
+
+:::{card}
 :header: **Grover Adaptive Search for Combinatorial Polynomial Binary Optimization**
 :link: grover_adaptive_search
 Solve a portfolio selection problem with `GASConverter`, driving the Grover threshold from a classical outer loop and checking the result against brute force.
