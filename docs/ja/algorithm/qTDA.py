@@ -28,15 +28,17 @@
 
 # %%
 # Install the latest Qamomile through pip! 
-# # !pip install "qamomile[qiskit, visualization]" scipy"
+# # !pip install "qamomile[qiskit,visualization]" scipy
 
 # %%
+import matplotlib.pyplot as plt
 import numpy as np
+
 from itertools import combinations, product
 from math import comb
 from scipy.spatial.distance import pdist, squareform
 from scipy.optimize import minimize
-import matplotlib.pyplot as plt
+
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm.basic import cx_entangling_layer, ry_layer, rz_layer
@@ -180,18 +182,75 @@ from qamomile.qiskit import QiskitTranspiler
 
 # %%
 def build_laplacian(n_vertices, edges, triangles):
-    """辺リストと三角形リストから組合せラプラシアン Δ₁ を作る"""
-    edge_idx = {e: k for k, e in enumerate(edges)}
-    n_e = len(edges)
+    """辺リストと三角形リストから組合せラプラシアン Δ₁ を作る。"""
+
+    if n_vertices < 0:
+        raise ValueError("n_vertices must be non-negative")
+
+    # --- Canonicalize edges ---
+    canonical_edges = []
+    for edge in edges:
+        if len(edge) != 2:
+            raise ValueError("each edge must contain exactly 2 vertices")
+
+        v0, v1 = edge
+
+        if not (0 <= v0 < n_vertices and 0 <= v1 < n_vertices):
+            raise ValueError(f"edge {edge} contains an invalid vertex")
+        if v0 == v1:
+            raise ValueError(f"self-edge {edge} is not allowed")
+
+        canonical_edges.append(tuple(sorted((v0, v1))))
+
+    if len(set(canonical_edges)) != len(canonical_edges):
+        raise ValueError("duplicate edges are not allowed")
+
+    # --- Canonicalize triangles ---
+    canonical_triangles = []
+    for triangle in triangles:
+        if len(triangle) != 3:
+            raise ValueError("each triangle must contain exactly 3 vertices")
+
+        if any(v < 0 or v >= n_vertices for v in triangle):
+            raise ValueError(f"triangle {triangle} contains an invalid vertex")
+        if len(set(triangle)) != 3:
+            raise ValueError(f"degenerate triangle {triangle} is not allowed")
+
+        canonical_triangles.append(tuple(sorted(triangle)))
+
+    if len(set(canonical_triangles)) != len(canonical_triangles):
+        raise ValueError("duplicate triangles are not allowed")
+
+    # --- Check that every triangle face exists in edges ---
+    edge_idx = {e: k for k, e in enumerate(canonical_edges)}
+
+    for v0, v1, v2 in canonical_triangles:
+        for edge in [(v0, v1), (v0, v2), (v1, v2)]:
+            if edge not in edge_idx:
+                raise ValueError(
+                    f"triangle {(v0, v1, v2)} requires missing edge {edge}"
+                )
+
+    # --- Boundary matrix B1 ---
+    n_e = len(canonical_edges)
     B1 = np.zeros((n_vertices, n_e))
-    for k, (v0, v1) in enumerate(edges):
+
+    for k, (v0, v1) in enumerate(canonical_edges):
         B1[v0, k] = -1.0
         B1[v1, k] = +1.0
-    B2 = np.zeros((n_e, len(triangles)))
-    for t, (v0, v1, v2) in enumerate(triangles):
-        for (a, b), sg in [((v1, v2), +1), ((v0, v2), -1), ((v0, v1), +1)]:
-            e = (a, b) if a < b else (b, a)
-            B2[edge_idx[e], t] = float(sg)
+
+    # --- Boundary matrix B2 ---
+    B2 = np.zeros((n_e, len(canonical_triangles)))
+
+    for t, (v0, v1, v2) in enumerate(canonical_triangles):
+        B2[edge_idx[(v1, v2)], t] = +1.0
+        B2[edge_idx[(v0, v2)], t] = -1.0
+        B2[edge_idx[(v0, v1)], t] = +1.0
+
+    # ∂₁∂₂ = 0 の確認
+    if not np.allclose(B1 @ B2, 0.0, atol=1e-12):
+        raise ValueError("invalid simplicial complex: B1 @ B2 != 0")
+
     return B2 @ B2.T + B1.T @ B1
 
 
