@@ -6,11 +6,11 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.5
 #   kernelspec:
-#     display_name: Python (qamomile)
+#     display_name: qamomile (3.11.16)
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
@@ -46,7 +46,7 @@ import pandas as pd
 from scipy.optimize import minimize
 
 import qamomile.circuit as qmc
-from qamomile.circuit.algorithm.basic import cx_entangling_layer, ry_layer, rz_layer
+from qamomile.circuit.algorithm.basic import cx_entangling_layer, cz_entangling_layer, ry_layer, rz_layer
 from qamomile.optimization.binary_model import BinaryModel, BinarySampleSet
 from qamomile.optimization.pce import PCEConverter
 from qamomile.qiskit import QiskitTranspiler
@@ -97,8 +97,7 @@ from qamomile.qiskit import QiskitTranspiler
 # $$
 #
 # ここで $\mathrm{Cov} (r_i, r_j)$ は、$i$ 番目の銘柄のリターン $r_i$ と $j$ 番目の銘柄のリターン $r_j$ の共分散です。
-# これが負の値になるように最小化することで、例えばある銘柄で損失が発生していても、別の銘柄で利益が生まれるようになります。
-# これにより、全体としてリスクを最小化できることになります。  
+# 相関の低い銘柄、あるいは負の共分散を持つ銘柄を組み合わせることで、収益の変動を相殺し、ポートフォリオ全体の分散を小さくできます。
 # これらを用いた平均・分散の枠組みに加え、ポートフォリオの運用を評価する指標として、シャープレシオがあります ([Sharpe (1966)](https://www.jstor.org/stable/2351741))。
 # これはリスクなしで得られるリターンを上回った超過収益を、ポートフォリオのリターンの標準偏差と比較することにより、ポートフォリオのリスク調整後のリターンを測ったものです。
 # 具体的には、次のように書かれます。
@@ -175,13 +174,13 @@ from qamomile.qiskit import QiskitTranspiler
 # 式 (4) は $\rho_{ij}$ の大きさが大きい、すなわち、強い相関がある頂点ペアほど重みが小さくなるように設計されています。
 # これにより、このグラフの MaxCut を考えた場合、結果として相関が弱い辺を切断することになります。
 # このようにして得られた各クラスタには、相関の強いものどうしの銘柄が残ります。
-# 直接、式 (4) を辺の重みにし、MinCut をすることも可能ですが、その場合、先ほどの PCE を直接適用することができません。  
-# 式 (3) の重みを持つ辺から構成されるグラフを、再帰的に分割することで、相関が強いものどうしによるクラスタリングを行うことができます。
+# 直接、式 (4) を辺の重みにし、MinCut をすることも可能ですが、目的関数や制約の設計が異なることに注意が必要です。
+# 式 (3) の重みを持つ辺から構成されるグラフを再帰的に分割することで、相関が強いものどうしによるクラスタリングを行うことができます。
 # 分割を行うための関数は、次のように表現されます。
 #
 # $$
 # \mathrm{Cut} (\mathcal{G}, \boldsymbol{x}) 
-# = \sum_{(v_i, v_j) \in E} w_{ij} x_i (1-x_j) \tag{5}
+# = \sum_{(v_i, v_j) \in E} w_{ij} \{ x_i (1-x_j) + x_j (1 - x_i) \}\tag{5}
 # $$
 #
 # ここで、$x_i \in \{ 0, 1 \}$ はどちらのクラスタに属するかを表すバイナリ変数です。
@@ -352,9 +351,9 @@ SEED = 42
 
 
 # %% [markdown]
-# ### HEA の定義
+# ### ハードウェア効率の良いアンザッツの定義
 #
-# Qamomile を用い、HEA を定義しましょう。
+# Qamomile を用い、ハードウェア効率の良いアンザッツ (HEA) を定義しましょう。
 # Ry, Rz、そして CX エンタングル層からなる構成を実装します。
 
 # %%
@@ -543,7 +542,7 @@ plt.show()
 # %% [markdown]
 # ベースラインとして全ての銘柄を用いた場合のリターンも表示しています。
 # この場合、一貫して PCE により選び出した銘柄によるリターンが、ベースラインを上回っていることがわかります。
-# 同様に、シャープレシオもベースラインを凌駕しています。
+# しかし、シャープレシオはベースラインを下回っており、収益とリスク調整後のスコアでは異なる結果となりました。
 #
 # ## まとめ
 #
@@ -552,6 +551,6 @@ plt.show()
 #
 # * Qamomile には PCE を実装する機能が備わっており、`PCEConverter` でこれを呼び出すことができます。
 # * 各銘柄間の相関を用いてグラフを構築し、その MaxCut を行うことで、相関の強い銘柄どうしをクラスタリングします。
-# * このようにして選ばれた銘柄が、より良いリターン・シャープレシオとなることを示しました。
+# * このようにして選ばれた銘柄が、より良いリターンをもたらすことを示しました。
 
 # %%
