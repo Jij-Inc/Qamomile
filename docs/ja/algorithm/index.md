@@ -15,6 +15,12 @@ Qamomileで実装した具体的な量子アルゴリズム例です。
 :::
 
 :::{card}
+:header: **Grover適応探索によるチャネル割当**
+:link: gas_channel_assignment
+無線チャネル割当問題をone-hotエンコーディングのQUBOと二進エンコーディングのHUBOとして定式化し、必要な量子ビット数を比較したうえで、実数係数のHUBOを`GASConverter`で解きます。
+:::
+
+:::{card}
 :header: **Suzuki–Trotter分解によるハミルトニアンシミュレーション (Rabi振動)**
 :link: hamiltonian_simulation
 RabiモデルでのTrotter–Suzuki積公式と収束次数の実験です。
