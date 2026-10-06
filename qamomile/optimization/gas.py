@@ -1,20 +1,26 @@
 """This module implements the Grover Adaptive Search (GAS) algorithm for Combinatorial Polynomial Binary Optimization (CPBO).
+
 The quantum optimization algorithm iteratively applies Grover's search to find the minimum of the function.
 The GAS algorithm is designed to efficiently find the optimal solution by adaptively adjusting the search
 space based on previous iterations' results.
 """
 
-import numpy as np
 import math
 
+import numpy as np
+
 import qamomile.circuit as qmc
-from qamomile.circuit.transpiler.transpiler import Transpiler
+from qamomile.circuit.algorithm.gas import (
+    grover_algorithm,
+    qft_encoding,
+    zero_degree_qft_encoding,
+)
 from qamomile.circuit.transpiler.executable import ExecutableProgram
+from qamomile.circuit.transpiler.transpiler import Transpiler
 
-from qamomile.circuit.algorithm.gas import function_preparation_qubo, grover_algorithm, qft_encoding, diffusion_op, zero_degree_qft_encoding
-
-from .converter import MathematicalProblemConverter
 from .binary_model import VarType
+from .converter import MathematicalProblemConverter
+
 
 class GASConverter(MathematicalProblemConverter):
     """Converter for Grover Adaptive Search (GAS).
@@ -25,44 +31,56 @@ class GASConverter(MathematicalProblemConverter):
     """
 
     def __post_init__(self) -> None:
-        """Derive and cache the BINARY model from the parent's spin model."""
+        """Derive and cache the BINARY model from the parent spin model."""
         self.binary_model = self.spin_model.change_vartype(VarType.BINARY)
 
     @staticmethod
     def _required_output_bits(binary_model) -> int:
-        """Compute the minimum output-register size for the Grover QFT circuit.
+        """Compute the maximum output-register size for the Grover QFT circuit.
 
         The register holds ``f(x) − y`` in two's complement.  The extremes of
         that quantity are ``±(f_max − f_min)``, so we need
         ``2^(m−1) > f_max − f_min``.
 
         Args:
-            binary_model (BinaryModel): QUBO model whose coefficients define
-                the objective range.
+            binary_model (BinaryModel): Binary model (QUBO or HUBO) whose
+                coefficients define the objective range.
 
         Returns:
             int: Minimum number of output qubits ``m``.
+
         """
-        all_coeffs = list(binary_model.linear.values()) + list(binary_model.quad.values())
+        all_coeffs = (
+            list(binary_model.linear.values())
+            + list(binary_model.quad.values())
+            + list(binary_model.higher.values())
+        )
         f_max = binary_model.constant + sum(c for c in all_coeffs if c > 0)
         f_min = binary_model.constant + sum(c for c in all_coeffs if c < 0)
         half_range = f_max - f_min
         return int(math.floor(math.log2(half_range))) + 2 if half_range > 0 else 1
 
     def get_cost_hamiltonian(self) -> None:
-        """GAS does not use a cost Hamiltonian in the same way as QAOA, so this method is not implemented."""
+        """Return no cost Hamiltonian because GAS is oracle-based."""
         return None
 
-    def transpile(self, transpiler: Transpiler, *, output_bits: int | None = None, y: int, num_iterations: int) -> ExecutableProgram:
+    def transpile(
+        self,
+        transpiler: Transpiler,
+        *,
+        output_bits: int | None = None,
+        y: int,
+        num_iterations: int,
+    ) -> ExecutableProgram:
         """Transpile the model into an executable Grover circuit.
 
-        Dispatches to the quadratic-only fast path when no higher-order terms
-        are present, otherwise uses the HUBO path with phase-gadget
-        decomposition.
+        Dispatches to the quadratic-only path, with build-in function, when no
+        higher-order terms are present. Otherwise uses the HUBO path with the
+        qkernel factory.
 
         Args:
             transpiler (Transpiler): Backend transpiler to use.
-            output_bits (int | None): Number of output qubits for the QFT
+            output_bits (int | None): Number of output qubits for the function output domain.
                 arithmetic register.  When ``None`` (default), the minimum
                 sufficient size is computed automatically via
                 ``_required_output_bits``.  A manual value must satisfy
@@ -75,17 +93,25 @@ class GASConverter(MathematicalProblemConverter):
         Returns:
             ExecutableProgram: The compiled circuit program.
 
-        Raises:
-            NotImplementedError: If the model contains higher-order (degree ≥ 3)
-                terms and the HUBO path has not yet been implemented.
         """
         if output_bits is None:
             output_bits = self._required_output_bits(self.binary_model)
         if not self.binary_model.higher:
-            return self._transpile_quadratic(transpiler, output_bits=output_bits, y=y, num_iterations=num_iterations)
-        return self._transpile_hubo(transpiler, output_bits=output_bits, y=y, num_iterations=num_iterations)
+            return self._transpile_quadratic(
+                transpiler, output_bits=output_bits, y=y, num_iterations=num_iterations
+            )
+        return self._transpile_hubo(
+            transpiler, output_bits=output_bits, y=y, num_iterations=num_iterations
+        )
 
-    def _transpile_quadratic(self, transpiler: Transpiler, *, output_bits: int, y: int, num_iterations: int) -> ExecutableProgram:
+    def _transpile_quadratic(
+        self,
+        transpiler: Transpiler,
+        *,
+        output_bits: int,
+        y: int,
+        num_iterations: int,
+    ) -> ExecutableProgram:
         """Transpile a QUBO model into an executable Grover circuit.
 
         Uses the BINARY-domain coefficients so that the QFT phase-encoding
@@ -105,6 +131,7 @@ class GASConverter(MathematicalProblemConverter):
 
         Returns:
             ExecutableProgram: The compiled circuit program.
+
         """
 
         @qmc.qkernel
@@ -114,23 +141,8 @@ class GASConverter(MathematicalProblemConverter):
             y: qmc.UInt,
             linear: qmc.Dict[qmc.UInt, qmc.Float],
             quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-            iters: qmc.UInt = 1
+            iters: qmc.UInt = 1,
         ) -> qmc.Vector[qmc.Bit]:
-            """Measure the input register after applying the Grover algorithm.
-
-            Args:
-                n (qmc.UInt): Number of input (decision-variable) qubits.
-                m (qmc.UInt): Number of output (objective-value) qubits.
-                y (qmc.UInt): Internal circuit threshold: ``binary_model.constant − best_y``.
-                    Encodes the shift so the oracle fires on ``f(x) < best_y``.
-                linear (qmc.Dict[qmc.UInt, qmc.Float]): BINARY linear coefficients.
-                quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]): BINARY
-                    quadratic coefficients.
-                iters (qmc.UInt): Number of Grover iterations. Defaults to 1.
-
-            Returns:
-                qmc.Vector[qmc.Bit]: Measurement outcomes of the input register.
-            """
             q_output, q_input = grover_algorithm(
                 n=n,
                 m=m,
@@ -155,27 +167,27 @@ class GASConverter(MathematicalProblemConverter):
                 "linear": self.binary_model.linear,
                 "quad": self.binary_model.quad,
                 "iters": num_iterations,
-            }
+            },
         )
 
-######################################################################################
-#                   HUBO PATH (degree ≥ 3) using qkernel factory                     #
-######################################################################################
+    ######################################################################################
+    #                   HUBO PATH (degree ≥ 3) using qkernel factory                     #
+    ######################################################################################
 
     def _make_term_encoding(self, ctrl_indices: list[int]):
-        """
-        Factory: returns a qkernel encoding one monomial term via a degree-k controlled phase.
+        """Factory to create kernel that encodes one polynomial term by controlled phase.
 
-        The degree k = len(ctrl_indices) and the exact qubit indices are captured at
-        creation time so that qmc.control(qmc.p, num_controls=k) receives a Python
-        integer — a requirement of the qamomile API.
+        Args:
+            ctrl_indices (list[int]): Input-qubit indices used as controls.
 
-        For k=0 (constant term) no control qubits are needed; for k≥1 the gate is
-        controlled on q_input[ctrl_indices[0]], q_input[ctrl_indices[1]], …
+        Returns:
+            callable: A qkernel with signature ``(q_output, q_input, theta)``.
+
         """
         degree = len(ctrl_indices)
 
         if degree == 0:
+
             @qmc.qkernel
             def constant_encoding(
                 q_output: qmc.Vector[qmc.Qubit],
@@ -184,6 +196,7 @@ class GASConverter(MathematicalProblemConverter):
             ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
                 q_output = qft_encoding(q_output, theta)
                 return q_output, q_input
+
             return constant_encoding
 
         @qmc.qkernel
@@ -195,30 +208,39 @@ class GASConverter(MathematicalProblemConverter):
             m = q_output.shape[0]
             # num_controls must be a Python int — baked in via closure over `degree`.
             mcp_phase = qmc.control(qmc.p, num_controls=degree)
-            for i in range(m):
+            for i in qmc.range(m):
                 # ctrl_indices is a plain Python list; the comprehension is fully
                 # resolved at trace time (not a @qkernel for-statement).
                 controls = [q_input[ci] for ci in ctrl_indices]
-                mcp_phase(*controls, q_output[i], theta=theta * (2 ** i))
+                mcp_phase(*controls, q_output[i], theta=theta * (2**i))
             return q_output, q_input
 
         return term_encoding
 
-    
     def _compose_encoders_baked(
         self,
         encoders: list,
         theta_values: list,
         start_idx: int = 0,
     ):
-        """
-        Like _compose_encoders, but bakes per-term theta values in as Python floats so
-        the chain kernel takes only (q_output, q_input) — no functional_theta argument.
+        """Factory that composes a recursive chain of term encoders with baked-in angles.
+
+        Args:
+            encoders (list): Encoder kernels to apply in sequence.
+            theta_values (list): Per-encoder phase angles.
+            start_idx (int): Index of the first encoder in the recursive chain.
+
+        Returns:
+            callable: A qkernel with signature ``(q_output, q_input)``.
+
         """
         current_encoder = encoders[start_idx]
-        current_theta = theta_values[start_idx]   # Python float, captured at factory time
+        current_theta = theta_values[
+            start_idx
+        ]  # Python float, captured at factory time
 
         if start_idx == len(encoders) - 1:
+
             @qmc.qkernel
             def last_step(
                 q_output: qmc.Vector[qmc.Qubit],
@@ -226,6 +248,7 @@ class GASConverter(MathematicalProblemConverter):
             ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
                 q_output, q_input = current_encoder(q_output, q_input, current_theta)
                 return q_output, q_input
+
             return last_step
 
         rest_chain = self._compose_encoders_baked(encoders, theta_values, start_idx + 1)
@@ -241,31 +264,23 @@ class GASConverter(MathematicalProblemConverter):
 
         return chain_step
 
-
     def _make_apply_function_preparation_hubo(
         self,
-        output_bits: int, 
+        output_bits: int,
     ):
+        """Factory to create the HUBO state-preparation kernel.
+
+        Args:
+            output_bits (int): Number of qubits in the QFT output register.
+
+        Returns:
+            callable: A qkernel with signature ``(q_output, q_input, y)``.
+
         """
-        Factory: returns a zero-argument qkernel that prepares |f(x)⟩|x⟩ for a HUBO.
-
-        Parameters
-        ----------
-        output_bits : int
-            Number of output qubits for the QFT register.
-        y : int
-            Current best candidate.
-
-        Returns
-        -------
-        qkernel with signature:
-            hubo_preparation() -> tuple[Vector[Qubit], Vector[Qubit]]
-        """
-
-        #We use linear, quad, higher for frontend but the function doesn't distinguish
-        #We gather all of them in a single list of encoders and a single list of coefficients
+        # Gather all terms — linear, quadratic, and higher-order — into a
+        # single encoder list. The function doesn't need to distinguish them.
         terms_indices = []
-        coefficients  = []
+        coefficients = []
 
         for idx, coef in self.binary_model.linear.items():
             terms_indices.append([idx])
@@ -279,37 +294,35 @@ class GASConverter(MathematicalProblemConverter):
             terms_indices.append(list(idxs))
             coefficients.append(float(coef))
 
-        #Compute in advance the appropriate angle for the rotations
+        # Pre-compute phase angles for each term.
         functional_theta = [2 * np.pi * c / (2**output_bits) for c in coefficients]
 
-        #factory for term encoders
-        encoders   = [self._make_term_encoding(idxs) for idxs in terms_indices]
-        #compose the different qkernel for each encoder
+        encoders = [self._make_term_encoding(idxs) for idxs in terms_indices]
         all_phases = self._compose_encoders_baked(encoders, functional_theta)
 
-        #Final qkernel that prepares the hubo function state
         @qmc.qkernel
-        def apply_hubo_preparation(q_output : qmc.Vector[qmc.Qubit], 
-                                   q_input : qmc.Vector[qmc.Qubit], 
-                                   y : qmc.UInt
-            ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-            for i in range(output_bits):
+        def apply_hubo_preparation(
+            q_output: qmc.Vector[qmc.Qubit],
+            q_input: qmc.Vector[qmc.Qubit],
+            y: qmc.UInt,
+        ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+            for i in qmc.range(output_bits):
                 q_output[i] = qmc.h(q_output[i])
-            for i in range(self.binary_model.num_bits):
-                q_input[i]  = qmc.h(q_input[i])
-            
-            q_output, q_input = zero_degree_qft_encoding(q_output,q_input, y)
-            q_output, q_input = all_phases(q_output, q_input) #Apply the encoding
+            for i in qmc.range(self.binary_model.num_bits):
+                q_input[i] = qmc.h(q_input[i])
+
+            q_output, q_input = zero_degree_qft_encoding(q_output, q_input, y)
+            q_output, q_input = all_phases(q_output, q_input)
             q_output = qmc.iqft(q_output)
             return q_output, q_input
 
-        return  apply_hubo_preparation
-    
+        return apply_hubo_preparation
+
     def _make_apply_function_preparation_hubo_dagger(
-            self,
-            output_bits: int,
-        ):
-        """Factory: returns the dagger (Hermitian conjugate) of the qkernel from _make_apply_function_preparation_hubo.
+        self,
+        output_bits: int,
+    ):
+        """Factory: returns the Hermitian conjugate of the qkernel from _make_apply_function_preparation_hubo.
 
         Applies all phase encodings in reverse order with negated angles, replaces the
         final IQFT with a QFT, negates the y offset, and undoes the initial Hadamards.
@@ -319,15 +332,13 @@ class GASConverter(MathematicalProblemConverter):
                 Must match the value used for the forward preparation kernel.
 
         Returns:
-            qkernel with signature:
-                apply_hubo_preparation_dagger(
-                    q_output: Vector[Qubit],
-                    q_input: Vector[Qubit],
-                    y: UInt
-                ) -> tuple[Vector[Qubit], Vector[Qubit]]
+            callable: A qkernel with signature
+                ``(q_output: Vector[Qubit], q_input: Vector[Qubit], y: UInt)
+                -> tuple[Vector[Qubit], Vector[Qubit]]``.
+
         """
         terms_indices = []
-        coefficients  = []
+        coefficients = []
 
         for idx, coef in self.binary_model.linear.items():
             terms_indices.append([idx])
@@ -341,18 +352,24 @@ class GASConverter(MathematicalProblemConverter):
             terms_indices.append(list(idxs))
             coefficients.append(float(coef))
 
-        # Negate all angles for the dagger, then reverse order of application
-        functional_theta_dagger = [-2 * np.pi * c / (2**output_bits) for c in coefficients]
+        # Negate all angles for the dagger, then reverse order of application.
+        functional_theta_dagger = [
+            -2 * np.pi * c / (2**output_bits) for c in coefficients
+        ]
         encoders = [self._make_term_encoding(idxs) for idxs in terms_indices]
         encoders_rev = list(reversed(encoders))
-        thetas_rev   = list(reversed(functional_theta_dagger))
+        thetas_rev = list(reversed(functional_theta_dagger))
 
-        all_phases_dagger = self._compose_encoders_baked(encoders_rev, thetas_rev) if encoders_rev else None
+        all_phases_dagger = (
+            self._compose_encoders_baked(encoders_rev, thetas_rev)
+            if encoders_rev
+            else None
+        )
 
         @qmc.qkernel
         def apply_hubo_preparation_dagger(
             q_output: qmc.Vector[qmc.Qubit],
-            q_input:  qmc.Vector[qmc.Qubit],
+            q_input: qmc.Vector[qmc.Qubit],
             y: qmc.UInt,
         ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
             # Reverse of the final iqft
@@ -363,40 +380,40 @@ class GASConverter(MathematicalProblemConverter):
             # Reverse the zero-degree phase with negated y
             q_output, q_input = zero_degree_qft_encoding(q_output, q_input, (-1.0) * y)
             # Reverse the initial Hadamards (H is self-adjoint)
-            for i in range(self.binary_model.num_bits):
+            for i in qmc.range(self.binary_model.num_bits):
                 q_input[i] = qmc.h(q_input[i])
-            for i in range(output_bits):
+            for i in qmc.range(output_bits):
                 q_output[i] = qmc.h(q_output[i])
             return q_output, q_input
 
         return apply_hubo_preparation_dagger
 
-
-    def _transpile_hubo(self, 
-            transpiler: Transpiler, *, 
-            output_bits: int, 
-            y: int, 
-            num_iterations: int
-        ) -> ExecutableProgram:
-
-        """Transpile a HUBO model into an executable Grover circuit.
+    def _transpile_hubo(
+        self,
+        transpiler: Transpiler,
+        *,
+        output_bits: int,
+        y: int,
+        num_iterations: int,
+    ) -> ExecutableProgram:
+        """Transpile a HUBO model into an executable Grover circuit using the factory methods.
 
         Args:
             transpiler (Transpiler): Backend transpiler to use.
             output_bits (int): Number of output qubits.
-            y (float): Current best known objective value.
+            y (int): Current best known objective value.
             num_iterations (int): Number of Grover operator applications.
 
         Returns:
             ExecutableProgram: The compiled circuit program.
 
-        Raises:
-            NotImplementedError: Always — the HUBO path is not yet implemented.
         """
-
-        #Use qkernel factory to create the qkernel for state preparation and the hermitian conjugate
-        apply_function_preparation_hubo = self._make_apply_function_preparation_hubo(output_bits=output_bits)
-        apply_function_preparation_hubo_dagger = self._make_apply_function_preparation_hubo_dagger(output_bits=output_bits)
+        apply_function_preparation_hubo = self._make_apply_function_preparation_hubo(
+            output_bits=output_bits
+        )
+        apply_function_preparation_hubo_dagger = (
+            self._make_apply_function_preparation_hubo_dagger(output_bits=output_bits)
+        )
 
         # Local diffusion that writes the slice back after controlled_Z so the
         # slice borrow is released before the next prep call (which accesses
@@ -405,27 +422,45 @@ class GASConverter(MathematicalProblemConverter):
         def hubo_diffusion_op(
             q_input: qmc.Vector[qmc.Qubit],
         ) -> qmc.Vector[qmc.Qubit]:
+            """Apply the diffusion step for the HUBO Grover operator.
+
+            Args:
+                q_input (qmc.Vector[qmc.Qubit]): Input register to reflect around the uniform superposition.
+
+            Returns:
+                qmc.Vector[qmc.Qubit]: Updated input register.
+
+            """
             n = q_input.shape[0]
             controlled_z = qmc.control(qmc.z, num_controls=n - 1)
-            for i in range(n):
+            for i in qmc.range(n):
                 q_input[i] = qmc.x(q_input[i])
-            controls = q_input[0:n - 1]
+            controls = q_input[0 : n - 1]
             target = q_input[n - 1]
             controls, target = controlled_z(controls, target)
-            q_input[0:n - 1] = controls   # ReleaseSliceViewOperation — releases borrow
+            q_input[0 : n - 1] = controls  # ReleaseSliceViewOperation — releases borrow
             q_input[n - 1] = target
-            for i in range(n):
+            for i in qmc.range(n):
                 q_input[i] = qmc.x(q_input[i])
             return q_input
 
-        #redefine the qkernel for grover_operator, grover_algorithm and grover_algorithm_measurement
         @qmc.qkernel
         def hubo_grover_operator(
             q_output: qmc.Vector[qmc.Qubit],
             q_input: qmc.Vector[qmc.Qubit],
             y: qmc.UInt,
         ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+            """Apply one Grover iteration for the HUBO GAS oracle.
 
+            Args:
+                q_output (qmc.Vector[qmc.Qubit]): Output register for arithmetic encoding.
+                q_input (qmc.Vector[qmc.Qubit]): Input register for decision variables.
+                y (qmc.UInt): Objective threshold offset encoded as a constant term.
+
+            Returns:
+                tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Updated output and input registers.
+
+            """
             m = q_output.shape[0]
 
             # Oracle
@@ -442,26 +477,34 @@ class GASConverter(MathematicalProblemConverter):
             q_input = hubo_diffusion_op(q_input)
 
             # A_y
-            q_output, q_input = apply_function_preparation_hubo(
-                q_output, q_input, y
-            )
+            q_output, q_input = apply_function_preparation_hubo(q_output, q_input, y)
 
             return q_output, q_input
-        
+
         @qmc.qkernel
         def hubo_grover_algorithm(
             n: qmc.UInt,
             m: qmc.UInt,
             y: qmc.UInt,
-            iters: qmc.UInt = 1
-        ) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
-            # original state
+            iters: qmc.UInt = 1,
+        ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
+            """Run repeated Grover iterations for the HUBO GAS circuit.
+
+            Args:
+                n (qmc.UInt): Number of input qubits.
+                m (qmc.UInt): Number of output qubits.
+                y (qmc.UInt): Objective threshold offset encoded as a constant term.
+                iters (qmc.UInt): Number of Grover iterations.
+
+            Returns:
+                tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Output and input qubit registers after all iterations.
+
+            """
             q_output = qmc.qubit_array(m, name="q_output")
             q_input = qmc.qubit_array(n, name="q_input")
             q_output, q_input = apply_function_preparation_hubo(q_output, q_input, y)
 
-            # Apply grover operator
-            for _ in range(iters):
+            for _ in qmc.range(iters):
                 q_output, q_input = hubo_grover_operator(
                     q_output,
                     q_input,
@@ -469,13 +512,13 @@ class GASConverter(MathematicalProblemConverter):
                 )
 
             return q_output, q_input
-        
+
         @qmc.qkernel
         def measure_hubo_grover_algorithm(
             n: qmc.UInt,
             m: qmc.UInt,
             y: qmc.UInt,
-            iters: qmc.UInt = 1
+            iters: qmc.UInt = 1,
         ) -> qmc.Vector[qmc.Bit]:
             """Measure the input register after applying the Grover algorithm.
 
@@ -488,6 +531,7 @@ class GASConverter(MathematicalProblemConverter):
 
             Returns:
                 qmc.Vector[qmc.Bit]: Measurement outcomes of the input register.
+
             """
             q_output, q_input = hubo_grover_algorithm(
                 n=n,
@@ -506,5 +550,5 @@ class GASConverter(MathematicalProblemConverter):
                 "m": output_bits,
                 "y": y_circuit,
                 "iters": num_iterations,
-            }
+            },
         )

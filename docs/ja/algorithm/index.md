@@ -92,4 +92,10 @@ Hamming [7,4,3]符号からのCSS構成、6スタビライザー、横断的Hada
 OpenFermionで分子ハミルトニアンを構築し、VQEで基底状態エネルギーを求めます。
 :::
 
+:::{card}
+:header: ** Pauli Correlation Encoding を用いたポートフォリオ最適化**
+:link: portfolio_PCE
+PCE をポートフォリオ最適化に応用する手法を示したものです。
+:::
+
 ::::
