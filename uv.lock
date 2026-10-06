@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'linux'",
@@ -2511,9 +2511,9 @@ resolution-markers = [
     "python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
 ]
 dependencies = [
-    { name = "llvmlite", version = "0.45.1", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
-    { name = "numpy", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
-    { name = "setuptools", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
+    { name = "llvmlite", version = "0.45.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
+    { name = "setuptools" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b0/2a/975f49e156dae4edd3ab5afc60e2b3d65add014db2ddbbc23b9bb89882a4/numba-0.47.0.tar.gz", hash = "sha256:c0703df0a0ea2e29fbef7937d9849cc4734253066cb5820c5d6e0851876e3b0a", size = 1935290, upload-time = "2020-01-03T17:03:47.391Z" }
 
@@ -2523,18 +2523,18 @@ version = "0.67.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'linux'",
-    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'linux'",
-    "python_full_version < '3.12' and sys_platform == 'linux'",
     "python_full_version >= '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
-    "python_full_version >= '3.12' and python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
-    "python_full_version < '3.12' and platform_machine == 'arm64' and sys_platform == 'darwin'",
     "(python_full_version >= '3.14' and platform_machine != 'arm64' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.14' and sys_platform != 'darwin' and sys_platform != 'linux')",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'linux'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
     "(python_full_version >= '3.12' and python_full_version < '3.14' and platform_machine != 'arm64' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'darwin' and sys_platform != 'linux')",
+    "python_full_version < '3.12' and sys_platform == 'linux'",
+    "python_full_version < '3.12' and platform_machine == 'arm64' and sys_platform == 'darwin'",
     "(python_full_version < '3.12' and platform_machine != 'arm64' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'linux')",
 ]
 dependencies = [
-    { name = "llvmlite", version = "0.49.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
-    { name = "numpy", marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
+    { name = "llvmlite", version = "0.49.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7a/90/2544f4e3a61e501d6c9a5418fd4b905323222693d54a02cab0106a0af865/numba-0.67.0.tar.gz", hash = "sha256:cd75aa535b33fa05d9d930b1ae8af9f97a2881e96d72dfb38ec9b78284d9f851", size = 2836515, upload-time = "2026-08-11T23:04:00.174Z" }
 wheels = [
@@ -4011,9 +4011,6 @@ dev = [
     { name = "zuban" },
 ]
 docs = [
-    { name = "amazon-braket-sdk" },
-    { name = "cuda-quantum-cu12", marker = "sys_platform == 'linux'" },
-    { name = "cuda-quantum-cu13", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "griffe" },
     { name = "grpcio-tools" },
     { name = "jupyter" },
@@ -4034,9 +4031,6 @@ docs = [
     { name = "qiskit" },
     { name = "qiskit-aer" },
     { name = "qiskit-ibm-runtime" },
-    { name = "quri-parts-circuit" },
-    { name = "quri-parts-core" },
-    { name = "quri-parts-qulacs" },
     { name = "ruff" },
     { name = "scikit-learn" },
     { name = "torch" },
@@ -4084,9 +4078,6 @@ dev = [
     { name = "zuban", specifier = ">=0.4.1" },
 ]
 docs = [
-    { name = "amazon-braket-sdk", specifier = ">=1.125,<2" },
-    { name = "cuda-quantum-cu12", marker = "sys_platform == 'linux'", specifier = ">=0.14,<0.15" },
-    { name = "cuda-quantum-cu13", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = ">=0.14,<0.15" },
     { name = "griffe", specifier = ">=1.0.0" },
     { name = "grpcio-tools", specifier = ">=1.71,<2" },
     { name = "jupyter", specifier = ">=1.1.1" },
@@ -4107,9 +4098,6 @@ docs = [
     { name = "qiskit", specifier = ">=2.3.0" },
     { name = "qiskit-aer", specifier = ">=0.17.2" },
     { name = "qiskit-ibm-runtime", specifier = ">=0.40,<1" },
-    { name = "quri-parts-circuit", specifier = ">=0.21.1" },
-    { name = "quri-parts-core", specifier = ">=0.21.1" },
-    { name = "quri-parts-qulacs", specifier = ">=0.21.1" },
     { name = "ruff", specifier = ">=0.14.11" },
     { name = "scikit-learn", specifier = ">=1.6.0" },
     { name = "torch", specifier = ">=2.13.0" },
