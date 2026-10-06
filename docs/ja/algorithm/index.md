@@ -81,6 +81,12 @@ QAOA回路をゼロから構築してMaxCutを解き、組み込みの`qaoa_stat
 :::
 
 :::{card}
+:header: **量子位相推定（QPE）**
+:link: qpe
+量子位相推定をQamomileで実装する例です。4x4ユニタリ行列に対して、スクラッチ実装と組み込みの`qpe`ヘルパーを使う2種類の方法を紹介します。さらに、カウント用量子ビット数を大きくしたときの精度や必要なゲート数を比較します。
+:::
+
+:::{card}
 :header: **量子カーネル分類**
 :link: quantum_kernel_classification
 量子特徴マップとカーネル法を使ってmake_circlesデータセットの分類を行います。
