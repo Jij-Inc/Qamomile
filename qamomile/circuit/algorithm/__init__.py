@@ -40,6 +40,10 @@ from .qaoa import (
     qaoa_state,
     x_mixer,
 )
+from .qsvt_eigenstate_filter import (
+    qsvt_filter_probe,
+    qsvt_filter_projector,
+)
 from .shor import ekera_hastad_factoring, shor_order_finding
 from .trotter import trotterized_time_evolution
 
@@ -85,4 +89,7 @@ __all__ = [
     "function_preparation_qubo_dagger",
     "grover_operator",
     "grover_algorithm",
+    # QSVT eigenstate filtering
+    "qsvt_filter_projector",
+    "qsvt_filter_probe",
 ]
