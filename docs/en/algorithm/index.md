@@ -98,4 +98,10 @@ CSS construction, syndrome decoding, and transversal Hadamard.
 Build a molecular Hamiltonian with OpenFermion and find the ground state energy via VQE.
 :::
 
+:::{card}
+:header: **Portfolio Optimization using Pauli Correlation Encoding**
+:link: portfolio_PCE
+Apply PCE to portfolio optimization.
+:::
+
 ::::

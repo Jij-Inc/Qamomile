@@ -101,6 +101,13 @@ docs = [
     "openfermionpyscf>=0.5",
     "pyscf>=2.5.0",
     "ommx-quantum-benchmarks>=0.0.2",
+    # Keep engine constraints aligned with project.optional-dependencies.
+    "quri-parts-core>=0.21.1",
+    "quri-parts-circuit>=0.21.1",
+    "quri-parts-qulacs>=0.21.1",
+    "cuda-quantum-cu12>=0.14,<0.15; sys_platform == 'linux'",
+    "cuda-quantum-cu13>=0.14,<0.15; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "amazon-braket-sdk>=1.125,<2",
     "grpcio-tools>=1.71,<2",
     "kagglehub>=1.0.2",
 ]

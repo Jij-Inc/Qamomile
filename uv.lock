@@ -4011,6 +4011,9 @@ dev = [
     { name = "zuban" },
 ]
 docs = [
+    { name = "amazon-braket-sdk" },
+    { name = "cuda-quantum-cu12", marker = "sys_platform == 'linux'" },
+    { name = "cuda-quantum-cu13", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "griffe" },
     { name = "grpcio-tools" },
     { name = "jupyter" },
@@ -4031,6 +4034,9 @@ docs = [
     { name = "qiskit" },
     { name = "qiskit-aer" },
     { name = "qiskit-ibm-runtime" },
+    { name = "quri-parts-circuit" },
+    { name = "quri-parts-core" },
+    { name = "quri-parts-qulacs" },
     { name = "ruff" },
     { name = "scikit-learn" },
     { name = "torch" },
@@ -4078,6 +4084,9 @@ dev = [
     { name = "zuban", specifier = ">=0.4.1" },
 ]
 docs = [
+    { name = "amazon-braket-sdk", specifier = ">=1.125,<2" },
+    { name = "cuda-quantum-cu12", marker = "sys_platform == 'linux'", specifier = ">=0.14,<0.15" },
+    { name = "cuda-quantum-cu13", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = ">=0.14,<0.15" },
     { name = "griffe", specifier = ">=1.0.0" },
     { name = "grpcio-tools", specifier = ">=1.71,<2" },
     { name = "jupyter", specifier = ">=1.1.1" },
@@ -4098,6 +4107,9 @@ docs = [
     { name = "qiskit", specifier = ">=2.3.0" },
     { name = "qiskit-aer", specifier = ">=0.17.2" },
     { name = "qiskit-ibm-runtime", specifier = ">=0.40,<1" },
+    { name = "quri-parts-circuit", specifier = ">=0.21.1" },
+    { name = "quri-parts-core", specifier = ">=0.21.1" },
+    { name = "quri-parts-qulacs", specifier = ">=0.21.1" },
     { name = "ruff", specifier = ">=0.14.11" },
     { name = "scikit-learn", specifier = ">=1.6.0" },
     { name = "torch", specifier = ">=2.13.0" },

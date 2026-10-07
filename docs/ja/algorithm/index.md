@@ -99,7 +99,7 @@ OpenFermionで分子ハミルトニアンを構築し、VQEで基底状態エネ
 :::
 
 :::{card}
-:header: ** Pauli Correlation Encoding を用いたポートフォリオ最適化**
+:header: **Pauli Correlation Encoding を用いたポートフォリオ最適化**
 :link: portfolio_PCE
 PCE をポートフォリオ最適化に応用する手法を示したものです。
 :::

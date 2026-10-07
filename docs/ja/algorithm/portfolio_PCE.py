@@ -29,8 +29,7 @@
 
 # %%
 # Install the latest Qamomile through pip! 
-# # !pip install qamomile 
-# # !pip install kagglehub
+# # # !pip install "qamomile[qiskit,visualization]" kagglehub networkx pandas
 
 
 # %%
@@ -123,7 +122,7 @@ from qamomile.qiskit import QiskitTranspiler
 # $$
 # \Pi_1^{(2)}
 # = Z_1 \otimes Z_2 \otimes I_3, \quad \Pi_2^{(2)} 
-# = X_1 \otimes I_2 \otimes Y_3 \dots \tag{1}
+# = X_1 \otimes I_2 \otimes Y_3 \dots \tag{4}
 # $$
 #
 # などが考えられます。
@@ -132,7 +131,7 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # $$
 # c_i 
-# = \langle \Psi (\boldsymbol{\theta}) \vert \Pi_i^{(k)} \vert \Psi (\boldsymbol{\theta}) \rangle \tag{2}
+# = \langle \Psi (\boldsymbol{\theta}) \vert \Pi_i^{(k)} \vert \Psi (\boldsymbol{\theta}) \rangle \tag{5}
 # $$
 #
 # のようになります。
@@ -161,7 +160,7 @@ from qamomile.qiskit import QiskitTranspiler
 # = \left\{ \begin{array}{ll}
 # 1 - \vert \rho_{ij} \vert & \mathrm{if} \ \vert \rho_{ij} \vert > \lambda \\
 # \emptyset & \mathrm{otherwise}
-# \end{array} \right. \tag{3}
+# \end{array} \right. \tag{6}
 # $$
 #
 # のように計算されます。
@@ -169,7 +168,7 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # $$
 # \rho_{ij} 
-# = \frac{\mathrm{Cov} (r_i, r_j)}{\sigma_i \sigma_j} \tag{4}
+# = \frac{\mathrm{Cov} (r_i, r_j)}{\sigma_i \sigma_j} \tag{7}
 # $$
 #
 # は銘柄 $i, j$ の相関を表す係数であり、$\sigma_i$ は銘柄 $i$ の標準偏差です。
@@ -183,7 +182,7 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # $$
 # \mathrm{Cut} (\mathcal{G}, \boldsymbol{x}) 
-# = \sum_{(v_i, v_j) \in E} w_{ij} \{ x_i (1-x_j) + x_j (1-x_i) \} \tag{5}
+# = \sum_{(v_i, v_j) \in E} w_{ij} \{ x_i (1-x_j) + x_j (1-x_i) \} \tag{8}
 # $$
 #
 # ここで、$x_i \in \{ 0, 1 \}$ はどちらのクラスタに属するかを表すバイナリ変数です。
@@ -193,7 +192,7 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # $$
 # r_i 
-# = \mathrm{arg} \max_j \mu_i^j \tag{6}
+# = \mathrm{arg} \max_j \mu_i^j \tag{9}
 # $$
 #
 # から、最大リターン銘柄を選出します。
@@ -208,7 +207,7 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # $$
 # \mathcal{L} 
-# = \sum_{(i, j) \in E} w_{ij} \tanh (\alpha \langle \Pi_i \rangle) \tanh (\alpha \langle \Pi_j \rangle) + \mathcal{L}^\mathrm{reg} \tag{7}
+# = \sum_{(i, j) \in E} w_{ij} \tanh (\alpha \langle \Pi_i \rangle) \tanh (\alpha \langle \Pi_j \rangle) + \mathcal{L}^\mathrm{reg} \tag{10}
 # $$
 #
 # ここで $E$ は分割前のグラフの辺集合であり、$\langle \Pi_i \rangle = \langle \Psi (\boldsymbol{\theta}) \vert \Pi_i^{(k)} \vert \Psi (\boldsymbol{\theta}) \rangle$ です。
@@ -438,7 +437,8 @@ def bipartition(sub):
     def f(p):
         th = list(p)
         sg = [np.tanh(a * e.run(executor, bindings={"thetas": th}).result()) for e in exes]
-        L = sum(J * sg[i] * sg[j] for (i, j), J in sm.quad.items())
+        # L = sum(J * sg[i] * sg[j] for (i, j), J in sm.quad.items())
+        L = sum(d["weight"] * sg[ix[u]] * sg[ix[v]] for u, v, d in sub.edges(data=True))
         L += sum(h * sg[i] for i, h in sm.linear.items())
         return L + BETA * nu_ * (sum(s * s for s in sg) / n_var) ** 2
 
@@ -528,12 +528,19 @@ print(f"selected {len(reps)} assets: {[tickers[v] for v in reps]}")
 equity = 1000 * (1 + test[[tickers[v] for v in reps]].mean(axis=1)).cumprod()
 baseline = 1000 * (1 + test.mean(axis=1)).cumprod()
 
-def sharpe(eq):
-    r = eq.pct_change().dropna()
-    return float(np.sqrt(252) * r.mean() / r.std()) if r.std() > 0 else 0.0
 
-print(f"\nPCE      final = {equity.iloc[-1]:8.2f}   sharpe = {sharpe(equity):+.3f}")
-print(f"baseline final = {baseline.iloc[-1]:8.2f}   sharpe = {sharpe(baseline):+.3f}")
+def sharpe(r: pd.Series) -> float:
+    """Calculate annualized Sharpe with a zero risk-free rate."""
+    std = r.std()
+    return float(np.sqrt(252) * r.mean() / std) if std > 0 else 0.0
+
+pce_returns = test[[tickers[v] for v in reps]].mean(axis=1)
+baseline_returns = test.mean(axis=1)
+
+
+
+print(f"\nPCE      final = {equity.iloc[-1]:8.2f}   sharpe = {sharpe(pce_returns):+.3f}")
+print(f"baseline final = {baseline.iloc[-1]:8.2f}   sharpe = {sharpe(baseline_returns):+.3f}")
 
 plt.figure(figsize=(8, 4))
 plt.plot(equity.values, label=f"PCE ({len(reps)} assets)", color="#2696EB")
@@ -543,9 +550,9 @@ plt.legend(); plt.title("Out-of-sample performance")
 plt.show()
 
 # %% [markdown]
-# ベースラインとして全ての銘柄を用いた場合のリターンも表示しています。
-# この場合、一貫して PCE により選び出した銘柄によるリターンが、ベースラインを上回っていることがわかります。
-# しかし、シャープレシオに関してはベースラインをわずかに下回っています。
+# ベースラインとして、全ての銘柄を用いた場合のリターンも表示しています。
+# この場合、PCE により選び出した銘柄によるリターンが、大半のテスト日数においてベースラインを上回っていることがわかります。
+# またシャープレシオに関しても、ベースラインを凌駕しています。
 #
 # ## まとめ
 #
@@ -554,6 +561,7 @@ plt.show()
 #
 # * Qamomile には PCE を実装する機能が備わっており、`PCEConverter` でこれを呼び出すことができます。
 # * 各銘柄間の相関を用いてグラフを構築し、その MaxCut を行うことで、相関の強い銘柄どうしをクラスタリングします。
-# * このようにして選ばれた銘柄が、より良いリターンとなることを示しました。
+# * このようにして選ばれた銘柄が、リターン・シャープレシオともに良い結果となることを示しました。
 
-# %%
+# %% [markdown]
+#
