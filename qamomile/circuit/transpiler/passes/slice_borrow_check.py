@@ -1050,6 +1050,24 @@ class SliceBorrowCheckPass(Pass[Block, Block]):
         outer state inconsistent — they are rejected with
         ``ValidationError`` for predictability.
 
+        Feasibility note — why rejection, not outward propagation, is
+        the design: deleting an outer entry from inside a body is sound
+        only when the body is guaranteed to execute exactly once. An
+        ``if`` branch is path-dependent — released on one path, live on
+        the other — and a single static table cannot represent "maybe
+        released" without being wrong in one direction (dropping the
+        entry readmits double-borrows on the not-taken path; keeping it
+        rejects legal parent access on the taken path). A loop body may
+        run zero times (the release never happens) or two-plus times
+        (the second iteration would re-consume the already-released
+        view, which is unsound regardless). The only sound corner — a
+        compile-time trip count of exactly one — is degenerate: the
+        loop can simply be removed at the source level. Every rejected
+        shape therefore has a trivial source rewrite (release at the
+        view's own scope, or construct the view inside the body so each
+        iteration borrows and returns locally), which the error message
+        points to and the vector-slicing tutorial documents.
+
         Args:
             view_value (ValueBase): Sliced value whose borrow is
                 being released.  Must be an ``ArrayValue`` (the
