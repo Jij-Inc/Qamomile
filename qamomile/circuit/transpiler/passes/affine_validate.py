@@ -8,10 +8,63 @@ from qamomile.circuit.ir.operation import (
     ReleaseSliceViewOperation,
     SliceArrayOperation,
 )
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.control_flow import HasNestedOps, IfOperation
+from qamomile.circuit.ir.operation.gate import ControlledUOperation
+from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
 from qamomile.circuit.ir.value import Value
 from qamomile.circuit.transpiler.errors import AffineTypeError, ValidationError
 from qamomile.circuit.transpiler.passes import Pass
+
+
+def operation_owned_blocks(op: Operation) -> list[Block]:
+    """Enumerate the implementation blocks an operation privately owns.
+
+    Owned blocks are boxed recipe bodies that survive inlining and reach
+    emit as part of the operation itself — unlike control-flow regions
+    (``HasNestedOps``), they are separate value namespaces whose
+    ``input_values`` form their own ownership boundary. Three operation
+    families carry them:
+
+    - ``ControlledUOperation.block`` (including ``ConcreteControlledU``):
+      the unitary body applied under control.
+    - ``InverseBlockOperation.source_block`` / ``implementation_block``:
+      the forward recipe and the pre-built inverse fallback.
+    - ``InvokeOperation.definition``: the standard ``body`` plus every
+      ``implementations[*].body`` (native / strategy-specific candidates,
+      the same both-kinds enumeration ``region_validation`` uses). The
+      standard pipeline flattens inlineable invokes before
+      ``affine_validate`` runs, but non-inline, hand-built, or
+      deserialized IR can still carry them — and emit may select an
+      implementation body over the standard one.
+
+    Args:
+        op (Operation): Operation to inspect.
+
+    Returns:
+        list[Block]: The owned blocks present on ``op`` (empty for the
+        overwhelming majority of operations).
+    """
+    blocks: list[Block] = []
+    if isinstance(op, ControlledUOperation):
+        if op.block is not None:
+            blocks.append(op.block)
+    elif isinstance(op, InverseBlockOperation):
+        if op.source_block is not None:
+            blocks.append(op.source_block)
+        if op.implementation_block is not None:
+            blocks.append(op.implementation_block)
+    elif isinstance(op, InvokeOperation):
+        if op.definition is not None:
+            if op.definition.body is not None:
+                blocks.append(op.definition.body)
+            for implementation in op.definition.implementations:
+                if implementation.body is not None:
+                    blocks.append(implementation.body)
+    else:
+        # Every other operation owns no implementation block.
+        pass
+    return blocks
 
 
 class AffineValidationPass(Pass[Block, Block]):
@@ -19,7 +72,11 @@ class AffineValidationPass(Pass[Block, Block]):
 
     This pass serves as a safety net to catch affine type violations
     that may have bypassed the frontend checks. It verifies that each
-    quantum value is used (consumed) at most once. It does NOT detect
+    quantum value is used (consumed) at most once — in the entry block's
+    control-flow nesting AND inside every operation-owned implementation
+    block (controlled-U bodies, inverse blocks, un-inlined callable
+    bodies; see :func:`operation_owned_blocks`), each of which is
+    validated as an independent affine scope. It does NOT detect
     "never consumed" / silent-discard patterns; the branch-internal and
     loop-body discard cases are rejected separately by
     ``reject_control_flow_quantum_discard`` in
@@ -106,6 +163,20 @@ class AffineValidationPass(Pass[Block, Block]):
                 if isinstance(op, IfOperation):
                     for scoped in scoped_sets:
                         consumed.update(scoped)
+
+            # Operation-OWNED implementation blocks (controlled-U bodies,
+            # inverse blocks, un-inlined callable bodies) are separate
+            # value namespaces, not control-flow scopes: their
+            # ``input_values`` are the ownership boundary, so each is
+            # validated as an independent affine scope with a FRESH
+            # consumed map instead of sharing the enclosing walk's state.
+            # Boxed blocks are HIERARCHICAL-kind, so this deliberately
+            # enters via ``_validate_operations`` rather than ``run()``
+            # (whose AFFINE-kind guard would reject them). Recursion
+            # covers boxed-in-boxed nesting and control flow inside a
+            # boxed body.
+            for owned in operation_owned_blocks(op):
+                self._validate_operations(owned.operations, {})
 
     def _check_and_mark_consumed(
         self,
