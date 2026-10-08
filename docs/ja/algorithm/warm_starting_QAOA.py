@@ -6,9 +6,9 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.5
 #   kernelspec:
-#     display_name: qamomile (3.11.16.final.0)
+#     display_name: qamomile (3.11.16)
 #     language: python
 #     name: python3
 # ---
@@ -30,7 +30,7 @@
 
 # %%
 # Install the latest Qamomile through pip! 
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %%
 import itertools
@@ -111,7 +111,10 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # 元の QUBO を緩和して得られた 式 (2), (3) の解を古典的に求め、それを QAOA の初期状態に用いるというのが、 WS-QAOA です。
 # このページでは式 (2) の最適解 $\boldsymbol{c}^\ast$ を初期状態に埋め込む方法を示します。
-# SDP である (3) 式の最適解 $Y^\ast$ を利用する場合には、丸めなどにより初期ビット列や初期確率へ変換する必要があります。
+#
+# :::{note} [Egger et al. (2021)](https://quantum-journal.org/papers/q-2021-06-17-479/) では、SDP 解を古典的に丸め込んだ結果を用いる Rounded WS-QAOA や WS-RQAOA についても議論されています。 
+# :::
+#
 # 式 (2) の最適解 $\boldsymbol{c}^\ast$ を埋め込む場合には、次のようにします。
 #
 # $$
@@ -165,10 +168,10 @@ from qamomile.qiskit import QiskitTranspiler
 # $$
 #
 # のようにします。
-# $c_i^\ast \in [\epsilon, 1 - \epsilon]$ の場合には、そのまま $c_i^\ast$ の値を用いますが、それ以外の範囲では $\epsilon, 1-\epsilon$ のようにすることで $c_i^\ast \sim 0, 1$ となるような状況を回避します。
-# すなわち、限りなく $c_i^\ast \sim 0$ となるような状況でも、$\epsilon$ の確率だけ $x_i = 1$ を測定する確率を $\epsilon$ 以上に保ちます。
-# $\epsilon = 0.5$ の場合、全ての量子ビットについて $\theta_i = \pi / 2$ となり、$\hat{H}_{M, i}^{(\mathrm{ws})} = - X_i$ となります。
-# よって、これは通常の QAOA に一致します。
+# $c_i^\ast \in [\epsilon, 1 - \epsilon]$ の場合には、そのまま $c_i^\ast$ の値を用いますが、それ以外の範囲では $\epsilon, 1-\epsilon$ のようにすることで $c_i^\ast \simeq 0, 1$ となるような状況を回避します。
+# すなわち、限りなく $c_i^\ast \simeq 0$ となるような状況でも、$\epsilon$ の確率だけ $x_i = 1$ を測定する確率を $\epsilon$ 以上に保ちます。
+# $\epsilon = 0$ の場合、これは正則化なしの WS-QAOA であり、先ほどの到達可能性の問題が起こり得ます。
+# $\epsilon = 0.5$ の場合、全ての量子ビットについてそれぞれ $\theta_i = \pi / 2$ となり、$\hat{H}_{M, i}^{(\mathrm{ws})} = - X_i$、つまりこれは通常の QAOA に一致します。
 
 # %% [markdown]
 # ## Qamomile を用いた実装
@@ -215,7 +218,7 @@ print("eigenvalues(Sigma) =", np.round(eigenvalues, 6))
 # $$
 # \boldsymbol{x}^\top \Sigma \boldsymbol{x} + \boldsymbol{\mu}^\top \boldsymbol{x} 
 # = \sum_i (\Sigma_{ii} + \mu_i) x_i + 2 \sum_{i<j} \Sigma_{ij} x_i x_j 
-# = \sum_{i, j} Q_{ij} x_i x_j \tag{8}
+# = \sum_i Q_{ii} x_i + \sum_{i<j} Q_{ij} x_i x_j \tag{8}
 # $$
 #
 # のように、QUBO 行列で表すことにしましょう。
@@ -292,7 +295,7 @@ print("f(c*)     :", qp_energy)
 # %%
 epsilon = 0.10
 
-if not (0.0 < epsilon <= 0.5):
+if not (0.0 <= epsilon <= 0.5):
     raise ValueError("epsilon must satisfy 0 < epsilon <= 0.5")
 
 c_tilde = np.clip(c_star, epsilon, 1.0 - epsilon)
@@ -666,7 +669,7 @@ for method_name, executable, executor in optimization_specs:
     print("  betas   :", np.round(result.x[p:], 6))
 
 # %% [markdown]
-# 標準的な QAOA > 初期状態のみ変化させた QAOA > continuous WS-QAOA のように、continous WS-QAOA が一番低いエネルギーに到達していることがわかります。
+# 今回の例では、標準的な QAOA > 初期状態のみ変化させた QAOA > Continuous WS-QAOA のように、continous WS-QAOA が最も低いサンプル平均エネルギーを示していることがわかります。
 # 最適化によるエネルギーの推移を、描画してみましょう。
 
 # %%
@@ -699,8 +702,8 @@ plt.show()
 # ここでは [Egger et al. (2021)](https://quantum-journal.org/papers/q-2021-06-17-479/) で提案されたウォームスタート QAOA を、Qamomile で実装する方法をご紹介しました。
 # 以下に、このページで紹介した重要な情報をまとめます。
 #
-# * ウォームスタートにより、より低いエネルギーの解を発見することに成功しました。
-# * 初期状態を変化させることに合わせて、ミキサーも適切なものに変更する必要があります。
+# * 今回の例では、ウォームスタートによりより低いエネルギーの解を発見することに成功しました。
+# * 初期状態に合わせてミキサーも変更することで、ウォームスタート状態をミキサーハミルトニアンの基底状態とする構造を保つことができます。
 # * Qamomile を用いることで、QAOA の X ミキサーや、ウォームスタートのための初期化の角度などを、簡単に設定することができます。
 
 # %%
