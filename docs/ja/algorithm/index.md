@@ -21,6 +21,12 @@ RabiモデルでのTrotter–Suzuki積公式と収束次数の実験です。
 :::
 
 :::{card}
+:header: **Groverの探索アルゴリズム**
+:link: grover_search
+Groverの探索アルゴリズムをスクラッチ実装と`qmc.grover_search`の2通りで実装し、確率振幅の増幅とオラクル問い合わせ回数を比較します。
+:::
+
+:::{card}
 :header: **ハイブリッド量子ニューラルネットワーク (HQNN)**
 :link: hybrid_qnn
 CNN＋量子変分回路をFashion-MNISTでend-to-end学習し、パラメータシフトルールで勾配を計算します。
