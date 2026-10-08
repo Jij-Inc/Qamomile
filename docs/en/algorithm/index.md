@@ -104,4 +104,10 @@ CSS construction, syndrome decoding, and transversal Hadamard.
 Build a molecular Hamiltonian with OpenFermion and find the ground state energy via VQE.
 :::
 
+:::{card}
+:header: **Quantum Risk Analysis**
+:link: risk_analysis
+Estimate lower-tail VaR and CVaR with QAE.
+:::
+
 ::::
