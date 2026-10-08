@@ -6,9 +6,9 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.5
 #   kernelspec:
-#     display_name: qamomile (3.11.16.final.0)
+#     display_name: qamomile (3.11.16)
 #     language: python
 #     name: python3
 # ---
@@ -30,7 +30,7 @@
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install qamomile
+# # !pip install "qamomile[qiskit,visualization]"
 
 # %%
 import itertools
@@ -110,7 +110,11 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # WS-QAOA classically solves the relaxation in Eq. (2) or Eq. (3) and uses its solution to prepare the QAOA initial state.
 # This page focuses on embedding the optimum $\boldsymbol{c}^\ast$ of Eq. (2) into the initial state.
-# To use the SDP optimum $Y^\ast$ from Eq. (3), it must first be converted into an initial bit string or initial probabilities, for example through rounding.
+#
+# :::{note}
+# [Egger et al. (2021)](https://quantum-journal.org/papers/q-2021-06-17-479/) also discuss Rounded WS-QAOA and WS-RQAOA, which use classically rounded SDP solutions.
+# :::
+#
 # We embed the optimum $\boldsymbol{c}^\ast$ of Eq. (2) as
 #
 # $$
@@ -163,6 +167,7 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # Values of $c_i^\ast$ within $[\epsilon, 1 - \epsilon]$ are used unchanged, while values outside that interval are clipped to $\epsilon$ or $1-\epsilon$ to avoid states arbitrarily close to $c_i^\ast = 0$ or $1$.
 # Even when $c_i^\ast$ is arbitrarily close to zero, the probability of measuring $x_i = 1$ is therefore kept at or above $\epsilon$.
+# When $\epsilon = 0$, this is unregularized WS-QAOA, and the reachability issue described above can occur.
 # When $\epsilon = 0.5$, every qubit has $\theta_i = \pi / 2$ and $\hat{H}_{M, i}^{(\mathrm{ws})} = -X_i$.
 # This recovers standard QAOA.
 
@@ -210,7 +215,7 @@ print("eigenvalues(Sigma) =", np.round(eigenvalues, 6))
 # $$
 # \boldsymbol{x}^\top \Sigma \boldsymbol{x} + \boldsymbol{\mu}^\top \boldsymbol{x}
 # = \sum_i (\Sigma_{ii} + \mu_i) x_i + 2 \sum_{i<j} \Sigma_{ij} x_i x_j
-# = \sum_{i, j} Q_{ij} x_i x_j \tag{8}
+# = \sum_i Q_{ii} x_i + \sum_{i<j} Q_{ij} x_i x_j \tag{8}
 # $$
 #
 # and represent the problem with a QUBO matrix.
@@ -287,7 +292,7 @@ print("f(c*)     :", qp_energy)
 # %%
 epsilon = 0.10
 
-if not (0.0 < epsilon <= 0.5):
+if not (0.0 <= epsilon <= 0.5):
     raise ValueError("epsilon must satisfy 0 < epsilon <= 0.5")
 
 c_tilde = np.clip(c_star, epsilon, 1.0 - epsilon)
@@ -658,7 +663,7 @@ for method_name, executable, executor in optimization_specs:
     print("  betas   :", np.round(result.x[p:], 6))
 
 # %% [markdown]
-# The results show the ordering standard QAOA > QAOA with only the initial state changed > continuous WS-QAOA, with continuous WS-QAOA reaching the lowest energy.
+# In this example, the sampled mean energies follow the ordering standard QAOA > QAOA with only the initial state changed > Continuous WS-QAOA, with Continuous WS-QAOA achieving the lowest sampled mean energy.
 # Next, plot the energy throughout the optimization.
 
 # %%
@@ -692,7 +697,7 @@ plt.show()
 # The key takeaways are:
 #
 # * Warm starting successfully found a lower-energy solution in this example.
-# * When changing the initial state, the mixer should also be changed accordingly.
+# * Adapting the mixer to the initial state preserves the structure in which the warm-start state is the ground state of the mixer Hamiltonian.
 # * Qamomile makes it straightforward to configure the QAOA X mixer and the initialization angles used for warm starting.
 
 # %%
