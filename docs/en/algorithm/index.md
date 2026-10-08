@@ -104,4 +104,10 @@ CSS construction, syndrome decoding, and transversal Hadamard.
 Build a molecular Hamiltonian with OpenFermion and find the ground state energy via VQE.
 :::
 
+:::{card}
+:header: **Quantum Topological Data Analysis (qTDA)**
+:link: qTDA
+A quantum topological data analysis method using PCE and VQE.
+:::
+
 ::::
