@@ -1,8 +1,9 @@
 """Expose standard-library quantum callables.
 
 The reader-facing circuit API is function-oriented: use :func:`qft`,
-:func:`iqft`, :func:`qpe`, :func:`qsvt`, state-preparation helpers, arithmetic
-helpers, and :func:`mcx` inside qkernels. Factories that must also expose
+:func:`iqft`, :func:`qpe`, :func:`qsvt`, :func:`amplitude_amplification`,
+state-preparation helpers, arithmetic helpers, and :func:`mcx` inside
+qkernels. Factories that must also expose
 algorithm metadata may return frozen non-callable descriptors; invoke the
 descriptor's documented qkernel field rather than the descriptor itself.
 Internally these functions emit named callables with Qamomile bodies and
@@ -22,6 +23,17 @@ Example:
     ```
 """
 
+from .amplitude_amplification import (
+    AmplificationPreparation,
+    AmplificationSchedule,
+    FixedPointAmplificationSchedule,
+    StandardAmplificationSchedule,
+    amplification_preparation,
+    amplitude_amplification,
+    amplitude_amplification_iteration_count,
+    fixed_point_amplification_schedule,
+    standard_amplification_schedule,
+)
 from .arithmetic import (
     add_const,
     controlled_add_const,
@@ -98,4 +110,13 @@ __all__ = [
     "modmul_const",
     "grover_search",
     "grover_iteration_count",
+    "AmplificationSchedule",
+    "StandardAmplificationSchedule",
+    "FixedPointAmplificationSchedule",
+    "standard_amplification_schedule",
+    "fixed_point_amplification_schedule",
+    "amplitude_amplification_iteration_count",
+    "AmplificationPreparation",
+    "amplification_preparation",
+    "amplitude_amplification",
 ]

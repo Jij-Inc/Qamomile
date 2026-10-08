@@ -14,6 +14,8 @@ re-imported here, so the test also documents the back-compat contract.
 
 from __future__ import annotations
 
+import importlib
+
 import qamomile.circuit as qmc
 import qamomile.circuit.stdlib as stdlib
 import qamomile.circuit.stdlib.block_encoding as block_encoding
@@ -40,6 +42,17 @@ from qamomile.circuit.frontend.operation.measurement import (
 )
 from qamomile.circuit.frontend.oracle import Oracle, TransformedOracle, opaque
 from qamomile.circuit.frontend.struct import struct
+from qamomile.circuit.stdlib.amplitude_amplification import (
+    AmplificationPreparation,
+    AmplificationSchedule,
+    FixedPointAmplificationSchedule,
+    StandardAmplificationSchedule,
+    amplification_preparation,
+    amplitude_amplification,
+    amplitude_amplification_iteration_count,
+    fixed_point_amplification_schedule,
+    standard_amplification_schedule,
+)
 from qamomile.circuit.stdlib.block_encoding.ising_z import (
     IsingZBlockEncoding,
     ising_z_block_encoding,
@@ -269,6 +282,36 @@ def test_block_encoding_subpackage_groups_every_public_producer() -> None:
         assert getattr(stdlib, name) is value
         assert getattr(qmc, name) is value
         assert name in block_encoding.__all__
+
+
+def test_amplitude_amplification_is_publicly_reexported() -> None:
+    """Amplitude amplification is reachable from every public namespace.
+
+    The subpackage is imported through ``importlib`` because ``stdlib`` rebinds
+    the ``amplitude_amplification`` attribute to the re-exported emitter, the
+    same way it does for ``qsvt`` and ``qft``.
+    """
+    package = importlib.import_module("qamomile.circuit.stdlib.amplitude_amplification")
+    exports = {
+        "AmplificationSchedule": AmplificationSchedule,
+        "StandardAmplificationSchedule": StandardAmplificationSchedule,
+        "FixedPointAmplificationSchedule": FixedPointAmplificationSchedule,
+        "standard_amplification_schedule": standard_amplification_schedule,
+        "fixed_point_amplification_schedule": fixed_point_amplification_schedule,
+        "amplitude_amplification_iteration_count": (
+            amplitude_amplification_iteration_count
+        ),
+        "AmplificationPreparation": AmplificationPreparation,
+        "amplification_preparation": amplification_preparation,
+        "amplitude_amplification": amplitude_amplification,
+    }
+    for name, value in exports.items():
+        assert getattr(qmc, name) is value
+        assert getattr(stdlib, name) is value
+        assert getattr(package, name) is value
+        assert name in qmc.__all__
+        assert name in stdlib.__all__
+        assert name in package.__all__
 
 
 def test_qsvt_is_publicly_reexported_as_a_stdlib_transform() -> None:

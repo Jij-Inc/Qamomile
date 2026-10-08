@@ -9,6 +9,12 @@ Concrete quantum algorithm examples built with Qamomile.
 ::::{grid} 1 1 1 1
 
 :::{card}
+:header: **Amplifying Block-Encoding Post-Selection**
+:link: amplitude_amplification
+Raise the probability that a block encoding's ancilla register measures all-zero, comparing standard amplitude amplification against the fixed-point schedule that needs only a lower bound on the success probability.
+:::
+
+:::{card}
 :header: **Grover Adaptive Search for Combinatorial Polynomial Binary Optimization**
 :link: grover_adaptive_search
 Solve a portfolio selection problem with `GASConverter`, driving the Grover threshold from a classical outer loop and checking the result against brute force.
