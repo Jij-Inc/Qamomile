@@ -1,11 +1,13 @@
-"""Submit instrumented HUGR programs to Quantinuum Nexus."""
+"""Submit instrumented HUGR programs to Helios or H2 through Nexus."""
 
 from __future__ import annotations
 
 import dataclasses
 import hashlib
 import importlib
+import json
 import math
+import re
 import threading
 import time
 from collections.abc import Mapping
@@ -20,6 +22,8 @@ from qamomile.circuit.transpiler import (
     ExecutionReference,
     JobStatus,
 )
+from qamomile.hugr._qir import to_h2_qir
+from qamomile.hugr._qir_results import decode_qir_results, parse_qir_output_manifest
 
 _NEXUS_STATUS_MAP: Mapping[str, JobStatus] = {
     "SUBMITTED": JobStatus.PENDING,
@@ -44,15 +48,17 @@ class NexusRegion(StrEnum):
 
 @dataclasses.dataclass(frozen=True)
 class NexusExecutionOptions:
-    """Configure HUGR execution on a Helios target through Nexus.
+    """Configure execution on a Helios or H2 target through Nexus.
 
     Args:
         project (Any | None): Native ``qnexus`` project reference. ``None``
             uses the active Nexus project.
-        backend_config (Any | None): Native ``qnexus.HeliosConfig`` with
-            optional emulator or compiler settings. When supplied, its
-            ``system_name`` takes precedence over ``system_name`` below.
-        system_name (str): Helios device name, defaulting to ``Helios-1``.
+        backend_config (Any | None): Native ``qnexus.HeliosConfig`` or H2
+            ``qnexus.QuantinuumConfig`` with optional device settings. Its
+            ``system_name`` or ``device_name`` overrides ``system_name`` below.
+        system_name (str): Device name, defaulting to ``Helios-1``. Helios
+            receives HUGR; H2 receives automatically converted QIR. H2 requires
+            the optional ``hugr-qir`` extra and Bit public outputs.
         name (str): Program and job name prefix. Each submission receives a
             unique suffix, including separate expectation measurement jobs.
         max_cost (float | None): Optional maximum HQC cost for each submitted
@@ -105,11 +111,41 @@ class NexusExecutionOptions:
                 )
             except ValueError as error:
                 raise ValueError("target_region must be 'us', 'sg', or None") from error
-        if self.backend_config is not None and (
-            getattr(self.backend_config, "type", None) != "HeliosConfig"
-            or not getattr(self.backend_config, "system_name", None)
-        ):
-            raise ValueError("backend_config must be a qnexus.HeliosConfig")
+        _destination(self)
+
+
+def _destination(options: NexusExecutionOptions) -> tuple[str, str]:
+    """Resolve the actual device and submission format before provider calls.
+
+    Args:
+        options (NexusExecutionOptions): Native config or device-name selection.
+
+    Returns:
+        tuple[str, str]: Device name and ``hugr`` or ``qir`` format.
+
+    Raises:
+        ValueError: If a device or native config family is unsupported.
+    """
+    config = options.backend_config
+    kind = getattr(config, "type", None)
+    if config is None:
+        name = options.system_name
+    elif kind == "HeliosConfig":
+        name = getattr(config, "system_name", None)
+    elif kind == "QuantinuumConfig":
+        name = getattr(config, "device_name", None)
+    else:
+        raise ValueError(
+            "backend_config must be a qnexus.HeliosConfig or H2 QuantinuumConfig"
+        )
+    if isinstance(name, str):
+        if re.fullmatch(r"Helios-[A-Za-z0-9][A-Za-z0-9-]*", name):
+            if config is None or kind == "HeliosConfig":
+                return name, "hugr"
+        if re.fullmatch(r"H2-(?:[1-9][0-9]*(?:E|SC)?|Emulator)", name):
+            if config is None or kind == "QuantinuumConfig":
+                return name, "qir"
+    raise ValueError("Nexus execution requires a matching Helios or H2 device config")
 
 
 def _validate_seconds(value: float, name: str, allow_zero: bool) -> None:
@@ -311,9 +347,14 @@ class NexusExecutionHandle(ExecutionHandle[list[dict[str, Any]]]):
                 raise self._result_error
             raw = refs[0].download_result()
             try:
-                self._result = _decode_results(
-                    raw, int(self._reference.context["shots"])
-                )
+                shots = int(self._reference.context["shots"])
+                if self._reference.context.get("program_format") == "qir":
+                    outputs = parse_qir_output_manifest(
+                        self._reference.context["qir_outputs"]
+                    )
+                    self._result = decode_qir_results(raw, shots, outputs)
+                else:
+                    self._result = _decode_results(raw, shots)
             except ExecutionError as exc:
                 self._result_error = exc
                 raise
@@ -395,7 +436,7 @@ class NexusExecutionHandle(ExecutionHandle[list[dict[str, Any]]]):
 
 
 class NexusTransport:
-    """Submit closed HUGR entry points through the optional Nexus SDK.
+    """Submit closed HUGR entry points to Helios or convert them for H2.
 
     The caller supplies an execution wrapper with runtime values connected to
     the unchanged parameterized body and with explicit output records. Nexus
@@ -430,12 +471,12 @@ class NexusTransport:
                 client = importlib.import_module("qnexus")
             except ImportError as exc:
                 raise ImportError(
-                    "Helios execution requires qnexus; install qamomile[hugr]"
+                    "Nexus execution requires qnexus; install qamomile[hugr]"
                 ) from exc
         self._client = client
 
     def submit(self, package: Any, shots: int) -> NexusExecutionHandle:
-        """Upload one HUGR package and submit exactly one execution request.
+        """Select the device format and submit exactly one execution request.
 
         Args:
             package (Any): Instrumented HUGR package with a closed entry point.
@@ -445,19 +486,37 @@ class NexusTransport:
             NexusExecutionHandle: Handle returned without waiting for results.
 
         Raises:
-            ValueError: If the number of shots is invalid.
+            ValueError: If the number of shots or destination is invalid.
+            ImportError: If H2 conversion dependencies are unavailable.
+            ExecutionError: If the program cannot be converted for H2.
             Exception: If Nexus rejects upload, compilation, or submission.
         """
         _validate_positive_integer(shots, "shots")
         fingerprint = hashlib.sha256(package.to_bytes()).hexdigest()
         options = self.options
+        target, program_format = _destination(options)
         config = options.backend_config
         if config is None:
-            config = self._client.HeliosConfig(system_name=options.system_name)
+            config = (
+                self._client.HeliosConfig(system_name=target)
+                if program_format == "hugr"
+                else self._client.QuantinuumConfig(device_name=target)
+            )
         name = f"{options.name}-{uuid4().hex}"
-        program = self._client.hugr.upload(
-            hugr_package=package, name=name, project=options.project
-        )
+        context = {"shots": str(shots), "package_sha256": fingerprint}
+        if program_format == "qir":
+            bitcode, outputs = to_h2_qir(package)
+            context.update(
+                program_format="qir",
+                qir_outputs=json.dumps(outputs, sort_keys=True, separators=(",", ":")),
+            )
+            program = self._client.qir.upload(
+                qir=bitcode, name=name, project=options.project
+            )
+        else:
+            program = self._client.hugr.upload(
+                hugr_package=package, name=name, project=options.project
+            )
         kwargs = {
             key: value
             for key, value in {
@@ -481,8 +540,8 @@ class NexusTransport:
         reference = ExecutionReference(
             provider="quantinuum-nexus",
             job_ids=(str(native.id),),
-            target=config.system_name,
-            context={"shots": str(shots), "package_sha256": fingerprint},
+            target=target,
+            context=context,
         )
         return NexusExecutionHandle(self._client, native, reference, options)
 
@@ -509,6 +568,16 @@ class NexusTransport:
                 "Nexus reference must contain a valid shots count"
             ) from exc
         _validate_positive_integer(shots, "reference shots")
+        program_format = reference.context.get("program_format", "hugr")
+        if program_format not in ("hugr", "qir"):
+            raise ValueError("Nexus reference has an unsupported program format")
+        if program_format == "qir":
+            try:
+                parse_qir_output_manifest(reference.context["qir_outputs"])
+            except (KeyError, ValueError) as exc:
+                raise ValueError(
+                    "Nexus reference must contain valid QIR outputs"
+                ) from exc
         native = self._client.jobs.get(id=reference.job_ids[0])
         kind = getattr(native, "job_type", None)
         if getattr(kind, "value", kind) != "execute":

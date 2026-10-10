@@ -68,6 +68,9 @@ hugr = [
     "tket-exts>=0.12,<0.13",
     "qnexus>=0.49,<0.50",
 ]
+hugr-qir = [
+    "hugr-qir>=0.1.2,<0.2; python_version < '3.13'",
+]
 braket = [
     "amazon-braket-sdk>=1.125,<2",
 ]

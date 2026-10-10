@@ -112,7 +112,7 @@ class HugrTranspiler:
         *,
         parameter_shapes: dict[str, tuple[int, ...]] | None = None,
     ) -> HugrExecutable:
-        """Transpile a qkernel into an executable for Selene and Nexus Helios.
+        """Transpile a qkernel into an executable for Selene and Nexus devices.
 
         Args:
             kernel (QKernelLike): Public qkernel entrypoint.
@@ -177,7 +177,7 @@ class HugrTranspiler:
         """Create an executor for a selected HUGR destination.
 
         Args:
-            target (str | HugrExecutionTarget): Selene or Helios destination.
+            target (str | HugrExecutionTarget): Selene or Nexus destination.
             options (SeleneExecutionOptions | NexusExecutionOptions | None):
                 Destination-specific execution options.
 
