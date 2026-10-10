@@ -482,12 +482,37 @@ wheels = [
 name = "click"
 version = "8.4.2"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'linux'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "(python_full_version >= '3.12' and python_full_version < '3.14' and platform_machine != 'arm64' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'darwin' and sys_platform != 'linux')",
+    "python_full_version < '3.12' and sys_platform == 'linux'",
+    "python_full_version < '3.12' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "(python_full_version < '3.12' and platform_machine != 'arm64' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'linux')",
+]
 dependencies = [
     { name = "colorama", marker = "sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/76/d4/81420972a676e8ffea40450d8c8c92943e7218a78fe9b64359836cc9876b/click-8.4.2.tar.gz", hash = "sha256:9a6cea6e60b17ebe0a44c5cc636d94f09bd66142c1cd7d8b4cd731c4917a15f6", size = 338000, upload-time = "2026-06-24T17:45:15.148Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fb/e2/79c688af8b210d232694e31e59da9f6ec747bae31c3f5946e4e9b98860d5/click-8.4.2-py3-none-any.whl", hash = "sha256:e6f9f66136c816745b9d65817da91d61d957fb16e02e4dcd0552553c5a197b76", size = 119243, upload-time = "2026-06-24T17:45:13.73Z" },
+]
+
+[[package]]
+name = "click"
+version = "8.5.0"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.14' and sys_platform == 'linux'",
+    "python_full_version >= '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "(python_full_version >= '3.14' and platform_machine != 'arm64' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.14' and sys_platform != 'darwin' and sys_platform != 'linux')",
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c7/0e/7fa0ef50764b67090eca4114772a2abf8b6148198475e54c660b97caeee6/click-8.5.0.tar.gz", hash = "sha256:ba0d2089de75ea0310e2dde03160e6ca10009947fb95a182f9b54021bb272e34", size = 382235, upload-time = "2026-08-26T13:33:14.56Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/58/50/6c0d534c5f134586a8e1ba4e330569e32f057e33372ae556463212fb4cd3/click-8.5.0-py3-none-any.whl", hash = "sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360", size = 125251, upload-time = "2026-08-26T13:33:12.928Z" },
 ]
 
 [[package]]
@@ -1261,7 +1286,7 @@ dependencies = [
     { name = "guppylang-internals" },
     { name = "numpy" },
     { name = "pytket" },
-    { name = "selene-hugr-qis-compiler" },
+    { name = "selene-hugr-qis-compiler", version = "0.2.11", source = { registry = "https://pypi.org/simple" } },
     { name = "selene-sim" },
     { name = "tqdm" },
     { name = "types-tqdm" },
@@ -1424,7 +1449,7 @@ name = "hugr-qir"
 version = "0.1.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "click" },
+    { name = "click", version = "8.4.2", source = { registry = "https://pypi.org/simple" } },
     { name = "guppylang" },
     { name = "hugr" },
     { name = "quantinuum-qircheck" },
@@ -3683,6 +3708,17 @@ wheels = [
 ]
 
 [[package]]
+name = "pyqsp"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/58/16/1ec68abe5447711b79324be38f2c71a519fa863a52a0f081f16cbe72b345/pyqsp-0.2.0.tar.gz", hash = "sha256:5b4901a88f98467a84838470a97ccba9853649a2227ad5bcb2cdefc662ec6d5e", size = 86999, upload-time = "2024-12-06T02:35:20.263Z" }
+
+[[package]]
 name = "pyscf"
 version = "2.12.1"
 source = { registry = "https://pypi.org/simple" }
@@ -4030,6 +4066,9 @@ qiskit = [
     { name = "qiskit-aer" },
     { name = "qiskit-ibm-runtime" },
 ]
+qsvt = [
+    { name = "pyqsp" },
+]
 quri-parts = [
     { name = "quri-parts-circuit" },
     { name = "quri-parts-core" },
@@ -4044,6 +4083,7 @@ dev = [
     { name = "grpcio-tools" },
     { name = "matplotlib" },
     { name = "networkx" },
+    { name = "pyqsp" },
     { name = "pytest" },
     { name = "pytest-mock" },
     { name = "pytest-mpl" },
@@ -4069,6 +4109,7 @@ docs = [
     { name = "openfermion" },
     { name = "openfermionpyscf" },
     { name = "pylatexenc" },
+    { name = "pyqsp" },
     { name = "pyscf" },
     { name = "pytest" },
     { name = "pytest-mock" },
@@ -4098,6 +4139,7 @@ requires-dist = [
     { name = "matplotlib", marker = "extra == 'visualization'", specifier = ">=3.10.8" },
     { name = "ommx", specifier = ">=2.3.3" },
     { name = "protobuf", specifier = ">=5.29,<7" },
+    { name = "pyqsp", marker = "extra == 'qsvt'", specifier = ">=0.2.0" },
     { name = "qbraid", extras = ["qiskit"], marker = "extra == 'qbraid'", specifier = ">=0.11.0" },
     { name = "qiskit", marker = "extra == 'qiskit'", specifier = ">=2.3.0" },
     { name = "qiskit-aer", marker = "extra == 'qiskit'", specifier = ">=0.17.2" },
@@ -4110,13 +4152,14 @@ requires-dist = [
     { name = "sympy", specifier = ">=1.14.0" },
     { name = "tket-exts", marker = "extra == 'hugr'", specifier = ">=0.12,<0.13" },
 ]
-provides-extras = ["qiskit", "visualization", "cudaq-cu12", "cudaq-cu13", "quri-parts", "qbraid", "hugr", "hugr-qir", "braket"]
+provides-extras = ["qiskit", "visualization", "qsvt", "cudaq-cu12", "cudaq-cu13", "quri-parts", "qbraid", "hugr", "hugr-qir", "braket"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "grpcio-tools", specifier = ">=1.71,<2" },
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "networkx", specifier = ">=3.0" },
+    { name = "pyqsp", specifier = ">=0.2.0" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest-mock", specifier = ">=3.14.0" },
     { name = "pytest-mpl", specifier = ">=0.17.0" },
@@ -4142,6 +4185,7 @@ docs = [
     { name = "openfermion", specifier = ">=1.7.0" },
     { name = "openfermionpyscf", specifier = ">=0.5" },
     { name = "pylatexenc", specifier = ">=2.10" },
+    { name = "pyqsp", specifier = ">=0.2.0" },
     { name = "pyscf", specifier = ">=2.5.0" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest-mock", specifier = ">=3.14.0" },
@@ -4304,7 +4348,8 @@ name = "qnexus"
 version = "0.49.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "click" },
+    { name = "click", version = "8.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
+    { name = "click", version = "8.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
     { name = "colorama" },
     { name = "httpx" },
     { name = "hugr" },
@@ -4849,12 +4894,40 @@ wheels = [
 name = "selene-hugr-qis-compiler"
 version = "0.2.11"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'linux'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "(python_full_version >= '3.12' and python_full_version < '3.14' and platform_machine != 'arm64' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'darwin' and sys_platform != 'linux')",
+    "python_full_version < '3.12' and sys_platform == 'linux'",
+    "python_full_version < '3.12' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "(python_full_version < '3.12' and platform_machine != 'arm64' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'linux')",
+]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fa/ce/d52855463d2a3f0dbca1e5556c08dcf33fa231bff98fc5566ba82af9f1a1/selene_hugr_qis_compiler-0.2.11-cp310-abi3-macosx_15_0_arm64.whl", hash = "sha256:d867c5b3bd06ec0ad09031c18ef980737b9115263581a0c211543519804b4e35", size = 29136612, upload-time = "2026-07-22T12:59:12.425Z" },
     { url = "https://files.pythonhosted.org/packages/cb/37/d34516be37fde9b076cdc6cbc1d6769d481900b1fde0e3f3dec8bc1eeabb/selene_hugr_qis_compiler-0.2.11-cp310-abi3-macosx_15_0_x86_64.whl", hash = "sha256:775fd24ef19e037e3bd6b21e075fd034bb21dee5ba15221a4baa7252ac129af0", size = 29824462, upload-time = "2026-07-22T12:59:15.169Z" },
     { url = "https://files.pythonhosted.org/packages/03/76/c4d624f33e4021a203039dac1014a35d399e8b62c6625e7d84092f653ffa/selene_hugr_qis_compiler-0.2.11-cp310-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:0e4506b206de8bf711bba2f2cae06cd8191f3a9c0269f73523ebdc2ed2cb17e3", size = 73076770, upload-time = "2026-07-22T12:59:18.45Z" },
     { url = "https://files.pythonhosted.org/packages/76/33/502d28681ed33bd0a5d31d50b80b2b75144bdc4ad6b5bb1b9e706ef3de13/selene_hugr_qis_compiler-0.2.11-cp310-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:b9cb5080afeba4912d1507df7a3f27204605b70934bb77384e512cc9724e7833", size = 80590679, upload-time = "2026-07-22T12:59:22.242Z" },
     { url = "https://files.pythonhosted.org/packages/0a/6d/ab3c5107138d803141bfebacad3b26e67a10eb80155fae43ca1597265e1a/selene_hugr_qis_compiler-0.2.11-cp310-abi3-win_amd64.whl", hash = "sha256:e33433a4389971d05f66aedc91f6dedb265d34ce91bcc785bdc401cf2b118429", size = 27746072, upload-time = "2026-07-22T12:59:25.218Z" },
+]
+
+[[package]]
+name = "selene-hugr-qis-compiler"
+version = "0.3.2"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.14' and sys_platform == 'linux'",
+    "python_full_version >= '3.14' and platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
+    "(python_full_version >= '3.14' and platform_machine != 'arm64' and platform_machine != 'x86_64' and sys_platform == 'darwin') or (python_full_version >= '3.14' and sys_platform != 'darwin' and sys_platform != 'linux')",
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/66/1c/6aa814446d0a9a2a537eb1e18a7a233e067be8ef0b7d408d0aa1332d549d/selene_hugr_qis_compiler-0.3.2-cp310-abi3-macosx_15_0_arm64.whl", hash = "sha256:dfc42ab54f7627f29d777c90e64377ea7cbb4527df838eed7939a0ea82e20ce7", size = 29308148, upload-time = "2026-06-22T08:49:35.524Z" },
+    { url = "https://files.pythonhosted.org/packages/60/90/8c78417270a1f55a152f29adcbecc30e284838d8b901bcc2c21c78392f91/selene_hugr_qis_compiler-0.3.2-cp310-abi3-macosx_15_0_x86_64.whl", hash = "sha256:12fe33d34cee7572253828ff59b2547f03836d16cc3705b10c1e43d1ed27164e", size = 30058003, upload-time = "2026-06-22T08:49:38.346Z" },
+    { url = "https://files.pythonhosted.org/packages/52/a4/974b3e01ab8a1275aedf6a92ab885786255cacaeca9c532964ffec034950/selene_hugr_qis_compiler-0.3.2-cp310-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:6a61882b108898ee35830c3a81acb63713734621a24e1d3d0494af0a372cd364", size = 73713527, upload-time = "2026-06-22T08:49:41.777Z" },
+    { url = "https://files.pythonhosted.org/packages/df/58/e487ed7e6e86b2caf8d436d5a0a92ad92050dccfcb0ed955b501f1603095/selene_hugr_qis_compiler-0.3.2-cp310-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:b780b7add24417e0edc3863c3eb7534f97740a117fce2257d0da60c7dd2b519f", size = 80442994, upload-time = "2026-06-22T08:49:45.806Z" },
+    { url = "https://files.pythonhosted.org/packages/97/84/7ff3cf0ca9782d52e7ef9637909dd7a29bdc95f0cedcb9ee15c4bb33312e/selene_hugr_qis_compiler-0.3.2-cp310-abi3-win_amd64.whl", hash = "sha256:1483c7804ae2c04a7d61faa789b4287562c8005f3208d08cb32de6e16fad304e", size = 27895954, upload-time = "2026-06-22T08:49:48.951Z" },
 ]
 
 [[package]]
@@ -4865,7 +4938,8 @@ dependencies = [
     { name = "numpy" },
     { name = "pyyaml" },
     { name = "selene-core" },
-    { name = "selene-hugr-qis-compiler" },
+    { name = "selene-hugr-qis-compiler", version = "0.2.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
+    { name = "selene-hugr-qis-compiler", version = "0.3.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
     { name = "tqdm" },
 ]
 wheels = [

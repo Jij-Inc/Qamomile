@@ -45,6 +45,9 @@ qiskit = [
 visualization = [
     "matplotlib>=3.10.8",
 ]
+qsvt = [
+    "pyqsp>=0.2.0",
+]
 cudaq-cu12 = [
     "cuda-quantum-cu12>=0.14,<0.15; sys_platform == 'linux'",
 ]
@@ -82,6 +85,7 @@ dev = [
     "pytest>=9.0.2",
     "qiskit>=2.3.0",
     "qiskit-aer>=0.17.2",
+    "pyqsp>=0.2.0",
     "qiskit-ibm-runtime>=0.40,<1",
     "pytest-mpl>=0.17.0",
     "pytest-mock>=3.14.0",
