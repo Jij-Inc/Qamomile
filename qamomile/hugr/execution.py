@@ -1,4 +1,4 @@
-"""Select local Selene or Nexus Helios for direct HUGR execution."""
+"""Select local Selene or a Nexus device for HUGR program execution."""
 
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ class HugrExecutionTarget(StrEnum):
     """Identify a supported HUGR execution destination."""
 
     SELENE = "selene"
+    NEXUS = "nexus"
     HELIOS = "helios"
 
 
@@ -207,7 +208,11 @@ def _qubit_capacity(package: Any) -> int:
 
 
 class HugrExecutor:
-    """Execute HUGR packages on local Selene or Nexus Helios.
+    """Execute HUGR packages on local Selene or Nexus devices.
+
+    The ``nexus`` destination selects HUGR or QIR submission from the device
+    configured in :class:`NexusExecutionOptions`. The existing ``helios``
+    destination remains an alias for Nexus execution.
 
     Args:
         target (str | HugrExecutionTarget): Destination, default ``selene``.
@@ -221,6 +226,9 @@ class HugrExecutor:
     Example:
         >>> executor = HugrExecutor(options=SeleneExecutionOptions(seed=7))
         >>> remote = HugrExecutor("helios", options=NexusExecutionOptions())
+        >>> h2 = HugrExecutor(
+        ...     "nexus", options=NexusExecutionOptions(system_name="H2-1E")
+        ... )
     """
 
     def __init__(
@@ -232,7 +240,8 @@ class HugrExecutor:
         """Initialize the destination and local compilation cache.
 
         Args:
-            target (str | HugrExecutionTarget): Selene or Helios destination.
+            target (str | HugrExecutionTarget): Selene or Nexus destination.
+                ``helios`` is retained as a Nexus alias.
             options (SeleneExecutionOptions | NexusExecutionOptions | None):
                 Destination-specific configuration.
 
@@ -243,7 +252,9 @@ class HugrExecutor:
         try:
             self.target = HugrExecutionTarget(target)
         except ValueError as error:
-            raise ValueError("HUGR target must be 'selene' or 'helios'") from error
+            raise ValueError(
+                "HUGR target must be 'selene', 'nexus', or 'helios'"
+            ) from error
         expected = (
             SeleneExecutionOptions
             if self.target is HugrExecutionTarget.SELENE
@@ -269,7 +280,7 @@ class HugrExecutor:
         Returns:
             ExecutionCapabilities: Shot estimation and remote lifecycle support.
         """
-        remote = self.target is HugrExecutionTarget.HELIOS
+        remote = self._nexus is not None
         return ExecutionCapabilities(
             supports_async_sampling=remote,
             supports_async_estimation=remote,
