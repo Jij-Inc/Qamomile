@@ -1,8 +1,9 @@
 """Restore tagged HUGR outputs from Nexus H2 bit-register results.
 
-QIR boolean records use one bit. Labels identify public output leaves; provider
-column order never defines the public return order. Decoding costs
-O(shots * recorded bits).
+Public QIR Boolean outputs have width one. Nexus H2 stores each Boolean in a
+64-bit register with the value at index zero; single-column SDK results are
+also accepted. Labels identify public output leaves independently of provider
+column order. Decoding costs O(shots * recorded bits).
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ def _validate_outputs(outputs: Mapping[str, Any]) -> dict[str, tuple[str, int]]:
     """Own and validate the supported scalar QIR output descriptors.
 
     Args:
-        outputs (Mapping[str, Any]): Tags mapped to a kind and register width.
+        outputs (Mapping[str, Any]): Tags mapped to a kind and logical width.
 
     Returns:
         dict[str, tuple[str, int]]: Boolean width-one output tags.
@@ -93,20 +94,26 @@ def parse_qir_output_manifest(encoded: str) -> dict[str, tuple[str, int]]:
 
 def _register_columns(
     bits: Sequence[Any], outputs: Mapping[str, tuple[str, int]]
-) -> dict[str, dict[int, int]]:
-    """Locate each declared register bit in the requested SDK column order.
+) -> dict[str, int]:
+    """Locate the value column for each declared Boolean output label.
+
+    A single-column result can use any nonnegative SDK bit index. H2 register
+    results contain exactly indices zero through 63, with the Boolean value at
+    index zero. The public width-one descriptor does not specify SDK storage.
 
     Args:
         bits (Sequence[Any]): Native bit identifiers in requested column order.
-        outputs (Mapping[str, tuple[str, int]]): Validated tags and widths.
+        outputs (Mapping[str, tuple[str, int]]): Validated logical width-one tags.
 
     Returns:
-        dict[str, dict[int, int]]: Tag and bit-index to readout-column mappings.
+        dict[str, int]: Output tags mapped to requested readout columns.
 
     Raises:
-        ExecutionError: If registers are missing, repeated, sparse, or unexpected.
+        ExecutionError: If labels are missing or unexpected, native bit
+            identifiers repeat or are malformed, or register layouts differ
+            from the supported single-column and complete 64-bit forms.
     """
-    columns: dict[str, dict[int, int]] = {}
+    registers: dict[str, dict[int, int]] = {}
     for column, bit in enumerate(bits):
         tag = getattr(bit, "reg_name", None)
         index = getattr(bit, "index", None)
@@ -117,19 +124,28 @@ def _register_columns(
             or len(index) != 1
             or isinstance(index[0], bool)
             or not isinstance(index[0], Integral)
+            or index[0] < 0
         ):
             raise ExecutionError(f"Invalid QIR result bit index for {tag!r}")
         position = int(index[0])
-        width = outputs[tag][1]
-        if not 0 <= position < width:
-            raise ExecutionError(f"QIR result bit index exceeds width for {tag!r}")
-        register = columns.setdefault(tag, {})
+        register = registers.setdefault(tag, {})
         if position in register:
             raise ExecutionError(f"Duplicate QIR result bit for {tag!r}")
         register[position] = column
-    for tag, (_, width) in outputs.items():
-        if len(columns.get(tag, {})) != width:
+    columns: dict[str, int] = {}
+    for tag in outputs:
+        register = registers.get(tag)
+        if not register:
             raise ExecutionError(f"Missing QIR result bits for {tag!r}")
+        if len(register) == 1:
+            columns[tag] = next(iter(register.values()))
+        elif len(register) == 64 and all(index in register for index in range(64)):
+            columns[tag] = register[0]
+        else:
+            raise ExecutionError(
+                f"Invalid QIR Boolean register layout for {tag!r}; "
+                "expected one column or bits 0 through 63"
+            )
     return columns
 
 
@@ -183,6 +199,6 @@ def decode_qir_results(
     for row in readouts:
         record = {}
         for tag in outputs:
-            record[tag] = bool(row[columns[tag][0]])
+            record[tag] = bool(row[columns[tag]])
         records.append(record)
     return records

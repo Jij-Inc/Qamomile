@@ -33,6 +33,15 @@ def _client():
     """Provide mock SDK operations that cannot connect to a remote service."""
     native = SimpleNamespace(id="h2-job-id", job_type="execute")
     return SimpleNamespace(
+        login=Mock(),
+        context=SimpleNamespace(
+            get_active_project=Mock(return_value=None),
+            set_active_project=Mock(),
+            set_active_project_token=Mock(),
+        ),
+        projects=SimpleNamespace(
+            get_or_create=Mock(return_value=SimpleNamespace(id="default-project"))
+        ),
         HeliosConfig=Mock(
             side_effect=lambda **kwargs: SimpleNamespace(type="HeliosConfig", **kwargs)
         ),
@@ -216,9 +225,37 @@ def test_conversion_failure_has_no_remote_submission(converter, error):
     )
     with pytest.raises(type(error), match=str(error)):
         transport.submit(_package(), 1)
+    client.login.assert_not_called()
+    client.context.get_active_project.assert_not_called()
+    client.projects.get_or_create.assert_not_called()
     client.qir.upload.assert_not_called()
     client.hugr.upload.assert_not_called()
     client.start_execute_job.assert_not_called()
+
+
+def test_h2_conversion_precedes_authentication_and_project_resolution(converter):
+    """Complete local conversion before authentication or any remote state changes."""
+    client = _client()
+    events = Mock()
+    events.attach_mock(converter, "convert")
+    events.attach_mock(client.login, "login")
+    events.attach_mock(client.projects.get_or_create, "project")
+    events.attach_mock(client.qir.upload, "upload")
+    events.attach_mock(client.start_execute_job, "execute")
+    options = NexusExecutionOptions(project="example", system_name="H2-1E")
+
+    NexusTransport(options, client=client).submit(_package(), 1)
+
+    assert [call[0] for call in events.mock_calls] == [
+        "convert",
+        "login",
+        "project",
+        "upload",
+        "execute",
+    ]
+    project = client.projects.get_or_create.return_value
+    assert client.qir.upload.call_args.kwargs["project"] is project
+    assert client.start_execute_job.call_args.kwargs["project"] is project
 
 
 @pytest.mark.parametrize(
@@ -241,6 +278,8 @@ def test_invalid_format_or_manifest_is_rejected_before_lookup(context):
     )
     with pytest.raises(ValueError):
         NexusTransport(client=client).retrieve(reference)
+    client.login.assert_not_called()
+    client.projects.get_or_create.assert_not_called()
     client.jobs.get.assert_not_called()
     client.qir.upload.assert_not_called()
     client.hugr.upload.assert_not_called()
@@ -292,6 +331,13 @@ def test_installed_sdk_h2_upload_contract_without_network(converter):
     from qnexus.models.references import ExecuteJobRef
 
     client = _client()
+    client.login = create_autospec(qnx.login)
+    client.context.get_active_project = create_autospec(
+        qnx.context.get_active_project, return_value=None
+    )
+    client.projects.get_or_create = create_autospec(
+        qnx.projects.get_or_create, return_value=SimpleNamespace(id="sdk-project")
+    )
     client.QuantinuumConfig = qnx.QuantinuumConfig
     client.qir.upload = create_autospec(qnx.qir.upload, return_value="sdk-qir")
     native = Mock(spec=ExecuteJobRef)
@@ -311,4 +357,6 @@ def test_installed_sdk_h2_upload_contract_without_network(converter):
     )
     assert client.qir.upload.call_args.kwargs["qir"] == _BITCODE
     assert transport.retrieve(handle.references()[0]).native is native
+    client.login.assert_called_once_with()
+    client.projects.get_or_create.assert_called_once_with(name="qamomile")
     client.hugr.upload.assert_not_called()

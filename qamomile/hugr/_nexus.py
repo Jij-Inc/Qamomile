@@ -51,14 +51,18 @@ class NexusExecutionOptions:
     """Configure execution on a Helios or H2 target through Nexus.
 
     Args:
-        project (Any | None): Native ``qnexus`` project reference. ``None``
-            uses the active Nexus project.
+        project (Any | None): Nexus project name or native ``qnexus`` project
+            reference. A name is looked up or created when submitting a job.
+            ``None`` uses the active Nexus project, or looks up or creates
+            ``qamomile`` if no project is active. Authentication is automatic
+            on the first submission or restoration; an initial login may
+            require browser approval.
         backend_config (Any | None): Native ``qnexus.HeliosConfig`` or H2
             ``qnexus.QuantinuumConfig`` with optional device settings. Its
             ``system_name`` or ``device_name`` overrides ``system_name`` below.
         system_name (str): Device name, defaulting to ``Helios-1``. Helios
             receives HUGR; H2 receives automatically converted QIR. H2 requires
-            the optional ``hugr-qir`` extra and Bit public outputs.
+            Python 3.11 or 3.12 with the ``hugr`` extra and Bit public outputs.
         name (str): Program and job name prefix. Each submission receives a
             unique suffix, including separate expectation measurement jobs.
         max_cost (float | None): Optional maximum HQC cost for each submitted
@@ -72,7 +76,7 @@ class NexusExecutionOptions:
             ``None`` waits indefinitely. Timing out never cancels a job.
 
     Raises:
-        ValueError: If a numeric option, name, region, or config is invalid.
+        ValueError: If a numeric option, project name, region, or config is invalid.
     """
 
     project: Any | None = None
@@ -96,6 +100,8 @@ class NexusExecutionOptions:
         for name in ("system_name", "name"):
             if not isinstance(getattr(self, name), str) or not getattr(self, name):
                 raise ValueError(f"{name} must be a non-empty string")
+        if isinstance(self.project, str) and not self.project.strip():
+            raise ValueError("project name must be a non-empty string")
         _validate_seconds(self.poll_interval_seconds, "poll_interval_seconds", False)
         if self.timeout_seconds is not None:
             _validate_seconds(self.timeout_seconds, "timeout_seconds", True)
@@ -440,7 +446,9 @@ class NexusTransport:
 
     The caller supplies an execution wrapper with runtime values connected to
     the unchanged parameterized body and with explicit output records. Nexus
-    0.49 has no separate HUGR entry-point argument field.
+    HUGR submission has no separate entry-point argument field. This transport owns
+    lazy authentication and project resolution without changing the SDK's
+    active project. Local validation precedes authentication and remote calls.
 
     Args:
         options (NexusExecutionOptions | None): Submission and polling settings.
@@ -474,6 +482,49 @@ class NexusTransport:
                     "Nexus execution requires qnexus; install qamomile[hugr]"
                 ) from exc
         self._client = client
+        self._session_lock = threading.Lock()
+        self._authenticated = False
+        self._named_project: Any | None = None
+
+    def _authenticate(self) -> None:
+        """Reuse saved Nexus credentials or start login once per transport.
+
+        Failed authentication leaves the transport available for a later retry.
+        The execution target region is independent of the SDK's login region.
+
+        Raises:
+            Exception: If Nexus authentication fails.
+        """
+        with self._session_lock:
+            if not self._authenticated:
+                self._client.login()
+                self._authenticated = True
+
+    def _submission_project(self) -> Any:
+        """Resolve a project for upload without changing the SDK active project.
+
+        Explicit references are preserved, and an active project is read on
+        every submission. Named or default projects are resolved once after
+        successful authentication.
+
+        Returns:
+            Any: Native Nexus project reference for upload and execution.
+
+        Raises:
+            Exception: If authentication or project lookup or creation fails.
+        """
+        self._authenticate()
+        project = self.options.project
+        if project is None:
+            project = self._client.context.get_active_project(project_required=False)
+        if project is not None and not isinstance(project, str):
+            return project
+        with self._session_lock:
+            if self._named_project is None:
+                self._named_project = self._client.projects.get_or_create(
+                    name=project or "qamomile"
+                )
+            return self._named_project
 
     def submit(self, package: Any, shots: int) -> NexusExecutionHandle:
         """Select the device format and submit exactly one execution request.
@@ -489,7 +540,8 @@ class NexusTransport:
             ValueError: If the number of shots or destination is invalid.
             ImportError: If H2 conversion dependencies are unavailable.
             ExecutionError: If the program cannot be converted for H2.
-            Exception: If Nexus rejects upload, compilation, or submission.
+            Exception: If authentication, project resolution, upload,
+                compilation, or submission fails.
         """
         _validate_positive_integer(shots, "shots")
         fingerprint = hashlib.sha256(package.to_bytes()).hexdigest()
@@ -510,12 +562,12 @@ class NexusTransport:
                 program_format="qir",
                 qir_outputs=json.dumps(outputs, sort_keys=True, separators=(",", ":")),
             )
-            program = self._client.qir.upload(
-                qir=bitcode, name=name, project=options.project
-            )
+            project = self._submission_project()
+            program = self._client.qir.upload(qir=bitcode, name=name, project=project)
         else:
+            project = self._submission_project()
             program = self._client.hugr.upload(
-                hugr_package=package, name=name, project=options.project
+                hugr_package=package, name=name, project=project
             )
         kwargs = {
             key: value
@@ -533,7 +585,7 @@ class NexusTransport:
             n_shots=[int(shots)],
             backend_config=config,
             name=name,
-            project=options.project,
+            project=project,
             valid_check=True,
             **kwargs,
         )
@@ -557,7 +609,7 @@ class NexusTransport:
         Raises:
             ValueError: If the reference is incompatible or identifies a
                 non-execution job.
-            Exception: If Nexus cannot retrieve the existing job.
+            Exception: If authentication or retrieval of the existing job fails.
         """
         if reference.provider != "quantinuum-nexus" or len(reference.job_ids) != 1:
             raise ValueError("Expected one quantinuum-nexus execution reference")
@@ -578,6 +630,7 @@ class NexusTransport:
                 raise ValueError(
                     "Nexus reference must contain valid QIR outputs"
                 ) from exc
+        self._authenticate()
         native = self._client.jobs.get(id=reference.job_ids[0])
         kind = getattr(native, "job_type", None)
         if getattr(kind, "value", kind) != "execute":

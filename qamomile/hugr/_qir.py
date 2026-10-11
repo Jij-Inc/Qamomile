@@ -21,7 +21,8 @@ def to_h2_qir(package: Any) -> tuple[bytes, dict[str, tuple[str, int]]]:
 
     Returns:
         tuple[bytes, dict[str, tuple[str, int]]]: QIR bitcode and each output
-            label's scalar kind and recorded bit width.
+            label's scalar kind and logical bit width, independently of the
+            provider's register storage width.
 
     Raises:
         ImportError: If Python is unsupported or the converter is unavailable.
@@ -31,8 +32,7 @@ def to_h2_qir(package: Any) -> tuple[bytes, dict[str, tuple[str, int]]]:
     runtime_python = sys.version_info[:2]
     if runtime_python >= (3, 13):
         raise ImportError(
-            "H2 execution currently requires Python 3.11 or 3.12 and "
-            "qamomile[hugr,hugr-qir]"
+            "H2 execution currently requires Python 3.11 or 3.12 and qamomile[hugr]"
         )
     outputs: dict[str, tuple[str, int]] = {}
     for graph in package.modules:
@@ -66,7 +66,7 @@ def to_h2_qir(package: Any) -> tuple[bytes, dict[str, tuple[str, int]]]:
         output = importlib.import_module("hugr_qir.output")
     except ImportError as exc:
         raise ImportError(
-            "H2 execution requires hugr-qir; install qamomile[hugr,hugr-qir]"
+            "H2 execution requires hugr-qir; install qamomile[hugr]"
         ) from exc
     try:
         bitcode = converter.hugr_to_qir(

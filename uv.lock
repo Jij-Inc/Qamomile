@@ -3861,7 +3861,7 @@ wheels = [
 
 [[package]]
 name = "pytket"
-version = "2.18.1"
+version = "2.18.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "graphviz" },
@@ -3875,16 +3875,16 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/06/f7/03eafcc4d7700bb518b25c6d67b4ba94314c26e007a8302f489caeff7e83/pytket-2.18.1-cp311-cp311-macosx_14_0_arm64.whl", hash = "sha256:269c04b6dea1257d4e07f86f5c2bfc63aa63413f0278018900f6de9f2a0d576a", size = 5659289, upload-time = "2026-07-06T11:05:23.314Z" },
-    { url = "https://files.pythonhosted.org/packages/24/39/90f1fe3c1cb8db215bc8a25bf77133fde424c101aa267006f47de59b859b/pytket-2.18.1-cp311-cp311-macosx_15_0_x86_64.whl", hash = "sha256:19096539b8b365e8e47ba3081a49ce28c829f2209f2e0c769b5f2dac6a774c2c", size = 6282225, upload-time = "2026-07-06T11:05:25.308Z" },
-    { url = "https://files.pythonhosted.org/packages/9a/06/ff64acbe2337232e04bfdc2219c629e69987a8230cd7dba2ab2f2d35d8fa/pytket-2.18.1-cp311-cp311-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:0124d1bb71af7c7e2b1dae4ff7f8a7f3c90064900b4327506e4e4cd2c78b9187", size = 7660984, upload-time = "2026-07-06T11:05:27.253Z" },
-    { url = "https://files.pythonhosted.org/packages/06/fb/770fdd734fb9e50e52103aaf30ef0127014e4c8c32983ff3f3e6593c63d5/pytket-2.18.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:6a79a4bd24752332139267dd517c46148589dcd967ce3153b105390ed0a69d39", size = 8382297, upload-time = "2026-07-06T11:05:29.246Z" },
-    { url = "https://files.pythonhosted.org/packages/47/bf/e8dd5f18705601b6a4a66e5880e2a48849180fda963f8242b324a50be838/pytket-2.18.1-cp311-cp311-win_amd64.whl", hash = "sha256:576aae081e70166c2ab5aad890ab9cb2ced97a91d3ddfb539fb48aaf5a0a83ec", size = 9822147, upload-time = "2026-07-06T11:05:31.362Z" },
-    { url = "https://files.pythonhosted.org/packages/dc/d6/907df4e3bf1380440807a1df42223b7ce5cf0053061bbd620b2baae9a60e/pytket-2.18.1-cp312-abi3-macosx_14_0_arm64.whl", hash = "sha256:d3a93af7ab5ceffcabc3fd49423bbe323c90b5da41c6b9b4b50301b505629420", size = 5629019, upload-time = "2026-07-06T11:05:33.813Z" },
-    { url = "https://files.pythonhosted.org/packages/60/de/2a6d239556cca21dc0d156c66c57c7f224691696fdca9fa66b6de5694187/pytket-2.18.1-cp312-abi3-macosx_15_0_x86_64.whl", hash = "sha256:4a9f7de0570cc62cf97cae36b6b5874d7043fce1cf1966c96ac8ae3de2482b42", size = 6257168, upload-time = "2026-07-06T11:05:35.767Z" },
-    { url = "https://files.pythonhosted.org/packages/41/28/6812c998d104f00d1478e5ecbb5c9722426ca70c51b1f7b6ad70a089b815/pytket-2.18.1-cp312-abi3-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:17992fa713b0d9c10217b00b347a4d6328423c6223bff5a5d7a38f556266ceef", size = 7605348, upload-time = "2026-07-06T11:05:37.558Z" },
-    { url = "https://files.pythonhosted.org/packages/d3/f7/a84f0ed901e53d31e347327fc969cc6a7efffff27ad0543fec4be3978576/pytket-2.18.1-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e95f16fa90bc7aee1e07f8468f56353a594eb5ada004c5ddf11a88365a0c3c13", size = 8316976, upload-time = "2026-07-06T11:05:39.392Z" },
-    { url = "https://files.pythonhosted.org/packages/61/ca/d466db761f3e074a5972f71071879f2c592cd789e3c987b657b4439f3519/pytket-2.18.1-cp312-abi3-win_amd64.whl", hash = "sha256:0535b605db1b853ca18a2b6903ae59f46a68f9c7a338f468d57c1a1eea46b3b1", size = 9798359, upload-time = "2026-07-06T11:05:41.527Z" },
+    { url = "https://files.pythonhosted.org/packages/83/79/e3e92e5947944fde61fe91afc5375daf7f7d9c4e8af0b9430e9189a7d49c/pytket-2.18.5-cp311-cp311-macosx_14_0_arm64.whl", hash = "sha256:77a279bfee4ee78dc2c468df5005788b0f5787c0864d94f883cb49f92913b8a8", size = 5754034, upload-time = "2026-10-08T10:09:44.79Z" },
+    { url = "https://files.pythonhosted.org/packages/fd/b3/a5beb32f13cacd52112fd8bb9431ece5186d00c917f35e07e00f8fcb2049/pytket-2.18.5-cp311-cp311-macosx_15_0_x86_64.whl", hash = "sha256:a83af4a12afda8dcb46e9dcf5bc0c973c2e358c8f04f5a0dfb61e29b854102b3", size = 6392762, upload-time = "2026-10-08T10:09:46.694Z" },
+    { url = "https://files.pythonhosted.org/packages/41/1d/87af372bae79ba0f2ce18a1759f874aa500b94dacc4e1dfa152ea8fce4b3/pytket-2.18.5-cp311-cp311-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:c7c7accb1099b0d2a7727e01e0744b31a6271d11d7ce81421c101d07e4075a85", size = 7794279, upload-time = "2026-10-08T10:09:49.626Z" },
+    { url = "https://files.pythonhosted.org/packages/19/57/e43916b9b26290abf88a96e02b3993709584eddf3757243f373b95238bb4/pytket-2.18.5-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:da6388da853873c42b04ed7cdf783e7497d1122b8ac42330ffb4555c214e9e8a", size = 8538602, upload-time = "2026-10-08T10:09:52.147Z" },
+    { url = "https://files.pythonhosted.org/packages/50/2b/fd09dd06f6cd0c09d1ee22f5ab720e61dacf0d15bd90b610164d49b28966/pytket-2.18.5-cp311-cp311-win_amd64.whl", hash = "sha256:9fa2ca76a2eb8c5010e882a3352b57574ed4426e56a3e63cc7f708b104c2e3a2", size = 8566922, upload-time = "2026-10-08T10:09:54.776Z" },
+    { url = "https://files.pythonhosted.org/packages/ff/57/40f1349b31217a98f259891e306e207db2458a408f8739a350f05b138833/pytket-2.18.5-cp312-abi3-macosx_14_0_arm64.whl", hash = "sha256:01417bc687030547e6e170d09d8b611fa79336dd0a6fc60ad345e6730484817f", size = 5724134, upload-time = "2026-10-08T10:09:57.647Z" },
+    { url = "https://files.pythonhosted.org/packages/6f/6a/9db1b152ef8726fbbc096188df8c24f95eb389b69eb2e46cc833d76efdaa/pytket-2.18.5-cp312-abi3-macosx_15_0_x86_64.whl", hash = "sha256:bb16b351f706b67fc5d457c8f738eb8ecce7dc70ad4fa0dd4344ea5b61445439", size = 6366190, upload-time = "2026-10-08T10:09:59.647Z" },
+    { url = "https://files.pythonhosted.org/packages/69/8b/e8e340bcbc21c306c250ecf2f759fdbfa44f9a5748e832e5f0f4bc965e8f/pytket-2.18.5-cp312-abi3-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:da0392a3dbaa585dec2f8cc1f8297b203580dccee00ba3d52548a283f650cb5e", size = 7731088, upload-time = "2026-10-08T10:10:01.641Z" },
+    { url = "https://files.pythonhosted.org/packages/a6/a4/d5d1dd144b655f7b2c0604f94d05bbde082943e27f5db4e3220d4dcf2d0c/pytket-2.18.5-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:a388d5dc0ee685f2fce913daa350539403d1d1d301839485d5d92bde0f9c2261", size = 8467219, upload-time = "2026-10-08T10:10:03.904Z" },
+    { url = "https://files.pythonhosted.org/packages/13/8a/d166b5db8e1a32e841b2bfb3090e3f729a3d22073388308e48ee66a8612c/pytket-2.18.5-cp312-abi3-win_amd64.whl", hash = "sha256:f2e305c503fdbd8ffbad49adf2a209c0a9d600edc50176ea318aecb6b389f26a", size = 8558955, upload-time = "2026-10-08T10:10:06.451Z" },
 ]
 
 [[package]]
@@ -4051,12 +4051,11 @@ cudaq-cu13 = [
 ]
 hugr = [
     { name = "hugr" },
+    { name = "hugr-qir", marker = "python_full_version < '3.13'" },
+    { name = "pytket" },
     { name = "qnexus" },
     { name = "selene-sim" },
     { name = "tket-exts" },
-]
-hugr-qir = [
-    { name = "hugr-qir", marker = "python_full_version < '3.13'" },
 ]
 qbraid = [
     { name = "qbraid", extra = ["qiskit"] },
@@ -4134,17 +4133,18 @@ requires-dist = [
     { name = "cuda-quantum-cu13", marker = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'cudaq-cu13'", specifier = ">=0.14,<0.15" },
     { name = "cuda-quantum-cu13", marker = "sys_platform == 'linux' and extra == 'cudaq-cu13'", specifier = ">=0.14,<0.15" },
     { name = "hugr", marker = "extra == 'hugr'", specifier = ">=0.16,<0.17" },
-    { name = "hugr-qir", marker = "python_full_version < '3.13' and extra == 'hugr-qir'", specifier = ">=0.1.2,<0.2" },
+    { name = "hugr-qir", marker = "python_full_version < '3.13' and extra == 'hugr'", specifier = ">=0.1.2,<0.2" },
     { name = "jijmodeling", specifier = ">=2.1.0" },
     { name = "matplotlib", marker = "extra == 'visualization'", specifier = ">=3.10.8" },
     { name = "ommx", specifier = ">=2.3.3" },
     { name = "protobuf", specifier = ">=5.29,<7" },
     { name = "pyqsp", marker = "extra == 'qsvt'", specifier = ">=0.2.0" },
+    { name = "pytket", marker = "extra == 'hugr'", specifier = ">=2.18.5,<3" },
     { name = "qbraid", extras = ["qiskit"], marker = "extra == 'qbraid'", specifier = ">=0.11.0" },
     { name = "qiskit", marker = "extra == 'qiskit'", specifier = ">=2.3.0" },
     { name = "qiskit-aer", marker = "extra == 'qiskit'", specifier = ">=0.17.2" },
     { name = "qiskit-ibm-runtime", marker = "extra == 'qiskit'", specifier = ">=0.40,<1" },
-    { name = "qnexus", marker = "extra == 'hugr'", specifier = ">=0.49,<0.50" },
+    { name = "qnexus", marker = "extra == 'hugr'", specifier = ">=0.51.1,<0.52" },
     { name = "quri-parts-circuit", marker = "extra == 'quri-parts'", specifier = ">=0.21.1" },
     { name = "quri-parts-core", marker = "extra == 'quri-parts'", specifier = ">=0.21.1" },
     { name = "quri-parts-qulacs", marker = "extra == 'quri-parts'", specifier = ">=0.21.1" },
@@ -4152,7 +4152,7 @@ requires-dist = [
     { name = "sympy", specifier = ">=1.14.0" },
     { name = "tket-exts", marker = "extra == 'hugr'", specifier = ">=0.12,<0.13" },
 ]
-provides-extras = ["qiskit", "visualization", "qsvt", "cudaq-cu12", "cudaq-cu13", "quri-parts", "qbraid", "hugr", "hugr-qir", "braket"]
+provides-extras = ["qiskit", "visualization", "qsvt", "cudaq-cu12", "cudaq-cu13", "quri-parts", "qbraid", "hugr", "braket"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -4345,7 +4345,7 @@ wheels = [
 
 [[package]]
 name = "qnexus"
-version = "0.49.0"
+version = "0.51.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click", version = "8.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
@@ -4363,9 +4363,9 @@ dependencies = [
     { name = "rich" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8e/bd/6b2c711434e6a96e8b8e22eb49d15f18823245ec2a10c7d2f54bf31317c2/qnexus-0.49.0.tar.gz", hash = "sha256:321396fe7207d9b92b64cc6f20c2c3fd34259935cd1e9c3eae3f29b0a3e29c85", size = 338129, upload-time = "2026-09-01T12:20:31.187Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/95/33/4955010b1c493496f275eff98bc08b0d46061caade45f5e2a4a64976c443/qnexus-0.51.1.tar.gz", hash = "sha256:1f506a5de8cf2224acf33b2208c241b6cd5dc5eab12222e8896d0ee5ba077188", size = 359795, upload-time = "2026-10-05T12:45:58.485Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4d/d9/fef037ffd5fc5183f5c52a9803b62a19e84e2b529f327e88b54fa96db0f7/qnexus-0.49.0-py3-none-any.whl", hash = "sha256:b9bd19a1a34464e25045a2e7b96f5b8c7a0550f46502bb45b537efd432e8d287", size = 83363, upload-time = "2026-09-01T12:20:30.008Z" },
+    { url = "https://files.pythonhosted.org/packages/fe/d8/ee97f8c9cc9641c70924cd8944f7349aac882a6436b68078054a1af3c9e8/qnexus-0.51.1-py3-none-any.whl", hash = "sha256:8679e78c7afeda674f645946637a0b7c8f416ca67b9b983afe86d46ec90ea3a0", size = 84374, upload-time = "2026-10-05T12:45:57.38Z" },
 ]
 
 [[package]]

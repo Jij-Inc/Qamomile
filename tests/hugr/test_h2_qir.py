@@ -101,13 +101,13 @@ def test_unsupported_h2_outputs_fail_before_loading_converter(
 
 
 def test_missing_converter_has_actionable_installation_error(monkeypatch):
-    """H2 explains its optional dependency without changing Helios installation."""
+    """H2 directs incomplete installations to the shared HUGR extra."""
     prepared = prepare_execution(HugrTranspiler().compile(_bell))
     monkeypatch.setattr(
         "qamomile.hugr._qir.importlib.import_module",
         Mock(side_effect=ModuleNotFoundError("hugr_qir")),
     )
-    with pytest.raises(ImportError, match=r"qamomile\[hugr,hugr-qir\]"):
+    with pytest.raises(ImportError, match=r"qamomile\[hugr\]"):
         to_h2_qir(prepared.package)
 
 
@@ -135,13 +135,16 @@ def test_invalid_converter_output_is_rejected(monkeypatch, value):
     assert converter.hugr_to_qir.call_args.kwargs["validate_hugr"] is True
 
 
-def _install_h2_client(monkeypatch, tags, readouts):
+def _install_h2_client(monkeypatch, tags, readouts, indices=None, layout="scalar"):
     """Use real SDK result storage with an entirely local submission client.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): Scoped transport replacement.
         tags (list[str]): Register labels in provider storage order.
         readouts (list[list[int]]): Measured bits in that storage order.
+        indices (list[int] | None): Native SDK indices for each register.
+            ``None`` uses register-local zero indices.
+        layout (str): Scalar, blocked, or interleaved 64-bit SDK registers.
 
     Returns:
         SimpleNamespace: Nexus-shaped client recording uploads and submissions.
@@ -150,10 +153,38 @@ def _install_h2_client(monkeypatch, tags, readouts):
     from pytket.circuit import Bit
     from pytket.utils.outcomearray import OutcomeArray
 
-    raw = BackendResult(
-        c_bits=[Bit(tag, 0) for tag in tags],
-        shots=OutcomeArray.from_readouts(np.asarray(readouts, dtype=np.uint8)),
+    if layout == "scalar":
+        columns = list(enumerate(indices or [0] * len(tags)))
+    elif layout == "blocked":
+        columns = [
+            (column, index)
+            for column in range(len(tags))
+            for index in reversed(range(64))
+        ]
+    elif layout == "interleaved":
+        columns = [
+            (column, index)
+            for index in reversed(range(64))
+            for column in range(len(tags))
+        ]
+    else:
+        raise ValueError("Unknown test register layout")
+    rows = (
+        readouts
+        if layout == "scalar"
+        else [
+            [
+                row[column] if index == 0 else (index + column + shot) % 2
+                for column, index in columns
+            ]
+            for shot, row in enumerate(readouts)
+        ]
     )
+    raw = BackendResult(
+        c_bits=[Bit(tags[column], index) for column, index in columns],
+        shots=OutcomeArray.from_readouts(np.asarray(rows, dtype=np.uint8)),
+    )
+    raw = BackendResult.from_dict(raw.to_dict())
     client = _client()
     client.QuantinuumConfig = Mock(
         side_effect=lambda **kwargs: SimpleNamespace(type="QuantinuumConfig", **kwargs)
@@ -167,12 +198,23 @@ def _install_h2_client(monkeypatch, tags, readouts):
     return client
 
 
-def test_real_converter_typed_array_sample_and_restore(monkeypatch):
+@pytest.mark.parametrize(
+    "indices,layout",
+    [
+        (None, "scalar"),
+        ([10, 0, 1], "scalar"),
+        (None, "blocked"),
+        (None, "interleaved"),
+    ],
+)
+def test_real_converter_typed_array_sample_and_restore(monkeypatch, indices, layout):
     """Real conversion plus shuffled provider columns preserves typed sample order."""
     _require_converter()
     pytest.importorskip("pytket")
     tags = ["qamomile.output.0.2", "qamomile.output.0.0", "qamomile.output.0.1"]
-    client = _install_h2_client(monkeypatch, tags, [[0, 1, 0], [1, 0, 0]])
+    client = _install_h2_client(
+        monkeypatch, tags, [[0, 1, 0], [1, 0, 0]], indices=indices, layout=layout
+    )
     program = HugrTranspiler().transpile(_runtime_bit_order)
     executor = HugrExecutor("nexus", options=NexusExecutionOptions(system_name="H2-1E"))
     job = program.sample(executor, shots=2)
@@ -191,11 +233,75 @@ def test_real_converter_typed_array_sample_and_restore(monkeypatch):
     assert reference.context["package_sha256"] == hashlib.sha256(expected).hexdigest()
 
 
-def test_real_converter_expectation_uses_bit_outputs_and_restores(monkeypatch):
+@pytest.mark.parametrize("layout", ["scalar", "blocked", "interleaved"])
+def test_real_converter_typed_tuple_restores_native_sdk_registers(monkeypatch, layout):
+    """A saved tuple execution restores by tags without reuploading or resubmitting."""
+    _require_converter()
+    pytest.importorskip("pytket")
+    tags = ["qamomile.output.1.0", "qamomile.output.0.0"]
+    client = _install_h2_client(
+        monkeypatch, tags, [[1, 0], [0, 1]], indices=[1, 0], layout=layout
+    )
+    program = HugrTranspiler().transpile(_bell)
+    executor = HugrExecutor("nexus", options=NexusExecutionOptions(system_name="H2-1E"))
+    job = program.sample(executor, shots=2)
+    expected = [((False, True), 1), ((True, False), 1)]
+    assert job.result().results == expected
+    snapshot = JobSnapshot.from_dict(job.snapshot().to_dict())
+    assert snapshot.executions[0].context["program_format"] == "qir"
+
+    restored = program.restore(HugrExecutor("nexus"), snapshot)
+
+    assert restored.result().results == expected
+    client.jobs.get.assert_called_once_with(id=snapshot.executions[0].job_ids[0])
+    client.qir.upload.assert_called_once()
+    client.hugr.upload.assert_not_called()
+    client.start_execute_job.assert_called_once()
+
+
+def test_snapshot_recovers_cached_decode_failure_without_resubmission(monkeypatch):
+    """A fresh restored handle decodes an existing job after a cached local failure."""
+    _require_converter()
+    pytest.importorskip("pytket")
+    client = _install_h2_client(
+        monkeypatch,
+        ["qamomile.output.1.0", "qamomile.output.0.0"],
+        [[0, 1], [1, 0]],
+        layout="interleaved",
+    )
+    program = HugrTranspiler().transpile(_bell)
+    executor = HugrExecutor("nexus", options=NexusExecutionOptions(system_name="H2-1E"))
+    job = program.sample(executor, shots=2)
+    with monkeypatch.context() as patch:
+        fail = Mock(side_effect=ExecutionError("Duplicate QIR result bit"))
+        patch.setattr("qamomile.hugr._nexus.decode_qir_results", fail)
+        with pytest.raises(ExecutionError, match="Duplicate"):
+            job.result()
+        fail.assert_called_once()
+
+    with pytest.raises(ExecutionError, match="Duplicate"):
+        job.result()
+    client.jobs.results.assert_called_once()
+    saved = JobSnapshot.from_dict(job.snapshot().to_dict())
+
+    recovered = program.restore(HugrExecutor("nexus"), saved)
+
+    assert recovered.result().results == [((True, False), 1), ((False, True), 1)]
+    client.jobs.get.assert_called_once_with(id=saved.executions[0].job_ids[0])
+    assert client.jobs.results.call_count == 2
+    client.qir.upload.assert_called_once()
+    client.hugr.upload.assert_not_called()
+    client.start_execute_job.assert_called_once()
+
+
+@pytest.mark.parametrize("layout", ["scalar", "blocked", "interleaved"])
+def test_real_converter_expectation_uses_bit_outputs_and_restores(monkeypatch, layout):
     """Expectation Float results are computed from H2 bits on the host."""
     _require_converter()
     pytest.importorskip("pytket")
-    client = _install_h2_client(monkeypatch, ["qamomile.output.0.0"], [[0], [1], [0]])
+    client = _install_h2_client(
+        monkeypatch, ["qamomile.output.0.0"], [[0], [1], [0]], layout=layout
+    )
     program = HugrTranspiler().transpile(
         _rotated, bindings={"observable": qm_o.Z(0)}, parameters=["theta"]
     )

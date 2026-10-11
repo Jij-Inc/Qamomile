@@ -1,10 +1,12 @@
 # HUGR execution through Nexus
 
-Install `qamomile[hugr,hugr-qir]` on Python 3.11 or 3.12 to enable H2 conversion. The converter extra
-uses the 0.1 series of `hugr-qir`, compatible with this Python implementation's
-HUGR 0.16 series. Its QIR validator currently requires Python below 3.13.
-Authenticate with `qnexus` and select an active Nexus project
-before submitting a job, or pass a project reference in `NexusExecutionOptions`.
+Install `qamomile[hugr]` on Python 3.11 or 3.12 to enable H2 conversion. The `hugr`
+extra automatically includes the 0.1 series of `hugr-qir`, compatible with this
+Python implementation's HUGR 0.16 series. The converter is omitted on Python
+3.13 and later because its QIR validator currently requires Python below 3.13.
+Qamomile authenticates through Nexus when you first submit or restore a job.
+Saved credentials are reused; an initial login may require browser approval.
+There is no need to import or call `qnexus` in normal execution code.
 
 Use the same executor class for Helios and H2:
 
@@ -24,11 +26,18 @@ def bell() -> tuple[qmc.Bit, qmc.Bit]:
 
 program = HugrTranspiler().transpile(bell)
 executor = HugrExecutor(
-    "nexus", options=NexusExecutionOptions(system_name="H2-1E")
+    "nexus",
+    options=NexusExecutionOptions(system_name="H2-1E", project="qamomile-demo"),
 )
 job = program.sample(executor, shots=100)
 print(job.result().results)
 ```
+
+`project` accepts a project name or an existing native Nexus project reference.
+A name is looked up or created on the first submission. If omitted, Qamomile
+uses the active Nexus project or looks up or creates `qamomile` when none is
+active. The SDK's active project is left unchanged. Restoring an existing job
+authenticates without creating a project or submitting another job.
 
 Change `system_name` to `Helios-1E` for Helios emulation or `H2-1` for H2
 hardware. Helios receives HUGR directly. H2 receives QIR bitcode converted and

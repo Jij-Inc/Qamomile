@@ -30,7 +30,7 @@ def test_boolean_decode_preserves_explicit_provider_column_order():
     """Reordered labels retain their meaning, including indices above nine."""
     tags = [f"qamomile.output.0.{index}" for index in range(12)]
     expected = {tag: index in (1, 4, 9) for index, tag in enumerate(tags)}
-    bits = [_bit(tag, 0) for tag in reversed(tags)]
+    bits = [_bit(tag, index) for index, tag in reversed(list(enumerate(tags)))]
     row = [int(expected[bit.reg_name]) for bit in bits]
     raw = _result(bits, np.asarray([row, [1 - value for value in row]], dtype=np.uint8))
 
@@ -41,28 +41,81 @@ def test_boolean_decode_preserves_explicit_provider_column_order():
     raw.get_shots.assert_called_once_with(cbits=bits)
 
 
-def test_native_pytket_readout_order_and_empty_output():
-    """The installed provider SDK follows the decoder's explicit column contract."""
+@pytest.mark.parametrize("indices", [(0, 0, 0), (0, 1, 10)])
+def test_native_pytket_readout_order_and_empty_output(indices):
+    """Local and global SDK indices retain tag identity across serialization."""
     pytest.importorskip("pytket")
     from pytket.backends.backendresult import BackendResult
     from pytket.circuit import Bit
     from pytket.utils.outcomearray import OutcomeArray
 
-    first, second = "qamomile.output.0.2", "qamomile.output.0.10"
-    bits = [Bit(second, 0), Bit(first, 0)]
+    tags = ["qamomile.output.0.0", "qamomile.output.1.0", "qamomile.output.0.10"]
+    bits = [Bit(tag, index) for tag, index in reversed(list(zip(tags, indices)))]
     raw = BackendResult(
         c_bits=bits,
-        shots=OutcomeArray.from_readouts(np.array([[1, 0], [0, 1]], dtype=np.uint8)),
+        shots=OutcomeArray.from_readouts(
+            np.array([[1, 1, 0], [0, 0, 1]], dtype=np.uint8)
+        ),
     )
-    assert decode_qir_results(raw, 2, {first: ("bool", 1), second: ("bool", 1)}) == [
-        {first: False, second: True},
-        {first: True, second: False},
+    stored = BackendResult.from_dict(raw.to_dict())
+    assert decode_qir_results(stored, 2, dict.fromkeys(tags, ("bool", 1))) == [
+        {tags[0]: False, tags[1]: True, tags[2]: True},
+        {tags[0]: True, tags[1]: False, tags[2]: False},
     ]
     empty = BackendResult(
         c_bits=[],
         shots=OutcomeArray.from_readouts(np.empty((3, 0), dtype=np.uint8)),
     )
     assert decode_qir_results(empty, 3, {}) == [{}, {}, {}]
+
+
+@pytest.mark.parametrize("interleaved", [False, True])
+def test_native_h_series_registers_decode_index_zero_in_provider_order(interleaved):
+    """Complete 64-bit registers decode by tag and index, ignoring upper bits."""
+    pytest.importorskip("pytket")
+    from pytket.backends.backendresult import BackendResult
+    from pytket.circuit import Bit
+    from pytket.utils.outcomearray import OutcomeArray
+
+    tags = ["qamomile.output.1.0", "qamomile.output.0.0", "qamomile.output.0.10"]
+    positions = (
+        [(tag, index) for index in reversed(range(64)) for tag in tags]
+        if interleaved
+        else [(tag, index) for tag in tags for index in reversed(range(64))]
+    )
+    expected = [
+        dict(zip(tags, [True, False, False], strict=True)),
+        dict(zip(tags, [False, True, True], strict=True)),
+    ]
+    raw = BackendResult(
+        c_bits=[Bit(tag, index) for tag, index in positions],
+        shots=OutcomeArray.from_readouts(
+            np.asarray(
+                [
+                    [
+                        int(record[tag]) if index == 0 else (index + shot) % 2
+                        for tag, index in positions
+                    ]
+                    for shot, record in enumerate(expected)
+                ],
+                dtype=np.uint8,
+            )
+        ),
+    )
+
+    stored = BackendResult.from_dict(raw.to_dict())
+
+    assert decode_qir_results(stored, 2, dict.fromkeys(tags, ("bool", 1))) == expected
+
+
+def test_scalar_and_complete_h_series_registers_can_coexist():
+    """Each tag independently selects its supported native storage layout."""
+    bits = [_bit("scalar", 10), *[_bit("wide", index) for index in reversed(range(64))]]
+    raw = _result(bits, [[0, *([1] * 63), 1], [1, *([1] * 63), 0]])
+    assert decode_qir_results(raw, 2, {"scalar": ("bool", 1), "wide": ("bool", 1)}) == [
+        {"scalar": False, "wide": True},
+        {"scalar": True, "wide": False},
+    ]
 
 
 def test_empty_output_still_validates_provider_shot_count():
@@ -79,9 +132,18 @@ def test_empty_output_still_validates_provider_shot_count():
         ([], {"flag": ("bool", 1)}, "Missing"),
         ([_bit("other", 0)], {"flag": ("bool", 1)}, "Unexpected"),
         ([_bit("flag", 0), _bit("flag", 0)], {"flag": ("bool", 1)}, "Duplicate"),
-        ([_bit("flag", 1)], {"flag": ("bool", 1)}, "width"),
-        ([_bit("flag", -1)], {"flag": ("bool", 1)}, "width"),
+        ([_bit("flag", 0), _bit("flag", 1)], {"flag": ("bool", 1)}, "QIR"),
+        ([_bit("flag", 10), _bit("flag", 2)], {"flag": ("bool", 1)}, "QIR"),
+        ([_bit("flag", -1)], {"flag": ("bool", 1)}, "index"),
         ([_bit("flag", True)], {"flag": ("bool", 1)}, "index"),
+        ([_bit("flag", 1.0)], {"flag": ("bool", 1)}, "index"),
+        ([_bit("flag", "1")], {"flag": ("bool", 1)}, "index"),
+        ([_bit("flag", None)], {"flag": ("bool", 1)}, "index"),
+        (
+            [SimpleNamespace(reg_name="flag", index=[])],
+            {"flag": ("bool", 1)},
+            "index",
+        ),
         (
             [SimpleNamespace(reg_name="flag", index=[0, 0])],
             {"flag": ("bool", 1)},
@@ -94,6 +156,24 @@ def test_invalid_registers_fail_before_fetching_readouts(bits, outputs, message)
     raw = _result(bits, [])
     with pytest.raises(ExecutionError, match=message):
         decode_qir_results(raw, 1, outputs)
+    raw.get_shots.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "indices",
+    [
+        list(range(63)),
+        list(range(1, 64)),
+        [*range(63), 64],
+        list(range(65)),
+        [*range(63), 0],
+    ],
+)
+def test_malformed_h_series_registers_fail_before_fetching_readouts(indices):
+    """Wide registers require every index from zero through 63 exactly once."""
+    raw = _result([_bit("flag", index) for index in indices], [])
+    with pytest.raises(ExecutionError):
+        decode_qir_results(raw, 1, {"flag": ("bool", 1)})
     raw.get_shots.assert_not_called()
 
 

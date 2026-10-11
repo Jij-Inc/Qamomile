@@ -212,7 +212,9 @@ class HugrExecutor:
 
     The ``nexus`` destination selects HUGR or QIR submission from the device
     configured in :class:`NexusExecutionOptions`. The existing ``helios``
-    destination remains an alias for Nexus execution.
+    destination remains an alias for Nexus execution. Nexus authentication
+    starts on the first submission or restoration, and project names are
+    resolved internally when submitting a job.
 
     Args:
         target (str | HugrExecutionTarget): Destination, default ``selene``.
