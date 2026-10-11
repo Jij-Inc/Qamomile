@@ -370,6 +370,11 @@ def _remote_executor(
 
     native = SimpleNamespace(id="sample-job", job_type="execute")
     client = SimpleNamespace(
+        login=Mock(),
+        context=SimpleNamespace(get_active_project=Mock(return_value=None)),
+        projects=SimpleNamespace(
+            get_or_create=Mock(return_value=SimpleNamespace(id="default-project"))
+        ),
         HeliosConfig=Mock(
             side_effect=lambda **kwargs: SimpleNamespace(type="HeliosConfig", **kwargs)
         ),

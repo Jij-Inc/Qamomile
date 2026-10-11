@@ -44,6 +44,15 @@ def _client(records=None, status="COMPLETED"):
     native = SimpleNamespace(id="test-job-id", job_type="execute")
     downloaded = QsysResult(records if records is not None else [[("result", True)]])
     return SimpleNamespace(
+        login=Mock(),
+        context=SimpleNamespace(
+            get_active_project=Mock(return_value=None),
+            set_active_project=Mock(),
+            set_active_project_token=Mock(),
+        ),
+        projects=SimpleNamespace(
+            get_or_create=Mock(return_value=SimpleNamespace(id="default-project"))
+        ),
         HeliosConfig=Mock(
             side_effect=lambda **kwargs: SimpleNamespace(type="HeliosConfig", **kwargs)
         ),
@@ -240,6 +249,8 @@ def test_invalid_reference_rejected_before_provider_lookup(reference):
     client = _client()
     with pytest.raises(ValueError):
         NexusTransport(client=client).retrieve(reference)
+    client.login.assert_not_called()
+    client.projects.get_or_create.assert_not_called()
     client.jobs.get.assert_not_called()
 
 
@@ -296,6 +307,9 @@ def test_invalid_shots_do_not_upload(shots):
     client = _client()
     with pytest.raises(ValueError, match="shots"):
         NexusTransport(client=client).submit(_package(), shots)
+    client.login.assert_not_called()
+    client.context.get_active_project.assert_not_called()
+    client.projects.get_or_create.assert_not_called()
     client.hugr.upload.assert_not_called()
 
 
@@ -349,6 +363,13 @@ def test_installed_sdk_contract_without_network():
     from qnexus.models.references import ExecuteJobRef, ExecutionResultRef
 
     client = _client()
+    client.login = create_autospec(qnx.login)
+    client.context.get_active_project = create_autospec(
+        qnx.context.get_active_project, return_value=None
+    )
+    client.projects.get_or_create = create_autospec(
+        qnx.projects.get_or_create, return_value=SimpleNamespace(id="sdk-project")
+    )
     client.HeliosConfig = qnx.HeliosConfig
     client.hugr.upload = create_autospec(qnx.hugr.upload, return_value="program")
     native = Mock(spec=ExecuteJobRef)
@@ -373,6 +394,8 @@ def test_installed_sdk_contract_without_network():
     assert handle.result() == [{"number": 5, "bits": [True, False]}]
     assert transport.retrieve(handle.references()[0]).native is native
     handle.cancel()
+    client.login.assert_called_once_with()
+    client.projects.get_or_create.assert_called_once_with(name="qamomile")
     parameters = inspect.signature(qnx.start_execute_job).parameters
     assert "inputs" not in parameters
     assert "arguments" not in parameters
