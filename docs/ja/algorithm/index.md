@@ -104,4 +104,10 @@ Hamming [7,4,3]符号からのCSS構成、6スタビライザー、横断的Hada
 OpenFermionで分子ハミルトニアンを構築し、VQEで基底状態エネルギーを求めます。
 :::
 
+:::{card}
+:header: **ADAPT VQE**
+:link: adapt_vqe
+適応的に演算子を追加することでアンザッツを構築する、VQE の改良版です。
+:::
+
 ::::
