@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.5
+#       jupytext_version: 1.19.1
 #   kernelspec:
 #     display_name: qamomile (3.11.16)
 #     language: python
@@ -571,7 +571,7 @@ for distance_index, distance in enumerate(bond_lengths):
     selected_labels_by_distance.append([pool_labels[j] for j in selected])
     energy_traces_by_distance.append(energy_history.copy())
     print(f"  最終: HF={hf_energy:.8f}, ADAPT={adapt_energy:.8f}, "
-          f"FCI={fci_energy:.8f} Ha, 誤差={scan_results[-1]['error_kcal_mol']:.4g} kcal/mol")
+          f"FCI={fci_energy:.8f} Ha, log10(誤差)={scan_results[-1]['error_kcal_mol']:.4g} kcal/mol")
 
 print(f"\n全 {len(scan_results)} 点の計算が終了しました。")
 
@@ -581,13 +581,13 @@ print(f"\n全 {len(scan_results)} 点の計算が終了しました。")
 # 最後に、横軸に原子間距離 (オングストローム)、縦軸にエネルギー (ハートリー) のグラフを描画します。
 
 # %%
-print("R[Å]   HF[Ha]        ADAPT[Ha]     FCI[Ha]       |log10(err|[kcal/mol])  Nop  収束")
+print("R[Å]   HF[Ha]        ADAPT[Ha]     FCI[Ha]        log10(err [kcal/mol])  Nop  収束")
 print("-" * 90)
 for result in scan_results:
     print(
         f"{result['R']:4.2f}  {result['HF']: .9f}  {result['ADAPT']: .9f}  "
         f"{result['FCI']: .9f}      {result['error_kcal_mol']:9.5f}   "
-        f"{result['n_operators']:2d}   {result['converged']}"
+        f"{result['n_operators']:2d}   {result['gradient_converged']}"
     )
 
 for record, labels in zip(scan_results, selected_labels_by_distance):

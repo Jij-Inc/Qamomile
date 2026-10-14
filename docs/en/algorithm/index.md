@@ -104,4 +104,10 @@ CSS construction, syndrome decoding, and transversal Hadamard.
 Build a molecular Hamiltonian with OpenFermion and find the ground state energy via VQE.
 :::
 
+:::{card}
+:header: **ADAPT VQE**
+:link: adapt_vqe
+Improved version of VQE that constructs the ansatz by adaptively adding operators.
+:::
+
 ::::
