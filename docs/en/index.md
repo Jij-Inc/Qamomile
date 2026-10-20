@@ -35,8 +35,6 @@ Higher-level language constructs and reusable algorithms help you express quantu
 
 ::::
 
-Existing SDKs address parts of these needs. Qamomile brings resource estimation, portability, and higher-level programming together in one quantum programming language.
-
 ## Key features
 
 ::::{grid} 1 1 3 3
