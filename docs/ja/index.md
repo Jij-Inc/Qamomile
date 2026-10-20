@@ -37,7 +37,7 @@ Qamomileは、Pythonで書ける量子プログラミング言語です。Python
 
 既存のSDKもこうした課題の一部に取り組んでいます。Qamomileは、リソース推定、移植性、高水準のプログラミングをひとつの量子プログラミング言語で扱うために生まれました。
 
-## 主な機能
+## 特徴
 
 ::::{grid} 1 1 3 3
 :class: qamomile-feature-cards
