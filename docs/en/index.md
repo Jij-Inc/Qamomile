@@ -9,7 +9,7 @@ If you find a bug, we'd really appreciate it if you could let us know via [GitHu
 
 ## What is Qamomile?
 
-Qamomile is a quantum programming SDK for writing quantum programs as typed Python functions. The same source supports resource estimation and execution across supported quantum SDKs.
+Qamomile is a quantum programming language embedded in Python, an embedded domain-specific language (eDSL). The same source supports resource estimation and execution across supported quantum SDKs.
 
 ## Motivations
 
@@ -17,7 +17,7 @@ As quantum hardware improves, we need to assess which problem sizes it can handl
 
 We also aim for "write once, run anywhere": you can choose a quantum SDK for its strengths without rewriting your program. Higher-level language constructs and reusable algorithms help you express quantum programs beyond low-level circuits and reduce the expertise needed to build applications.
 
-Existing SDKs address parts of these needs. Qamomile brings resource estimation, portability, and higher-level programming together in one SDK.
+Existing SDKs address parts of these needs. Qamomile brings resource estimation, portability, and higher-level programming together in one quantum programming language.
 
 ## Key features
 
