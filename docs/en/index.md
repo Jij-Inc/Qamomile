@@ -9,29 +9,24 @@ If you find a bug, we'd really appreciate it if you could let us know via [GitHu
 
 ## What is Qamomile?
 
-Qamomile is a quantum programming SDK for writing quantum circuits as typed Python functions. You can run the circuits you build on quantum SDKs such as Qiskit, CUDA-Q, QURI Parts, and qBraid. Furthermore, Qamomile supports symbolic algebraic resource estimation and can estimate resources for circuits containing black-box oracles, even when those circuits cannot be executed directly.
+Qamomile is a quantum programming SDK for writing quantum programs as typed Python functions. The same source supports resource estimation and execution across supported quantum SDKs.
 
-::::{grid} 1 1 3 3
+## Motivations
 
-:::{card}
-**Quantum circuits in Python**
+As quantum hardware improves, we need to assess which problem sizes it can handle and when algorithms might become practical for a given problem size. Estimating the required qubits and gates is therefore as important as running algorithms on hardware.
 
-Write circuits as typed Python functions, then draw, check, and reuse them like regular code.
-:::
+We also aim for "write once, run anywhere": you can choose a quantum SDK for its strengths without rewriting your program. Higher-level language constructs and reusable algorithms help you express quantum programs beyond low-level circuits and reduce the expertise needed to build applications.
 
-:::{card}
-**One program, many quantum SDKs**
+Existing SDKs address parts of these needs. Qamomile brings resource estimation, portability, and higher-level programming together in one SDK.
 
-Move between Qiskit, CUDA-Q, QURI Parts, and qBraid without rewriting your circuit.
-:::
+## Key features
 
-:::{card}
-**Made for optimization**
-
-Connect QUBO and Ising models to quantum algorithms, then implement and run optimization workflows end to end.
-:::
-
-::::
+- **Type safety.** Qamomile's affine type system allows each quantum value to be consumed at most once. It catches invalid reuse before execution.
+- **Built-in modules.** Reuse common operation patterns and well-known algorithms without writing complex logic and boilerplate from scratch.
+- **Algorithm-level resource estimation.** Estimate qubits and gates symbolically to assess implementations and identify bottlenecks. Oracles, black-box operations with specified resource requirements, let you estimate a program before every operation is implemented. Execution requires implementations for the oracles.
+- **Portable quantum programs.** Transpilers convert your programs to supported targets such as Qiskit, CUDA-Q, and HUGR. The corresponding executors run the converted programs through Qamomile.
+- **One source for estimation and execution.** Use the same Qamomile program for both tasks without maintaining separate implementations.
+- **Optimization modules.** Run quantum optimization algorithms with OMMX, a solver-independent data format for optimization problems. OMMX provides adapters for classical and quantum solvers, so you can compare their results with Qamomile's algorithms.
 
 ---
 
