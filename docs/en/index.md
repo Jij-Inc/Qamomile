@@ -21,12 +21,12 @@ Existing SDKs address parts of these needs. Qamomile brings resource estimation,
 
 ## Key features
 
-- **Type safety.** Qamomile's affine type system allows each quantum value to be consumed at most once. It catches invalid reuse before execution.
-- **Built-in modules.** Reuse common operation patterns and well-known algorithms without writing complex logic and boilerplate from scratch.
-- **Algorithm-level resource estimation.** Estimate qubits and gates symbolically to assess implementations and identify bottlenecks. Oracles, black-box operations with specified resource requirements, let you estimate a program before every operation is implemented. Execution requires implementations for the oracles.
-- **Portable quantum programs.** Transpilers convert your programs to supported targets such as Qiskit, CUDA-Q, and HUGR. The corresponding executors run the converted programs through Qamomile.
-- **One source for estimation and execution.** Use the same Qamomile program for both tasks without maintaining separate implementations.
-- **Optimization modules.** Run quantum optimization algorithms with OMMX, a solver-independent data format for optimization problems. OMMX provides adapters for classical and quantum solvers, so you can compare their results with Qamomile's algorithms.
+- **Type safety:** Qamomile's affine type system allows each quantum value to be consumed at most once. It catches invalid reuse before execution.
+- **Built-in modules:** Reuse common operation patterns and well-known algorithms without writing complex logic and boilerplate from scratch.
+- **Algorithm-level resource estimation:** Estimate qubits and gates symbolically to assess implementations and identify bottlenecks. Oracles, black-box operations with specified resource requirements, let you estimate a program before every operation is implemented. Execution requires implementations for the oracles.
+- **Portable quantum programs:** Transpilers convert your programs to supported targets such as Qiskit, CUDA-Q, and HUGR. The corresponding executors run the converted programs through Qamomile.
+- **One source for estimation and execution:** Use the same Qamomile program for both tasks without maintaining separate implementations.
+- **Optimization modules:** Run quantum optimization algorithms with OMMX, a solver-independent data format for optimization problems. OMMX provides adapters for classical and quantum solvers, so you can compare their results with Qamomile's algorithms.
 
 ---
 
