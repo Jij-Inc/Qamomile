@@ -13,20 +13,72 @@ Qamomile is a quantum programming language embedded in Python, an embedded domai
 
 ## Motivations
 
-As quantum hardware improves, we need to assess which problem sizes it can handle and when algorithms might become practical for a given problem size. Estimating the required qubits and gates is therefore as important as running algorithms on hardware.
+::::{grid} 1 1 3 3
 
-We also aim for "write once, run anywhere": you can choose a quantum SDK for its strengths without rewriting your program. Higher-level language constructs and reusable algorithms help you express quantum programs beyond low-level circuits and reduce the expertise needed to build applications.
+:::{card}
+:header: Resource estimation
+
+As quantum hardware improves, we need to assess which problem sizes it can handle and when algorithms might become practical for a given problem size. Estimating the required qubits and gates is therefore as important as running algorithms on hardware.
+:::
+
+:::{card}
+:header: Portability
+
+We also aim for "write once, run anywhere": you can choose a quantum SDK for its strengths without rewriting your program.
+:::
+
+:::{card}
+:header: Higher-level programming
+
+Higher-level language constructs and reusable algorithms help you express quantum programs beyond low-level circuits and reduce the expertise needed to build applications.
+:::
+
+::::
 
 Existing SDKs address parts of these needs. Qamomile brings resource estimation, portability, and higher-level programming together in one quantum programming language.
 
 ## Key features
 
-- **Type safety:** Qamomile's affine type system allows each quantum value to be consumed at most once. It catches invalid reuse before execution.
-- **Built-in modules:** Reuse common operation patterns and well-known algorithms without writing complex logic and boilerplate from scratch.
-- **Algorithm-level resource estimation:** Estimate qubits and gates symbolically to assess implementations and identify bottlenecks. Oracles, black-box operations with specified resource requirements, let you estimate a program before every operation is implemented. Execution requires implementations for the oracles.
-- **Portable quantum programs:** Transpilers convert your programs to supported targets such as Qiskit, CUDA-Q, and HUGR. The corresponding executors run the converted programs through Qamomile.
-- **One source for estimation and execution:** Use the same Qamomile program for both tasks without maintaining separate implementations.
-- **Optimization modules:** Run quantum optimization algorithms with OMMX, a solver-independent data format for optimization problems. OMMX provides adapters for classical and quantum solvers, so you can compare their results with Qamomile's algorithms.
+::::{grid} 1 1 3 3
+:class: qamomile-feature-cards
+
+:::{card}
+:header: Type safety
+
+Qamomile's affine type system allows each quantum value to be consumed at most once. It catches invalid reuse before execution.
+:::
+
+:::{card}
+:header: Built-in modules
+
+Reuse common operation patterns and well-known algorithms without writing complex logic and boilerplate from scratch.
+:::
+
+:::{card}
+:header: Algorithm-level resource estimation
+
+Estimate qubits and gates symbolically to assess implementations and identify bottlenecks. Oracles, black-box operations with specified resource requirements, let you estimate a program before every operation is implemented. Execution requires implementations for the oracles.
+:::
+
+:::{card}
+:header: Portable quantum programs
+
+Transpilers convert your programs to supported targets such as Qiskit, CUDA-Q, and HUGR. The corresponding executors run the converted programs through Qamomile.
+:::
+
+:::{card}
+:header: One source for estimation and execution
+
+Use the same Qamomile program for both tasks without maintaining separate implementations.
+:::
+
+:::{card}
+:header: Optimization modules
+
+Run quantum optimization algorithms with OMMX, a solver-independent data format for optimization problems. OMMX provides adapters for classical and quantum solvers, so you can compare their results with Qamomile's algorithms.
+:::
+
+::::
 
 ---
 
