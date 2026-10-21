@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from decimal import Decimal
 
 import numpy as np
 import pytest
@@ -134,6 +135,49 @@ def _decode_loop(repetitions: qmc.UInt) -> qmc.Vector[qmc.Bit]:
         bits[1] = bits[0] != bits[1]
         bits[2] = bits[1]
     return bits
+
+
+@qmc.qkernel
+def _saved_before_loop(repetitions: qmc.UInt) -> tuple[qmc.Bit, qmc.Vector[qmc.Bit]]:
+    """Keep a scalar snapshot while repeated stores update its source vector."""
+    qs = qmc.qubit_array(1, "qs")
+    bits = qmc.measure(qs)
+    old = bits[0]
+    for i in qmc.range(repetitions):
+        bits[0] = ~bits[0]
+    return old, bits
+
+
+@qmc.qkernel
+def _snapshot_used_in_loop(repetitions: qmc.UInt) -> qmc.Vector[qmc.Bit]:
+    """Read a captured element alongside the current mutable vector."""
+    qs = qmc.qubit_array(2, "qs")
+    bits = qmc.measure(qs)
+    old = bits[0]
+    for i in qmc.range(repetitions):
+        bits[0] = ~old
+        bits[1] = bits[0]
+    return bits
+
+
+@qmc.qkernel
+def _nested_snapshots(repetitions: qmc.UInt) -> tuple[qmc.Bit, qmc.Vector[qmc.Bit]]:
+    """Capture a fresh element before each inner loop and retain an outer copy."""
+    qs = qmc.qubit_array(2, "qs")
+    bits = qmc.measure(qs)
+    old = bits[0]
+    for i in qmc.range(repetitions):
+        inner_old = bits[0]
+        for j in qmc.range(2):
+            bits[0] = ~inner_old
+        bits[1] = old
+    return old, bits
+
+
+@qmc.qkernel
+def _read_float_table(values: qmc.Vector[qmc.Float]) -> qmc.Float:
+    """Return a Float selected from a bound table."""
+    return values[qmc.get_current_shot()]
 
 
 def _executor():
@@ -335,3 +379,69 @@ def test_bound_table_is_available_inside_runtime_branch():
     """A bound table is a region-local constant, while its index remains a capture."""
     p = HugrTranspiler().transpile(_guarded_bound_table, bindings={"values": [3, 5]})
     assert p.sample(_executor(), shots=3).result().results == [(3, 1), (5, 1), (7, 1)]
+
+
+@pytest.mark.parametrize("serialized", [False, True])
+@pytest.mark.parametrize("repetitions", [0, 1, 2, 3])
+def test_loop_stores_preserve_pre_loop_element_snapshot(repetitions, serialized):
+    """A saved element retains its initial value after every loop trip count."""
+    kernel = (
+        deserialize(serialize(_saved_before_loop)) if serialized else _saved_before_loop
+    )
+    p = HugrTranspiler().transpile(kernel, bindings={"repetitions": repetitions})
+    expected = (False, (bool(repetitions % 2),))
+    assert p.sample(_executor(), shots=2).result().results == [(expected, 2)]
+
+
+@pytest.mark.parametrize("serialized", [False, True])
+@pytest.mark.parametrize("repetitions", [0, 1, 2, 3])
+def test_loop_body_reads_snapshot_and_latest_store_independently(
+    repetitions, serialized
+):
+    """A captured scalar stays fixed while body element reads see earlier stores."""
+    kernel = (
+        deserialize(serialize(_snapshot_used_in_loop))
+        if serialized
+        else _snapshot_used_in_loop
+    )
+    p = HugrTranspiler().transpile(kernel, bindings={"repetitions": repetitions})
+    expected = (repetitions > 0, repetitions > 0)
+    assert p.sample(_executor(), shots=2).result().results == [(expected, 2)]
+
+
+@pytest.mark.parametrize("serialized", [False, True])
+@pytest.mark.parametrize("runtime", [False, True])
+@pytest.mark.parametrize(
+    "kernel,values",
+    [
+        (_read_table, [0, 2**63 + 1, 2**64 - 1]),
+        (_read_table, np.array([0, 2**63 + 1, 2**64 - 1], dtype=np.uint64)),
+        (_read_float_table, [Decimal("0.125"), Decimal("0.875")]),
+    ],
+)
+def test_classical_table_bindings_preserve_scalar_values(
+    kernel, values, runtime, serialized
+):
+    """Flattening preserves UInt precision and accepts frontend-valid Float values."""
+    if serialized:
+        kernel = deserialize(serialize(kernel))
+    if runtime:
+        p = _table_program(kernel, "values", len(values))
+        result = p.sample(_executor(), shots=len(values), bindings={"values": values})
+    else:
+        p = HugrTranspiler().transpile(kernel, bindings={"values": values})
+        result = p.sample(_executor(), shots=len(values))
+    expected = [
+        float(value) if isinstance(value, Decimal) else int(value) for value in values
+    ]
+    assert result.result().results == [(value, 1) for value in expected]
+
+
+@pytest.mark.parametrize("repetitions", [0, 1, 2, 3])
+def test_nested_loop_snapshots_are_refreshed_for_each_outer_iteration(repetitions):
+    """Inner captures see each iteration's input, while outer captures stay fixed."""
+    p = HugrTranspiler().transpile(
+        _nested_snapshots, bindings={"repetitions": repetitions}
+    )
+    expected = (False, (bool(repetitions % 2), False))
+    assert p.sample(_executor(), shots=2).result().results == [(expected, 2)]

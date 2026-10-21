@@ -524,6 +524,37 @@ def _array_size(value: ArrayValue) -> int:
     return size
 
 
+def _load_classical_array(value: ArrayValue, concrete: Any, builder: Any) -> list[Any]:
+    """Load fixed classical elements without inferring a lossy common dtype.
+
+    Args:
+        value (ArrayValue): Array declaring the element type and static shape.
+        concrete (Any): Bound or initialized array contents.
+        builder (Any): HUGR builder receiving scalar constants.
+
+    Returns:
+        list[Any]: Scalar wires in row-major element order.
+
+    Raises:
+        EmitError: If the size or any scalar constant is unsupported.
+    """
+    import numpy as np
+
+    flat = np.asarray(concrete, dtype=object).reshape(-1)
+    if flat.size != _array_size(value):
+        raise EmitError("Bound HUGR array disagrees with its declared shape")
+    return [
+        builder.load(
+            _constant_value(
+                Value(type=value.type, name=value.name).with_const(
+                    item.item() if isinstance(item, np.generic) else item
+                )
+            )
+        )[0]
+        for item in flat
+    ]
+
+
 def _lower_block(
     block: Block,
     builder: Any,
@@ -552,19 +583,7 @@ def _lower_block(
         if value is None:
             continue
         if isinstance(value, ArrayValue):
-            import numpy as np
-
-            flat = np.asarray(concrete).reshape(-1)
-            if flat.size != _array_size(value):
-                raise EmitError("Bound HUGR array disagrees with its declared shape")
-            resolved = [
-                builder.load(
-                    _constant_value(
-                        Value(type=value.type, name="").with_const(item.item())
-                    )
-                )[0]
-                for item in flat
-            ]
+            resolved = _load_classical_array(value, concrete, builder)
         elif isinstance(value.type, ObservableType):
             resolved = concrete
         else:
@@ -866,6 +885,10 @@ def _lower_for(
 ) -> None:
     """Lower a for-loop with static unrolling or a native runtime TailLoop.
 
+    Keep enclosing array versions immutable while threading current contents
+    through each unrolled iteration. Scalar snapshots materialized for this
+    loop stay local, so enclosing iterations can capture fresh values.
+
     Args:
         operation (ForOperation): Prepared loop operation.
         builder (Any): HUGR dataflow builder.
@@ -926,38 +949,51 @@ def _lower_for(
     start, stop, step = (int(value.get_const()) for value in operation.operands[:3])
     if step == 0:
         raise EmitError("HUGR for-loop step cannot be zero")
-    captured_ids = _for_capture_ids(operation, environment)
+    loop_inputs = dict(environment)
+    for capture in operation.captures:
+        if (
+            isinstance(capture, Value)
+            and capture.parent_array is not None
+            and not capture.type.is_quantum()
+            and capture.uuid not in loop_inputs
+        ):
+            loop_inputs[capture.uuid] = _resolve_classical_argument(
+                capture, builder, loop_inputs
+            )
+    captured_ids = _for_capture_ids(operation, loop_inputs)
+    snapshot_ids = loop_inputs.keys() - environment.keys()
+    loop_environment = dict(loop_inputs)
     carried = {
         region.block_arg.uuid: _resolve_classical_argument(
             region.init,
             builder,
-            environment,
+            loop_inputs,
         )
         for region in operation.region_args
     }
     array_state = {
-        initial.uuid: list(_resolve_classical_argument(initial, builder, environment))
+        initial.uuid: list(_resolve_classical_argument(initial, builder, loop_inputs))
         for initial, _ in array_carries
     }
     for index in range(start, stop, step):
-        environment.update(array_state)
+        loop_environment.update(array_state)
         incoming_keys = set(live_qubits)
         if operation.loop_var_value is not None:
             [loop_wire] = builder.load(_hugr_uint_value(index))
-            environment[operation.loop_var_value.uuid] = loop_wire
-            environment[f"__index__:{operation.loop_var_value.uuid}"] = index
-        environment.update(carried)
+            loop_environment[operation.loop_var_value.uuid] = loop_wire
+            loop_environment[f"__index__:{operation.loop_var_value.uuid}"] = index
+        loop_environment.update(carried)
         for nested in operation.operations:
             _lower_operation(
                 nested,
                 builder,
-                environment,
+                loop_environment,
                 live_qubits,
                 functions,
             )
         array_state = {
             initial.uuid: list(
-                _resolve_classical_argument(yielded, builder, environment)
+                _resolve_classical_argument(yielded, builder, loop_environment)
             )
             for initial, yielded in array_carries
         }
@@ -965,7 +1001,7 @@ def _lower_for(
             region.block_arg.uuid: _resolve_classical_argument(
                 region.yielded,
                 builder,
-                environment,
+                loop_environment,
             )
             for region in operation.region_args
         }
@@ -974,10 +1010,15 @@ def _lower_for(
             live_qubits,
             incoming_keys,
             [
-                *_flatten_environment_values(captured_ids, environment),
+                *_flatten_environment_values(captured_ids, loop_environment),
                 *carried.values(),
             ],
         )
+    environment.update(
+        (uuid, wire)
+        for uuid, wire in loop_environment.items()
+        if uuid not in array_state and uuid not in snapshot_ids
+    )
     for initial, yielded in array_carries:
         environment[yielded.uuid] = array_state[initial.uuid]
     for region in operation.region_args:
@@ -2071,8 +2112,8 @@ def _capture_environment_ids(
             rather than generic captures. Defaults to ``None``.
 
     Returns:
-        list[str]: Environment UUIDs in declared capture order, with array
-            elements collapsed to an available root carrier.
+        list[str]: Environment UUIDs in declared capture order, preserving
+            materialized classical scalars and sharing linear root carriers.
 
     Raises:
         EmitError: If a non-constant declared capture has no parent-region
@@ -2091,7 +2132,8 @@ def _capture_environment_ids(
         if isinstance(value, Value):
             root_uuid = _array_root_uuid(value)
             if (
-                root_uuid is not None
+                value.type.is_quantum()
+                and root_uuid is not None
                 and root_uuid in environment
                 and root_uuid in declared_ids
             ):
@@ -2461,21 +2503,9 @@ def _lower_cinit(
         if isinstance(result, ArrayValue):
             concrete = result.get_const_array()
             if concrete is not None:
-                import numpy as np
-
-                flat = np.asarray(concrete).reshape(-1)
-                if len(flat) != _array_size(result):
-                    raise EmitError("HUGR array initializer disagrees with its shape")
-                environment[result.uuid] = [
-                    builder.load(
-                        _constant_value(
-                            Value(type=result.type, name=result.name).with_const(
-                                item.item()
-                            )
-                        )
-                    )[0]
-                    for item in flat
-                ]
+                environment[result.uuid] = _load_classical_array(
+                    result, concrete, builder
+                )
                 continue
             elements = result.get_element_uuids()
             if elements and len(elements) == _array_size(result):
