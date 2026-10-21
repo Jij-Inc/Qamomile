@@ -175,6 +175,19 @@ def _nested_snapshots(repetitions: qmc.UInt) -> tuple[qmc.Bit, qmc.Vector[qmc.Bi
 
 
 @qmc.qkernel
+def _saved_before_conditional(
+    flip_on: qmc.UInt,
+) -> tuple[qmc.Bit, qmc.Vector[qmc.Bit]]:
+    """Keep a scalar snapshot while a runtime branch updates its source vector."""
+    qs = qmc.qubit_array(1, "qs")
+    bits = qmc.measure(qs)
+    old = bits[0]
+    if qmc.get_current_shot() == flip_on:
+        bits[0] = ~bits[0]
+    return old, bits
+
+
+@qmc.qkernel
 def _read_float_table(values: qmc.Vector[qmc.Float]) -> qmc.Float:
     """Return a Float selected from a bound table."""
     return values[qmc.get_current_shot()]
@@ -445,3 +458,19 @@ def test_nested_loop_snapshots_are_refreshed_for_each_outer_iteration(repetition
     )
     expected = (False, (bool(repetitions % 2), False))
     assert p.sample(_executor(), shots=2).result().results == [(expected, 2)]
+
+
+@pytest.mark.parametrize("serialized", [False, True])
+@pytest.mark.parametrize("flip_on", [0, 1])
+def test_conditional_store_preserves_pre_branch_element_snapshot(flip_on, serialized):
+    """Both conditional outcomes preserve the saved scalar and update only the result."""
+    kernel = (
+        deserialize(serialize(_saved_before_conditional))
+        if serialized
+        else _saved_before_conditional
+    )
+    p = HugrTranspiler().transpile(kernel, bindings={"flip_on": flip_on})
+    assert dict(p.sample(_executor(), shots=2).result().results) == {
+        (False, (False,)): 1,
+        (False, (True,)): 1,
+    }

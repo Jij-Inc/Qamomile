@@ -1302,6 +1302,9 @@ def _lower_if(
 ) -> None:
     """Lower an SSA-merging conditional to a native HUGR Conditional node.
 
+    Preserve classical branch inputs as immutable snapshots. Only linear
+    quantum array aliases follow the merged resource wires.
+
     Args:
         operation (IfOperation): Prepared conditional operation.
         builder (Any): HUGR dataflow builder.
@@ -1469,7 +1472,7 @@ def _lower_if(
                 _set_quantum_origin_value(common_origin, result_wires, environment)
             environment[merge.result.uuid] = result_wires
             for value in (merge.true_value, merge.false_value):
-                if isinstance(value, ArrayValue):
+                if isinstance(value, ArrayValue) and value.type.is_quantum():
                     environment[value.uuid] = result_wires
             if merge.result.type.is_quantum():
                 consumed_ids = {

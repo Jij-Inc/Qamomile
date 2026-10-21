@@ -93,6 +93,7 @@ def test_unsupported_h2_outputs_fail_before_loading_converter(
 ):
     """Unsupported output types fail locally even without converter installation."""
     prepared = prepare_execution(HugrTranspiler().compile(kernel, bindings=bindings))
+    monkeypatch.setattr("qamomile.hugr._qir.sys.version_info", (3, 12, 0))
     load = Mock(side_effect=AssertionError("Converter must not be loaded"))
     monkeypatch.setattr("qamomile.hugr._qir.importlib.import_module", load)
     with pytest.raises(ExecutionError, match=kind):
@@ -103,12 +104,12 @@ def test_unsupported_h2_outputs_fail_before_loading_converter(
 def test_missing_converter_has_actionable_installation_error(monkeypatch):
     """H2 directs incomplete installations to the shared HUGR extra."""
     prepared = prepare_execution(HugrTranspiler().compile(_bell))
-    monkeypatch.setattr(
-        "qamomile.hugr._qir.importlib.import_module",
-        Mock(side_effect=ModuleNotFoundError("hugr_qir")),
-    )
+    monkeypatch.setattr("qamomile.hugr._qir.sys.version_info", (3, 12, 0))
+    load = Mock(side_effect=ModuleNotFoundError("hugr_qir"))
+    monkeypatch.setattr("qamomile.hugr._qir.importlib.import_module", load)
     with pytest.raises(ImportError, match=r"qamomile\[hugr\]"):
         to_h2_qir(prepared.package)
+    load.assert_called_once_with("hugr_qir.hugr_to_qir")
 
 
 def test_unsupported_python_version_has_actionable_error(monkeypatch):
@@ -123,6 +124,7 @@ def test_unsupported_python_version_has_actionable_error(monkeypatch):
 def test_invalid_converter_output_is_rejected(monkeypatch, value):
     """A malformed conversion result cannot be uploaded as executable bitcode."""
     prepared = prepare_execution(HugrTranspiler().compile(_bell))
+    monkeypatch.setattr("qamomile.hugr._qir.sys.version_info", (3, 12, 0))
     converter = SimpleNamespace(hugr_to_qir=Mock(return_value=value))
     output = SimpleNamespace(OutputFormat=SimpleNamespace(BITCODE="bitcode"))
     monkeypatch.setattr(
