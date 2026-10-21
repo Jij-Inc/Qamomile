@@ -104,4 +104,10 @@ Hamming [7,4,3]符号からのCSS構成、6スタビライザー、横断的Hada
 OpenFermionで分子ハミルトニアンを構築し、VQEで基底状態エネルギーを求めます。
 :::
 
+:::{card}
+:header: **量子リスク分析**
+:link: risk_analysis
+量子振幅推定により、VaR と CVaR を推定します。
+:::
+
 ::::
