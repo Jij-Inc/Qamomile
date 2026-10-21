@@ -511,6 +511,10 @@ class HugrExecutable:
     ) -> Job[SampleResult[Any]]:
         """Sample the typed program with runtime parameter values.
 
+        Ordinary sampling submits one program with one set of bindings and
+        requests ``shots`` repetitions. Device shot context is native to that
+        execution, not a parameter sweep or a counter shared across jobs.
+
         Args:
             executor (HugrExecutor): Selene or Nexus destination.
             shots (int): Positive number of repetitions, default ``1024``.

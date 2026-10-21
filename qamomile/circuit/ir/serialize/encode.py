@@ -79,6 +79,7 @@ from qamomile.circuit.ir.operation.operation import (
     Signature,
 )
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.shot import GetCurrentShotOperation
 from qamomile.circuit.ir.operation.slice_array import (
     ReleaseSliceViewOperation,
     SliceArrayOperation,
@@ -1253,6 +1254,22 @@ def _encode_qinit(op: QInitOperation, ctx: _EncodeContext) -> dict[str, Any]:
     return _base_op_dict("QInitOperation", op)
 
 
+def _encode_current_shot(
+    op: GetCurrentShotOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode a device shot-context read without resolving its result.
+
+    Args:
+        op (GetCurrentShotOperation): Abstract context read.
+        ctx (_EncodeContext): Current graph encoder context.
+
+    Returns:
+        dict[str, Any]: Operation record with its UInt result identity.
+    """
+    del ctx
+    return _base_op_dict("GetCurrentShotOperation", op)
+
+
 def _encode_cinit(op: CInitOperation, ctx: _EncodeContext) -> dict[str, Any]:
     """Encode :class:`CInitOperation`.
 
@@ -1964,6 +1981,7 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     CastOperation: _encode_cast,
     QInitOperation: _encode_qinit,
     CInitOperation: _encode_cinit,
+    GetCurrentShotOperation: _encode_current_shot,
     SliceArrayOperation: _encode_slice_array,
     ReleaseSliceViewOperation: _encode_release_slice_view,
     ReturnOperation: _encode_return,

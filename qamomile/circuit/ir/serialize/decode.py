@@ -84,6 +84,7 @@ from qamomile.circuit.ir.operation.operation import (
     Signature,
 )
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.shot import GetCurrentShotOperation
 from qamomile.circuit.ir.operation.slice_array import (
     ReleaseSliceViewOperation,
     SliceArrayOperation,
@@ -1464,6 +1465,22 @@ def _decode_qinit(d: dict[str, Any], ctx: _DecodeContext) -> QInitOperation:
     return QInitOperation(operands=operands, results=results)
 
 
+def _decode_current_shot(
+    d: dict[str, Any], ctx: _DecodeContext
+) -> GetCurrentShotOperation:
+    """Decode an abstract shot-context read without a host-side value.
+
+    Args:
+        d (dict[str, Any]): Serialized operation record.
+        ctx (_DecodeContext): Current graph decoder context.
+
+    Returns:
+        GetCurrentShotOperation: Reconstructed context read.
+    """
+    operands, results = _operands_results(d, ctx)
+    return GetCurrentShotOperation(operands=operands, results=results)
+
+
 def _decode_cinit(d: dict[str, Any], ctx: _DecodeContext) -> CInitOperation:
     """Decode :class:`CInitOperation`.
 
@@ -2491,6 +2508,7 @@ _OP_DECODERS: dict[str, Callable[[dict[str, Any], _DecodeContext], Operation]] =
     "CastOperation": _decode_cast,
     "QInitOperation": _decode_qinit,
     "CInitOperation": _decode_cinit,
+    "GetCurrentShotOperation": _decode_current_shot,
     "SliceArrayOperation": _decode_slice_array,
     "ReleaseSliceViewOperation": _decode_release_slice_view,
     "ReturnOperation": _decode_return,

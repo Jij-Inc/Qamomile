@@ -76,6 +76,7 @@ from qamomile.circuit.ir.operation.operation import (
     QInitOperation,
 )
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.shot import GetCurrentShotOperation
 from qamomile.circuit.ir.operation.slice_array import (
     ReleaseSliceViewOperation,
     SliceArrayOperation,
@@ -1158,6 +1159,14 @@ def _validate_operation_contract(
         _require_array_type(operation.operands[0], BitType(), location)
         _validate_qint_decode_layout(cast(ArrayValue, operation.operands[0]), location)
         _require_types(operation.results, [UIntType()], location, "result")
+    elif isinstance(operation, GetCurrentShotOperation):
+        _require_arity(operation, 0, 1, location)
+        _require_types(operation.results, [UIntType()], location, "result")
+        if (
+            isinstance(operation.results[0], ArrayValue)
+            or operation.results[0].is_constant()
+        ):
+            raise ValueError(f"{location} requires one nonconstant scalar UInt result")
     elif isinstance(operation, StoreArrayElementOperation):
         _validate_array_store(operation, location)
     elif isinstance(operation, ReturnQuantumArrayElementOperation):

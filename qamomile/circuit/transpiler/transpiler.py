@@ -574,6 +574,46 @@ class Transpiler(ABC, Generic[T]):
             QamomileCompileError: If validation, partial evaluation, or
                 segmentation rejects the program.
         """
+        from qamomile.circuit.ir.dataflow import walk_operations
+        from qamomile.circuit.ir.operation.gate import ControlledUOperation
+        from qamomile.circuit.ir.operation.inverse_block import InverseBlockOperation
+        from qamomile.circuit.ir.operation.select import SelectOperation
+        from qamomile.circuit.ir.operation.shot import GetCurrentShotOperation
+        from qamomile.circuit.transpiler.errors import TargetCapabilityError
+
+        bodies = [prepared.entrypoint]
+        for variants in prepared.definition_variants.values():
+            for definition in variants:
+                if definition.body is not None:
+                    bodies.append(definition.body)
+                bodies.extend(
+                    implementation.body
+                    for implementation in definition.implementations
+                    if implementation.body is not None
+                )
+        visited: set[int] = set()
+        while bodies:
+            body = bodies.pop()
+            if id(body) in visited:
+                continue
+            visited.add(id(body))
+            for op in walk_operations(body.operations):
+                if isinstance(op, GetCurrentShotOperation):
+                    raise TargetCapabilityError(
+                        f"{type(self).__name__} does not support get_current_shot(); use the HUGR target",
+                        target=type(self).__name__,
+                        operation="GetCurrentShotOperation",
+                    )
+                if isinstance(op, SelectOperation):
+                    bodies.extend(op.case_blocks)
+                if isinstance(op, ControlledUOperation) and op.block is not None:
+                    bodies.append(op.block)
+                if isinstance(op, InverseBlockOperation):
+                    bodies.extend(
+                        block
+                        for block in (op.source_block, op.implementation_block)
+                        if block is not None
+                    )
         affine = self.inline(prepared.entrypoint)
         affine = self.unroll_recursion(affine, bindings)
         validated = self.affine_validate(affine)

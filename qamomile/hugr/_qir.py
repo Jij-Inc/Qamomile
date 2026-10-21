@@ -12,9 +12,10 @@ from qamomile.circuit.transpiler import ExecutionError
 def to_h2_qir(package: Any) -> tuple[bytes, dict[str, tuple[str, int]]]:
     """Convert an instrumented package without changing its public output tags.
 
-    This adapter records Boolean results. Floating-point calculations inside
-    the program remain available. Integer output decoding requires a separate
-    verified provider contract before it can preserve unsigned values safely.
+    This adapter records Boolean results. H2 permits constant floating-point
+    gate arguments but only integer runtime computations. Integer output
+    decoding requires a separate verified provider contract before it can
+    preserve unsigned values safely.
 
     Args:
         package (Any): HUGR package with a closed ``main`` and tagged outputs.
@@ -76,7 +77,59 @@ def to_h2_qir(package: Any) -> tuple[bytes, dict[str, tuple[str, int]]]:
             validate_hugr=True,
         )
     except Exception as exc:
-        raise ExecutionError(f"H2 QIR conversion failed: {exc}") from exc
+        hint = ""
+        if "@abort()" in str(exc):
+            hint = (
+                " The installed hugr-qir converter lowers runtime bounds failure "
+                "to abort(), which H2 QIR validation rejects. Guard table access "
+                "with index < table.shape[0] and define the fallback explicitly."
+            )
+        raise ExecutionError(f"H2 QIR conversion failed: {exc}{hint}") from exc
     if not isinstance(bitcode, bytes) or not bitcode.startswith(b"BC\xc0\xde"):
         raise ExecutionError("H2 QIR conversion did not produce LLVM bitcode")
+    _validate_h2_classical_instructions(bitcode)
     return bitcode, outputs
+
+
+def _validate_h2_classical_instructions(bitcode: bytes) -> None:
+    """Reject operations accepted by the shared validator but unavailable on H2.
+
+    The pinned validator covers both platform families and accepts floating
+    computations and integer division/remainder that require Helios. Inspect
+    optimized QIR so constant binding and constant angle folding remain valid.
+
+    Args:
+        bitcode (bytes): LLVM bitcode already accepted by the shared validator.
+
+    Raises:
+        ExecutionError: If QIR contains runtime Float values, integer division
+            or remainder, or invalid bitcode.
+    """
+    import pyqir
+
+    try:
+        module = pyqir.Module.from_bitcode(pyqir.Context(), bitcode)
+    except Exception as exc:
+        raise ExecutionError(f"H2 QIR bitcode could not be inspected: {exc}") from exc
+    unsupported = {
+        pyqir.Opcode.UDIV,
+        pyqir.Opcode.SDIV,
+        pyqir.Opcode.UREM,
+        pyqir.Opcode.SREM,
+    }
+    for function in module.functions:
+        for block in function.basic_blocks:
+            for instruction in block.instructions:
+                if instruction.opcode in unsupported:
+                    raise ExecutionError(
+                        "H2 does not support runtime integer division or remainder"
+                    )
+                if instruction.type.is_double or any(
+                    operand.type.is_double and not isinstance(operand, pyqir.Constant)
+                    for operand in instruction.operands
+                ):
+                    raise ExecutionError(
+                        "H2 does not support runtime Float computations or selected "
+                        "Float gate arguments; use integer predicates to select "
+                        "gates with constant angles, or target Helios"
+                    )

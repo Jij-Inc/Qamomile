@@ -24,6 +24,7 @@ from qamomile.circuit.ir.operation.callable import (
     InvokeOperation,
 )
 from qamomile.circuit.ir.operation.cast import CastOperation
+from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
     HasNestedOps,
@@ -51,6 +52,7 @@ from qamomile.circuit.ir.operation.operation import CInitOperation, QInitOperati
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
 from qamomile.circuit.ir.operation.select import SelectOperation
+from qamomile.circuit.ir.operation.shot import GetCurrentShotOperation
 from qamomile.circuit.ir.operation.slice_array import (
     ReleaseSliceViewOperation,
     SliceArrayOperation,
@@ -291,6 +293,7 @@ def _lower_module(program: PreparedModule, plan: HugrCompilationPlan) -> Any:
         tket_exts.rotation(),
         tket_exts.bool(),
         tket_exts.global_phase(),
+        tket_exts.qsystem_utils(),
     ]
     return Package([module.hugr], extensions)
 
@@ -548,7 +551,21 @@ def _lower_block(
         value = block.parameters.get(name)
         if value is None:
             continue
-        if isinstance(value.type, ObservableType):
+        if isinstance(value, ArrayValue):
+            import numpy as np
+
+            flat = np.asarray(concrete).reshape(-1)
+            if flat.size != _array_size(value):
+                raise EmitError("Bound HUGR array disagrees with its declared shape")
+            resolved = [
+                builder.load(
+                    _constant_value(
+                        Value(type=value.type, name="").with_const(item.item())
+                    )
+                )[0]
+                for item in flat
+            ]
+        elif isinstance(value.type, ObservableType):
             resolved = concrete
         else:
             scalar = cast(int | float | bool, concrete)
@@ -725,6 +742,21 @@ def _lower_operation(
         EmitError: If the operation has no direct program-graph lowering.
     """
     match operation:
+        case GetCurrentShotOperation():
+            import tket_exts
+
+            from hugr import tys
+
+            [wire] = builder.add_op(
+                tket_exts.qsystem_utils()
+                .get_op("GetCurrentShot")
+                .instantiate(
+                    concrete_signature=tys.FunctionType([], [_hugr_uint_type()])
+                )
+            )
+            environment[operation.results[0].uuid] = wire
+        case StoreArrayElementOperation():
+            _lower_classical_store(operation, builder, environment)
         case CInitOperation():
             _lower_cinit(operation, builder, environment)
         case QInitOperation():
@@ -766,7 +798,13 @@ def _lower_operation(
         case NotOp():
             from hugr.std.logic import Not
 
-            [result] = builder.add(Not(environment[operation.operands[0].uuid]))
+            [result] = builder.add(
+                Not(
+                    _resolve_classical_argument(
+                        operation.operands[0], builder, environment
+                    )
+                )
+            )
             environment[operation.results[0].uuid] = result
         case SliceArrayOperation():
             _lower_slice(operation, environment)
@@ -855,6 +893,18 @@ def _lower_for(
         for rebind in operation.loop_carried_rebinds
         if not rebind.before.type.is_quantum()
     ]
+    array_carries = _static_classical_array_carries(operation)
+    carried_array_ids = {initial.logical_id for initial, _ in array_carries}
+    residual_rebinds = [
+        rebind
+        for rebind in residual_rebinds
+        if not (
+            isinstance(rebind.before, ArrayValue)
+            and isinstance(rebind.after, ArrayValue)
+            and rebind.before.logical_id == rebind.after.logical_id
+            and rebind.before.logical_id in carried_array_ids
+        )
+    ]
     if residual_rebinds:
         names = ", ".join(rebind.var_name for rebind in residual_rebinds)
         raise EmitError(
@@ -885,7 +935,12 @@ def _lower_for(
         )
         for region in operation.region_args
     }
+    array_state = {
+        initial.uuid: list(_resolve_classical_argument(initial, builder, environment))
+        for initial, _ in array_carries
+    }
     for index in range(start, stop, step):
+        environment.update(array_state)
         incoming_keys = set(live_qubits)
         if operation.loop_var_value is not None:
             [loop_wire] = builder.load(_hugr_uint_value(index))
@@ -900,6 +955,12 @@ def _lower_for(
                 live_qubits,
                 functions,
             )
+        array_state = {
+            initial.uuid: list(
+                _resolve_classical_argument(yielded, builder, environment)
+            )
+            for initial, yielded in array_carries
+        }
         carried = {
             region.block_arg.uuid: _resolve_classical_argument(
                 region.yielded,
@@ -917,12 +978,91 @@ def _lower_for(
                 *carried.values(),
             ],
         )
+    for initial, yielded in array_carries:
+        environment[yielded.uuid] = array_state[initial.uuid]
     for region in operation.region_args:
         wire = carried[region.block_arg.uuid]
         environment[region.result.uuid] = wire
         if region.result.type.is_quantum():
             live_qubits.pop(region.init.uuid, None)
             live_qubits[region.result.uuid] = wire
+
+
+def _static_classical_array_carries(
+    operation: ForOperation,
+) -> tuple[tuple[ArrayValue, ArrayValue], ...]:
+    """Find persistent array stores that need routing through a static loop.
+
+    Measured Bit arrays retain logical identity across Store SSA versions but
+    do not use the frontend's scalar region-argument protocol. Route their
+    current contents at target emission, as the host classical executor does.
+    Explicit array region arguments already provide their own routing.
+
+    Args:
+        operation (ForOperation): Loop with body operations and optional carries.
+
+    Returns:
+        tuple[tuple[ArrayValue, ArrayValue], ...]: External initial array and
+            final body version for each persistent classical array. Runtime
+            loops and arrays allocated inside the body are excluded.
+    """
+    from qamomile.circuit.ir.dataflow import walk_operations
+
+    if len(operation.operands) < 3 or not all(
+        value.is_constant() for value in operation.operands[:3]
+    ):
+        return ()
+    operations = list(walk_operations(operation.operations))
+    produced = {value.uuid for op in operations for value in op.results}
+    explicit = {region.init.logical_id for region in operation.region_args}
+    initial_arrays: dict[str, ArrayValue] = {}
+    final_arrays: dict[str, ArrayValue] = {}
+    stored_ids = {
+        op.array.logical_id
+        for op in operations
+        if isinstance(op, StoreArrayElementOperation)
+    }
+    for candidate in [
+        *operation.captures,
+        *(rebind.before for rebind in operation.loop_carried_rebinds),
+    ]:
+        if (
+            isinstance(candidate, ArrayValue)
+            and candidate.logical_id in stored_ids
+            and candidate.logical_id not in explicit
+            and candidate.uuid not in produced
+        ):
+            initial_arrays.setdefault(candidate.logical_id, candidate)
+    for op in operations:
+        if isinstance(op, StoreArrayElementOperation):
+            array = op.array
+            if array.uuid not in produced and array.logical_id not in explicit:
+                initial_arrays.setdefault(array.logical_id, array)
+
+    pending = [(op, False) for op in reversed(operation.operations)]
+    while pending:
+        op, visited = pending.pop()
+        if isinstance(op, HasNestedOps) and not visited:
+            pending.append((op, True))
+            pending.extend(
+                (nested, False)
+                for nested in reversed(
+                    [
+                        child
+                        for region in op.nested_regions()
+                        for child in region.operations
+                    ]
+                )
+            )
+            continue
+        for value in op.results:
+            if isinstance(value, ArrayValue) and value.logical_id in initial_arrays:
+                final_arrays[value.logical_id] = value
+    return tuple(
+        (initial, final_arrays[logical_id])
+        for logical_id, initial in initial_arrays.items()
+        if logical_id in final_arrays
+    )
 
 
 def _lower_runtime_for(
@@ -1168,7 +1308,7 @@ def _lower_if(
             "HUGR runtime conditionals do not support QInt register merges",
             operation="IfOperation",
         )
-    condition = _resolve_wire(operation.condition, environment)
+    condition = _resolve_classical_argument(operation.condition, builder, environment)
     captured_ids = _branch_capture_ids(operation, environment)
     true_origins = _quantum_origins(operation.true_operations, captured_ids)
     false_origins = _quantum_origins(operation.false_operations, captured_ids)
@@ -1203,7 +1343,7 @@ def _lower_if(
             functions,
         )
     true_outputs = _flatten_region_yields(
-        operation.true_yields, true_environment, "true"
+        operation.true_yields, true_environment, "true", true_builder
     )
     _validate_live_quantum_yields(
         operation.true_yields,
@@ -1244,7 +1384,7 @@ def _lower_if(
             functions,
         )
     false_outputs = _flatten_region_yields(
-        operation.false_yields, false_environment, "false"
+        operation.false_yields, false_environment, "false", false_builder
     )
     _validate_live_quantum_yields(
         operation.false_yields,
@@ -1945,6 +2085,8 @@ def _capture_environment_ids(
     for value in captures:
         if value.uuid in excluded_ids or value.is_constant():
             continue
+        if isinstance(value, ArrayValue) and value.get_const_array() is not None:
+            continue
         environment_id = value.uuid if value.uuid in environment else None
         if isinstance(value, Value):
             root_uuid = _array_root_uuid(value)
@@ -2245,6 +2387,7 @@ def _flatten_region_yields(
     values: list[Value],
     environment: dict[str, Any],
     branch: str,
+    builder: Any = None,
 ) -> list[Any]:
     """Flatten scalar and fixed-array region yields into HUGR wires.
 
@@ -2252,6 +2395,7 @@ def _flatten_region_yields(
         values (list[Value]): Semantic values yielded by a region.
         environment (dict[str, Any]): Region-local value environment.
         branch (str): Region name used in diagnostics.
+        builder (Any): Region builder for classical element selection; defaults to None.
 
     Returns:
         list[Any]: Flattened HUGR output wires.
@@ -2261,7 +2405,11 @@ def _flatten_region_yields(
     """
     wires: list[Any] = []
     for value in values:
-        resolved = _require_wire(value, environment, branch)
+        resolved = (
+            _resolve_classical_argument(value, builder, environment)
+            if builder is not None and not value.type.is_quantum()
+            else _require_wire(value, environment, branch)
+        )
         wires.extend(resolved if isinstance(resolved, list) else [resolved])
     return wires
 
@@ -2469,6 +2617,9 @@ def _resolve_classical_argument(
         return _pack_value(value, environment, builder)
     if value.uuid in environment:
         return environment[value.uuid]
+    if isinstance(value, ArrayValue) and value.get_const_array() is not None:
+        _lower_cinit(CInitOperation(results=[value]), builder, environment)
+        return environment[value.uuid]
     address = _array_address(value, environment)
     if address is not None:
         root_uuid, index = address
@@ -2478,6 +2629,8 @@ def _resolve_classical_argument(
             raise EmitError(
                 f"Unresolved HUGR classical array element {value.name!r}"
             ) from error
+    if value.parent_array is not None and not value.type.is_quantum():
+        return _lower_dynamic_classical_element(value, builder, environment)
     parameter_name = value.parameter_name()
     if parameter_name is not None:
         alias = f"__parameter__:{parameter_name}"
@@ -2487,6 +2640,158 @@ def _resolve_classical_argument(
         [wire] = builder.load(_constant_value(value))
         return wire
     raise EmitError(f"Unresolved HUGR classical argument {value.name!r}")
+
+
+def _lower_dynamic_classical_element(
+    value: Value, builder: Any, environment: dict[str, Any]
+) -> Any:
+    """Select a classical vector element through bounded forward branches.
+
+    Args:
+        value (Value): Scalar element of a fixed classical vector.
+        builder (Any): Current HUGR dataflow builder.
+        environment (dict[str, Any]): Available scalar and array wires.
+
+    Returns:
+        Any: Selected scalar wire.
+
+    Raises:
+        EmitError: If the vector, index, or element type cannot be resolved.
+    """
+    array = value.parent_array
+    if array is None or len(value.element_indices) != 1 or array.slice_of is not None:
+        raise EmitError("HUGR runtime classical indexing requires an unsliced Vector")
+    if not isinstance(value.type, (BitType, UIntType, FloatType)):
+        raise EmitError("HUGR runtime indexing supports Bit, UInt, and Float elements")
+    if array.uuid not in environment and array.get_const_array() is not None:
+        _lower_cinit(CInitOperation(results=[array]), builder, environment)
+    elements = environment.get(array.uuid)
+    if not isinstance(elements, list) or not elements:
+        raise EmitError("HUGR runtime classical indexing requires a resolved Vector")
+    index = _resolve_classical_argument(value.element_indices[0], builder, environment)
+    return _select_classical_element(builder, index, elements, _lower_type(value.type))
+
+
+def _select_classical_element(
+    builder: Any, index: Any, elements: list[Any], element_type: Any
+) -> Any:
+    """Select a scalar with explicit bounds failure and forward-only branching.
+
+    Args:
+        builder (Any): HUGR dataflow builder receiving the selection.
+        index (Any): Runtime UInt wire.
+        elements (list[Any]): Fixed classical vector carrier wires.
+        element_type (Any): Common HUGR element type.
+
+    Returns:
+        Any: Selected element; an out-of-range execution panics instead.
+    """
+    from hugr import tys, val
+    from hugr.std.int import INT_OPS_EXTENSION
+    from hugr.std.prelude import PRELUDE_EXTENSION
+
+    [size] = builder.load(_hugr_uint_value(len(elements)))
+    compare = INT_OPS_EXTENSION.get_op("ilt_u").instantiate(
+        list(_hugr_uint_type().args),
+        concrete_signature=tys.FunctionType([_hugr_uint_type()] * 2, [tys.Bool]),
+    )
+    [in_bounds] = builder.add_op(compare, index, size)
+    valid = builder.add_if(in_bounds, index, *elements)
+    selected = _select_in_bounds(valid, valid.inputs()[0], list(valid.inputs()[1:]), 0)
+    valid.set_outputs(selected)
+    invalid = valid.add_else()
+    error_type = PRELUDE_EXTENSION.types["error"].instantiate([])
+    [error] = invalid.load(
+        val.Extension(
+            "ConstError",
+            typ=error_type,
+            val={
+                "signal": 1,
+                "message": "Qamomile classical Vector index out of range",
+            },
+        )
+    )
+    panic = PRELUDE_EXTENSION.get_op("panic").instantiate(
+        [tys.ListArg([]), tys.ListArg([tys.TypeTypeArg(element_type)])],
+        concrete_signature=tys.FunctionType([error_type], [element_type]),
+    )
+    [failed] = invalid.add_op(panic, error)
+    invalid.set_outputs(failed)
+    return valid.conditional_node[0]
+
+
+def _select_in_bounds(
+    builder: Any, index: Any, elements: list[Any], offset: int
+) -> Any:
+    """Build a balanced selection tree for an already checked classical index.
+
+    Args:
+        builder (Any): HUGR builder for this selection region.
+        index (Any): Original runtime UInt index.
+        elements (list[Any]): Nonempty contiguous subset of vector wires.
+        offset (int): Position of this subset's first element.
+
+    Returns:
+        Any: Selected scalar wire.
+    """
+    from hugr import tys
+    from hugr.std.int import INT_OPS_EXTENSION
+
+    if len(elements) == 1:
+        return elements[0]
+    middle = len(elements) // 2
+    [split] = builder.load(_hugr_uint_value(offset + middle))
+    compare = INT_OPS_EXTENSION.get_op("ilt_u").instantiate(
+        list(_hugr_uint_type().args),
+        concrete_signature=tys.FunctionType([_hugr_uint_type()] * 2, [tys.Bool]),
+    )
+    [left] = builder.add_op(compare, index, split)
+    branch = builder.add_if(left, index, *elements)
+    inputs = list(branch.inputs())
+    branch.set_outputs(
+        _select_in_bounds(branch, inputs[0], inputs[1 : middle + 1], offset)
+    )
+    other = branch.add_else()
+    inputs = list(other.inputs())
+    other.set_outputs(
+        _select_in_bounds(other, inputs[0], inputs[middle + 1 :], offset + middle)
+    )
+    return branch.conditional_node[0]
+
+
+def _lower_classical_store(
+    operation: StoreArrayElementOperation, builder: Any, environment: dict[str, Any]
+) -> None:
+    """Publish an SSA classical vector update at a statically resolved index.
+
+    Args:
+        operation (StoreArrayElementOperation): Source vector and replacement.
+        builder (Any): HUGR dataflow builder.
+        environment (dict[str, Any]): Value wires to update.
+
+    Raises:
+        EmitError: If the vector or index is unresolved or outside its shape.
+    """
+    if len(operation.index_values) != 1:
+        raise EmitError("HUGR classical stores currently require a Vector")
+    value = operation.index_values[0]
+    index = (
+        value.get_const()
+        if value.is_constant()
+        else environment.get(f"__index__:{value.uuid}")
+    )
+    source = environment.get(operation.array.uuid)
+    if (
+        not isinstance(index, int)
+        or not isinstance(source, list)
+        or not 0 <= index < len(source)
+    ):
+        raise EmitError("HUGR classical stores require an in-range static index")
+    updated = list(source)
+    updated[index] = _resolve_classical_argument(
+        operation.stored_value, builder, environment
+    )
+    environment[operation.results[0].uuid] = updated
 
 
 def _array_address(
