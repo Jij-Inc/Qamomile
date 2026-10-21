@@ -126,12 +126,19 @@ from .frontend.qkernel import QKernel, qkernel
 from .frontend.struct import struct
 from .ir.effect import KernelEffect
 from .stdlib import (
+    AmplificationPreparation,
+    AmplificationSchedule,
+    FixedPointAmplificationSchedule,
     IsingZBlockEncoding,
     LCUBlockEncoding,
     LCUBlockEncodingTerm,
     PauliLCUBlockEncoding,
     PeriodicShiftLCUBlockEncoding,
+    StandardAmplificationSchedule,
     add_const,
+    amplification_preparation,
+    amplitude_amplification,
+    amplitude_amplification_iteration_count,
     amplitude_encoding,
     amplitude_encoding_from_angles,
     computational_basis_state,
@@ -139,6 +146,7 @@ from .stdlib import (
     controlled_modular_add,
     controlled_modular_add_const,
     controlled_modular_add_const_modulus,
+    fixed_point_amplification_schedule,
     grover_iteration_count,
     grover_search,
     identity_block_encoding,
@@ -161,6 +169,7 @@ from .stdlib import (
     qpe,
     qsvt,
     ripple_carry_add,
+    standard_amplification_schedule,
 )
 
 # Execution result / job types (return values of ExecutableProgram.sample / run)
@@ -325,6 +334,15 @@ __all__ = [
     "ekera_hastad_factoring",
     "grover_search",
     "grover_iteration_count",
+    "AmplificationSchedule",
+    "StandardAmplificationSchedule",
+    "FixedPointAmplificationSchedule",
+    "standard_amplification_schedule",
+    "fixed_point_amplification_schedule",
+    "amplitude_amplification_iteration_count",
+    "AmplificationPreparation",
+    "amplification_preparation",
+    "amplitude_amplification",
     "QKernel",
     # Job / result types
     "Job",
