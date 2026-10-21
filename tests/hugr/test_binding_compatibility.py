@@ -499,6 +499,11 @@ def test_restore_accepts_equivalent_whole_and_indexed_bindings(
     shots = 1 if operation == "run" else 3
     native = SimpleNamespace(id="binding-job", job_type="execute")
     client = SimpleNamespace(
+        login=Mock(),
+        context=SimpleNamespace(get_active_project=Mock(return_value=None)),
+        projects=SimpleNamespace(
+            get_or_create=Mock(return_value=SimpleNamespace(id="default-project"))
+        ),
         HeliosConfig=Mock(side_effect=lambda **kwargs: SimpleNamespace(**kwargs)),
         hugr=SimpleNamespace(upload=Mock(return_value="binding-program")),
         start_execute_job=Mock(return_value=native),

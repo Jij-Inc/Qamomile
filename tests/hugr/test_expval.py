@@ -395,6 +395,11 @@ def _mock_helios_client(rows_by_term: list[list[tuple[int, ...]]]) -> Any:
         for job, rows in zip(jobs, rows_by_term, strict=True)
     }
     return SimpleNamespace(
+        login=Mock(),
+        context=SimpleNamespace(get_active_project=Mock(return_value=None)),
+        projects=SimpleNamespace(
+            get_or_create=Mock(return_value=SimpleNamespace(id="default-project"))
+        ),
         HeliosConfig=Mock(
             side_effect=lambda **kwargs: SimpleNamespace(type="HeliosConfig", **kwargs)
         ),

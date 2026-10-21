@@ -121,6 +121,7 @@ from .frontend.operation.qubit_gates import (
     z,
 )
 from .frontend.operation.select import select
+from .frontend.operation.shot import get_current_shot
 from .frontend.oracle import Oracle, TransformedOracle, opaque
 from .frontend.qkernel import QKernel, qkernel
 from .frontend.struct import struct
@@ -235,6 +236,7 @@ __all__ = [
     "select",
     "inverse",
     "global_phase",
+    "get_current_shot",
     "cast",
     "ceil",
     "log2",

@@ -512,7 +512,7 @@ class HugrExecutable:
         """Sample the typed program with runtime parameter values.
 
         Args:
-            executor (HugrExecutor): Selene or Helios destination.
+            executor (HugrExecutor): Selene or Nexus destination.
             shots (int): Positive number of repetitions, default ``1024``.
             bindings (Mapping[str, Any] | None): Runtime values, keyed by
                 whole argument names or shared indexed parameter names.
@@ -547,7 +547,7 @@ class HugrExecutable:
         nonidentity Pauli term; total device shots scale with that term count.
 
         Args:
-            executor (HugrExecutor): Selene or Helios destination.
+            executor (HugrExecutor): Selene or Nexus destination.
             bindings (Mapping[str, Any] | None): Whole or indexed runtime
                 parameter values.
             shots (int | None): Legacy positive shots per expectation term.
