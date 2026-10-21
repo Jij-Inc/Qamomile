@@ -37,6 +37,7 @@ TUTORIAL_PATTERNS = [
 # Tutorials that require optional dependency groups (e.g. chemistry)
 # and should be skipped when those dependencies are not installed.
 OPTIONAL_SKIP_MODULES: dict[str, tuple[str, ...]] = {
+    "adapt_vqe": ("openfermion", "openfermionpyscf", "pyscf"),
     "vqe_for_hydrogen": ("openfermion",),
     "braket_support": ("braket",),
     "cudaq_support": ("cudaq",),
