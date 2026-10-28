@@ -31,6 +31,8 @@ def serialize(kernel: QKernelLike) -> bytes:
     Raises:
         TypeError: If the qkernel contains an unsupported type or payload.
         ValueError: If the qkernel is bound, lowered, or malformed.
+        RuntimeError: If an opaque resource estimate contains public metrics or
+            metadata that disagree with retained canonical provenance.
     """
     try:
         return _to_proto(kernel).SerializeToString(deterministic=True)
@@ -84,6 +86,8 @@ def _to_proto(kernel: QKernelLike) -> pb.QKernel:
     Raises:
         TypeError: If a frontend type or payload is unsupported.
         ValueError: If the qkernel is bound, lowered, or malformed.
+        RuntimeError: If an opaque resource estimate contains public metrics or
+            metadata that disagree with retained canonical provenance.
     """
     return qkernel_from_graph_dict(_to_dict(kernel))
 

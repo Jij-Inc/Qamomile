@@ -16,11 +16,12 @@ executor and emit-time unrolling thread ``init → block_arg → yielded →
 result`` per iteration. ``sum(range(4))`` now compiles to ``6``; these
 tests pin Python-exact execution for the previously rejected shapes.
 
-``while`` loops keep the record-based rejection for non-condition
-carries: a runtime while loop cannot be unrolled, so a per-iteration
-classical carry (other than the aliased condition pair) is still not
-representable. Measurement-backed ``Bit`` carries in ``for`` loops keep
-their targeted rejection too.
+``while`` loops expose non-condition scalar carries as ``RegionArg`` values
+in the semantic IR. Circuit targets still reject a genuinely changing carry
+because their runtime-loop APIs cannot portably thread classical state;
+identity carries are lowered normally, and HUGR can consume the explicit
+interface. Measurement-backed ``Bit`` carries in ``for`` loops keep their
+targeted rejection too.
 """
 
 import math
@@ -40,11 +41,13 @@ from qamomile.circuit.ir.operation.control_flow import (
 from qamomile.circuit.ir.types.primitives import UIntType
 from qamomile.circuit.ir.value import DictValue, TupleValue, Value
 from qamomile.circuit.transpiler.errors import (
+    FrontendTransformError,
     QamomileCompileError,
     QubitRebindError,
     ValidationError,
 )
 from qamomile.circuit.transpiler.passes.analyze import (
+    _collect_loop_external_liveness,
     reject_loop_carried_classical_rebinds,
 )
 
@@ -53,6 +56,125 @@ pytest.importorskip("qiskit")
 from qamomile.qiskit import QiskitTranspiler  # noqa: E402
 
 LOOP_CARRIED = "Loop-carried"
+
+
+@qmc.qkernel
+def _recursive_unary_driver(
+    value: qmc.Float,
+    target: qmc.Qubit,
+) -> qmc.Qubit:
+    """Recurse until a unary compile-time expression reaches zero.
+
+    Args:
+        value (qmc.Float): Compile-time recursion driver.
+        target (qmc.Qubit): Qubit updated at the base case.
+
+    Returns:
+        qmc.Qubit: Updated target qubit.
+    """
+    rounded = qmc.ceil(value)
+    if rounded == 0:
+        target = qmc.h(target)
+    else:
+        target = _recursive_unary_driver(value - 1.0, target)
+    return target
+
+
+@qmc.qkernel
+def _recursive_unary_circuit(value: qmc.Float) -> qmc.Bit:
+    """Measure one target after compile-time unary recursion.
+
+    Args:
+        value (qmc.Float): Compile-time recursion driver.
+
+    Returns:
+        qmc.Bit: Measurement of the recursively updated target.
+    """
+    target = _recursive_unary_driver(value, qmc.qubit("target"))
+    return qmc.measure(target)
+
+
+@qmc.qkernel
+def _recursive_unused_predicate(
+    depth: qmc.UInt,
+    predicate: qmc.Bit,
+    target: qmc.Qubit,
+) -> qmc.Qubit:
+    """Recurse to one gate without reading a forwarded predicate.
+
+    Args:
+        depth (qmc.UInt): Compile-time recursion depth.
+        predicate (qmc.Bit): Deliberately unused caller predicate.
+        target (qmc.Qubit): Qubit updated at the base case.
+
+    Returns:
+        qmc.Qubit: Updated target qubit.
+    """
+    if depth == 0:
+        target = qmc.t(target)
+    else:
+        target = _recursive_unused_predicate(depth - 1, predicate, target)
+    return target
+
+
+@qmc.qkernel
+def _recursive_unused_predicate_circuit(
+    depth: qmc.UInt,
+    iterations: qmc.UInt,
+) -> qmc.Bit:
+    """Refresh an ignored predicate around recursive invocations.
+
+    Args:
+        depth (qmc.UInt): Compile-time recursion depth.
+        iterations (qmc.UInt): Number of loop iterations.
+
+    Returns:
+        qmc.Bit: Final target measurement.
+    """
+    predicate = qmc.bit(False)
+    target = qmc.qubit("target")
+    source = qmc.qubit("source")
+    for _index in qmc.range(iterations):
+        target = _recursive_unused_predicate(depth, predicate, target)
+        predicate = qmc.measure(source)
+    return qmc.measure(target)
+
+
+def test_operation_liveness_is_retained_only_inside_while_bodies() -> None:
+    """Per-operation snapshots are omitted outside stale-while analysis."""
+
+    @qmc.qkernel
+    def for_only() -> qmc.Bit:
+        """Build a loop tree that contains no runtime while."""
+        qubit = qmc.qubit("qubit")
+        for _index in qmc.range(4):
+            qubit = qmc.h(qubit)
+        return qmc.measure(qubit)
+
+    _, operation_liveness = _collect_loop_external_liveness(
+        for_only.build().operations,
+        set(),
+    )
+    assert operation_liveness == {}
+
+    @qmc.qkernel
+    def with_while() -> qmc.Bit:
+        """Build one while whose body updates its measured condition."""
+        condition = qmc.measure(qmc.qubit("initial"))
+        while condition:
+            condition = qmc.measure(qmc.qubit("next"))
+        return condition
+
+    block = with_while.build()
+    [while_operation] = _find_loops(block.operations)
+    _, operation_liveness = _collect_loop_external_liveness(
+        block.operations,
+        set(),
+    )
+    assert operation_liveness
+    assert {id(operation) for operation in while_operation.operations} <= set(
+        operation_liveness
+    )
 
 
 def _transpile(kernel, bindings=None, parameters=None):
@@ -519,7 +641,7 @@ class TestSupportedLoopCarriedScalars:
                 q = qmc.x(q)
             return qmc.measure(q)
 
-        with pytest.raises(QamomileCompileError, match="backend-representable"):
+        with pytest.raises(QamomileCompileError, match="engine-representable"):
             _transpile(kernel)
 
     def test_huge_static_region_range_raises_typed_compile_error(self):
@@ -534,7 +656,7 @@ class TestSupportedLoopCarriedScalars:
                 angle = angle + 1.0
             return qmc.measure(q)
 
-        with pytest.raises(QamomileCompileError, match="backend-representable"):
+        with pytest.raises(QamomileCompileError, match="engine-representable"):
             _transpile(kernel)
 
     def test_swap_rotation(self):
@@ -769,7 +891,7 @@ class TestSupportedLoopCarriedScalars:
 
         monkeypatch.setattr(
             compile_time_if_lowering,
-            "_MAX_STATIC_CARRY_ITERATIONS",
+            "MAX_STATIC_REPLAY_TRIPS",
             8,
         )
 
@@ -805,7 +927,7 @@ class TestSupportedLoopCarriedScalars:
 
         monkeypatch.setattr(
             compile_time_if_lowering,
-            "_MAX_STATIC_CARRY_ITERATIONS",
+            "MAX_STATIC_REPLAY_TRIPS",
             3,
         )
 
@@ -1072,7 +1194,7 @@ class TestSupportedLoopCarriedScalars:
             n = 1
             for _i in qmc.range(2):
                 n = n
-            return n
+            return qmc.uint(n)
 
         @qmc.qkernel
         def divergent() -> qmc.UInt:
@@ -1177,9 +1299,10 @@ class TestRejectedRebinds:
     def test_while_counter_rejected(self):
         """A classical counter inside a measurement-conditioned while is rejected.
 
-        A runtime while loop cannot be unrolled, so a non-condition
-        classical carry has no emit-time threading; the record-based
-        rejection stays.
+        The frontend represents the counter as a RegionArg, but circuit
+        targets cannot portably thread that state through their runtime loop
+        APIs and reject it before materialization. HUGR TailLoop lowering is
+        covered separately and accepts the same semantic interface.
         """
 
         @qmc.qkernel
@@ -1651,7 +1774,7 @@ class TestRejectedRebinds:
         """A residual endpoint keeps the identity RegionArg that defines it."""
 
         @qmc.qkernel
-        def kernel() -> qmc.Bit:
+        def kernel() -> qmc.UInt:
             selector = qmc.measure(qmc.qubit("selector"))
             base = 1
             flag = qmc.bit(False)
@@ -1866,6 +1989,41 @@ class TestRejectedRebinds:
             return value
 
         assert _sample_single(kernel) == 1
+
+    def test_nested_varying_trip_count_rejects_bit_backedge(self):
+        """Any outer index producing two inner trips requires Bit carry."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            target = qmc.qubit("target")
+            source = qmc.qubit("source")
+            for outer in qmc.range(1, 3):
+                predicate = qmc.bit(False)
+                for _inner in qmc.range(outer):
+                    if predicate:
+                        target = qmc.t(target)
+                    predicate = qmc.measure(source)
+            return qmc.measure(target)
+
+        with pytest.raises(ValidationError, match=LOOP_CARRIED):
+            _transpile(kernel)
+
+    def test_nested_translation_invariant_single_trip_bit_is_allowed(self):
+        """An affine inner range that is always one trip has no backedge."""
+
+        @qmc.qkernel
+        def kernel() -> qmc.Bit:
+            target = qmc.qubit("target")
+            source = qmc.qubit("source")
+            for outer in qmc.range(1, 3):
+                predicate = qmc.bit(False)
+                for _inner in qmc.range(outer, outer + 1):
+                    if predicate:
+                        target = qmc.t(target)
+                    predicate = qmc.measure(source)
+            return qmc.measure(target)
+
+        _transpile(kernel)
 
     def test_nested_singleton_outer_index_proves_inner_nonempty(self):
         """A singleton outer range supplies its concrete index to the inner."""
@@ -2226,7 +2384,7 @@ class TestRejectedRebinds:
         While bodies get no RegionArg promotion, and the always-live
         zero-trip path means no trip-count proof can surface the traced
         body value. Accepting this shape compiles and then fails at
-        sampling with an unbound backend parameter (the traced
+        sampling with an unbound engine parameter (the traced
         ``x + 1`` lives only in the per-iteration emit scope).
         """
 
@@ -2302,6 +2460,67 @@ class TestRejectedRebinds:
 
 class TestAllowedPatterns:
     """Legal loop patterns are not rejected and still execute correctly."""
+
+    @pytest.mark.parametrize("value", [0.0, 1.0, 2.0])
+    def test_recursive_compile_time_unary_driver_transpiles(
+        self,
+        value: float,
+    ) -> None:
+        """Unary math remains foldable while recursive calls are unrolled.
+
+        Args:
+            value (float): Concrete recursion depth expressed as a float.
+        """
+        _transpile(_recursive_unary_circuit, bindings={"value": value})
+
+    def test_recursive_unroll_preserves_derived_loop_bit_condition(self) -> None:
+        """A traced constant must not erase a derived loop-backedge read."""
+
+        @qmc.qkernel
+        def kernel(value: qmc.Float) -> qmc.Bit:
+            """Read a carried Bit through a derived condition during recursion.
+
+            Args:
+                value (qmc.Float): Compile-time recursion driver.
+
+            Returns:
+                qmc.Bit: Final target measurement.
+            """
+            predicate = qmc.bit(False)
+            target = qmc.qubit("target")
+            source = qmc.qubit("source")
+            for _index in qmc.range(2):
+                target = _recursive_unary_driver(value, target)
+                derived = ~predicate
+                if derived:
+                    target = qmc.z(target)
+                predicate = qmc.measure(source)
+            return qmc.measure(target)
+
+        with pytest.raises(ValidationError, match=LOOP_CARRIED):
+            _transpile(kernel, bindings={"value": 1.0})
+
+    def test_recursive_unused_predicate_depth_boundary_matches_compiler(self) -> None:
+        """Estimator and compiler share the depth-65 recursion boundary."""
+        supported = {"depth": 65, "iterations": 2}
+        estimate = _recursive_unused_predicate_circuit.estimate_resources(
+            inputs=supported
+        )
+
+        assert estimate.gates.total == 2
+        _transpile(_recursive_unused_predicate_circuit, bindings=supported)
+
+        unsupported = {"depth": 66, "iterations": 2}
+        with pytest.raises(
+            ValueError,
+            match="Recursive resource validation.*supported inline depth",
+        ):
+            _recursive_unused_predicate_circuit.estimate_resources(inputs=unsupported)
+        with pytest.raises(
+            FrontendTransformError,
+            match="Recursive @qkernel did not terminate",
+        ):
+            _transpile(_recursive_unused_predicate_circuit, bindings=unsupported)
 
     def test_loop_invariant_rebind_allowed(self):
         """`last = x + i` re-executes to the correct final value (8)."""
@@ -2666,23 +2885,23 @@ class TestAllowedPatterns:
 
 
 # ---------------------------------------------------------------------------
-# Cross-backend execution: carried scalars drive identical circuits everywhere
+# Cross-engine execution: carried scalars drive identical circuits everywhere
 # ---------------------------------------------------------------------------
 
 
-def _make_transpiler(backend: str):
-    """Build the requested backend transpiler, skipping if the SDK is absent.
+def _make_transpiler(engine: str):
+    """Build the requested engine transpiler, skipping if the SDK is absent.
 
     Args:
-        backend (str): One of ``"qiskit"``, ``"quri_parts"``, ``"cudaq"``.
+        engine (str): One of ``"qiskit"``, ``"quri_parts"``, ``"cudaq"``.
 
     Returns:
-        Any: The backend transpiler instance.
+        Any: The engine transpiler instance.
     """
-    if backend == "qiskit":
+    if engine == "qiskit":
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler as T
-    elif backend == "quri_parts":
+    elif engine == "quri_parts":
         pytest.importorskip("quri_parts")
         from qamomile.quri_parts import QuriPartsTranspiler as T
     else:
@@ -2691,12 +2910,12 @@ def _make_transpiler(backend: str):
     return T()
 
 
-class TestCarriedScalarCrossBackend:
-    """The carried-angle kernel samples identically on every backend."""
+class TestCarriedScalarCrossEngine:
+    """The carried-angle kernel samples identically on every engine."""
 
-    @pytest.mark.parametrize("backend", ["qiskit", "quri_parts", "cudaq"])
+    @pytest.mark.parametrize("engine", ["qiskit", "quri_parts", "cudaq"])
     @pytest.mark.parametrize("n_expected", [(2, 0), (3, 1), (4, 0)])
-    def test_carried_angle_rotation(self, backend, n_expected):
+    def test_carried_angle_rotation(self, engine, n_expected):
         """n accumulated pi-rotations flip the qubit iff n is odd."""
         n, expected = n_expected
 
@@ -2709,7 +2928,7 @@ class TestCarriedScalarCrossBackend:
             q = qmc.rx(q, total * 3.141592653589793)
             return qmc.measure(q)
 
-        transpiler = _make_transpiler(backend)
+        transpiler = _make_transpiler(engine)
         executable = transpiler.transpile(kernel, bindings={"n": n})
         result = executable.sample(transpiler.executor(), shots=100).result()
         assert len(result.results) == 1, f"expected deterministic result: {result}"
@@ -2801,11 +3020,16 @@ class TestRegionArgSerialization:
         assert found_region_args, "fixture must produce at least one region arg"
 
 
-class TestRebindRecordSerialization:
-    """LoopCarriedRebind records round-trip with their qkernel."""
+class TestWhileRegionArgSerialization:
+    """Explicit while region arguments round-trip with their qkernel."""
 
-    def _build_block_with_records(self):
-        """Build a block whose WhileOperation carries rebind records."""
+    def _build_kernel_with_region_args(self) -> qmc.QKernel:
+        """Build a kernel whose WhileOperation carries explicit state.
+
+        Returns:
+            qmc.QKernel: Kernel containing a measurement-controlled loop with
+                one non-condition region argument.
+        """
 
         @qmc.qkernel
         def kernel(dummy: qmc.UInt) -> qmc.UInt:
@@ -2822,14 +3046,14 @@ class TestRebindRecordSerialization:
 
         return kernel
 
-    def test_records_roundtrip(self):
-        """Records survive a serialize/deserialize cycle."""
+    def test_region_args_roundtrip(self) -> None:
+        """While region arguments survive a serialization cycle."""
         from qamomile.circuit.serialization import (
             deserialize,
             serialize,
         )
 
-        kernel = self._build_block_with_records()
+        kernel = self._build_kernel_with_region_args()
         transpiler = QiskitTranspiler()
         affine = transpiler.inline(kernel.block)
 
@@ -2838,23 +3062,18 @@ class TestRebindRecordSerialization:
         original_loops = _find_loops(affine.operations)
         restored_loops = _find_loops(restored.operations)
         assert len(original_loops) == len(restored_loops)
-        found_records = False
+        found_region_args = False
         for orig, rest in zip(original_loops, restored_loops, strict=True):
-            assert len(orig.loop_carried_rebinds) == len(rest.loop_carried_rebinds)
-            for orig_rec, rest_rec in zip(
-                orig.loop_carried_rebinds,
-                rest.loop_carried_rebinds,
+            assert len(orig.region_args) == len(rest.region_args)
+            for orig_arg, rest_arg in zip(
+                orig.region_args,
+                rest.region_args,
                 strict=True,
             ):
-                found_records = True
-                assert orig_rec.var_name == rest_rec.var_name
-                assert orig_rec.before.type == rest_rec.before.type
-                assert orig_rec.after.type == rest_rec.after.type
-                assert (orig_rec.before.uuid == orig_rec.after.uuid) == (
-                    rest_rec.before.uuid == rest_rec.after.uuid
-                )
-                assert (orig_rec.before.logical_id == orig_rec.after.logical_id) == (
-                    rest_rec.before.logical_id == rest_rec.after.logical_id
-                )
-                assert orig_rec.before_synthesized == rest_rec.before_synthesized
-        assert found_records, "fixture must produce at least one rebind record"
+                found_region_args = True
+                assert orig_arg.var_name == rest_arg.var_name
+                assert orig_arg.init.type == rest_arg.init.type
+                assert orig_arg.block_arg.type == rest_arg.block_arg.type
+                assert orig_arg.yielded.type == rest_arg.yielded.type
+                assert orig_arg.result.type == rest_arg.result.type
+        assert found_region_args, "fixture must produce at least one region argument"

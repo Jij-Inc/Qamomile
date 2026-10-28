@@ -1,12 +1,12 @@
 """Inverse block emission helpers extracted from StandardEmitPass.
 
 Emits :class:`InverseBlockOperation` with a three-tier strategy: try the
-backend-native inverse of the forward ``source_block`` first (reusable
+engine-native inverse of the forward ``source_block`` first (reusable
 gate + ``gate_inverse``), then a reusable gate built from the
 ``implementation_block`` fallback, and finally inline the fallback
 gate by gate. Each function takes an ``emit_pass`` parameter (a
 ``StandardEmitPass`` instance) in place of ``self`` so subclass
-overrides (e.g. backend emit passes) are respected, mirroring
+overrides (e.g. engine emit passes) are respected, mirroring
 :mod:`.controlled_emission`.
 """
 
@@ -23,6 +23,7 @@ from qamomile.circuit.transpiler.passes.emit_support.control_value_emission impo
 )
 from qamomile.circuit.transpiler.passes.emit_support.controlled_block_support import (
     _bind_and_populate_block_inputs,
+    _bind_block_inputs,
     _emitter_supports_reusable_gates,
     _expand_quantum_operands_to_phys,
     _gate_matches_qubit_count,
@@ -110,7 +111,7 @@ def emit_inverse_block(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         op (InverseBlockOperation): Inverse block operation to emit.
         qubit_map (QubitMap): Current quantum value to physical qubit map.
         bindings (dict[str, Any]): Active emit bindings.
@@ -170,7 +171,7 @@ def emit_inverse_block_at_indices(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         op (InverseBlockOperation): Inverse block operation to emit.
         control_indices (list[int]): Physical control qubits in enclosing-first
             order, followed by this operation's own controls.
@@ -205,9 +206,32 @@ def emit_inverse_block_at_indices(
     # on the same combined ``control_indices + target_indices`` set. A single
     # check here covers them all: an inverse block whose controls/targets alias
     # at runtime (``inverse(u)(qs[i], qs[j])`` on the diagonal) is physically
-    # ill-defined and would otherwise leak a raw backend error (Qiskit) or
+    # ill-defined and would otherwise leak a raw engine error (Qiskit) or
     # compile silently and crash the simulator (CUDA-Q).
     reject_duplicate_physical_indices("inverse block", control_indices + target_indices)
+
+    from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+        _is_resolved_identity_phase_block,
+    )
+
+    implementation_block = op.implementation_block
+    if implementation_block is None:
+        raise EmitError(
+            "Normalized inverse block lost its implementation body.",
+            operation="InverseBlockOperation",
+        )
+    identity_bindings = _bind_block_inputs(
+        emit_pass,
+        implementation_block,
+        [*op.target_qubits, *op.parameters],
+        bindings,
+    )
+    if _is_resolved_identity_phase_block(
+        emit_pass,
+        implementation_block,
+        identity_bindings,
+    ):
+        return
 
     # Nested emission prepends enclosing controls. InverseBlockOperation
     # validates one scalar qubit per control operand, so num_control_qubits is
@@ -243,7 +267,7 @@ def _emit_all_ones_inverse_block_at_indices(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         op (InverseBlockOperation): Normalized inverse block operation.
         control_indices (list[int]): Physical all-ones control qubits.
         target_indices (list[int]): Physical target qubits.
@@ -392,7 +416,7 @@ def _emit_inverse_block_inline(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted into.
+        circuit (Any): Engine circuit being emitted into.
         impl (Any): Fallback inverse implementation block.
         op (InverseBlockOperation): Inverse block operation being emitted.
         target_indices (list[int]): Physical target qubits.
@@ -426,7 +450,7 @@ def _emitter_supports_gate_inverse(emitter: Any) -> bool:
     """Return whether an emitter can invert reusable gates.
 
     Args:
-        emitter (Any): Backend gate emitter.
+        emitter (Any): Engine gate emitter.
 
     Returns:
         bool: True when ``emitter`` advertises reusable-gate inversion.

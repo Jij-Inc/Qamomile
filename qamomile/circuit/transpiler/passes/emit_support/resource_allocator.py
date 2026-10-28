@@ -662,7 +662,7 @@ class ResourceAllocator:
         Runtime branch merging first allocates a clbit for each branch-local
         measurement and then aliases the mutually exclusive writes onto one
         physical slot.  Later measurements would otherwise retain the skipped
-        numeric indices, inflating the backend circuit's classical register.
+        numeric indices, inflating the engine circuit's classical register.
         Only indices at or above ``first_new_index`` are renumbered; every
         caller-supplied ``initial_clbit_map`` entry therefore keeps its exact
         physical index.
@@ -1680,9 +1680,7 @@ class ResourceAllocator:
                         dst_addr = QubitAddress(dst.uuid)
                         if dst_addr not in qubit_map:
                             qubit_map[dst_addr] = physical
-            sub_quantum_operands = [
-                v for v in op.operands[op.num_control_args :] if v.type.is_quantum()
-            ]
+            sub_quantum_operands = [v for v in op.body_operands if v.type.is_quantum()]
             sub_quantum_results = [
                 r for r in op.results[op.num_control_args :] if r.type.is_quantum()
             ]

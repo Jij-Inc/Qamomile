@@ -5,8 +5,8 @@ its Python construction API. The public transpiler is therefore named
 ``QurationTranspiler`` while the target-native materializer is explicitly
 named ``PyQretMaterializer``.
 
-This backend depends only on ``qamomile.circuit`` and optional ``pyqret``.
-It consumes backend-neutral ``CircuitProgram`` artifacts and never reaches
+This engine depends only on ``qamomile.circuit`` and optional ``pyqret``.
+It consumes engine-neutral ``CircuitProgram`` artifacts and never reaches
 back into Qamomile's semantic IR.
 """
 

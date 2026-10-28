@@ -44,25 +44,6 @@ def _periodic_encoding(
 
 
 @qmc.qkernel
-def _prepare_basis(
-    system: qmc.Vector[qmc.Qubit],
-    bits: qmc.Vector[qmc.UInt],
-) -> qmc.Vector[qmc.Qubit]:
-    """Prepare a flattened system register in an LSB-first basis state.
-
-    Args:
-        system (qmc.Vector[qmc.Qubit]): All-zero system register.
-        bits (qmc.Vector[qmc.UInt]): Compile-time basis bits.
-
-    Returns:
-        qmc.Vector[qmc.Qubit]: Prepared system register.
-    """
-    for index in qmc.range(system.shape[0]):
-        system[index] = qmc.rx(system[index], math.pi * bits[index])
-    return system
-
-
-@qmc.qkernel
 def _identity_registers(
     signal: qmc.Vector[qmc.Qubit],
     system: qmc.Vector[qmc.Qubit],
@@ -346,10 +327,10 @@ def _sample_only_outcome(
     kernel: Any,
     bindings: dict[str, Any],
 ) -> Any:
-    """Transpile and sample a deterministic kernel on one SDK backend.
+    """Transpile and sample a deterministic kernel on one SDK engine.
 
     Args:
-        sdk_case (Any): Backend fixture with transpiler and backend name.
+        sdk_case (Any): Engine fixture with transpiler and engine name.
         kernel (Any): Classical-output qkernel to execute.
         bindings (dict[str, Any]): Compile-time kernel bindings.
 
@@ -364,7 +345,7 @@ def _sample_only_outcome(
     ).result()
     counts = {outcome: count for outcome, count in result.results}
     assert sum(counts.values()) == 16
-    assert len(counts) == 1, f"{sdk_case.backend_name}: got {counts}"
+    assert len(counts) == 1, f"{sdk_case.engine_name}: got {counts}"
     return next(iter(counts))
 
 
@@ -373,15 +354,15 @@ def _run_expval(
     kernel: Any,
     bindings: dict[str, Any],
 ) -> float:
-    """Transpile and execute an expectation-value kernel on one backend.
+    """Transpile and execute an expectation-value kernel on one engine.
 
     Args:
-        sdk_case (Any): Backend fixture with transpiler and executor.
+        sdk_case (Any): Engine fixture with transpiler and executor.
         kernel (Any): Expectation-value qkernel to execute.
         bindings (dict[str, Any]): Compile-time kernel bindings.
 
     Returns:
-        float: Backend expectation-value result.
+        float: Engine expectation-value result.
     """
     executable = sdk_case.transpiler.transpile(kernel, bindings=bindings)
     return float(executable.run(sdk_case.transpiler.executor(), bindings={}).result())
@@ -391,7 +372,7 @@ def _is_all_zero(value: Any) -> bool:
     """Return whether a sampled scalar or nested register value is all zero.
 
     Args:
-        value (Any): Backend-independent sampled outcome value.
+        value (Any): Engine-independent sampled outcome value.
 
     Returns:
         bool: Whether every contained classical bit is zero.
@@ -405,7 +386,7 @@ def _zero_probability(results: Sequence[tuple[Any, int]]) -> float:
     """Return the empirical probability of an all-zero sampled outcome.
 
     Args:
-        results (Sequence[tuple[Any, int]]): Backend result-count pairs.
+        results (Sequence[tuple[Any, int]]): Engine result-count pairs.
 
     Returns:
         float: Fraction of shots assigned to the all-zero outcome.
@@ -451,7 +432,7 @@ def _qiskit_unitary(
     """Materialize one periodic encoding as an exact dense unitary.
 
     Args:
-        qiskit_transpiler (Any): Qiskit backend fixture.
+        qiskit_transpiler (Any): Qiskit engine fixture.
         encoding (qmc.PeriodicShiftLCUBlockEncoding): Descriptor to inspect.
         invert (bool): Whether to materialize the inverse. Defaults to
             ``False``.
@@ -493,7 +474,7 @@ def _top_left_block(
 
 
 def _lower_first_circuit(kernel: qmc.QKernel, transpiler: Any) -> CircuitProgram:
-    """Lower one qkernel and return its first backend-neutral circuit.
+    """Lower one qkernel and return its first engine-neutral circuit.
 
     Args:
         kernel (qmc.QKernel): Entrypoint to lower.
@@ -1205,7 +1186,7 @@ def test_distinct_periodic_instances_compose_in_one_caller(
 def test_zero_periodic_encoding_samples_and_estimates_on_every_sdk(
     sdk_transpiler: Any,
 ) -> None:
-    """The exact zero path and its transforms execute on every backend."""
+    """The exact zero path and its transforms execute on every engine."""
     lcu = PeriodicShiftLCU.from_coefficients({}, register_sizes=(2,))
     encoding = qmc.periodic_shift_lcu_block_encoding(lcu)
     inverse_unitary = qmc.inverse(encoding.unitary)
@@ -1266,7 +1247,7 @@ def test_zero_periodic_encoding_samples_and_estimates_on_every_sdk(
         {"observable": qm_o.Z(0)},
     )
 
-    tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    tolerance = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed == pytest.approx(-1.0, abs=tolerance)
 
 
@@ -1370,7 +1351,7 @@ def test_serialized_generic_lcu_template_rebinds_periodic_on_every_sdk(
                 "observable": _z_hamiltonian(weights),
             },
         )
-        tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+        tolerance = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
         assert observed == pytest.approx(sum(weights), abs=tolerance)
         assert serialize(sample_template) == sample_payload
         assert serialize(expval_template) == expval_payload
@@ -1383,7 +1364,7 @@ def test_two_term_periodic_encoding_samples_and_estimates_on_every_sdk(
     num_system_qubits: int,
     seed: int,
 ) -> None:
-    """Random two-term stencils execute sampler and estimator backend paths.
+    """Random two-term stencils execute sampler and estimator engine paths.
 
     Acting on ``|0>`` makes the identity and one-step-shift outputs orthogonal,
     so success probability is ``(|a|² + |b|²) / normalization²``. Projecting
@@ -1452,7 +1433,7 @@ def test_two_term_periodic_encoding_samples_and_estimates_on_every_sdk(
         * np.imag(np.conj(identity_weight) * shift_weight)
         / encoding.normalization**2
     )
-    tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    tolerance = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed_y == pytest.approx(expected_y, abs=tolerance)
 
 
@@ -1504,7 +1485,7 @@ def test_binary_periodic_shifts_execute_on_every_sdk(
         """
         signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
         system = qmc.qubit_array(encoding.num_system_qubits, "system")
-        system = _prepare_basis(system, bits)
+        system = qmc.computational_basis_state(system, bits)
         signal, system = encoding.unitary(signal, system)
         return qmc.measure(system)
 
@@ -1524,7 +1505,7 @@ def test_binary_periodic_shifts_execute_on_every_sdk(
         """
         signal = qmc.qubit_array(encoding.num_signal_qubits, "signal")
         system = qmc.qubit_array(encoding.num_system_qubits, "system")
-        system = _prepare_basis(system, bits)
+        system = qmc.computational_basis_state(system, bits)
         signal, system = encoding.unitary(signal, system)
         return qmc.expval(system, observable)
 
@@ -1543,7 +1524,7 @@ def test_binary_periodic_shifts_execute_on_every_sdk(
     )
 
     assert tuple(sampled) == expected_bits
-    tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    tolerance = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed == pytest.approx(
         _expected_z(z_coefficients, expected_bits),
         abs=tolerance,
@@ -1552,12 +1533,12 @@ def test_binary_periodic_shifts_execute_on_every_sdk(
 
 @pytest.mark.parametrize("register_sizes", [(1,), (2,), (1, 2)])
 @pytest.mark.parametrize("seed", [0, 1, 2, 42])
-def test_periodic_stencil_inverse_cross_backend_sample_and_expval(
+def test_periodic_stencil_inverse_cross_engine_sample_and_expval(
     sdk_transpiler: Any,
     register_sizes: tuple[int, ...],
     seed: int,
 ) -> None:
-    """Random complex stencils cancel with inverse on every backend path."""
+    """Random complex stencils cancel with inverse on every engine path."""
     rng = np.random.default_rng(seed)
     dimensions = len(register_sizes)
     offsets = [tuple(0 for _ in register_sizes)]
@@ -1583,7 +1564,7 @@ def test_periodic_stencil_inverse_cross_backend_sample_and_expval(
     ) -> qmc.Vector[qmc.Bit]:
         signal = qmc.qubit_array(encoding.num_signal_qubits, name="signal")
         system = qmc.qubit_array(encoding.num_system_qubits, name="system")
-        system = _prepare_basis(system, initial_bits)
+        system = qmc.computational_basis_state(system, initial_bits)
         signal, system = encoding.unitary(signal, system)
         signal, system = qmc.inverse(encoding.unitary)(signal, system)
         _ = qmc.measure(signal)
@@ -1596,7 +1577,7 @@ def test_periodic_stencil_inverse_cross_backend_sample_and_expval(
     ) -> qmc.Float:
         signal = qmc.qubit_array(encoding.num_signal_qubits, name="signal")
         system = qmc.qubit_array(encoding.num_system_qubits, name="system")
-        system = _prepare_basis(system, initial_bits)
+        system = qmc.computational_basis_state(system, initial_bits)
         signal, system = encoding.unitary(signal, system)
         signal, system = qmc.inverse(encoding.unitary)(signal, system)
         return qmc.expval(system, observable)
@@ -1621,7 +1602,7 @@ def test_periodic_stencil_inverse_cross_backend_sample_and_expval(
     [None, 0.5],
     ids=["single-term", "multi-term"],
 )
-def test_periodic_phase_composes_cross_backend(
+def test_periodic_phase_composes_cross_engine(
     sdk_transpiler: Any,
     composition: str,
     shift_weight: float | None,
@@ -1698,5 +1679,5 @@ def test_periodic_phase_composes_cross_backend(
         expected_zero,
         abs=sampling_tolerance,
     )
-    tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    tolerance = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed == pytest.approx(overlap.imag, abs=tolerance)

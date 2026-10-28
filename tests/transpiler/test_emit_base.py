@@ -1176,7 +1176,7 @@ class TestLoopAnalyzerMeasurementArrayAccess:
     Regression for the silent-measurement-drop bug: ``MeasureOperation``,
     ``MeasureVectorOperation``, ``ProjectOperation`` and ``ResetOperation``
     are not ``GateOperation`` subclasses, so the old type-enumerated
-    ``_has_array_element_access`` skipped them. A native backend loop whose
+    ``_has_array_element_access`` skipped them. A native engine loop whose
     only loop-var element access was ``measure(q[i])`` then took the native
     path and dropped the measurement at emit. The scan is now generic over
     ``all_input_values()``.

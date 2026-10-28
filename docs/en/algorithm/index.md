@@ -9,6 +9,12 @@ Concrete quantum algorithm examples built with Qamomile.
 ::::{grid} 1 1 1 1
 
 :::{card}
+:header: **Grover Adaptive Search for Combinatorial Polynomial Binary Optimization**
+:link: grover_adaptive_search
+Solve a portfolio selection problem with `GASConverter`, driving the Grover threshold from a classical outer loop and checking the result against brute force.
+:::
+
+:::{card}
 :header: **Hamiltonian Simulation with Suzuki–Trotter (Rabi oscillation)**
 :link: hamiltonian_simulation
 Trotter–Suzuki product formulas on the Rabi model with empirical convergence orders.
@@ -22,20 +28,26 @@ End-to-end CNN + quantum variational circuit on Fashion-MNIST with the parameter
 
 :::{card}
 :header: **Möttönen Amplitude Encoding**
-:link: mottonen_amplitude_encoding
-Prepare an arbitrary real or complex amplitude vector via Gray-code Ry/Rz multiplexers, with three input modes (concrete, bound `Vector[Float]`, runtime-parametric angles).
+:link: mottonen_amplitude_encoding.ipynb
+Learn how to use Möttönen amplitude encoding in Qamomile to prepare arbitrary quantum states. This tutorial introduces state preparation based on `amplitude_encoding` and `mottonen_amplitude_encoding`.
 :::
 
 :::{card}
-:header: **Multidimensional Quantum Fourier Transform**
+:header: **Option Pricing with Quantum Amplitude Estimation**
+:link: option_pricing
+An example of option pricing with quantum amplitude estimation (QAE) in Qamomile. It encodes stock-price data into amplitudes, implements amplitude estimation with the Grover operator, and runs a numerical option-pricing simulation.
+:::
+
+:::{card}
+:header: **Multidimensional QFT for Estimating Nanosheet Material Properties**
 :link: multidimensional_qft
-Implement multidimensional QFT and classical preprocessing for inputs whose grid sizes are not powers of two.
+This example implements a multidimensional quantum Fourier transform with Qamomile. For nanosheet material characterization, it uses a multidimensional QFT with data preprocessing to run a nanosheet simulation.
 :::
 
 :::{card}
-:header: **Pauli Correlation Encoding (PCE)**
+:header: **Pauli Correlation Encoding**
 :link: pce_maxcut
-Solve a 20-variable MaxCut on just 3 qubits with Pauli Correlation Encoding, training a hardware-efficient ansatz against a tanh-relaxed surrogate and decoding via sign rounding.
+An example of using Pauli Correlation Encoding (PCE) with Qamomile. It solves MaxCut for a 20-node graph using 3-qubit PCE and compares the result with the exact solution.
 :::
 
 :::{card}
@@ -54,6 +66,12 @@ Build a QAOA circuit from scratch to solve MaxCut, then compare with the built-i
 :header: **Quantum-enhanced Markov chain Monte Carlo**
 :link: qe_mcmc
 Implement Quantum-enhanced MCMC using Trotter-decomposed time evolution.
+:::
+
+:::{card}
+:header: **QSVT Eigenstate Filtering**
+:link: qsvt_eigenstate_filter_graph_partitioning
+Filter a block-encoded cost Hamiltonian with a QSVT sign approximation, and drive a Lin & Tong binary search with the post-selection rate.
 :::
 
 :::{card}

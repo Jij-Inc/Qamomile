@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -31,6 +32,9 @@ from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
     CompileTimeIfLoweringPass,
 )
 from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
+from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
+    emit_controlled_pauli_evolve,
+)
 from qamomile.circuit.transpiler.passes.emit_support.global_phase_emission import (
     emit_controlled_global_phase,
     emit_global_phase,
@@ -220,6 +224,119 @@ def test_legacy_pauli_complex_identity_constant_is_rejected() -> None:
         )
 
     assert circuit == []
+
+
+def test_legacy_pauli_validates_late_terms_before_emitting() -> None:
+    """A late non-Hermitian term cannot leave a partial circuit behind."""
+    import qamomile.observable as qm_o
+
+    hamiltonian = qm_o.Hamiltonian()
+    hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), 1.0)
+    hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 0),), 1.0 + 0.1j)
+    emit_pass = _LegacyPauliEmitPass(hamiltonian)
+    emit_pass._emitter = Mock()
+    operation, qubits, _ = _legacy_pauli_operation(0.25)
+
+    with pytest.raises(EmitError, match="complex coefficient"):
+        emit_pauli_evolve(  # type: ignore[arg-type]
+            emit_pass,
+            object(),
+            operation,
+            {QubitAddress(qubits.uuid, 0): 0},
+            {},
+        )
+
+    assert emit_pass._emitter.mock_calls == []
+
+
+def test_controlled_pauli_validates_late_terms_before_emitting() -> None:
+    """Controlled lowering validates every term before circuit mutation."""
+    import qamomile.observable as qm_o
+
+    hamiltonian = qm_o.Hamiltonian()
+    hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), 1.0)
+    hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, 0),), 1.0 + 0.1j)
+    emit_pass = _LegacyPauliEmitPass(hamiltonian)
+    emit_pass._emitter = Mock()
+    operation, qubits, _ = _legacy_pauli_operation(0.25)
+
+    with pytest.raises(EmitError, match="complex coefficient"):
+        emit_controlled_pauli_evolve(  # type: ignore[arg-type]
+            emit_pass,
+            object(),
+            operation,
+            [1],
+            {QubitAddress(qubits.uuid, 0): 0},
+            {},
+        )
+
+    assert emit_pass._emitter.mock_calls == []
+
+
+def test_legacy_zero_time_still_validates_hamiltonian() -> None:
+    """The zero-time shortcut must not accept a non-Hermitian Hamiltonian."""
+    import qamomile.observable as qm_o
+
+    hamiltonian = qm_o.Hamiltonian()
+    hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.X, 0),), 1.0 + 0.1j)
+    emit_pass = _LegacyPauliEmitPass(hamiltonian)
+    emit_pass._emitter = Mock()
+    operation, qubits, _ = _legacy_pauli_operation(0.0)
+
+    with pytest.raises(EmitError, match="complex coefficient"):
+        emit_pauli_evolve(  # type: ignore[arg-type]
+            emit_pass,
+            object(),
+            operation,
+            {QubitAddress(qubits.uuid, 0): 0},
+            {},
+        )
+
+    assert emit_pass._emitter.mock_calls == []
+
+
+@pytest.mark.parametrize("gamma", [0.0, 0.25])
+@pytest.mark.parametrize(
+    ("location", "coefficient"),
+    [
+        pytest.param("constant", float("nan"), id="constant-nan"),
+        pytest.param("constant", float("inf"), id="constant-infinity"),
+        pytest.param("constant", complex(1.0, float("nan")), id="constant-imag-nan"),
+        pytest.param("term", float("nan"), id="term-nan"),
+        pytest.param("term", float("inf"), id="term-infinity"),
+        pytest.param("term", complex(1.0, float("nan")), id="term-imag-nan"),
+    ],
+)
+def test_legacy_pauli_rejects_nonfinite_hamiltonian_before_emission(
+    gamma: float,
+    location: str,
+    coefficient: complex | float,
+) -> None:
+    """Every shared Pauli path rejects non-finite coefficients atomically."""
+    import qamomile.observable as qm_o
+
+    hamiltonian = qm_o.Hamiltonian()
+    if location == "constant":
+        hamiltonian.constant = complex(coefficient)
+    else:
+        hamiltonian.add_term(
+            (qm_o.PauliOperator(qm_o.Pauli.X, 0),),
+            coefficient,
+        )
+    emit_pass = _LegacyPauliEmitPass(hamiltonian)
+    emit_pass._emitter = Mock()
+    operation, qubits, _ = _legacy_pauli_operation(gamma)
+
+    with pytest.raises(EmitError, match="finite Hamiltonian coefficients"):
+        emit_pauli_evolve(  # type: ignore[arg-type]
+            emit_pass,
+            object(),
+            operation,
+            {QubitAddress(qubits.uuid, 0): 0},
+            {},
+        )
+
+    assert emit_pass._emitter.mock_calls == []
 
 
 def test_content_hash_includes_global_phase_operand() -> None:

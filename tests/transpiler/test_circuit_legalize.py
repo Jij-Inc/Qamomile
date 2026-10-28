@@ -435,7 +435,7 @@ class TestSemanticLegalization:
             verify_target_legal(legalized, capabilities)
 
     def test_native_semantic_op_rejects_incompatible_operand_grouping(self):
-        """A backend vector API is not selected for two scalar operands."""
+        """An engine vector API is not selected for two scalar operands."""
         capabilities = _capabilities(
             native_semantic_ops=(
                 NativeSemanticOpCapabilities(

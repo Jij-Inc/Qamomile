@@ -40,7 +40,7 @@ def pauli_evolve(
     Implements Hamiltonian time evolution using the Pauli gadget technique.
     The actual Hamiltonian is provided via bindings at transpile time.
 
-    Each backend can use native implementations:
+    Each engine can use native implementations:
     - Qiskit: PauliEvolutionGate
     - QuriParts: PauliRotation gates
     - Others: fallback decomposition (basis change + CNOT ladder + RZ)

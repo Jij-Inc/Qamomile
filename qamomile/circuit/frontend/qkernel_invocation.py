@@ -11,9 +11,12 @@ from qamomile.circuit.frontend.func_to_block import (
 )
 from qamomile.circuit.frontend.handle.array import ArrayBase, VectorView
 from qamomile.circuit.frontend.handle.containers import Dict, Tuple
-from qamomile.circuit.frontend.handle.primitives import Handle, UInt
+from qamomile.circuit.frontend.handle.primitives import Bit, Float, Handle, UInt
 from qamomile.circuit.frontend.param_validation import _validate_bound_handles
 from qamomile.circuit.frontend.qkernel_callable import qkernel_invoke_block
+from qamomile.circuit.frontend.qkernel_definition import (
+    resolve_qkernel_like_return_type,
+)
 from qamomile.circuit.frontend.qkernel_self_call import emit_self_call_forward_ref
 from qamomile.circuit.frontend.qkernel_specialization import (
     select_specialized_block,
@@ -36,6 +39,12 @@ from qamomile.circuit.ir.value import (
 )
 
 InputViewKey = tuple[str, str | None, str | None, str | None]
+
+_NATIVE_SCALAR_RESULT_HANDLES: dict[type, type[Handle]] = {
+    bool: Bit,
+    int: UInt,
+    float: Float,
+}
 
 
 def _collect_input_view_metas(arguments: dict[str, Any]) -> dict[InputViewKey, Any]:
@@ -422,12 +431,13 @@ def _wrap_call_value(
             f"Expected scalar Value for return type {handle_type!r}, "
             f"got {type(value).__name__}."
         )
+    result_handle_type = _NATIVE_SCALAR_RESULT_HANDLES.get(handle_type, handle_type)
     if value.logical_id in provenance_map:
         parent, indices, intermediate = provenance_map.pop(value.logical_id)
-        output = handle_type(value=value, parent=parent, indices=indices)
+        output = result_handle_type(value=value, parent=parent, indices=indices)
         intermediate._handoff_direct_borrow_to(output)
         return output
-    return handle_type(value=value)
+    return result_handle_type(value=value)
 
 
 def _wrap_call_results(
@@ -485,6 +495,29 @@ def _wrap_call_results(
         wrapped_results.append(_wrap_call_value(val, handle_type, provenance_map))
 
     return wrapped_results
+
+
+def _shape_invocation_results(
+    return_annotation: Any,
+    wrapped_results: list[Any],
+) -> Any:
+    """Restore the Python-level result shape declared by a qkernel.
+
+    Args:
+        return_annotation (Any): Complete resolved return annotation.
+        wrapped_results (list[Any]): Frontend handles reconstructed from IR
+            result values.
+
+    Returns:
+        Any: ``None``, one handle, or a Python tuple matching the annotation.
+    """
+    if return_annotation is None or return_annotation is type(None):
+        return None
+    if getattr(return_annotation, "__origin__", None) is tuple:
+        return tuple(wrapped_results)
+    if len(wrapped_results) == 1:
+        return wrapped_results[0]
+    return tuple(wrapped_results)
 
 
 def invoke_qkernel_with_operation(
@@ -569,9 +602,8 @@ def invoke_qkernel_with_operation(
         if not in_view._consumed:
             in_view.consume(operation_name="qkernel call (view dropped)")
 
-    if len(wrapped_results) == 1:
-        return wrapped_results[0]
-    return tuple(wrapped_results)
+    return_annotation = resolve_qkernel_like_return_type(kernel)
+    return _shape_invocation_results(return_annotation, wrapped_results)
 
 
 def invoke_qkernel(kernel: Any, *args: Any, **kwargs: Any) -> Any:

@@ -84,7 +84,7 @@ class TestTypedWriters:
         ctx = EmitContext()
         uuid = "expr-uuid"
 
-        # A stand-in for a backend Expr object (any non-scalar Python obj works).
+        # A stand-in for an engine Expr object (any non-scalar Python obj works).
         class _FakeExpr:
             pass
 

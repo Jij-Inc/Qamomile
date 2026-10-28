@@ -1,0 +1,882 @@
+"""Tests for user-facing resource-estimate serialization."""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import os
+import subprocess
+import sys
+from copy import deepcopy
+from pathlib import Path
+
+import pytest
+import sympy as sp
+
+import qamomile.circuit as qm
+from qamomile.circuit.estimator._dependency_indices import _WireRangeIndex
+from qamomile.circuit.estimator._dependency_metadata import (
+    _dependency_metadata_symbols,
+    _synchronized_entry_condition_symbols,
+)
+from qamomile.circuit.estimator._dependency_synchronization import (
+    _merge_synchronized_entry_certificates,
+    _SynchronizedEntryCertificate,
+)
+from qamomile.circuit.estimator._resource_conditions import _PhaseIdentity
+from qamomile.circuit.estimator._resource_constraints import (
+    _ConstraintRange,
+    _ResourceConstraint,
+)
+from qamomile.circuit.estimator._resource_expressions import _ConditionIndicator
+from qamomile.circuit.estimator._resource_types import ResourceTraceNode
+from qamomile.circuit.estimator._serialization import (
+    normalize_expression,
+)
+from qamomile.circuit.estimator._symbolic import _CappedRangeSum
+from qamomile.circuit.estimator._wire import (
+    resource_estimate_from_wire,
+    resource_estimate_to_wire,
+)
+from qamomile.circuit.estimator.wire import (
+    ResourceEstimateWireDecoder,
+    ResourceEstimateWireEncoder,
+)
+
+
+@qm.qkernel
+def _triangular_gate_count(k: qm.UInt) -> qm.Bit:
+    """Build a nested loop whose symbolic count retains an internal Sum."""
+    target = qm.qubit("target")
+    for outer in qm.range(k):
+        for _ in qm.range(qm.ceil(qm.log2(outer + 1))):
+            target = qm.x(target)
+    return qm.measure(target)
+
+
+def test_call_map_merge_order_is_hash_seed_independent() -> None:
+    """Merged call maps and same-name aliases are deterministic across runs."""
+    script = """
+import json
+import sympy as sp
+import qamomile.circuit as qm
+
+left_symbol = sp.Symbol("k", integer=True, positive=True)
+right_symbol = sp.Symbol("k", integer=True, nonnegative=True)
+left = qm.ResourceEstimate(
+    calls=qm.CallResources(
+        calls_by_name={"charlie": 1, "alpha": left_symbol},
+    ),
+)
+right = qm.ResourceEstimate(
+    calls=qm.CallResources(
+        calls_by_name={"delta": 1, "bravo": right_symbol},
+    ),
+)
+flag = sp.Symbol("flag", integer=True, nonnegative=True)
+
+def payload(estimate):
+    serialized_calls = estimate.to_dict()["calls"]["calls_by_name"]
+    return {
+        "keys": list(serialized_calls),
+        "values": serialized_calls,
+        "parameters": list(estimate.parameters),
+    }
+
+print(json.dumps({
+    "conditional": payload(left.conditional(right, flag > 0)),
+    "choice": payload(left.choice(right)),
+}))
+"""
+    repository = Path(__file__).resolve().parents[3]
+    payloads: list[dict[str, object]] = []
+    for seed in ("1", "2", "3", "4"):
+        environment = dict(os.environ)
+        environment["PYTHONHASHSEED"] = seed
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=repository,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        payloads.append(json.loads(completed.stdout))
+
+    assert all(payload == payloads[0] for payload in payloads)
+    for composition in payloads[0].values():
+        assert isinstance(composition, dict)
+        keys = composition["keys"]
+        assert isinstance(keys, list)
+        assert keys == sorted(keys)
+
+
+def test_large_quantified_finite_requirement_does_not_ignore_a_pole() -> None:
+    """Analytic range validation never proves finiteness across a singularity."""
+    index = sp.Dummy("index", integer=True, nonnegative=True)
+    requirement = _ResourceConstraint(
+        expression=1 / (index - 5000) ** 2,
+        minimum=0,
+        label="log2 input",
+        integer=False,
+        minimum_inclusive=False,
+        finite=True,
+        ranges=(
+            _ConstraintRange(
+                symbol=index,
+                start=sp.Integer(0),
+                step=sp.Integer(1),
+                iterations=sp.Integer(10000),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="validate log2 input exhaustively"):
+        requirement.validate()
+
+
+def test_bound_sum_index_does_not_claim_free_parameter_name() -> None:
+    """A bound Sum index cannot rename a same-name public parameter."""
+    estimate = _triangular_gate_count.estimate_resources()
+    (parameter,) = estimate.gates.total.free_symbols
+    (index,) = estimate.gates.total.atoms(sp.Dummy)
+    estimate.trace = ResourceTraceNode(
+        name="loop",
+        source_kind="for",
+        active_when=sp.Gt(index, 0),
+    )
+
+    assert estimate.parameters == {"k": parameter}
+    assert estimate.to_dict()["parameters"] == {"k": "k"}
+    assert estimate.to_dict()["gates"]["total"] == (
+        "Sum(ceiling(log(k__2 + 1)/log(2)), (k__2, 0, k - 1))"
+    )
+    assert "when=k__2 > 0" in estimate.explain()
+    assert estimate.substitute(k=5).gates.total == 8
+
+
+def test_resource_payload_skips_an_existing_suffix_when_aliasing_symbols() -> None:
+    """Generated aliases never replace an existing public parameter name."""
+    first = sp.Dummy("item")
+    reserved = sp.Symbol("item__2")
+    second = sp.Dummy("item")
+    estimate = qm.ResourceEstimate(
+        gates=qm.GateResources(total=first + reserved + second)
+    )
+
+    assert list(estimate.parameters) == ["item", "item__2", "item__3"]
+    assert estimate.to_dict()["parameters"] == {
+        "item": "item",
+        "item__2": "item__2",
+        "item__3": "item__3",
+    }
+    assert estimate.substitute(item=1, item__2=2, item__3=3).gates.total == 6
+
+
+def test_resource_payload_exposes_every_same_name_parameter_identity() -> None:
+    """One payload registry keeps colliding parameters distinct and substitutable."""
+    left = sp.Dummy("total_after_loop", integer=True, nonnegative=True)
+    right = sp.Dummy("total_after_loop", integer=True, nonnegative=True)
+    expression = sp.Piecewise(
+        (sp.Integer(3), sp.Ne(left, right, evaluate=False)),
+        (sp.Integer(1), True),
+        evaluate=False,
+    )
+    estimate = qm.ResourceEstimate(gates=qm.GateResources(total=expression))
+
+    payload = json.loads(json.dumps(estimate.to_dict()))
+
+    assert payload == estimate.to_dict()
+    assert list(estimate.parameters) == [
+        "total_after_loop",
+        "total_after_loop__2",
+    ]
+    assert payload["parameters"] == {
+        "total_after_loop": "total_after_loop",
+        "total_after_loop__2": "total_after_loop__2",
+    }
+    assert payload["gates"]["total"] == (
+        "Piecewise((3, Ne(total_after_loop, total_after_loop__2)), (1, True))"
+    )
+    public_bindings = {
+        name: value for name, value in zip(payload["parameters"], (0, 1), strict=True)
+    }
+    assert estimate.substitute(**public_bindings).gates.total == 3
+
+    partially_bound = estimate.substitute(total_after_loop=0)
+    assert partially_bound.to_dict()["parameters"] == {
+        "total_after_loop__2": "total_after_loop__2"
+    }
+    assert partially_bound.substitute(total_after_loop__2=0).gates.total == 1
+
+
+def test_payload_registry_is_shared_with_quantified_range_symbols() -> None:
+    """Requirement expressions and range binders share metric symbol aliases."""
+    parameter = sp.Dummy("index", integer=True, nonnegative=True)
+    loop_index = sp.Dummy("index", integer=True, nonnegative=True)
+    requirement = _ResourceConstraint(
+        expression=parameter + loop_index,
+        minimum=0,
+        label="Indexed width",
+        ranges=(
+            _ConstraintRange(
+                symbol=loop_index,
+                start=sp.Integer(0),
+                step=sp.Integer(1),
+                iterations=parameter,
+            ),
+        ),
+    )
+    estimate = qm.ResourceEstimate(
+        gates=qm.GateResources(total=parameter),
+        _constraints=(requirement,),
+    )
+
+    payload = estimate.to_dict()
+    serialized_requirement = payload["requirements"][0]
+
+    assert payload["parameters"] == {"index": "index"}
+    assert payload["gates"]["total"] == "index"
+    assert serialized_requirement["expression"] == "index + index__2"
+    assert serialized_requirement["ranges"] == [
+        {
+            "symbol": "index__2",
+            "start": "0",
+            "step": "1",
+            "iterations": "index",
+        }
+    ]
+
+
+def test_resource_dict_uses_one_name_for_quantified_dummy_expressions() -> None:
+    """JSON payloads align requirement expressions with their range names."""
+    target_index = sp.Dummy(
+        "target_index",
+        integer=True,
+        nonnegative=True,
+    )
+    iterations = sp.Symbol("iterations", integer=True, nonnegative=True)
+    constrained = sp.Piecewise(
+        (sp.Max(target_index + 1, iterations), sp.Lt(target_index, iterations)),
+        (target_index, True),
+    )
+    requirement = _ResourceConstraint(
+        expression=constrained,
+        minimum=0,
+        label="Target index",
+        expected=sp.Max(target_index, iterations),
+        ranges=(
+            _ConstraintRange(
+                symbol=target_index,
+                start=sp.Integer(0),
+                step=sp.Integer(1),
+                iterations=iterations,
+            ),
+        ),
+    )
+    estimate = qm.ResourceEstimate(
+        gates=qm.GateResources(total=constrained),
+        _constraints=(requirement,),
+    )
+
+    payload = json.loads(json.dumps(estimate.to_dict()))
+    serialized_gate = payload["gates"]["total"]
+    serialized_requirement = payload["requirements"][0]
+    external_target = sp.Symbol(
+        "target_index",
+        integer=True,
+        nonnegative=True,
+    )
+    restored = sp.sympify(
+        serialized_requirement["expression"],
+        locals={
+            "target_index": external_target,
+            "iterations": iterations,
+        },
+    )
+
+    assert "_target_index" not in serialized_gate
+    assert "_target_index" not in serialized_requirement["expression"]
+    assert "_target_index" not in serialized_requirement["expected"]
+    assert serialized_requirement["ranges"][0]["symbol"] == "target_index"
+    assert restored == normalize_expression(constrained)
+
+
+def test_resource_wire_rejects_executable_expression_syntax() -> None:
+    """Opaque cost decoding accepts constructors but never Python execution."""
+    wire = resource_estimate_to_wire(
+        qm.ResourceEstimate(gates=qm.GateResources(total=1))
+    )
+    wire["gates"]["total"] = "__import__('os').system('false')"
+
+    with pytest.raises(
+        ValueError,
+        match="outside safe constructors|non-constructor",
+    ):
+        resource_estimate_from_wire(wire)
+
+
+def test_resource_wire_rejects_nonstring_metric_fields_as_value_error() -> None:
+    """Malformed mixed-type metric keys retain the decoder's error contract."""
+    wire = resource_estimate_to_wire(qm.ResourceEstimate())
+    wire["width"][1] = "Integer(0)"
+
+    with pytest.raises(ValueError, match="width fields must be"):
+        resource_estimate_from_wire(wire)
+
+
+def test_resource_wire_rejects_unsupported_expression_before_encoding() -> None:
+    """A fixed cost is never persisted when its expression cannot decode."""
+    repetitions = sp.Symbol("repetitions", integer=True, nonnegative=True)
+    estimate = qm.ResourceEstimate(
+        gates=qm.GateResources(total=sp.factorial(repetitions))
+    )
+
+    with pytest.raises(ValueError, match="unsupported symbolic constructor"):
+        resource_estimate_to_wire(estimate)
+
+
+def test_resource_wire_round_trips_estimator_provenance() -> None:
+    """The closed wire format preserves estimator provenance."""
+    estimate = qm.ResourceEstimate(
+        gates=qm.GateResources(total=2, two_qubit=2),
+        control_decomposition=qm.ControlDecomposition.ABSTRACT,
+        derivation=qm.EstimateDerivation.MODELED,
+    )
+
+    wire = resource_estimate_to_wire(estimate)
+    restored = resource_estimate_from_wire(wire)
+
+    assert restored == estimate
+
+
+@pytest.mark.parametrize(
+    ("field", "provenance_field", "replacement"),
+    [
+        ("derivation", "derivations", qm.EstimateDerivation.STRUCTURAL.value),
+        ("quality", "qualities", qm.EstimateQuality.EXACT.value),
+        (
+            "approximation",
+            "approximations",
+            qm.ApproximationStatus.EXACT.value,
+        ),
+    ],
+)
+@pytest.mark.parametrize("tamper_target", ["public", "guarded"])
+def test_resource_wire_rejects_inconsistent_canonical_provenance(
+    field: str,
+    provenance_field: str,
+    replacement: str,
+    tamper_target: str,
+) -> None:
+    """Public metadata and guarded facts must encode one canonical meaning."""
+    estimate = qm.ResourceEstimate(
+        derivation=qm.EstimateDerivation.MODELED,
+        quality=qm.EstimateQuality.CONSERVATIVE,
+        approximation=qm.ApproximationStatus.APPROXIMATE,
+    )
+    wire = deepcopy(resource_estimate_to_wire(estimate))
+    if tamper_target == "public":
+        wire[field] = replacement
+    else:
+        wire["provenance"][provenance_field] = []
+
+    with pytest.raises(ValueError, match="public metadata.*guarded provenance"):
+        resource_estimate_from_wire(wire)
+
+
+def test_resource_wire_round_trips_global_barrier_condition() -> None:
+    """Opaque scheduling barriers retain their condition and symbol identity."""
+    barrier = sp.Dummy("barrier", integer=True, nonnegative=True)
+    estimate = qm.ResourceEstimate(
+        _global_barrier_condition=sp.Gt(barrier, 0),
+    )
+
+    wire = resource_estimate_to_wire(estimate)
+    restored = resource_estimate_from_wire(wire)
+
+    (restored_barrier,) = restored._global_barrier_condition.free_symbols
+    assert "dummy_index=0" in wire["global_barrier_condition"]
+    assert restored_barrier is restored.parameters["barrier"]
+    assert restored._global_barrier_condition == sp.Gt(restored_barrier, 0)
+
+
+def test_resource_wire_schema_accounts_for_every_estimate_field() -> None:
+    """Every ResourceEstimate field is explicitly persisted or boundary-local."""
+    persisted_or_verified = {
+        "width",
+        "gates",
+        "depth",
+        "calls",
+        "assumptions",
+        "trace",
+        "parameters",
+        "derivation",
+        "quality",
+        "approximation",
+        "control_decomposition",
+        "measurements",
+        "resets",
+        "_constraints",
+        "_global_barrier_condition",
+        "_guarded_assumptions",
+        "_guarded_derivations",
+        "_guarded_qualities",
+        "_guarded_approximations",
+        "_symbol_aliases",
+        "_domain_rewrite_policy",
+        "_domain_rewrite_state",
+        "_rendered_assumption_snapshot",
+    }
+    caller_or_interpreter_local = {
+        "_allocation_sites",
+        "_output_sizes",
+        "_input_sizes",
+        "_has_output_summary",
+        "_dependency_keys",
+        "_dependency_reads",
+        "_dependency_writes",
+        "_dependency_completion",
+        "_dependency_completion_uniform",
+        "_dependency_synchronized_entry_conditions",
+        "_dependency_synchronized_entry_certificates",
+        "_measurement_taint_conditions",
+    }
+
+    assert {field.name for field in dataclasses.fields(qm.ResourceEstimate)} == (
+        persisted_or_verified | caller_or_interpreter_local
+    )
+
+
+def test_synchronized_entry_certificates_stay_grouped_during_composition() -> None:
+    """Composition never combines safe frontiers from distinct premises."""
+    left_certificate = _SynchronizedEntryCertificate(
+        coverage=frozenset({("left", 0)}),
+        frontier=frozenset({("left", 0)}),
+        active_when=sp.true,
+    )
+    right_certificate = _SynchronizedEntryCertificate(
+        coverage=frozenset({("right", 0)}),
+        frontier=frozenset({("right", 0)}),
+        active_when=sp.true,
+    )
+    left = qm.ResourceEstimate(
+        _dependency_synchronized_entry_certificates=(left_certificate,)
+    )
+    right = qm.ResourceEstimate(
+        _dependency_synchronized_entry_certificates=(right_certificate,)
+    )
+
+    for composed in (left.seq(right), left.parallel(right), left.choice(right)):
+        assert composed._dependency_synchronized_entry_certificates == (
+            left_certificate,
+            right_certificate,
+        )
+
+    selector = sp.Symbol("selector", integer=True, nonnegative=True)
+    predicate = sp.Gt(selector, 0)
+    conditional = left.conditional(right, predicate)
+
+    assert len(conditional._dependency_synchronized_entry_certificates) == 2
+    true_group, false_group = conditional._dependency_synchronized_entry_certificates
+    assert true_group.coverage == left_certificate.coverage
+    assert true_group.active_when == predicate
+    assert false_group.coverage == right_certificate.coverage
+    assert false_group.active_when == sp.Not(predicate)
+
+
+def test_identical_synchronized_entry_certificates_merge_their_guards() -> None:
+    """Equivalent groups share one certificate with a disjoined guard."""
+    left_active = sp.Eq(sp.Symbol("left_active", integer=True), 1)
+    right_active = sp.Eq(sp.Symbol("right_active", integer=True), 1)
+    coverage = frozenset({("register", 0), ("register", 1)})
+    frontier = frozenset({("register", 0)})
+    left = _SynchronizedEntryCertificate(coverage, frontier, left_active)
+    right = _SynchronizedEntryCertificate(coverage, frontier, right_active)
+
+    (merged,) = _merge_synchronized_entry_certificates((left,), (right,))
+
+    assert merged.coverage == coverage
+    assert merged.frontier == frontier
+    assert merged.active_when == sp.Or(left_active, right_active)
+
+
+def test_frontier_clearing_coalesces_newly_identical_certificates() -> None:
+    """A temporal transform merges groups that differ only by frontier."""
+    left_active = sp.Eq(sp.Symbol("left_active", integer=True), 1)
+    right_active = sp.Eq(sp.Symbol("right_active", integer=True), 1)
+    coverage = frozenset({("register", 0), ("register", 1)})
+    left = _SynchronizedEntryCertificate(
+        coverage,
+        frozenset({("register", 0)}),
+        left_active,
+    )
+    right = _SynchronizedEntryCertificate(
+        coverage,
+        frozenset({("register", 1)}),
+        right_active,
+    )
+    estimate = qm.ResourceEstimate(
+        _dependency_synchronized_entry_certificates=(left, right)
+    )
+
+    (merged,) = estimate.repeat(1)._dependency_synchronized_entry_certificates
+
+    assert merged.coverage == coverage
+    assert merged.frontier == frozenset()
+    assert merged.active_when == sp.Or(left_active, right_active)
+
+
+def test_temporal_transforms_clear_only_synchronized_entry_frontier() -> None:
+    """Repeat and inverse retain reset coverage but invalidate the frontier."""
+    flag = sp.Symbol("flag", integer=True, nonnegative=True)
+    certificate = _SynchronizedEntryCertificate(
+        coverage=frozenset({("register", 0), ("register", 1)}),
+        frontier=frozenset({("register", 0)}),
+        active_when=sp.Gt(flag, 0),
+    )
+    estimate = qm.ResourceEstimate(
+        _dependency_synchronized_entry_certificates=(certificate,)
+    )
+
+    for transformed in (estimate.repeat(1), estimate.inverse()):
+        (transformed_certificate,) = (
+            transformed._dependency_synchronized_entry_certificates
+        )
+        assert transformed_certificate.coverage == certificate.coverage
+        assert transformed_certificate.frontier == frozenset()
+        assert transformed_certificate.active_when == certificate.active_when
+
+    assert estimate.repeat(0)._dependency_synchronized_entry_certificates == ()
+
+
+@pytest.mark.parametrize(
+    ("start", "stop", "step", "expected_indices"),
+    [
+        (0, 0, 1, frozenset()),
+        (0, 1, 1, frozenset({0, 1})),
+        (0, 3, 1, frozenset({0, 1, 2, 3})),
+        (4, 0, -2, frozenset({2, 3, 4, 5})),
+    ],
+)
+def test_sum_over_projects_certificate_coverage_and_clears_frontier(
+    start: int,
+    stop: int,
+    step: int,
+    expected_indices: frozenset[int],
+) -> None:
+    """Signed and strided loop projection preserves U and discards F."""
+    index = sp.Symbol("index", integer=True, nonnegative=True)
+    flag = sp.Symbol("flag", integer=True, nonnegative=True)
+    certificate = _SynchronizedEntryCertificate(
+        coverage=frozenset({("register", index), ("register", index + 1)}),
+        frontier=frozenset({("register", index)}),
+        active_when=sp.Gt(flag, 0),
+    )
+    estimate = qm.ResourceEstimate(
+        _dependency_synchronized_entry_certificates=(certificate,)
+    )
+
+    summed = estimate.sum_over(
+        index,
+        sp.Integer(start),
+        sp.Integer(stop),
+        sp.Integer(step),
+    )
+
+    if not expected_indices:
+        assert summed._dependency_synchronized_entry_certificates == ()
+        return
+    (projected,) = summed._dependency_synchronized_entry_certificates
+    assert projected.coverage == frozenset(
+        ("register", wire_index) for wire_index in expected_indices
+    )
+    assert projected.frontier == frozenset()
+    assert projected.active_when == certificate.active_when
+
+
+def test_symbolic_sum_projects_certificate_without_leaking_binder() -> None:
+    """Symbolic U projection removes the outer binder and always clears F."""
+    index = sp.Symbol("index", integer=True, nonnegative=True)
+    iterations = sp.Symbol("iterations", integer=True, nonnegative=True)
+    certificate = _SynchronizedEntryCertificate(
+        coverage=frozenset({("register", index), ("register", index + 1)}),
+        frontier=frozenset({("register", index)}),
+        active_when=sp.true,
+    )
+    estimate = qm.ResourceEstimate(
+        _dependency_synchronized_entry_certificates=(certificate,)
+    )
+
+    summed = estimate.sum_over(
+        index,
+        sp.Integer(0),
+        iterations,
+        sp.Integer(2),
+    )
+
+    (projected,) = summed._dependency_synchronized_entry_certificates
+    assert projected.frontier == frozenset()
+    assert projected.active_when == sp.Gt(sp.ceiling(iterations / 2), 0)
+    assert all(
+        isinstance(wire_index, _WireRangeIndex)
+        and index not in wire_index.index_at_offset.free_symbols
+        for _owner, wire_index in projected.coverage
+    )
+
+
+def test_substitution_rewrites_complete_synchronized_entry_certificate() -> None:
+    """Substitution maps U, F, and the guard through one rewrite."""
+    index = sp.Symbol("index", integer=True, nonnegative=True)
+    flag = sp.Symbol("flag", integer=True, nonnegative=True)
+    certificate = _SynchronizedEntryCertificate(
+        coverage=frozenset({("register", index), ("register", index + 1)}),
+        frontier=frozenset({("register", index)}),
+        active_when=sp.Gt(flag, 0),
+    )
+    estimate = qm.ResourceEstimate(
+        gates=qm.GateResources(total=index + flag),
+        _dependency_synchronized_entry_certificates=(certificate,),
+    )
+
+    assert _dependency_metadata_symbols(estimate) == {index, flag}
+    assert _synchronized_entry_condition_symbols(estimate) == {flag}
+    specialized = estimate.substitute(index=3, flag=1)
+    (mapped,) = specialized._dependency_synchronized_entry_certificates
+    assert mapped.coverage == frozenset({("register", 3), ("register", 4)})
+    assert mapped.frontier == frozenset({("register", 3)})
+    assert mapped.active_when is sp.true
+    assert (
+        estimate.substitute(index=3, flag=0)._dependency_synchronized_entry_certificates
+        == ()
+    )
+
+
+def test_resource_wire_round_trips_large_substituted_capped_range_sum() -> None:
+    """A specialized large loop remains serializable without eager replay."""
+    index = sp.Dummy("index", integer=True, nonnegative=True)
+    iterations = sp.Symbol("iterations", integer=True, nonnegative=True)
+    work_per_iteration = sp.Symbol(
+        "work_per_iteration",
+        integer=True,
+        nonnegative=True,
+    )
+    work = _CappedRangeSum(
+        sp.Lambda(
+            index,
+            work_per_iteration * _ConditionIndicator(sp.Gt(index, 0)),
+        ),
+        sp.Integer(0),
+        sp.Integer(1),
+        iterations,
+        evaluate=False,
+    )
+    estimate = qm.ResourceEstimate(gates=qm.GateResources(total=work))
+    specialized = estimate.substitute(iterations=2000)
+
+    restored = resource_estimate_from_wire(resource_estimate_to_wire(specialized))
+
+    assert restored.gates.total.has(_CappedRangeSum)
+    assert set(restored.parameters) == {"work_per_iteration"}
+    assert restored.substitute(work_per_iteration=0).gates.total == 0
+    assert restored.substitute(work_per_iteration=1).gates.total == 2
+
+
+def test_resource_wire_capped_sum_preserves_exact_rational_contribution() -> None:
+    """A rational term is multiplied before an integral capped sum is cast."""
+    index = sp.Dummy("index", integer=True, nonnegative=True)
+    iterations = sp.Symbol("iterations", integer=True, nonnegative=True)
+    work = _CappedRangeSum(
+        sp.Lambda(
+            index,
+            sp.Rational(1, 2) + _ConditionIndicator(sp.Lt(index, 0, evaluate=False)),
+        ),
+        sp.Integer(0),
+        sp.Integer(1),
+        iterations,
+        evaluate=False,
+    )
+    estimate = qm.ResourceEstimate(gates=qm.GateResources(total=work))
+
+    restored = resource_estimate_from_wire(resource_estimate_to_wire(estimate))
+
+    assert restored.substitute(iterations=4).gates.total == 2
+
+
+def test_resource_wire_capped_sum_rejects_nonintegral_total() -> None:
+    """A fully resolved capped sum cannot silently truncate a rational total."""
+    index = sp.Dummy("index", integer=True, nonnegative=True)
+    iterations = sp.Symbol("iterations", integer=True, nonnegative=True)
+    work = _CappedRangeSum(
+        sp.Lambda(index, sp.Rational(1, 2)),
+        sp.Integer(0),
+        sp.Integer(1),
+        iterations,
+        evaluate=False,
+    )
+    estimate = qm.ResourceEstimate(gates=qm.GateResources(total=work))
+    restored = resource_estimate_from_wire(resource_estimate_to_wire(estimate))
+
+    with pytest.raises(ValueError, match="nonnegative integer total"):
+        restored.substitute(iterations=3)
+
+
+def test_resource_wire_round_trips_supported_symbolic_constructors() -> None:
+    """Supported estimator functions survive the closed wire format."""
+    index = sp.Dummy("index", integer=True, nonnegative=True)
+    iterations = sp.Symbol("iterations", integer=True, nonnegative=True)
+    phase = sp.Symbol("phase", real=True)
+    loop_carry = sp.Function("loop_carry")
+    expression = (
+        sp.Sum(loop_carry(index), (index, 0, iterations)) + sp.E + _PhaseIdentity(phase)
+    )
+    estimate = qm.ResourceEstimate(gates=qm.GateResources(total=expression))
+
+    restored = resource_estimate_from_wire(resource_estimate_to_wire(estimate))
+
+    assert restored.gates.total.has(sp.Sum)
+    assert restored.gates.total.has(sp.E)
+    assert restored.gates.total.has(_PhaseIdentity)
+    assert "loop_carry" in str(restored.gates.total)
+    assert set(restored.parameters) == {"iterations", "phase"}
+
+
+def test_resource_wire_round_trips_extreme_finite_float() -> None:
+    """A compact decimal exponent is not charged as mantissa digits."""
+    tiny_cost = sp.Float("1e-1300")
+    estimate = qm.ResourceEstimate(gates=qm.GateResources(total=tiny_cost))
+
+    restored = resource_estimate_from_wire(resource_estimate_to_wire(estimate))
+
+    assert restored.gates.total == tiny_cost
+
+
+def test_resource_wire_rejects_caller_scoped_liveness_before_encoding() -> None:
+    """Opaque definition costs cannot persist private caller owner mappings."""
+    hidden_size = sp.Symbol("hidden_size", integer=True, nonnegative=True)
+    estimate = qm.ResourceEstimate(
+        _output_sizes={"caller-owner": hidden_size},
+        _has_output_summary=True,
+    )
+
+    with pytest.raises(ValueError, match="caller-scoped input/output liveness"):
+        resource_estimate_to_wire(estimate)
+
+
+def test_resource_wire_preserves_trace_only_symbol_identity() -> None:
+    """Trace guards round-trip even when no metric exposes their symbol."""
+    trace_flag = sp.Dummy("trace_flag", integer=True, nonnegative=True)
+    estimate = qm.ResourceEstimate(
+        trace=ResourceTraceNode(
+            name="conditional trace",
+            source_kind="test",
+            active_when=sp.Gt(trace_flag, 0),
+        )
+    )
+
+    wire = resource_estimate_to_wire(estimate)
+    restored = resource_estimate_from_wire(wire)
+
+    assert "dummy_index=0" in wire["trace"]["nodes"][0]["active_when"]
+    assert restored.parameters == {}
+    assert restored.explain() == (
+        "Resource estimate\n  conditional trace [test] when=trace_flag > 0"
+    )
+
+
+def test_resource_wire_shares_dummy_identity_across_one_payload() -> None:
+    """One payload restores the same Dummy identity in every expression."""
+    shared = sp.Dummy("shared", integer=True, nonnegative=True)
+    estimate = qm.ResourceEstimate(
+        gates=qm.GateResources(total=shared),
+        trace=ResourceTraceNode(
+            name="conditional trace",
+            source_kind="test",
+            active_when=sp.Gt(shared, 0),
+        ),
+    )
+
+    restored = resource_estimate_from_wire(resource_estimate_to_wire(estimate))
+    (metric_symbol,) = restored.gates.total.free_symbols
+    (trace_symbol,) = restored.trace.active_when.free_symbols
+
+    assert isinstance(metric_symbol, sp.Dummy)
+    assert metric_symbol is trace_symbol
+
+
+def test_resource_wire_round_trips_capped_symbolic_loop_work() -> None:
+    """A bounded batching sum remains specializable after wire serialization."""
+    index = sp.Dummy("index", integer=True, nonnegative=True)
+    repetitions = sp.Symbol("repetitions", integer=True, nonnegative=True)
+    work = _CappedRangeSum(
+        sp.Lambda(index, _ConditionIndicator(sp.Gt(index, 0))),
+        sp.Integer(0),
+        sp.Integer(1),
+        repetitions,
+    )
+    estimate = qm.ResourceEstimate(gates=qm.GateResources(total=work))
+
+    restored = resource_estimate_from_wire(resource_estimate_to_wire(estimate))
+
+    assert set(restored.parameters) == {"repetitions"}
+    assert restored.substitute(repetitions=0).gates.total == 0
+    assert restored.substitute(repetitions=1).gates.total == 0
+    assert restored.substitute(repetitions=2).gates.total == 1
+    assert restored.substitute(repetitions=3).gates.total == 2
+
+
+def test_separately_decoded_costs_keep_independent_symbol_identities() -> None:
+    """Independent fixed-cost payloads do not merge same-named parameters."""
+    left_symbol = sp.Dummy("n", integer=True, nonnegative=True)
+    right_symbol = sp.Dummy("n", integer=True, nonnegative=True)
+    left = qm.ResourceEstimate(
+        gates=qm.GateResources(total=left_symbol),
+    )
+    right = qm.ResourceEstimate(
+        gates=qm.GateResources(total=right_symbol),
+    )
+
+    restored_left = resource_estimate_from_wire(resource_estimate_to_wire(left))
+    restored_right = resource_estimate_from_wire(resource_estimate_to_wire(right))
+    combined = restored_left.seq(restored_right)
+
+    assert set(combined.parameters) == {"n", "n__2"}
+    assert combined.substitute(n=2, n__2=5).gates.total == 7
+
+
+def test_separately_decoded_costs_preserve_shared_symbol_identity() -> None:
+    """Ordinary Symbols retain one name across independent cost payloads."""
+    shared_symbol = sp.Symbol("n", integer=True, nonnegative=True)
+    left = qm.ResourceEstimate(
+        gates=qm.GateResources(total=shared_symbol),
+    )
+    right = qm.ResourceEstimate(
+        gates=qm.GateResources(total=shared_symbol),
+    )
+
+    restored_left = resource_estimate_from_wire(resource_estimate_to_wire(left))
+    restored_right = resource_estimate_from_wire(resource_estimate_to_wire(right))
+    combined = restored_left.seq(restored_right)
+
+    assert set(combined.parameters) == {"n"}
+    assert combined.substitute(n=3).gates.total == 6
+
+
+def test_shared_wire_stream_preserves_shared_dummy_identity() -> None:
+    """One encoder/decoder stream retains a shared identity-only parameter."""
+    shared_symbol = sp.Dummy("n", integer=True, nonnegative=True)
+    left = qm.ResourceEstimate(gates=qm.GateResources(total=shared_symbol))
+    right = qm.ResourceEstimate(gates=qm.GateResources(total=shared_symbol))
+    encoder = ResourceEstimateWireEncoder()
+    decoder = ResourceEstimateWireDecoder()
+
+    restored_left = decoder(encoder(left))
+    restored_right = decoder(encoder(right))
+    (left_symbol,) = restored_left.gates.total.free_symbols
+    (right_symbol,) = restored_right.gates.total.free_symbols
+    combined = restored_left.seq(restored_right)
+
+    assert isinstance(left_symbol, sp.Dummy)
+    assert left_symbol is right_symbol
+    assert set(combined.parameters) == {"n"}
+    assert combined.substitute(n=3).gates.total == 6

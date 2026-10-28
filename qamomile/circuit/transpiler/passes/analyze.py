@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import dataclasses
 import numbers
-from typing import Any
+from typing import Any, cast
 
+from qamomile._utils import coerce_nonnegative_integral
 from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.dataflow import (
+    build_dependency_graph,
+    find_loop_carried_condition_reads,
+    find_measurement_derived_values,
+    find_measurement_results,
+)
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, BinOpKind
 from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
@@ -46,207 +53,14 @@ from qamomile.circuit.transpiler.errors import (
 )
 from qamomile.circuit.transpiler.passes import Pass
 from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
-    _same_exact_typed_constant,
     evaluate_classical_op_concrete,
     resolve_compile_time_condition,
 )
+from qamomile.circuit.transpiler.passes.control_flow_reachability import (
+    same_exact_typed_constant,
+)
 from qamomile.circuit.transpiler.passes.control_flow_visitor import ControlFlowVisitor
 from qamomile.circuit.transpiler.passes.validate_while import build_producer_map
-
-# ---------------------------------------------------------------------------
-# Public dataflow utilities
-#
-# These helpers were originally private methods of ``AnalyzePass`` but are
-# exposed at module scope so that other passes (e.g. ``ClassicalLoweringPass``)
-# can reuse the same measurement-taint analysis without instantiating
-# ``AnalyzePass`` or duplicating the worklist algorithm.
-# ---------------------------------------------------------------------------
-
-
-def build_dependency_graph(operations: list[Operation]) -> dict[str, set[str]]:
-    """Build a map from each value UUID to the UUIDs it depends on.
-
-    Walks operations recursively (through ``HasNestedOps``) and records,
-    for each result UUID, the set of operand UUIDs that produced it.
-    ``IfOperation`` merge outputs get explicit edges to the condition and
-    both branch sources via ``iter_merges`` — the builder does not rely
-    on merge storage being reachable through the generic nested-list
-    walk. Loop ``RegionArg`` block arguments and results likewise get
-    explicit edges to both their initial and yielded values, preserving
-    fixed-point dataflow across zero or more iterations. Also seeds an edge
-    from each ``ArrayValue`` element (``Value``
-    carrying ``parent_array``) to its parent array UUID, and walks the
-    parent's ``slice_of`` chain so that a sliced view (e.g. ``s[0:4:2][i]``
-    for ``s = qmc.measure(register)``) inherits taint from the root
-    measured array. ``StripSliceArrayOpsPass`` removes the explicit
-    ``SliceArrayOperation`` boundary before this pass runs, so the
-    ``slice_of`` link is the only remaining connection between a view and
-    its root in the IR. Used downstream by measurement-taint analysis.
-
-    Args:
-        operations (list[Operation]): Top-level operations of the block.
-
-    Returns:
-        dict[str, set[str]]: Mapping ``result_uuid -> set(operand_uuid, ...)``.
-    """
-
-    class DependencyGraphBuilder(ControlFlowVisitor):
-        def __init__(self):
-            self.graph: dict[str, set[str]] = {}
-
-        def visit_operation(self, op: Operation) -> None:
-            """Record one operation's result-to-operand dependency edges.
-
-            Args:
-                op (Operation): The visited operation.
-            """
-            operand_uuids = {v.uuid for v in op.operands if isinstance(v, ValueBase)}
-            for result in op.results:
-                if result.uuid not in self.graph:
-                    self.graph[result.uuid] = set()
-                self.graph[result.uuid].update(operand_uuids)
-            for v in op.operands:
-                self._seed_structural_edges(v)
-            if isinstance(op, IfOperation):
-                # Explicit merge edges: each merged output depends on the
-                # condition and both branch sources. A compile-time-constant
-                # condition may be a raw Python bool (closure constant)
-                # with no IR identity — and malformed IR may lack the
-                # operand entirely — so it contributes no edge in either
-                # case.
-                condition = op.operands[0] if op.operands else None
-                condition_uuid = (
-                    condition.uuid if isinstance(condition, ValueBase) else None
-                )
-                for merge in op.iter_merges():
-                    deps = self.graph.setdefault(merge.result.uuid, set())
-                    if condition_uuid is not None:
-                        deps.add(condition_uuid)
-                    deps.add(merge.true_value.uuid)
-                    deps.add(merge.false_value.uuid)
-                    self._seed_structural_edges(merge.true_value)
-                    self._seed_structural_edges(merge.false_value)
-            if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
-                # Region arguments are phi-like loop boundaries rather than
-                # ordinary operands. Both the value visible in the body and
-                # the post-loop result may come from the zero-trip initializer
-                # or from a preceding iteration's yield, so both edges are
-                # required for measurement-taint and ownership analyses.
-                for region_arg in op.region_args:
-                    region_dependencies = {
-                        region_arg.init.uuid,
-                        region_arg.yielded.uuid,
-                    }
-                    self.graph.setdefault(region_arg.block_arg.uuid, set()).update(
-                        region_dependencies
-                    )
-                    self.graph.setdefault(region_arg.result.uuid, set()).update(
-                        region_dependencies
-                    )
-                    for value in (
-                        region_arg.init,
-                        region_arg.block_arg,
-                        region_arg.yielded,
-                        region_arg.result,
-                    ):
-                        self._seed_structural_edges(value)
-
-        def _seed_structural_edges(self, value: object) -> None:
-            """Seed element-to-parent and slice-chain edges for one value.
-
-            Args:
-                value (object): Candidate operand / merge source; ignored
-                    unless it is a ``ValueBase`` carrying ``parent_array``.
-            """
-            if not isinstance(value, ValueBase):
-                return
-            parent = getattr(value, "parent_array", None)
-            if parent is None:
-                return
-            self.graph.setdefault(value.uuid, set()).add(parent.uuid)
-            cur = parent
-            while getattr(cur, "slice_of", None) is not None:
-                self.graph.setdefault(cur.uuid, set()).add(cur.slice_of.uuid)
-                cur = cur.slice_of
-
-    builder = DependencyGraphBuilder()
-    builder.visit_operations(operations)
-    return builder.graph
-
-
-def find_measurement_results(operations: list[Operation]) -> set[str]:
-    """Find all value UUIDs that are direct results of measurement ops.
-
-    Walks operations recursively (through ``HasNestedOps``) and collects
-    every measurement result's UUID, covering both scalar
-    ``MeasureOperation`` and vector ``MeasureVectorOperation``. The
-    returned set is the seed for taint propagation; ``Vector[Bit]``
-    element accesses inherit the parent array's taint through the
-    parent-array edges added by ``build_dependency_graph``.
-
-    Args:
-        operations (list[Operation]): Top-level operations of the block.
-
-    Returns:
-        set[str]: Result UUIDs of every measurement operation.
-    """
-
-    class MeasurementResultCollector(ControlFlowVisitor):
-        def __init__(self):
-            self.result_uuids: set[str] = set()
-
-        def visit_operation(self, op: Operation) -> None:
-            if isinstance(op, (MeasureOperation, MeasureVectorOperation)):
-                for result in op.results:
-                    self.result_uuids.add(result.uuid)
-            elif isinstance(op, ProjectOperation):
-                self.result_uuids.add(op.results[1].uuid)
-
-    collector = MeasurementResultCollector()
-    collector.visit_operations(operations)
-    return collector.result_uuids
-
-
-def find_measurement_derived_values(
-    dependency_graph: dict[str, set[str]],
-    measurement_uuids: set[str],
-) -> set[str]:
-    """Forward-propagate measurement taint through the dependency graph.
-
-    Args:
-        dependency_graph (dict[str, set[str]]): ``result_uuid ->
-            set(operand_uuid, ...)`` as produced by
-            ``build_dependency_graph``, including the parent-array /
-            slice-of edges that connect measured-vector elements to the
-            root measured array.
-        measurement_uuids (set[str]): Seed set (results of
-            ``MeasureOperation`` / ``MeasureVectorOperation`` collected by
-            ``find_measurement_results``).
-
-    Returns:
-        set[str]: The set of all UUIDs transitively derived from a
-            measurement, including the seeds themselves.
-    """
-    # Build a reverse adjacency map once (dependency -> dependents) so taint
-    # propagation is a linear worklist traversal instead of rescanning the
-    # whole graph for every popped node (which is O(N^2) and shows up as a
-    # compile-time cost on large kernels, since this runs on every transpile).
-    dependents: dict[str, list[str]] = {}
-    for uuid, deps in dependency_graph.items():
-        for dep in deps:
-            dependents.setdefault(dep, []).append(uuid)
-
-    derived: set[str] = set()
-    worklist = list(measurement_uuids)
-    while worklist:
-        current = worklist.pop()
-        if current in derived:
-            continue
-        derived.add(current)
-        for dependent in dependents.get(current, ()):
-            if dependent not in derived:
-                worklist.append(dependent)
-    return derived
 
 
 @dataclasses.dataclass(frozen=True)
@@ -271,11 +85,15 @@ class PrunedIfView:
             keyed by ``id()`` of the rebuilt loop op. The keyed objects
             are kept alive by ``operations``, so the ids are stable for
             this view's lifetime.
+        _loop_condition_reads (dict[int, frozenset[tuple[str, str]]]): Legacy
+            loop-rebind UUID pairs whose entry value controlled a reachable
+            branch before compile-time pruning removed that branch.
     """
 
     operations: list[Operation]
     merge_aliases: tuple[tuple[Value, Value], ...]
     _loop_aliases: dict[int, tuple[tuple[Value, Value], ...]]
+    _loop_condition_reads: dict[int, frozenset[tuple[str, str]]]
 
     def aliases_for_loop(self, loop_op: Operation) -> tuple[tuple[Value, Value], ...]:
         """Return the alias pairs recorded inside one pruned loop's body.
@@ -292,6 +110,21 @@ class PrunedIfView:
                 loop's body, or an empty tuple.
         """
         return self._loop_aliases.get(id(loop_op), ())
+
+    def condition_reads_for_loop(
+        self,
+        loop_op: Operation,
+    ) -> frozenset[tuple[str, str]]:
+        """Return condition-dependent legacy rebinds for one pruned loop.
+
+        Args:
+            loop_op (Operation): Loop operation taken from ``operations``.
+
+        Returns:
+            frozenset[tuple[str, str]]: ``(before_uuid, after_uuid)`` pairs
+                observed on paths visited by compile-time pruning.
+        """
+        return self._loop_condition_reads.get(id(loop_op), frozenset())
 
 
 def prune_compile_time_ifs(
@@ -344,11 +177,13 @@ def prune_compile_time_ifs(
     """
     global_aliases: list[tuple[Value, Value]] = []
     loop_aliases: dict[int, tuple[tuple[Value, Value], ...]] = {}
+    loop_condition_reads: dict[int, frozenset[tuple[str, str]]] = {}
 
     def walk(
         ops: list[Operation],
         concrete_values: dict[str, Any],
         sink: list[tuple[Value, Value]],
+        condition_sink: list[ValueBase],
     ) -> list[Operation]:
         """Prune one operation list, recording aliases into ``sink``.
 
@@ -358,6 +193,8 @@ def prune_compile_time_ifs(
                 this scope; updated in place.
             sink (list[tuple[Value, Value]]): Alias accumulator of the
                 nearest enclosing loop (or the global one).
+            condition_sink (list[ValueBase]): Conditions reached in the
+                nearest enclosing loop, including conditions later pruned.
 
         Returns:
             list[Operation]: The pruned view of ``ops``.
@@ -366,6 +203,7 @@ def prune_compile_time_ifs(
         for op in ops:
             evaluate_classical_op_concrete(op, concrete_values, bindings)
             if isinstance(op, IfOperation):
+                condition_sink.append(op.condition)
                 # A malformed condition-less if resolves as runtime (None
                 # coerces to no compile-time value) and passes through.
                 taken = resolve_compile_time_condition(
@@ -381,16 +219,22 @@ def prune_compile_time_ifs(
                         op = dataclasses.replace(
                             op,
                             true_operations=walk(
-                                op.true_operations, dict(concrete_values), sink
+                                op.true_operations,
+                                dict(concrete_values),
+                                sink,
+                                condition_sink,
                             ),
                             false_operations=walk(
-                                op.false_operations, dict(concrete_values), sink
+                                op.false_operations,
+                                dict(concrete_values),
+                                sink,
+                                condition_sink,
                             ),
                         )
                     pruned.append(op)
                     continue
                 branch = op.true_operations if taken else op.false_operations
-                pruned.extend(walk(branch, concrete_values, sink))
+                pruned.extend(walk(branch, concrete_values, sink, condition_sink))
                 for merge in op.iter_merges():
                     sink.append((merge.result, merge.select(taken)))
                 continue
@@ -400,29 +244,64 @@ def prune_compile_time_ifs(
                     # loop-scoped checks see exactly the pairs from ifs
                     # inside this body — pre-loop pairs must not leak in.
                     subtree: list[tuple[Value, Value]] = []
-                    op = op.rebuild_nested(
+                    subtree_conditions: list[ValueBase] = []
+                    op = op.rebuild_regions(
                         [
-                            walk(body, dict(concrete_values), subtree)
-                            for body in op.nested_op_lists()
+                            dataclasses.replace(
+                                region,
+                                operations=tuple(
+                                    walk(
+                                        list(region.operations),
+                                        dict(concrete_values),
+                                        subtree,
+                                        subtree_conditions,
+                                    )
+                                ),
+                            )
+                            for region in op.nested_regions()
                         ]
                     )
                     loop_aliases[id(op)] = tuple(subtree)
+                    loop_condition_reads[id(op)] = frozenset(
+                        find_loop_carried_condition_reads(
+                            cast(
+                                ForOperation | ForItemsOperation | WhileOperation,
+                                op,
+                            ),
+                            condition_values=subtree_conditions,
+                            selected_aliases={
+                                result.uuid: source.uuid for result, source in subtree
+                            },
+                        )
+                    )
                     sink.extend(subtree)
+                    condition_sink.extend(subtree_conditions)
                 else:
-                    op = op.rebuild_nested(
+                    op = op.rebuild_regions(
                         [
-                            walk(body, dict(concrete_values), sink)
-                            for body in op.nested_op_lists()
+                            dataclasses.replace(
+                                region,
+                                operations=tuple(
+                                    walk(
+                                        list(region.operations),
+                                        dict(concrete_values),
+                                        sink,
+                                        condition_sink,
+                                    )
+                                ),
+                            )
+                            for region in op.nested_regions()
                         ]
                     )
             pruned.append(op)
         return pruned
 
-    pruned_ops = walk(ops, concrete_values, global_aliases)
+    pruned_ops = walk(ops, concrete_values, global_aliases, [])
     return PrunedIfView(
         operations=pruned_ops,
         merge_aliases=tuple(global_aliases),
         _loop_aliases=loop_aliases,
+        _loop_condition_reads=loop_condition_reads,
     )
 
 
@@ -451,8 +330,13 @@ def flatten_ops(
         if not into_if_branches and isinstance(op, IfOperation):
             continue
         if isinstance(op, HasNestedOps):
-            for body in op.nested_op_lists():
-                flat.extend(flatten_ops(body, into_if_branches=into_if_branches))
+            for region in op.nested_regions():
+                flat.extend(
+                    flatten_ops(
+                        list(region.operations),
+                        into_if_branches=into_if_branches,
+                    )
+                )
     return flat
 
 
@@ -635,7 +519,11 @@ def reject_self_referential_loop_stores(
     for op in flatten_ops(pruned.operations, into_if_branches=False):
         if isinstance(op, (ForOperation, ForItemsOperation, WhileOperation)):
             check_loop_body(
-                [body_op for body in op.nested_op_lists() for body_op in body],
+                [
+                    body_op
+                    for region in op.nested_regions()
+                    for body_op in region.operations
+                ],
                 pruned.aliases_for_loop(op),
             )
 
@@ -805,6 +693,10 @@ def _reject_stale_while_condition_reads(
             while — directly, through a lazy expression, or through a
             pruned-merge alias — is read after the condition update.
     """
+    flat_operations = flatten_ops(pruned.operations)
+    if not any(isinstance(operation, WhileOperation) for operation in flat_operations):
+        return
+
     dependency_graph = build_dependency_graph(pruned.operations)
     value_table: dict[str, ValueBase] = {}
 
@@ -831,7 +723,6 @@ def _reject_stale_while_condition_reads(
             if isinstance(item, ValueBase):
                 register_value(item)
 
-    flat_operations = flatten_ops(pruned.operations)
     for operation in flat_operations:
         for value in (*operation.all_input_values(), *operation.results):
             register_value(value)
@@ -1044,6 +935,7 @@ def _reject_stale_while_condition_reads(
 def _check_loop_carried_rebinds(
     loop_op: ForOperation | ForItemsOperation | WhileOperation,
     body_merge_aliases: tuple[tuple[Value, Value], ...],
+    body_condition_reads: frozenset[tuple[str, str]],
     bindings: dict[str, Any],
     concrete_values: dict[str, Any],
     loop_var_domains: dict[str, tuple[int, int]],
@@ -1062,6 +954,9 @@ def _check_loop_carried_rebinds(
             pruned inside this loop's body. Body-local by design: the
             canonical chain below must stop at the pre-loop value, so
             pre-loop merge aliases must not leak in.
+        body_condition_reads (frozenset[tuple[str, str]]): Legacy rebind
+            UUID pairs whose entry value controlled a reachable branch before
+            compile-time pruning removed it.
         bindings (dict[str, Any]): Compile-time parameter bindings used to
             prove a store-only Bit loop has at least one unrolled iteration.
         concrete_values (dict[str, Any]): UUID-keyed singleton values for
@@ -1082,12 +977,52 @@ def _check_loop_carried_rebinds(
             body, was initialized from a plain Python number, or swaps
             with another rebound variable.
     """
+    if isinstance(loop_op, WhileOperation) and loop_op.region_args:
+        # The frontend now represents non-condition while state explicitly,
+        # but the circuit emit contract has no target-independent runtime
+        # storage model for these values yet. Reject at analysis rather than
+        # letting segmentation or an engine fail ambiguously. Compile-time
+        # branch pruning can collapse a provisional carry to an identity,
+        # which the normal identity-carry lowering removes later.
+        collapsed = {result.uuid: source.uuid for result, source in body_merge_aliases}
+
+        def canonical_region_uuid(uuid: str) -> str:
+            """Follow pruned merge aliases for a region yield.
+
+            Args:
+                uuid (str): Yield UUID to canonicalize.
+
+            Returns:
+                str: First non-merge UUID in the alias chain.
+            """
+            seen: set[str] = set()
+            while uuid in collapsed and uuid not in seen:
+                seen.add(uuid)
+                uuid = collapsed[uuid]
+            return uuid
+
+        unsupported = next(
+            (
+                region_arg
+                for region_arg in loop_op.region_args
+                if canonical_region_uuid(region_arg.yielded.uuid)
+                not in {region_arg.block_arg.uuid, region_arg.init.uuid}
+            ),
+            None,
+        )
+        if unsupported is not None:
+            raise _loop_carried_rebind_error(unsupported.var_name, "while")
+
     records = loop_op.loop_carried_rebinds
     if not records:
         return
 
     loop_kind = _LOOP_KIND_NAMES.get(type(loop_op), "for")
-    body_ops = [o for body in loop_op.nested_op_lists() for o in body]
+    body_ops = [
+        operation
+        for region in loop_op.nested_regions()
+        for operation in region.operations
+    ]
     flat_body = flatten_ops(body_ops)
 
     # Dead-branch merge aliases recorded by pruning:
@@ -1254,10 +1189,31 @@ def _check_loop_carried_rebinds(
         canon_value = value_table.get(canon_uuid)
         if canon_value is None and canon_uuid == record.after.uuid:
             canon_value = record.after
-        reads_pre_loop_value = record.before.uuid in body_read_uuids
-        if reads_pre_loop_value and is_loop_invariant_if_overwrite(
-            record,
-            canon_uuid,
+        condition_reads_pre_loop_value = (
+            record.before.uuid,
+            record.after.uuid,
+        ) in body_condition_reads
+        reads_pre_loop_value = (
+            record.before.uuid in body_read_uuids or condition_reads_pre_loop_value
+        )
+        if reads_pre_loop_value:
+            trip_count = _static_loop_max_trip_count(
+                loop_op,
+                concrete_values,
+                bindings,
+                producer_by_result,
+                loop_var_domains,
+            )
+            if trip_count is not None and trip_count <= 1:
+                reads_pre_loop_value = False
+                condition_reads_pre_loop_value = False
+        if (
+            reads_pre_loop_value
+            and not condition_reads_pre_loop_value
+            and is_loop_invariant_if_overwrite(
+                record,
+                canon_uuid,
+            )
         ):
             reads_pre_loop_value = False
 
@@ -1301,7 +1257,7 @@ def _check_loop_carried_rebinds(
             )
             and not reads_pre_loop_value
         ):
-            trip_count = _static_loop_trip_count(
+            trip_count = _static_loop_min_trip_count(
                 loop_op,
                 concrete_values,
                 bindings,
@@ -1326,7 +1282,7 @@ def _check_loop_carried_rebinds(
             if (
                 isinstance(record.before, Value)
                 and isinstance(canon_value, Value)
-                and _same_exact_typed_constant(record.before, canon_value)
+                and same_exact_typed_constant(record.before, canon_value)
             ):
                 continue
             # Trace-time-folded accumulation: an all-constant update like
@@ -1509,6 +1465,7 @@ def reject_loop_carried_classical_rebinds(
                 _check_loop_carried_rebinds(
                     operation,
                     pruned.aliases_for_loop(operation),
+                    pruned.condition_reads_for_loop(operation),
                     resolved_bindings,
                     concrete_values,
                     loop_var_domains,
@@ -1819,20 +1776,21 @@ def _static_for_iteration_range(
     return range(start, stop, step)
 
 
-def _static_loop_trip_count(
+def _static_loop_trip_count_bounds(
     loop_op: "ForOperation | ForItemsOperation | WhileOperation",
     concrete_values: dict[str, Any],
     bindings: dict[str, Any],
     producer_by_result: dict[str, Operation] | None = None,
     loop_var_domains: dict[str, tuple[int, int]] | None = None,
-) -> int | None:
-    """Resolve a static loop's trip count when its cardinality is known.
+) -> tuple[int, int] | None:
+    """Resolve lower and upper bounds for a static loop's trip count.
 
     ``ForOperation`` bounds resolve through constants, accumulated concrete
     values, parameter bindings, and affine expressions over statically-bounded
-    enclosing loop variables. For the latter, the result is the guaranteed
-    minimum trip count over every enclosing iteration, which is sufficient for
-    callers proving a loop is non-empty on every reachable path.
+    enclosing loop variables. For the latter, the result contains the minimum
+    and maximum trip counts over every enclosing iteration. Keeping both bounds
+    prevents callers proving non-emptiness from accidentally reusing that lower
+    bound to prove a loop runs at most once.
     ``ForItemsOperation`` cardinality resolves through the dict operand's bound
     contents. ``WhileOperation`` trip counts are runtime measurement outcomes
     and always return None. The frontend's zero-trip trace guards
@@ -1855,9 +1813,8 @@ def _static_loop_trip_count(
             variables. Defaults to None.
 
     Returns:
-        int | None: Exact trip count for concrete bounds, guaranteed minimum
-            trip count for affine enclosing-loop domains, or None when the
-            bounds cannot be resolved.
+        tuple[int, int] | None: Inclusive ``(minimum, maximum)`` trip-count
+            bounds, or None when the bounds cannot be resolved.
     """
     if isinstance(loop_op, ForItemsOperation):
         for operand in loop_op.operands:
@@ -1865,7 +1822,8 @@ def _static_loop_trip_count(
                 getattr(operand, "metadata", None), "dict_runtime", None
             )
             if dict_runtime is not None:
-                return len(dict_runtime.bound_data)
+                count = len(dict_runtime.bound_data)
+                return count, count
         return None
     if not isinstance(loop_op, ForOperation) or len(loop_op.operands) < 3:
         return None
@@ -1877,7 +1835,8 @@ def _static_loop_trip_count(
     if all(value is not None for value in resolved):
         start, stop, step = (int(value) for value in resolved)
         try:
-            return len(range(start, stop, step))
+            count = len(range(start, stop, step))
+            return count, count
         except (OverflowError, ValueError):
             # step == 0; leave it to the emit-time bound validation.
             return None
@@ -1971,29 +1930,95 @@ def _static_loop_trip_count(
     if step_form[0]:
         return None
     delta_form = combine(stop_form, start_form, -1)
-    delta = delta_form[1]
+    minimum_delta = delta_form[1]
+    maximum_delta = delta_form[1]
     if delta_form[0]:
         if loop_var_domains is None or any(
             uuid not in loop_var_domains for uuid in delta_form[0]
         ):
             return None
-        minimum = delta_form[1]
-        maximum = delta_form[1]
         for uuid, coefficient in delta_form[0].items():
             lower, upper = loop_var_domains[uuid]
             if coefficient >= 0:
-                minimum += coefficient * lower
-                maximum += coefficient * upper
+                minimum_delta += coefficient * lower
+                maximum_delta += coefficient * upper
             else:
-                minimum += coefficient * upper
-                maximum += coefficient * lower
-        # For a fixed positive step, range length is minimized by the
-        # smallest delta; for a negative step it is minimized by the largest.
-        delta = minimum if step_form[1] > 0 else maximum
+                minimum_delta += coefficient * upper
+                maximum_delta += coefficient * lower
     try:
-        return len(range(0, delta, step_form[1]))
+        endpoint_counts = (
+            len(range(0, minimum_delta, step_form[1])),
+            len(range(0, maximum_delta, step_form[1])),
+        )
     except (OverflowError, ValueError):
         return None
+    return min(endpoint_counts), max(endpoint_counts)
+
+
+def _static_loop_min_trip_count(
+    loop_op: "ForOperation | ForItemsOperation | WhileOperation",
+    concrete_values: dict[str, Any],
+    bindings: dict[str, Any],
+    producer_by_result: dict[str, Operation] | None = None,
+    loop_var_domains: dict[str, tuple[int, int]] | None = None,
+) -> int | None:
+    """Return the guaranteed minimum static trip count.
+
+    Args:
+        loop_op (ForOperation | ForItemsOperation | WhileOperation): Loop to
+            inspect.
+        concrete_values (dict[str, Any]): UUID-keyed concrete values known at
+            the loop position.
+        bindings (dict[str, Any]): Compile-time parameter bindings.
+        producer_by_result (dict[str, Operation] | None): Optional producer
+            lookup for affine bounds. Defaults to None.
+        loop_var_domains (dict[str, tuple[int, int]] | None): Optional domains
+            of enclosing static loop variables. Defaults to None.
+
+    Returns:
+        int | None: Guaranteed minimum trip count, or None when unresolved.
+    """
+    bounds = _static_loop_trip_count_bounds(
+        loop_op,
+        concrete_values,
+        bindings,
+        producer_by_result,
+        loop_var_domains,
+    )
+    return None if bounds is None else bounds[0]
+
+
+def _static_loop_max_trip_count(
+    loop_op: "ForOperation | ForItemsOperation | WhileOperation",
+    concrete_values: dict[str, Any],
+    bindings: dict[str, Any],
+    producer_by_result: dict[str, Operation] | None = None,
+    loop_var_domains: dict[str, tuple[int, int]] | None = None,
+) -> int | None:
+    """Return the guaranteed maximum static trip count.
+
+    Args:
+        loop_op (ForOperation | ForItemsOperation | WhileOperation): Loop to
+            inspect.
+        concrete_values (dict[str, Any]): UUID-keyed concrete values known at
+            the loop position.
+        bindings (dict[str, Any]): Compile-time parameter bindings.
+        producer_by_result (dict[str, Operation] | None): Optional producer
+            lookup for affine bounds. Defaults to None.
+        loop_var_domains (dict[str, tuple[int, int]] | None): Optional domains
+            of enclosing static loop variables. Defaults to None.
+
+    Returns:
+        int | None: Guaranteed maximum trip count, or None when unresolved.
+    """
+    bounds = _static_loop_trip_count_bounds(
+        loop_op,
+        concrete_values,
+        bindings,
+        producer_by_result,
+        loop_var_domains,
+    )
+    return None if bounds is None else bounds[1]
 
 
 def _root_wire_family(
@@ -2260,8 +2285,9 @@ def _collect_loop_external_liveness(
 
     Returns:
         tuple[dict[int, set[str]], dict[int, set[str]]]: Same-path live-after
-            UUIDs keyed first by loop identity and then by every operation
-            identity.
+            UUIDs keyed first by loop identity and then by operation identity.
+            Per-operation entries are recorded only inside while bodies, where
+            stale-condition validation consumes them.
     """
     live_after_loop: dict[int, set[str]] = {}
     live_after_operation: dict[int, set[str]] = {}
@@ -2275,19 +2301,29 @@ def _collect_loop_external_liveness(
         """
         _add_uuid_with_ancestry(value, live)
 
-    def walk_scope(scope: list[Operation], inherited: set[str]) -> set[str]:
+    def walk_scope(
+        scope: list[Operation],
+        inherited: set[str],
+        *,
+        record_operation_liveness: bool = False,
+    ) -> set[str]:
         """Walk one sequential scope backwards.
 
         Args:
             scope (list[Operation]): Operations in execution order.
             inherited (set[str]): Values live after the scope returns.
+            record_operation_liveness (bool): Whether to retain a live-after
+                snapshot for each operation in this scope. This is enabled
+                only for while bodies, whose stale-condition validation needs
+                those snapshots. Defaults to ``False``.
 
         Returns:
             set[str]: Values live before entering the scope.
         """
         live = set(inherited)
         for operation in reversed(scope):
-            live_after_operation[id(operation)] = set(live)
+            if record_operation_liveness:
+                live_after_operation[id(operation)] = set(live)
             if isinstance(operation, IfOperation):
                 result_uuids = {result.uuid for result in operation.results}
                 true_live = live - result_uuids
@@ -2297,8 +2333,16 @@ def _collect_loop_external_liveness(
                         continue
                     add_value(true_live, merge.true_value)
                     add_value(false_live, merge.false_value)
-                true_before = walk_scope(operation.true_operations, true_live)
-                false_before = walk_scope(operation.false_operations, false_live)
+                true_before = walk_scope(
+                    operation.true_operations,
+                    true_live,
+                    record_operation_liveness=record_operation_liveness,
+                )
+                false_before = walk_scope(
+                    operation.false_operations,
+                    false_live,
+                    record_operation_liveness=record_operation_liveness,
+                )
                 live.difference_update(result_uuids)
                 live.update(true_before)
                 live.update(false_before)
@@ -2323,7 +2367,16 @@ def _collect_loop_external_liveness(
 
                 body_before: set[str] = set()
                 for body in operation.nested_op_lists():
-                    body_before.update(walk_scope(body, body_live))
+                    body_before.update(
+                        walk_scope(
+                            body,
+                            body_live,
+                            record_operation_liveness=(
+                                record_operation_liveness
+                                or isinstance(operation, WhileOperation)
+                            ),
+                        )
+                    )
 
                 internal_uuids = set(result_uuids)
                 for region_arg in operation.region_args:
@@ -2355,7 +2408,13 @@ def _collect_loop_external_liveness(
             if isinstance(operation, HasNestedOps):
                 nested_before: set[str] = set()
                 for body in operation.nested_op_lists():
-                    nested_before.update(walk_scope(body, live))
+                    nested_before.update(
+                        walk_scope(
+                            body,
+                            live,
+                            record_operation_liveness=record_operation_liveness,
+                        )
+                    )
                 live.update(nested_before)
 
             result_uuids = {result.uuid for result in operation.results}
@@ -2911,7 +2970,7 @@ def _check_loop_quantum_discards(
     the body, and it is not read after the loop. That is exactly the
     repeat-until-success pattern where ``qmc.qubit()`` denotes a fresh
     logical ``|0>`` per iteration; nested ``QInitOperation`` emission is
-    responsible for preparing/resetting the persistent backend wire.
+    responsible for preparing/resetting the persistent engine wire.
     In-body consumption of the incoming value itself remains NOT an
     exemption: the read re-executes against the traced register every
     iteration and matches Python semantics only for the first one.
@@ -2926,7 +2985,7 @@ def _check_loop_quantum_discards(
     :func:`_while_zero_trip_rebind_error`). For static loops the same
     zero-trip hazard is closed twice over: the frontend prunes a
     statically-zero-trip loop at build time (no loop op, no record), and
-    :func:`_static_loop_trip_count` rejects any quantum record on a loop
+    :func:`_static_loop_min_trip_count` rejects any quantum record on a loop
     whose bounds still resolve to zero trips at check time.
 
     Args:
@@ -2952,7 +3011,7 @@ def _check_loop_quantum_discards(
     if not quantum_records:
         return
     loop_kind = _LOOP_KIND_NAMES.get(type(loop_op), "for")
-    trip_count = _static_loop_trip_count(loop_op, concrete_values, bindings)
+    trip_count = _static_loop_min_trip_count(loop_op, concrete_values, bindings)
     if trip_count == 0:
         # A statically-zero-trip loop never runs, but post-loop reads
         # keep the traced post-body binding (emit does not restore
@@ -3172,9 +3231,9 @@ def _check_loop_quantum_discards(
         # unrolled loops re-instantiate the body without carrying the
         # rebound register between iterations, and a runtime while
         # re-executes its body on one persistent register without reset,
-        # so "fresh per iteration" is not expressible either way (review
-        # measured an rx-gated while repeat-until-success body sampling
-        # the wire-reuse distribution, not the fresh-register one).
+        # so "fresh per iteration" is not expressible either way. An
+        # rx-gated repeat-until-success body would otherwise sample the
+        # wire-reuse distribution instead of the fresh-register one.
         if not record.after.type.is_quantum():
             raise _loop_nonquantum_overwrite_error(record.var_name, loop_kind)
         raise _loop_quantum_discard_error(record.var_name, loop_kind)
@@ -3519,6 +3578,13 @@ class AnalyzePass(Pass[Block, Block]):
         # Build dependency graph
         dependency_graph = self._build_dependency_graph(input.operations)
 
+        # Stored Bit slots retain measurement provenance for output
+        # materialization, but are not yet valid in-circuit conditions.
+        self._reject_stored_bit_array_conditions(
+            input.operations,
+            dependency_graph,
+        )
+
         # Validate quantum-classical dependencies
         self._validate_quantum_dependencies(
             input.operations,
@@ -3608,6 +3674,108 @@ class AnalyzePass(Pass[Block, Block]):
             elif isinstance(op, HasNestedOps):
                 for body in op.nested_op_lists():
                     self._reject_stores_in_if_branches(body)
+
+    def _reject_stored_bit_array_conditions(
+        self,
+        operations: list[Operation],
+        dependency_graph: dict[str, set[str]],
+    ) -> None:
+        """Reject runtime control flow sourced from an assigned Bit array slot.
+
+        Store operations retain the exact source value and destination index,
+        which is sufficient for host-side materialization and return values.
+        Engines do not yet allocate or alias a destination clbit for a
+        user-created Bit array, so using a stored slot as an in-circuit
+        condition would otherwise risk reading the wrong physical clbit.
+
+        Args:
+            operations (list[Operation]): Operations to inspect recursively.
+            dependency_graph (dict[str, set[str]]): Result-to-input dependency
+                graph for the same block.
+
+        Raises:
+            ValidationError: If an ``if`` or ``while`` condition transitively
+                depends on a ``StoreArrayElementOperation`` for ``Bit``
+                elements.
+        """
+        stored_bit_arrays: set[str] = set()
+
+        class StoreCollector(ControlFlowVisitor):
+            """Collect result UUIDs of Bit array stores."""
+
+            def visit_operation(self, op: Operation) -> None:
+                """Record a Bit array store result.
+
+                Args:
+                    op (Operation): Operation visited by the recursive walker.
+                """
+                if isinstance(op, StoreArrayElementOperation) and isinstance(
+                    op.array.type, BitType
+                ):
+                    stored_bit_arrays.update(result.uuid for result in op.results)
+
+        collector = StoreCollector()
+        collector.visit_operations(operations)
+        if not stored_bit_arrays:
+            return
+
+        def depends_on_stored_array(value: ValueBase) -> bool:
+            """Return whether a value transitively reads a stored Bit array.
+
+            Args:
+                value (ValueBase): Candidate control-flow condition.
+
+            Returns:
+                bool: ``True`` when the dependency closure reaches a stored
+                    Bit array version.
+            """
+            pending = [value.uuid]
+            visited: set[str] = set()
+            while pending:
+                current = pending.pop()
+                if current in visited:
+                    continue
+                visited.add(current)
+                if current in stored_bit_arrays:
+                    return True
+                pending.extend(dependency_graph.get(current, ()))
+            return False
+
+        class ConditionValidator(ControlFlowVisitor):
+            """Reject control-flow conditions backed by stored Bit slots."""
+
+            def visit_operation(self, op: Operation) -> None:
+                """Validate one control-flow operation.
+
+                Args:
+                    op (Operation): Operation visited by the recursive walker.
+
+                Raises:
+                    ValidationError: If a condition depends on a stored Bit
+                        array version.
+                """
+                conditions: list[ValueBase] = []
+                if isinstance(op, IfOperation) and op.operands:
+                    condition = op.operands[0]
+                    if isinstance(condition, ValueBase):
+                        conditions.append(condition)
+                elif isinstance(op, WhileOperation):
+                    conditions.extend(
+                        operand
+                        for operand in op.operands[:2]
+                        if isinstance(operand, ValueBase)
+                    )
+                if any(depends_on_stored_array(value) for value in conditions):
+                    raise ValidationError(
+                        "Using an assigned Bit array element as a runtime "
+                        "if/while condition is not supported yet. Bit arrays "
+                        "currently support storing and returning values only; "
+                        "keep and use the original measurement Bit handle for "
+                        "feed-forward control."
+                    )
+
+        validator = ConditionValidator()
+        validator.visit_operations(operations)
 
     def _reject_self_referential_loop_stores(
         self,
@@ -3782,12 +3950,12 @@ class AnalyzePass(Pass[Block, Block]):
 
         ``power`` lives outside ``op.operands``, so the generic
         dependency validation does not cover it.  This method rejects
-        statically-decidable invalid concrete values (``<= 0``,
+        statically-decidable invalid concrete values (negative integers,
         ``bool``, non-integer) while allowing unresolved symbolic
         ``Value`` instances that will be resolved at emit time.
 
         Args:
-            operations: The affine operation list to validate.
+            operations (list[Operation]): The affine operation list to validate.
 
         Raises:
             ValidationError: If a concrete ``power`` value is invalid.
@@ -3795,28 +3963,32 @@ class AnalyzePass(Pass[Block, Block]):
         from qamomile.circuit.ir.operation.gate import ControlledUOperation
 
         def _validate_concrete_power(value: object, op: ControlledUOperation) -> None:
-            if isinstance(value, bool):
-                raise ValidationError(
-                    f"ControlledU power must be a positive integer, got bool ({value})."
-                )
-            if not isinstance(value, (int, float)):
-                raise ValidationError(
-                    f"ControlledU power must be a positive integer, "
-                    f"got {type(value).__name__}."
-                )
-            if isinstance(value, float) and value != int(value):
-                raise ValidationError(
-                    f"ControlledU power must be an integer, "
-                    f"got non-integer float {value}."
-                )
-            int_val = int(value)
-            if int_val <= 0:
-                raise ValidationError(
-                    f"ControlledU power must be strictly positive, got {int_val}."
-                )
+            """Validate one statically resolved controlled-call power.
+
+            Args:
+                value (object): Resolved power candidate.
+                op (ControlledUOperation): Operation owning the candidate.
+
+            Raises:
+                ValidationError: If the candidate is not a nonnegative integer.
+            """
+            try:
+                coerce_nonnegative_integral(value, label="ControlledU power")
+            except (TypeError, ValueError) as error:
+                raise ValidationError(str(error)) from error
 
         class ControlledUValidator(ControlFlowVisitor):
+            """Validate controlled-call powers across nested operation lists."""
+
             def visit_operation(self, op: Operation) -> None:
+                """Validate a controlled operation when its power is concrete.
+
+                Args:
+                    op (Operation): Operation currently visited.
+
+                Raises:
+                    ValidationError: If a controlled-call power is invalid.
+                """
                 if not isinstance(op, ControlledUOperation):
                     return
                 power = op.power

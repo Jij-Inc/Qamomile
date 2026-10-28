@@ -39,6 +39,8 @@ import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 100
 
 # %% [markdown]
 # ## `qmc.range` Loops
@@ -220,17 +222,14 @@ def conditional_flip() -> qmc.Bit:
 
 # %%
 exe = transpiler.transpile(conditional_flip)
-if os.environ.get("QAMOMILE_DOCS_TEST") == "1":
-    print("Skipping dynamic-circuit execution in docs test mode.")
-else:
-    executor = transpiler.executor()
-    job = exe.sample(executor, bindings={}, shots=100)
-    result = job.result()
-    for value, count in result.results:
-        print(f"  bit={value}: {count} shots")
-    # q0 prepared as |1>; the if-branch flips q1 to |1> on every shot.
-    assert result.shots == 100
-    assert result.results == [(1, 100)]
+executor = transpiler.executor()
+job = exe.sample(executor, bindings={}, shots=sample_shots)
+result = job.result()
+for value, count in result.results:
+    print(f"  bit={value}: {count} shots")
+# q0 prepared as |1>; the if-branch flips q1 to |1> on every shot.
+assert result.shots == sample_shots
+assert result.results == [(1, sample_shots)]
 
 # %% [markdown]
 # Since `q0` is prepared as |1⟩, the measurement always yields 1, so `q1` always gets flipped — every shot should return 1.

@@ -6,6 +6,8 @@ import copy
 import uuid
 from typing import Any
 
+from qamomile.circuit.ir.value import remap_indexed_identifier
+
 _VALUE_NAMESPACE = uuid.UUID("9529c31d-33c5-59c2-9f1a-518667dcf104")
 _LOGICAL_NAMESPACE = uuid.UUID("81394e4d-0599-5dfd-873a-59eb7bc42c80")
 
@@ -103,17 +105,18 @@ def _rewrite_node(
             node[key] = [
                 None
                 if item is None
-                else _mapped(item, uuid_remap, key, _VALUE_NAMESPACE)
+                else _mapped_indexed(item, uuid_remap, key, _VALUE_NAMESPACE)
                 for item in value
             ]
         elif key.endswith("_logical_ids") and isinstance(value, list):
             node[key] = [
-                _mapped(item, logical_id_remap, key, _LOGICAL_NAMESPACE)
+                _mapped_indexed(item, logical_id_remap, key, _LOGICAL_NAMESPACE)
                 for item in value
             ]
         elif key == "qubit_mapping" and isinstance(value, list):
             node[key] = [
-                _mapped(item, uuid_remap, key, _VALUE_NAMESPACE) for item in value
+                _mapped_indexed(item, uuid_remap, key, _VALUE_NAMESPACE)
+                for item in value
             ]
         elif key == "parameters" and isinstance(value, dict):
             node[key] = {
@@ -124,6 +127,43 @@ def _rewrite_node(
             node[key] = _mapped(value, uuid_remap, key, _VALUE_NAMESPACE)
         else:
             _rewrite_node(value, uuid_remap, logical_id_remap)
+
+
+def _mapped_indexed(
+    value: Any,
+    mapping: dict[str, str],
+    field: str,
+    namespace: uuid.UUID,
+) -> str:
+    """Canonicalize a scalar identity or indexed carrier key.
+
+    Composite carrier keys use the legacy ``"<root>_<index>"`` spelling.
+    Identities present in the value table take precedence over this spelling:
+    ordinary scalar and array identities may also end in numeric suffixes.
+    For composite keys, only the root identity is process-local; the numeric
+    suffix is a physical carrier index and must survive unchanged.
+
+    Args:
+        value (Any): Scalar identity or indexed carrier key to canonicalize.
+        mapping (dict[str, str]): Original-to-canonical root identity map.
+        field (str): Field name used for malformed-value diagnostics.
+        namespace (uuid.UUID): Namespace for identities absent from the value
+            table.
+
+    Returns:
+        str: Canonical identity with any numeric carrier suffix preserved.
+
+    Raises:
+        ValueError: If ``value`` is not a string identity.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"{field} has a non-string identity {value!r}")
+    if value in mapping:
+        return mapping[value]
+    return remap_indexed_identifier(
+        value,
+        lambda base: _mapped(base, mapping, field, namespace),
+    )
 
 
 def _mapped(

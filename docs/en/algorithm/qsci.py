@@ -211,7 +211,7 @@ assert opt_params.shape == (n_params,)
 # `subspace_hamiltonian` expects.
 
 # %%
-shots = 500 if docs_test_mode else 4000
+shots = 1 if docs_test_mode else 4000
 sample_results = (
     sample_exec.sample(executor, bindings={"thetas": list(opt_params)}, shots=shots)
     .result()

@@ -96,6 +96,101 @@ def bit(arg: bool | str | int) -> Bit:
         raise TypeError("Argument must be of type bool, str, or int")
 
 
+@typing.overload
+def bit_array(shape: int | UInt, name: str = "bits") -> Vector[Bit]: ...
+
+
+@typing.overload
+def bit_array(shape: tuple[int | UInt], name: str = "bits") -> Vector[Bit]: ...
+
+
+def bit_array(
+    shape: UInt | int | tuple[UInt | int, ...],
+    name: str = "bits",
+) -> Vector[Bit]:
+    """Create a fixed-length classical bit vector initialized to zero.
+
+    The vector is represented as an initialized IR constant array, so it can
+    receive measured ``Bit`` values through ordinary element assignment and
+    can be returned from a qkernel. Its length must be known while tracing;
+    the emitted classical initializer materializes contents, not a dynamic
+    array shape.
+
+    Args:
+        shape (UInt | int | tuple[UInt | int, ...]): Number of bits in the
+            vector, given either as a scalar or a one-element tuple. A
+            ``UInt`` must resolve to a compile-time constant.
+        name (str): Display name for the underlying array value. Defaults to
+            ``"bits"``.
+
+    Returns:
+        Vector[Bit]: A fixed-length vector whose elements are initialized to
+            ``False``.
+
+    Raises:
+        TypeError: If ``shape`` or ``name`` has the wrong type.
+        ValueError: If the shape is empty, negative, or not known at trace
+            time.
+        NotImplementedError: If a shape with more than one dimension is
+            requested.
+
+    Example:
+        >>> import qamomile.circuit as qmc
+        >>>
+        >>> @qmc.qkernel
+        ... def readout() -> qmc.Vector[qmc.Bit]:
+        ...     qubits = qmc.qubit_array(2, "qubits")
+        ...     measured = qmc.measure(qubits)
+        ...     bits = qmc.bit_array(2)
+        ...     bits[0] = measured[0]
+        ...     bits[1] = measured[1]
+        ...     return bits
+    """
+    raw_shape: typing.Any = shape
+    raw_name: typing.Any = name
+    if not isinstance(raw_name, str):
+        raise TypeError(f"bit_array name must be a str, got {type(raw_name).__name__}.")
+    if isinstance(raw_shape, bool) or not isinstance(raw_shape, (int, UInt, tuple)):
+        raise TypeError(
+            "bit_array shape must be an int, UInt, or a tuple containing "
+            f"one such value, got {type(raw_shape).__name__}."
+        )
+
+    normalized_shape = raw_shape if isinstance(raw_shape, tuple) else (raw_shape,)
+    ndim = len(normalized_shape)
+    if ndim == 0:
+        raise ValueError("bit_array shape must contain one dimension.")
+    if ndim > 1:
+        raise NotImplementedError(
+            f"bit_array does not support rank-{ndim} shapes; use a 1-D "
+            "Vector[Bit] and compute flat indices explicitly."
+        )
+
+    raw_size = normalized_shape[0]
+    if isinstance(raw_size, bool) or not isinstance(raw_size, (int, UInt)):
+        raise TypeError(
+            "bit_array shape tuple must contain one int or UInt, got "
+            f"{type(raw_size).__name__}."
+        )
+    dim = raw_size if isinstance(raw_size, UInt) else uint(raw_size)
+    const_size = dim.value.get_const()
+    if const_size is None:
+        raise ValueError(
+            "bit_array shape must be known at trace time; bind the UInt size "
+            "through `bindings` instead of keeping it in `parameters`."
+        )
+    size = int(const_size)
+    if size < 0:
+        raise ValueError(f"bit_array shape must be non-negative, got {size}.")
+
+    array_value = ArrayValue(
+        type=ir_type.BitType(),
+        name=name,
+        shape=(dim.value,),
+    ).with_array_runtime_metadata(const_array=(False,) * size)
+    return Vector[Bit](value=array_value, _shape=(dim,))
+
+
 def qubit(name: str) -> Qubit:
     """Create a new qubit and emit a QInitOperation."""
     value = Value(type=ir_type.QubitType(), name=name)

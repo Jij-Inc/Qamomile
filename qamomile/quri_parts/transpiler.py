@@ -1,4 +1,4 @@
-"""QURI Parts backend transpiler implementation.
+"""QURI Parts engine transpiler implementation.
 
 This module provides QuriPartsTranspiler for converting Qamomile QKernels
 into QURI Parts quantum circuits.
@@ -6,9 +6,11 @@ into QURI Parts quantum circuits.
 
 from __future__ import annotations
 
+import math
+from numbers import Integral, Real
 from typing import TYPE_CHECKING, Any, Sequence
 
-from qamomile.circuit.transpiler.circuit_ir import CircuitBackendEmitPass
+from qamomile.circuit.transpiler.circuit_ir import CircuitEngineEmitPass
 from qamomile.circuit.transpiler.executable import (
     ParameterMetadata,
     QuantumExecutor,
@@ -82,6 +84,44 @@ def _create_seeded_qulacs_vector_sampler(seed: int) -> Any:
         return Counter(state.sampling(shots, seed))
 
     return sampler
+
+
+def _normalize_sample_count(count: object) -> int:
+    """Convert an SDK count to a nonnegative Python integer without rounding.
+
+    Args:
+        count (object): One count returned by a QURI Parts sampler.
+
+    Returns:
+        int: The exact nonnegative count, including integral real scalars.
+
+    Raises:
+        ValueError: If the count is boolean, nonnumeric, nonfinite, negative,
+            or fractional.
+    """
+    message = (
+        "QURI Parts sampling requires nonnegative whole-number counts; use "
+        "an ordinary sampler such as create_qulacs_vector_sampler() instead "
+        "of fractional ideal-sampler weights."
+    )
+    if isinstance(count, bool):
+        raise ValueError(message)
+    if isinstance(count, Integral):
+        normalized = int(count)
+    elif isinstance(count, Real):
+        try:
+            normalized = int(math.floor(count))
+            ceiling = int(math.ceil(count))
+        except (OverflowError, ValueError) as error:
+            raise ValueError(message) from error
+        # Compare integers so fractional weights are never rounded or tolerated.
+        if normalized != ceiling:
+            raise ValueError(message)
+    else:
+        raise ValueError(message)
+    if normalized < 0:
+        raise ValueError(message)
+    return normalized
 
 
 class QuriPartsExecutor(
@@ -170,22 +210,38 @@ class QuriPartsExecutor(
     def execute(self, circuit: Any, shots: int) -> dict[str, int]:
         """Sample a circuit and return bitstring counts.
 
+        Nonnegative whole-number SDK scalars become Python integers so
+        completed jobs contain portable counts. Fractional ideal-sampler
+        weights, including floating-point roundoff, are rejected rather
+        than rounded to fabricated observations.
+
         Args:
-            circuit: Bound or unbound QURI Parts circuit.
-            shots: Number of measurement shots.
+            circuit (Any): Bound or unbound QURI Parts circuit.
+            shots (int): Number of measurement shots.
 
         Returns:
-            Counts keyed by zero-padded bitstrings. A zero-qubit circuit
-            returns ``{"": shots}`` without invoking the sampler.
+            dict[str, int]: Counts keyed by zero-padded bitstrings. A
+                zero-qubit circuit returns ``{"": shots}`` without invoking
+                the sampler. Outcomes with zero counts are omitted.
+
+        Raises:
+            ImportError: If the default sampler's SDK is unavailable.
+            ValueError: If a sampler count is boolean, nonnumeric, nonfinite,
+                negative, or fractional. Use an ordinary sampler that draws
+                observations, such as ``create_qulacs_vector_sampler``.
+            Exception: Propagates SDK circuit-conversion or sampling errors.
         """
         if circuit.qubit_count == 0:
             return {"": shots}
 
         counter = self.sampler(circuit, shots)
-        return {
-            format(value, f"0{circuit.qubit_count}b"): count
-            for value, count in counter.items()
-        }
+        counts = {}
+        for value, count in counter.items():
+            normalized = _normalize_sample_count(count)
+            # Zero counts are not observations and make one-shot outcomes ambiguous.
+            if normalized > 0:
+                counts[format(value, f"0{circuit.qubit_count}b")] = normalized
+        return counts
 
     def bind_parameters(  # type: ignore[override]
         self,
@@ -193,12 +249,12 @@ class QuriPartsExecutor(
         bindings: dict[str, Any],
         parameter_metadata: ParameterMetadata,
     ) -> "ImmutableBoundParametricQuantumCircuit":
-        """Bind named parameters in backend order.
+        """Bind named parameters in engine order.
 
         Args:
             circuit: Unbound parametric circuit.
             bindings: Parameter values by Qamomile name.
-            parameter_metadata: Ordered backend parameter metadata.
+            parameter_metadata: Ordered engine parameter metadata.
 
         Returns:
             Bound QURI Parts circuit.
@@ -251,12 +307,19 @@ class QuriPartsExecutor(
         """Estimate a native QURI Parts operator expectation value.
 
         Args:
-            circuit: Parametric or concrete QURI Parts circuit.
-            hamiltonian: Native QURI Parts operator.
-            param_values: Values for an unbound parametric circuit.
+            circuit (qp_c.LinearMappedUnboundParametricQuantumCircuit):
+                Parametric or concrete QURI Parts circuit.
+            hamiltonian (qp_o.Operator): Native QURI Parts operator.
+            param_values (Sequence[float]): Values for an unbound circuit.
 
         Returns:
-            Real expectation value.
+            float: Real expectation value as a native Python scalar.
+
+        Raises:
+            ImportError: If a required QURI Parts estimator SDK is unavailable.
+            QamomileQuriPartsTranspileError: If a bound circuit requires a
+                non-parametric estimator but only a parametric one was supplied.
+            Exception: Propagates SDK state-preparation or estimation errors.
         """
         from quri_parts.core.state import (  # type: ignore[import-not-found]
             apply_circuit,
@@ -279,7 +342,7 @@ class QuriPartsExecutor(
                     "or omit estimator to use the default Qulacs estimators."
                 )
             estimate = self.non_parametric_estimator(hamiltonian, state)
-        return estimate.value.real
+        return float(estimate.value.real)
 
 
 class QuriPartsTranspiler(
@@ -296,7 +359,7 @@ class QuriPartsTranspiler(
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
     ) -> EmitPass["qp_c.LinearMappedUnboundParametricQuantumCircuit"]:
-        """Create the common circuit-backend emission pass.
+        """Create the common circuit-engine emission pass.
 
         Args:
             bindings: Compile-time argument values.
@@ -305,7 +368,7 @@ class QuriPartsTranspiler(
         Returns:
             Emit pass backed by the QURI Parts materializer.
         """
-        return CircuitBackendEmitPass(
+        return CircuitEngineEmitPass(
             QuriPartsMaterializer(),
             bindings,
             parameters,

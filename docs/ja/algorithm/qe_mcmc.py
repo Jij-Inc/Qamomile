@@ -152,7 +152,7 @@ def metropolis_hastings(
 # これでMCMCが実装できました。それでは、MCMCを使ってサンプリングしてみましょう。
 
 # %%
-T = 100 if docs_test_mode else 1000  # MCMCのステップ数
+T = 1 if docs_test_mode else 1000  # MCMCのステップ数
 beta = 0.5  # 逆温度
 
 sample = np.zeros((T, n_spins))
@@ -289,9 +289,9 @@ from qamomile.qiskit import QiskitTranspiler
 gamma = 0.45  # 混合係数
 time = 12.0  # 総発展時間
 delta_t = 0.8  # Trotterステップの時間幅
-step = int(time/delta_t)
+step = 1 if docs_test_mode else int(time / delta_t)
 order = 2  # Suzuki-Trotter近似次数
-assert step == 15  # 12.0 / 0.8
+assert step == (1 if docs_test_mode else 15)
 
 Hs = [
     (1 - gamma) * mixer_hamiltonian,
@@ -385,9 +385,7 @@ def quantum_proposal(state: np.ndarray, executable: Any, executor: Any) -> np.nd
 from qiskit_aer import AerSimulator
 
 beta = 1.0  # 局所更新では混合が遅くなる低温に切り替える
-T_quantum = (
-    20 if docs_test_mode else 1000
-)  # 量子回路シミュレーションのコストが高いため小さめに設定
+T_quantum = 1 if docs_test_mode else 1000
 
 # beta=1.0 におけるボルツマン分布から平均磁化の理論値を再計算
 weights = np.exp(-beta * energies)

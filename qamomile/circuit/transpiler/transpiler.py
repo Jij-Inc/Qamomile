@@ -1,4 +1,4 @@
-"""Base transpiler class for backend-specific compilation."""
+"""Base transpiler class for engine-specific compilation."""
 
 from __future__ import annotations
 
@@ -21,8 +21,15 @@ from qamomile.circuit.transpiler.errors import (
 from qamomile.circuit.transpiler.executable import ExecutableProgram, QuantumExecutor
 from qamomile.circuit.transpiler.passes.affine_validate import AffineValidationPass
 from qamomile.circuit.transpiler.passes.analyze import AnalyzePass
+from qamomile.circuit.transpiler.passes.array_bounds_validation import (
+    ArrayBoundsValidationPass,
+)
+from qamomile.circuit.transpiler.passes.circuit_shot_validation import (
+    validate_circuit_shot_context,
+)
 from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
     CompileTimeIfLoweringPass,
+    lower_compile_time_ifs_preserving_loop_conditions,
 )
 from qamomile.circuit.transpiler.passes.constant_fold import ConstantFoldingPass
 from qamomile.circuit.transpiler.passes.emit import EmitPass
@@ -49,11 +56,11 @@ from qamomile.circuit.transpiler.segments import ProgramPlan
 if TYPE_CHECKING:
     pass
 
-T = TypeVar("T")  # Backend circuit type
+T = TypeVar("T")  # Engine circuit type
 
 
 class Transpiler(ABC, Generic[T]):
-    """Base class for backend-specific transpilers.
+    """Base class for engine-specific transpilers.
 
     Provides the full compilation pipeline from qkernel-like frontend objects
     to executable programs.
@@ -96,10 +103,10 @@ class Transpiler(ABC, Generic[T]):
 
     @abstractmethod
     def _create_segmentation_pass(self) -> SegmentationPass:
-        """Create the backend-specific segmentation pass.
+        """Create the engine-specific segmentation pass.
 
         Subclasses must implement this to provide a SegmentationPass
-        configured with the backend's capabilities.
+        configured with the engine's capabilities.
         """
         pass
 
@@ -109,17 +116,17 @@ class Transpiler(ABC, Generic[T]):
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
     ) -> EmitPass[T]:
-        """Create the backend-specific emit pass.
+        """Create the engine-specific emit pass.
 
         Args:
             bindings: Parameter values to bind at compile time
-            parameters: Parameter names to preserve as backend parameters
+            parameters: Parameter names to preserve as engine parameters
         """
         pass
 
     @abstractmethod
     def executor(self, **kwargs: Any) -> QuantumExecutor[T]:
-        """Create a quantum executor for this backend."""
+        """Create a quantum executor for this engine."""
         pass
 
     # === Conversion Methods ===
@@ -209,11 +216,13 @@ class Transpiler(ABC, Generic[T]):
         block: Block,
         bindings: dict[str, Any] | None = None,
     ) -> Block:
-        """Fixed-point loop of inline ↔ partial_eval for self-recursive kernels.
+        """Fixed-point loop of inline and branch lowering for recursion.
 
         Each iteration unrolls one layer of self-referential inline
-        callable invocation and then folds the base-case
-        ``IfOperation`` via ``partial_eval``. Terminates when no
+        callable invocation and then lowers its compile-time base-case
+        ``IfOperation``. Loop-carried Bit conditions remain visible until the
+        final validation pass so first-iteration constants cannot erase a real
+        backedge read. Terminates when no
         inline callable invocation remains (success), when every residual call
         is trapped inside an operation-owned block whose recursive callable
         contract is unsupported (control / inverse / select over a recursive
@@ -226,7 +235,7 @@ class Transpiler(ABC, Generic[T]):
                 (still containing self-referential callable invocations)
                 or already ``AFFINE`` (returned unchanged).
             bindings (dict[str, Any] | None): Compile-time bindings used by
-                ``partial_eval`` to fold the base-case condition. Defaults
+                condition lowering to select the base case. Defaults
                 to None, meaning no bindings are applied.
 
         Returns:
@@ -250,15 +259,18 @@ class Transpiler(ABC, Generic[T]):
 
         for _ in range(self.MAX_UNROLL_DEPTH):
             block = self.inline(block)
-            block = self.partial_eval(block, bindings)
+            block = lower_compile_time_ifs_preserving_loop_conditions(
+                block,
+                bindings,
+            )
             if count_inline_invokes(block.operations) == 0:
-                # ``partial_eval`` keeps ``block.kind`` from the input,
+                # Compile-time if lowering keeps ``block.kind`` from the input,
                 # which stays HIERARCHICAL even after the last
                 # inline callable invocation was folded away.  Re-run ``inline``
                 # to refresh the kind to AFFINE so downstream
                 # ``affine_validate`` is happy.
                 return self.inline(block)
-            # After a full inline + partial_eval iteration, if calls remain
+            # After a full inline + branch-lowering iteration, if calls remain
             # only inside operation-owned blocks (a ControlledUOperation's
             # ``block``, an InverseBlockOperation's nested blocks, or a
             # SelectOperation case block), the fixed-point loop deliberately
@@ -289,8 +301,8 @@ class Transpiler(ABC, Generic[T]):
             f"{self.MAX_UNROLL_DEPTH} unroll iterations.  Either the "
             f"recursion does not terminate under the provided bindings, "
             f"or the parameter driving the base-case condition was not "
-            f"bound to a compile-time constant so partial_eval could "
-            f"not fold the base case."
+            f"bound to a compile-time constant, so compile-time branch "
+            f"lowering could not select the base case."
         )
 
     def affine_validate(self, block: Block) -> Block:
@@ -354,6 +366,26 @@ class Transpiler(ABC, Generic[T]):
         )
 
         return StripSliceArrayOpsPass().run(block)
+
+    def array_bounds_check(self, block: Block) -> Block:
+        """Pass 1.85: Reject reachable accesses outside resolved array bounds.
+
+        Runs after :meth:`partial_eval` so binding-dependent view extents and
+        indices are concrete where possible, and before declarative slice
+        operations are stripped. Statically zero-trip loop bodies are skipped
+        because their element accesses are unreachable.
+
+        Args:
+            block (Block): Post-fold affine or hierarchical block to validate.
+
+        Returns:
+            Block: The input block unchanged after successful validation.
+
+        Raises:
+            ValidationError: If a reachable constant element index is outside
+                a resolved root-array or view-local extent.
+        """
+        return ArrayBoundsValidationPass().run(block)
 
     def slice_borrow_check(self, block: Block) -> Block:
         """Pass 1.9: Post-fold slice-view linearity checker.
@@ -498,12 +530,12 @@ class Transpiler(ABC, Generic[T]):
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
     ) -> ExecutableProgram[T]:
-        """Pass 4: Generate backend-specific code.
+        """Pass 4: Generate engine-specific code.
 
         Args:
             separated: The separated program to emit
             bindings: Parameter values to bind at compile time
-            parameters: Parameter names to preserve as backend parameters
+            parameters: Parameter names to preserve as engine parameters
 
         Raises:
             ValueError: If a name appears in both ``bindings`` and
@@ -549,6 +581,10 @@ class Transpiler(ABC, Generic[T]):
         affine = self.unroll_recursion(affine, bindings)
         validated = self.affine_validate(affine)
         partially_evaluated = self.partial_eval(validated, bindings)
+        validate_circuit_shot_context(
+            partially_evaluated, bindings, target=type(self).__name__
+        )
+        partially_evaluated = self.array_bounds_check(partially_evaluated)
         partially_evaluated = self.slice_borrow_check(partially_evaluated)
         partially_evaluated = self.strip_slice_ops(partially_evaluated)
         analyzed = self.analyze(partially_evaluated)
@@ -574,9 +610,9 @@ class Transpiler(ABC, Generic[T]):
                 ``parameters`` must be disjoint — a name is either
                 compile-time bound or runtime symbolic, never both.
             parameters (list[str] | None): Parameter names to preserve as
-                backend parameters. Scalars/arrays of float/int/UInt are
+                engine parameters. Scalars/arrays of float/int/UInt are
                 supported, plus ``Dict[K, Float]``: each constant-key
-                subscript lookup (``d[key]``) becomes one backend
+                subscript lookup (``d[key]``) becomes one engine
                 parameter named ``"d[<key>]"``, and the execution-time
                 binding ``bindings={"d": {...}}`` is decomposed per key
                 onto those parameters. A Dict runtime parameter is
@@ -587,7 +623,7 @@ class Transpiler(ABC, Generic[T]):
                 ``ExecutableProgram.parameter_names``.
 
         Returns:
-            ExecutableProgram[T]: Executable wrapping the backend circuit
+            ExecutableProgram[T]: Executable wrapping the engine circuit
                 and the parameter metadata needed to re-bind runtime
                 parameters, ready for execution.
 
@@ -614,12 +650,12 @@ class Transpiler(ABC, Generic[T]):
                compile-time structure, analyze dependencies, and segment the
                program into the host-orchestrated C-to-Q-to-C model.
             3. lower: Convert each quantum segment to immutable,
-               backend-neutral ``CircuitProgram`` IR.
+               engine-neutral ``CircuitProgram`` IR.
             4. legalize: Select native intrinsics and Pauli-evolution
                realizations from target capabilities and compilation policy.
             5. verify: Prove circuit structure and target legality before
-               constructing backend objects.
-            6. materialize: Convert the legalized circuit IR to backend-native
+               constructing engine objects.
+            6. materialize: Convert the legalized circuit IR to engine-native
                artifacts and preserve the executable ABI.
         """
         validate_bindings_parameters_disjoint(bindings, parameters)
@@ -638,7 +674,7 @@ class Transpiler(ABC, Generic[T]):
         """Compile and extract just the quantum circuit.
 
         This is a convenience method for when you just want the
-        backend circuit without the full executable.
+        engine circuit without the full executable.
 
         Args:
             kernel (QKernelLike): QKernel or qkernel-like frontend object to
@@ -646,7 +682,7 @@ class Transpiler(ABC, Generic[T]):
             bindings (dict[str, Any] | None): Parameter values to bind.
 
         Returns:
-            T: Backend-specific quantum circuit.
+            T: Engine-specific quantum circuit.
 
         Note:
             ``kernel`` is treated as a top-level executable entrypoint and

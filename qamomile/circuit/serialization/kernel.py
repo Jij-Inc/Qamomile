@@ -32,6 +32,7 @@ from qamomile.circuit.frontend.static_binding import (
     validate_static_binding_slot,
 )
 from qamomile.circuit.ir.block import Block, BlockKind
+from qamomile.circuit.ir.effect import KernelEffect
 from qamomile.circuit.ir.operation import ExpvalOp, Operation
 from qamomile.circuit.ir.operation.callable import (
     CallableDef,
@@ -54,6 +55,7 @@ from qamomile.circuit.ir.value import (
     Value,
     ValueBase,
     ValueLike,
+    static_quantum_width,
 )
 from qamomile.circuit.ir.value_mapping import ValueSubstitutor
 
@@ -236,6 +238,15 @@ class SerializedQKernel:
         """
         return self._block
 
+    @property
+    def effects(self) -> KernelEffect:
+        """Return cached semantic effects of the preserved body.
+
+        Returns:
+            KernelEffect: Aggregated non-unitary effects.
+        """
+        return self._block.effects
+
     def build(
         self,
         parameters: list[str] | None = None,
@@ -248,7 +259,7 @@ class SerializedQKernel:
         IR values; runtime parameters remain symbolic.
 
         Args:
-            parameters (list[str] | None): Names retained as backend runtime
+            parameters (list[str] | None): Names retained as engine runtime
                 parameters. ``None`` auto-detects unbound parameterizable
                 arguments.
             **kwargs (Any): Compile-time bindings keyed by qkernel argument.
@@ -471,8 +482,8 @@ def _collect_reachable_values(block: Block) -> list[ValueBase]:
         for result in operation.results:
             visit_value(result)
         if isinstance(operation, HasNestedOps):
-            for nested in operation.nested_op_lists():
-                for child in nested:
+            for region in operation.nested_regions():
+                for child in region.operations:
                     visit_operation(child)
         if isinstance(operation, InvokeOperation):
             definition = operation.definition
@@ -571,8 +582,8 @@ def _validate_materialized_expval_parent_indices(block: Block) -> None:
                                     f"{parent_index} is outside array width {size}"
                                 )
         if isinstance(operation, HasNestedOps):
-            for nested in operation.nested_op_lists():
-                for child in nested:
+            for region in operation.nested_regions():
+                for child in region.operations:
                     visit_operation(child)
         if isinstance(operation, InvokeOperation):
             definition = operation.definition
@@ -720,8 +731,8 @@ class _StaticBindingResolver:
                 owned block's call ABI is malformed.
         """
         if isinstance(operation, HasNestedOps):
-            for items in operation.nested_op_lists():
-                for item in items:
+            for region in operation.nested_regions():
+                for item in region.operations:
                     self._validate_operation_call_widths(
                         item,
                         widths,
@@ -760,12 +771,9 @@ class _StaticBindingResolver:
 
         if isinstance(operation, ControlledUOperation):
             if operation.block is not None:
-                actuals_without_controls = list(
-                    operation.operands[len(operation.control_operands) :]
-                )
                 self._validate_owned_block_call_widths(
                     operation.block,
-                    actuals_without_controls,
+                    operation.body_operands,
                     list(operation.operands),
                     widths,
                     active_blocks,
@@ -776,9 +784,7 @@ class _StaticBindingResolver:
             _materialize_inverse_target_width(
                 operation,
                 [
-                    self._concrete_array_width(target, widths)
-                    if isinstance(target, ArrayValue)
-                    else 1
+                    self._concrete_quantum_width(target, widths)
                     for target in operation.target_qubits
                 ],
             )
@@ -872,7 +878,29 @@ class _StaticBindingResolver:
         inherited = widths.get(value.logical_id)
         if inherited is not None:
             return inherited
-        return _concrete_quantum_width(value)
+        return static_quantum_width(value)
+
+    @staticmethod
+    def _concrete_quantum_width(
+        value: ValueBase,
+        widths: dict[str, int],
+    ) -> int | None:
+        """Return a quantum value's concrete scalar width at one call site.
+
+        Args:
+            value (ValueBase): Quantum scalar, array, or packed register.
+            widths (dict[str, int]): Concrete array widths inherited from
+                enclosing calls.
+
+        Returns:
+            int | None: Inherited or statically represented scalar-qubit
+            width, or ``None`` while the width remains symbolic.
+        """
+        if isinstance(value, ArrayValue):
+            inherited = widths.get(value.logical_id)
+            if inherited is not None:
+                return inherited
+        return static_quantum_width(value)
 
     def _validate_static_invoke_widths(
         self,
@@ -991,11 +1019,16 @@ class _StaticBindingResolver:
             regions when present.
         """
         if isinstance(operation, HasNestedOps):
-            operation = operation.rebuild_nested(
-                [
-                    [self._resolve_operation(item) for item in items]
-                    for items in operation.nested_op_lists()
-                ]
+            operation = operation.rebuild_regions(
+                tuple(
+                    dataclasses.replace(
+                        region,
+                        operations=tuple(
+                            self._resolve_operation(item) for item in region.operations
+                        ),
+                    )
+                    for region in operation.nested_regions()
+                )
             )
 
         if isinstance(operation, InvokeOperation):
@@ -1198,7 +1231,7 @@ class _StaticBindingResolver:
         concrete_definition = self._definition_for(
             slot_name,
             member_name,
-            require_inverse=operation.transform is CallTransform.INVERSE,
+            require_inverse=operation.transform.is_inverse,
         )
         resolved_attrs = dict(concrete_definition.attrs)
         for key in (
@@ -1333,29 +1366,6 @@ def _collect_formal_replacements(
             _collect_formal_replacements(formal_value, concrete_value, replacements)
 
 
-def _concrete_quantum_width(value: ValueBase) -> int | None:
-    """Return the scalar qubit width of one concrete quantum value.
-
-    Args:
-        value (ValueBase): Scalar or array quantum value to inspect.
-
-    Returns:
-        int | None: Scalar qubit width, or ``None`` when an array dimension
-            remains symbolic.
-    """
-    if not isinstance(value, ArrayValue):
-        return 1
-    if not value.shape:
-        return None
-    width = 1
-    for dimension in value.shape:
-        concrete = dimension.get_const()
-        if type(concrete) is not int:
-            return None
-        width *= concrete
-    return width
-
-
 def _materialize_inverse_target_width(
     operation: InverseBlockOperation,
     target_widths: list[int | None],
@@ -1403,17 +1413,22 @@ def _replace_operations(
             continue
         new_operation = substitutor.substitute_operation(operation)
         if isinstance(new_operation, HasNestedOps):
-            nested = [
-                _replace_operations(
-                    items,
-                    substitutor,
-                    bound_formal_uuids,
-                    replacements,
-                    block_cache,
+            nested = tuple(
+                dataclasses.replace(
+                    region,
+                    operations=tuple(
+                        _replace_operations(
+                            list(region.operations),
+                            substitutor,
+                            bound_formal_uuids,
+                            replacements,
+                            block_cache,
+                        )
+                    ),
                 )
-                for items in new_operation.nested_op_lists()
-            ]
-            new_operation = new_operation.rebuild_nested(nested)
+                for region in new_operation.nested_regions()
+            )
+            new_operation = new_operation.rebuild_regions(nested)
         _replace_owned_blocks(new_operation, replacements, block_cache)
         rewritten.append(new_operation)
     return rewritten

@@ -1,4 +1,4 @@
-"""Shared helpers for backend emission."""
+"""Shared helpers for engine emission."""
 
 from .composite_decomposer import CompositeDecomposer
 from .condition_resolution import (

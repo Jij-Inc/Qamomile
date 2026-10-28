@@ -196,10 +196,17 @@ class ParameterShapeResolutionPass(Pass[Block, Block]):
         for op in operations:
             substituted = substitutor.substitute_operation(op)
             if isinstance(substituted, HasNestedOps):
-                new_lists = [
-                    self._walk_and_substitute(op_list, substitutor)
-                    for op_list in substituted.nested_op_lists()
-                ]
-                substituted = substituted.rebuild_nested(new_lists)
+                new_regions = tuple(
+                    dataclasses.replace(
+                        region,
+                        operations=tuple(
+                            self._walk_and_substitute(
+                                list(region.operations), substitutor
+                            )
+                        ),
+                    )
+                    for region in substituted.nested_regions()
+                )
+                substituted = substituted.rebuild_regions(new_regions)
             result.append(substituted)
         return result

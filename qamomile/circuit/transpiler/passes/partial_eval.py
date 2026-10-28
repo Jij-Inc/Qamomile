@@ -177,19 +177,25 @@ class PartialEvaluationPass(Pass[Block, Block]):
                     )
                 current = dataclasses.replace(current, case_blocks=case_blocks)
             if isinstance(current, HasNestedOps):
-                nested_lists = current.nested_op_lists()
-                evaluated_nested = [
-                    self._evaluate_select_case_blocks(nested) for nested in nested_lists
+                regions = current.nested_regions()
+                evaluated_regions = [
+                    dataclasses.replace(
+                        region,
+                        operations=tuple(
+                            self._evaluate_select_case_blocks(list(region.operations))
+                        ),
+                    )
+                    for region in regions
                 ]
                 if any(
-                    evaluated is not original
+                    evaluated.operations != original.operations
                     for evaluated, original in zip(
-                        evaluated_nested,
-                        nested_lists,
+                        evaluated_regions,
+                        regions,
                         strict=True,
                     )
                 ):
-                    current = current.rebuild_nested(evaluated_nested)
+                    current = current.rebuild_regions(evaluated_regions)
             changed = changed or current is not operation
             rewritten.append(current)
         return rewritten if changed else operations

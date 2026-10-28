@@ -1,0 +1,96 @@
+name: Quality Checks
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+  # Required for the merge queue: checks run again on the temporary merge
+  # branch (latest main + queued PRs) before the actual merge lands.
+  merge_group:
+
+permissions:
+  contents: read
+
+# One run at a time per PR (fallback: per ref for push / merge_group). New
+# commits cancel the in-progress run only for pull requests; main pushes and
+# merge-group runs must complete, since cancelling a merge-group run would
+# eject its PR from the queue.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Every suite consumes this single classification result.
+  # full_ci_required (output): if full CI is required.
+  # docs_changed (output): if any documentation is changed or not.
+  changes:
+    name: Classify changes
+    uses: ./.github/workflows/_quality-classification.yml
+
+  python-test:
+    name: Python Test
+    needs: changes
+    if: ${{ needs.changes.outputs.full_ci_required == 'true' }}
+    uses: ./.github/workflows/_quality-python.yml
+
+  docs-test:
+    name: Docs Test
+    needs: changes
+    if: ${{ needs.changes.outputs.full_ci_required == 'true' || needs.changes.outputs.docs_changed == 'true' }}
+    uses: ./.github/workflows/_quality-docs.yml
+
+  ruff:
+    name: Ruff
+    needs: changes
+    if: ${{ needs.changes.outputs.full_ci_required == 'true' }}
+    uses: ./.github/workflows/_quality-ruff.yml
+
+  zuban:
+    name: Zuban
+    needs: changes
+    if: ${{ needs.changes.outputs.full_ci_required == 'true' }}
+    uses: ./.github/workflows/_quality-zuban.yml
+
+  all-checks:
+    name: All checks
+    needs:
+      - changes
+      - python-test
+      - docs-test
+      - ruff
+      - zuban
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      # Get the github official result from changes job.
+      # Ref: https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#needs-context
+      CHANGES_RESULT: ${{ needs.changes.result }}
+      # Get the changes outputs, which are defined in _quality-classification.yml.
+      FULL_CI_REQUIRED: ${{ needs.changes.outputs.full_ci_required }}
+      DOCS_CHANGED: ${{ needs.changes.outputs.docs_changed }}
+      # Get the github official results from the other jobs.
+      PYTHON_TEST_RESULT: ${{ needs.python-test.result }}
+      DOCS_TEST_RESULT: ${{ needs.docs-test.result }}
+      RUFF_RESULT: ${{ needs.ruff.result }}
+      ZUBAN_RESULT: ${{ needs.zuban.result }}
+    steps:
+      - name: Check out the required-check verifier
+        # v4.4.0 = https://github.com/actions/checkout/releases/tag/v4.4.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          # Never execute the verifier supplied by the pull request or merge
+          # group being checked. Pushes and manual runs use their own commit.
+          # github.sha is for main right after PR was merged.
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
+          persist-credentials: false
+          # Fetch only a single file.
+          # Ref: https://github.com/actions/checkout#fetch-only-a-single-file
+          sparse-checkout: .github/scripts/verify-required-checks.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Verify required checks
+        run: bash .github/scripts/verify-required-checks.sh

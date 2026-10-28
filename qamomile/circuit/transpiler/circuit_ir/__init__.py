@@ -1,4 +1,4 @@
-"""Backend-neutral circuit code-generation IR.
+"""Engine-neutral circuit code-generation IR.
 
 This module is intentionally lower-level than Qamomile's semantic IR and
 higher-level than any SDK object. It contains virtual quantum wires,
@@ -55,7 +55,7 @@ from qamomile.circuit.transpiler.circuit_ir.lowering import (
     lower_circuit_plan,
 )
 from qamomile.circuit.transpiler.circuit_ir.materialize import (
-    CircuitBackendEmitPass,
+    CircuitEngineEmitPass,
     CircuitMaterializer,
     MaterializedCircuit,
     materialize_executable,
@@ -113,7 +113,7 @@ __all__ = [
     "CallPhaseMode",
     "CallTransformCapabilities",
     "CircuitBuilder",
-    "CircuitBackendEmitPass",
+    "CircuitEngineEmitPass",
     "CircuitCapabilities",
     "CircuitGateEmitter",
     "CircuitLoweringPass",

@@ -183,8 +183,8 @@ def prepare_module(
                 if operation.definition is not None:
                     visit_definition(operation.definition)
             if isinstance(operation, HasNestedOps):
-                for nested in operation.nested_op_lists():
-                    visit_operations(owner, nested)
+                for region in operation.nested_regions():
+                    visit_operations(owner, list(region.operations))
             if isinstance(operation, SelectOperation):
                 for case_block in operation.case_blocks:
                     # A case is a fresh-namespace callable region, but calls

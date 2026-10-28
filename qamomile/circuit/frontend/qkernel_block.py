@@ -43,6 +43,7 @@ def get_or_build_block(kernel: Any) -> Block:
         kernel._block_building = True
         try:
             refresh_qkernel_function_namespace(kernel)
+            kernel._ensure_annotation_types_resolved()
             # Use the AST-transformed function so qmc.range() and control flow are
             # represented through frontend builder operations.
             kernel._block = func_to_block(kernel.func)

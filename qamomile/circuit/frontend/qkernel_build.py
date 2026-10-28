@@ -7,16 +7,19 @@ from typing import Any, cast
 
 from qamomile.circuit.frontend.constructors import qubit_array
 from qamomile.circuit.frontend.func_to_block import (
+    _validate_return_type,
     build_param_slots,
+    create_dummy_handle,
     create_dummy_input,
     is_array_type,
 )
-from qamomile.circuit.frontend.handle import Observable
+from qamomile.circuit.frontend.handle import Observable, QInt
 from qamomile.circuit.frontend.param_validation import (
     validate_bindings_parameters_disjoint,
 )
 from qamomile.circuit.frontend.qkernel_definition import (
     refresh_qkernel_function_namespace,
+    resolve_qkernel_like_return_type,
 )
 from qamomile.circuit.frontend.qkernel_inputs import (
     auto_detect_parameters,
@@ -34,6 +37,7 @@ from qamomile.circuit.frontend.static_binding import (
 from qamomile.circuit.frontend.tracer import Tracer, trace
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation.return_operation import ReturnOperation
+from qamomile.circuit.ir.types import QUIntType
 from qamomile.circuit.ir.value import Value, ValueLike
 
 
@@ -43,6 +47,7 @@ def build_specialized_block(
     parameters: list[str],
     bindings: dict[str, Any],
     qubit_sizes: dict[str, int],
+    qint_types: dict[str, QUIntType] | None = None,
 ) -> Block:
     """Trace a specialized sub-block for a call site.
 
@@ -53,7 +58,9 @@ def build_specialized_block(
         bindings (dict[str, Any]): Concrete Python values for classical
             arguments and caller-owned proxies for unresolved static bindings.
         qubit_sizes (dict[str, int]): First-axis sizes for ``Vector[Qubit]``
-            arguments supplied by the caller.
+            arguments or ``QInt`` widths supplied by the caller.
+        qint_types (dict[str, QUIntType] | None): Caller-owned QInt types,
+            preserving symbolic width identities. Defaults to ``None``.
 
     Returns:
         Block: Specialized hierarchical block ready to be invoked from the
@@ -65,6 +72,7 @@ def build_specialized_block(
         parameters,
         bindings,
         qubit_sizes=qubit_sizes,
+        qint_types=qint_types,
         emit_qubit_init=False,
         emit_return_op=True,
     )
@@ -78,6 +86,7 @@ def create_traced_block(
     kwargs: dict[str, Any],
     qubit_sizes: dict[str, int] | None = None,
     *,
+    qint_types: dict[str, QUIntType] | None = None,
     emit_qubit_init: bool = True,
     emit_return_op: bool = False,
 ) -> Block:
@@ -89,8 +98,11 @@ def create_traced_block(
         kwargs (dict[str, Any]): Concrete values for non-parameter arguments
             and caller-owned proxies for unresolved static bindings.
         qubit_sizes (dict[str, int] | None): Optional mapping from
-            ``Vector[Qubit]`` parameter names to integer sizes. Defaults to
-            ``None``.
+            ``Vector[Qubit]`` or ``QInt`` parameter names to integer widths.
+            Defaults to ``None``.
+        qint_types (dict[str, QUIntType] | None): Caller-owned QInt types used
+            during call-time tracing, including unresolved widths. Defaults
+            to ``None``.
         emit_qubit_init (bool): Whether quantum-array size entries should emit
             ``QInitOperation``. Defaults to ``True``.
         emit_return_op (bool): Whether to append an explicit
@@ -114,6 +126,10 @@ def create_traced_block(
     tracked_parameters: dict[str, Value] = {}
 
     refresh_qkernel_function_namespace(kernel)
+    ensure_annotations = getattr(kernel, "_ensure_annotation_types_resolved", None)
+    if callable(ensure_annotations):
+        ensure_annotations()
+    return_type = resolve_qkernel_like_return_type(kernel)
 
     with trace(tracer):
         dummy_inputs: dict[str, Any] = {}
@@ -151,8 +167,10 @@ def create_traced_block(
                 else:
                     handle = create_parameter_input(param_type, name)
                 tracked_parameters[name] = handle.value
+            elif param_type is QInt and qint_types is not None and name in qint_types:
+                handle = create_dummy_handle(qint_types[name], name, emit_init=False)
             elif name in qubit_sizes:
-                if emit_qubit_init:
+                if emit_qubit_init and param_type is not QInt:
                     handle = qubit_array(qubit_sizes[name], name)
                 else:
                     handle = create_dummy_input(
@@ -171,6 +189,7 @@ def create_traced_block(
             dummy_inputs[name] = handle
 
         result = kernel.func(**dummy_inputs)
+        _validate_return_type(result, return_type)
         output_values = _extract_output_values(result)
         if emit_return_op:
             tracer.add_operation(
@@ -232,6 +251,10 @@ def build_qkernel(
             both ``parameters`` and ``kwargs`` (the compile-time-bound values),
             which violates the bindings/parameters disjointness rule.
     """
+    ensure_annotations = getattr(kernel, "_ensure_annotation_types_resolved", None)
+    if callable(ensure_annotations):
+        ensure_annotations()
+
     # Enforce the bindings/parameters disjointness rule against the
     # *user-provided* ``parameters`` before auto-detection. Auto-detect only
     # ever picks names absent from ``kwargs``, so it can never introduce an

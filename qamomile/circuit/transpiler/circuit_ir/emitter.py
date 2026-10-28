@@ -31,7 +31,7 @@ _BINARY_OPERATORS = {
 
 
 class CircuitGateEmitter:
-    """Emit primitive operations into backend-neutral circuit IR."""
+    """Emit primitive operations into engine-neutral circuit IR."""
 
     @property
     def measurement_mode(self) -> MeasurementMode:
@@ -50,7 +50,7 @@ class CircuitGateEmitter:
             num_clbits (int): Number of classical bit slots.
 
         Returns:
-            CircuitBuilder: Empty backend-neutral builder.
+            CircuitBuilder: Empty engine-neutral builder.
         """
         return CircuitBuilder(num_qubits, num_clbits)
 
@@ -71,7 +71,7 @@ class CircuitGateEmitter:
         lhs: ScalarExpr | bool | int | float,
         rhs: ScalarExpr | bool | int | float,
     ) -> BinaryExpr | None:
-        """Combine symbolic operands without creating backend expressions.
+        """Combine symbolic operands without creating engine expressions.
 
         Args:
             kind (BinOpKind): Qamomile arithmetic operation.

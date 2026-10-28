@@ -254,11 +254,16 @@ class SubstitutionPass(Pass[Block, Block]):
             )
 
         if isinstance(op, HasNestedOps):
-            # Recursively transform all nested operation lists
-            new_lists = [
-                self._transform_operations(op_list) for op_list in op.nested_op_lists()
-            ]
-            return op.rebuild_nested(new_lists)
+            new_regions = tuple(
+                dataclasses.replace(
+                    region,
+                    operations=tuple(
+                        self._transform_operations(list(region.operations))
+                    ),
+                )
+                for region in op.nested_regions()
+            )
+            return op.rebuild_regions(new_regions)
 
         # Other operations pass through unchanged
         return op

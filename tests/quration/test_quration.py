@@ -1,4 +1,4 @@
-"""Quration backend tests, including optional PyQret execution coverage."""
+"""Quration engine tests, including optional PyQret execution coverage."""
 
 from __future__ import annotations
 
@@ -371,7 +371,7 @@ def _quration_three_term_periodic_stencil() -> qmc.Bit:
 
 
 def _lower_quration_program(kernel: qmc.QKernel) -> CircuitProgram:
-    """Lower one public qkernel to backend-neutral circuit IR.
+    """Lower one public qkernel to engine-neutral circuit IR.
 
     Args:
         kernel (qmc.QKernel): Classical-I/O entrypoint to lower.

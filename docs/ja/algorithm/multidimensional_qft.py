@@ -22,7 +22,7 @@
 #
 # 量子フーリエ変換（QFT）は、量子アルゴリズムの中核的なプリミティブとして広く使われており、さまざまな応用が提案されています。
 # しかし従来のQFTに基づく構成では、入力データが2のべき乗のグリッドサイズに自然に定義されない場合に制約がありました。
-# そこで本記事では、[](https://doi.org/10.1039/D5CP00030K)で提案された、任意のグリッドサイズの入力に対する多次元量子フーリエ変換の実装についてまとめました。
+# そこで本記事では、[](https://doi.org/10.1039/d4cp04399e)で提案された、任意のグリッドサイズの入力に対する多次元量子フーリエ変換の実装についてまとめました。
 # 多次元量子フーリエ変換実装を通して、Qamomileの使い方を学ぶことができます。
 
 # %%
@@ -30,6 +30,8 @@
 # # !pip install "qamomile[qiskit]"
 
 # %%
+import os
+
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -37,6 +39,9 @@ import qamomile.circuit as qmc
 from qamomile.circuit.stdlib import mottonen_amplitude_encoding
 from qamomile.circuit.transpiler.job import SampleResult
 from qamomile.qiskit import QiskitTranspiler
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 2**14
 
 # %% [markdown]
 # ## 背景
@@ -73,7 +78,7 @@ from qamomile.qiskit import QiskitTranspiler
 # 上図の${\mathrm{initialize}}(\vert v \rangle)$は、入力データに応じて量子状態を準備するサブルーチンを表しています。
 # 状態準備の手法にはいくつかありますが、以降に示す実装では[Möttönen状態準備ルーチンによる振幅エンコーディング](mottonen_amplitude_encoding)を用いています。
 # しかしこの手法は、各次元サイズが $N_i = 2^{n_i}$ でなければならないという制限がありました。
-# そこで、[](https://doi.org/10.1039/D5CP00030K)ではこの制限を解消する手法を提案しました。
+# そこで、[](https://doi.org/10.1039/d4cp04399e)ではこの制限を解消する手法を提案しました。
 # Qamomileには、1次元QFTが標準で備わっています。
 # Qamomileの機能を活用することで、多次元QFTも容易に実装することが可能です。
 #
@@ -81,7 +86,7 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # 結晶やナノシートの実空間構造は、一般に2のべき乗のグリッド上でサンプリングされるとは限りません。
 # その格子周期性は、任意の整数個のグリッド点に対応しえます。
-# そこで、[](https://doi.org/10.1039/D5CP00030K)では、結晶の周期性をそのまま量子状態に符号化するための、前処理手法を提案しました。
+# そこで、[](https://doi.org/10.1039/d4cp04399e)では、結晶の周期性をそのまま量子状態に符号化するための、前処理手法を提案しました。
 #
 # ### 領域の切り捨て/ゼロ埋め
 #
@@ -260,7 +265,7 @@ def compute_prob(result: SampleResult) -> np.ndarray:
     return prob
 
 
-result1 = exe.sample(transpiler.executor(), shots=2**14).result()
+result1 = exe.sample(transpiler.executor(), shots=sample_shots).result()
 prob = compute_prob(result1)
 
 
@@ -313,7 +318,7 @@ plt.show()
 fw = w2d * f_padding
 fw_flatten = fw.flatten()
 exe = transpiler.transpile(qft_for_multidimension, bindings={"inputs": fw_flatten})
-result2 = exe.sample(transpiler.executor(), shots=2**14).result()
+result2 = exe.sample(transpiler.executor(), shots=sample_shots).result()
 prob2 = compute_prob(result2)
 
 # %% [markdown]

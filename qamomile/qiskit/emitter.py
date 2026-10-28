@@ -1,7 +1,7 @@
 """Qiskit GateEmitter implementation.
 
 This module provides QiskitGateEmitter, which implements the GateEmitter
-protocol for Qiskit backends.
+protocol for Qiskit engines.
 """
 
 from __future__ import annotations

@@ -1,0 +1,67 @@
+# Every third-party action below is pinned to a full commit SHA instead of a
+# mutable tag such as v4. A tag can be repointed at malicious code if the
+# action repository is compromised: in March 2025 the tj-actions/changed-files
+# incident retagged existing releases and exfiltrated CI secrets from the
+# repositories that consumed them. A commit SHA is content-addressed and
+# cannot be repointed. The comment on each `uses:` line records the release
+# the SHA was resolved from, with a link for verifying the correspondence.
+
+name: Change Classification
+
+on:
+  workflow_call:
+    outputs:
+      full_ci_required:
+        description: Whether source, test, build, or CI changes require full CI.
+        value: ${{ jobs.changes.outputs.full_ci_required }}
+      docs_changed:
+        description: Whether documentation paths changed.
+        value: ${{ jobs.changes.outputs.docs_changed }}
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      # If steps.changes.outputs.classification_complete is not true, meaning including 
+      # Null or "unknown" or anything, we conservatively require the full quality check,
+      # and also regard documentations are changed.
+      full_ci_required: ${{ steps.changes.outputs.classification_complete != 'true' || steps.changes.outputs.full_ci_required != 'false' }}
+      docs_changed: ${{ steps.changes.outputs.classification_complete != 'true' || steps.changes.outputs.docs_changed != 'false' }}
+    steps:
+      - name: Check out the repository
+        # v4.4.0 = https://github.com/actions/checkout/releases/tag/v4.4.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          # Obtain all commits in the PR diff.
+          fetch-depth: 0
+          # Do not keep the GITHUB_TOKEN.
+          persist-credentials: false
+
+      - name: Classify changed files
+        id: changes
+        shell: bash
+        env:
+          # Get the base SHA, which we can trust.
+          # This is essentially for not using an unknown (changed by someone) bash file
+          # in the automated workflow.
+          #   github.event.pull_request.base.sha  pull_request: target-branch tip
+          #   github.event.before                 push: main tip before this push
+          #   github.event.merge_group.base_sha   merge_group: main tip the queue
+          #                                       branch was built on
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || github.event.merge_group.base_sha }}
+          # Get the head SHA, which we will compare against the base.
+          #   github.event.pull_request.head.sha  pull_request: submitted head
+          #   github.sha                          other events: workflow commit
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Define a differentiation mode. See classify-changes.sh for more details.
+          #   PRs   : merge-base (three-dot) diff
+          #   pushes: compare the exact before..after range
+          DIFF_MODE: ${{ github.event_name == 'pull_request' && 'merge-base' || 'direct' }}
+        continue-on-error: true
+        # Run the classifier from the commit that was trusted above.
+        run: >-
+          git show "${BASE_SHA}:.github/scripts/classify-changes.sh" |
+          bash -s -- "${BASE_SHA}" "${HEAD_SHA}" "${DIFF_MODE}"

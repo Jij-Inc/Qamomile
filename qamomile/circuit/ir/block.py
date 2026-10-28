@@ -11,8 +11,20 @@ from qamomile.circuit.ir.static_binding import StaticBindingSlot
 from qamomile.circuit.ir.value import Value, ValueLike, collect_value_like_uuids
 
 if TYPE_CHECKING:
+    from qamomile.circuit.ir.effect import KernelEffect
     from qamomile.circuit.ir.operation import Operation
     from qamomile.circuit.ir.operation.callable import InvokeOperation
+
+
+def _empty_kernel_effect() -> "KernelEffect":
+    """Return the empty effect set without introducing an import cycle.
+
+    Returns:
+        KernelEffect: ``KernelEffect.NONE``.
+    """
+    from qamomile.circuit.ir.effect import KernelEffect
+
+    return KernelEffect.NONE
 
 
 class BlockKind(Enum):
@@ -58,6 +70,27 @@ class Block:
     # slots; build() materializes and removes them before compilation.
     static_bindings: tuple[StaticBindingSlot, ...] = dataclasses.field(
         default_factory=tuple
+    )
+
+    # Derived semantic metadata. The cache is populated on first access, so
+    # compiler passes that construct transient Blocks do not repeatedly scan
+    # bodies whose effects they never inspect. ``dataclasses.replace`` resets
+    # init=False fields and therefore invalidates the cache automatically.
+    _effects: "KernelEffect" = dataclasses.field(
+        default_factory=_empty_kernel_effect,
+        init=False,
+        repr=False,
+    )
+    _measurement_result_indices: frozenset[int] = dataclasses.field(
+        default_factory=frozenset,
+        init=False,
+        repr=False,
+    )
+    _effects_valid: bool = dataclasses.field(default=False, init=False, repr=False)
+    _effects_refreshing: bool = dataclasses.field(
+        default=False,
+        init=False,
+        repr=False,
     )
 
     def __post_init__(self):
@@ -141,6 +174,35 @@ class Block:
                     )
                 static_field_uuids.add(field.value.uuid)
             static_names.add(slot.name)
+
+    def _ensure_effects(self) -> None:
+        """Populate derived effect metadata when it is first requested."""
+        if self._effects_valid or self._effects_refreshing:
+            return
+        from qamomile.circuit.ir.effect import refresh_block_effects
+
+        refresh_block_effects(self)
+
+    @property
+    def effects(self) -> "KernelEffect":
+        """Return lazily cached semantic effects for this block.
+
+        Returns:
+            KernelEffect: Aggregated measurement, reset, and feed-forward
+                effects reachable from the block.
+        """
+        self._ensure_effects()
+        return self._effects
+
+    @property
+    def measurement_result_indices(self) -> frozenset[int]:
+        """Return public output positions derived from measurement.
+
+        Returns:
+            frozenset[int]: Indices of measurement-derived block outputs.
+        """
+        self._ensure_effects()
+        return self._measurement_result_indices
 
     def unbound_parameters(self) -> list[str]:
         """Return list of unbound parameter names."""

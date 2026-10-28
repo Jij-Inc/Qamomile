@@ -1,0 +1,49 @@
+# Every third-party action below is pinned to a full commit SHA instead of a
+# mutable tag such as v4. A tag can be repointed at malicious code if the
+# action repository is compromised: in March 2025 the tj-actions/changed-files
+# incident retagged existing releases and exfiltrated CI secrets from the
+# repositories that consumed them. A commit SHA is content-addressed and
+# cannot be repointed. The comment on each `uses:` line records the release
+# the SHA was resolved from, with a link for verifying the correspondence.
+
+name: Zuban
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.11.32"
+
+jobs:
+  zuban:
+    name: zuban-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Check out the repository
+        # v4.4.0 = https://github.com/actions/checkout/releases/tag/v4.4.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        # v5.6.0 = https://github.com/actions/setup-python/releases/tag/v5.6.0
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        # v5.4.2 = https://github.com/astral-sh/setup-uv/releases/tag/v5.4.2
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev --extra hugr
+
+      - name: Type check with Zuban
+        run: uv run zuban check qamomile/ tests/typecheck/

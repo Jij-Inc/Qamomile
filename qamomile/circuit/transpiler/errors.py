@@ -114,10 +114,30 @@ class SeparationError(QamomileCompileError):
 
 
 class EmitError(QamomileCompileError):
-    """Error during backend code emission."""
+    """Report an engine failure to emit one semantic operation.
+
+    Args:
+        message (str): Human-readable emission failure.
+        operation (str | None): Related operation description. Defaults to
+            ``None``.
+
+    Example:
+        Correct — identify the unsupported operation at its target boundary::
+
+            raise EmitError(
+                "HUGR cannot emit a symbolic gate power",
+                operation="ControlledUOperation",
+            )
+
+        Incorrect — silently dropping an unsupported operation can change the
+        compiled program's meaning::
+
+            if not target_supports(operation):
+                return
+    """
 
     def __init__(self, message: str, operation: str | None = None):
-        """Initialize a backend emission diagnosis.
+        """Initialize an engine emission diagnosis.
 
         Args:
             message (str): Human-readable emission failure.
@@ -132,7 +152,7 @@ class EmitError(QamomileCompileError):
 class TargetCapabilityError(EmitError):
     """A program requires a capability the selected target does not declare.
 
-    Raised by circuit-IR target-legality verification before any backend
+    Raised by circuit-IR target-legality verification before any engine
     materialization starts. The message always names the target and the
     missing capability axis, so the failure reads as a target restriction
     rather than a Qamomile language error.

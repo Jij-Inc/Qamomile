@@ -57,7 +57,7 @@ def qpe(
     with for_loop(0, n, var_name="k") as k:
         counting[k], target = controlled_u(counting[k], target, power=2**k, **params)
 
-    # 3. Inverse QFT (emit as InvokeOperation for native backend support)
+    # 3. Inverse QFT (emit as InvokeOperation for native engine support)
     # Returns QFixed directly (bypassing cast) to ensure correct UUID mapping
     return _emit_iqft_and_cast_to_qfixed(counting)
 

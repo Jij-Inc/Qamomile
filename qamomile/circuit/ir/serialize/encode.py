@@ -5,7 +5,7 @@ Walks a :class:`Block` and produces the internal graph records consumed by
 definitions are deduplicated into module-wide tables and referenced elsewhere
 by stable IDs. Keeping those registries outside individual blocks preserves
 recursive call graphs and shared callable identity without expanding the
-high-level IR into backend-specific instructions.
+high-level IR into engine-specific instructions.
 
 Every encoder branch is dispatched through a hard-coded table keyed
 on the runtime class; there is no dynamic resolution, no ``getattr``
@@ -36,6 +36,7 @@ from qamomile.circuit.ir.operation import (
     InvokeOperation,
     MeasureOperation,
     MeasureQFixedOperation,
+    MeasureQIntOperation,
     MeasureVectorOperation,
     Operation,
     ProjectOperation,
@@ -49,10 +50,12 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CondOp,
     NotOp,
     RuntimeClassicalExpr,
+    UnaryMathOp,
 )
 from qamomile.circuit.ir.operation.cast import CastOperation
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
+    DecodeQIntOperation,
     DictGetItemOperation,
     ReturnQuantumArrayElementOperation,
     StoreArrayElementOperation,
@@ -76,6 +79,7 @@ from qamomile.circuit.ir.operation.operation import (
     Signature,
 )
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
+from qamomile.circuit.ir.operation.shot import GetCurrentShotOperation
 from qamomile.circuit.ir.operation.slice_array import (
     ReleaseSliceViewOperation,
     SliceArrayOperation,
@@ -121,15 +125,45 @@ class _EncodeContext:
     Values are keyed by semantic UUID. Callable definitions are keyed by
     object identity because one :class:`CallableRef` may intentionally identify
     more than one semantic body in a surrounding module.
+
+    Args:
+        opaque_cost_encoder (Callable[[Any], Any] | None): Optional outer-layer
+            adapter that converts an opaque callable cost into an IR payload.
+            Defaults to identity conversion.
     """
 
-    def __init__(self) -> None:
-        """Initialize an empty encode context."""
+    def __init__(
+        self,
+        *,
+        opaque_cost_encoder: Callable[[Any], Any] | None = None,
+    ) -> None:
+        """Initialize an empty encode context.
+
+        Args:
+            opaque_cost_encoder (Callable[[Any], Any] | None): Optional
+                outer-layer adapter for opaque callable costs. Defaults to
+                ``None``, which preserves serializer-friendly values unchanged.
+        """
         self.value_table_dicts: list[dict[str, Any]] = []
         self._seen_uuids: set[str] = set()
         self._values_by_uuid: dict[str, ValueBase] = {}
         self._definition_ids: dict[int, str] = {}
         self._definitions: list[CallableDef] = []
+        self._opaque_cost_encoder = opaque_cost_encoder
+
+    def encode_opaque_cost(self, cost: Any) -> Any:
+        """Convert one opaque callable cost into an IR-owned payload.
+
+        Args:
+            cost (Any): Opaque cost value attached to a callable definition.
+
+        Returns:
+            Any: Serializer-friendly payload produced by the configured
+            adapter, or ``cost`` unchanged when no adapter is configured.
+        """
+        if self._opaque_cost_encoder is None:
+            return cost
+        return self._opaque_cost_encoder(cost)
 
     def register_value(self, v: ValueBase) -> str:
         """Record ``v`` in the value table if not already present.
@@ -286,8 +320,8 @@ def _walk_op_values(op: Operation, ctx: _EncodeContext) -> None:
         if isinstance(v, ValueBase):
             ctx.register_value(v)
     if isinstance(op, HasNestedOps):
-        for child_list in op.nested_op_lists():
-            for child in child_list:
+        for region in op.nested_regions():
+            for child in region.operations:
                 _walk_op_values(child, ctx)
     if isinstance(op, InvokeOperation):
         ctx.register_definition(op.definition)
@@ -344,7 +378,10 @@ def _encode_value(v: ValueBase, ctx: _EncodeContext) -> dict[str, Any]:
 
     Raises:
         TypeError: If ``v`` is an unrecognized ValueBase subclass.
+        ValueError: If a referenced type-width value conflicts with another
+            value carrying the same UUID.
     """
+    _register_type_values(v.type, ctx)
     if isinstance(v, TupleValue):
         for elem in v.elements:
             ctx.register_value(elem)
@@ -414,6 +451,34 @@ def _encode_value(v: ValueBase, ctx: _EncodeContext) -> dict[str, Any]:
         f"Cannot encode value of type {type(v).__name__}; "
         f"expected Value / ArrayValue / TupleValue / DictValue"
     )
+
+
+def _register_type_values(value_type: ValueType, ctx: _EncodeContext) -> None:
+    """Register scalar values referenced only by parametric type fields.
+
+    Args:
+        value_type (ValueType): Type whose width dependencies are registered.
+        ctx (_EncodeContext): Active context owning the value table.
+
+    Raises:
+        ValueError: If one dependency UUID denotes conflicting value structures.
+    """
+    if isinstance(value_type, TupleType):
+        for element_type in value_type.element_types:
+            _register_type_values(element_type, ctx)
+    elif isinstance(value_type, DictType):
+        for item_type in (value_type.key_type, value_type.value_type):
+            if item_type is not None:
+                _register_type_values(item_type, ctx)
+    elif isinstance(value_type, (QUIntType, QFixedType)):
+        widths = (
+            (value_type.width,)
+            if isinstance(value_type, QUIntType)
+            else (value_type.integer_bits, value_type.fractional_bits)
+        )
+        for width in widths:
+            if isinstance(width, Value):
+                ctx.register_value(width)
 
 
 def _value_structures_match(
@@ -1076,6 +1141,36 @@ def _encode_decode_qfixed(
     return d
 
 
+def _encode_measure_qint(
+    op: MeasureQIntOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode :class:`MeasureQIntOperation`.
+
+    Args:
+        op (MeasureQIntOperation): The operation to encode.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base operation dictionary. The carrier width is not
+            encoded because it is derived from the register operand.
+    """
+    return _base_op_dict("MeasureQIntOperation", op)
+
+
+def _encode_decode_qint(op: DecodeQIntOperation, ctx: _EncodeContext) -> dict[str, Any]:
+    """Encode :class:`DecodeQIntOperation`.
+
+    Args:
+        op (DecodeQIntOperation): The operation to encode.
+        ctx (_EncodeContext): The active encoding context.
+
+    Returns:
+        dict[str, Any]: Base operation dictionary. The bit count is not
+            encoded because it is derived from the bit-array operand.
+    """
+    return _base_op_dict("DecodeQIntOperation", op)
+
+
 def _encode_store_array_element(
     op: StoreArrayElementOperation, ctx: _EncodeContext
 ) -> dict[str, Any]:
@@ -1157,6 +1252,22 @@ def _encode_qinit(op: QInitOperation, ctx: _EncodeContext) -> dict[str, Any]:
         dict[str, Any]: Base op dict.
     """
     return _base_op_dict("QInitOperation", op)
+
+
+def _encode_current_shot(
+    op: GetCurrentShotOperation, ctx: _EncodeContext
+) -> dict[str, Any]:
+    """Encode a device shot-context read without resolving its result.
+
+    Args:
+        op (GetCurrentShotOperation): Abstract context read.
+        ctx (_EncodeContext): Current graph encoder context.
+
+    Returns:
+        dict[str, Any]: Operation record with its UInt result identity.
+    """
+    del ctx
+    return _base_op_dict("GetCurrentShotOperation", op)
 
 
 def _encode_cinit(op: CInitOperation, ctx: _EncodeContext) -> dict[str, Any]:
@@ -1250,6 +1361,26 @@ def _encode_binop(op: BinOp, ctx: _EncodeContext) -> dict[str, Any]:
         dict[str, Any]: Base op dict plus the ``BinOpKind`` enum name.
     """
     d = _base_op_dict("BinOp", op)
+    assert op.kind is not None
+    d["kind"] = op.kind.name
+    return d
+
+
+def _encode_unary_math(
+    op: UnaryMathOp,
+    ctx: _EncodeContext,
+) -> dict[str, Any]:
+    """Encode a unary mathematical operation.
+
+    Args:
+        op (UnaryMathOp): Operation to encode.
+        ctx (_EncodeContext): Active encoding context.
+
+    Returns:
+        dict[str, Any]: Base operation dictionary plus its kind name.
+    """
+    del ctx
+    d = _base_op_dict("UnaryMathOp", op)
     assert op.kind is not None
     d["kind"] = op.kind.name
     return d
@@ -1397,6 +1528,7 @@ def _encode_for(op: ForOperation, ctx: _EncodeContext) -> dict[str, Any]:
     )
     d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)
     d["region_args"] = _encode_region_args(op.region_args)
+    d["capture_refs"] = [value.uuid for value in op.captures]
     d["body"] = [_encode_operation(child, ctx) for child in op.operations]
     return d
 
@@ -1430,6 +1562,7 @@ def _encode_for_items(op: ForItemsOperation, ctx: _EncodeContext) -> dict[str, A
     )
     d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)
     d["region_args"] = _encode_region_args(op.region_args)
+    d["capture_refs"] = [value.uuid for value in op.captures]
     d["body"] = [_encode_operation(child, ctx) for child in op.operations]
     return d
 
@@ -1455,6 +1588,7 @@ def _encode_while(op: WhileOperation, ctx: _EncodeContext) -> dict[str, Any]:
     d["max_iterations"] = op.max_iterations
     d["loop_carried_rebinds"] = _encode_loop_carried_rebinds(op.loop_carried_rebinds)
     d["region_args"] = _encode_region_args(op.region_args)
+    d["capture_refs"] = [value.uuid for value in op.captures]
     d["body"] = [_encode_operation(child, ctx) for child in op.operations]
     return d
 
@@ -1510,6 +1644,8 @@ def _encode_if(op: IfOperation, ctx: _EncodeContext) -> dict[str, Any]:
     d["true_yield_refs"] = [m.true_value.uuid for m in merges]
     d["false_yield_refs"] = [m.false_value.uuid for m in merges]
     d["branch_rebinds"] = _encode_branch_rebinds(op.branch_rebinds)
+    d["true_capture_refs"] = [value.uuid for value in op.true_captures]
+    d["false_capture_refs"] = [value.uuid for value in op.false_captures]
     return d
 
 
@@ -1559,6 +1695,8 @@ def _encode_select(op: SelectOperation, ctx: _EncodeContext) -> dict[str, Any]:
     else:
         payload["num_index_qubits"] = op.num_index_qubits
     payload["case_blocks"] = [_encode_block(block, ctx) for block in op.case_blocks]
+    if op.case_callable_attrs:
+        payload["callable_attrs"] = _encode_payload({"cases": op.case_callable_attrs})
     return payload
 
 
@@ -1674,12 +1812,12 @@ def _encode_callable_implementation(
         raise TypeError(
             "CallableImplementation.emitter contains a process-local extension "
             "object and cannot be represented in semantic Qamomile IR. Standard "
-            "Qamomile backend emitters are registered outside the serialized "
-            "module. Store a backend/strategy/body_ref contract instead."
+            "Qamomile engine emitters are registered outside the serialized "
+            "module. Store an engine/strategy/body_ref contract instead."
         )
     return {
         "transform": impl.transform.name,
-        "backend": impl.backend,
+        "engine": impl.engine,
         "strategy": impl.strategy,
         "body": _encode_block(impl.body, ctx) if impl.body is not None else None,
         "body_ref": _encode_callable_body_ref(impl.body_ref),
@@ -1730,7 +1868,15 @@ def _encode_callable_def(
 
     Returns:
         dict[str, Any]: Serialized definition.
+
+    Raises:
+        TypeError: If the configured opaque-cost adapter or generic payload
+            encoder rejects ``opaque_cost``.
     """
+    opaque_cost = definition.opaque_cost
+    encoded_opaque_cost = None
+    if opaque_cost is not None:
+        encoded_opaque_cost = _encode_payload(ctx.encode_opaque_cost(opaque_cost))
     return {
         "ref": _encode_callable_ref(definition.ref),
         "signature": _encode_signature(definition.signature),
@@ -1742,6 +1888,7 @@ def _encode_callable_def(
             _encode_callable_implementation(impl, ctx)
             for impl in definition.implementations
         ],
+        "opaque_cost": encoded_opaque_cost,
         "default_policy": definition.default_policy.name,
         "attrs": _encode_payload(definition.attrs),
     }
@@ -1826,18 +1973,22 @@ _OP_ENCODERS: dict[type, Callable[[Any, _EncodeContext], dict[str, Any]]] = {
     MeasureVectorOperation: _encode_measure_vector,
     MeasureQFixedOperation: _encode_measure_qfixed,
     DecodeQFixedOperation: _encode_decode_qfixed,
+    MeasureQIntOperation: _encode_measure_qint,
+    DecodeQIntOperation: _encode_decode_qint,
     DictGetItemOperation: _encode_dict_getitem,
     StoreArrayElementOperation: _encode_store_array_element,
     ReturnQuantumArrayElementOperation: _encode_return_quantum_array_element,
     CastOperation: _encode_cast,
     QInitOperation: _encode_qinit,
     CInitOperation: _encode_cinit,
+    GetCurrentShotOperation: _encode_current_shot,
     SliceArrayOperation: _encode_slice_array,
     ReleaseSliceViewOperation: _encode_release_slice_view,
     ReturnOperation: _encode_return,
     ExpvalOp: _encode_expval,
     PauliEvolveOp: _encode_pauli_evolve,
     BinOp: _encode_binop,
+    UnaryMathOp: _encode_unary_math,
     CompOp: _encode_compop,
     CondOp: _encode_condop,
     NotOp: _encode_notop,

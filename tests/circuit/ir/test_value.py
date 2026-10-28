@@ -1,5 +1,7 @@
 """Tests for Value and ArrayValue IR classes."""
 
+from types import SimpleNamespace
+
 from qamomile.circuit.ir.types.primitives import (
     BitType,
     DictType,
@@ -8,7 +10,46 @@ from qamomile.circuit.ir.types.primitives import (
     TupleType,
     UIntType,
 )
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.types.q_register import QFixedType, QUIntType
+from qamomile.circuit.ir.value import (
+    ArrayValue,
+    DictValue,
+    TupleValue,
+    Value,
+    ValueBase,
+    ValueMetadata,
+    composite_carrier_key,
+    packed_register_type_width,
+    root_carrier_keys,
+    split_indexed_identifier,
+)
+
+
+def test_value_base_is_nominal_for_all_ir_value_shapes() -> None:
+    """IR values share a constant-time nominal runtime classification."""
+    scalar = Value(type=UIntType(), name="scalar")
+    values = (
+        scalar,
+        ArrayValue(type=UIntType(), name="array"),
+        TupleValue(name="tuple", elements=(scalar,)),
+        DictValue(name="dict"),
+    )
+
+    duck_value = SimpleNamespace(
+        uuid="uuid",
+        logical_id="logical_id",
+        name="duck",
+        metadata=ValueMetadata(),
+        type=UIntType(),
+        next_version=lambda: None,
+        is_parameter=lambda: False,
+        parameter_name=lambda: None,
+        is_constant=lambda: False,
+        get_const=lambda: None,
+    )
+
+    assert all(isinstance(value, ValueBase) for value in values)
+    assert not isinstance(duck_value, ValueBase)
 
 
 class TestContainerTypeClassification:
@@ -184,3 +225,65 @@ class TestArrayValueNextVersion:
         assert av4.version == 3
         assert av4.shape == shape
         assert av4.shape[0].get_const() == 5
+
+
+def _const_uint(value: int, name: str = "dim") -> Value:
+    """Build a constant UInt dimension value."""
+    return Value(type=UIntType(), name=name).with_const(value)
+
+
+def test_composite_carrier_key_roundtrips_split_indexed_identifier() -> None:
+    """composite_carrier_key spells the key split_indexed_identifier parses."""
+    key = composite_carrier_key("root", 3)
+    assert key == "root_3"
+    assert split_indexed_identifier(key) == ("root", "3")
+
+
+def test_root_carrier_keys_folds_strided_view() -> None:
+    """Carrier keys are spelled in the root array's index space."""
+    root = ArrayValue(type=QubitType(), name="root", shape=(_const_uint(4),))
+    view = ArrayValue(
+        type=QubitType(),
+        name="view",
+        shape=(_const_uint(2),),
+        slice_of=root,
+        slice_start=_const_uint(1, "start"),
+        slice_step=_const_uint(2, "step"),
+    )
+
+    assert root_carrier_keys(view, 2) == (
+        [f"{root.uuid}_1", f"{root.uuid}_3"],
+        [f"{root.logical_id}_1", f"{root.logical_id}_3"],
+    )
+    assert root_carrier_keys(root, 4) == (
+        [f"{root.uuid}_{i}" for i in range(4)],
+        [f"{root.logical_id}_{i}" for i in range(4)],
+    )
+    assert root_carrier_keys(view, 0) == ([], [])
+
+
+def test_root_carrier_keys_defers_symbolic_slice() -> None:
+    """A symbolic slice bound cannot be folded, so the helper defers."""
+    root = ArrayValue(type=QubitType(), name="root", shape=(_const_uint(4),))
+    view = ArrayValue(
+        type=QubitType(),
+        name="view",
+        shape=(_const_uint(2),),
+        slice_of=root,
+        slice_start=Value(type=UIntType(), name="symbolic_start"),
+        slice_step=_const_uint(1, "step"),
+    )
+
+    assert root_carrier_keys(view, 2) is None
+
+
+def test_packed_register_type_width() -> None:
+    """Type-only width is known for static registers and None otherwise."""
+    symbolic = Value(type=UIntType(), name="n")
+
+    assert packed_register_type_width(QUIntType(3)) == 3
+    assert packed_register_type_width(QUIntType(0)) == 0
+    assert packed_register_type_width(QUIntType(symbolic)) is None
+    assert packed_register_type_width(QFixedType(1, 2)) == 3
+    assert packed_register_type_width(QFixedType(0, symbolic)) is None
+    assert packed_register_type_width(QubitType()) is None

@@ -1,8 +1,8 @@
-"""Regression tests for measurements inside native backend loops (M2).
+"""Regression tests for measurements inside native engine loops (M2).
 
-A backend whose ``GateEmitter.supports_for_loop()`` is ``True`` (Qiskit)
+An engine whose ``GateEmitter.supports_for_loop()`` is ``True`` (Qiskit)
 lowers a ``for i in qmc.range(n):`` body to a native loop instruction,
-keeping ``i`` as an opaque backend loop parameter. When the body's only
+keeping ``i`` as an opaque engine loop parameter. When the body's only
 loop-var-indexed access was a measurement (``measure(q[i])``), the old
 ``LoopAnalyzer._has_array_element_access`` — which enumerated only
 ``GateOperation`` / ``BinOp`` / ``ControlledUOperation`` / ``PauliEvolveOp``

@@ -1,10 +1,16 @@
 """Test changed-page selection for documentation execution tests."""
 
+import matplotlib
 import pytest
 
 from tests.docs.test_tutorials import PROJECT_ROOT, select_tutorial_files
 
 pytestmark = pytest.mark.docs
+
+
+def test_docs_use_noninteractive_matplotlib_backend() -> None:
+    """Keep local documentation tests independent of GUI interaction."""
+    assert matplotlib.get_backend().lower() == "agg"
 
 
 @pytest.mark.parametrize(
@@ -18,6 +24,14 @@ pytestmark = pytest.mark.docs
         ),
         (
             ["docs/en/tutorial/example.ipynb"],
+            ["docs/en/tutorial/example.py"],
+        ),
+        (
+            ["docs/ja/tutorial/example.py"],
+            ["docs/en/tutorial/example.py"],
+        ),
+        (
+            ["docs/ja/tutorial/example.ipynb"],
             ["docs/en/tutorial/example.py"],
         ),
         (

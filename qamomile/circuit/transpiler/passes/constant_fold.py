@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, cast
 
+from qamomile._utils import coerce_nonnegative_integral
 from qamomile.circuit.ir.block import Block, BlockKind
 from qamomile.circuit.ir.operation import (
     Operation,
@@ -17,6 +18,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
     CompOp,
     CondOp,
     NotOp,
+    UnaryMathOp,
 )
 from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
 from qamomile.circuit.ir.operation.control_flow import (
@@ -211,6 +213,12 @@ class ConstantFoldingPass(Pass[Block, Block]):
                         # BinOp was folded to a constant - remove it
                         # Just record the mapping for later substitution
                         folded_values[op.results[0].uuid] = folded
+                        return None
+
+                if isinstance(op, UnaryMathOp):
+                    folded = outer_self._try_fold_unary_math(op, folded_values)
+                    if folded is not None:
+                        folded_values[op.output.uuid] = folded
                         return None
 
                 # A pure-classical for loop with explicit region args
@@ -420,6 +428,45 @@ class ConstantFoldingPass(Pass[Block, Block]):
             return None
         return result.with_array_runtime_metadata(const_array=tuple(elements))
 
+    def _try_fold_unary_math(
+        self,
+        op: UnaryMathOp,
+        folded_values: dict[str, Value],
+    ) -> Value | None:
+        """Try to fold a unary mathematical operation to a constant.
+
+        Args:
+            op (UnaryMathOp): Unary expression to inspect.
+            folded_values (dict[str, Value]): Constants produced earlier in
+                the traversal.
+
+        Returns:
+            Value | None: Constant replacement, or ``None`` when unresolved.
+
+        Raises:
+            ValueError: If a resolved operand is outside the operation's
+                mathematical domain.
+        """
+        from qamomile.circuit.transpiler.passes.eval_utils import (
+            evaluate_unary_math_value,
+        )
+
+        operand = self._resolve_value(op.input, folded_values)
+        if not isinstance(operand, (int, float)):
+            return None
+        result_value = evaluate_unary_math_value(op.kind, operand)
+        if result_value is None:
+            assert op.kind is not None
+            raise ValueError(
+                f"Invalid {op.kind.name.lower()} operand during constant folding: "
+                f"{operand!r}."
+            )
+        return Value(
+            type=op.output.type,
+            name=f"folded_{op.output.name}",
+            uuid=op.output.uuid,
+        ).with_const(result_value)
+
     def _resolve_value(
         self,
         value: Value,
@@ -567,7 +614,7 @@ class ConstantFoldingPass(Pass[Block, Block]):
             bool: ``True`` when every operation is interpretable.
         """
         for body_op in operations:
-            if isinstance(body_op, (BinOp, CompOp, CondOp, NotOp)):
+            if isinstance(body_op, (BinOp, CompOp, CondOp, NotOp, UnaryMathOp)):
                 continue
             if isinstance(body_op, IfOperation):
                 if not self._region_body_supported(body_op.true_operations):
@@ -606,7 +653,7 @@ class ConstantFoldingPass(Pass[Block, Block]):
         )
 
         for body_op in operations:
-            if isinstance(body_op, (BinOp, CompOp, CondOp, NotOp)):
+            if isinstance(body_op, (BinOp, CompOp, CondOp, NotOp, UnaryMathOp)):
                 folded = fold_classical_op(
                     body_op, resolve, set(), FoldPolicy.COMPILE_TIME
                 )
@@ -994,6 +1041,7 @@ class ConstantFoldingPass(Pass[Block, Block]):
                             power=power,
                             block=result_op.block,
                             callable_ref=result_op.callable_ref,
+                            callable_attrs=dict(result_op.callable_attrs),
                         )
                         extra_kwargs = {}  # Already applied
                     else:
@@ -1086,39 +1134,26 @@ class ConstantFoldingPass(Pass[Block, Block]):
         """Cast *value* to ``int`` with strict validation for power fields.
 
         Only true integer values (or whole ``float`` like ``4.0``) are
-        accepted.  ``bool``, non-integer ``float``, and non-positive
+        accepted.  ``bool``, non-integer ``float``, and negative
         integers are rejected.
 
         Args:
-            value: The resolved constant to cast.
+            value (object): The resolved constant to cast.
 
         Returns:
-            A validated positive ``int``.
+            int: A validated nonnegative integer.
 
         Raises:
             ValueError: If *value* is ``bool``, a non-integer ``float``,
-                a non-``int`` type, or ``<= 0``.
+                a non-``int`` type, or a negative integer.
         """
-        if isinstance(value, bool):
-            raise ValueError(
-                f"ControlledU power must be a positive integer, got bool ({value})."
+        try:
+            return coerce_nonnegative_integral(
+                value,
+                label="ControlledU power",
             )
-        if isinstance(value, float):
-            if value != int(value):
-                raise ValueError(
-                    f"ControlledU power must be an integer, "
-                    f"got non-integer float {value}."
-                )
-            value = int(value)
-        if not isinstance(value, int):
-            raise ValueError(
-                f"ControlledU power must be an integer, got {type(value).__name__}."
-            )
-        if value <= 0:
-            raise ValueError(
-                f"ControlledU power must be strictly positive, got {value}."
-            )
-        return value
+        except TypeError as error:
+            raise ValueError(str(error)) from error
 
     def _expand_symbolic_controlled_operands(
         self,

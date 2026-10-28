@@ -40,6 +40,9 @@ project:
     - title: リリースノート
       file: release_notes/index.md
       children:
+        - file: release_notes/v0_15_1.md
+        - file: release_notes/v0_15_0.md
+        - file: release_notes/v0_14_0.md
         - file: release_notes/v0_13_0.md
         - file: release_notes/v0_12_7.md
         - file: release_notes/v0_12_6.md
@@ -57,6 +60,12 @@ project:
     - title: API Reference
       file: api/index
       children:
+        - file: api/braket/index
+          children:
+            - file: api/braket/execution
+            - file: api/braket/materializer
+            - file: api/braket/observable
+            - file: api/braket/transpiler
         - file: api/circuit/index
           children:
             - file: api/circuit/algorithm
@@ -66,6 +75,7 @@ project:
             - file: api/circuit/multi_controlled_x
             - file: api/circuit/qft
             - file: api/circuit/qpe
+            - file: api/circuit/qsvt
             - file: api/circuit/serialization
             - file: api/circuit/stdlib
             - file: api/circuit/transpiler
@@ -76,24 +86,40 @@ project:
             - file: api/cudaq/materializer
             - file: api/cudaq/observable
             - file: api/cudaq/transpiler
-        - file: api/hugr
-        - file: api/linalg
+        - file: api/hugr/index
+          children:
+            - file: api/hugr/executable
+            - file: api/hugr/execution
+            - file: api/hugr/lowerer
+            - file: api/hugr/transpiler
+        - file: api/linalg/index
+          children:
+            - file: api/linalg/hermitian
+            - file: api/linalg/mottonen
+            - file: api/linalg/pauli_lcu
+            - file: api/linalg/periodic_shift_lcu
+            - file: api/linalg/subspace
         - file: api/observable
         - file: api/optimization/index
           children:
             - file: api/optimization/binary_model
             - file: api/optimization/converter
             - file: api/optimization/fqaoa
+            - file: api/optimization/gas
             - file: api/optimization/pce
             - file: api/optimization/post_process
             - file: api/optimization/qaoa
             - file: api/optimization/qrao
+            - file: api/optimization/qsvt_eigenstate_filter
         - file: api/qbraid
         - file: api/qiskit/index
           children:
             - file: api/qiskit/emitter
+            - file: api/qiskit/execution
             - file: api/qiskit/materializer
             - file: api/qiskit/observable
+            - file: api/qiskit/runtime
+            - file: api/qiskit/runtime_execution
             - file: api/qiskit/transpiler
         - file: api/quration
         - file: api/quri_parts/index
@@ -109,6 +135,7 @@ site:
   template: book-theme
   title: Qamomile ドキュメント
   options:
+    favicon: ../assets/qamomile_logo.png
     logo: ../assets/qamomile_logo.png
     style: ../assets/custom-theme.css
     folders: true

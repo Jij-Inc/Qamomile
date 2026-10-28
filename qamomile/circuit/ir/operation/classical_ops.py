@@ -2,8 +2,8 @@
 
 import dataclasses
 
-from qamomile.circuit.ir.types.primitives import BitType, FloatType
-from qamomile.circuit.ir.value import ArrayValue, Value
+from qamomile.circuit.ir.types.primitives import BitType, FloatType, UIntType
+from qamomile.circuit.ir.value import ArrayValue, Value, array_static_length
 
 from .operation import Operation, OperationKind, ParamHint, Signature
 
@@ -50,6 +50,56 @@ class DecodeQFixedOperation(Operation):
 
 
 @dataclasses.dataclass
+class DecodeQIntOperation(Operation):
+    """Decode least-significant-first measurement bits to an unsigned integer.
+
+    Carrier position ``i`` contributes ``bit[i] * 2**i``, which matches the
+    carrier ordering used by ``DecodeQFixedOperation``.
+
+    The bit count is not stored on the operation: it is derived from the
+    bit-array operand's static length through ``num_bits``.
+
+    Args:
+        operands (list[Value]): Single measured ``ArrayValue[Bit]`` operand.
+        results (list[Value]): Single decoded ``UIntType`` result.
+    """
+
+    @property
+    def num_bits(self) -> int | None:
+        """Return the bit count derived from the bit-array operand.
+
+        Returns:
+            int | None: Static bit-array length, including zero for an empty
+                array; ``None`` when the length is symbolic or the operand
+                is missing or not an array.
+        """
+        if not self.operands or not isinstance(self.operands[0], ArrayValue):
+            return None
+        return array_static_length(self.operands[0])
+
+    @property
+    def signature(self) -> Signature:
+        """Return the integer-decoder signature.
+
+        Returns:
+            Signature: One bit-array operand and one unsigned-integer result.
+        """
+        return Signature(
+            operands=[ParamHint(name="bits", type=BitType())],
+            results=[ParamHint(name="uint_out", type=UIntType())],
+        )
+
+    @property
+    def operation_kind(self) -> OperationKind:
+        """Classify integer decoding as host-side classical work.
+
+        Returns:
+            OperationKind: ``OperationKind.CLASSICAL``.
+        """
+        return OperationKind.CLASSICAL
+
+
+@dataclasses.dataclass
 class StoreArrayElementOperation(Operation):
     """Store a classical scalar into one element of a classical array.
 
@@ -71,7 +121,7 @@ class StoreArrayElementOperation(Operation):
     - **Runtime**: otherwise the store executes host-side in a classical
       segment via ``ClassicalExecutor`` (e.g. for measurement-derived
       ``Vector[Bit]`` contents).  It must never reach a quantum segment;
-      backend emit rejects it explicitly.
+      engine emit rejects it explicitly.
 
     Operand convention:
         operands: ``[array (ArrayValue), stored_value (Value), *index_values]``
@@ -156,7 +206,7 @@ class ReturnQuantumArrayElementOperation(Operation):
     Operand convention:
         ``[array, returned_qubit, *target_indices, *source_indices]``. The
         target and source halves have equal nonzero arity, inferred from the
-        operand count. The operation has no results and emits no backend gate.
+        operand count. The operation has no results and emits no engine gate.
     """
 
     @property

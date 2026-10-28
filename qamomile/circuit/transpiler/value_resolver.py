@@ -317,9 +317,10 @@ class ValueResolver:
             tuple[ArrayValue | None, tuple[Any, ...]]: The root array and
                 root-local indices when every slice bound can be resolved,
                 or ``(None, ())`` when the slice chain is symbolic, a
-                resolved index is negative, a resolved bound violates the
-                frontend contract (non-negative start, positive step), or
-                the chain is otherwise not resolvable at compile time.
+                resolved index is negative or outside a resolved view-local
+                extent, a resolved bound violates the frontend contract
+                (non-negative start, positive step), or the chain is otherwise
+                not resolvable at compile time.
         """
         root_array = parent_array
         root_indices = element_indices
@@ -353,6 +354,22 @@ class ValueResolver:
                 # satisfy the frontend contract (non-negative start,
                 # positive step). Stay unresolved instead of guessing.
                 return None, ()
+
+            # A view-local index must be valid for the view itself before it
+            # is mapped back to the root container. Checking only the mapped
+            # root index would incorrectly resolve ``array[0:0][0]`` as
+            # ``array[0]`` whenever the root is non-empty. Besides changing
+            # program meaning, that premature fold erases the view and extent
+            # provenance needed by the post-fold bounds validator to name the
+            # responsible compile-time argument.
+            if root_array.shape:
+                length = self.resolve(root_array.shape[0])
+                if (
+                    not isinstance(length, (bool, np.bool_))
+                    and isinstance(length, numbers.Integral)
+                    and index_int >= int(length)
+                ):
+                    return None, ()
             root_index = start_int + step_int * index_int
 
             root_indices = (

@@ -29,6 +29,8 @@
 # # !pip install qamomile
 
 # %%
+import os
+
 import numpy as np
 from qiskit.quantum_info import Statevector
 
@@ -44,6 +46,8 @@ from qamomile.linalg import (
     compute_mottonen_amplitude_encoding_rz_angles,
 )
 from qamomile.qiskit import QiskitTranspiler
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 # %% [markdown]
 # ## Background
@@ -66,7 +70,7 @@ from qamomile.qiskit import QiskitTranspiler
 # - `mottonen_amplitude_encoding(...)` explicitly requests Qamomile's Möttönen
 #   construction. Use it when the decomposition, resource counts, or synthesis
 #   method are part of the program's intent.
-# - `amplitude_encoding(...)` expresses only the target state. A backend may use
+# - `amplitude_encoding(...)` expresses only the target state. An engine may use
 #   its native state-preparation operation. Qamomile currently uses the
 #   Möttönen construction as the portable fallback, but that fallback is not a
 #   method guarantee of the generic API.
@@ -93,7 +97,7 @@ from qamomile.qiskit import QiskitTranspiler
 # - a complex vector $(1, 1+i, 1-i, 2i)$.
 #
 # State fidelity is phase-invariant, so it verifies the intended physical state
-# even if a backend chooses a different global phase.
+# even if an engine chooses a different global phase.
 
 # %%
 transpiler = QiskitTranspiler()
@@ -252,7 +256,7 @@ prepare_from_angles.draw(
 # ### Build kernels for resource checks
 #
 # These helpers create real and complex Möttönen circuits over several register
-# sizes. Using the explicit API ensures that backend-native state preparation
+# sizes. Using the explicit API ensures that engine-native state preparation
 # cannot change the construction whose resources we are measuring.
 
 
@@ -331,7 +335,7 @@ n_runtime_params = len(executable.compiled_quantum[0].circuit.parameters)
 print(f"runtime parameters in compiled circuit: {n_runtime_params}")
 assert n_runtime_params == 2 * (2**2 - 1)
 
-shots = 8192
+shots = 1 if docs_test_mode else 8192
 for trial_amplitudes in (
     [1.0, 0.0, 0.0, 1.0],
     [3.0, 4.0, 0.0, 0.0],
@@ -355,7 +359,9 @@ for trial_amplitudes in (
     expected_probabilities = np.abs(normalize(trial_amplitudes)) ** 2
     max_deviation = float(np.max(np.abs(observed - expected_probabilities)))
     print(f"amps={str(trial_amplitudes):<48s} max|p_obs - p_exp| = {max_deviation:.4f}")
-    assert max_deviation < ATOL_SHOT
+    assert sum(count for _, count in counts) == shots
+    if not docs_test_mode:
+        assert max_deviation < ATOL_SHOT
 
 # %% [markdown]
 # ### Resource formula
@@ -444,14 +450,14 @@ assert np.isclose(float(expval_result), -1.0 / 3.0, atol=ATOL_STATEVECTOR)
 #
 # | Goal | API |
 # |---|---|
-# | Prepare a target state and allow backend-native synthesis | `amplitude_encoding(q, amplitudes)` |
+# | Prepare a target state and allow engine-native synthesis | `amplitude_encoding(q, amplitudes)` |
 # | Require Qamomile's Möttönen construction | `mottonen_amplitude_encoding(q, amplitudes)` |
 # | Bind real amplitudes at transpile time while retaining the Möttönen method | `mottonen_amplitude_encoding(q, amps)` with `bindings={"amps": [...]}` |
 # | Reuse one Möttönen circuit with runtime angle bindings | `mottonen_amplitude_encoding_from_angles(q, ry, rz)` with `parameters=[...]` |
 # | Keep existing code working during migration | `amplitude_encoding_from_angles(...)` (compatibility wrapper) |
 #
 # The generic and explicit amplitude APIs prepare the same target state, but a
-# backend is free to realize only the generic operation with a different
+# engine is free to realize only the generic operation with a different
 # state-preparation synthesis.
 
 
