@@ -15,7 +15,7 @@ from typing import Any
 
 import numpy as np
 
-from qamomile.circuit.transpiler.errors import ExecutionError
+from qamomile.circuit.transpiler import ExecutionError
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

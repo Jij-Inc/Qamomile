@@ -61,8 +61,12 @@ This H2 adapter supports Boolean public outputs, including fixed-size
 containers of these values. Public floating-point outputs are rejected before
 upload because H2 does not support their QIR output operation. Unsigned integer
 public outputs are also rejected until their provider result representation
-can be decoded reliably. Floating-point and integer calculations used
-internally, for example rotation angles and loop indices, remain available.
+can be decoded reliably. H2 supports constant floating-point gate arguments
+and runtime integer control flow. Runtime floating-point computations,
+runtime-selected floating-point gate arguments, and integer division or
+remainder are rejected before upload. Constant bindings can eliminate these
+computations before conversion and validation. Use integer predicates to select
+gates with constant angles, or target Helios for these operations.
 Other operations must be supported by `hugr-qir` and its H2 QIR validator;
 conversion errors stop submission without an automatic retry on another device.
 
