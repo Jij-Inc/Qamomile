@@ -340,6 +340,7 @@ class ResourceEstimator:
             config=config,
             bindings=build_inputs,
             condition_values=condition_values,
+            shot_bindings={**build_inputs, **estimation_inputs},
         )
         if isinstance(block_or_ops, Block):
             _require_concrete_product_formula_structure(
@@ -458,6 +459,7 @@ class ResourceEstimator:
             # deeper than Python's recursion limit.  A disabled trace is not
             # observable, so discard it before symbolic mapping/simplification.
             estimate = dataclasses.replace(estimate, trace=None)
+        estimate = interpreter.retain_shot_assumptions(estimate)
         interpreter.validate_no_internal_resource_symbols(estimate)
         if config.simplify:
             estimate = estimate.simplify()

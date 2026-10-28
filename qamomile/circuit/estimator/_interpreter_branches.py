@@ -88,6 +88,8 @@ class _BranchInterpreter(_IfMergeInterpreter):
         predicate = _boolean_condition(resolved_condition)
         runtime_guard = _classical_fact_runtime_condition(condition_fact)
         uncertainty_guard = _classical_fact_uncertainty_condition(condition_fact)
+        if self._run_state.shot_context.contains(resolved_condition):
+            uncertainty_guard = sp.true
         conservative_guard = _boolean_condition(sp.Or(runtime_guard, uncertainty_guard))
         compile_predicate = (
             _refine_boolean_under_assumption(
@@ -390,7 +392,9 @@ class _BranchInterpreter(_IfMergeInterpreter):
             runtime_condition=True,
         )
         conservative_reason = (
-            "measurement-derived"
+            "shot-context"
+            if self._run_state.shot_context.contains(resolved_condition)
+            else "measurement-derived"
             if uncertainty_guard is sp.false
             else (
                 "unresolved loop-state"

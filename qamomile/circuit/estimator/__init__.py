@@ -9,6 +9,17 @@ intentionally is not re-exported here, keeping algorithmic estimation and
 physical assumptions clearly separated. Measurements and resets are reported
 independently from gates, while depth retains both the complete critical path
 and per-operation-class layers.
+
+Device-supplied shot indices have no quantum cost and remain private execution
+values. Fixed-cost branches and finite remainder/table-derived loop counts use
+conservative bounds. Loops that change persistent classical or consumed-qubit
+state remain unsupported when their trip counts depend on the shot. Ordinary
+while loops retain their symbolic repetition counts. Shot-derived UInt arithmetic
+uses nonnegative mathematical integers; estimates explicitly assume no backend
+integer overflow. Unresolved shot-indexed
+scalar array accesses can carry explicit array-validity assumptions when
+resource bounds do not require their selected values. Known invalid accesses
+remain rejected.
 """
 
 from qamomile.circuit.estimator._resource_base import (
