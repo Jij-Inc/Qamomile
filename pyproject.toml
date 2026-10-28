@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=70.0", "setuptools-scm>=8"]
+requires = ["setuptools>=77.0", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,8 @@ name = "qamomile"
 dynamic = ["version"]
 description = ""
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE.txt"]
 requires-python = ">=3.11"
 dependencies = [
     "jijmodeling>=2.1.0",
@@ -39,7 +41,7 @@ combine-as-imports = true
 
 [project.optional-dependencies]
 qiskit = [
-    "qiskit>=2.3.0",
+    "qiskit>=2.3.0,<3",
     "qiskit-aer>=0.17.2",
     "qiskit-ibm-runtime>=0.40,<1",
 ]
@@ -80,7 +82,7 @@ dev = [
     "matplotlib>=3.10.8",
     "networkx>=3.0",
     "pytest>=9.0.2",
-    "qiskit>=2.3.0",
+    "qiskit>=2.3.0,<3",
     "qiskit-aer>=0.17.2",
     "qiskit-ibm-runtime>=0.40,<1",
     "pytest-mpl>=0.17.0",
