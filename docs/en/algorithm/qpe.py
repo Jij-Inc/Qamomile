@@ -103,7 +103,8 @@ transpiler = QiskitTranspiler()
 #
 # It maps an integer $x$ to a regular phase pattern across the computational
 # basis. We refer to a state that stores a value in these relative phases as a
-# Fourier-encoded state. See the QFT tutorial for details. The inverse QFT
+# Fourier-encoded state. For an application in Qamomile, see the
+# [multidimensional QFT example](multidimensional_qft.ipynb). The inverse QFT
 # $\mathrm{QFT}_M^{-1}$ performs the reverse operation. If $\phi=a/M$ is
 # exactly representable with $m$ bits, then the
 # controlled powers $U^{2^0}, U^{2^1}, \ldots, U^{2^{m-1}}$ prepare the
@@ -466,13 +467,16 @@ def run_qpe_experiment(qpe_kernel, counting_bits: int) -> float:
         bindings={},
     ).result()
 
-    # Keep the most frequently observed decoded phase.
-    most_observed_result = max(sample_result.results, key=lambda item: item[1])
+    # Keep the most frequent phase, choosing the smaller phase when counts tie.
+    most_observed_result = max(
+        sample_result.results, key=lambda item: (item[1], -item[0])
+    )
     print(most_observed_result)
     qpe_output, most_observed_shots = most_observed_result
 
     assert 0 < most_observed_shots <= SHOTS
     return qpe_output
+
 
 # Run QPE for all requested counting-qubit counts.
 bits = list(range(3, 6) if docs_test_mode else range(3, 10))
@@ -518,6 +522,12 @@ for counting_bits, phase_error in zip(bits, phase_errors):
 # We can apply `estimate_resources()` directly to the same QPE kernels used by
 # `run_qpe_experiment()` above. This estimate includes the Hadamards, controlled
 # powers from `qmc.qpe`, inverse QFT, and final fixed-point measurement.
+# The plot uses `gates.total`, which counts logical gates under the default
+# `CLEAN_ANCILLA_TOFFOLI` control-decomposition model. Measurement counts are
+# reported separately in `measurements.total`. Engine compilation and
+# optimization can change the emitted gate count. See the
+# [resource-estimation tutorial](../tutorial/05_resource_estimation.ipynb)
+# for details of the counting model.
 
 # %%
 # Substitute concrete counting-qubit counts and collect total gate counts.
@@ -529,8 +539,7 @@ for counting_bits in bits:
 
 # Anchor a 2^m reference curve at the first resource-estimate point.
 scaling_reference = [
-    resource_gate_counts[0] * 2 ** (counting_bits - bits[0])
-    for counting_bits in bits
+    resource_gate_counts[0] * 2 ** (counting_bits - bits[0]) for counting_bits in bits
 ]
 
 # Plot the resource estimate with its expected exponential-in-m trend.
@@ -540,7 +549,7 @@ ax.plot(
     resource_gate_counts,
     marker="o",
     color="#2696EB",
-    label="QPE gate count",
+    label="QPE logical gate estimate",
 )
 ax.plot(
     bits,
@@ -550,7 +559,7 @@ ax.plot(
     label=r"$O(2^m)$",
 )
 ax.set_xlabel(r"counting qubits $m$")
-ax.set_ylabel("total gates")
+ax.set_ylabel("logical gates")
 ax.set_yscale("log")
 ax.set_xticks(bits)
 ax.grid(alpha=0.25)
@@ -606,8 +615,8 @@ assert all(
 # $$
 #
 # :::{note} Inverse QFT Gate Count
-# The inverse QFT on $m$ qubits can be decomposed using $O(m^2)$ gates. Refer
-# to the QFT tutorial for details.
+# The inverse QFT on $m$ qubits can be decomposed using $O(m^2)$ gates.
+# This is the contribution represented by the $O(m^2)$ term above.
 # :::
 #
 # In practice, however, this estimate can change significantly. The expression

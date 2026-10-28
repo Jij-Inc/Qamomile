@@ -81,7 +81,7 @@ transpiler = QiskitTranspiler()
 #   \sum_{y=0}^{M-1} e^{2\pi i xy/M}|y\rangle.
 # $$
 #
-# これは整数$x$を、計算基底全体にわたる規則的な位相パターンへ写します。このように、値を各計算基底の相対位相として保持した状態を、ここでは「フーリエ符号化された状態」と呼びます。詳しい説明はQFTチュートリアルをご覧ください。逆QFT $\mathrm{QFT}_M^{-1}$は、この変換の逆操作です。$\phi=a/M$が$m$ビットで正確に表せる場合、制御$U^{2^0}, U^{2^1}, \ldots, U^{2^{m-1}}$ゲートによってカウント用量子ビットは
+# これは整数$x$を、計算基底全体にわたる規則的な位相パターンへ写します。このように、値を各計算基底の相対位相として保持した状態を、ここでは「フーリエ符号化された状態」と呼びます。Qamomileでの応用例は、[多次元QFTの記事](multidimensional_qft.ipynb)を参照してください。逆QFT $\mathrm{QFT}_M^{-1}$は、この変換の逆操作です。$\phi=a/M$が$m$ビットで正確に表せる場合、制御$U^{2^0}, U^{2^1}, \ldots, U^{2^{m-1}}$ゲートによってカウント用量子ビットは
 #
 # $$
 # \frac{1}{\sqrt{M}}\sum_{k=0}^{M-1} e^{2\pi i a k/M}|k\rangle
@@ -391,13 +391,16 @@ def run_qpe_experiment(qpe_kernel, counting_bits: int) -> float:
         bindings={},
     ).result()
 
-    # 最も多く観測された復号済み位相を取り出します。
-    most_observed_result = max(sample_result.results, key=lambda item: item[1])
+    # 観測回数が最多の位相を選び、同率の場合は小さい位相を使います。
+    most_observed_result = max(
+        sample_result.results, key=lambda item: (item[1], -item[0])
+    )
     print(most_observed_result)
     qpe_output, most_observed_shots = most_observed_result
 
     assert 0 < most_observed_shots <= SHOTS
     return qpe_output
+
 
 # すべてのカウント用量子ビット数でQPEを実行します。
 bits = list(range(3, 6) if docs_test_mode else range(3, 10))
@@ -440,6 +443,7 @@ for counting_bits, phase_error in zip(bits, phase_errors):
 # ## リソース推定
 #
 # 前のセクションでは、カウント用量子ビットを増やすと精度が上がることを確認しました。ここでは、上の`run_qpe_experiment()`で使ったものと同じQPE量子カーネルに、`estimate_resources()`を直接適用します。この推定には、アダマールゲート、`qmc.qpe`による制御$U^{2^k}$ゲート、逆QFT、最後の固定小数点測定が含まれます。
+# プロットでは、既定の制御演算分解モデル`CLEAN_ANCILLA_TOFFOLI`に基づく論理ゲート数`gates.total`を使います。測定回数は`measurements.total`に別途計上されます。エンジン向けのコンパイルや最適化によって、出力回路のゲート数は変わる場合があります。集計モデルの詳細は、[リソース推定のチュートリアル](../tutorial/05_resource_estimation.ipynb)を参照してください。
 
 # %%
 # 具体的なカウント用量子ビット数を代入し、総ゲート数を集めます。
@@ -451,8 +455,7 @@ for counting_bits in bits:
 
 # 最初の推定点に合わせて2^mの参照曲線を作ります。
 scaling_reference = [
-    resource_gate_counts[0] * 2 ** (counting_bits - bits[0])
-    for counting_bits in bits
+    resource_gate_counts[0] * 2 ** (counting_bits - bits[0]) for counting_bits in bits
 ]
 
 # リソース推定とmに対する指数的な傾向をプロットします。
@@ -462,7 +465,7 @@ ax.plot(
     resource_gate_counts,
     marker="o",
     color="#2696EB",
-    label="QPE gate count",
+    label="QPE logical gate estimate",
 )
 ax.plot(
     bits,
@@ -472,7 +475,7 @@ ax.plot(
     label=r"$O(2^m)$",
 )
 ax.set_xlabel(r"counting qubits $m$")
-ax.set_ylabel("total gates")
+ax.set_ylabel("logical gates")
 ax.set_yscale("log")
 ax.set_xticks(bits)
 ax.grid(alpha=0.25)
@@ -521,7 +524,7 @@ assert all(
 # $$
 #
 # :::{note}
-# $m$個の量子ビットに対する逆QFTは、$O(m^2)$個のゲートに分解できます。詳しくはQFTのチュートリアルを参照してください。
+# $m$個の量子ビットに対する逆QFTは、$O(m^2)$個のゲートに分解できます。これが上式の$O(m^2)$項に相当します。
 # :::
 #
 # しかし、実際にはこの見積もりは大きく変わる可能性があります。上式はQPE本体のゲート数を表しており、初期状態の準備コストは含みません。また、各制御$U^{2^k}$ゲートのゲート数は、その実装方法に依存します。以下では、この2点を分けて説明します。
