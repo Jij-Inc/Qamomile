@@ -4036,6 +4036,7 @@ dependencies = [
     { name = "jijmodeling" },
     { name = "ommx" },
     { name = "protobuf" },
+    { name = "pyqsp" },
     { name = "sympy" },
 ]
 
@@ -4065,9 +4066,6 @@ qiskit = [
     { name = "qiskit-aer" },
     { name = "qiskit-ibm-runtime" },
 ]
-qsvt = [
-    { name = "pyqsp" },
-]
 quri-parts = [
     { name = "quri-parts-circuit" },
     { name = "quri-parts-core" },
@@ -4082,7 +4080,6 @@ dev = [
     { name = "grpcio-tools" },
     { name = "matplotlib" },
     { name = "networkx" },
-    { name = "pyqsp" },
     { name = "pytest" },
     { name = "pytest-mock" },
     { name = "pytest-mpl" },
@@ -4108,7 +4105,6 @@ docs = [
     { name = "openfermion" },
     { name = "openfermionpyscf" },
     { name = "pylatexenc" },
-    { name = "pyqsp" },
     { name = "pyscf" },
     { name = "pytest" },
     { name = "pytest-mock" },
@@ -4138,7 +4134,7 @@ requires-dist = [
     { name = "matplotlib", marker = "extra == 'visualization'", specifier = ">=3.10.8" },
     { name = "ommx", specifier = ">=2.3.3" },
     { name = "protobuf", specifier = ">=5.29,<7" },
-    { name = "pyqsp", marker = "extra == 'qsvt'", specifier = ">=0.2.0" },
+    { name = "pyqsp", specifier = ">=0.2.0" },
     { name = "pytket", marker = "extra == 'hugr'", specifier = ">=2.18.5,<3" },
     { name = "qbraid", extras = ["qiskit"], marker = "extra == 'qbraid'", specifier = ">=0.11.0" },
     { name = "qiskit", marker = "extra == 'qiskit'", specifier = ">=2.3.0" },
@@ -4152,14 +4148,13 @@ requires-dist = [
     { name = "sympy", specifier = ">=1.14.0" },
     { name = "tket-exts", marker = "extra == 'hugr'", specifier = ">=0.12,<0.13" },
 ]
-provides-extras = ["qiskit", "visualization", "qsvt", "cudaq-cu12", "cudaq-cu13", "quri-parts", "qbraid", "hugr", "braket"]
+provides-extras = ["qiskit", "visualization", "cudaq-cu12", "cudaq-cu13", "quri-parts", "qbraid", "hugr", "braket"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "grpcio-tools", specifier = ">=1.71,<2" },
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "networkx", specifier = ">=3.0" },
-    { name = "pyqsp", specifier = ">=0.2.0" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest-mock", specifier = ">=3.14.0" },
     { name = "pytest-mpl", specifier = ">=0.17.0" },
@@ -4185,7 +4180,6 @@ docs = [
     { name = "openfermion", specifier = ">=1.7.0" },
     { name = "openfermionpyscf", specifier = ">=0.5" },
     { name = "pylatexenc", specifier = ">=2.10" },
-    { name = "pyqsp", specifier = ">=0.2.0" },
     { name = "pyscf", specifier = ">=2.5.0" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest-mock", specifier = ">=3.14.0" },

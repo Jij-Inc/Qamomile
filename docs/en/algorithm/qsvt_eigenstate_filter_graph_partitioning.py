@@ -40,7 +40,7 @@
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install "qamomile[qiskit,qsvt,visualization]" networkx
+# # !pip install "qamomile[qiskit,visualization]" networkx
 
 # %%
 import jijmodeling as jm
