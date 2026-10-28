@@ -241,12 +241,12 @@ def _executor(case: Any) -> Any:
     """Return a local simulator executor for one SDK fixture case.
 
     Args:
-        case (Any): Cross-backend fixture carrying a transpiler and name.
+        case (Any): Cross-engine fixture carrying a transpiler and name.
 
     Returns:
-        Any: Backend-specific local executor.
+        Any: Engine-specific local executor.
     """
-    if case.backend_name == "qiskit":
+    if case.engine_name == "qiskit":
         from qiskit.providers.basic_provider import BasicSimulator
 
         return case.transpiler.executor(backend=BasicSimulator())
@@ -774,7 +774,7 @@ def test_random_complex_two_term_lcu_samples_and_estimates_on_every_sdk(
     expected_expval = (
         2.0 * np.imag(np.conj(identity_weight) * x_weight) / encoding.normalization**2
     )
-    expval_tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    expval_tolerance = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed_expval == pytest.approx(expected_expval, abs=expval_tolerance)
 
 
@@ -1038,7 +1038,7 @@ def test_outer_select_observes_single_identity_term_phase_on_every_sdk(
         bindings={"observable": qm_o.Y(0)},
     )
     observed_y = float(expval_executable.run(_executor(sdk_transpiler)).result())
-    expval_tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    expval_tolerance = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed_y == pytest.approx(math.sin(phase), abs=expval_tolerance)
 
 
@@ -1142,7 +1142,7 @@ def test_patterned_outer_control_composes_with_lcu_select_on_every_sdk(
         bindings={"observable": qm_o.Y(0)},
     )
     observed_y = float(expval_executable.run(_executor(sdk_transpiler)).result())
-    expval_tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    expval_tolerance = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed_y == pytest.approx(expected_y, abs=expval_tolerance)
 
 

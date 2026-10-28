@@ -112,26 +112,23 @@
   text-decoration: underline;
 }
 
-/* Front-page feature cards below the Qamomile introduction. */
-:is(#what-is-qamomile, #qamomile) + p + .myst-grid .myst-card,
-:is(#what-is-qamomile, #qamomile) + p + .myst-grid .myst-card-header {
+/* Front-page feature cards. */
+.qamomile-feature-cards .myst-card,
+.qamomile-feature-cards .myst-card-header {
   background-color: var(--qamomile-feature-card-bg) !important;
 }
 
-:is(#what-is-qamomile, #qamomile) + p + .myst-grid .myst-card {
+.qamomile-feature-cards .myst-card {
   border-color: var(--qamomile-feature-card-bg) !important;
 }
 
-:is(#what-is-qamomile, #qamomile) + p + .myst-grid .myst-card,
-:is(#what-is-qamomile, #qamomile) + p + .myst-grid .myst-card * {
+.qamomile-feature-cards .myst-card,
+.qamomile-feature-cards .myst-card * {
   color: var(--qamomile-feature-card-text) !important;
 }
 
-:is(#what-is-qamomile, #qamomile) + p + .myst-grid .myst-card-header {
+.qamomile-feature-cards .myst-card-header {
   border-bottom: 0 !important;
-}
-
-:is(#what-is-qamomile, #qamomile) + p + .myst-grid .myst-card-body > p:first-child {
   font-size: 1.06rem;
   line-height: 1.35;
 }

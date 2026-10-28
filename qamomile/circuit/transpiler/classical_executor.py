@@ -19,6 +19,7 @@ from qamomile.circuit.ir.operation.arithmetic_operations import (
 )
 from qamomile.circuit.ir.operation.classical_ops import (
     DecodeQFixedOperation,
+    DecodeQIntOperation,
     DictGetItemOperation,
     StoreArrayElementOperation,
 )
@@ -117,6 +118,36 @@ def resolve_runtime_array_location(
 class ClassicalExecutor:
     """Executes classical segments in Python."""
 
+    def resolve_value(self, value: ValueLike, context: ExecutionContext) -> Any:
+        """Resolve a typed classical output using the execution interpreter.
+
+        Args:
+            value (ValueLike): Scalar, array, tuple, or dictionary output.
+            context (ExecutionContext): Runtime bindings and computed values
+                keyed by their IR identities or public parameter names.
+
+        Returns:
+            Any: Concrete value with tuple and dictionary structure retained.
+
+        Raises:
+            ExecutionError: If a required value is absent from the context
+                and its compile-time metadata.
+        """
+        if context.has(value.uuid):
+            return context.get(value.uuid)
+        if isinstance(value, TupleValue):
+            return tuple(
+                self.resolve_value(element, context) for element in value.elements
+            )
+        if isinstance(value, DictValue):
+            if value.metadata.dict_runtime is not None:
+                return value.get_bound_data()
+            return {
+                self.resolve_value(key, context): self.resolve_value(item, context)
+                for key, item in value.entries
+            }
+        return self._get_value(value, context, {}, {})
+
     def execute(
         self,
         segment: ClassicalSegment,
@@ -125,6 +156,19 @@ class ClassicalExecutor:
         """Execute classical operations and return outputs.
 
         Interprets the operations list directly using Python.
+
+        Args:
+            segment (ClassicalSegment): Ordered classical operations and
+                declared outputs to evaluate.
+            context (ExecutionContext): Per-shot quantum and bound input
+                values available to the segment.
+
+        Returns:
+            dict[str, Any]: Computed classical values keyed by result UUID.
+
+        Raises:
+            ExecutionError: If an operation is unsupported or a required
+                runtime value is unavailable.
         """
         results: dict[str, Any] = {}
         self._execute_operations(segment.operations, context, results, {})
@@ -137,6 +181,19 @@ class ClassicalExecutor:
         results: dict[str, Any],
         scoped_locals: dict[str, Any],
     ) -> None:
+        """Execute an ordered operation sequence in one classical scope.
+
+        Args:
+            operations (list[Operation]): Operations to execute in order.
+            context (ExecutionContext): Per-shot quantum and bound input
+                values.
+            results (dict[str, Any]): Result map updated in place.
+            scoped_locals (dict[str, Any]): Active control-flow locals.
+
+        Raises:
+            ExecutionError: If an operation is unsupported or a required
+                runtime value is unavailable.
+        """
         for op in operations:
             self._execute_operation(op, context, results, scoped_locals)
 
@@ -147,7 +204,19 @@ class ClassicalExecutor:
         results: dict[str, Any],
         scoped_locals: dict[str, Any],
     ) -> None:
-        """Execute a single operation."""
+        """Execute one classical operation through its type-specific handler.
+
+        Args:
+            op (Operation): Operation to execute.
+            context (ExecutionContext): Per-shot quantum and bound input
+                values.
+            results (dict[str, Any]): Result map updated in place.
+            scoped_locals (dict[str, Any]): Active control-flow locals.
+
+        Raises:
+            ExecutionError: If ``op`` is unsupported or a required runtime
+                value is unavailable.
+        """
         if isinstance(op, BinOp):
             self._execute_binop(op, context, results, scoped_locals)
         elif isinstance(op, CompOp):
@@ -160,6 +229,8 @@ class ClassicalExecutor:
             self._execute_runtime_expr(op, context, results, scoped_locals)
         elif isinstance(op, DecodeQFixedOperation):
             self._execute_decode_qfixed(op, context, results, scoped_locals)
+        elif isinstance(op, DecodeQIntOperation):
+            self._execute_decode_qint(op, context, results, scoped_locals)
         elif isinstance(op, DictGetItemOperation):
             self._execute_dict_getitem(op, context, results, scoped_locals)
         elif isinstance(op, CInitOperation):
@@ -310,7 +381,7 @@ class ClassicalExecutor:
         ``SegmentationPass`` routes a ``RuntimeClassicalExpr`` into a
         classical segment when its result is a block output or feeds
         host-side post-processing (in-circuit consumers instead keep the
-        op in the quantum segment, where backend emit lowers it). The
+        op in the quantum segment, where engine emit lowers it). The
         unified ``RuntimeOpKind`` is mapped back to its per-family kind
         and delegated to the shared ``eval_utils`` helpers so evaluation
         semantics match compile-time folding exactly. Boolean results are
@@ -394,37 +465,22 @@ class ClassicalExecutor:
         For QPE phase (int_bits=0, n=4):
             weights: [0.0625, 0.125, 0.25, 0.5] for bits[0] to bits[3]
 
-        Example:
-            bits = [1, 0, 1] with int_bits=0 and n=3
-            After QPE: bits[0]=LSB, bits[2]=MSB
-            -> value = bits[0]*0.125 + bits[1]*0.25 + bits[2]*0.5
-                     = 1*0.125 + 0*0.25 + 1*0.5 = 0.625
-        """
-        from qamomile.circuit.ir.value import ArrayValue
+        Args:
+            op (DecodeQFixedOperation): Fixed-point decode operation.
+            context (ExecutionContext): Per-shot values produced by quantum
+                execution.
+            results (dict[str, Any]): Classical result map updated in place.
+            scoped_locals (dict[str, Any]): Active control-flow locals.
 
-        # Get bit values from operands
-        # Handle both ArrayValue (new) and individual bits (legacy)
-        bits: list[Any] = []
-        if len(op.operands) == 1 and isinstance(op.operands[0], ArrayValue):
-            # New format: single ArrayValue containing all bits
-            bits_array = op.operands[0]
-            n = op.num_bits
-            for i in range(n):
-                # Bits are stored in context with indexed UUID format
-                bit_uuid = f"{bits_array.uuid}_{i}"
-                if context.has(bit_uuid):
-                    bits.append(context.get(bit_uuid))
-                elif bit_uuid in results:
-                    bits.append(results[bit_uuid])
-                else:
-                    raise ExecutionError(
-                        f"Bit {i} not found for ArrayValue {bits_array.name}"
-                    )
-        else:
-            # Legacy format: individual bit operands
-            bits = [
-                self._get_value(b, context, results, scoped_locals) for b in op.operands
-            ]
+        Raises:
+            ExecutionError: If the decoder width is unknown or a required measured
+                bit is unavailable.
+
+        Example:
+            ``[1, 0, 1]`` with three fractional bits decodes as
+            ``1 * 0.125 + 0 * 0.25 + 1 * 0.5 = 0.625``.
+        """
+        bits = self._read_decode_bits(op, context, results, scoped_locals)
 
         # Decode: bits -> fixed-point float
         # After QPE with inverse QFT, bits are in order [LSB, ..., MSB]
@@ -440,6 +496,80 @@ class ClassicalExecutor:
 
         if op.results:
             results[op.results[0].uuid] = value
+
+    def _execute_decode_qint(
+        self,
+        op: DecodeQIntOperation,
+        context: ExecutionContext,
+        results: dict[str, Any],
+        scoped_locals: dict[str, Any],
+    ) -> None:
+        """Decode measured QInt bits to an unsigned integer.
+
+        Bit position zero is the least-significant carrier, exactly matching
+        the carrier order used by QFixed decoding.
+
+        Args:
+            op (DecodeQIntOperation): Unsigned-integer decode operation.
+            context (ExecutionContext): Per-shot values produced by quantum
+                execution.
+            results (dict[str, Any]): Classical result map updated in place.
+            scoped_locals (dict[str, Any]): Active control-flow locals.
+
+        Raises:
+            ExecutionError: If the decoder width is unknown or a required measured
+                bit is unavailable.
+        """
+        bits = self._read_decode_bits(op, context, results, scoped_locals)
+        value = sum(int(bit) << index for index, bit in enumerate(bits))
+        if op.results:
+            results[op.results[0].uuid] = value
+
+    def _read_decode_bits(
+        self,
+        op: DecodeQFixedOperation | DecodeQIntOperation,
+        context: ExecutionContext,
+        results: dict[str, Any],
+        scoped_locals: dict[str, Any],
+    ) -> list[Any]:
+        """Read one packed-register decoder's bits in carrier order.
+
+        Args:
+            op (DecodeQFixedOperation | DecodeQIntOperation): Decode operation
+                whose bit operands should be loaded.
+            context (ExecutionContext): Per-shot quantum result context.
+            results (dict[str, Any]): Classical results already computed.
+            scoped_locals (dict[str, Any]): Active control-flow locals.
+
+        Returns:
+            list[Any]: Bit values ordered from least- to most-significant.
+
+        Raises:
+            ExecutionError: If the decoder width is unknown or an indexed
+                array bit cannot be found.
+        """
+        num_bits = op.num_bits
+        if num_bits is None:
+            raise ExecutionError(
+                "Cannot decode a packed register with unknown bit width"
+            )
+        if len(op.operands) == 1 and isinstance(op.operands[0], ArrayValue):
+            bits_array = op.operands[0]
+            bits: list[Any] = []
+            for index in range(num_bits):
+                bit_uuid = f"{bits_array.uuid}_{index}"
+                if context.has(bit_uuid):
+                    bits.append(context.get(bit_uuid))
+                elif bit_uuid in results:
+                    bits.append(results[bit_uuid])
+                else:
+                    raise ExecutionError(
+                        f"Bit {index} not found for ArrayValue {bits_array.name}"
+                    )
+            return bits
+        return [
+            self._get_value(bit, context, results, scoped_locals) for bit in op.operands
+        ]
 
     def _execute_store_array_element(
         self,

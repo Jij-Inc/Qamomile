@@ -267,9 +267,25 @@ class RegionCapturePass(Pass[Block, Block]):
         """
         if value.uuid in local or value.uuid in captured_ids or value.is_constant():
             return
+        if isinstance(value, Value) and value.parent_array is not None:
+            for index in value.element_indices:
+                RegionCapturePass._record_capture(
+                    index,
+                    local,
+                    outer_available,
+                    declared_captures,
+                    captures,
+                    captured_ids,
+                )
         if value.uuid not in outer_available:
             declared = declared_captures.get(value.uuid)
-            if isinstance(declared, ArrayValue):
+            if isinstance(declared, ArrayValue) or (
+                isinstance(declared, Value)
+                and declared.parent_array is not None
+                and not declared.type.is_quantum()
+            ):
+                # A lexical classical element capture is an immutable scalar
+                # snapshot, even when its parent is stored later in the body.
                 value = declared
             else:
                 logical_match = RegionCapturePass._matching_outer_value(

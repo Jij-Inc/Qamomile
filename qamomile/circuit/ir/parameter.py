@@ -6,17 +6,16 @@ function so the kernel's parameter contract is recoverable from the
 IR alone — without an external Python-side manifest.
 
 Motivation:
-    The project rule documented in ``CLAUDE.md`` keeps ``bindings`` and
-    ``parameters`` strictly disjoint at the ``Transpiler.transpile()``
-    API boundary, but the IR itself does not record which name was
-    decided which way. After ``partial_eval`` folds a binding into a
-    concrete constant, downstream readers cannot tell whether a
-    constant value originated from a compile-time binding or was a
-    literal in the kernel source. This is especially limiting for the
-    "qamomile as subgraph of an outer DSL's computation graph" use
-    case, where the receiver needs to know the kernel's full classical
-    interface (name, type, default, runtime-or-bound) to rebind values
-    in subsequent calls.
+    The ``Transpiler.transpile()`` contract keeps ``bindings`` and
+    ``parameters`` strictly disjoint at the API boundary, but the IR
+    itself does not record which name was decided which way. After
+    ``partial_eval`` folds a binding into a concrete constant,
+    downstream readers cannot tell whether a constant value originated
+    from a compile-time binding or was a literal in the kernel source.
+    This is especially limiting for the "qamomile as subgraph of an
+    outer DSL's computation graph" use case, where the receiver needs
+    to know the kernel's full classical interface (name, type, default,
+    runtime-or-bound) to rebind values in subsequent calls.
 
     Per-kernel-argument metadata also makes it natural to attach
     optional hints (currently just ``differentiable``) for outer DSL
@@ -48,7 +47,7 @@ class ParamKind(enum.Enum):
 
     Values:
         RUNTIME_PARAMETER: The argument is intended to be bound at
-            execution time by the backend (or, more generally, by the
+            execution time by the engine (or, more generally, by the
             outer caller in a hybrid loop). It survives the
             compilation pipeline as a symbolic parameter.
         COMPILE_TIME_BOUND: The argument was provided as a binding

@@ -6,10 +6,14 @@ import dataclasses
 from abc import ABC, abstractmethod
 
 from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.dataflow import walk_operations
 from qamomile.circuit.ir.operation import Operation
 from qamomile.circuit.ir.operation.arithmetic_operations import RuntimeClassicalExpr
 from qamomile.circuit.ir.operation.cast import CastOperation
-from qamomile.circuit.ir.operation.classical_ops import DecodeQFixedOperation
+from qamomile.circuit.ir.operation.classical_ops import (
+    DecodeQFixedOperation,
+    DecodeQIntOperation,
+)
 from qamomile.circuit.ir.operation.control_flow import (
     ForItemsOperation,
     ForOperation,
@@ -21,6 +25,7 @@ from qamomile.circuit.ir.operation.control_flow import (
 from qamomile.circuit.ir.operation.expval import ExpvalOp
 from qamomile.circuit.ir.operation.gate import (
     MeasureQFixedOperation,
+    MeasureQIntOperation,
     MeasureVectorOperation,
 )
 from qamomile.circuit.ir.operation.operation import OperationKind
@@ -34,8 +39,10 @@ from qamomile.circuit.ir.value import (
     ValueBase,
     ValueLike,
     array_physical_region,
+    array_static_length,
     arrays_share_physical_region,
     collect_value_like_uuids,
+    packed_register_type_width,
 )
 from qamomile.circuit.transpiler.errors import SeparationError
 from qamomile.circuit.transpiler.passes import Pass
@@ -103,72 +110,139 @@ def _collect_compile_time_outputs(output_values: list[Value]) -> dict[str, objec
     return resolved_outputs
 
 
-def lower_measure_qfixed(
-    op: MeasureQFixedOperation,
+def _build_register_measurement_arrays(
+    register: Value,
+    qubit_uuids: tuple[str, ...],
     cast_source: ArrayValue | None = None,
-) -> list[Operation]:
-    """Lower MeasureQFixedOperation to MeasureVectorOperation + decode.
+    *,
+    name_prefix: str,
+) -> tuple[ArrayValue, ArrayValue, int]:
+    """Build ordered carrier and bit arrays for packed-register measurement.
+
+    The carrier width is derived from the first available source of truth,
+    in this order: an enumerated carrier list, the static length of the cast
+    source vector, and finally the register's type-declared width, which is
+    only accepted when it is a known zero. The lowering never synthesizes an
+    empty register for an unknown width: measuring nothing and decoding zero
+    would silently corrupt the result.
 
     Args:
-        op (MeasureQFixedOperation): QFixed measurement to lower.
+        register (Value): Packed quantum register being measured.
+        qubit_uuids (tuple[str, ...]): Concrete carrier keys in
+            least-significant-bit-first order, or an empty tuple for a
+            deferred symbolic-width cast.
         cast_source (ArrayValue | None): Source vector from the preceding
-            ``CastOperation`` when the QFixed carries a deferred, non-enumerated
+            ``CastOperation`` when the register carries a deferred, non-enumerated
             vector alias. Defaults to ``None`` for concrete carrier lists.
+        name_prefix (str): Prefix for generated carrier and bit-array names.
 
     Returns:
-        list[Operation]: Operations ``[MeasureVectorOperation,
-        DecodeQFixedOperation]``.
+        tuple[ArrayValue, ArrayValue, int]: Quantum carrier array, measured bit
+            array, and resolved bit count. Array element order is preserved
+            exactly from the cast metadata.
+
+    Raises:
+        SeparationError: If the carrier width cannot be resolved at plan
+            time: the cast source vector has a symbolic length, or no carrier
+            list and no source vector exist for a register whose declared
+            width is not a known zero.
     """
-    qfixed = op.operands[0]
-
-    qubit_uuids = qfixed.get_cast_qubit_uuids() or qfixed.get_qfixed_qubit_uuids()
-    num_bits = op.num_bits or len(qubit_uuids)
-    int_bits = op.int_bits
-
     if qubit_uuids:
+        num_bits = len(qubit_uuids)
         size_value = Value(
             type=UIntType(),
-            name="qfixed_size",
+            name=f"{name_prefix}_size",
         ).with_const(num_bits)
 
         qubits_array = ArrayValue(
             type=QubitType(),
-            name="qfixed_qubits",
+            name=f"{name_prefix}_qubits",
             shape=(size_value,),
         ).with_array_runtime_metadata(
             element_uuids=qubit_uuids,
-            element_logical_ids=qfixed.get_cast_qubit_logical_ids() or (),
+            element_logical_ids=register.get_cast_qubit_logical_ids() or (),
         )
-        cast_source_uuid = qfixed.get_cast_source_uuid()
+        cast_source_uuid = register.get_cast_source_uuid()
         if cast_source_uuid:
             qubits_array = qubits_array.with_cast_metadata(
                 source_uuid=cast_source_uuid,
-                source_logical_id=qfixed.get_cast_source_logical_id(),
+                source_logical_id=register.get_cast_source_logical_id(),
                 qubit_uuids=qubit_uuids,
-                qubit_logical_ids=qfixed.get_cast_qubit_logical_ids() or (),
+                qubit_logical_ids=register.get_cast_qubit_logical_ids() or (),
             )
-    elif cast_source is not None and cast_source.shape:
+    elif cast_source is not None:
+        length = array_static_length(cast_source)
+        if length is None:
+            raise SeparationError(
+                f"{name_prefix} measurement width is still symbolic at plan "
+                f"time: source vector '{cast_source.name}' has no static "
+                "length; bind the register size at compile time"
+            )
         qubits_array = cast_source
         size_value = cast_source.shape[0]
-        if num_bits == 0 and size_value.is_constant():
-            const_bits = size_value.get_const()
-            if const_bits is not None:
-                num_bits = int(const_bits)
+        num_bits = length
     else:
+        # Use the declared type to distinguish a known empty register from
+        # an unknown width; stored QFixed layout fields use zero for both.
+        type_width = packed_register_type_width(register.type)
+        if type_width != 0:
+            declared = type_width if type_width is not None else "symbolic"
+            raise SeparationError(
+                f"{name_prefix} measurement has no resolvable carrier qubits "
+                f"(declared width: {declared}) and no source vector was "
+                "found; refusing to synthesize an empty register"
+            )
+        num_bits = 0
         size_value = Value(
             type=UIntType(),
-            name="qfixed_size",
+            name=f"{name_prefix}_size",
         ).with_const(num_bits)
         qubits_array = ArrayValue(
             type=QubitType(),
-            name="qfixed_qubits",
+            name=f"{name_prefix}_qubits",
             shape=(size_value,),
         )
 
     bits_array = ArrayValue(
         type=BitType(),
-        name="qfixed_bits",
+        name=f"{name_prefix}_bits",
         shape=(size_value,),
+    )
+
+    return qubits_array, bits_array, num_bits
+
+
+def lower_measure_qfixed(
+    op: MeasureQFixedOperation,
+    cast_source: ArrayValue | None = None,
+) -> list[Operation]:
+    """Lower MeasureQFixedOperation to MeasureVectorOperation plus decode.
+
+    Carrier keys are read exclusively from the operand's required cast
+    metadata.
+
+    Args:
+        op (MeasureQFixedOperation): QFixed measurement to lower.
+        cast_source (ArrayValue | None): Source vector for a deferred-width
+            cast. Defaults to ``None`` for concrete carrier lists.
+
+    Returns:
+        list[Operation]: Ordered vector measurement and fixed-point decode.
+
+    Raises:
+        SeparationError: If cast metadata is missing or the carrier width
+            cannot be resolved at plan time (see
+            :func:`_build_register_measurement_arrays`).
+    """
+    qfixed = op.operands[0]
+    if qfixed.metadata.cast is None:
+        raise SeparationError("QFixed measurement requires cast metadata.")
+    qubit_uuids = qfixed.metadata.cast.qubit_uuids
+    qubits_array, bits_array, num_bits = _build_register_measurement_arrays(
+        qfixed,
+        qubit_uuids,
+        cast_source,
+        name_prefix="qfixed",
     )
 
     measure_vec_op = MeasureVectorOperation(
@@ -178,7 +252,7 @@ def lower_measure_qfixed(
 
     decode_op = DecodeQFixedOperation(
         num_bits=num_bits,
-        int_bits=int_bits,
+        int_bits=op.int_bits,
         operands=[bits_array],
         results=list(op.results),
     )
@@ -186,16 +260,50 @@ def lower_measure_qfixed(
     return [measure_vec_op, decode_op]
 
 
-def _reject_nested_measure_qfixed(
+def lower_measure_qint(
+    op: MeasureQIntOperation,
+    cast_source: ArrayValue | None = None,
+) -> list[Operation]:
+    """Lower MeasureQIntOperation to vector measurement plus integer decode.
+
+    Args:
+        op (MeasureQIntOperation): Unsigned quantum-integer measurement to
+            lower.
+        cast_source (ArrayValue | None): Source vector for a deferred-width
+            cast. Defaults to ``None`` for concrete carrier lists.
+
+    Returns:
+        list[Operation]: Ordered vector measurement and unsigned-integer
+            decode.
+
+    Raises:
+        SeparationError: If the carrier width cannot be resolved at plan time
+            (see :func:`_build_register_measurement_arrays`).
+    """
+    qint = op.operands[0]
+    qubit_uuids = qint.get_cast_qubit_uuids() or ()
+    qubits_array, bits_array, _num_bits = _build_register_measurement_arrays(
+        qint,
+        qubit_uuids,
+        cast_source,
+        name_prefix="qint",
+    )
+    return [
+        MeasureVectorOperation(operands=[qubits_array], results=[bits_array]),
+        DecodeQIntOperation(operands=[bits_array], results=list(op.results)),
+    ]
+
+
+def _reject_nested_register_measurement(
     operations: list[Operation], *, nested: bool = False
 ) -> None:
-    """Reject QFixed measurements inside runtime control flow.
+    """Reject packed-register measurements inside runtime control flow.
 
-    Pre-segmentation QFixed lowering splits one hybrid operation into a
+    Pre-segmentation QFixed/QInt lowering splits one hybrid operation into a
     quantum vector measurement and a host-side decode. A nested control-flow
     body cannot carry that decoded value across the quantum/host boundary
     with today's segmented control-flow representation, so leaving the
-    operation nested would expose raw carrier bits as a Float output.
+    operation nested would expose raw carrier bits as a scalar output.
 
     Args:
         operations (list[Operation]): Operations in the current lexical body.
@@ -203,52 +311,121 @@ def _reject_nested_measure_qfixed(
             Defaults to False.
 
     Raises:
-        SeparationError: If a nested ``MeasureQFixedOperation`` is found.
+        SeparationError: If a nested QFixed or QInt measurement is found.
     """
     for op in operations:
-        if nested and isinstance(op, MeasureQFixedOperation):
+        if nested and isinstance(op, (MeasureQFixedOperation, MeasureQIntOperation)):
             raise SeparationError(
-                "QFixed measurement inside control flow cannot be split into "
+                f"{type(op).__name__.removeprefix('Measure').removesuffix('Operation')} "
+                "measurement inside control flow cannot be split into "
                 "quantum measurement and host-side decode until branch and "
                 "loop values can cross the quantum/host segment boundary. "
-                "Move the QFixed measurement outside the if/loop, or return "
+                "Move the packed-register measurement outside the if/loop, or "
+                "return "
                 "raw measured bits and decode them outside the kernel."
             )
         if isinstance(op, HasNestedOps):
             for body in op.nested_op_lists():
-                _reject_nested_measure_qfixed(body, nested=True)
+                _reject_nested_register_measurement(body, nested=True)
+
+
+def _collect_register_cast_sources(
+    block: Block,
+) -> tuple[dict[str, ArrayValue], dict[str, ArrayValue]]:
+    """Index every candidate packed-register cast source in a block.
+
+    Casts feeding a top-level measurement may live inside control-flow bodies
+    (a runtime ``if`` whose branches each cast the same vector and merge the
+    packed results), so the whole nested region tree is walked. Block inputs
+    are indexed too because a caller-supplied vector can be cast without a
+    top-level ``CastOperation`` once the kernel has been specialized.
+
+    Args:
+        block (Block): Block whose operations and inputs are indexed.
+
+    Returns:
+        tuple[dict[str, ArrayValue], dict[str, ArrayValue]]:
+            ``(by_result_uuid, by_source_uuid)``. The first maps each
+            ``CastOperation`` result UUID to its operand vector; the second
+            maps each candidate vector's own UUID to itself.
+    """
+    by_result: dict[str, ArrayValue] = {}
+    by_source: dict[str, ArrayValue] = {}
+    for value in block.input_values:
+        if isinstance(value, ArrayValue):
+            by_source[value.uuid] = value
+    for op in walk_operations(block.operations):
+        if not isinstance(op, CastOperation) or not op.results:
+            continue
+        source = op.operands[0]
+        if not isinstance(source, ArrayValue):
+            continue
+        by_result[op.results[0].uuid] = source
+        by_source[source.uuid] = source
+    return by_result, by_source
+
+
+def _resolve_register_cast_source(
+    register: Value,
+    by_result: dict[str, ArrayValue],
+    by_source: dict[str, ArrayValue],
+) -> ArrayValue | None:
+    """Resolve the source vector behind a measured packed register.
+
+    An exact match on the register's own UUID (it is the direct result of a
+    ``CastOperation``) always wins. Otherwise the register's cast metadata
+    ``source_uuid`` is consulted, which covers registers merged out of
+    control-flow branches whose casts live in nested regions.
+
+    Args:
+        register (Value): Packed register operand of a measurement.
+        by_result (dict[str, ArrayValue]): Cast result UUID to source vector.
+        by_source (dict[str, ArrayValue]): Source vector UUID to itself.
+
+    Returns:
+        ArrayValue | None: Resolved source vector, or ``None`` when neither
+            lookup matches.
+    """
+    exact = by_result.get(register.uuid)
+    if exact is not None:
+        return exact
+    return by_source.get(register.get_cast_source_uuid() or "")
 
 
 def lower_operations(block: Block) -> Block:
-    """Lower high-level operations like MeasureQFixedOperation.
+    """Lower packed-register measurements before segmentation.
 
-    MeasureQFixedOperation is lowered to:
-    1. MeasureVectorOperation for the QFixed carrier (HYBRID -> QUANTUM segment)
-    2. DecodeQFixedOperation to convert bits to float (CLASSICAL segment)
+    QFixed and QInt measurements become one ordered vector measurement plus a
+    type-specific host-side decode operation.
 
     Args:
         block (Block): Block whose top-level high-level operations should be
             lowered.
 
     Returns:
-        Block: Block with top-level QFixed measurements split into quantum
-            measurement and classical decode operations.
+        Block: Block with top-level packed-register measurements split into
+            quantum measurement and classical decode operations.
 
     Raises:
-        SeparationError: If a QFixed measurement occurs inside control flow,
-            where the decode result cannot cross the segment boundary.
+        SeparationError: If a QFixed or QInt measurement occurs inside control
+            flow, where the decoded result cannot cross the segment boundary,
+            or if a measured register's carrier width cannot be resolved at
+            plan time.
     """
-    _reject_nested_measure_qfixed(block.operations)
+    _reject_nested_register_measurement(block.operations)
+    by_result, by_source = _collect_register_cast_sources(block)
     lowered_ops: list[Operation] = []
-    qfixed_cast_sources: dict[str, ArrayValue] = {}
     for op in block.operations:
-        if isinstance(op, CastOperation):
-            if op.results and isinstance(op.operands[0], ArrayValue):
-                qfixed_cast_sources[op.results[0].uuid] = op.operands[0]
-            lowered_ops.append(op)
-        elif isinstance(op, MeasureQFixedOperation):
-            cast_source = qfixed_cast_sources.get(op.operands[0].uuid)
+        if isinstance(op, MeasureQFixedOperation):
+            cast_source = _resolve_register_cast_source(
+                op.operands[0], by_result, by_source
+            )
             lowered_ops.extend(lower_measure_qfixed(op, cast_source))
+        elif isinstance(op, MeasureQIntOperation):
+            cast_source = _resolve_register_cast_source(
+                op.operands[0], by_result, by_source
+            )
+            lowered_ops.extend(lower_measure_qint(op, cast_source))
         else:
             lowered_ops.append(op)
     return dataclasses.replace(block, operations=lowered_ops)
@@ -533,12 +710,12 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         # they end up computed inside the quantum circuit regardless of where
         # the user wrote them — never stranded in a classical prep segment.
         pending_absorbable: list[Operation] = []
-        # Host-evaluated runtime expressions encountered while inside the
-        # quantum segment. They are held here and flushed into the first
-        # post-quantum classical segment (creating one at the end of the
-        # stream if no classical op follows), so a runtime expression written
-        # between measurements never splits the quantum segment and never
-        # gets stranded inside it.
+        # Host-evaluated runtime expressions and packed-register decodes
+        # encountered while inside the quantum segment. They are held here
+        # and flushed into the first post-quantum classical segment (creating
+        # one at the end of the stream if no classical op follows), so host
+        # work between independent measurements never splits the quantum
+        # segment and never gets stranded inside it.
         pending_post: list[Operation] = []
 
         for op in block.operations:
@@ -611,7 +788,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             # quantum→classical→quantum split (``MultipleQuantumSegmentsError``)
             # and an op written *before* the quantum segment (e.g. ``angle =
             # -phase`` computed before ``qmc.qubit_array``) is stranded in a
-            # classical prep segment, where the backend has no gate to attach
+            # classical prep segment, where the engine has no gate to attach
             # the parameter expression to and silently emits a zero angle.
             # ``_absorbable_op_ids`` (from :meth:`_compute_absorbable`) holds
             # exactly the ops safe to absorb: non-measurement classical ops
@@ -635,7 +812,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             # segment model: it is *not* absorbable because it is also read by
             # classical work or returned as a block output, so it must stay in a
             # classical segment — but then the quantum op reads a value the
-            # classical segment never threads into the circuit and the backend
+            # classical segment never threads into the circuit and the engine
             # silently emits a zero/garbage parameter. (When the op sits between
             # quantum ops this also manifests as a spurious extra quantum
             # segment; before the quantum region it produces a legal C→Q plan
@@ -662,6 +839,20 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             if current_kind is None:
                 current_kind = op_kind
 
+            # Decoding a packed measurement is pure host work. When its
+            # result is not needed by any quantum operation, defer it with
+            # the other host expressions so independent later measurements
+            # remain in the same quantum segment. The transitive dependency
+            # check includes gate parameters and nested control-flow inputs;
+            # a decode feeding them must retain its classical boundary.
+            if (
+                current_kind == OperationKind.QUANTUM
+                and isinstance(op, (DecodeQFixedOperation, DecodeQIntOperation))
+                and not self._feeds_quantum(op)
+            ):
+                pending_post.append(op)
+                continue
+
             # Runtime classical expressions (measurement-derived classical
             # ops, lowered by ``ClassicalLoweringPass``) are placed by
             # consumer (see :meth:`_classify_runtime_exprs`):
@@ -669,7 +860,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             # - An expr bridging a measurement to a runtime IfOperation /
             #   WhileOperation condition (directly or through other
             #   in-circuit exprs) stays inside the quantum segment so the
-            #   backend can lower it to a native classical expression.
+            #   engine can lower it to a native classical expression.
             #   Examples that work under this rule but the old BitType-only
             #   heuristic could not handle:
             #     ``if (s0 + 2 * s1 + 4 * s2) == 5:``  (UInt-typed BinOp/CompOp)
@@ -715,10 +906,10 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 pending_absorbable = []
 
             # Entering (or continuing) a post-quantum classical segment:
-            # flush deferred runtime expressions first so ops that consume
-            # their results execute after them. ``pending_post`` only fills
-            # while the quantum segment is active, so any classical segment
-            # reached with a non-empty list is post-quantum.
+            # flush deferred decodes and runtime expressions first so their
+            # consumers execute after them. ``pending_post`` only fills while
+            # the quantum segment is active, so any classical segment reached
+            # with a non-empty list is post-quantum.
             if current_kind == OperationKind.CLASSICAL and pending_post:
                 current_ops.extend(pending_post)
                 pending_post = []
@@ -744,8 +935,8 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             segment = self._create_segment(current_kind, current_ops)
             segments.append(segment)
 
-        # Deferred runtime expressions with no classical op after them in
-        # the stream still must run host-side.
+        # Deferred decodes and runtime expressions still must run host-side
+        # when no classical op follows them in the stream.
         if pending_post:
             segments.append(ClassicalSegment(operations=pending_post))
 
@@ -885,7 +1076,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         """Collect non-Bit classical merges embedded in a quantum op tree.
 
         Measurement-backed ``Bit`` merges have a physical clbit and are
-        handled by backend aliasing.  Other classical merge results created by
+        handled by engine aliasing.  Other classical merge results created by
         a runtime ``if`` inside a quantum segment exist only while emitting the
         circuit; the classical executor cannot later surface them.
 
@@ -1134,7 +1325,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
                 "(by classical post-processing or as block outputs). These "
                 "values exist only while emitting the circuit and have no "
                 "runtime representation the classical executor could surface. "
-                "Keep the merged value inside backend-supported quantum "
+                "Keep the merged value inside engine-supported quantum "
                 "control flow, or compute it in a classical-only segment."
             )
 
@@ -1638,7 +1829,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
         - **In-circuit**: its result feeds a quantum / hybrid operation —
           in practice a runtime ``IfOperation`` / ``WhileOperation``
           condition — or another in-circuit runtime expression. Such an
-          expr must ride inside the quantum segment so the backend emits
+          expr must ride inside the quantum segment so the engine emits
           it as a native classical expression.
         - **Host-side**: its result is a block output or is read by
           classical post-processing (a classical-segment op, classical
@@ -1648,7 +1839,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
           silently dropped and the orchestrator would surface ``None``.
 
         Both sets are transitive closures over the expression dataflow: an
-        expr feeding an in-circuit expr is itself in-circuit (the backend
+        expr feeding an in-circuit expr is itself in-circuit (the engine
         expression tree needs its operands emitted too), and an expr read
         by a host-evaluated expr must itself be host-evaluated (the host
         evaluation needs its operand values). An expr may be in both sets
@@ -1924,7 +2115,7 @@ class SegmentationPass(Pass[Block, ProgramPlan]):
             # Mixed operations in control flow
             # If any QUANTUM or HYBRID operation exists, treat as QUANTUM
             # because measurements belong in the quantum circuit
-            # EmitPass will handle backend-specific behavior
+            # EmitPass will handle engine-specific behavior
             if (
                 OperationKind.QUANTUM in inner_kinds
                 or OperationKind.HYBRID in inner_kinds

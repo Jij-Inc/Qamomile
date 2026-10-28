@@ -68,8 +68,8 @@ class PeriodicShiftLCUBlockEncoding(LCUBlockEncoding):
 
     including coefficient phase. The construction is exact in ideal logical
     arithmetic; host floating-point roundoff in state-preparation angles and
-    backend gate synthesis are outside this semantic equality. This producer
-    allocates no hidden source-level logical qubits. Backend decomposition
+    engine gate synthesis are outside this semantic equality. This producer
+    allocates no hidden source-level logical qubits. Engine decomposition
     scratch is permitted only when resource-accounted and exactly uncomputed
     for every input, including under inverse and control. Descriptor comparison
     and hashing use object identity rather than field values.
@@ -352,8 +352,8 @@ def periodic_shift_lcu_block_encoding(
     uses the shorter signed displacement, then emits one ancilla-free
     increment or decrement ladder for each set bit of its magnitude. This
     bounds the number of Qamomile-level X and multi-controlled-X operations by
-    a quadratic function of an axis register's width; backend elementary-gate
-    cost depends on how that backend decomposes multi-controlled X operations.
+    a quadratic function of an axis register's width; engine elementary-gate
+    cost depends on how that engine decomposes multi-controlled X operations.
 
     The returned descriptor's ``unitary`` acts on arbitrary signal states.
     Projecting its signal register onto all zero before and after the unitary

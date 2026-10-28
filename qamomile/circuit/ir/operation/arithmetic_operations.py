@@ -268,8 +268,8 @@ class RuntimeClassicalExpr(Operation):
     Lowered from ``CompOp`` / ``CondOp`` / ``NotOp`` / ``BinOp`` by
     ``ClassicalLoweringPass`` when the op's operand dataflow traces back
     to a ``MeasureOperation`` (i.e. cannot be folded at compile-time, by
-    emit-time loop unrolling, or by ``compile_time_if_lowering``). Backend
-    emit translates this 1:1 to a backend-native runtime expression
+    emit-time loop unrolling, or by ``compile_time_if_lowering``). Engine
+    emit translates this 1:1 to an engine-native runtime expression
     (e.g. ``qiskit.circuit.classical.expr.Expr``).
 
     Operand convention:
@@ -282,7 +282,7 @@ class RuntimeClassicalExpr(Operation):
     - Result: ``results = [output_value]``.
 
     The single-node + unified-kind shape (vs four parallel subclasses)
-    keeps the backend dispatch a single ``match op.kind`` instead of four
+    keeps the engine dispatch a single ``match op.kind`` instead of four
     parallel hooks, and makes the IR self-documenting: a single
     ``RuntimeClassicalExpr`` instance signals "runtime evaluation
     required" regardless of which classical family it came from.

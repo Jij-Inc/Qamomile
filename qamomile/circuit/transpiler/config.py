@@ -58,4 +58,4 @@ class CompilerConfig:
 
 
 TranspilerConfig = CompilerConfig
-"""Backward name for :class:`CompilerConfig` during backend migration."""
+"""Backward name for :class:`CompilerConfig` during engine migration."""

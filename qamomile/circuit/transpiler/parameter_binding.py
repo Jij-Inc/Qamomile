@@ -10,6 +10,7 @@ from typing import Any
 
 import numpy as np
 
+from qamomile.circuit._array_shape import _rectangular_array_shape
 from qamomile.circuit.transpiler.param_keys import (
     dict_param_key,
     is_decomposable_dict_binding_key,
@@ -21,7 +22,7 @@ _INDEX = re.compile(r"\[(\d+)\]")
 
 
 class ParameterContainerKind(enum.StrEnum):
-    """Classify the public container that owns one backend scalar slot."""
+    """Classify the public container that owns one engine scalar slot."""
 
     SCALAR = "scalar"
     ARRAY = "array"
@@ -32,7 +33,7 @@ def split_parameter_key(name: str) -> tuple[str, tuple[int, ...] | None]:
     """Split an emitted scalar key into its root name and array indices.
 
     Args:
-        name (str): Backend parameter key such as ``theta`` or
+        name (str): Engine parameter key such as ``theta`` or
             ``angles[1][0]``.
 
     Returns:
@@ -48,14 +49,14 @@ def split_parameter_key(name: str) -> tuple[str, tuple[int, ...] | None]:
 
 @dataclasses.dataclass
 class ParameterInfo:
-    """Describe one scalar slot in a compiled backend parameter ABI.
+    """Describe one scalar slot in a compiled engine parameter ABI.
 
     Args:
         name (str): Full scalar key, for example ``gammas[0]``.
         array_name (str): Root parameter name, for example ``gammas``.
         index (int | None): Backward-compatible one-dimensional index, or
             ``None`` for scalars and higher-rank elements.
-        backend_param (Any): Backend-specific parameter object.
+        engine_param (Any): Engine-specific parameter object.
         source_ref (str | None): IR value UUID providing the runtime value.
             Defaults to ``None``.
         indices (tuple[int, ...] | None): Complete array index tuple, or
@@ -67,7 +68,7 @@ class ParameterInfo:
     name: str
     array_name: str
     index: int | None
-    backend_param: Any
+    engine_param: Any
     source_ref: str | None = None
     indices: tuple[int, ...] | None = None
     container_kind: ParameterContainerKind = ParameterContainerKind.SCALAR
@@ -112,7 +113,7 @@ class ParameterMetadata:
     """Describe every scalar slot and runtime array in a compiled segment.
 
     Args:
-        parameters (list[ParameterInfo]): Ordered scalar backend slots.
+        parameters (list[ParameterInfo]): Ordered scalar engine slots.
             Defaults to an empty list.
         arrays (dict[str, ParameterArrayInfo]): Explicit runtime-array ABI
             descriptors keyed by root name. Defaults to descriptors derived
@@ -160,7 +161,7 @@ class ParameterMetadata:
         """Find one scalar slot by its full emitted key.
 
         Args:
-            name (str): Full backend parameter key.
+            name (str): Full engine parameter key.
 
         Returns:
             ParameterInfo | None: Matching slot, or ``None`` when absent.
@@ -171,25 +172,25 @@ class ParameterMetadata:
         )
 
     def get_ordered_params(self) -> list[Any]:
-        """Return backend parameter objects in ABI definition order.
+        """Return engine parameter objects in ABI definition order.
 
         Returns:
-            list[Any]: Backend-specific parameter objects.
+            list[Any]: Engine-specific parameter objects.
         """
-        return [parameter.backend_param for parameter in self.parameters]
+        return [parameter.engine_param for parameter in self.parameters]
 
     def to_binding_dict(self, bindings: Mapping[str, Any]) -> dict[Any, Any]:
-        """Map indexed user bindings to backend parameter objects.
+        """Map indexed user bindings to engine parameter objects.
 
         Args:
             bindings (Mapping[str, Any]): Scalar values keyed by full emitted
                 parameter name.
 
         Returns:
-            dict[Any, Any]: Backend parameter objects mapped to bound values.
+            dict[Any, Any]: Engine parameter objects mapped to bound values.
         """
         return {
-            parameter.backend_param: bindings[parameter.name]
+            parameter.engine_param: bindings[parameter.name]
             for parameter in self.parameters
             if parameter.name in bindings
         }
@@ -361,7 +362,7 @@ def _binding_shape(value: Any) -> tuple[int, ...]:
     """Return the rectangular shape of one public array binding.
 
     Args:
-        value (Any): Nested sequence, ndarray, or scalar candidate.
+        value (Any): Nested list, tuple, ndarray, or scalar candidate.
 
     Returns:
         tuple[int, ...]: Rectangular array shape; scalars have rank zero.
@@ -369,13 +370,6 @@ def _binding_shape(value: Any) -> tuple[int, ...]:
     Raises:
         ValueError: If nested sequences have inconsistent shapes.
     """
-    if isinstance(value, np.ndarray):
-        return tuple(int(dimension) for dimension in value.shape)
-    if not isinstance(value, (list, tuple)):
+    if not isinstance(value, (list, tuple, np.ndarray)):
         return ()
-    if not value:
-        return (0,)
-    child_shapes = [_binding_shape(item) for item in value]
-    if any(shape != child_shapes[0] for shape in child_shapes[1:]):
-        raise ValueError("Runtime parameter arrays must be rectangular.")
-    return (len(value), *child_shapes[0])
+    return _rectangular_array_shape(value)

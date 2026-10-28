@@ -9,6 +9,12 @@ Concrete quantum algorithm examples built with Qamomile.
 ::::{grid} 1 1 1 1
 
 :::{card}
+:header: **Grover Adaptive Search for Combinatorial Polynomial Binary Optimization**
+:link: grover_adaptive_search
+Solve a portfolio selection problem with `GASConverter`, driving the Grover threshold from a classical outer loop and checking the result against brute force.
+:::
+
+:::{card}
 :header: **Hamiltonian Simulation with Suzuki–Trotter (Rabi oscillation)**
 :link: hamiltonian_simulation
 Trotter–Suzuki product formulas on the Rabi model with empirical convergence orders.
@@ -30,6 +36,12 @@ Learn how to use Möttönen amplitude encoding in Qamomile to prepare arbitrary 
 :header: **Quantum Fourier Transform (QFT)**
 :link: qft
 Implement QFT from scratch and with the built-in `qft`, then compare their frequency estimates and examine the required gate count.
+:::
+
+:::{card}
+:header: **Option Pricing with Quantum Amplitude Estimation**
+:link: option_pricing
+An example of option pricing with quantum amplitude estimation (QAE) in Qamomile. It encodes stock-price data into amplitudes, implements amplitude estimation with the Grover operator, and runs a numerical option-pricing simulation.
 :::
 
 :::{card}
@@ -60,6 +72,12 @@ Build a QAOA circuit from scratch to solve MaxCut, then compare with the built-i
 :header: **Quantum-enhanced Markov chain Monte Carlo**
 :link: qe_mcmc
 Implement Quantum-enhanced MCMC using Trotter-decomposed time evolution.
+:::
+
+:::{card}
+:header: **QSVT Eigenstate Filtering**
+:link: qsvt_eigenstate_filter_graph_partitioning
+Filter a block-encoded cost Hamiltonian with a QSVT sign approximation, and drive a Lin & Tong binary search with the post-selection rate.
 :::
 
 :::{card}

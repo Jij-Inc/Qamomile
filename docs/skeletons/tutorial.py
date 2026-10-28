@@ -59,7 +59,7 @@
 # %% [markdown]
 # ## Run
 #
-# Execute the example with one supported backend or local executor. Keep the
+# Execute the example with one supported engine or local executor. Keep the
 # runtime small enough for docs tests.
 
 # %%

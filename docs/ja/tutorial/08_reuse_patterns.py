@@ -33,10 +33,14 @@
 # # !pip install "qamomile[qiskit,visualization]"
 
 # %%
+import os
+
 import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 128
 
 # %% [markdown]
 # ## パターン1:ヘルパーQKernel
@@ -70,13 +74,13 @@ result = (
     transpiler.transpile(ghz_with_helper, bindings={"n": 4})
     .sample(
         transpiler.executor(),
-        shots=128,
+        shots=sample_shots,
     )
     .result()
 )
 print("GHZ result:", result.results)
-assert result.shots == 128
-assert sum(count for _, count in result.results) == 128
+assert result.shots == sample_shots
+assert sum(count for _, count in result.results) == sample_shots
 # 4 量子ビット GHZ 状態 → (0, 0, 0, 0) と (1, 1, 1, 1) のみ出現。
 assert all(outcome in {(0, 0, 0, 0), (1, 1, 1, 1)} for outcome, _ in result.results)
 
@@ -171,13 +175,13 @@ workspace_result = (
     transpiler.transpile(bell_with_workspace)
     .sample(
         transpiler.executor(),
-        shots=128,
+        shots=sample_shots,
     )
     .result()
 )
 print("Bell result:", workspace_result.results)
-assert workspace_result.shots == 128
-assert sum(count for _, count in workspace_result.results) == 128
+assert workspace_result.shots == sample_shots
+assert sum(count for _, count in workspace_result.results) == sample_shots
 assert all(outcome in {(0, 0), (1, 1)} for outcome, _ in workspace_result.results)
 
 # %% [markdown]

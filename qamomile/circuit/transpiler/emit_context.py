@@ -14,7 +14,7 @@ eight distinct semantic purposes simultaneously:
    originally also keyed by Value name, which collided across tmps).
 4. Merge-output aliases (keyed by merge-output UUID; written by
    ``register_classical_merge_aliases``).
-5. Backend runtime expressions (e.g. ``qiskit.circuit.classical.expr.Expr``
+5. Engine runtime expressions (e.g. ``qiskit.circuit.classical.expr.Expr``
    for compound runtime if-conditions).
 6. Array data (keyed by ArrayValue UUID).
 7. Dict data (keyed by DictValue UUID).
@@ -36,7 +36,7 @@ appropriate identity key:
 - ``_params`` — user parameters, keyed by **name** (user-facing).
 - ``_loop_vars`` — loop iteration variables, keyed by **Value UUID**.
 - ``_values`` — emit-time intermediates, keyed by **UUID**.
-- ``_runtime_exprs`` — backend Expr objects, keyed by **UUID**.
+- ``_runtime_exprs`` — engine Expr objects, keyed by **UUID**.
 - ``_array_data`` — array bindings, keyed by ``ArrayValue.uuid``.
 - ``_dict_data`` — dict bindings, keyed by ``DictValue.uuid``.
 - ``_observables`` — Pauli observables, keyed by ``Value.uuid``.
@@ -87,7 +87,7 @@ class EmitContext(dict):
         _values: Emit-time-computed intermediate values (``BinOp``
             results, ``CompOp``/``CondOp``/``NotOp`` results, merge
             aliases), keyed by Value UUID.
-        _runtime_exprs: Backend runtime-expression objects (e.g. Qiskit
+        _runtime_exprs: Engine runtime-expression objects (e.g. Qiskit
             ``expr.Expr`` for compound classical conditions), keyed by
             Value UUID.
         _array_data: Bound array data (e.g. ``Vector[Float]`` parameter
@@ -200,9 +200,9 @@ class EmitContext(dict):
         self[uuid] = value
 
     def set_runtime_expr(self, uuid: str, expr: Any) -> None:
-        """Bind a backend runtime expression by Value UUID.
+        """Bind an engine runtime expression by Value UUID.
 
-        Backends (e.g. Qiskit) call this when they construct a
+        Engines (e.g. Qiskit) call this when they construct a
         runtime-evaluable expression for a classical predicate that
         wasn't compile-time-foldable. ``_emit_if`` / ``_emit_while``
         consult the runtime-expr slot first when resolving conditions.
@@ -211,7 +211,7 @@ class EmitContext(dict):
         self[uuid] = expr
 
     def get_runtime_expr(self, uuid: str) -> Any:
-        """Get a backend runtime expression by Value UUID, or None."""
+        """Get an engine runtime expression by Value UUID, or None."""
         return self._runtime_exprs.get(uuid)
 
     def set_array_data(
@@ -268,7 +268,7 @@ class EmitContext(dict):
 
         Args:
             uuid (str): The observable Value's UUID.
-            observable (Any): A ``qm_o.Hamiltonian`` (or backend-equivalent).
+            observable (Any): A ``qm_o.Hamiltonian`` (or engine-equivalent).
             display_name (str | None): Reserved for debug-only display. It is
                 not used as a binding key.
         """

@@ -198,17 +198,17 @@ def _symbolic_select_x(
 
 
 def _executor(case: Any, *, runtime_control: bool = False) -> Any:
-    """Return a simulator executor for a cross-backend test case.
+    """Return a simulator executor for a cross-engine test case.
 
     Args:
-        case (Any): Backend fixture containing a transpiler and backend name.
+        case (Any): Engine fixture containing a transpiler and engine name.
         runtime_control (bool): Whether Qiskit needs a dynamic-control capable
             simulator. Defaults to ``False``.
 
     Returns:
-        Any: Executor for the selected SDK backend.
+        Any: Executor for the selected SDK engine.
     """
-    if case.backend_name == "qiskit":
+    if case.engine_name == "qiskit":
         if runtime_control:
             from qiskit_aer import AerSimulator
 
@@ -228,7 +228,7 @@ def _sample_outcomes(
     """Transpile a deterministic kernel and return its sampled outcomes.
 
     Args:
-        case (Any): Backend fixture containing a transpiler and backend name.
+        case (Any): Engine fixture containing a transpiler and engine name.
         kernel (Any): Deterministic qkernel to transpile and execute.
         runtime_control (bool): Whether the kernel uses dynamic control flow.
             Defaults to ``False``.
@@ -244,8 +244,8 @@ def _sample_outcomes(
     return {bits for bits, _ in job.result().results}
 
 
-class TestSelectCrossBackend:
-    """Execute SELECT through every supported SDK backend."""
+class TestSelectCrossEngine:
+    """Execute SELECT through every supported SDK engine."""
 
     @pytest.mark.parametrize("index_value", [0, 1])
     def test_two_case_basis_selection(
@@ -590,7 +590,7 @@ class TestSelectCrossBackend:
         assert _sample_outcomes(sdk_transpiler, circuit) == {index_value}
 
     def test_runtime_parameter_reaches_case(self, sdk_transpiler: Any) -> None:
-        """A shared case argument remains a backend runtime parameter."""
+        """A shared case argument remains an engine runtime parameter."""
 
         @qkernel
         def circuit(theta: Float) -> Bit:
@@ -681,8 +681,8 @@ class TestSelectCrossBackend:
 
     def test_select_inside_runtime_if(self, sdk_transpiler: Any) -> None:
         """SELECT results merge from a measurement-backed conditional."""
-        if sdk_transpiler.backend_name == "quri_parts":
-            pytest.skip("QURI Parts has no dynamic if primitive")
+        if sdk_transpiler.engine_name in {"quri_parts", "braket"}:
+            pytest.skip("This engine has no dynamic if primitive")
 
         @qkernel
         def circuit() -> Bit:
@@ -701,8 +701,8 @@ class TestSelectCrossBackend:
 
     def test_select_inside_runtime_while(self, sdk_transpiler: Any) -> None:
         """SELECT results remain loop-carried through a dynamic while."""
-        if sdk_transpiler.backend_name == "quri_parts":
-            pytest.skip("QURI Parts has no dynamic while primitive")
+        if sdk_transpiler.engine_name in {"quri_parts", "braket"}:
+            pytest.skip("This engine has no dynamic while primitive")
 
         @qkernel
         def circuit() -> Bit:
@@ -1053,6 +1053,17 @@ class TestSelectValidation:
                 num_index_qubits=num_index_qubits,
                 case_blocks=[Block(), Block()],
             )
+
+    def test_ir_positional_constructor_preserves_num_index_args_abi(self) -> None:
+        """New callable metadata does not shift the exported positional ABI."""
+        from qamomile.circuit.ir.block import Block
+        from qamomile.circuit.ir.operation.select import SelectOperation
+
+        cases = [Block(), Block()]
+        operation = SelectOperation([], [], 1, cases, 1)
+
+        assert operation.num_index_args == 1
+        assert operation.case_callable_attrs == []
 
 
 class TestSelectSerialization:

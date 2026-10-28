@@ -56,11 +56,14 @@
 
 # %%
 import math
+import os
 
 import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 256
 
 # %% [markdown]
 # ## 最初の量子カーネル：偏りのあるコイン
@@ -139,7 +142,7 @@ exe = transpiler.transpile(biased_coin, parameters=["theta"])
 # 独自のカスタムexecutor（例:実機やクラウドサービス）を接続することもできます。
 job = exe.sample(
     transpiler.executor(),
-    shots=256,
+    shots=sample_shots,
     bindings={"theta": math.pi / 4},
 )
 
@@ -148,8 +151,8 @@ job = exe.sample(
 result = job.result()
 
 print("sample results:", result.results)
-assert result.shots == 256
-assert sum(count for _, count in result.results) == 256
+assert result.shots == sample_shots
+assert sum(count for _, count in result.results) == sample_shots
 
 # %% [markdown]
 # 3つの概念を押さえておきましょう：
@@ -226,15 +229,15 @@ demo_result = (
     transpiler.transpile(two_qubit_demo)
     .sample(
         transpiler.executor(),
-        shots=256,
+        shots=sample_shots,
     )
     .result()
 )
 
 for outcome, count in demo_result.results:
     print(f"  outcome={outcome}, count={count}")
-assert demo_result.shots == 256
-assert sum(count for _, count in demo_result.results) == 256
+assert demo_result.shots == sample_shots
+assert sum(count for _, count in demo_result.results) == sample_shots
 # Bell 状態 |Phi+>: (0,0) と (1,1) のみが出現する。
 assert all(outcome in {(0, 0), (1, 1)} for outcome, _ in demo_result.results)
 
@@ -304,7 +307,7 @@ except Exception as e:
 # | **QuriParts** | サポート済み | 全ゲートセット、オブザーバブル |
 # | **CUDA-Q** | サポート済み | GPUアクセラレーテッドシミュレーション。対応: forループ（展開）、ランタイム`if`/`if-else`/`while`（`cudaq.run()`経由） |
 #
-# > **注意**：ランタイム測定依存の制御フロー（`if bit:`、`if/else`、`while bit:`）はQiskitとCUDA-Qの両方でサポートされています。`while`ループの条件は**必ず**測定結果（`qmc.measure()`から得られる`Bit`）でなければなりません。古典変数、定数、比較演算はwhile条件としてサポートされていません。CUDA-Qでは、すべての回路が`@cudaq.kernel`デコレータ関数としてコンパイルされます。ランタイム制御フローを含まない静的回路は`cudaq.sample()` / `cudaq.observe()`経由で実行され、ランタイム測定依存の分岐を含む回路は`cudaq.run()`経由で実行されます。`if`文のコンパイル時定数の条件はすべてのバックエンドで静的に解決されます。
+# > **注意**：ランタイム測定依存の制御フロー（`if bit:`、`if/else`、`while bit:`）はQiskitとCUDA-Qの両方でサポートされています。`while`ループの条件は**必ず**測定結果（`qmc.measure()`から得られる`Bit`）でなければなりません。古典変数、定数、比較演算はwhile条件としてサポートされていません。CUDA-Qでは、すべての回路が`@cudaq.kernel`デコレータ関数としてコンパイルされます。ランタイム制御フローを含まない静的回路は`cudaq.sample()` / `cudaq.observe()`経由で実行され、ランタイム測定依存の分岐を含む回路は`cudaq.run()`経由で実行されます。`if`文のコンパイル時定数の条件はすべてのエンジンで静的に解決されます。
 #
 # ### CUDA-Q プラットフォームサポート
 #

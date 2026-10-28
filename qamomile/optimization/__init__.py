@@ -8,19 +8,23 @@ This package turns classical combinatorial optimization problems
 decodes measurement results back into classical solutions. It hosts the
 converter family: ``QAOAConverter`` (``qaoa.py``, QUBO/Ising and HUBO via
 phase gadgets), ``FQAOAConverter`` (``fqaoa.py``, fermionic mixers with
-particle-number constraints), the QRAC converters (``qrao/``), and
-``PCEConverter`` (``pce.py``, Pauli correlation encoding).
+particle-number constraints), the QRAC converters (``qrao/``),
+``PCEConverter`` (``pce.py``, Pauli correlation encoding),
+``GASConverter`` (``gas.py``, oracle-based Grover Adaptive Search over
+QFT-encoded QUBO/HUBO arithmetic), and ``QSVTEigenstateFilterConverter``
+(``qsvt_eigenstate_filter.py``, QSVT eigenstate filtering for the Lin & Tong
+ground-energy search).
 
 Layering constraint (inviolable)
 --------------------------------
 
-``optimization → circuit ← backends``. This package is a *consumer* of
+``optimization → circuit ← engines``. This package is a *consumer* of
 ``qamomile.circuit``'s public transpiler and algorithm APIs
 (``Transpiler``, ``ExecutableProgram``, ``qamomile.circuit.algorithm``
 ansatz builders) — it must never be imported by ``qamomile.circuit`` or
-by backend packages, and it must never reach into circuit internals
+by engine packages, and it must never reach into circuit internals
 (passes, IR rewriting). A converter builds a qkernel / Hamiltonian and
-hands it to whatever backend ``Transpiler`` the caller supplies; backend
+hands it to whatever engine ``Transpiler`` the caller supplies; engine
 choice stays out of this layer entirely.
 
 Extension points

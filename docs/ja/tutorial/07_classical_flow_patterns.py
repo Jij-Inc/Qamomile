@@ -39,6 +39,8 @@ import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 100
 
 # %% [markdown]
 # ## `qmc.range`ループ
@@ -220,17 +222,14 @@ def conditional_flip() -> qmc.Bit:
 
 # %%
 exe = transpiler.transpile(conditional_flip)
-if os.environ.get("QAMOMILE_DOCS_TEST") == "1":
-    print("docs test mode では dynamic circuit の実行を省略します。")
-else:
-    executor = transpiler.executor()
-    job = exe.sample(executor, bindings={}, shots=100)
-    result = job.result()
-    for value, count in result.results:
-        print(f"  bit={value}: {count} shots")
-    # q0 は |1> として準備 → if 分岐で q1 を毎ショット |1> に反転。
-    assert result.shots == 100
-    assert result.results == [(1, 100)]
+executor = transpiler.executor()
+job = exe.sample(executor, bindings={}, shots=sample_shots)
+result = job.result()
+for value, count in result.results:
+    print(f"  bit={value}: {count} shots")
+# q0 は |1> として準備 → if 分岐で q1 を毎ショット |1> に反転。
+assert result.shots == sample_shots
+assert result.results == [(1, sample_shots)]
 
 # %% [markdown]
 # `q0`は |1⟩ として準備されているため、測定結果は常に1となり、`q1`は常に反転されます。全てのショットで1が返るはずです。

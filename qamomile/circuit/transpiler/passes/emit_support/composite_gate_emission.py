@@ -84,9 +84,18 @@ def emit_composite_gate(
     ``EmitError`` if any operand cannot be resolved, rather than
     silently dropping it (previously ``qft(view)`` emitted zero gates).
 
+    Args:
+        emit_pass (StandardEmitPass): Active emit pass.
+        circuit (Any): Engine circuit being emitted into.
+        op (InvokeOperation): Composite or Oracle invocation to emit.
+        qubit_map (QubitMap): Logical-to-physical map, mutated with results.
+        bindings (dict[str, Any]): Bindings visible at the call site.
+
     Raises:
         EmitError: If any control or target qubit operand fails to
-            resolve to a physical qubit index.
+            resolve to a physical qubit index, or an inverse body is absent.
+        ValueError: If the selected implementation body disagrees with the
+            invocation contract.
     """
     from qamomile.circuit.transpiler.passes.emit_support.controlled_block_support import (
         _expand_quantum_operands_to_phys,
@@ -117,7 +126,7 @@ def emit_composite_gate(
         update_composite_result_mapping(op, qubit_groups, qubit_map)
         return
 
-    if op.transform is CallTransform.CONTROLLED:
+    if op.transform.is_controlled:
         from qamomile.circuit.transpiler.passes.emit_support.controlled_emission import (
             emit_controlled_composite_at_indices,
         )
@@ -133,14 +142,15 @@ def emit_composite_gate(
         update_composite_result_mapping(op, qubit_groups, qubit_map)
         return
 
-    if op.transform is CallTransform.INVERSE:
-        implementation = op.implementation_for(
-            backend=getattr(emit_pass, "backend_name", None)
-        )
-        if implementation is None or implementation.body is None:
+    if op.transform.is_inverse:
+        selection = op.select_body(engine=getattr(emit_pass, "engine_name", None))
+        if (
+            selection.body is None
+            or selection.realized_transform is not CallTransform.INVERSE
+        ):
             raise EmitError(
                 f"Inverse callable '{op.target.name}' has no inverse "
-                "implementation body for this backend. Bind structural "
+                "implementation body for this engine. Bind structural "
                 "parameters at compile time so the inverse can be "
                 "materialized, or register an inverse implementation.",
                 operation=f"InvokeOperation[{op.target.name}]",
@@ -148,14 +158,14 @@ def emit_composite_gate(
         emit_pass._emit_custom_composite(
             circuit,
             op,
-            implementation.body,
+            selection.body,
             qubit_indices,
             bindings,
         )
         update_composite_result_mapping(op, qubit_groups, qubit_map)
         return
 
-    # Try backend-global native emitters after callable-specific implementations.
+    # Try engine-global native emitters after callable-specific implementations.
     for emitter in emit_pass._composite_emitters:
         if emitter.can_emit(op.gate_type):
             if emitter.emit(circuit, op, qubit_indices, bindings):
@@ -178,7 +188,7 @@ def emit_invoke_operation(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted.
+        circuit (Any): Engine circuit being emitted.
         op (InvokeOperation): Invocation to emit.
         qubit_map (QubitMap): Current qubit allocation map.
         bindings (dict[str, Any]): Active emit bindings.
@@ -187,9 +197,9 @@ def emit_invoke_operation(
         EmitError: If the invocation is opaque and has neither an executable
             body nor a selected native emitter.
     """
-    backend_name = getattr(emit_pass, "backend_name", None)
-    body = op.effective_body(backend=backend_name)
-    impl = op.implementation_for(backend=backend_name)
+    engine_name = getattr(emit_pass, "engine_name", None)
+    body = op.effective_body(engine=engine_name)
+    impl = op.implementation_for(engine=engine_name)
     has_native_emitter = impl is not None and impl.emitter is not None
     if body is None and op.attrs.get("kind") == "oracle" and not has_native_emitter:
         raise EmitError(
@@ -209,7 +219,7 @@ def emit_invoke_operation(
     ):
         raise EmitError(
             f"Composite '{op.target.name}' has an opaque cost for estimation "
-            "but no executable body or native emitter for this backend; it "
+            "but no executable body or native emitter for this engine; it "
             "cannot be transpiled to an executable circuit.",
             operation=f"InvokeOperation[{op.target.name}]",
         )
@@ -236,8 +246,8 @@ def emit_composite_fallback(
     elif op.gate_type == CompositeGateType.IQFT:
         emit_iqft_with_strategy(emit_pass, circuit, op, qubit_indices)
     else:
-        backend_name = getattr(emit_pass, "backend_name", None)
-        impl = op.effective_body(backend=backend_name)
+        engine_name = getattr(emit_pass, "engine_name", None)
+        impl = op.effective_body(engine=engine_name)
         if impl is not None:
             # _emit_custom_composite lives in controlled_emission module;
             # call via emit_pass so CudaqEmitPass overrides are respected.
@@ -257,7 +267,7 @@ def emit_callable_implementation_emitter(
 
     Args:
         emit_pass (StandardEmitPass): Active emit pass.
-        circuit (Any): Backend circuit being emitted.
+        circuit (Any): Engine circuit being emitted.
         op (InvokeOperation): Invocation to emit.
         qubit_indices (list[int]): Physical qubit indices in operand order.
         bindings (dict[str, Any]): Active emit bindings.
@@ -271,8 +281,8 @@ def emit_callable_implementation_emitter(
         RuntimeError: If a declining emitter removed or replaced circuit state
             that existed before its append-only emission attempt.
     """
-    backend_name = getattr(emit_pass, "backend_name", None)
-    impl = op.implementation_for(backend=backend_name)
+    engine_name = getattr(emit_pass, "engine_name", None)
+    impl = op.implementation_for(engine=engine_name)
     if impl is None or impl.emitter is None:
         return False
 
@@ -323,7 +333,7 @@ def emit_qft_with_strategy(
     Args:
         emit_pass (StandardEmitPass): The active emit pass whose emitter
             should receive decomposed QFT gates.
-        circuit (Any): Backend circuit being emitted.
+        circuit (Any): Engine circuit being emitted.
         op (InvokeOperation): Invocation expected to be a QFT.
         qubit_indices (list[int]): Physical qubit indices for the QFT target
             register.
@@ -354,7 +364,7 @@ def emit_iqft_with_strategy(
     Args:
         emit_pass (StandardEmitPass): The active emit pass whose emitter
             should receive decomposed IQFT gates.
-        circuit (Any): Backend circuit being emitted.
+        circuit (Any): Engine circuit being emitted.
         op (InvokeOperation): Invocation expected to be an IQFT.
         qubit_indices (list[int]): Physical qubit indices for the IQFT target
             register.
@@ -550,7 +560,7 @@ def emit_qpe_manual(
     Args:
         emit_pass (StandardEmitPass): The active emit pass whose emitter
             should receive decomposed QPE gates.
-        circuit (Any): Backend circuit being emitted.
+        circuit (Any): Engine circuit being emitted.
         op (InvokeOperation): Invocation expected to be a QPE.
         qubit_indices (list[int]): Physical qubit indices for counting and
             target registers, in operation operand order.

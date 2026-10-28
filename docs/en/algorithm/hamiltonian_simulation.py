@@ -43,6 +43,7 @@
 # # !pip install "qamomile[qiskit]"
 
 # %%
+import os
 from typing import Any
 
 import matplotlib.pyplot as plt
@@ -55,6 +56,8 @@ import qamomile.circuit as qmc
 import qamomile.observable as qm_o
 from qamomile.circuit.algorithm import trotterized_time_evolution
 from qamomile.qiskit import QiskitTranspiler
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 # %% [markdown]
 # ## The Rabi Hamiltonian
@@ -261,7 +264,7 @@ def rabi_s2(
 #
 # - **`order` must be concrete at transpile time.** Without a binding the
 #   base-case `if` never folds and the unroll loop has nothing to terminate
-#   on; the transpiler leaves the self-call in the IR and backend emit
+#   on; the transpiler leaves the self-call in the IR and engine emit
 #   rejects it.
 # - **Non-terminating recursion is caught.** If the body calls itself with
 #   `order + 2` instead of `order - 2`, or never reaches the base case, the
@@ -388,7 +391,7 @@ for name, order in suzuki_orders.items():
 # rather than $1, 2, 4$.
 
 # %%
-Ns = np.array([2, 4, 8, 16, 32, 64])
+Ns = np.array([2, 4, 8] if docs_test_mode else [2, 4, 8, 16, 32, 64])
 all_names = ["S1", "S2", "S4", "S6"]
 errors: dict[str, Any] = {name: [] for name in all_names}
 

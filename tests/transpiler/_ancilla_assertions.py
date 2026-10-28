@@ -1,6 +1,6 @@
 """Shared assertion for multi-control clean-ancilla uncomputation in tests.
 
-Backends without a native multi-controlled primitive lower an ``n``-controlled
+Engines without a native multi-controlled primitive lower an ``n``-controlled
 gate through a Toffoli cascade that borrows clean ancilla qubits appended after
 the data qubits and uncomputes them before the circuit ends. Several
 statevector tests need to assert those ancillas returned to ``|0>`` and then

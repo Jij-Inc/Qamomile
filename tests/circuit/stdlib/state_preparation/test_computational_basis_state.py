@@ -4,7 +4,7 @@ The kernel prepares ``|bits>`` from ``|0>^n`` via exact conditional X powers.
 Sampling must yield exactly the prepared bit string on every shot, and
 the expectation value of any diagonal Pauli-Z Hamiltonian must match the
 analytical eigenvalue at ``|bits>``.  We pin both paths down on Qiskit,
-QURI Parts, and CUDA-Q so that any backend-specific Rx parameter or
+QURI Parts, and CUDA-Q so that any engine-specific Rx parameter or
 measurement-readout bug surfaces here.
 """
 
@@ -176,7 +176,7 @@ def test_controlled_basis_bit_has_no_spurious_relative_phase() -> None:
 
 
 class TestComputationalBasisStateSample:
-    """Deterministic sampling: |bits> sampled with probability 1 on every backend."""
+    """Deterministic sampling: |bits> sampled with probability 1 on every engine."""
 
     @pytest.mark.parametrize("n", _SIZES)
     @pytest.mark.parametrize("seed", _SEEDS)

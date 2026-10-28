@@ -7,7 +7,7 @@ import typing
 import uuid
 from collections.abc import Mapping, Sequence
 
-from .types import DictType, ValueType
+from .types import DictType, QFixedType, QubitType, QUIntType, ValueType
 
 if typing.TYPE_CHECKING:
     from .types.primitives import TupleType
@@ -72,6 +72,8 @@ class ArrayRuntimeMetadata:
     array's ``QubitAddress(root_uuid, index)`` key even when the element's own
     UUID was never registered. The sentinel ``("", -1)`` marks an element with
     no array parent (a standalone qubit), for which a flat UUID lookup is used.
+    ``(root_uuid, -1)`` preserves a known root owner when the scalar index is
+    symbolic and therefore cannot be resolved at trace time.
     """
 
     const_array: typing.Any = None
@@ -102,6 +104,12 @@ class ValueMetadata:
 def split_indexed_identifier(identifier: str) -> tuple[str, str] | None:
     """Split a legacy indexed identifier into base and index suffix.
 
+    This parses the ``"<base>_<index>"`` spelling used by
+    :func:`composite_carrier_key` and by packed-register identity remapping.
+    A numeric suffix alone does not distinguish a carrier key from an
+    ordinary identity; callers with an identity table must prefer exact
+    matches before parsing.
+
     Args:
         identifier (str): Identifier to inspect. Legacy carrier keys use the
             ``"<base>_<index>"`` spelling, where ``index`` is decimal.
@@ -117,6 +125,31 @@ def split_indexed_identifier(identifier: str) -> tuple[str, str] | None:
     if not suffix.isdigit():
         return None
     return identifier[:separator], suffix
+
+
+def composite_carrier_key(root_identity: str, index: int) -> str:
+    """Format a packed-register carrier key for one root-array element.
+
+    This formats the ``"<root>_<index>"`` carrier key spelling used by
+    packed register (QInt and QFixed) cast metadata and
+    ``CastOperation.qubit_mapping``. Value remapping also rebuilds these
+    keys, and the visualization analyzer resolves them independently.
+    It is the formatting counterpart of :func:`split_indexed_identifier`
+    and the IR-side twin of the emit-side
+    ``QubitAddress.__str__`` / ``QubitAddress.from_composite_key`` in
+    ``qamomile.circuit.transpiler.passes.emit_support.qubit_address``, which
+    ``qamomile.circuit.ir`` cannot import without reversing the dependency
+    direction. Both spellings must stay identical.
+
+    Args:
+        root_identity (str): Root array identity, either its ``uuid`` or its
+            ``logical_id``.
+        index (int): Element index in the root array's own index space.
+
+    Returns:
+        str: ``f"{root_identity}_{index}"``.
+    """
+    return f"{root_identity}_{index}"
 
 
 def remap_indexed_identifier(
@@ -206,8 +239,9 @@ def remap_value_metadata_references(
                 remap_indexed_identifier(logical_id, remap_logical_id)
                 for logical_id in new_array_rt.element_logical_ids
             ),
-            # Empty parent UUID is a sentinel for standalone or unresolved
-            # elements, not a Value UUID, so keep it unchanged.
+            # Empty parent UUID is the standalone-element sentinel, not a
+            # Value UUID, so keep it unchanged. A nonempty UUID paired with
+            # index -1 denotes a known root with an unresolved scalar index.
             element_parent_uuids=tuple(
                 remap_uuid(uuid_ref) if uuid_ref else uuid_ref
                 for uuid_ref in new_array_rt.element_parent_uuids
@@ -434,10 +468,12 @@ class _MetadataValueMixin:
                 callers can index by element position without a length check.
                 Each entry is the element's root ``(array_uuid, index)``
                 address, or ``None`` for a standalone qubit (recorded with the
-                ``("", -1)`` sentinel), for an element whose root could not be
-                resolved at trace time, or for any element whose parent address
-                was never recorded (e.g. metadata that only set
-                ``element_uuids``).
+                ``("", -1)`` sentinel), an element whose scalar index could
+                not be resolved at trace time (recorded as
+                ``(root_uuid, -1)``), or any element whose parent address was
+                never recorded. Consumers that only need the owner can inspect
+                the raw parallel metadata even when this method returns
+                ``None``.
         """
         if self.metadata.array_runtime is None:
             return ()
@@ -467,10 +503,10 @@ class _MetadataValueMixin:
                 continue
             parent_uuid = rt.element_parent_uuids[i]
             parent_idx = rt.element_parent_indices[i]
-            # ``("", -1)`` is the sentinel written by ``expval()`` for a
-            # standalone qubit (no array parent) or an element whose root could
-            # not be resolved at trace time; decode it back to ``None`` so the
-            # caller skips the root-address fallback for that position.
+            # A negative index never identifies one exact scalar address.
+            # ``("", -1)`` denotes a standalone qubit, while
+            # ``(root_uuid, -1)`` retains only a known root owner. Decode both
+            # to ``None`` here; owner-aware consumers inspect the raw metadata.
             if parent_uuid == "" or parent_idx < 0:
                 result.append(None)
             else:
@@ -603,7 +639,7 @@ class Value(_MetadataValueMixin, ValueBase, typing.Generic[T]):
         after the value is updated (e.g. by a gate application or a
         classical operation).  The ``logical_id`` also stays the same:
         it identifies the same logical variable across SSA versions,
-        independently of backend resource allocation.  This applies to
+        independently of engine resource allocation.  This applies to
         every ``Value`` regardless of its type (``Qubit``, ``Float``,
         ``Bit``, ...) -- it is not specific to qubits.
         """
@@ -684,6 +720,108 @@ class ArrayValue(Value[T]):
         return self.slice_of is not None
 
 
+def static_quantum_width(value: ValueBase) -> int | None:
+    """Return a quantum value's compile-time scalar-qubit width.
+
+    The helper understands both ordinary qubit arrays and packed quantum
+    register carriers. Runtime carrier metadata is preferred when present
+    because it records the physical scalar values represented by a packed
+    value even when its type-level width is symbolic.
+
+    Args:
+        value (ValueBase): Quantum scalar, array, or packed register value.
+
+    Returns:
+        int | None: Non-negative scalar-qubit width, or ``None`` when the
+            value is non-quantum or any required dimension remains symbolic.
+    """
+    if not value.type.is_quantum():
+        return None
+
+    if isinstance(value, ArrayValue):
+        if value.shape:
+            element_count = 1
+            for dimension in value.shape:
+                size = _static_nonnegative_integer(dimension)
+                if size is None:
+                    return None
+                element_count *= size
+        else:
+            runtime = value.metadata.array_runtime
+            if runtime is None or not runtime.element_uuids:
+                return None
+            element_count = len(runtime.element_uuids)
+    else:
+        element_count = 1
+
+    qfixed = value.metadata.qfixed if not isinstance(value, ArrayValue) else None
+    if qfixed is not None:
+        element_width = _static_nonnegative_integer(qfixed.num_bits)
+    elif (
+        not isinstance(value, ArrayValue)
+        and value.metadata.cast is not None
+        and value.metadata.cast.qubit_uuids
+    ):
+        element_width = len(value.metadata.cast.qubit_uuids)
+    elif isinstance(value.type, (QUIntType, QFixedType)):
+        element_width = packed_register_type_width(value.type)
+    elif isinstance(value.type, QubitType):
+        element_width = 1
+    else:
+        return None
+
+    if element_width is None:
+        return None
+    return element_count * element_width
+
+
+def packed_register_type_width(value_type: ValueType) -> int | None:
+    """Return the type-declared width of a packed quantum register type.
+
+    Unlike :func:`static_quantum_width`, this helper consults only the type
+    and never runtime carrier or fixed-point metadata, so it distinguishes a
+    register whose width is *known* to be zero (returns ``0``) from one whose
+    width is symbolic (returns ``None``). ``static_quantum_width`` cannot make
+    that distinction for a QFixed whose frontend ``qfixed`` metadata records
+    ``num_bits=0`` for a symbolic layout.
+
+    Args:
+        value_type (ValueType): Type to inspect. Only ``QUIntType`` and
+            ``QFixedType`` describe packed registers.
+
+    Returns:
+        int | None: ``QUIntType.width`` or ``QFixedType.integer_bits +
+            fractional_bits`` when every component is a compile-time
+            non-negative integer; ``None`` when any component is symbolic or
+            when ``value_type`` is not a packed register type.
+    """
+    if isinstance(value_type, QUIntType):
+        return _static_nonnegative_integer(value_type.width)
+    if isinstance(value_type, QFixedType):
+        integer_bits = _static_nonnegative_integer(value_type.integer_bits)
+        fractional_bits = _static_nonnegative_integer(value_type.fractional_bits)
+        if integer_bits is None or fractional_bits is None:
+            return None
+        return integer_bits + fractional_bits
+    return None
+
+
+def _static_nonnegative_integer(value: int | Value) -> int | None:
+    """Return a statically known non-negative integer component.
+
+    Args:
+        value (int | Value): Literal or scalar IR value to inspect.
+
+    Returns:
+        int | None: Concrete non-negative integer, or ``None`` when the value
+            is symbolic, non-integral, Boolean, or negative.
+    """
+    concrete = value.get_const() if isinstance(value, Value) else value
+    if type(concrete) is not int or concrete < 0:
+        return None
+    return concrete
+
+
 def resolve_root_array_index(
     array: "ArrayValue",
     index: int,
@@ -736,6 +874,50 @@ def resolve_root_array_index(
         idx = start + step * idx
         current = current.slice_of
     return current, idx
+
+
+def root_carrier_keys(
+    array: "ArrayValue",
+    count: int,
+) -> tuple[list[str], list[str]] | None:
+    """Build root-space carrier keys for the first ``count`` array elements.
+
+    Folds each view-local index through :func:`resolve_root_array_index` and
+    spells the result with :func:`composite_carrier_key`, so packed register
+    (QInt and QFixed) carriers produced by the frontend cast, rebuilt by
+    compile-time ``if`` lowering, and re-derived by serialization validation
+    all share one key producer.
+
+    Callers are responsible for bounding ``count`` by the array's static
+    length: this helper performs no bounds check because its ``None`` result
+    must keep the single meaning "a slice bound on the chain is symbolic or
+    out of contract, defer resolution". Serialization validation compares
+    ``count`` against ``array_static_length`` before calling; compile-time
+    ``if`` lowering does the same whenever the selected source has a static
+    length and otherwise trusts the trace-time carrier count.
+
+    Args:
+        array (ArrayValue): One-dimensional qubit array, either a root array
+            or an arbitrarily nested strided view.
+        count (int): Number of leading elements to key, in ``array``'s own
+            index space.
+
+    Returns:
+        tuple[list[str], list[str]] | None: Parallel ``(uuids, logical_ids)``
+            carrier keys, ``(root.uuid, root_index)`` and
+            ``(root.logical_id, root_index)`` respectively, or ``None`` when
+            any index cannot be folded to the root index space.
+    """
+    uuids: list[str] = []
+    logical_ids: list[str] = []
+    for local_index in range(count):
+        resolved = resolve_root_array_index(array, local_index)
+        if resolved is None:
+            return None
+        root, root_index = resolved
+        uuids.append(composite_carrier_key(root.uuid, root_index))
+        logical_ids.append(composite_carrier_key(root.logical_id, root_index))
+    return uuids, logical_ids
 
 
 def array_static_length(array: "ArrayValue") -> int | None:
@@ -907,6 +1089,29 @@ def resolve_root_qubit_address(value: "Value") -> tuple[str, int] | None:
         return None
     root, root_idx = resolved
     return (root.uuid, root_idx)
+
+
+def resolve_root_qubit_array(value: Value) -> ArrayValue | None:
+    """Return the root array that owns one quantum scalar value.
+
+    Unlike :func:`resolve_root_qubit_address`, this helper does not require a
+    concrete scalar index or concrete slice bounds. It is used when dependency
+    analysis can identify the allocation owner but must conservatively treat
+    the selected scalar as unresolved.
+
+    Args:
+        value (Value): Candidate scalar quantum array element.
+
+    Returns:
+        ArrayValue | None: Root array reached through ``parent_array`` and
+            ``slice_of`` links, or ``None`` for an independent scalar.
+    """
+    current = value.parent_array
+    if current is None:
+        return None
+    while current.slice_of is not None:
+        current = current.slice_of
+    return current
 
 
 @dataclasses.dataclass(frozen=True)

@@ -285,7 +285,7 @@ class TestExpvalTranspiler:
 
         @qm.qkernel
         def vqe(Hs: qm.Vector[qm.Observable]) -> qm.UInt:
-            return Hs.shape[0]
+            return qm.uint(Hs.shape[0])  # type: ignore[arg-type]
 
         block = vqe.build(Hs=[qm_o.Z(0), qm_o.X(0), qm_o.Y(0)])
         hs_input = next(v for v in block.input_values if v.name == "Hs")

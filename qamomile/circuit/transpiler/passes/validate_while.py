@@ -8,7 +8,7 @@ else: bit = measure(q2)``).
 
 All other while patterns (classical variables, constants, comparison
 results, non-measurement branch leaves) are rejected with a clear
-``ValidationError`` before reaching backend-specific emit passes.
+``ValidationError`` before reaching engine-specific emit passes.
 
 This pass runs after ``lower_compile_time_ifs`` and before ``analyze``.
 """
@@ -312,7 +312,7 @@ class ValidateWhileContractPass(Pass[Block, Block]):
                         "updated by measurements produced inside the loop "
                         "body, or preserve the current condition value. "
                         "Reusing a different measurement taken before the "
-                        "loop cannot safely update the backend condition.",
+                        "loop cannot safely update the engine condition.",
                         value_name=carried.name,
                     )
 

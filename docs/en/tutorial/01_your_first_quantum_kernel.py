@@ -56,11 +56,14 @@
 
 # %%
 import math
+import os
 
 import qamomile.circuit as qmc
 from qamomile.qiskit import QiskitTranspiler
 
 transpiler = QiskitTranspiler()
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 256
 
 # %% [markdown]
 # ## First QKernel: The Biased Coin
@@ -143,7 +146,7 @@ exe = transpiler.transpile(biased_coin, parameters=["theta"])
 # your own custom executor (e.g., for real hardware or cloud services).
 job = exe.sample(
     transpiler.executor(),
-    shots=256,
+    shots=sample_shots,
     bindings={"theta": math.pi / 4},
 )
 
@@ -152,8 +155,8 @@ job = exe.sample(
 result = job.result()
 
 print("sample results:", result.results)
-assert result.shots == 256
-assert sum(count for _, count in result.results) == 256
+assert result.shots == sample_shots
+assert sum(count for _, count in result.results) == sample_shots
 
 # %% [markdown]
 # Let's unpack the three concepts:
@@ -238,15 +241,15 @@ demo_result = (
     transpiler.transpile(two_qubit_demo)
     .sample(
         transpiler.executor(),
-        shots=256,
+        shots=sample_shots,
     )
     .result()
 )
 
 for outcome, count in demo_result.results:
     print(f"  outcome={outcome}, count={count}")
-assert demo_result.shots == 256
-assert sum(count for _, count in demo_result.results) == 256
+assert demo_result.shots == sample_shots
+assert sum(count for _, count in demo_result.results) == sample_shots
 # Bell state |Phi+>: only (0,0) and (1,1) outcomes appear.
 assert all(outcome in {(0, 0), (1, 1)} for outcome, _ in demo_result.results)
 
@@ -322,7 +325,7 @@ except Exception as e:
 # | **QuriParts** | Supported | Full gate set, observables |
 # | **CUDA-Q** | Supported | GPU-accelerated simulation. Supported: for-loops (unrolled), runtime `if`/`if-else`/`while` (via `cudaq.run()`) |
 #
-# > **Note**: Runtime measurement-dependent control flow (`if bit:`, `if/else`, `while bit:`) is supported on both Qiskit and CUDA-Q. The `while` loop condition **must** be a measurement result (`Bit` from `qmc.measure()`); classical variables, constants, and comparisons are not supported as while conditions. On CUDA-Q, all circuits are compiled as `@cudaq.kernel` decorated functions. Static circuits (without runtime control flow) are executed via `cudaq.sample()` / `cudaq.observe()`, while circuits with runtime measurement-dependent branching are executed via `cudaq.run()`. Compile-time constant conditions for `if` statements are statically resolved on all backends.
+# > **Note**: Runtime measurement-dependent control flow (`if bit:`, `if/else`, `while bit:`) is supported on both Qiskit and CUDA-Q. The `while` loop condition **must** be a measurement result (`Bit` from `qmc.measure()`); classical variables, constants, and comparisons are not supported as while conditions. On CUDA-Q, all circuits are compiled as `@cudaq.kernel` decorated functions. Static circuits (without runtime control flow) are executed via `cudaq.sample()` / `cudaq.observe()`, while circuits with runtime measurement-dependent branching are executed via `cudaq.run()`. Compile-time constant conditions for `if` statements are statically resolved on all engines.
 #
 # ### CUDA-Q Platform Support
 #

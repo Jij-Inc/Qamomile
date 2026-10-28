@@ -289,7 +289,7 @@ def _execute_sample(
     """Transpile and return the deterministic most-common sample.
 
     Args:
-        sdk_transpiler (Any): Supported backend fixture case.
+        sdk_transpiler (Any): Supported engine fixture case.
         kernel (Any): QKernel to execute.
         bindings (dict[str, Any]): Compile-time kernel inputs.
 
@@ -316,12 +316,12 @@ def _execute_expval(
     """Transpile and evaluate one expectation-value kernel.
 
     Args:
-        sdk_transpiler (Any): Supported backend fixture case.
+        sdk_transpiler (Any): Supported engine fixture case.
         kernel (Any): QKernel to execute.
         bindings (dict[str, Any]): Compile-time kernel inputs.
 
     Returns:
-        float: Backend expectation value.
+        float: Engine expectation value.
     """
     transpiler = sdk_transpiler.transpiler
     return float(
@@ -365,9 +365,15 @@ def test_modular_add_resources_are_derived_symbolically() -> None:
         ).degree()
         == 1
     )
-    assert estimate.qubits == 3 * size + 3
+    assert estimate.width.allocated_qubits == 3 * size + 3
+    assert estimate.qubits == 3 * size + 5
     concrete = _symbolic_modular_add.estimate_resources(inputs={"size": 2048})
     assert concrete.gates.total == estimate.gates.total.subs(size, 2048)
+    assert concrete.width.clean_ancilla_qubits == 2
+
+    for concrete_size in range(1, 5):
+        direct = qmc.estimate_resources(_symbolic_modular_add.build(size=concrete_size))
+        assert estimate.substitute(size=concrete_size).depth == direct.depth
 
 
 def test_const_modular_add_uses_no_quantum_constant_registers() -> None:
@@ -381,7 +387,7 @@ def test_const_modular_add_uses_no_quantum_constant_registers() -> None:
 
 @pytest.mark.parametrize("size,seed", [(2, 0), (3, 2), (4, 42)])
 @pytest.mark.parametrize("enabled", [0, 1])
-def test_controlled_const_modular_add_cross_backend(
+def test_controlled_const_modular_add_cross_engine(
     sdk_transpiler: Any,
     size: int,
     seed: int,
@@ -417,12 +423,12 @@ def test_controlled_const_modular_add_cross_backend(
         {**bindings, "observable": qm_o.Z(qubit)},
     )
     expected = -1.0 if output >> qubit & 1 else 1.0
-    tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    tolerance = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert np.isclose(actual, expected, atol=tolerance)
 
 
 @pytest.mark.parametrize("size,seed", [(1, 0), (2, 1), (3, 2), (5, 42)])
-def test_ripple_carry_cross_backend(
+def test_ripple_carry_cross_engine(
     sdk_transpiler: Any,
     size: int,
     seed: int,
@@ -453,19 +459,19 @@ def test_ripple_carry_cross_backend(
         {**bindings, "observable": qm_o.Z(qubit)},
     )
     expected = -1.0 if output >> qubit & 1 else 1.0
-    tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    tolerance = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert np.isclose(actual, expected, atol=tolerance)
 
 
 @pytest.mark.parametrize("size,seed", [(2, 0), (3, 2), (5, 42)])
 @pytest.mark.parametrize("enabled", [0, 1])
-def test_controlled_modular_add_cross_backend(
+def test_controlled_modular_add_cross_engine(
     sdk_transpiler: Any,
     size: int,
     seed: int,
     enabled: int,
 ) -> None:
-    """Representative controlled modular additions pass both backend paths."""
+    """Representative controlled modular additions pass both engine paths."""
     rng = np.random.default_rng(seed)
     modulus = (1 << size) - 1
     addend = int(rng.integers(0, modulus))
@@ -495,5 +501,5 @@ def test_controlled_modular_add_cross_backend(
         {**bindings, "observable": qm_o.Z(qubit)},
     )
     expected = -1.0 if output >> qubit & 1 else 1.0
-    tolerance = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    tolerance = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert np.isclose(actual, expected, atol=tolerance)

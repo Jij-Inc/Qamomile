@@ -12,6 +12,7 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
+from qamomile.circuit.frontend.qkernel_callable import qkernel_callable_attrs
 from qamomile.linalg import PeriodicShiftLCU
 
 
@@ -120,8 +121,8 @@ def _single_static_encoding_template(
 
 
 def _executor(case: Any) -> Any:
-    """Return a local executor for one cross-backend fixture case."""
-    if case.backend_name == "qiskit":
+    """Return a local executor for one cross-engine fixture case."""
+    if case.engine_name == "qiskit":
         from qiskit.providers.basic_provider import BasicSimulator
 
         return case.transpiler.executor(backend=BasicSimulator())
@@ -340,6 +341,59 @@ def test_descriptor_and_term_reject_invalid_values() -> None:
         qmc.LCUBlockEncodingTerm(1.0, object())
 
 
+def test_descriptor_normalizes_reordered_operand_width_contract() -> None:
+    """Equivalent operand-width metadata is independent of entry order."""
+    attrs = qkernel_callable_attrs(_identity_case)
+    attrs["resource_contract"] = {
+        "quantum_operand_widths": [
+            {"index": 1, "name": "system", "width": 2},
+            {"index": 0, "name": "signal", "width": 1},
+        ]
+    }
+    reordered = _identity_case._clone_with_callable_attrs(attrs)
+
+    encoding = qmc.LCUBlockEncoding(reordered, 1.0, 1, 2)
+
+    normalized_attrs = qkernel_callable_attrs(encoding.unitary)
+    assert normalized_attrs["resource_contract"]["quantum_operand_widths"] == [
+        {"index": 0, "name": "signal", "width": 1},
+        {"index": 1, "name": "system", "width": 2},
+    ]
+    assert encoding.unitary.estimate_resources().width.input_qubits == 3
+
+
+def test_descriptor_owned_width_contract_is_replaceable() -> None:
+    """Descriptor reconstruction replaces only its own generated widths."""
+    encoding = qmc.LCUBlockEncoding(_identity_case, 1.0, 1, 2)
+
+    replaced = dataclasses.replace(
+        encoding,
+        num_signal_qubits=2,
+        num_system_qubits=3,
+    )
+    attrs = qkernel_callable_attrs(replaced.unitary)
+    assert attrs["resource_contract"]["quantum_operand_widths"] == [
+        {"index": 0, "name": "signal", "width": 2},
+        {"index": 1, "name": "system", "width": 3},
+    ]
+    assert replaced.unitary.estimate_resources().width.input_qubits == 5
+
+
+def test_descriptor_rejects_reordered_operand_width_conflict() -> None:
+    """Reordering does not hide a conflicting pre-existing register width."""
+    attrs = qkernel_callable_attrs(_identity_case)
+    attrs["resource_contract"] = {
+        "quantum_operand_widths": [
+            {"index": 1, "name": "system", "width": 3},
+            {"index": 0, "name": "signal", "width": 1},
+        ]
+    }
+    reordered = _identity_case._clone_with_callable_attrs(attrs)
+
+    with pytest.raises(ValueError, match="num_system_qubits conflicts"):
+        qmc.LCUBlockEncoding(reordered, 1.0, 1, 2)
+
+
 @pytest.mark.parametrize("exception_type", [TypeError, ValueError])
 def test_term_wraps_numeric_complex_conversion_failures(
     exception_type: type[Exception],
@@ -471,7 +525,7 @@ def test_zero_terms_are_removed_before_multi_and_single_term_lowering() -> None:
 def test_zero_encoding_samples_and_estimates_on_every_sdk(
     sdk_transpiler: Any,
 ) -> None:
-    """The generic all-zero composition executes on every circuit backend."""
+    """The generic all-zero composition executes on every circuit engine."""
     encoding = qmc.lcu_block_encoding(
         (qmc.LCUBlockEncodingTerm(0.0, qmc.identity_block_encoding(1)),)
     )
@@ -513,7 +567,7 @@ def test_zero_encoding_samples_and_estimates_on_every_sdk(
         bindings={"observable": qm_o.Z(0)},
     )
     observed = float(expval.run(_executor(sdk_transpiler)).result())
-    atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    atol = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed == pytest.approx(-1.0, abs=atol)
 
 
@@ -872,14 +926,14 @@ def test_recursive_inverse_round_trip_samples_and_estimates_on_every_sdk(
         bindings={"observable": qm_o.Z(0)},
     )
     observed = float(expval.run(_executor(sdk_transpiler)).result())
-    atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    atol = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed == pytest.approx(-1.0, abs=atol)
 
 
 def test_recursive_lcu_control_samples_and_estimates_on_every_sdk(
     sdk_transpiler: Any,
 ) -> None:
-    """Serialized two-level LCU control executes through every backend path."""
+    """Serialized two-level LCU control executes through every engine path."""
     from qamomile.circuit.serialization import deserialize, serialize
 
     encoding, matrix = _recursive_encoding()
@@ -920,7 +974,7 @@ def test_recursive_lcu_control_samples_and_estimates_on_every_sdk(
         bindings={"observable": qm_o.Y(0)},
     )
     observed = float(expval.run(_executor(sdk_transpiler)).result())
-    atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    atol = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed == pytest.approx(float(np.imag(overlap)), abs=atol)
 
 
@@ -993,7 +1047,7 @@ def test_random_recursive_lcu_samples_and_estimates_on_every_sdk(
         bindings={"observable": qm_o.Y(0)},
     )
     observed = float(expval.run(_executor(sdk_transpiler)).result())
-    atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    atol = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed == pytest.approx(float(np.imag(overlap)), abs=atol)
 
 
@@ -1048,5 +1102,5 @@ def test_outer_select_of_lcu_samples_and_estimates_phase_on_every_sdk(
         bindings={"observable": qm_o.Y(0)},
     )
     observed = float(expval.run(_executor(sdk_transpiler)).result())
-    atol = 1e-6 if sdk_transpiler.backend_name == "cudaq" else 1e-8
+    atol = 1e-6 if sdk_transpiler.engine_name == "cudaq" else 1e-8
     assert observed == pytest.approx(math.sin(phase), abs=atol)

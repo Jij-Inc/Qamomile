@@ -1,6 +1,6 @@
 """Clean-ancilla planning for the shared multi-controlled decomposition.
 
-Backends without a native multi-controlled gate primitive lower an
+Engines without a native multi-controlled gate primitive lower an
 irreducible ``n``-controlled single-qubit gate through the standard
 Toffoli-cascade construction (arXiv:2307.07478, Appendix A.3): the
 logical AND of all ``n`` controls is accumulated onto ``n - 1`` clean
@@ -10,7 +10,7 @@ uncomputed in reverse. Every ancilla therefore returns to ``|0>`` and
 the same pool can be reused by every multi-controlled gate in the
 segment.
 
-Backend circuits are created with a fixed qubit count before emission
+Engine circuits are created with a fixed qubit count before emission
 starts, so the pool must be sized up front. Its size is measured by a
 count-only dry-run of the real emission (see
 ``StandardEmitPass._count_multi_control_ancilla_demand`` and

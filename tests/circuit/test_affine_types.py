@@ -488,6 +488,23 @@ class TestErrorMessageQuality:
         error = exc_info.value
         assert error.handle_name is not None
 
+    def test_error_message_uses_allocated_qubit_name(self):
+        """Allocated qubit diagnostics should use the user-provided name."""
+
+        @qkernel
+        def bad_circuit() -> qm.Bit:
+            qubit = qm.qubit("qubit")
+            qm.x(qubit)
+            qm.h(qubit)
+            return qm.measure(qubit)
+
+        with pytest.raises(QubitConsumedError) as exc_info:
+            bad_circuit.build()
+
+        error = exc_info.value
+        assert error.handle_name == "qubit"
+        assert "Qubit 'qubit'" in str(error)
+
     def test_error_message_contains_operation_names(self):
         """Error messages should name both operations involved."""
 
@@ -3304,7 +3321,7 @@ class TestDuplicateQuantumCallArgs:
     ``VectorView`` arguments used to collapse to a single
     ``input_view_metas`` entry in ``QKernel.__call__``, silently aliasing
     both formal registers onto the same physical qubits (or crashing with
-    a raw backend error once the callee entangled them).
+    a raw engine error once the callee entangled them).
     """
 
     @staticmethod
@@ -3342,7 +3359,7 @@ class TestDuplicateQuantumCallArgs:
 
     def test_same_view_twice_entangling_callee_raises(self):
         """An entangling callee with an aliased view pair raises a Qamomile
-        affine error at trace time, not a raw backend error deep in emit."""
+        affine error at trace time, not a raw engine error deep in emit."""
 
         @qkernel
         def entangle(

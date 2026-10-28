@@ -1,4 +1,4 @@
-"""Tests for backend-neutral circuit code-generation IR."""
+"""Tests for engine-neutral circuit code-generation IR."""
 
 from __future__ import annotations
 
@@ -472,6 +472,24 @@ def test_builder_reduces_constant_only_pauli_evolution_to_phase() -> None:
     verify_circuit(program)
 
 
+@pytest.mark.parametrize(
+    "constant",
+    [float("nan"), float("inf"), complex(1.0, float("nan"))],
+)
+def test_builder_rejects_nonfinite_pauli_identity_coefficient(
+    constant: complex | float,
+) -> None:
+    """Circuit IR never converts a non-finite identity term into phase."""
+    builder = CircuitBuilder(1, 0)
+
+    with pytest.raises(ValueError, match="finite Hamiltonian coefficients"):
+        builder.append_pauli_evolution(
+            (0,),
+            qm_o.Hamiltonian.identity(constant, num_qubits=1),
+            ParameterExpr("theta"),
+        )
+
+
 def test_builder_hoists_uncontrolled_call_phase_with_inverse_and_power() -> None:
     """An unconditional call contributes one canonical enclosing phase."""
     theta = ParameterExpr("theta")
@@ -769,7 +787,7 @@ def test_verifier_rejects_invalid_reusable_call_transforms(
 
 
 def test_materialization_rejects_positional_parameter_order_drift() -> None:
-    """A positional backend cannot silently reorder runtime parameters."""
+    """A positional engine cannot silently reorder runtime parameters."""
     transpiler = QiskitTranspiler()
     prepared = transpiler.prepare(
         _two_parameter_rotation,
@@ -837,7 +855,7 @@ def test_materialization_accepts_legacy_one_argument_materializer() -> None:
     assert executable.compiled_quantum[0].circuit is artifact
 
 
-def test_qamomile_plan_lowers_to_backend_neutral_circuit_ir() -> None:
+def test_qamomile_plan_lowers_to_engine_neutral_circuit_ir() -> None:
     """The full semantic circuit path produces verified circuit IR."""
     transpiler = QiskitTranspiler()
     prepared = transpiler.prepare(_lowered_bell, parameters=["theta"])

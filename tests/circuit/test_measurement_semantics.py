@@ -85,8 +85,8 @@ def test_project_x_and_project_y_lower_through_basis_changes(
     assert gate_types == basis_gates
 
 
-def test_measure_reset_resource_estimate_counts_reset_as_primitive():
-    """``measure_reset`` is estimable as projective measure plus reset."""
+def test_measure_reset_resource_estimate_separates_nonunitary_primitives():
+    """``measure_reset`` separates measurements and reset from gate cost."""
 
     @qmc.qkernel
     def kernel() -> qmc.Bit:
@@ -96,14 +96,19 @@ def test_measure_reset_resource_estimate_counts_reset_as_primitive():
         return qmc.measure(q)
 
     estimate = kernel.estimate_resources(trace=True).simplify()
-    assert estimate.gates.total == 2
-    assert estimate.gates.single_qubit == 2
+    assert estimate.gates.total == 1
+    assert estimate.gates.single_qubit == 1
+    assert estimate.measurements.total == 2
+    assert estimate.resets.total == 1
+    assert estimate.depth.depth == 4
+    assert estimate.depth.gate_depth == 1
     assert estimate.depth.measurement_depth == 2
+    assert estimate.depth.reset_depth == 1
     assert estimate.trace is not None
     assert "reset" in estimate.trace.render()
 
 
-def test_qiskit_emit_measure_reset_uses_backend_reset():
+def test_qiskit_emit_measure_reset_uses_engine_reset():
     """Qiskit emission preserves ``measure_reset`` as measurement plus reset."""
     pytest.importorskip("qiskit")
     from qamomile.qiskit import QiskitTranspiler
@@ -123,16 +128,16 @@ def test_qiskit_emit_measure_reset_uses_backend_reset():
     assert counts["reset"] == 1
 
 
-class TestResetBackendUnsupported:
-    """A backend without a reset primitive fails with EmitError, not raw Python.
+class TestResetEngineUnsupported:
+    """An engine without a reset primitive fails with EmitError, not raw Python.
 
-    ``GateEmitter.emit_reset`` raises ``NotImplementedError`` on backends with
+    ``GateEmitter.emit_reset`` raises ``NotImplementedError`` on engines with
     no reset primitive (e.g. QURI Parts). That raw exception used to escape a
     normal qkernel compile; ``StandardEmitPass._checked_emit_reset`` now
     converts it into an actionable ``EmitError``.
     """
 
-    def test_reset_on_unsupported_backend_raises_emit_error(self, monkeypatch):
+    def test_reset_on_unsupported_engine_raises_emit_error(self, monkeypatch):
         """qmc.reset on a reset-less emitter raises EmitError with guidance."""
         pytest.importorskip("qiskit")
         from qiskit import QuantumCircuit
@@ -142,7 +147,7 @@ class TestResetBackendUnsupported:
 
         def _no_reset(self, qubit):
             del self, qubit
-            raise NotImplementedError("This backend does not support reset.")
+            raise NotImplementedError("This engine does not support reset.")
 
         monkeypatch.setattr(QuantumCircuit, "reset", _no_reset)
 
@@ -157,7 +162,7 @@ class TestResetBackendUnsupported:
             QiskitTranspiler().transpile(kernel)
 
     def test_quri_parts_reset_raises_emit_error(self):
-        """The QURI Parts backend rejects reset at its capability boundary.
+        """The QURI Parts engine rejects reset at its capability boundary.
 
         The declaration-driven target verification now diagnoses reset
         before materialization, so the error is the ``EmitError``-compatible

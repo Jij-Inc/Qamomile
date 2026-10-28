@@ -3,11 +3,7 @@
 import runpy
 from pathlib import Path
 
-import matplotlib
 import matplotlib.pyplot as plt
-
-matplotlib.use("Agg")
-
 import pytest
 
 try:
@@ -23,26 +19,17 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 # Tutorials that require credentials or remote side effects and are skipped in CI.
 SKIP_TUTORIALS: dict[str, str] = {
     "en/integration/qbraid_executor": "Requires a qBraid API key.",
-    "ja/integration/qbraid_executor": "Requires a qBraid API key.",
 }
 
 TUTORIAL_PATTERNS = [
     "docs/en/tutorial/**/*.py",
-    "docs/ja/tutorial/**/*.py",
     "docs/en/tutorial/**/*.ipynb",
-    "docs/ja/tutorial/**/*.ipynb",
     "docs/en/algorithm/**/*.py",
-    "docs/ja/algorithm/**/*.py",
     "docs/en/algorithm/**/*.ipynb",
-    "docs/ja/algorithm/**/*.ipynb",
     "docs/en/usage/**/*.py",
-    "docs/ja/usage/**/*.py",
     "docs/en/usage/**/*.ipynb",
-    "docs/ja/usage/**/*.ipynb",
     "docs/en/integration/**/*.py",
-    "docs/ja/integration/**/*.py",
     "docs/en/integration/**/*.ipynb",
-    "docs/ja/integration/**/*.ipynb",
     # We will not execute the following directories:
     # - release_notes: markdown-only; nothing to execute.
 ]
@@ -51,6 +38,7 @@ TUTORIAL_PATTERNS = [
 # and should be skipped when those dependencies are not installed.
 OPTIONAL_SKIP_MODULES: dict[str, tuple[str, ...]] = {
     "vqe_for_hydrogen": ("openfermion",),
+    "braket_support": ("braket",),
     "cudaq_support": ("cudaq",),
     "qsci": ("quri_parts",),
     "quri_parts_support": ("quri_parts.qulacs",),
@@ -86,10 +74,12 @@ def discover_tutorial_files() -> list[Path]:
 def select_tutorial_files(
     tutorial_files: list[Path], changed_files: list[str] | None
 ) -> list[Path]:
-    """Select runnable pages corresponding to changed documentation files.
+    """Select runnable pages for an explicitly requested local subset.
 
     A changed paired notebook selects its Python authoring source because the
-    Python file is the canonical executable used by documentation tests.
+    Python file is the canonical executable used by documentation tests. A
+    changed Japanese page selects the corresponding English executable. CI
+    does not use this helper; it executes every English page.
 
     Args:
         tutorial_files (list[Path]): All runnable documentation files in the
@@ -110,6 +100,13 @@ def select_tutorial_files(
         paired_suffix = ".ipynb" if tutorial_file.suffix == ".py" else ".py"
         paired_path = Path(relative_path).with_suffix(paired_suffix).as_posix()
         files_by_changed_path[paired_path] = tutorial_file
+        if relative_path.startswith("docs/en/"):
+            japanese_path = relative_path.replace("docs/en/", "docs/ja/", 1)
+            files_by_changed_path[japanese_path] = tutorial_file
+            paired_japanese_path = (
+                Path(japanese_path).with_suffix(paired_suffix).as_posix()
+            )
+            files_by_changed_path[paired_japanese_path] = tutorial_file
 
     selected_files = {
         files_by_changed_path[changed_file]
@@ -200,3 +197,5 @@ def test_tutorial_executes_without_error(tutorial_file: Path, tmp_path, monkeypa
             pytest.fail(f"Tutorial exited with code {e.code}")
     except Exception as e:
         pytest.fail(f"Tutorial raised an exception: {type(e).__name__}: {e}")
+    finally:
+        plt.close("all")

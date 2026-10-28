@@ -9,12 +9,14 @@ its API may change.
 
 The logical :class:`ResourceEstimate` produced by
 :mod:`qamomile.circuit.estimator.resource_estimator` counts logical qubits and
-(non-Clifford) gates. Turning those into *physical* qubit counts and wall-clock
-runtime requires a fault-tolerance model. This module implements the toy
+logical gate families; it does not synthesize rotations or Toffoli gates into
+magic-state operations. Turning those values into *physical* qubit counts and
+wall-clock runtime therefore requires an additional modeling assumption. This
+module implements the toy
 surface-code / lattice-surgery back-of-the-envelope model used for high-level
 resource estimates such as the RSA-2048 factoring numbers in the literature:
 
-    d               ~= ceil(2 * log(alpha * N * M) / log(p_th / p))
+    d               ~= odd_ceiling(2 * log(alpha * N * M) / log(p_th / p))
     physical_qubits ~= 4 * N * d**2
     runtime         ~= M * d * tau
 
@@ -29,14 +31,94 @@ physical estimate.
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING
+import math
+from typing import TYPE_CHECKING, Any, cast
 
 import sympy as sp
 
 if TYPE_CHECKING:
-    from qamomile.circuit.estimator.resource_estimator import ResourceEstimate
+    from qamomile.circuit.estimator._estimate import ResourceEstimate
 
 ResourceExpr = sp.Expr
+
+
+def _positive_finite_float(value: object, *, name: str) -> float:
+    """Normalize one positive finite physical-model coefficient.
+
+    Args:
+        value (object): User-provided numeric coefficient.
+        name (str): Public argument name used in diagnostics.
+
+    Returns:
+        float: Normalized positive finite value.
+
+    Raises:
+        TypeError: If ``value`` cannot represent a real scalar.
+        ValueError: If the scalar is non-finite or not strictly positive.
+    """
+    if isinstance(value, (bool, str, bytes)):
+        raise TypeError(
+            f"surface_code_estimate requires {name} to be a real scalar, "
+            f"got {type(value).__name__} ({value!r})."
+        )
+    try:
+        normalized = float(cast(Any, value))
+    except (TypeError, ValueError, OverflowError) as error:
+        raise TypeError(
+            f"surface_code_estimate requires {name} to be a real scalar, "
+            f"got {type(value).__name__} ({value!r})."
+        ) from error
+    if not math.isfinite(normalized) or normalized <= 0:
+        raise ValueError(
+            f"surface_code_estimate requires {name} to be positive and "
+            f"finite, got {value!r}."
+        )
+    return normalized
+
+
+def _logical_count(value: object, *, name: str) -> ResourceExpr:
+    """Normalize one nonnegative logical-resource count.
+
+    Args:
+        value (object): Numeric or symbolic logical-resource count.
+        name (str): Public argument name used in diagnostics.
+
+    Returns:
+        ResourceExpr: SymPy count expression.
+
+    Raises:
+        TypeError: If ``value`` is not a numeric or symbolic scalar.
+        ValueError: If the count is provably negative, non-real, or
+            non-finite.
+    """
+    if isinstance(value, (bool, str, bytes)):
+        raise TypeError(
+            f"surface_code_estimate requires {name} to be a numeric or "
+            f"symbolic scalar, got {type(value).__name__} ({value!r})."
+        )
+    try:
+        count = sp.sympify(value)
+    except (TypeError, ValueError, sp.SympifyError) as error:
+        raise TypeError(
+            f"surface_code_estimate requires {name} to be a numeric or "
+            f"symbolic scalar, got {type(value).__name__} ({value!r})."
+        ) from error
+    if not isinstance(count, sp.Expr):
+        raise TypeError(
+            f"surface_code_estimate requires {name} to be a scalar, got "
+            f"{type(value).__name__} ({value!r})."
+        )
+    invalid_concrete_count = count.is_number is True and (
+        count.is_real is not True
+        or count.is_finite is not True
+        or count.is_nonnegative is not True
+    )
+    if invalid_concrete_count or count.is_nonnegative is False:
+        raise ValueError(
+            f"surface_code_estimate requires {name} to be a finite "
+            f"nonnegative real value; got {count}."
+        )
+    return count
 
 
 @dataclasses.dataclass(frozen=True)
@@ -113,29 +195,45 @@ def surface_code_estimate(
         code distance, physical qubit count, and runtime.
 
     Raises:
+        TypeError: If a logical count or model coefficient is not a numeric or
+            symbolic scalar of the declared kind.
         ValueError: If ``threshold`` is not strictly greater than
-            ``physical_error_rate`` (the code cannot suppress errors otherwise).
+            ``physical_error_rate`` (the code cannot suppress errors otherwise),
+            a model coefficient is not positive and finite, or either logical
+            count is provably negative, non-real, or non-finite.
 
     Example:
         >>> import sympy as sp
         >>> n = sp.Symbol("n", positive=True)
         >>> est = surface_code_estimate(3 * n, sp.Rational(3, 10) * n**3)
-        >>> est.physical_qubits.subs(n, 2048).evalf()  # doctest: +ELLIPSIS
-        1...e+7
+        >>> est.physical_qubits.subs(n, 2048).evalf()
+        15360000.0000000
     """
+    physical_error_rate = _positive_finite_float(
+        physical_error_rate,
+        name="physical_error_rate",
+    )
+    threshold = _positive_finite_float(threshold, name="threshold")
+    alpha = _positive_finite_float(alpha, name="alpha")
+    syndrome_cycle_seconds = _positive_finite_float(
+        syndrome_cycle_seconds,
+        name="syndrome_cycle_seconds",
+    )
     if threshold <= physical_error_rate:
         raise ValueError(
             "surface_code_estimate requires threshold > physical_error_rate; "
             f"got threshold={threshold}, physical_error_rate={physical_error_rate}."
         )
-    n = sp.sympify(logical_qubits)
-    m = sp.sympify(non_clifford_gates)
+    n = _logical_count(logical_qubits, name="logical_qubits")
+    m = _logical_count(non_clifford_gates, name="non_clifford_gates")
     ratio = sp.log(sp.Float(threshold) / sp.Float(physical_error_rate))
     # For small circuits ``alpha * N * M`` can fall below 1, making the raw
     # distance formula non-positive; clamp to the smallest sensible odd surface
     # code distance so downstream qubit/runtime figures stay meaningful.
-    raw_distance = sp.ceiling(2 * sp.log(sp.Float(alpha) * n * m) / ratio)
-    distance = sp.Max(raw_distance, sp.Integer(3))
+    scaled_volume = sp.Max(sp.Float(alpha) * n * m, sp.Integer(1))
+    raw_distance = sp.ceiling(2 * sp.log(scaled_volume) / ratio)
+    minimum_distance = sp.Max(raw_distance, sp.Integer(3))
+    distance = 2 * sp.ceiling((minimum_distance - 1) / 2) + 1
     physical_qubits = 4 * n * distance**2
     runtime_seconds = m * distance * sp.Float(syndrome_cycle_seconds)
     return PhysicalResourceEstimate(
@@ -162,12 +260,20 @@ def estimate_physical_resources(
     alpha: float = 0.05,
     syndrome_cycle_seconds: float = 1e-6,
 ) -> PhysicalResourceEstimate:
-    """Estimate physical resources directly from a logical resource estimate.
+    """Estimate physical resources heuristically from a logical estimate.
 
     Reads the logical qubit count and non-Clifford gate count from a
     :class:`ResourceEstimate` and feeds them into :func:`surface_code_estimate`.
     The non-Clifford count falls back to ``t + toffoli`` when the estimate does
-    not populate ``gates.non_clifford`` explicitly.
+    not populate ``gates.non_clifford`` explicitly. This automatic mapping
+    treats each logical non-Clifford-family entry as one magic-state event; it
+    is not a synthesis-aware conversion and does not account for the different
+    costs of arbitrary rotations, T gates, and Toffoli gates. Pass an explicit
+    ``non_clifford_gates`` value when a separate synthesis model is available.
+    A logical formula simplified under an unresolved qkernel input condition
+    must first be specialized with ``ResourceEstimate.substitute()``. Because
+    explicit values no longer depend on that logical formula, supplying both
+    ``logical_qubits`` and ``non_clifford_gates`` also permits conversion.
 
     Args:
         estimate (ResourceEstimate): Logical resource estimate to convert.
@@ -175,8 +281,8 @@ def estimate_physical_resources(
             logical qubit count ``N``. Defaults to ``None``, meaning
             ``estimate.qubits`` is used.
         non_clifford_gates (ResourceExpr | float | int | None): Override for the
-            non-Clifford gate count ``M``. Defaults to ``None``, meaning the
-            value is read from ``estimate.gates``.
+            magic-state event count ``M``. Defaults to ``None``, meaning a
+            heuristic value is read from the logical gate-family fields.
         physical_error_rate (float): Physical gate error rate ``p``. Defaults to
             ``1e-3``.
         threshold (float): Surface-code threshold ``p_th``. Defaults to
@@ -190,14 +296,35 @@ def estimate_physical_resources(
         estimate.
 
     Raises:
-        ValueError: If ``threshold`` is not strictly greater than
-            ``physical_error_rate``.
+        TypeError: If a logical count or model coefficient is not a numeric or
+            symbolic scalar of the declared kind.
+        RuntimeError: If public resource metrics or metadata disagree with
+            retained canonical provenance.
+        ValueError: If the logical estimate has an unresolved input-domain
+            condition while either logical count is read from it, ``threshold``
+            is not strictly greater than ``physical_error_rate``, a model
+            coefficient is not positive and finite, or either logical count is
+            provably negative, non-real, or non-finite.
 
     Example:
         >>> import qamomile.circuit as qmc
         >>> # est = kernel.estimate_resources(inputs={"n": 2048})
         >>> # phys = estimate_physical_resources(est)
     """
+    from qamomile.circuit.estimator._estimate_domain import (
+        _validate_domain_rewrite_state,
+    )
+
+    _validate_domain_rewrite_state(estimate)
+    state = estimate._domain_rewrite_state
+    reads_logical_estimate = logical_qubits is None or non_clifford_gates is None
+    if state is not None and state.requirements and reads_logical_estimate:
+        raise ValueError(
+            "Cannot derive physical resources from a symbolic logical estimate "
+            "whose formula has an unresolved qkernel input-domain condition; "
+            "specialize it with substitute() first, or override both logical "
+            "counts explicitly."
+        )
     n = estimate.qubits if logical_qubits is None else logical_qubits
     if non_clifford_gates is None:
         gates = estimate.gates

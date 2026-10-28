@@ -142,7 +142,7 @@ class TestWhileContractNegative:
             while bit:
                 q2 = qmc.h(q2)
                 bit = False
-            return bit
+            return qmc.bit(False)
 
         transpiler = QiskitTranspiler()
         with pytest.raises(ValidationError, match="measurement result"):

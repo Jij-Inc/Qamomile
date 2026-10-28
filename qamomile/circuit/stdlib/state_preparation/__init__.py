@@ -9,7 +9,7 @@ Available routines:
   without exposing an unintended relative phase.
 * :func:`amplitude_encoding`: prepare an arbitrary real- or
   complex-amplitude state from :math:`|0\\rangle^{\\otimes n}`. The
-  synthesis method is unspecified, so a backend may select a native
+  synthesis method is unspecified, so an engine may select a native
   state-preparation implementation. Qamomile's portable fallback currently
   uses the Möttönen construction.
 * :func:`mottonen_amplitude_encoding`: prepare the same target state while

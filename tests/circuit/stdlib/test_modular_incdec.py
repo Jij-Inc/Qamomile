@@ -210,11 +210,11 @@ def _expval_if_supported(
     transpiler: Any,
     kernel: Any,
     bindings: dict[str, Any],
-    backend_name: str,
+    engine_name: str,
     mode: str,
 ) -> float:
-    """Return expval or mark a known backend limitation explicitly."""
-    if backend_name == "cudaq" and mode == "controlled":
+    """Return expval or mark a known engine limitation explicitly."""
+    if engine_name == "cudaq" and mode == "controlled":
         pytest.xfail(
             "CUDA-Q observe() does not support the runtime control flow "
             "used by controlled modular arithmetic yet."
@@ -259,7 +259,7 @@ def _bindings_for_case(
 
 def _run_shift_case(
     transpiler: Any,
-    backend_name: str,
+    engine_name: str,
     n: int,
     bits: list[int],
     direction: str,
@@ -284,7 +284,7 @@ def _run_shift_case(
         transpiler,
         expval_kernel,
         expval_bindings,
-        backend_name,
+        engine_name,
         mode,
     )
 
@@ -299,7 +299,7 @@ def _run_shift_case(
 
 @pytest.mark.parametrize(("n", "seed"), _RANDOM_CASES)
 @pytest.mark.parametrize(("direction", "mode"), _CASES)
-def test_modular_arithmetic_cross_backend_sample_and_expval(
+def test_modular_arithmetic_cross_engine_sample_and_expval(
     sdk_transpiler: Any,
     n: int,
     seed: int,
@@ -308,7 +308,7 @@ def test_modular_arithmetic_cross_backend_sample_and_expval(
 ) -> None:
     """Execute seeded primitive shifts and qmc.control-created shifts."""
     transpiler = sdk_transpiler.transpiler
-    backend_name = sdk_transpiler.backend_name
+    engine_name = sdk_transpiler.engine_name
 
     rng = np.random.default_rng(seed)
     bits = _random_bits(rng, n)
@@ -316,7 +316,7 @@ def test_modular_arithmetic_cross_backend_sample_and_expval(
     coeffs = rng.uniform(-1.0, 1.0, size=n).tolist()
     _run_shift_case(
         transpiler,
-        backend_name,
+        engine_name,
         n,
         bits,
         direction,
@@ -351,13 +351,13 @@ def test_modular_arithmetic_wraparound_and_control_boundaries(
 ) -> None:
     """Exercise wrap-around and both controlled enabled states explicitly."""
     transpiler = sdk_transpiler.transpiler
-    backend_name = sdk_transpiler.backend_name
+    engine_name = sdk_transpiler.engine_name
 
     bits = [1] * n if pattern == "ones" else [0] * n
     coeffs = [((-1.0) ** index) * (index + 1) / (n + 1) for index in range(n)]
     _run_shift_case(
         transpiler,
-        backend_name,
+        engine_name,
         n,
         bits,
         direction,

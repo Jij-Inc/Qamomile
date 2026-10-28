@@ -9,6 +9,12 @@ Qamomileで実装した具体的な量子アルゴリズム例です。
 ::::{grid} 1 1 1 1
 
 :::{card}
+:header: **組合せ多項式二値最適化のためのGrover Adaptive Search**
+:link: grover_adaptive_search
+`GASConverter`でポートフォリオ選択問題を解く例です。古典的な外側ループからGroverの閾値を更新し、結果を全探索と比較して検証します。
+:::
+
+:::{card}
 :header: **Suzuki–Trotter分解によるハミルトニアンシミュレーション (Rabi振動)**
 :link: hamiltonian_simulation
 RabiモデルでのTrotter–Suzuki積公式と収束次数の実験です。
@@ -30,6 +36,12 @@ CNN＋量子変分回路をFashion-MNISTでend-to-end学習し、パラメータ
 :header: **量子フーリエ変換（QFT）**
 :link: qft
 QFTをスクラッチ実装と組み込みの`qft`で実装し、周波数の推定結果を比較して、必要なゲート数を確認します。
+:::
+
+:::{card}
+:header: **量子振幅推定を用いたオプションプライシング**
+:link: option_pricing
+量子振幅推定(QAE)によるオプションプライシングをQamomileで実装する例です。株価データの振幅への埋め込みと、Grover演算子による振幅推定を実装し、オプションの数値シミュレーションを実行します。
 :::
 
 :::{card}
@@ -78,6 +90,12 @@ QAOA回路をゼロから構築してMaxCutを解き、組み込みの`qaoa_stat
 :header: **量子カーネル分類**
 :link: quantum_kernel_classification
 量子特徴マップとカーネル法を使ってmake_circlesデータセットの分類を行います。
+:::
+
+:::{card}
+:header: **QSVT Filteringによるグラフ分割問題の求解**
+:link: qsvt_eigenstate_filter_graph_partitioning
+コストハミルトニアンをブロックエンコーディングしてsign関数のQSVT近似でフィルタし、post-selectionの割合を使ったLin & Tongの二分探索で基底エネルギーを求めます。
 :::
 
 :::{card}

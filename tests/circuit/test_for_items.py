@@ -98,7 +98,7 @@ class TestForItemsTranspile:
     """Tests for transpiling for_items."""
 
     def test_for_items_unroll_with_qiskit(self):
-        """Test for-items loop unrolling with Qiskit backend."""
+        """Test for-items loop unrolling with Qiskit engine."""
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler
 

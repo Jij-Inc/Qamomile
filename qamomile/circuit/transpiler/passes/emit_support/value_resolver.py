@@ -66,7 +66,7 @@ class ValueResolver:
         """Create an emit-time resolver.
 
         Args:
-            parameters (set[str] | None): Names preserved as backend runtime
+            parameters (set[str] | None): Names preserved as engine runtime
                 parameters. Defaults to None.
         """
         self.parameters = parameters or set()
@@ -515,15 +515,15 @@ class ValueResolver:
         Args:
             block_value (Any): Nested block whose classical/object inputs are
                 bound. Objects without ``input_values`` receive no additional
-                local bindings for compatibility with optional backend recipes.
+                local bindings for compatibility with optional engine recipes.
             param_operands (list[Value]): Classical/object call-site operands
                 in the controlled operation's signature order.
             bindings (dict[str, Any]): Parent emit-time bindings used to
                 resolve the call-site operands.
             parameter_factory (Callable[[str, str], Any] | None): Optional
-                backend parameter factory used when an operand is a declared
+                engine parameter factory used when an operand is a declared
                 runtime parameter rather than a concrete binding. Defaults to
-                None so standalone resolver use remains backend-neutral.
+                None so standalone resolver use remains engine-neutral.
 
         Returns:
             dict[str, Any]: Parent bindings with each inner formal rebound under
@@ -547,7 +547,7 @@ class ValueResolver:
                 and isinstance(param_input, ArrayValue)
                 and isinstance(operand, ArrayValue)
             ):
-                # Runtime arrays are structural aliases, not scalar backend
+                # Runtime arrays are structural aliases, not scalar engine
                 # parameters. Preserve the actual array identity so element
                 # lookups in the callee can recover keys such as
                 # ``actual_name[2]`` even when the formal has another name.
@@ -889,7 +889,7 @@ class ValueResolver:
         value: "Value",
         bindings: dict[str, Any],
     ) -> str | None:
-        """Get the backend parameter key for a symbolic scalar.
+        """Get the engine parameter key for a symbolic scalar.
 
         Args:
             value (Value): Scalar value or array element to identify.

@@ -168,7 +168,8 @@ def qaoa_ansatz(
 
 # %%
 # Draw the Qamomile-level QAOA ansatz for the fixed problem shape.
-p = 3  # number of QAOA layers
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+p = 1 if docs_test_mode else 3  # number of QAOA layers
 qaoa_ansatz.draw(
     p=p,
     quad=spin_model.quad,
@@ -240,9 +241,8 @@ rng = np.random.default_rng(42)
 init_params = rng.uniform(-np.pi / 2, np.pi / 2, 2 * p)
 init_gammas = list(init_params[:p])
 init_betas = list(init_params[p:])
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-sample_shots = 256 if docs_test_mode else 2000
-maxiter = 20 if docs_test_mode else 100
+sample_shots = 1 if docs_test_mode else 2000
+maxiter = 4 if docs_test_mode else 100
 
 # Sample the parameterized executable and decode bitstrings to Ising energies.
 sample_result = executable.sample(
@@ -465,6 +465,7 @@ assert np.isclose(energy_via_estimate, energy_unbound, atol=1e-10)
 # To swap QURI Parts' sampler or estimator, pass it through `QuriPartsTranspiler.executor(sampler=..., estimator=...)`, or instantiate `QuriPartsExecutor(sampler=..., estimator=...)` directly.
 # The custom executor can be used anywhere `executor` appeared above.
 # Swapping the sampler does not require re-transpiling the kernel.
+# Custom samplers must return nonnegative whole measurement counts; fractional weights, including fractional outputs from ideal samplers, raise `ValueError`.
 # The executable carries the circuit, while the executor carries the sampler or estimator used for execution.
 #
 # As a concrete example, we build a noisy sampler with QURI Parts' Qulacs `NoiseSimulator`.

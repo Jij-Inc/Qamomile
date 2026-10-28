@@ -257,6 +257,42 @@ def _owned_control_array_element(values: qmc.Vector[qmc.Float]) -> qmc.Bit:
 
 
 @qmc.qkernel
+def _owned_quantum_vector_second_element(
+    register: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Apply X to the second element of an operation-owned quantum vector.
+
+    Args:
+        register (qmc.Vector[qmc.Qubit]): Quantum vector whose second element
+            is required by the controlled body.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Updated quantum vector.
+    """
+    register[1] = qmc.x(register[1])
+    return register
+
+
+@qmc.qkernel
+def _controlled_owned_quantum_vector(length: qmc.UInt) -> qmc.Bit:
+    """Control a vector-formal body over a binding-sized actual register.
+
+    Args:
+        length (qmc.UInt): Actual register length supplied at transpile time.
+
+    Returns:
+        qmc.Bit: Measured control qubit.
+    """
+    control = qmc.qubit("control")
+    register = qmc.qubit_array(length, "register")
+    control, register = qmc.control(_owned_quantum_vector_second_element)(
+        control,
+        register,
+    )
+    return qmc.measure(control)
+
+
+@qmc.qkernel
 def _serialized_zero_trip_shape_body(
     values: qmc.Vector[qmc.UInt],
     repetitions: qmc.UInt,
@@ -1305,6 +1341,28 @@ class TestOperationOwnedStructure:
         executable = QiskitTranspiler().transpile(
             restored,
             bindings={"values": [0.25]},
+        )
+
+        assert executable.get_first_circuit() is not None
+
+    def test_controlled_vector_formal_rejects_short_actual_before_emit(self) -> None:
+        """A vector formal retains its actual extent during bounds validation."""
+        restored = deserialize(serialize(_controlled_owned_quantum_vector))
+
+        with pytest.raises(ValidationError) as exc_info:
+            QiskitTranspiler().transpile(restored, bindings={"length": 1})
+
+        message = str(exc_info.value)
+        assert "Index 1" in message
+        assert "register" in message
+
+    def test_controlled_vector_formal_accepts_covering_actual(self) -> None:
+        """A vector formal compiles when its actual covers every used index."""
+        restored = deserialize(serialize(_controlled_owned_quantum_vector))
+
+        executable = QiskitTranspiler().transpile(
+            restored,
+            bindings={"length": 2},
         )
 
         assert executable.get_first_circuit() is not None

@@ -565,7 +565,7 @@ def test_controlled_constant_plus_pauli_relative_phase(invert, gamma, constant):
 def test_parametric_gamma_carries_constant_phase(use_native, gamma, constant):
     """Runtime-parametric gamma keeps the constant's phase and binding.
 
-    With ``gamma`` preserved as a backend runtime parameter, both Qiskit
+    With ``gamma`` preserved as an engine runtime parameter, both Qiskit
     paths must carry the constant term of ``H = Z(0) + c`` as a
     ``ParameterExpression`` phase that binds together with the circuit's
     other parameters: after ``assign_parameters`` the exact statevector

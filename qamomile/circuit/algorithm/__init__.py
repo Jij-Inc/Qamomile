@@ -18,6 +18,19 @@ from .fqaoa import (
     initial_occupations,
     mixer_layer,
 )
+from .gas import (
+    apply_function_preparation_qubo,
+    apply_function_preparation_qubo_dagger,
+    diffusion_op,
+    first_degree_qft_encoding,
+    function_preparation_qubo,
+    function_preparation_qubo_dagger,
+    grover_algorithm,
+    grover_operator,
+    qft_encoding,
+    second_degree_qft_encoding,
+    zero_degree_qft_encoding,
+)
 from .qaoa import (
     hubo_ising_cost,
     hubo_qaoa_layers,
@@ -26,6 +39,10 @@ from .qaoa import (
     qaoa_layers,
     qaoa_state,
     x_mixer,
+)
+from .qsvt_eigenstate_filter import (
+    qsvt_filter_probe,
+    qsvt_filter_projector,
 )
 from .shor import ekera_hastad_factoring, shor_order_finding
 from .trotter import trotterized_time_evolution
@@ -60,4 +77,19 @@ __all__ = [
     "fqaoa_state",
     # Trotterization
     "trotterized_time_evolution",
+    # GAS primitives
+    "qft_encoding",
+    "zero_degree_qft_encoding",
+    "first_degree_qft_encoding",
+    "second_degree_qft_encoding",
+    "apply_function_preparation_qubo",
+    "apply_function_preparation_qubo_dagger",
+    "diffusion_op",
+    "function_preparation_qubo",
+    "function_preparation_qubo_dagger",
+    "grover_operator",
+    "grover_algorithm",
+    # QSVT eigenstate filtering
+    "qsvt_filter_projector",
+    "qsvt_filter_probe",
 ]

@@ -102,6 +102,32 @@ class TestControlNumControlsRejectsBool:
         assert qmc.control(_phase, num_controls=2)._num_controls == 2
         assert qmc.control(_phase)._num_controls == 1
 
+    @pytest.mark.parametrize(
+        "value",
+        [pytest.param(2.0, id="python"), pytest.param(np.float64(2.0), id="numpy")],
+    )
+    def test_num_controls_rejects_integer_valued_real(self, value: object) -> None:
+        """Control widths remain integral-type-only, unlike gate powers."""
+        with pytest.raises(TypeError, match="positive integer or UInt"):
+            qmc.control(_phase, num_controls=value)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("target", [_phase, qmc.x])
+    def test_num_controls_normalizes_numpy_integer(self, target):
+        """Qkernels and built-in gates normalize NumPy integral widths."""
+        controlled = qmc.control(target, num_controls=np.int64(2))
+
+        assert controlled._num_controls == 2
+        assert isinstance(controlled._num_controls, int)
+
+    def test_nested_control_normalizes_numpy_integer(self):
+        """A NumPy width composes with an existing controlled wrapper."""
+        controlled = qmc.control(_phase)
+
+        nested = qmc.control(controlled, num_controls=np.int64(2))
+
+        assert nested._num_controls == 3
+        assert isinstance(nested._num_controls, int)
+
 
 class TestArrayIndexRejectsBool:
     """Array element indices and slice bounds reject a bool."""

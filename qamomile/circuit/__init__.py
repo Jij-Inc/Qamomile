@@ -7,7 +7,7 @@ The central abstraction is the ``qkernel`` decorator (``frontend/``):
 users write quantum programs as plain Python functions, the frontend
 traces them into an IR ``Block`` (``ir/``), the transpiler pipeline
 (``transpiler/``) rewrites the IR through staged, ``BlockKind``-gated
-passes, and a backend package emits an executable program. This module
+passes, and an engine package emits an executable program. This module
 re-exports everything a user program needs to be written: the decorator,
 the handle types (``Qubit``, ``Vector``, ``Float``, ...), gate /
 measurement / control-flow builders, meta-operations (``control`` /
@@ -21,13 +21,13 @@ Dependency direction (hard constraint)
 
 ``qamomile.circuit`` is the design center of the whole project: every
 other qamomile module depends on it, never the reverse —
-``optimization → circuit ← backends`` (qiskit / quri_parts / cudaq /
-...). Nothing under this package may import a backend package or SDK.
-Backend-specific concretization (native gate sets, per-qubit instruction
-encoding, runtime control-flow lowering) belongs in each backend's emit
+``optimization → circuit ← engines`` (qiskit / quri_parts / cudaq /
+...). Nothing under this package may import an engine package or SDK.
+Engine-specific concretization (native gate sets, per-qubit instruction
+encoding, runtime control-flow lowering) belongs in each engine's emit
 pass / ``GateEmitter``; this package owns only the abstract IR, the
-backend-agnostic pass pipeline, and the shared decomposition recipes
-that backends may fall back on.
+engine-agnostic pass pipeline, and the shared decomposition recipes
+that engines may fall back on.
 
 Module-local constraints
 ------------------------
@@ -46,12 +46,17 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .estimator import (
+    ApproximationStatus,
     CallResources,
+    ControlDecomposition,
     DepthResources,
+    EstimateDerivation,
     EstimateQuality,
-    GateBasis,
     GateResources,
-    OpaqueCallContext,
+    MeasurementResources,
+    OpaqueCostContext,
+    ResetResources,
+    ResourceAssumption,
     ResourceEstimate,
     ResourceEstimator,
     UnknownResourcePolicy,
@@ -71,6 +76,7 @@ from .frontend.handle import (
     Matrix,
     Observable,
     QFixed,
+    QInt,
     Qubit,
     Tensor,
     Tuple,
@@ -115,7 +121,8 @@ from .frontend.operation.qubit_gates import (
     z,
 )
 from .frontend.operation.select import select
-from .frontend.oracle import Oracle, opaque
+from .frontend.operation.shot import get_current_shot
+from .frontend.oracle import Oracle, TransformedOracle, opaque
 from .frontend.qkernel import QKernel, qkernel
 from .frontend.struct import struct
 from .ir.effect import KernelEffect
@@ -158,9 +165,14 @@ from .stdlib import (
 )
 
 # Execution result / job types (return values of ExecutableProgram.sample / run)
+from .transpiler.execution_capability import ExecutionCapabilities
+from .transpiler.execution_handle import ExecutionHandle, ExecutionReference
+from .transpiler.execution_request import Exact, ShotBased, TargetPrecision
 from .transpiler.job import (
     ExpvalJob,
     Job,
+    JobKind,
+    JobSnapshot,
     JobStatus,
     RunJob,
     SampleJob,
@@ -201,14 +213,20 @@ __all__ = [
     "KernelEffect",
     "composite_gate",
     "Oracle",
+    "TransformedOracle",
     "opaque",
     "CallableSignature",
+    "ApproximationStatus",
     "CallResources",
+    "ControlDecomposition",
     "DepthResources",
+    "EstimateDerivation",
     "EstimateQuality",
-    "GateBasis",
     "GateResources",
-    "OpaqueCallContext",
+    "MeasurementResources",
+    "OpaqueCostContext",
+    "ResetResources",
+    "ResourceAssumption",
     "ResourceEstimate",
     "ResourceEstimator",
     "UnknownResourcePolicy",
@@ -218,6 +236,7 @@ __all__ = [
     "select",
     "inverse",
     "global_phase",
+    "get_current_shot",
     "cast",
     "ceil",
     "log2",
@@ -261,6 +280,7 @@ __all__ = [
     "Float",
     "Handle",
     "Qubit",
+    "QInt",
     "QFixed",
     "Tuple",
     "UInt",
@@ -310,11 +330,19 @@ __all__ = [
     "QKernel",
     # Job / result types
     "Job",
+    "JobKind",
+    "JobSnapshot",
     "JobStatus",
     "SampleResult",
     "SampleJob",
     "RunJob",
     "ExpvalJob",
+    "ExecutionCapabilities",
+    "ExecutionHandle",
+    "ExecutionReference",
+    "Exact",
+    "ShotBased",
+    "TargetPrecision",
     # Visualization (lazy-loaded)
     "MatplotlibDrawer",
     "CircuitStyle",

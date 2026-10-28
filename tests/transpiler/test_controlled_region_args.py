@@ -1,4 +1,4 @@
-"""Cross-backend regressions for RegionArgs inside controlled blocks."""
+"""Cross-engine regressions for RegionArgs inside controlled blocks."""
 
 from __future__ import annotations
 
@@ -9,28 +9,28 @@ import pytest
 
 import qamomile.circuit as qmc
 
-BACKENDS = [
+ENGINES = [
     pytest.param("qiskit", id="qiskit"),
     pytest.param("quri_parts", marks=pytest.mark.quri_parts, id="quri_parts"),
     pytest.param("cudaq", marks=pytest.mark.cudaq, id="cudaq"),
 ]
 
 
-def _make_transpiler(backend: str) -> Any:
-    """Build one installed backend transpiler or skip its test.
+def _make_transpiler(engine: str) -> Any:
+    """Build one installed engine transpiler or skip its test.
 
     Args:
-        backend (str): One of ``qiskit``, ``quri_parts``, or ``cudaq``.
+        engine (str): One of ``qiskit``, ``quri_parts``, or ``cudaq``.
 
     Returns:
-        Any: Backend transpiler when its optional SDK is installed.
+        Any: Engine transpiler when its optional SDK is installed.
     """
-    if backend == "qiskit":
+    if engine == "qiskit":
         pytest.importorskip("qiskit")
         from qamomile.qiskit import QiskitTranspiler
 
         return QiskitTranspiler()
-    if backend == "quri_parts":
+    if engine == "quri_parts":
         pytest.importorskip("quri_parts")
         pytest.importorskip("quri_parts.qulacs")
         from qamomile.quri_parts import QuriPartsTranspiler
@@ -79,6 +79,26 @@ def _nested_carried_index_body(
         for _inner in qmc.range(1):
             targets[index] = qmc.x(targets[index])
             index = index + 1
+    return targets
+
+
+@qmc.qkernel
+def _conditional_carried_angle_body(
+    targets: qmc.Vector[qmc.Qubit],
+) -> qmc.Vector[qmc.Qubit]:
+    """Update a loop-carried angle in a statically selected branch.
+
+    Args:
+        targets (qmc.Vector[qmc.Qubit]): Target register to rotate.
+
+    Returns:
+        qmc.Vector[qmc.Qubit]: Register after two controlled half-pi rotations.
+    """
+    angle = qmc.float_(0.0)
+    for iteration in qmc.range(2):
+        if iteration == 0:
+            angle = angle + math.pi / 2
+        targets[0] = qmc.rx(targets[0], angle)
     return targets
 
 
@@ -712,7 +732,7 @@ def _direct_sample_kernel(body: Any, target_count: int) -> Any:
         target_count (int): Number of target qubits to allocate.
 
     Returns:
-        Any: Module-independent qkernel ready for backend transpilation.
+        Any: Module-independent qkernel ready for engine transpilation.
     """
 
     @qmc.qkernel
@@ -756,17 +776,45 @@ def _controlled_sample_kernel_with_width(body: Any, target_count: int) -> Any:
     return kernel
 
 
-def _sample(backend: str, body: Any) -> tuple[int, ...]:
-    """Execute one deterministic controlled body on ``backend``.
+def _controlled_sample_kernel_with_two_controls(body: Any) -> Any:
+    """Build a two-control sample kernel for a vector-target body.
 
     Args:
-        backend (str): Backend key accepted by ``_make_transpiler``.
+        body (Any): Qkernel that consumes and returns a target vector.
+
+    Returns:
+        Any: Qkernel applying ``body`` under two enabled controls.
+    """
+    controlled = qmc.control(body, num_controls=2)
+
+    @qmc.qkernel
+    def kernel() -> qmc.Vector[qmc.Bit]:
+        """Enable both controls, apply the body, and measure its targets.
+
+        Returns:
+            qmc.Vector[qmc.Bit]: Measured target bits.
+        """
+        controls = qmc.qubit_array(2, "controls")
+        controls[0] = qmc.x(controls[0])
+        controls[1] = qmc.x(controls[1])
+        targets = qmc.qubit_array(2, "targets")
+        controls, targets = controlled(controls, targets)
+        return qmc.measure(targets)
+
+    return kernel
+
+
+def _sample(engine: str, body: Any) -> tuple[int, ...]:
+    """Execute one deterministic controlled body on ``engine``.
+
+    Args:
+        engine (str): Engine key accepted by ``_make_transpiler``.
         body (Any): Two-target qkernel to apply under control.
 
     Returns:
         tuple[int, ...]: Deterministic measured target tuple.
     """
-    transpiler = _make_transpiler(backend)
+    transpiler = _make_transpiler(engine)
     executable = transpiler.transpile(_controlled_sample_kernel(body))
     sampled = executable.sample(transpiler.executor(), shots=16).result()
     assert len(sampled.results) == 1
@@ -775,8 +823,27 @@ def _sample(backend: str, body: Any) -> tuple[int, ...]:
     return value
 
 
+def _sample_with_two_controls(engine: str, body: Any) -> tuple[int, ...]:
+    """Execute one deterministic two-control body on ``engine``.
+
+    Args:
+        engine (str): Engine key accepted by ``_make_transpiler``.
+        body (Any): Two-target qkernel to apply under two controls.
+
+    Returns:
+        tuple[int, ...]: Deterministic measured target tuple.
+    """
+    transpiler = _make_transpiler(engine)
+    executable = transpiler.transpile(_controlled_sample_kernel_with_two_controls(body))
+    sampled = executable.sample(transpiler.executor(), shots=16).result()
+    assert len(sampled.results) == 1
+    value, count = sampled.results[0]
+    assert count == 16
+    return value
+
+
 def _sample_inverse(
-    backend: str,
+    engine: str,
     body: Any,
     target_count: int,
     controlled: bool,
@@ -784,7 +851,7 @@ def _sample_inverse(
     """Execute one direct or controlled inverse regression.
 
     Args:
-        backend (str): Backend key accepted by ``_make_transpiler``.
+        engine (str): Engine key accepted by ``_make_transpiler``.
         body (Any): Inverse qkernel to execute.
         target_count (int): Number of measured target qubits.
         controlled (bool): Whether to wrap ``body`` in an enabled control.
@@ -792,7 +859,7 @@ def _sample_inverse(
     Returns:
         tuple[int, ...]: Deterministic measured target tuple.
     """
-    transpiler = _make_transpiler(backend)
+    transpiler = _make_transpiler(engine)
     kernel = (
         _controlled_sample_kernel_with_width(body, target_count)
         if controlled
@@ -806,24 +873,36 @@ def _sample_inverse(
     return value
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("engine", ENGINES)
 @pytest.mark.parametrize(
     ("body", "expected"),
     [
         (_carried_index_body, (1, 0)),
         (_nested_carried_index_body, (1, 1)),
+        (_conditional_carried_angle_body, (1, 0)),
     ],
 )
-def test_controlled_region_args_execute_across_backends(
-    backend: str,
+def test_controlled_region_args_execute_across_engines(
+    engine: str,
     body: Any,
     expected: tuple[int, ...],
 ) -> None:
     """Controlled loop carries advance on every nested static iteration."""
-    assert _sample(backend, body) == expected
+    assert _sample(engine, body) == expected
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("engine", ENGINES)
+def test_controlled_conditional_carry_profiles_across_engines(
+    engine: str,
+) -> None:
+    """Two-control lowering preserves a carry updated by a static branch."""
+    assert _sample_with_two_controls(engine, _conditional_carried_angle_body) == (
+        1,
+        0,
+    )
+
+
+@pytest.mark.parametrize("engine", ENGINES)
 @pytest.mark.parametrize("controlled", [False, True], ids=["direct", "controlled"])
 @pytest.mark.parametrize(
     ("body", "target_count", "expected"),
@@ -858,19 +937,19 @@ def test_controlled_region_args_execute_across_backends(
         "float-zero-delta-derived-gate",
     ],
 )
-def test_inverse_additive_region_args_execute_across_backends(
-    backend: str,
+def test_inverse_additive_region_args_execute_across_engines(
+    engine: str,
     controlled: bool,
     body: Any,
     target_count: int,
     expected: tuple[int, ...],
 ) -> None:
     """Direct and controlled inverse preserve additive carry snapshots."""
-    assert _sample_inverse(backend, body, target_count, controlled) == expected
+    assert _sample_inverse(engine, body, target_count, controlled) == expected
 
 
 def test_inverse_rejects_nonadditive_region_arg_during_construction() -> None:
-    """Unsupported recurrences fail before backend-dependent emission."""
+    """Unsupported recurrences fail before engine-dependent emission."""
     with pytest.raises(
         NotImplementedError,
         match="constant additive recurrence",
@@ -909,7 +988,7 @@ def test_inverse_rejects_coupled_region_args_independent_of_order(
 def test_inverse_rejects_nonzero_float_region_arg_during_construction(
     wrapper: Any,
 ) -> None:
-    """IEEE-sensitive Float recurrences fail before backend emission."""
+    """IEEE-sensitive Float recurrences fail before engine emission."""
     with pytest.raises(
         NotImplementedError,
         match="Float values only with an identity recurrence",

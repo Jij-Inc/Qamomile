@@ -6,7 +6,7 @@ Qamomile can be installed via standard package managers, such as pip.
 pip install qamomile
 ```
 
-Install optional integrations explicitly. For the Qiskit backend and circuit
+Install optional integrations explicitly. For the Qiskit engine and circuit
 drawings used throughout the tutorials:
 
 ```bash
@@ -48,6 +48,19 @@ pip install "qamomile[quri_parts]"
 
 ```python
 from qamomile.quri_parts import QuriPartsTranspiler, QuriPartsExecutor
+```
+
+:::
+
+:::{tab-item} Amazon Braket
+:sync: braket
+
+```bash
+pip install "qamomile[braket]"
+```
+
+```python
+from qamomile.braket import BraketExecutor, BraketTranspiler
 ```
 
 :::

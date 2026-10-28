@@ -82,7 +82,7 @@ def pauli_lcu_block_encoding(lcu: PauliLCU) -> PauliLCUBlockEncoding:
     error in this unitary. The unitary accepts arbitrary signal states, returns
     the same signal and system wires in the same order, supports
     :func:`~qamomile.circuit.inverse`, and allocates no hidden source-level
-    logical workspace. Backend-only decomposition scratch is permitted only
+    logical workspace. Engine-only decomposition scratch is permitted only
     when resource-accounted and exactly uncomputed for all inputs, including
     under inverse and control.
 

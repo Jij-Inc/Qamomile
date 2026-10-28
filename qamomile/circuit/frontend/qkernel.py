@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import threading
+from collections.abc import Mapping
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -18,8 +19,12 @@ from qamomile.circuit.frontend.qkernel_api import (
 )
 from qamomile.circuit.frontend.qkernel_block import get_or_build_block
 from qamomile.circuit.frontend.qkernel_definition import (
-    resolve_kernel_io_types,
+    _ANNOTATION_LOCALNS_ATTR,
+    flatten_kernel_return_type,
+    get_quantum_rebind_error,
     transform_qkernel_function,
+    try_resolve_kernel_input_types,
+    try_resolve_kernel_return_type,
     validate_quantum_rebinds,
 )
 from qamomile.circuit.ir.block import Block
@@ -54,10 +59,23 @@ class QKernel(QKernelBuildMixin, QKernelVisualizationMixin, Generic[P, R]):
 
         self.name = func.__name__
         self.signature = inspect.signature(func)
-        self.input_types, self.output_types = resolve_kernel_io_types(
-            func,
-            self.signature,
+        self._annotation_lock = threading.RLock()
+        self._input_type_validation_error: Exception | None = None
+        self._input_types, self._input_type_resolution_errors = (
+            try_resolve_kernel_input_types(func, self.signature)
         )
+        self._input_types_resolved = not self._input_type_resolution_errors
+        if self._input_types_resolved:
+            self._freeze_input_types()
+        (
+            self._return_type,
+            self._return_type_resolved,
+            self._return_type_resolution_error,
+        ) = try_resolve_kernel_return_type(func, self.signature)
+        self._output_types = flatten_kernel_return_type(self._return_type)
+        if self._return_type_resolved:
+            self._freeze_return_type()
+        self._release_annotation_localns_if_resolved()
 
         # Lazy initialization for hierarchical Block
         self._block: Block | None = None
@@ -99,13 +117,239 @@ class QKernel(QKernelBuildMixin, QKernelVisualizationMixin, Generic[P, R]):
         validate_quantum_rebinds(
             self.raw_func,
             kernel_name=self.name,
-            input_types=self.input_types,
+            input_types=self._input_types,
         )
+
+    def _freeze_input_types(self) -> None:
+        """Pin resolved input annotations to the transformed function."""
+        setattr(
+            self.func,
+            "__qamomile_resolved_input_types__",
+            dict(self._input_types),
+        )
+        self.func.__annotations__.update(self._input_types)
+
+    def _freeze_return_type(self) -> None:
+        """Pin the resolved return annotation to the transformed function."""
+        self.func.__annotations__["return"] = self._return_type
+        setattr(
+            self.func,
+            "__qamomile_resolved_return_type__",
+            self._return_type,
+        )
+
+    def _release_annotation_localns_if_resolved(self) -> None:
+        """Release captured defining locals after the interface is frozen."""
+        if self._input_types_resolved and self._return_type_resolved:
+            self.raw_func.__dict__.pop(_ANNOTATION_LOCALNS_ATTR, None)
+
+    def _resolve_pending_annotation_types(
+        self,
+    ) -> tuple[dict[str, NameError], NameError | None]:
+        """Resolve and freeze every currently available interface annotation.
+
+        Returns:
+            tuple[dict[str, NameError], NameError | None]: Remaining input
+            resolution errors and the remaining return resolution error.
+
+        Raises:
+            QubitRebindError: If a newly resolved quantum input exposes an
+                illegal quantum rebind in the kernel body.
+        """
+        with self._annotation_lock:
+            if self._input_type_validation_error is not None:
+                raise self._input_type_validation_error
+            if self._input_types_resolved and self._return_type_resolved:
+                return {}, None
+
+            input_updates: dict[str, Any] = {}
+            input_errors: dict[str, NameError] = {}
+            if not self._input_types_resolved:
+                unresolved_input_names = self._input_type_resolution_errors
+            else:
+                unresolved_input_names = {}
+            for name in unresolved_input_names:
+                parameter = self.signature.parameters[name]
+                annotations, errors = try_resolve_kernel_input_types(
+                    self.raw_func,
+                    self.signature.replace(parameters=[parameter]),
+                )
+                if errors:
+                    input_errors[name] = errors[name]
+                else:
+                    input_updates[name] = annotations[name]
+
+            return_annotation = self._return_type
+            return_resolved = self._return_type_resolved
+            return_error = self._return_type_resolution_error
+            if not return_resolved:
+                (
+                    return_annotation,
+                    return_resolved,
+                    return_error,
+                ) = try_resolve_kernel_return_type(
+                    self.raw_func,
+                    self.signature,
+                )
+
+            if input_updates:
+                self._input_types = {**self._input_types, **input_updates}
+            self._input_type_resolution_errors = input_errors
+
+            if return_resolved and not self._return_type_resolved:
+                self._return_type = return_annotation
+                self._output_types = flatten_kernel_return_type(return_annotation)
+                self._return_type_resolution_error = None
+                self._freeze_return_type()
+                self._return_type_resolved = True
+            elif not return_resolved:
+                self._return_type_resolution_error = return_error
+
+            if input_updates:
+                validation_error = get_quantum_rebind_error(
+                    self.raw_func,
+                    kernel_name=self.name,
+                    input_types=self._input_types,
+                )
+                if validation_error is not None:
+                    self._input_type_validation_error = validation_error
+                    raise validation_error
+
+            if not input_errors and not self._input_types_resolved:
+                self._freeze_input_types()
+                self._input_types_resolved = True
+
+            self._release_annotation_localns_if_resolved()
+            return input_errors, return_error if not return_resolved else None
+
+    def _ensure_annotation_types_resolved(self) -> None:
+        """Require the complete qkernel interface to be resolved and frozen.
+
+        Raises:
+            TypeError: If an input or return annotation cannot be resolved.
+            QubitRebindError: If a newly resolved quantum input exposes an
+                illegal quantum rebind in the kernel body.
+        """
+        input_errors, return_error = self._resolve_pending_annotation_types()
+        if not self._input_types_resolved:
+            name, error = next(iter(input_errors.items()))
+            annotation = self.signature.parameters[name].annotation
+            raise TypeError(
+                f"Cannot resolve annotation {annotation!r} for parameter "
+                f"{name!r} of qkernel {self.name!r}."
+            ) from error
+        if not self._return_type_resolved:
+            raise TypeError(
+                f"Cannot resolve return annotation {self._return_type!r} for "
+                f"qkernel {self.name!r}."
+            ) from return_error
+
+    def _ensure_input_types_resolved(self) -> None:
+        """Resolve and freeze deferred qkernel input annotations.
+
+        Raises:
+            TypeError: If an input annotation cannot be resolved.
+            QubitRebindError: If a newly resolved quantum input exposes an
+                illegal quantum rebind in the kernel body.
+        """
+        with self._annotation_lock:
+            if self._input_type_validation_error is not None:
+                raise self._input_type_validation_error
+            if self._input_types_resolved:
+                return
+        input_errors, _ = self._resolve_pending_annotation_types()
+        if not input_errors:
+            return
+        name, error = next(iter(input_errors.items()))
+        annotation = self.signature.parameters[name].annotation
+        raise TypeError(
+            f"Cannot resolve annotation {annotation!r} for parameter "
+            f"{name!r} of qkernel {self.name!r}."
+        ) from error
+
+    @property
+    def input_types(self) -> dict[str, Any]:
+        """Return resolved and frozen frontend input annotations.
+
+        Returns:
+            dict[str, Any]: Input annotations keyed by parameter name.
+
+        Raises:
+            TypeError: If a deferred input annotation cannot be resolved.
+        """
+        self._ensure_input_types_resolved()
+        return dict(self._input_types)
+
+    @input_types.setter
+    def input_types(self, value: dict[str, Any]) -> None:
+        """Replace the mutable frontend input ABI.
+
+        Args:
+            value (dict[str, Any]): Replacement annotations keyed by parameter
+                name.
+
+        Raises:
+            TypeError: If a deferred source annotation cannot be resolved.
+            QubitRebindError: If the source or replacement annotations expose
+                an illegal quantum rebind in the kernel body.
+        """
+        with self._annotation_lock:
+            self._ensure_input_types_resolved()
+            replacement = dict(value)
+            validate_quantum_rebinds(
+                self.raw_func,
+                kernel_name=self.name,
+                input_types=replacement,
+            )
+            self._input_types = replacement
 
     @property
     def block(self) -> Block:
         """Compile the function to a hierarchical Block if not already compiled."""
         return get_or_build_block(self)
+
+    def _ensure_return_type_resolved(self) -> None:
+        """Resolve and freeze the deferred qkernel return annotation.
+
+        Raises:
+            TypeError: If the return annotation cannot be resolved.
+        """
+        with self._annotation_lock:
+            if self._return_type_resolved:
+                return
+        _, return_error = self._resolve_pending_annotation_types()
+        if return_error is None:
+            return
+        raise TypeError(
+            f"Cannot resolve return annotation {self._return_type!r} for "
+            f"qkernel {self.name!r}."
+        ) from return_error
+
+    @property
+    def return_type(self) -> Any:
+        """Return the resolved and frozen complete return annotation.
+
+        Returns:
+            Any: Scalar, array, container, or Python tuple annotation.
+
+        Raises:
+            TypeError: If a deferred return annotation cannot be resolved.
+        """
+        self._ensure_return_type_resolved()
+        return self._return_type
+
+    @property
+    def output_types(self) -> list[Any]:
+        """Return the resolved frontend annotation for every output slot.
+
+        Returns:
+            list[Any]: Output annotations in ABI order.
+
+        Raises:
+            TypeError: If a deferred return annotation cannot be resolved.
+        """
+        self._ensure_return_type_resolved()
+        return list(self._output_types)
 
     @property
     def effects(self) -> KernelEffect:
@@ -131,14 +375,123 @@ class QKernel(QKernelBuildMixin, QKernelVisualizationMixin, Generic[P, R]):
 
         return cast(R, invoke_qkernel(self, *args, **kwargs))
 
+    def _clone_with_callable_attrs(self, attrs: Mapping[str, Any]) -> QKernel[P, R]:
+        """Clone this qkernel with isolated compiler-facing attributes.
+
+        A fresh transformed function and self-call state keep descriptor-local
+        metadata from leaking through a shallow copy. An already completed
+        body may be shared because its recursive references have been fully
+        finalized; an unbuilt clone remains independently lazy.
+
+        Args:
+            attrs (Mapping[str, Any]): Serializer-safe callable attributes for
+                the clone.
+
+        Returns:
+            QKernel[P, R]: Independent qkernel carrying the supplied attrs.
+        """
+        with self._annotation_lock:
+            self._ensure_annotation_types_resolved()
+            source_signature = self.signature
+            source_input_types = dict(self._input_types)
+            source_return_type = self._return_type
+            source_output_types = list(self._output_types)
+
+        cloned = QKernel(self.raw_func)
+        cloned.name = self.name
+        with cloned._annotation_lock:
+            cloned.signature = source_signature
+            # The source may have resolved annotation-only local aliases and
+            # released their captured namespace already. Preserve that frozen
+            # interface instead of asking the fresh clone to resolve the raw
+            # annotations again.
+            cloned._input_types = source_input_types
+            cloned._input_type_resolution_errors = {}
+            cloned._input_types_resolved = True
+            cloned._input_type_validation_error = None
+            cloned._return_type = source_return_type
+            cloned._return_type_resolved = True
+            cloned._return_type_resolution_error = None
+            cloned._output_types = source_output_types
+            cloned._freeze_input_types()
+            cloned._freeze_return_type()
+            cloned._release_annotation_localns_if_resolved()
+        cloned._callable_kind = self._callable_kind
+        cloned._callable_name = self._callable_name
+        cloned._callable_namespace = self._callable_namespace
+        cloned._callable_policy = self._callable_policy
+        cloned._callable_gate_type = self._callable_gate_type
+        cloned._callable_implementations = tuple(self._callable_implementations)
+        cloned._callable_semantic_arguments = dict(self._callable_semantic_arguments)
+        with self._block_lock:
+            if self._block is not None:
+                cloned._block = self._block
+        callable_ref = getattr(self, "_callable_ref_override", None)
+        if callable_ref is not None:
+            setattr(cloned, "_callable_ref_override", callable_ref)
+        setattr(cloned, "_callable_attrs_override", dict(attrs))
+        return cloned
+
+
+def _defining_local_namespace(func: Callable[..., Any]) -> dict[str, Any]:
+    """Copy the live local namespace that lexically defines a function.
+
+    Args:
+        func (Callable[..., Any]): Function whose defining frame may still be
+            active while a decorator wrapper constructs its QKernel.
+
+    Returns:
+        dict[str, Any]: Snapshot of the defining frame's locals, or an empty
+            dictionary when the frame is module-global or no longer active.
+    """
+    code = getattr(func, "__code__", None)
+    if code is None or "." not in code.co_qualname:
+        return {}
+
+    defining_qualname = code.co_qualname.rsplit(".", 1)[0]
+    if defining_qualname.endswith(".<locals>"):
+        defining_qualname = defining_qualname.removesuffix(".<locals>")
+
+    frame = inspect.currentframe()
+    try:
+        frame = frame.f_back if frame is not None else None
+        while frame is not None:
+            if frame.f_code.co_qualname == defining_qualname:
+                if frame.f_locals is func.__globals__:
+                    return {}
+                return dict(frame.f_locals)
+            frame = frame.f_back
+    finally:
+        del frame
+    return {}
+
 
 def qkernel(func: Callable[P, R]) -> QKernel[P, R]:
     """Decorator to define a Qamomile quantum kernel.
 
     Args:
-        func: The function to decorate.
+        func (Callable[P, R]): Function to decorate.
 
     Returns:
-        An instance of QKernel wrapping the function.
+        QKernel[P, R]: QKernel wrapping the function.
     """
-    return QKernel(func)
+    annotation_localns = _defining_local_namespace(func)
+    if not annotation_localns:
+        return QKernel(func)
+
+    had_previous_localns = hasattr(func, _ANNOTATION_LOCALNS_ATTR)
+    previous_localns = getattr(func, _ANNOTATION_LOCALNS_ATTR, {})
+    if isinstance(previous_localns, dict):
+        annotation_localns = {**previous_localns, **annotation_localns}
+    setattr(func, _ANNOTATION_LOCALNS_ATTR, annotation_localns)
+    constructed = False
+    try:
+        kernel = QKernel(func)
+        constructed = True
+    finally:
+        if not constructed:
+            if had_previous_localns:
+                setattr(func, _ANNOTATION_LOCALNS_ATTR, previous_localns)
+            else:
+                func.__dict__.pop(_ANNOTATION_LOCALNS_ATTR, None)
+    return kernel

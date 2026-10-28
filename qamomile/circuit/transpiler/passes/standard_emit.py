@@ -2,11 +2,11 @@
 
 This module provides the legacy-named ``StandardEmitPass`` used internally
 by ``CircuitLoweringPass`` to walk Qamomile semantic IR and construct the
-backend-neutral circuit-family IR.
+engine-neutral circuit-family IR.
 
 The actual emission logic is decomposed into focused modules under
 ``emit_support/``. This class serves as the orchestrator with thin
-wrappers that delegate to those module functions. SDK backends do not
+wrappers that delegate to those module functions. SDK engines do not
 subclass this engine; they consume the resulting immutable circuit program.
 """
 
@@ -48,6 +48,7 @@ from qamomile.circuit.ir.operation.gate import (
     GateOperationType,
     MeasureOperation,
     MeasureQFixedOperation,
+    MeasureQIntOperation,
     MeasureVectorOperation,
     ProjectOperation,
     ResetOperation,
@@ -81,8 +82,14 @@ from qamomile.circuit.transpiler.passes.emit_support.cast_binop_emission import 
     evaluate_classical_predicate,
     handle_cast,
 )
+from qamomile.circuit.transpiler.passes.emit_support.clean_ancilla_toffoli import (
+    clean_ancilla_toffoli_ladder,
+)
 from qamomile.circuit.transpiler.passes.emit_support.composite_gate_emission import (
     emit_invoke_operation,
+)
+from qamomile.circuit.transpiler.passes.emit_support.control_batching import (
+    ControlBatchProfile,
 )
 from qamomile.circuit.transpiler.passes.emit_support.control_flow_emission import (
     emit_for,
@@ -122,7 +129,7 @@ from qamomile.circuit.transpiler.passes.emit_support.pauli_evolve_emission impor
     emit_pauli_evolve,
 )
 
-T = TypeVar("T")  # Backend circuit type
+T = TypeVar("T")  # Engine circuit type
 
 
 def _segment_may_reserve_ancillas(operations: list[Operation]) -> bool:
@@ -175,7 +182,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         parameters (list[str] | None): Parameter names preserved at runtime.
         composite_emitters (list[CompositeGateEmitter[T]] | None): Optional
             callable-preservation or lowering hooks.
-        backend_name (str | None): Diagnostic name for the traversal target.
+        engine_name (str | None): Diagnostic name for the traversal target.
     """
 
     def __init__(
@@ -184,43 +191,49 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         bindings: dict[str, Any] | None = None,
         parameters: list[str] | None = None,
         composite_emitters: list[CompositeGateEmitter[T]] | None = None,
-        backend_name: str | None = None,
+        engine_name: str | None = None,
     ):
         super().__init__(bindings, parameters)
         self._emitter = gate_emitter
         self._composite_emitters = composite_emitters or []
-        self.backend_name = backend_name
+        self.engine_name = engine_name
 
         # Helper classes (``_resolver`` is built by ``EmitPass.__init__``).
         self._allocator = ResourceAllocator(self._resolver)
         self._loop_analyzer = LoopAnalyzer()
         self._decomposer = CompositeDecomposer()
 
-        # Cache for backend parameter objects
+        # Cache for engine parameter objects
         self._parameter_map: dict[str, Any] = {}
         self._parameter_sources: dict[str, str] = {}
         self._parameter_container_kinds: dict[str, ParameterContainerKind] = {}
         self._parameter_container_names: dict[str, str] = {}
         self._parameter_declaration_order = tuple(parameters or ())
+        self._parameter_probe_depth = 0
 
         # Mapping from classical bit index to physical qubit index.
-        # Populated during measurement emission to support backends
+        # Populated during measurement emission to support engines
         # where emit_measure is a no-op (e.g., QURI Parts).
         self._measurement_qubit_map: dict[int, int] = {}
 
         # Clean ancilla qubits reserved for the shared Toffoli-cascade
         # lowering of irreducible multi-controlled gates. Populated per
         # quantum segment when ``_reserves_multi_control_ancillas()``
-        # is True; None on backends with native multi-control support.
+        # is True; None on engines with native multi-control support.
         self._mc_ancilla_pool: MultiControlAncillaPool | None = None
 
         # Complete map for the segment currently being emitted. Controlled
         # fallback decomposition consults it for private workspace wires that
-        # were reserved before the backend circuit width was fixed.
+        # were reserved before the engine circuit width was fixed.
         self._active_qubit_map: QubitMap | None = None
 
+        # Runtime Bit merges that may safely alias different branch-local
+        # values. Resource allocation refreshes this immutable set for every
+        # quantum segment before emission starts.
+        self._safe_mixed_bit_merge_outputs: frozenset[str] = frozenset()
+
         # True only during the count-only dry-run walk in
-        # ``_count_multi_control_ancilla_demand``. Backend paths that build
+        # ``_count_multi_control_ancilla_demand``. Engine paths that build
         # or manipulate real circuit objects (e.g. QURI Parts' native
         # inverse) consult this to stay on a counting-safe route.
         self._counting_emission = False
@@ -255,7 +268,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
 
             Returns:
                 tuple[int, tuple[int, ...]]: Declaration position and array
-                    index tuple used for deterministic backend ABI ordering.
+                    index tuple used for deterministic engine ABI ordering.
             """
             root, indices = split_parameter_key(name)
             return (
@@ -271,7 +284,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             key=sort_key,
         )
         for name in ordered_names:
-            backend_param = self._parameter_map[name]
+            engine_param = self._parameter_map[name]
             parsed_name, indices = split_parameter_key(name)
             array_name = self._parameter_container_names.get(name, parsed_name)
             container_kind = self._parameter_container_kinds[name]
@@ -284,7 +297,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                     name=name,
                     array_name=array_name,
                     index=index,
-                    backend_param=backend_param,
+                    engine_param=engine_param,
                     source_ref=self._parameter_sources.get(name),
                     indices=indices,
                     container_kind=container_kind,
@@ -300,7 +313,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         container_kind: ParameterContainerKind | None = None,
         container_name: str | None = None,
     ) -> Any:
-        """Get or create a backend parameter while tracking its public ABI.
+        """Get or create an engine parameter while tracking its public ABI.
 
         Args:
             name (str): Full emitted scalar parameter key.
@@ -313,8 +326,14 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 to the root parsed from ``name``.
 
         Returns:
-            Any: Backend-specific parameter object for ``name``.
+            Any: Engine-specific parameter object for ``name``.
         """
+        if self._parameter_probe_depth:
+            # Imported lazily because circuit_ir.__init__ imports the lowering
+            # pass that owns this class.
+            from qamomile.circuit.transpiler.circuit_ir.model import ParameterExpr
+
+            return ParameterExpr(name)
         if name not in self._parameter_map:
             self._parameter_map[name] = self._emitter.create_parameter(name)
         parsed_name, indices = split_parameter_key(name)
@@ -332,6 +351,24 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         if source_ref is not None:
             self._parameter_sources.setdefault(name, source_ref)
         return self._parameter_map[name]
+
+    @contextlib.contextmanager
+    def _parameter_probe(self) -> Iterator[None]:
+        """Resolve symbolic values without mutating the public parameter ABI.
+
+        Analysis-only walks use target-neutral parameter expressions.  They
+        may inspect arithmetic and control structure, but only the later real
+        emission is allowed to create engine parameters or record their
+        source/container metadata.
+
+        Yields:
+            None: Control returns to the analysis-only emit walk.
+        """
+        self._parameter_probe_depth += 1
+        try:
+            yield
+        finally:
+            self._parameter_probe_depth -= 1
 
     def _reject_overwritten_live_condition_outputs(self) -> None:
         """Reject exposing a measurement snapshot overwritten by a while.
@@ -471,7 +508,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         operations: list[Operation],
         bindings: dict[str, Any],
     ) -> tuple[T, QubitMap, ClbitMap]:
-        """Generate a backend circuit from one quantum segment.
+        """Generate an engine circuit from one quantum segment.
 
         Args:
             operations (list[Operation]): Quantum/control-flow operation tree
@@ -480,11 +517,11 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 bindings.
 
         Returns:
-            tuple[T, QubitMap, ClbitMap]: Emitted backend circuit and its
+            tuple[T, QubitMap, ClbitMap]: Emitted engine circuit and its
                 logical-to-physical qubit and clbit maps.
 
         Raises:
-            EmitError: If resource allocation or backend emission cannot
+            EmitError: If resource allocation or engine emission cannot
                 represent the operation tree safely.
             RuntimeError: If an IR marker that should have been removed by an
                 earlier pass reaches emission.
@@ -501,13 +538,14 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             allocate_controlled_workspaces,
         )
 
-        allocate_controlled_workspaces(
-            self,
-            operations,
-            qubit_map,
-            clbit_map,
-            bindings,
-        )
+        with self._parameter_probe():
+            allocate_controlled_workspaces(
+                self,
+                operations,
+                qubit_map,
+                clbit_map,
+                bindings,
+            )
         self._active_qubit_map = qubit_map
         self._safe_mixed_bit_merge_outputs = (
             self._allocator.safe_mixed_bit_merge_outputs
@@ -536,6 +574,93 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         self._reject_overwritten_live_condition_outputs()
 
         return circuit, qubit_map, clbit_map
+
+    @contextlib.contextmanager
+    def _analysis_emission_transaction(
+        self,
+        data_qubit_count: int,
+        qubit_map: QubitMap,
+        clbit_map: ClbitMap,
+        bindings: dict[str, Any],
+    ) -> Iterator[tuple[T, QubitMap, ClbitMap, MultiControlAncillaPool]]:
+        """Run the ordinary emit walker in an isolated count-only context.
+
+        The transaction swaps every mutable pass field that an emit walk may
+        update, supplies copied wire maps, and restores the caller's binding
+        object in place. Exceptions deliberately propagate after restoration,
+        so analysis-only validation has the same failure semantics as real
+        emission without changing the real circuit or its parameter ABI.
+
+        Args:
+            data_qubit_count (int): Number of already allocated data qubits;
+                temporary counting-ancilla indices begin at this offset.
+            qubit_map (QubitMap): Initial logical-to-physical qubit map. The
+                analysis walk receives a shallow copy.
+            clbit_map (ClbitMap): Initial logical-to-physical classical-bit
+                map. The analysis walk receives a shallow copy.
+            bindings (dict[str, Any]): Emit bindings whose complete state is
+                restored when the transaction exits.
+
+        Yields:
+            tuple[T, QubitMap, ClbitMap, MultiControlAncillaPool]: No-op
+                circuit, isolated qubit and clbit maps, and the pool recording
+                peak clean-ancilla demand.
+        """
+        saved_emitter = self._emitter
+        saved_pool = self._mc_ancilla_pool
+        saved_composites = self._composite_emitters
+        saved_counting = self._counting_emission
+        saved_active_qubits = self._active_qubit_map
+        saved_safe_merge_outputs = self._safe_mixed_bit_merge_outputs
+        saved_parameter_map = self._parameter_map
+        saved_parameter_sources = self._parameter_sources
+        saved_parameter_container_kinds = self._parameter_container_kinds
+        saved_parameter_container_names = self._parameter_container_names
+        saved_measurement_map = self._measurement_qubit_map
+        saved_overwritten_conditions = self._overwritten_runtime_condition_sources
+        saved_bindings = (
+            bindings.snapshot_state()
+            if isinstance(bindings, EmitContext)
+            else dict(bindings)
+        )
+
+        analysis_qubit_map = dict(qubit_map)
+        analysis_clbit_map = dict(clbit_map)
+        counting_pool = MultiControlAncillaPool(data_qubit_count, 0, counting=True)
+        self._emitter = cast(GateEmitter[T], CountingEmitter(saved_emitter))
+        self._mc_ancilla_pool = counting_pool
+        self._composite_emitters = []
+        self._counting_emission = True
+        self._active_qubit_map = analysis_qubit_map
+        self._safe_mixed_bit_merge_outputs = saved_safe_merge_outputs
+        self._parameter_map = dict(saved_parameter_map)
+        self._parameter_sources = dict(saved_parameter_sources)
+        self._parameter_container_kinds = dict(saved_parameter_container_kinds)
+        self._parameter_container_names = dict(saved_parameter_container_names)
+        self._measurement_qubit_map = dict(saved_measurement_map)
+        self._overwritten_runtime_condition_sources = set(saved_overwritten_conditions)
+        try:
+            dummy = self._emitter.create_circuit(0, 0)
+            with self._parameter_probe():
+                yield dummy, analysis_qubit_map, analysis_clbit_map, counting_pool
+        finally:
+            self._emitter = saved_emitter
+            self._mc_ancilla_pool = saved_pool
+            self._composite_emitters = saved_composites
+            self._counting_emission = saved_counting
+            self._active_qubit_map = saved_active_qubits
+            self._safe_mixed_bit_merge_outputs = saved_safe_merge_outputs
+            self._parameter_map = saved_parameter_map
+            self._parameter_sources = saved_parameter_sources
+            self._parameter_container_kinds = saved_parameter_container_kinds
+            self._parameter_container_names = saved_parameter_container_names
+            self._measurement_qubit_map = saved_measurement_map
+            self._overwritten_runtime_condition_sources = saved_overwritten_conditions
+            if isinstance(bindings, EmitContext):
+                bindings.restore_state(saved_bindings)
+            else:
+                bindings.clear()
+                bindings.update(saved_bindings)
 
     def _count_multi_control_ancilla_demand(
         self,
@@ -571,51 +696,19 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             int: The peak number of clean ancilla qubits a real emission of
                 ``operations`` would hold at once.
         """
-        saved_emitter = self._emitter
-        saved_pool = self._mc_ancilla_pool
-        saved_composites = self._composite_emitters
-        saved_params = dict(self._parameter_map)
-        saved_sources = dict(self._parameter_sources)
-        saved_measure = dict(self._measurement_qubit_map)
-        saved_overwritten_conditions = set(self._overwritten_runtime_condition_sources)
-        saved_context = (
-            bindings.snapshot_state()
-            if isinstance(bindings, EmitContext)
-            else dict(bindings)
-        )
-        counting_pool = MultiControlAncillaPool(data_qubit_count, 0, counting=True)
-        self._emitter = cast(GateEmitter[T], CountingEmitter(saved_emitter))
-        self._mc_ancilla_pool = counting_pool
-        self._counting_emission = True
-        # Native composite emitters would construct real circuit objects on
-        # the dummy circuit; disable them so counting stays on the library
-        # decomposition path (which reserves the same or more ancillas).
-        self._composite_emitters = []
-        try:
-            dummy = self._emitter.create_circuit(0, 0)
+        with self._analysis_emission_transaction(
+            data_qubit_count,
+            qubit_map,
+            clbit_map,
+            bindings,
+        ) as (dummy, analysis_qubit_map, analysis_clbit_map, counting_pool):
             self._emit_operations(
-                dummy, operations, dict(qubit_map), dict(clbit_map), bindings
+                dummy,
+                operations,
+                analysis_qubit_map,
+                analysis_clbit_map,
+                bindings,
             )
-        finally:
-            self._emitter = saved_emitter
-            self._mc_ancilla_pool = saved_pool
-            self._composite_emitters = saved_composites
-            self._counting_emission = False
-            self._parameter_map.clear()
-            self._parameter_map.update(saved_params)
-            self._parameter_sources.clear()
-            self._parameter_sources.update(saved_sources)
-            self._measurement_qubit_map.clear()
-            self._measurement_qubit_map.update(saved_measure)
-            self._overwritten_runtime_condition_sources.clear()
-            self._overwritten_runtime_condition_sources.update(
-                saved_overwritten_conditions
-            )
-            if isinstance(bindings, EmitContext):
-                bindings.restore_state(saved_context)
-            else:
-                bindings.clear()
-                bindings.update(saved_context)
         return counting_pool.peak
 
     def _validate_quantum_array_element_return(
@@ -630,7 +723,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         different array indices on its branches. Static loop/condition replay
         has populated ``bindings`` with the selected source index by this
         point, allowing the return target and physical carrier to be checked
-        without emitting a backend instruction.
+        without emitting an engine instruction.
 
         Args:
             operation (ReturnQuantumArrayElementOperation): Deferred return
@@ -680,6 +773,46 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 operation="ReturnQuantumArrayElementOperation",
             )
 
+    def _reject_slice_marker_at_emit(self, operation: Operation) -> None:
+        """Reject a slice-lifetime marker that survived the strip pass.
+
+        Args:
+            operation (Operation): Unexpected slice or release marker.
+
+        Raises:
+            RuntimeError: Always, because slice markers are invalid at emit.
+        """
+        raise RuntimeError(
+            f"{type(operation).__name__} reached emit — "
+            f"StripSliceArrayOpsPass should have stripped it "
+            f"after SliceBorrowCheckPass.  This is a "
+            f"compiler bug; please report it."
+        )
+
+    def _reject_store_array_element_at_emit(
+        self,
+        operation: StoreArrayElementOperation,
+    ) -> None:
+        """Reject an unresolved classical array store in a quantum segment.
+
+        Args:
+            operation (StoreArrayElementOperation): Store that survived
+                compile-time folding.
+
+        Raises:
+            EmitError: Always, because silently ignoring the store could emit
+                stale quantum-gate parameters.
+        """
+        raise EmitError(
+            f"Classical array element store into "
+            f"'{operation.array.name or 'array'}' reached the quantum "
+            f"segment. Stored elements consumed by quantum gates "
+            f"must be compile-time resolvable: bind the array and "
+            f"the stored value via `bindings` instead of "
+            f"`parameters`, or restructure the kernel so the "
+            f"stored elements are not used as gate parameters."
+        )
+
     def _emit_operations(
         self,
         circuit: T,
@@ -690,10 +823,10 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         force_unroll: bool = False,
         emit_qinit_reset: bool = False,
     ) -> None:
-        """Dispatch an operation list into a backend circuit.
+        """Dispatch an operation list into an engine circuit.
 
         Args:
-            circuit (T): Backend circuit being mutated.
+            circuit (T): Engine circuit being mutated.
             operations (list[Operation]): Operations in program order.
             qubit_map (QubitMap): Current logical-to-physical qubit map.
             clbit_map (ClbitMap): Current logical-to-physical clbit map.
@@ -702,12 +835,12 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             force_unroll (bool): Whether range loops must use emit-time
                 unrolling. Defaults to False.
             emit_qinit_reset (bool): Whether nested allocations should reset
-                their persistent backend wires at each body entry. Defaults to
+                their persistent engine wires at each body entry. Defaults to
                 False.
 
         Raises:
             EmitError: If an operation or control-flow shape cannot be emitted
-                safely by the backend.
+                safely by the engine.
             RuntimeError: If slice-lifetime markers or another invalid
                 pipeline-stage artifact reaches this dispatcher.
             ValueError: If required loop values cannot be resolved.
@@ -728,12 +861,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 # stage was skipped or ran out of order — a
                 # compiler-internal invariant violation.  Fail loudly
                 # rather than silently emitting nothing.
-                raise RuntimeError(
-                    f"{type(op).__name__} reached emit — "
-                    f"StripSliceArrayOpsPass should have stripped it "
-                    f"after SliceBorrowCheckPass.  This is a "
-                    f"compiler bug; please report it."
-                )
+                self._reject_slice_marker_at_emit(op)
             elif isinstance(op, GateOperation):
                 emit_gate(self, circuit, op, qubit_map, bindings)
             elif isinstance(op, MeasureOperation):
@@ -746,6 +874,16 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 emit_measure_vector(self, circuit, op, qubit_map, clbit_map, bindings)
             elif isinstance(op, MeasureQFixedOperation):
                 emit_measure_qfixed(self, circuit, op, qubit_map, clbit_map)
+            elif isinstance(op, MeasureQIntOperation):
+                # QInt measurements require plan-time splitting into a vector
+                # measurement and host-side decode before emission.
+                raise EmitError(
+                    "MeasureQIntOperation reached emit; QInt measurements must "
+                    "be lowered to MeasureVectorOperation plus a host-side "
+                    "decode by the plan stage (separate.lower_operations) "
+                    "before emit.",
+                    operation=type(op).__name__,
+                )
             elif isinstance(op, ForOperation):
                 self._emit_for(
                     circuit, op, qubit_map, clbit_map, bindings, force_unroll
@@ -829,15 +967,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 # One reaching a quantum segment means the stored contents
                 # feed a quantum op without being compile-time resolvable;
                 # silently skipping it would emit stale gate parameters.
-                raise EmitError(
-                    f"Classical array element store into "
-                    f"'{op.array.name or 'array'}' reached the quantum "
-                    f"segment. Stored elements consumed by quantum gates "
-                    f"must be compile-time resolvable: bind the array and "
-                    f"the stored value via `bindings` instead of "
-                    f"`parameters`, or restructure the kernel so the "
-                    f"stored elements are not used as gate parameters."
-                )
+                self._reject_store_array_element_at_emit(op)
             elif isinstance(op, ReturnQuantumArrayElementOperation):
                 self._validate_quantum_array_element_return(
                     op,
@@ -852,13 +982,13 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 evaluate_dict_getitem(self, op, bindings)
             elif isinstance(op, RuntimeClassicalExpr):
                 # Pre-emit ``ClassicalLoweringPass`` already identified this
-                # op as runtime-only. Hand off to the backend hook directly;
+                # op as runtime-only. Hand off to the engine hook directly;
                 # no fold attempt — the IR has already declared the verdict.
                 self._emit_runtime_classical_expr(circuit, op, clbit_map, bindings)
             elif isinstance(op, (CompOp, CondOp, NotOp)):
                 evaluate_classical_predicate(self, op, bindings)
                 # If the predicate could not be folded at compile time (e.g.
-                # operands are runtime measurement bits), give the backend a
+                # operands are runtime measurement bits), give the engine a
                 # chance to build a runtime expression that downstream
                 # if/while emission can consume as a classical condition.
                 # Note: post-``ClassicalLoweringPass``, most measurement-
@@ -899,7 +1029,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         """Emit prepare-zero operations for nested fresh allocations.
 
         Args:
-            circuit (T): Backend circuit currently being emitted.
+            circuit (T): Engine circuit currently being emitted.
             op (QInitOperation): Fresh logical allocation to prepare.
             qubit_map (QubitMap): Current logical-to-physical qubit map.
             bindings (dict[str, Any]): Emit-time bindings for array sizes.
@@ -997,7 +1127,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         ``emit_measure``.
 
         Args:
-            circuit (T): Backend circuit currently being emitted.
+            circuit (T): Engine circuit currently being emitted.
             op (ProjectOperation): The projection operation to emit. Must have
                 already lowered ``project_x`` / ``project_y`` to ``project_z``
                 plus basis-change gates.
@@ -1052,7 +1182,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         correctly.
 
         Args:
-            circuit (T): Backend circuit currently being emitted.
+            circuit (T): Engine circuit currently being emitted.
             op (ResetOperation): The reset operation to emit.
             qubit_map (QubitMap): Current logical-to-physical qubit map.
             bindings (dict[str, Any]): Emit-time bindings for index/size
@@ -1069,23 +1199,23 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         self._checked_emit_reset(circuit, qubit, "ResetOperation")
 
     def _checked_emit_reset(self, circuit: T, qubit: int, operation: str) -> None:
-        """Emit a reset, converting backend refusal into an ``EmitError``.
+        """Emit a reset, converting engine refusal into an ``EmitError``.
 
-        ``GateEmitter.emit_reset`` raises ``NotImplementedError`` on backends
+        ``GateEmitter.emit_reset`` raises ``NotImplementedError`` on engines
         with no reset primitive (e.g. QURI Parts). Letting that raw Python
         exception escape a normal qkernel compile is a UX bug, so every reset
         emission funnels through here and surfaces an actionable compile
         error instead.
 
         Args:
-            circuit (T): Backend circuit currently being emitted.
+            circuit (T): Engine circuit currently being emitted.
             qubit (int): Physical qubit index to reset.
             operation (str): Operation label for the error message
                 (``"ResetOperation"`` or ``"QInitOperation"``).
 
         Raises:
-            EmitError: If the backend emitter does not support reset. The
-                message tells the user to use a reset-capable backend or
+            EmitError: If the engine emitter does not support reset. The
+                message tells the user to use a reset-capable engine or
                 avoid ``qmc.reset`` / fresh in-loop allocation on this one.
         """
         from qamomile.circuit.transpiler.errors import EmitError
@@ -1094,11 +1224,11 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             self._emitter.emit_reset(circuit, qubit)
         except NotImplementedError as e:
             raise EmitError(
-                "This backend cannot emit a qubit reset. "
+                "This engine cannot emit a qubit reset. "
                 "`qmc.reset(...)` and fresh qubit allocation inside a "
                 "runtime loop (which requires a per-iteration reset) need a "
-                "backend with a native reset primitive, e.g. Qiskit or "
-                "CUDA-Q. Either switch backend or restructure the kernel to "
+                "engine with a native reset primitive, e.g. Qiskit or "
+                "CUDA-Q. Either switch engine or restructure the kernel to "
                 "avoid reset on this one.",
                 operation=operation,
             ) from e
@@ -1171,13 +1301,13 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         """Emit a first-class inverse block operation.
 
         Args:
-            circuit (T): Backend circuit being built.
+            circuit (T): Engine circuit being built.
             op (InverseBlockOperation): Inverse block operation to emit.
             qubit_map (QubitMap): Current quantum value to physical qubit map.
             bindings (dict[str, Any]): Active emit bindings.
 
         Raises:
-            EmitError: If neither backend-native inverse emission nor the
+            EmitError: If neither engine-native inverse emission nor the
                 fallback implementation can be emitted.
         """
         emit_inverse_block(self, circuit, op, qubit_map, bindings)
@@ -1227,7 +1357,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
 
         Raises:
             EmitError: Always in the shared base; ``CircuitLoweringPass`` must
-                provide the backend-neutral reusable-call implementation.
+                provide the engine-neutral reusable-call implementation.
         """
         del circuit, op, qubit_map, bindings, outer_control_indices
         raise EmitError(
@@ -1242,9 +1372,9 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         clbit_map: ClbitMap,
         bindings: dict[str, Any],
     ) -> None:
-        """Backend hook: lower ``RuntimeClassicalExpr`` to a backend expr.
+        """Engine hook: lower ``RuntimeClassicalExpr`` to an engine expr.
 
-        The default implementation raises ``EmitError``. A backend that
+        The default implementation raises ``EmitError``. An engine that
         supports runtime classical expressions (e.g. Qiskit 2.x with
         ``qiskit.circuit.classical.expr``) overrides this to translate the
         IR op to its native expression type and store it in
@@ -1253,23 +1383,23 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         ``_emit_while`` can consume it.
 
         Args:
-            circuit: The backend circuit being built.
+            circuit: The engine circuit being built.
             op: The runtime classical expression to lower.
             clbit_map: Map from ``QubitAddress`` → physical clbit index.
             bindings: Current bindings; the result should be written here.
 
         Raises:
-            EmitError: If the backend does not support runtime classical
+            EmitError: If the engine does not support runtime classical
                 expressions.
         """
         from qamomile.circuit.transpiler.errors import EmitError
 
         raise EmitError(
-            f"Backend {type(self).__name__!r} does not support runtime "
+            f"Engine {type(self).__name__!r} does not support runtime "
             f"classical expressions (RuntimeClassicalExpr). The IR contains "
             f"a measurement-derived classical op (kind={op.kind}) that "
             f"cannot be folded at compile time. Either bind the upstream "
-            f"parameters to compile-time constants or use a backend with "
+            f"parameters to compile-time constants or use an engine with "
             f"dynamic-circuit support."
         )
 
@@ -1280,27 +1410,27 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         clbit_map: ClbitMap,
         bindings: dict[str, Any],
     ) -> Any:
-        """Build a backend-specific runtime expression for a classical predicate.
+        """Build an engine-specific runtime expression for a classical predicate.
 
-        Hook for backends that support classical-bit-level expressions in
+        Hook for engines that support classical-bit-level expressions in
         ``if`` / ``while`` conditions (e.g. Qiskit's
         ``qiskit.circuit.classical.expr``). When a ``CompOp`` / ``CondOp`` /
         ``NotOp`` cannot be folded at compile time because its operands are
         runtime measurement bits, the emit dispatch calls this hook to give
-        the backend a chance to express the predicate as a clbit-level
+        the engine a chance to express the predicate as a clbit-level
         expression. The returned object is stored in ``bindings`` keyed by
         the op's result UUID and later consumed by ``_emit_if`` /
         ``_emit_while``.
 
         Args:
-            circuit: The backend circuit being built (for clbit lookups).
+            circuit: The engine circuit being built (for clbit lookups).
             op: The unresolved classical predicate.
             clbit_map: Map from ``QubitAddress`` → physical clbit index.
             bindings: Current bindings (read-only here; mutation happens at
                 the caller).
 
         Returns:
-            A backend-native expression object, or ``None`` if the backend
+            An engine-native expression object, or ``None`` if the engine
             does not support runtime classical predicates (default for the
             base class).
         """
@@ -1315,7 +1445,22 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         target_indices: list[int],
         power: int,
         bindings: dict[str, Any],
+        batch_profile: ControlBatchProfile | None = None,
     ) -> None:
+        """Emit a controlled body through the shared fallback walker.
+
+        Args:
+            circuit (T): Engine circuit being built.
+            block_value (Any): Block whose operations should be controlled.
+            num_controls (int): Number of active control qubits.
+            control_indices (list[int]): Physical control-qubit indices.
+            target_indices (list[int]): Physical target-qubit indices.
+            power (int): Number of controlled body repetitions.
+            bindings (dict[str, Any]): Bindings visible inside the body.
+            batch_profile (ControlBatchProfile | None): Previously resolved
+                profile for this exact body and binding scope. Defaults to
+                ``None``, which lets the fallback resolve it.
+        """
         emit_controlled_fallback(
             self,
             circuit,
@@ -1325,10 +1470,11 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             target_indices,
             power,
             bindings,
+            batch_profile=batch_profile,
         )
 
     def _reserves_multi_control_ancillas(self) -> bool:
-        """Backend hook: opt in to the shared multi-controlled lowering.
+        """Engine hook: opt in to the shared multi-controlled lowering.
 
         When True, ``_emit_quantum_segment`` statically estimates the
         clean-ancilla demand of the segment's multi-controlled gates,
@@ -1338,10 +1484,10 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         decomposition (arXiv:2307.07478, Appendix A.3) on those
         ancillas.
 
-        Backends with a native multi-controlled primitive (e.g. Qiskit's
+        Engines with a native multi-controlled primitive (e.g. Qiskit's
         ``gate.control(k)``, CUDA-Q's ``ctrl`` variants) keep the
         default False so their circuits carry no unused ancilla qubits.
-        A new backend without native multi-control support should
+        A new engine without native multi-control support should
         override this to return True instead of implementing its own
         ``_emit_irreducible_multi_controlled_gate``.
 
@@ -1357,8 +1503,8 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         The reserved pool's indices are physical addresses in the *parent*
         segment's circuit (they sit past that circuit's data qubits). Any
         helper that emits a block into an independent sub-circuit — the
-        reusable-gate probe (``blockvalue_to_gate``) or a backend-native
-        inverse (``_try_emit_backend_inverse``) — MUST run its sub-circuit
+        reusable-gate probe (``blockvalue_to_gate``) or an engine-native
+        inverse (``_try_emit_engine_inverse``) — MUST run its sub-circuit
         emission inside this context so that an irreducible
         multi-controlled gate in the block does not index the parent pool.
         Reusing a parent index in the narrower sub-circuit would either
@@ -1368,7 +1514,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         ``_emit_irreducible_multi_controlled_gate`` finds no pool and
         raises ``EmitError``; the sub-circuit helpers catch it and fall
         back to gate-by-gate emission on the parent circuit, where the
-        pool and the composed control set are both valid. Backends that do
+        pool and the composed control set are both valid. Engines that do
         not reserve a pool (native multi-control) already hold ``None``,
         so the suspension is a no-op for them.
 
@@ -1398,14 +1544,14 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         Toffoli. Single-qubit gates that still carry two or more
         controls after those reductions land here.
 
-        When the backend reserved a clean-ancilla pool (see
+        When the engine reserved a clean-ancilla pool (see
         ``_reserves_multi_control_ancillas``), the gate is lowered
         through the shared Toffoli-cascade decomposition. Otherwise the
-        backend is expected to have native multi-control support and
+        engine is expected to have native multi-control support and
         never reach this hook; reaching it raises a descriptive error.
 
         Args:
-            circuit (T): Backend circuit being built.
+            circuit (T): Engine circuit being built.
             gate_type (GateOperationType): The single-qubit gate to
                 control.
             control_indices (list[int]): Physical control qubits.
@@ -1422,23 +1568,24 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
             raise EmitError(
                 f"Cannot emit {len(control_indices)}-controlled "
                 f"{gate_type.name}: the shared fallback reduces to Toffoli "
-                f"for up to two controls only, and backend "
+                f"for up to two controls only, and engine "
                 f"{type(self).__name__!r} neither reserves ancillas for the "
                 f"shared Toffoli-cascade decomposition "
                 f"(``_reserves_multi_control_ancillas``) nor overrides "
                 f"``_emit_irreducible_multi_controlled_gate``. Run this "
-                f"kernel on a backend with native multi-control support, or "
-                f"enable the shared decomposition in the backend's emit "
+                f"kernel on an engine with native multi-control support, or "
+                f"enable the shared decomposition in the engine's emit "
                 f"pass.",
                 operation="ControlledGate",
             )
 
-        ancillas = self._mc_ancilla_pool.take(len(control_indices) - 1)
+        recipe = clean_ancilla_toffoli_ladder(len(control_indices))
+        ancillas = self._mc_ancilla_pool.take(recipe.clean_ancillas)
         if ancillas is None:
             raise EmitError(
                 f"Multi-controlled {gate_type.name} over "
                 f"{len(control_indices)} controls needs "
-                f"{len(control_indices) - 1} clean ancilla qubit(s), but "
+                f"{recipe.clean_ancillas} clean ancilla qubit(s), but "
                 f"only {self._mc_ancilla_pool.count} were reserved for this "
                 f"segment. This means the count-only demand walk "
                 f"(``_count_multi_control_ancilla_demand``) under-measured "
@@ -1457,11 +1604,11 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
         input_operands: list[Any] | None = None,
         operation_name: str = "ControlledUOperation",
     ) -> Any:
-        """Convert a nested block into a reusable backend gate.
+        """Convert a nested block into a reusable engine gate.
 
         Args:
             block_value (Any): Block-like object to emit into a temporary
-                backend circuit.
+                engine circuit.
             num_qubits (int): Number of qubits in the temporary circuit.
             bindings (dict[str, Any]): Active emit bindings.
             input_operands (list[Any] | None): Optional call-site operands
@@ -1470,7 +1617,7 @@ class StandardEmitPass(EmitPass[T], Generic[T]):
                 input binding fails. Defaults to ``"ControlledUOperation"``.
 
         Returns:
-            Any: Backend gate object, or None when conversion fails.
+            Any: Engine gate object, or None when conversion fails.
         """
         return blockvalue_to_gate(
             self,

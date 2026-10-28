@@ -19,6 +19,49 @@ from qamomile.circuit.ir.operation import GateOperationType, InvokeOperation
 from qamomile.circuit.transpiler.errors import FrontendTransformError
 
 _LIVE_GLOBAL_ANGLE = 0.5
+_OUTER_ANNOTATION_EVALUATIONS = 0
+_NESTED_ANNOTATION_EVALUATIONS = 0
+
+
+def _next_outer_annotation() -> type[qmc.Bit]:
+    """Count and return the outer qkernel annotation.
+
+    Returns:
+        type[qmc.Bit]: Bit handle class used as the return annotation.
+    """
+    global _OUTER_ANNOTATION_EVALUATIONS
+
+    _OUTER_ANNOTATION_EVALUATIONS += 1
+    return qmc.Bit
+
+
+def _mark_nested_annotation() -> type[qmc.Bit]:
+    """Count and return one nested function annotation.
+
+    Returns:
+        type[qmc.Bit]: Bit handle class used as the parameter annotation.
+    """
+    global _NESTED_ANNOTATION_EVALUATIONS
+
+    _NESTED_ANNOTATION_EVALUATIONS += 1
+    return qmc.Bit
+
+
+@qkernel
+def _kernel_with_side_effectful_outer_annotation() -> _next_outer_annotation():
+    """Return a Bit through an eagerly evaluated outer annotation."""
+    return qmc.bit(False)
+
+
+@qkernel
+def _kernel_with_side_effectful_nested_annotation() -> qmc.Bit:
+    """Execute a nested function definition with an eager annotation."""
+
+    def identity(value: _mark_nested_annotation()) -> qmc.Bit:
+        """Return one Bit unchanged."""
+        return value
+
+    return identity(qmc.bit(False))
 
 
 @qkernel
@@ -28,6 +71,26 @@ def _kernel_using_live_global(q: Qubit) -> Qubit:
 
 
 _LIVE_GLOBAL_ANGLE = 1.25
+
+
+def test_transform_does_not_reevaluate_outer_annotations() -> None:
+    """AST recompilation preserves one eager outer annotation evaluation."""
+    assert _OUTER_ANNOTATION_EVALUATIONS == 1
+
+    block = _kernel_with_side_effectful_outer_annotation.build()
+
+    assert block.output_values[0].type.label() == "BitType"
+    assert _OUTER_ANNOTATION_EVALUATIONS == 1
+
+
+def test_transform_preserves_nested_annotation_semantics() -> None:
+    """Nested annotations retain eager evaluation in no-future modules."""
+    assert _NESTED_ANNOTATION_EVALUATIONS == 0
+
+    block = _kernel_with_side_effectful_nested_annotation.build()
+
+    assert block.output_values[0].type.label() == "BitType"
+    assert _NESTED_ANNOTATION_EVALUATIONS == 1
 
 
 @qkernel
