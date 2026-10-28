@@ -24,6 +24,9 @@ from qamomile.circuit.transpiler.passes.analyze import AnalyzePass
 from qamomile.circuit.transpiler.passes.array_bounds_validation import (
     ArrayBoundsValidationPass,
 )
+from qamomile.circuit.transpiler.passes.circuit_shot_validation import (
+    validate_circuit_shot_context,
+)
 from qamomile.circuit.transpiler.passes.compile_time_if_lowering import (
     CompileTimeIfLoweringPass,
     lower_compile_time_ifs_preserving_loop_conditions,
@@ -578,6 +581,9 @@ class Transpiler(ABC, Generic[T]):
         affine = self.unroll_recursion(affine, bindings)
         validated = self.affine_validate(affine)
         partially_evaluated = self.partial_eval(validated, bindings)
+        validate_circuit_shot_context(
+            partially_evaluated, bindings, target=type(self).__name__
+        )
         partially_evaluated = self.array_bounds_check(partially_evaluated)
         partially_evaluated = self.slice_borrow_check(partially_evaluated)
         partially_evaluated = self.strip_slice_ops(partially_evaluated)

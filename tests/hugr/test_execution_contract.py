@@ -84,9 +84,9 @@ def test_invalid_estimation_has_no_provider_effects(
     assert executor.mock_calls == []
 
 
-@pytest.mark.parametrize("target", ["selene", "helios"])
+@pytest.mark.parametrize("target", ["selene", "helios", "nexus"])
 def test_capabilities_declare_supported_accuracy(target):
-    """Both destinations advertise only their implemented shot estimator."""
+    """All destination names advertise only their implemented shot estimator."""
     capabilities = HugrExecutor(target).capabilities
     assert capabilities.supports_estimation
     assert capabilities.estimation_accuracy == frozenset({ShotBased})

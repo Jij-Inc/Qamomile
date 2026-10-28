@@ -95,10 +95,12 @@ from .inverse_block import InverseBlockOperation
 from .operation import Operation
 from .return_operation import ReturnOperation
 from .select import SelectOperation
+from .shot import GetCurrentShotOperation
 from .slice_array import ReleaseSliceViewOperation, SliceArrayOperation
 
 __all__ = [
     "Operation",
+    "GetCurrentShotOperation",
     "ReturnOperation",
     "CallableBodyRef",
     "CallableDef",

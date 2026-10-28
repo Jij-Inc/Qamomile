@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import cast
 
 import sympy as sp
@@ -55,12 +55,50 @@ from qamomile.circuit.estimator._scopes import (
     _LocalBlock,
     build_for_loop_scope,
 )
+from qamomile.circuit.ir.block import Block
 from qamomile.circuit.ir.dataflow import walk_operations
+from qamomile.circuit.ir.operation.callable import InvokeOperation
 from qamomile.circuit.ir.operation.classical_ops import StoreArrayElementOperation
 from qamomile.circuit.ir.operation.control_flow import (
     ForOperation,
     LoopCarriedRebind,
 )
+from qamomile.circuit.ir.operation.operation import Operation
+
+
+def _shot_loop_has_state_changes(
+    operations: Sequence[Operation],
+    strategy_for: Callable[[InvokeOperation], str | None],
+) -> bool:
+    """Find persistent state changes in a bounded context loop's bodies.
+
+    Replacing a variable trip count by its maximum bounds repeated work, but
+    cannot select one definite classical or consumed-qubit state for later
+    program operations.
+
+    Args:
+        operations (Sequence[Operation]): Loop body to inspect.
+        strategy_for (Callable[[InvokeOperation], str | None]): Selected
+            implementation strategy for each invocation.
+
+    Returns:
+        bool: Whether a selected body writes an array or consumes qubits.
+    """
+    pending = [operations]
+    visited: set[int] = set()
+    while pending:
+        for nested in walk_operations(pending.pop()):
+            if isinstance(
+                nested, StoreArrayElementOperation
+            ) or _loop_body_has_destructive_observation((nested,)):
+                return True
+            if not isinstance(nested, InvokeOperation):
+                continue
+            body = nested.select_body(strategy=strategy_for(nested)).body
+            if isinstance(body, Block) and id(body) not in visited:
+                visited.add(id(body))
+                pending.append(body.operations)
+    return False
 
 
 class _ForInterpreter(_ForRegionInterpreter):
@@ -100,6 +138,24 @@ class _ForInterpreter(_ForRegionInterpreter):
             operation,
             resolver,
         )
+        shot_bounded = self._run_state.shot_context.contains(stop)
+        if shot_bounded:
+            alternatives = self._finite_runtime_alternatives(stop)
+            if (
+                start != _ZERO
+                or step != _ONE
+                or alternatives is None
+                or operation.region_args
+                or operation.loop_carried_rebinds
+                or _shot_loop_has_state_changes(
+                    operation.operations, self._strategy_for
+                )
+            ):
+                raise NotImplementedError(
+                    "Resource estimation cannot bound this shot-dependent loop. "
+                    "Use a finite remainder or table with a fixed-cost body."
+                )
+            stop = sp.Max(*alternatives)
         iterations = symbolic_iterations(start, stop, step)
         initial_array_states = self._initial_loop_array_states(operation, resolver)
         specialized_bounds = tuple(
@@ -366,6 +422,17 @@ class _ForInterpreter(_ForRegionInterpreter):
                 estimate,
                 active_when=sp.Gt(iterations, _ZERO),
                 source="for liveness",
+            )
+        if shot_bounded:
+            estimate = estimate._with_metadata(
+                assumptions=(
+                    ResourceAssumption(
+                        "shot-dependent loop resources use the maximum finite "
+                        "trip count and conservative body resources",
+                        source="shot context",
+                    ),
+                ),
+                quality=EstimateQuality.CONSERVATIVE,
             )
         return _with_constraints(
             estimate,

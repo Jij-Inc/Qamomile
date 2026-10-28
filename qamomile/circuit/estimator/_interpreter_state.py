@@ -12,6 +12,7 @@ from typing import Any, cast
 import sympy as sp
 from sympy.logic.boolalg import Boolean
 
+from qamomile.circuit.estimator._array_state import _ArrayReferenceState
 from qamomile.circuit.estimator._classical_facts import (
     _fact_from_expression,
     _ResolvedClassicalFact,
@@ -39,6 +40,7 @@ from qamomile.circuit.estimator._measurement_provenance import (
 from qamomile.circuit.estimator._resolver import (
     ExprResolver,
 )
+from qamomile.circuit.estimator._resolver_indices import _resolve_concrete_array_payload
 from qamomile.circuit.estimator._resource_base import (
     _is_concrete_integer,
     _symbol_display_name,
@@ -49,7 +51,11 @@ from qamomile.circuit.estimator._resource_constraints import (
 from qamomile.circuit.estimator._resource_expressions import (
     _and_conditions,
 )
+from qamomile.circuit.estimator._scopes import _typed_value_symbol
+from qamomile.circuit.estimator._shot_context import _ShotContext
+from qamomile.circuit.estimator._symbolic import _normalize_resource_scalar
 from qamomile.circuit.ir.block import Block
+from qamomile.circuit.ir.operation.arithmetic_operations import BinOp, UnaryMathOp
 from qamomile.circuit.ir.operation.callable import (
     InvokeOperation,
 )
@@ -62,6 +68,7 @@ from qamomile.circuit.ir.operation.operation import (
 )
 from qamomile.circuit.ir.types.primitives import (
     BitType,
+    UIntType,
 )
 from qamomile.circuit.ir.value import (
     Value,
@@ -90,6 +97,7 @@ class _InterpreterRunState:
         tuple[sp.Expr, ...] | None,
     ] = field(default_factory=dict)
     unresolved_resource_symbols: set[sp.Symbol] = field(default_factory=set)
+    shot_context: _ShotContext = field(default_factory=_ShotContext)
     constraint_scope_condition: Boolean = sp.true
     array_constraint_proven: dict[_ResourceConstraint, bool] = field(
         default_factory=dict
@@ -133,6 +141,7 @@ class _InterpreterState(_InterpreterContract):
         config: _ResourceEstimatorConfig,
         bindings: Mapping[str, Any],
         condition_values: Mapping[str, sp.Expr] | None = None,
+        shot_bindings: Mapping[str, Any] | None = None,
     ) -> None:
         """Initialize an interpreter.
 
@@ -142,10 +151,14 @@ class _InterpreterState(_InterpreterContract):
             condition_values (Mapping[str, sp.Expr] | None): Numeric scalar
                 input values used to decide compile-time ``if`` branches and
                 resolve physical dependency indices. Defaults to ``None``.
+            shot_bindings (Mapping[str, Any] | None): Explicit array inputs
+                available only for shot-dependent scalar projection. Defaults
+                to ``None``.
         """
         self.config = config
         self.bindings = bindings
         self._initial_condition_values = condition_values or {}
+        self._shot_bindings = shot_bindings or {}
         # Keep an ad-hoc state available for low-level handler tests that call
         # services directly without entering ``estimate``.
         self._run_state = self._new_run_state()
@@ -157,9 +170,12 @@ class _InterpreterState(_InterpreterContract):
             _InterpreterRunState: State initialized from interpreter-lifetime
             scalar condition values.
         """
-        return _InterpreterRunState(
+        state = _InterpreterRunState(
             condition_values=self._initial_condition_values,
         )
+        state.unresolved_resource_symbols.add(state.shot_context.current)
+        state.runtime_value_domains[state.shot_context.current] = None
+        return state
 
     @property
     def condition_values(self) -> Mapping[str, sp.Expr]:
@@ -486,6 +502,225 @@ class _InterpreterState(_InterpreterContract):
             resolver.bind_classical_fact(
                 result,
                 fact,
+            )
+
+    def _require_nonnegative_shot_uint_candidates(
+        self,
+        expression: sp.Expr,
+    ) -> None:
+        """Reject finite context values outside the supported UInt domain.
+
+        Args:
+            expression (sp.Expr): Context-derived UInt value to check before
+                further arithmetic or resource use.
+
+        Raises:
+            NotImplementedError: If a candidate is negative or its
+                nonnegativity cannot be proved within the bounded analysis.
+        """
+        normalized = self._run_state.shot_context.normalize_remainders(
+            expression,
+            self._run_state.runtime_value_domains,
+            limit=_MAX_RUNTIME_DOMAIN_ALTERNATIVES,
+        )
+        alternatives = self._finite_runtime_alternatives(normalized)
+        if alternatives is None:
+            alternatives = (normalized,)
+        if any(
+            self._apply_condition_values(candidate, record_usage=False).is_nonnegative
+            is not True
+            for candidate in alternatives
+        ):
+            raise NotImplementedError(
+                "Resource estimation cannot bound shot-dependent UInt arithmetic "
+                "that may become negative."
+            )
+
+    def _prepare_shot_values(
+        self,
+        operation: Operation,
+        resolver: ExprResolver,
+    ) -> None:
+        """Resolve bounded context arithmetic and selected scalar array values.
+
+        Args:
+            operation (Operation): Operation about to consume classical data.
+            resolver (ExprResolver): Resolver for the active scope.
+        """
+        shot = self._run_state.shot_context
+        if not shot.used:
+            return
+        visited: set[str] = set()
+
+        def visit(value: Value) -> None:
+            """Prepare indices before their enclosing scalar value.
+
+            Args:
+                value (Value): Scalar whose symbolic expression is prepared.
+            """
+            if value.uuid in visited or value.type.is_quantum():
+                return
+            visited.add(value.uuid)
+            for index in value.element_indices:
+                visit(index)
+            fact = resolver.resolve_classical_fact(value)
+            expression = cast(sp.Expr, fact.value)
+            normalized = shot.normalize_remainders(
+                expression,
+                self._run_state.runtime_value_domains,
+                limit=_MAX_RUNTIME_DOMAIN_ALTERNATIVES,
+            )
+            if isinstance(value.type, UIntType) and shot.contains(normalized):
+                self._require_nonnegative_shot_uint_candidates(normalized)
+            if normalized != expression:
+                self._run_state.unresolved_resource_symbols.update(
+                    symbol
+                    for symbol in shot.derived
+                    if symbol in normalized.free_symbols
+                )
+                resolver.bind_classical_fact(
+                    value,
+                    _ResolvedClassicalFact.create(normalized, fact.dependencies),
+                )
+            if not value.is_array_element() or not any(
+                shot.contains(resolver.resolve(index))
+                for index in value.element_indices
+            ):
+                return
+            if expression.free_symbols & shot.derived:
+                return
+            if resolver._resolve_array_element(value, concrete=False) is not None:
+                return
+            alternatives = [
+                self._finite_runtime_alternatives(resolver.resolve(index))
+                for index in value.element_indices
+            ]
+            selected: list[sp.Expr] = []
+            parent = value.parent_array
+            assert parent is not None
+            state = resolver.snapshot_array_state(parent)
+            payload = (
+                _resolve_concrete_array_payload(
+                    state.array,
+                    self._shot_bindings,
+                    resolve_expression=resolver.resolve,
+                    specialize=lambda expression: self._apply_condition_values(
+                        expression, record_usage=False
+                    ),
+                    source="shot-dependent array",
+                )
+                if isinstance(state, _ArrayReferenceState)
+                else None
+            )
+            if (
+                all(domain is not None for domain in alternatives)
+                and math.prod(
+                    len(domain) for domain in alternatives if domain is not None
+                )
+                <= _MAX_RUNTIME_DOMAIN_ALTERNATIVES
+            ):
+                for indices in itertools.product(
+                    *(domain for domain in alternatives if domain is not None)
+                ):
+                    child = resolver.child_scope(None)
+                    for index, candidate in zip(
+                        value.element_indices, indices, strict=True
+                    ):
+                        child.bind_classical_fact(
+                            index,
+                            _ResolvedClassicalFact.create(candidate),
+                        )
+                    projected = child._resolve_array_element(value, concrete=False)
+                    if (
+                        projected is None
+                        and payload is not None
+                        and all(
+                            isinstance(candidate, sp.Integer) for candidate in indices
+                        )
+                    ):
+                        item = payload
+                        try:
+                            for candidate in indices:
+                                if int(candidate) < 0:
+                                    raise IndexError("negative array index")
+                                item = item[int(candidate)]
+                        except (IndexError, KeyError, TypeError) as error:
+                            raise ValueError(
+                                "Shot-dependent array index is out of bounds."
+                            ) from error
+                        projected = _normalize_resource_scalar(
+                            item,
+                            label="shot-dependent array element",
+                            allow_symbolic=False,
+                            allow_bool=True,
+                        )
+                    if projected is None:
+                        selected.clear()
+                        break
+                    if projected not in selected:
+                        selected.append(projected)
+            symbol = _typed_value_symbol(value, "shot_array_value", fresh=True)
+            shot.derived.add(symbol)
+            self._run_state.unresolved_resource_symbols.add(symbol)
+            self._run_state.runtime_value_domains[symbol] = (
+                tuple(selected) if selected else None
+            )
+            if isinstance(value.type, UIntType):
+                self._require_nonnegative_shot_uint_candidates(symbol)
+            resolver.bind_classical_fact(
+                value,
+                _ResolvedClassicalFact.create(symbol, fact.dependencies),
+            )
+
+        for root in operation.all_input_values():
+            for value in _structural_value_ancestry(root):
+                if isinstance(value, Value):
+                    visit(value)
+
+    def _record_shot_results(
+        self,
+        operation: Operation,
+        resolver: ExprResolver,
+    ) -> None:
+        """Keep unresolved context-derived results private across boundaries.
+
+        Args:
+            operation (Operation): Recently evaluated operation.
+            resolver (ExprResolver): Resolver carrying its result expressions.
+        """
+        shot = self._run_state.shot_context
+        if not shot.used:
+            return
+        has_shot_inputs = any(
+            isinstance(value, Value)
+            and not value.type.is_quantum()
+            and shot.contains(resolver.resolve(value))
+            for root in operation.all_input_values()
+            for value in _structural_value_ancestry(root)
+        )
+        if (
+            has_shot_inputs
+            and isinstance(operation, (BinOp, UnaryMathOp))
+            and any(isinstance(result.type, UIntType) for result in operation.results)
+        ):
+            shot.used_uint_arithmetic = True
+        for result in operation.results:
+            if not isinstance(result, Value) or result.type.is_quantum():
+                continue
+            expression = resolver.resolve(result)
+            if isinstance(result.type, UIntType) and (
+                has_shot_inputs or expression.is_negative is True
+            ):
+                self._require_nonnegative_shot_uint_candidates(expression)
+            if not has_shot_inputs:
+                continue
+            fallback = resolver.unresolved_fallback_symbol(result)
+            if fallback is not None:
+                self._run_state.unresolved_resource_symbols.add(fallback)
+            shot.derived.update(
+                symbol
+                for symbol in self._run_state.unresolved_resource_symbols
+                if symbol in expression.free_symbols
             )
 
     def _finite_runtime_alternatives(

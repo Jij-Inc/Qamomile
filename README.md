@@ -96,6 +96,15 @@ Runtime-only environment from source with qBraid support:
 uv sync --no-dev --extra qbraid
 ```
 
+Runtime-only environment from source with HUGR, Nexus, and H2 conversion support:
+
+```bash
+uv sync --no-dev --extra hugr
+```
+
+The `hugr` extra automatically includes `hugr-qir` on Python 3.11 and 3.12 for H2 conversion.
+H2 execution currently requires one of these Python versions. Helios and local Selene do not need QIR conversion.
+
 Runtime-only environment from source with CUDA-Q v0.14.0 support:
 
 ```bash

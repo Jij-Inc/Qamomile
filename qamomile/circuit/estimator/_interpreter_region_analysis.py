@@ -11,6 +11,7 @@ from sympy.logic.boolalg import Boolean
 from qamomile.circuit.estimator._allocation_width import (
     _without_input_allocation_sites,
 )
+from qamomile.circuit.estimator._classical_facts import _ResolvedClassicalFact
 from qamomile.circuit.estimator._classical_provenance import (
     _classical_fact_runtime_condition,
     _direct_observation_source_conditions,
@@ -145,6 +146,7 @@ from qamomile.circuit.ir.operation.operation import (
 )
 from qamomile.circuit.ir.operation.pauli_evolve import PauliEvolveOp
 from qamomile.circuit.ir.operation.select import SelectOperation
+from qamomile.circuit.ir.operation.shot import GetCurrentShotOperation
 from qamomile.circuit.ir.operation.slice_array import (
     ReleaseSliceViewOperation,
     SliceArrayOperation,
@@ -443,6 +445,7 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
             known_classical_sources: set[str] = set()
             seen_array_constraints: set[_ResourceConstraint] = set()
             for operation in operations:
+                self._prepare_shot_values(operation, resolver)
                 structural_input_sources = _resolved_classical_source_conditions(
                     operation.all_input_values(),
                     resolver,
@@ -473,6 +476,7 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
                     resolver,
                     classical_input_sources,
                 )
+                self._record_shot_results(operation, resolver)
                 classical_output_sources = _resolved_classical_source_conditions(
                     _operation_classical_dependency_outputs(operation),
                     resolver,
@@ -971,6 +975,14 @@ class _RegionAnalysisInterpreter(_ControlBatchingInterpreter):
                 resource estimation.
         """
         match operation:
+            case GetCurrentShotOperation():
+                _require_uncontrolled_operation(operation, controls)
+                self._run_state.shot_context.used = True
+                resolver.bind_classical_fact(
+                    operation.results[0],
+                    _ResolvedClassicalFact.create(self._run_state.shot_context.current),
+                )
+                return ResourceEstimate.zero()
             case _ResourceInlineBoundaryOperation():
                 self._bind_resource_inline_array_states(operation, resolver)
                 _require_concrete_product_formula_structure(

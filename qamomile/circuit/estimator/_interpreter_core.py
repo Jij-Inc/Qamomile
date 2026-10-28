@@ -43,8 +43,11 @@ from qamomile.circuit.estimator._resource_base import (
     _symbol_display_name,
 )
 from qamomile.circuit.estimator._resource_constraints import (
+    _ConstraintOrigin,
+    _ConstraintProvenance,
     _ResourceConstraint,
 )
+from qamomile.circuit.estimator._resource_types import ResourceAssumption
 from qamomile.circuit.estimator._symbol_discovery import (
     _free_symbols,
     _trace_guard_free_symbols,
@@ -394,6 +397,111 @@ class _InterpreterCore(_InterpreterState):
             "Provide concrete structural inputs or rewrite the continuation so "
             "its resource cost does not depend on that runtime value."
         )
+
+    def retain_shot_assumptions(
+        self,
+        estimate: ResourceEstimate,
+    ) -> ResourceEstimate:
+        """Disclose shot arithmetic and unresolved array-validity premises.
+
+        Context-derived UInt arithmetic uses nonnegative mathematical integers
+        and assumes backend integer overflow does not occur.
+        Finite context domains have already been expanded and checked. An
+        unrestricted context index can still select an angle without changing
+        gate resources. Such estimates are conditional on valid array access;
+        execution context must not become a substitutable public input.
+
+        Args:
+            estimate (ResourceEstimate): Specialized estimate to inspect.
+
+        Returns:
+            ResourceEstimate: Estimate retaining public constraints and explicit
+            premises for arithmetic and unresolved context-only array bounds.
+
+        Raises:
+            ValueError: If a context-dependent array bound is provably invalid.
+        """
+        shot = self._run_state.shot_context
+        if not shot.used:
+            return estimate
+        if shot.used_uint_arithmetic:
+            estimate = estimate._with_metadata(
+                assumptions=(
+                    ResourceAssumption(
+                        "resources assume shot-dependent UInt arithmetic uses "
+                        "nonnegative mathematical integers without backend "
+                        "integer overflow",
+                        source="shot UInt arithmetic",
+                    ),
+                ),
+            )
+        retained: list[_ResourceConstraint] = []
+        conditional = False
+        for constraint in estimate._constraints:
+            if (
+                constraint.provenance.origin is not _ConstraintOrigin.ARRAY_ACCESS
+                or not shot.contains(constraint.expression)
+                or constraint.ranges
+                or constraint.expected is not None
+                or constraint.active_when is not sp.true
+                or constraint.minimum is None
+                or bool(
+                    constraint.expression.free_symbols
+                    & self._run_state.runtime_observation_symbols
+                )
+            ):
+                retained.append(constraint)
+                continue
+            slack = constraint.expression - constraint.minimum
+            if slack.is_negative is True:
+                raise ValueError(f"{constraint.label} is invalid for every shot index.")
+            sources = constraint.provenance.source_expressions
+            if len(sources) == 2 and not shot.contains(sources[0]):
+                dimension = cast(sp.Expr, sources[0])
+                dimension_constraint = dataclasses.replace(
+                    constraint,
+                    expression=dimension,
+                    minimum=1,
+                    label="Shot-indexed array dimension",
+                    provenance=_ConstraintProvenance(
+                        origin=_ConstraintOrigin.ARRAY_ACCESS,
+                        source_expressions=(dimension,),
+                    ),
+                )
+                dimension_constraint.validate()
+                retained.append(dimension_constraint)
+            derivative = sp.diff(constraint.expression, shot.current)
+            if derivative.is_nonpositive is True:
+                endpoint = constraint.expression.subs(shot.current, 0)
+                if not shot.contains(endpoint):
+                    public_constraint = dataclasses.replace(
+                        constraint,
+                        expression=endpoint,
+                        provenance=_ConstraintProvenance(
+                            origin=_ConstraintOrigin.ARRAY_ACCESS,
+                            source_expressions=(endpoint,),
+                        ),
+                    )
+                    public_constraint.validate()
+                    retained.append(public_constraint)
+            if slack.is_nonnegative is not True:
+                conditional = True
+        if not conditional and len(retained) == len(estimate._constraints):
+            return estimate
+        estimate = dataclasses.replace(
+            estimate, _constraints=tuple(dict.fromkeys(retained))
+        )
+        if conditional:
+            estimate = estimate._with_metadata(
+                assumptions=(
+                    ResourceAssumption(
+                        "resources assume all shot-dependent array accesses "
+                        "are within their declared array bounds",
+                        source="shot context",
+                    ),
+                ),
+            )
+        return estimate
 
     def _validate_legacy_scalar_bit_rebinds(
         self,
