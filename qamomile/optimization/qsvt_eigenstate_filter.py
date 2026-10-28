@@ -287,7 +287,6 @@ class QSVTEigenstateFilterConverter(MathematicalProblemConverter):
                 ready to bind as ``phi``.
 
         Raises:
-            ImportError: If ``pyqsp`` is not installed.
             ValueError: If ``degree`` is not a positive odd integer, ``delta``
                 is not positive and finite, ``scale`` is zero, non-finite, or
                 exceeds :data:`MAX_POLYNOMIAL_SCALE` in magnitude, or the
@@ -326,15 +325,8 @@ class QSVTEigenstateFilterConverter(MathematicalProblemConverter):
         if cached is not None:
             return list(cached)
 
-        try:
-            from pyqsp.angle_sequence import QuantumSignalProcessingPhases
-            from pyqsp.poly import PolySign
-        except ImportError as error:
-            raise ImportError(
-                "QSVTEigenstateFilterConverter._qsp_phases requires pyqsp. "
-                "Install it with `pip install 'qamomile[qsvt]'`, or pass "
-                "precomputed phases via the `phi` argument of transpile()."
-            ) from error
+        from pyqsp.angle_sequence import QuantumSignalProcessingPhases
+        from pyqsp.poly import PolySign
 
         # Synthesis blocks for seconds inside transpile, so record which filter
         # is being built. INFO rather than stdout: a library has no business
@@ -440,7 +432,6 @@ class QSVTEigenstateFilterConverter(MathematicalProblemConverter):
                 or holds a non-finite phase; or if the phase-synthesis
                 arguments are out of range or jointly break the QSP bound (see
                 :meth:`_qsp_phases`).
-            ImportError: If ``phi`` is omitted and ``pyqsp`` is not installed.
         """
         phases = (
             list(phi) if phi is not None else self._qsp_phases(degree, delta, scale)

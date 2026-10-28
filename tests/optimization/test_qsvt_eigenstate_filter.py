@@ -176,7 +176,6 @@ def test_holding_out_the_constant_shrinks_the_subnormalization() -> None:
 
 def test_qsp_phases_are_odd_length_and_cached() -> None:
     """Phase generation returns degree+1 phases and reuses its cache."""
-    pytest.importorskip("pyqsp")
     model = BinaryModel.from_higher_ising({(0,): 1.0})
     converter = QSVTEigenstateFilterConverter(model)
 
@@ -200,7 +199,6 @@ def test_qsp_phases_log_the_summary_and_demote_pyqsp_output(
     ``DEBUG``. The converter's own one-line summary goes to ``INFO``, leaving a
     downstream application's console untouched.
     """
-    pytest.importorskip("pyqsp")
     model = BinaryModel.from_higher_ising({(0,): 1.0})
     converter = QSVTEigenstateFilterConverter(model)
 
@@ -231,7 +229,6 @@ def test_qsp_phases_reject_a_polynomial_outside_the_qsp_bound() -> None:
     approximate nothing, which surfaces as a filter that keeps ~80% of the
     spectrum instead of 3%.
     """
-    pytest.importorskip("pyqsp")
     model = BinaryModel.from_higher_ising({(0,): 1.0})
     converter = QSVTEigenstateFilterConverter(model)
 
@@ -246,7 +243,6 @@ def test_qsp_phases_reject_a_polynomial_outside_the_qsp_bound() -> None:
 
 def test_qsp_phases_accept_a_bounded_polynomial() -> None:
     """The default combination clears the bound and still synthesizes."""
-    pytest.importorskip("pyqsp")
     model = BinaryModel.from_higher_ising({(0,): 1.0})
     converter = QSVTEigenstateFilterConverter(model)
 
@@ -349,7 +345,6 @@ def test_success_probability_counts_the_states_below_the_threshold(
     ancilla probability is the fraction of eigenstates with energy below
     ``mu`` — the predicate the Lin & Tong binary search thresholds.
     """
-    pytest.importorskip("pyqsp")
     coefficients = {(0,): 1.0, (1,): -1.0, (0, 1): -1.0}
     model = BinaryModel.from_higher_ising(coefficients)
     converter = QSVTEigenstateFilterConverter(model)
@@ -372,7 +367,6 @@ def test_the_predicate_is_unchanged_by_holding_out_the_constant(
     inside the encoding. Only the subnormalization -- and hence the resolution
     -- improves.
     """
-    pytest.importorskip("pyqsp")
     coefficients = {(0,): 1.0, (1,): -1.0, (0, 1): -1.0}
     constant = 5.0
     converter = QSVTEigenstateFilterConverter(
@@ -397,7 +391,6 @@ def test_a_positive_scale_inverts_the_filter(transpiler: Any) -> None:
     spectrum below ``mu``, and negating the polynomial keeps the complementary
     quarter above it.
     """
-    pytest.importorskip("pyqsp")
     coefficients = {(0,): 1.0, (1,): -1.0, (0, 1): -1.0}
     model = BinaryModel.from_higher_ising(coefficients)
     converter = QSVTEigenstateFilterConverter(model)
@@ -416,7 +409,6 @@ def test_a_positive_scale_inverts_the_filter(transpiler: Any) -> None:
 
 def test_sampled_filter_recovers_the_ground_states(transpiler: Any) -> None:
     """Post-selected samples concentrate on the states the filter keeps."""
-    pytest.importorskip("pyqsp")
     coefficients = {(0,): 1.0, (1,): -1.0, (0, 1): -1.0}
     model = BinaryModel.from_higher_ising(coefficients)
     converter = QSVTEigenstateFilterConverter(model)
@@ -562,27 +554,10 @@ def _hide_pyqsp(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(sys.modules, name, None)
 
 
-def test_transpile_without_pyqsp_points_at_the_extra(
+def test_transpile_with_precomputed_phases_skips_phase_synthesis(
     transpiler: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Phase synthesis is the only part that needs the optional dependency.
-
-    Omitting ``phi`` asks the converter to synthesize phases, which is exactly
-    what ``pyqsp`` is for, so a missing install must say how to get it rather
-    than surface a bare module-not-found.
-    """
-    model = BinaryModel.from_higher_ising({(0,): 1.0})
-    converter = QSVTEigenstateFilterConverter(model)
-    _hide_pyqsp(monkeypatch)
-
-    with pytest.raises(ImportError, match=r"qamomile\[qsvt\]"):
-        converter.transpile(transpiler, mu=0.0)
-
-
-def test_transpile_with_precomputed_phases_does_not_need_pyqsp(
-    transpiler: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Passing ``phi`` is the documented escape hatch, so it must really work."""
+    """Compile supplied phases without running phase synthesis."""
     model = BinaryModel.from_higher_ising({(0,): 1.0})
     converter = QSVTEigenstateFilterConverter(model)
     _hide_pyqsp(monkeypatch)
