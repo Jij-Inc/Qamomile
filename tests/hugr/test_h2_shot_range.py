@@ -292,6 +292,8 @@ def test_normalization_guards_no_array_reads_and_rejects_repeated_preparation():
     assert guarded
     assert normalized is not package
     assert package.to_bytes() == before
-    assert SHOT_SUCCESS_TAG in to_h2_qir(normalized)[1]
     with pytest.raises(ExecutionError, match="cannot be applied twice"):
         normalize_h2_shots(normalized, 4, 1)
+    pytest.importorskip("hugr_qir.hugr_to_qir")
+    pytest.importorskip("pyqir")
+    assert SHOT_SUCCESS_TAG in to_h2_qir(normalized)[1]
