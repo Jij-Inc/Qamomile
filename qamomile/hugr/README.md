@@ -74,84 +74,136 @@ references retain output labels so a later process can recover the same typed
 values without converting or submitting the program again. Existing Helios
 references remain compatible.
 
-## Save exact H2 bytes before submission
+## Inspect and save the latest H2 QIR
 
-Use `prepare_h2_submission(package, shots=1024)` with the same bound,
-zero-argument HUGR `Package` with recorded outputs that `HugrExecutor.submit`
-accepts. Preparation runs locally and preserves the original package. It
-normalizes shot reads, applies the existing table-proof fallback when required,
-and returns the final QIR bytes and complete tagged-result recovery context.
-It requires no Nexus client, authentication, or project.
+Ordinary `program.sample(...)` and `program.run(...)` retain the exact H2 QIR
+sent to Nexus. `program.artifact` remains the original HUGR package.
+`program.qir` and `program.qir_info` are read-only properties, initially `None`.
+For one payload, `qir` is `bytes`. For a multi-term expectation it is an ordered
+`tuple[bytes, ...]` containing every payload in that logical operation.
 
-Save the binary bytes separately from the JSON metadata before submitting:
+Preparation binds runtime arguments, normalizes H2 shot numbers, and applies
+range guards and the existing table-proof fallback when needed. All payloads,
+full generated names, targets, and typed restoration context are ready before
+authentication, project lookup, upload, or execution starts. A complete
+operation replaces one immutable latest record. Local preparation or validation
+failure preserves the previous record. A network failure retains the new one.
+Helios, Selene, and constant-only expectations leave the last H2 record unchanged.
+This record describes the last successfully prepared H2 operation, even if no
+remote job was accepted.
+
+Read the properties after the call returns or after catching its exception.
+Qamomile does not save files or pause execution for caller-managed persistence.
+For the single-payload sample above, save the bytes and detached metadata with
+ordinary Python file operations:
 
 ```python
 import json
 from pathlib import Path
 
-from hugr.package import Package
-from qamomile.hugr import (
-    HugrExecutor,
-    NexusExecutionOptions,
-    PreparedH2Submission,
-    prepare_h2_submission,
-)
-
-package = Package.from_bytes(Path("bound-instrumented.hugr").read_bytes())
-prepared = prepare_h2_submission(package, shots=100)
-Path("program.bc").write_bytes(prepared.qir)
-Path("prepared.json").write_text(json.dumps(prepared.to_dict()))
-request = {"name": "my-h2-run-001", "target": "H2-1E"}
-Path("request.json").write_text(json.dumps(request))
-
-executor = HugrExecutor(
-    "nexus",
-    options=NexusExecutionOptions(system_name=request["target"], project="qamomile-demo"),
-)
-handle = executor.submit_prepared(prepared, name=request["name"])
-print(handle.result())
+Path("program.bc").write_bytes(program.qir)
+Path("submission.json").write_text(json.dumps(program.qir_info), encoding="utf-8")
 ```
 
-`submit_prepared` sends `prepared.qir` unchanged and uses the saved shot count.
-Its required `name` is the complete program and job name, with no random suffix.
-The executor supplies the actual device, project, credentials, cost limit, and
-polling settings. A compatible H2 executor can submit the same bytes with a
-separate name. Syntax-check targets retain required shot-success guards and expose status
-and cost without measurement results. Ordinary `submit` uses the same
-preparation and send path while retaining its generated name suffix.
-
-`PreparedH2Submission` is frozen, and its `context` is a detached read-only
-mapping. `shots` and `qir_sha256` are derived properties. `to_dict()` returns
-version `1`, `qir_sha256`, `context`, and `prepared_sha256`. The combined checksum
-covers canonical JSON metadata containing the version, QIR digest, and complete
-context. These checksums detect accidental corruption; they provide no proof
-of authenticity. `from_dict` validates the schema, checksums, LLVM bitcode
-magic, and recovery contract locally. Unknown string context fields survive
-round trips; unsupported versions and extra top-level fields fail validation.
-
-If the submission response is lost, find the existing execute-job ID through
-your own Nexus lookup and attach it to the saved payload:
+`qir_info` returns an independent JSON-compatible dictionary with this shape:
 
 ```python
-loaded = PreparedH2Submission.from_dict(
-    json.loads(Path("prepared.json").read_text()),
-    qir=Path("program.bc").read_bytes(),
+{
+    "version": 1,
+    "operation": "sample",  # "run" for ordinary runs and expectations
+    "shots": 100,  # None for run; each term's count is in its context
+    "submissions": [
+        {
+            "provider": "quantinuum-nexus",
+            "name": "qamomile-hugr-<generated-suffix>",
+            "target": "H2-1E",
+            "qir_sha256": "<digest of the exact uploaded bytes>",
+            "context": {
+                "shots": "100",
+                "package_sha256": "<original bound package digest>",
+                "program_format": "qir",
+                "qir_outputs": "<JSON output labels, types, and widths>",
+                "abi_sha256": "<public input and output contract digest>",
+            },
+        },
+    ],
+}
+```
+
+Guarded payloads also include `shot_success_tag`, `shot_origin`, and
+`h2_package_sha256` in their context. Expectation terms include
+`expectation_sha256`, which identifies the reconstruction recipe. All context
+keys and values are strings accepted by the existing `ExecutionReference`.
+The submissions and QIR tuple use the same term order. The record stores no
+runtime argument values or job IDs. Previously read bytes and dictionaries
+remain unchanged when another call replaces the latest record. Editing a
+returned dictionary cannot change retained data or future requests.
+
+## Reuse QIR from a syntax check
+
+Consecutive compatible H2 calls on the same live program reuse the latest
+payloads without QIR conversion. This requires the same operation, bound
+instrumented packages, shot counts, term order, and H2 shot-origin convention.
+Changing runtime bindings or shot counts generates a new record. Only the
+immediately retained operation is available for reuse, with no history or
+cache indexed by older arguments.
+
+```python
+sc = HugrExecutor("nexus", options=NexusExecutionOptions(system_name="H2-1SC"))
+checked = program.sample(sc, shots=100)
+# Inspect checked.status() and checked.metadata() before continuing.
+hardware = HugrExecutor("nexus", options=NexusExecutionOptions(system_name="H2-1"))
+job = program.sample(hardware, shots=100)
+```
+
+The second call reuses the exact QIR but creates a new upload and execute
+request. Target, name, cost limit, and provider settings belong to each call.
+The recorded name includes the normal generated suffix. Names do not provide
+submission deduplication. An SC success confirms syntax checking, not runtime
+success of every shot's guard.
+
+## Restore after a lost submission response
+
+After a submission exception, save `program.qir_info` if preparation completed.
+Find the existing execute-job IDs through your own Nexus lookup, using the
+saved full names and actual targets. Then use the existing typed restoration
+interface with the original program and runtime bindings:
+
+```python
+from qamomile.circuit.transpiler import ExecutionReference, JobKind, JobSnapshot
+
+info = json.loads(Path("submission.json").read_text(encoding="utf-8"))
+matched_job_ids = ["caller-found-execute-job-id"]
+references = tuple(
+    ExecutionReference(
+        provider=item["provider"],
+        job_ids=(job_id,),
+        target=item["target"],
+        context=item["context"],
+    )
+    for item, job_id in zip(info["submissions"], matched_job_ids, strict=True)
 )
-request = json.loads(Path("request.json").read_text())
-reference = loaded.reference(job_id="caller-found-execute-job-id", target=request["target"])
-restored = executor.retrieve(reference)
+snapshot = JobSnapshot(
+    kind=JobKind(info["operation"]),
+    executions=references,
+    shots=info["shots"],
+)
+restored = program.restore(executor, snapshot, bindings={})
 print(restored.result())
 ```
 
-Use the device that actually received the job as `target`. Each submission
-attempts a new upload and execute request. Qamomile does not deduplicate calls
-by name. Resolve an uncertain response through lookup before making another
-submission.
-Restoration uses the saved output labels and guard metadata, checks every
-required success marker, and hides the private marker from returned rows.
-This low-level interface returns one tag-to-value dictionary per shot.
-Typed `HugrExecutable.restore` still requires its existing ABI and job snapshot
-metadata; preparation from a bare package does not create that metadata.
+Pass the original runtime bindings instead of `{}` for a parameterized program.
+For an expectation, match every ID to its saved term position. Partial submission
+can leave some terms without jobs, and the existing failure cleanup attempts
+to cancel earlier accepted jobs. Complete restoration requires every term's
+existing job and available results.
+
+Restoration validates the package, public result contract, and expectation
+recipe, then retrieves existing jobs without QIR conversion, upload, or execute
+requests. It does not need the saved QIR bytes. Checksums identify matching
+content but do not authenticate saved metadata. Qamomile does not find jobs
+automatically. These properties also do not provide a new-submission interface
+for arbitrary QIR loaded from files in a later process.
 
 This H2 adapter supports Boolean public outputs, including fixed-size
 containers of these values. Public floating-point outputs are rejected before

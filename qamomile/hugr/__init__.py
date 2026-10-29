@@ -11,19 +11,14 @@ retain their measured state with ``Measure``. Direct measurement/reset pairs
 use ``MeasureReset`` when their quantum wire and ordering permit fusion.
 Opaque measurement bits are converted to the existing native Boolean carrier.
 
-``prepare_h2_submission`` exposes final QIR and detached recovery metadata
-before any Nexus client or network operation. ``HugrExecutor.submit_prepared``
-sends those bytes unchanged with a caller-owned job name. The saved context
-restores tagged rows through ``retrieve``; typed executable restoration retains
-its existing ABI and snapshot requirements.
+``HugrExecutable.qir`` and ``qir_info`` expose the latest complete H2 payloads
+and detached restoration metadata from ordinary ``sample`` and ``run`` calls.
+These records are ready before authentication or upload and survive a lost
+submission response. Compatible consecutive H2 calls reuse the exact bytes.
+Existing typed jobs, snapshots, and restoration keep their usual contracts.
 """
 
-from qamomile.hugr._nexus import (
-    NexusExecutionOptions,
-    NexusRegion,
-    PreparedH2Submission,
-    prepare_h2_submission,
-)
+from qamomile.hugr._nexus import NexusExecutionOptions, NexusRegion
 from qamomile.hugr.executable import HugrExecutable
 from qamomile.hugr.execution import (
     HugrExecutionTarget,
@@ -43,6 +38,4 @@ __all__ = [
     "SeleneExecutionOptions",
     "NexusExecutionOptions",
     "NexusRegion",
-    "PreparedH2Submission",
-    "prepare_h2_submission",
 ]

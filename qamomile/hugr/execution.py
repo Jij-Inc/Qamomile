@@ -7,6 +7,7 @@ import hashlib
 import math
 import tempfile
 import threading
+from collections.abc import Mapping, Sequence
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -24,7 +25,8 @@ from qamomile.circuit.transpiler import (
 from qamomile.hugr._nexus import (
     NexusExecutionOptions,
     NexusTransport as _NexusTransport,
-    PreparedH2Submission,
+    _H2Batch,
+    _H2Submission,
 )
 
 if TYPE_CHECKING:
@@ -369,27 +371,48 @@ class HugrExecutor:
             )
         return CompletedExecutionHandle(samples)
 
-    def submit_prepared(
-        self, prepared: PreparedH2Submission, *, name: str
-    ) -> ExecutionHandle[list[dict[str, Any]]]:
-        """Submit exact saved H2 bytes without normalization or conversion.
+    def _prepare_h2_submissions(
+        self,
+        packages: Sequence[Package],
+        shots: int,
+        contexts: Sequence[Mapping[str, str]],
+        reusable: tuple[_H2Submission, ...] = (),
+    ) -> _H2Batch | None:
+        """Prepare an entire H2 operation without provider side effects.
 
         Args:
-            prepared (PreparedH2Submission): Final QIR and fixed shot context.
-            name (str): Complete program and job name without an added suffix.
-                Must contain a non-whitespace character.
+            packages (Sequence[Package]): Ordered bound and instrumented packages.
+            shots (int): Positive repetitions per package.
+            contexts (Sequence[Mapping[str, str]]): Typed restoration identities.
+            reusable (tuple[_H2Submission, ...]): Latest compatible operation.
 
         Returns:
-            ExecutionHandle[list[dict[str, Any]]]: Tagged values for each shot.
+            _H2Batch | None: Prepared H2 requests, or None for Selene and Helios.
 
         Raises:
-            TypeError: If prepared has an incompatible type.
-            ValueError: If the destination is local or not H2, or settings are invalid.
-            Exception: If provider upload or submission fails.
+            Exception: If local validation or QIR conversion fails.
         """
         if self._nexus is None:
-            raise ValueError("Prepared H2 submissions require a Nexus H2 destination")
-        return self._nexus.submit_prepared(prepared, name=name)
+            return None
+        return self._nexus._prepare_h2_submissions(packages, shots, contexts, reusable)
+
+    def _send_h2_submission(
+        self, batch: _H2Batch, index: int
+    ) -> ExecutionHandle[list[dict[str, Any]]]:
+        """Send one request from an already prepared H2 operation.
+
+        Args:
+            batch (_H2Batch): Local payloads and provider settings for this call.
+            index (int): Ordered submission position.
+
+        Returns:
+            ExecutionHandle[list[dict[str, Any]]]: Deferred tagged result rows.
+
+        Raises:
+            Exception: If authentication or provider submission fails.
+        """
+        assert self._nexus is not None
+        return self._nexus._send_h2_submission(batch, index)
 
     def retrieve(
         self, reference: ExecutionReference

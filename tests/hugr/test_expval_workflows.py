@@ -400,6 +400,7 @@ def test_identity_only_workflow_evaluates_classical_result_without_provider(
         parameter_shapes={"values": (2,)},
     )
     executor = Mock(spec=HugrExecutor)
+    executor._prepare_h2_submissions.return_value = None
     job = executable.run(executor, bindings={"values[0]": 0.3, "values[1]": 2.0})
     assert job.result() == pytest.approx((2.5, 0.5, 0.3), abs=1e-12)
     executor.submit.assert_not_called()
