@@ -21,6 +21,12 @@ Transpile MaxCut QAOA to CUDA-Q and run sampling and expectation-value workflows
 :::
 
 :::{card}
+:header: **HUGR Support**
+:link: hugr_support
+Transpile circuits to HUGR, check them locally with Selene, and submit to H2 through Nexus.
+:::
+
+:::{card}
 :header: **Using OMMX Quantum Benchmarks: Implementing and Benchmarking Quantum Algorithms with Qamomile**
 :link: ommx_quantum_benchmarks_qaoa
 Drive QAOA on a LABS instance loaded from the OMMX Quantum Benchmarks dataset and compare against SCIP.
