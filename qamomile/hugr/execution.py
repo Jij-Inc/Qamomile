@@ -24,6 +24,7 @@ from qamomile.circuit.transpiler import (
 from qamomile.hugr._nexus import (
     NexusExecutionOptions,
     NexusTransport as _NexusTransport,
+    PreparedH2Submission,
 )
 
 if TYPE_CHECKING:
@@ -367,6 +368,29 @@ class HugrExecutor:
                 f"Selene returned {len(samples)} shots; expected {shots}"
             )
         return CompletedExecutionHandle(samples)
+
+    def submit_prepared(
+        self, prepared: PreparedH2Submission, *, name: str
+    ) -> ExecutionHandle[list[dict[str, Any]]]:
+        """Submit exact saved H2 bytes without normalization or conversion.
+
+        Args:
+            prepared (PreparedH2Submission): Final QIR and fixed shot context.
+            name (str): Complete program and job name without an added suffix.
+                Must contain a non-whitespace character.
+
+        Returns:
+            ExecutionHandle[list[dict[str, Any]]]: Tagged values for each shot.
+
+        Raises:
+            TypeError: If prepared has an incompatible type.
+            ValueError: If the destination is local or not H2, or settings are invalid.
+            ExecutionError: If an H2 syntax checker cannot verify the shot guard.
+            Exception: If provider upload or submission fails.
+        """
+        if self._nexus is None:
+            raise ValueError("Prepared H2 submissions require a Nexus H2 destination")
+        return self._nexus.submit_prepared(prepared, name=name)
 
     def retrieve(
         self, reference: ExecutionReference

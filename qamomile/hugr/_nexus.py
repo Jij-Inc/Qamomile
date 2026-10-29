@@ -13,6 +13,7 @@ import time
 from collections.abc import Mapping
 from enum import StrEnum
 from numbers import Integral
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
@@ -32,6 +33,10 @@ from qamomile.hugr._shot_range import (
 
 if TYPE_CHECKING:
     from hugr.package import Package
+
+_H2_SHOT_ORIGIN = 1
+_H2_TARGET = re.compile(r"H2-(?:[1-9][0-9]*(?:E|SC)?|Emulator)")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 _NEXUS_STATUS_MAP: Mapping[str, JobStatus] = {
     "SUBMITTED": JobStatus.PENDING,
@@ -172,9 +177,9 @@ def _destination(options: NexusExecutionOptions) -> _NexusDestination:
         if re.fullmatch(r"Helios-[A-Za-z0-9][A-Za-z0-9-]*", name):
             if config is None or kind == "HeliosConfig":
                 return _NexusDestination(name, "hugr", 0)
-        if re.fullmatch(r"H2-(?:[1-9][0-9]*(?:E|SC)?|Emulator)", name):
+        if _H2_TARGET.fullmatch(name):
             if config is None or kind == "QuantinuumConfig":
-                return _NexusDestination(name, "qir", 1)
+                return _NexusDestination(name, "qir", _H2_SHOT_ORIGIN)
     raise ValueError("Nexus execution requires a matching Helios or H2 device config")
 
 
@@ -249,6 +254,225 @@ def _qir_success_tag(
     if int(shot_origin) + int(context["shots"]) >= 2**64:
         raise ValueError("H2 shot guard range must fit unsigned 64-bit integers")
     return success_tag
+
+
+def _prepared_context(context: Mapping[str, str]) -> dict[str, str]:
+    """Validate and detach the recovery context for exact H2 bitcode.
+
+    Args:
+        context (Mapping[str, str]): Output and original package metadata.
+            Unknown string fields are retained for compatible extensions.
+
+    Returns:
+        dict[str, str]: Independently owned, validated context.
+
+    Raises:
+        ValueError: If required metadata, counts, hashes, or guards are invalid.
+    """
+    if not isinstance(context, Mapping) or not all(
+        isinstance(key, str) and key and isinstance(value, str)
+        for key, value in context.items()
+    ):
+        raise ValueError("Prepared H2 context must map non-empty strings to strings")
+    context = dict(context)
+    if (
+        re.fullmatch(r"[1-9][0-9]*", context.get("shots", "")) is None
+        or context.get("program_format") != "qir"
+        or _SHA256.fullmatch(context.get("package_sha256", "")) is None
+    ):
+        raise ValueError(
+            "Prepared H2 context requires valid shots, format, and package hash"
+        )
+    _validate_positive_integer(int(context["shots"]), "prepared shots")
+    outputs = parse_qir_output_manifest(context.get("qir_outputs", ""))
+    success_tag = _qir_success_tag(context, outputs)
+    h2_hash = context.get("h2_package_sha256")
+    if (success_tag is None and h2_hash is not None) or (
+        success_tag is not None
+        and (h2_hash is None or _SHA256.fullmatch(h2_hash) is None)
+    ):
+        raise ValueError("Prepared H2 guard requires its normalized package hash")
+    return context
+
+
+def _prepared_checksum(metadata: Mapping[str, Any]) -> str:
+    """Checksum canonical metadata including the separate QIR digest.
+
+    Args:
+        metadata (Mapping[str, Any]): Version, QIR digest, and validated context.
+
+    Returns:
+        str: SHA-256 checksum for accidental corruption detection.
+    """
+    encoded = json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+@dataclasses.dataclass(frozen=True)
+class PreparedH2Submission:
+    """Own exact H2 QIR bytes and their read-only recovery context.
+
+    This record contains no client, credentials, destination, or job name. Save
+    the QIR as binary and :meth:`to_dict` metadata as JSON before submission.
+    Checksums detect accidental corruption and do not establish authenticity.
+
+    Args:
+        qir (bytes): Final LLVM bitcode sent unchanged to Nexus.
+        context (Mapping[str, str]): Matching output, shot, original package,
+            and optional guard metadata. The record copies this mapping.
+
+    Raises:
+        ValueError: If bitcode magic or recovery metadata is invalid.
+    """
+
+    qir: bytes
+    context: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        """Validate the payload and make its detached context read-only.
+
+        Raises:
+            ValueError: If bitcode magic or recovery metadata is invalid.
+        """
+        if not isinstance(self.qir, bytes) or not self.qir.startswith(b"BC\xc0\xde"):
+            raise ValueError("Prepared H2 QIR must be LLVM bitcode bytes")
+        object.__setattr__(
+            self, "context", MappingProxyType(_prepared_context(self.context))
+        )
+
+    @property
+    def shots(self) -> int:
+        """Return the fixed repetition count.
+
+        Returns:
+            int: Positive count saved in the recovery context.
+        """
+        return int(self.context["shots"])
+
+    @property
+    def qir_sha256(self) -> str:
+        """Return the digest of the exact submitted bytes.
+
+        Returns:
+            str: Lowercase hexadecimal SHA-256 digest.
+        """
+        return hashlib.sha256(self.qir).hexdigest()
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return versioned JSON-compatible metadata without the QIR bytes.
+
+        Returns:
+            dict[str, Any]: Detached metadata with QIR and combined checksums.
+        """
+        metadata = {
+            "version": 1,
+            "qir_sha256": self.qir_sha256,
+            "context": dict(self.context),
+        }
+        return {**metadata, "prepared_sha256": _prepared_checksum(metadata)}
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any], *, qir: bytes) -> PreparedH2Submission:
+        """Load saved metadata and its separately stored QIR bytes.
+
+        Args:
+            data (Mapping[str, Any]): Exact version-one metadata from ``to_dict``.
+            qir (bytes): Separately saved binary LLVM bitcode.
+
+        Returns:
+            PreparedH2Submission: Validated, independently owned payload.
+
+        Raises:
+            ValueError: If the schema, metadata, bytes, or checksums are invalid.
+        """
+        if not isinstance(data, Mapping) or set(data) != {
+            "version",
+            "qir_sha256",
+            "context",
+            "prepared_sha256",
+        }:
+            raise ValueError("Invalid prepared H2 metadata schema")
+        if type(data["version"]) is not int or data["version"] != 1:
+            raise ValueError("Unsupported prepared H2 metadata version")
+        for name in ("qir_sha256", "prepared_sha256"):
+            if not isinstance(data[name], str) or _SHA256.fullmatch(data[name]) is None:
+                raise ValueError(f"Invalid prepared H2 {name}")
+        prepared = cls(qir=qir, context=data["context"])
+        if prepared.qir_sha256 != data["qir_sha256"]:
+            raise ValueError("Prepared H2 QIR checksum mismatch")
+        if prepared.to_dict()["prepared_sha256"] != data["prepared_sha256"]:
+            raise ValueError("Prepared H2 metadata checksum mismatch")
+        return prepared
+
+    def reference(self, *, job_id: str, target: str) -> ExecutionReference:
+        """Attach an independently discovered H2 job ID to saved context.
+
+        Args:
+            job_id (str): Non-empty Nexus execute-job identifier found by caller.
+            target (str): Actual supported H2 device used for that submission.
+
+        Returns:
+            ExecutionReference: Existing tagged-result restoration reference.
+
+        Raises:
+            ValueError: If the job ID or H2 target is invalid.
+        """
+        if not isinstance(job_id, str) or not job_id.strip():
+            raise ValueError("job_id must be a non-empty string")
+        if not isinstance(target, str) or _H2_TARGET.fullmatch(target) is None:
+            raise ValueError("Prepared H2 references require a supported H2 target")
+        return ExecutionReference(
+            provider="quantinuum-nexus",
+            job_ids=(job_id,),
+            target=target,
+            context=self.context,
+        )
+
+
+def prepare_h2_submission(package: Package, shots: int = 1024) -> PreparedH2Submission:
+    """Prepare final H2 bitcode and recovery metadata without contacting Nexus.
+
+    Shot normalization and fallback table proofs leave the original package
+    unchanged. The result can be saved before creating any executor or client.
+
+    Args:
+        package (Package): Bound HUGR package with closed, instrumented ``main``.
+        shots (int): Positive repetition count, default ``1024``.
+
+    Returns:
+        PreparedH2Submission: Final bytes and matching tagged-result context.
+
+    Raises:
+        ValueError: If the repetition count is invalid.
+        ImportError: If H2 conversion dependencies are unavailable.
+        ExecutionError: If normalization, conversion, or output contracts fail.
+    """
+    _validate_positive_integer(shots, "shots")
+    fingerprint = hashlib.sha256(package.to_bytes()).hexdigest()
+    h2_package, guarded = normalize_h2_shots(package, shots, _H2_SHOT_ORIGIN)
+    try:
+        bitcode, outputs = to_h2_qir(h2_package)
+    except _H2AbortError:
+        h2_package, guarded = prepare_h2_shot_range(package, shots, _H2_SHOT_ORIGIN)
+        if not guarded:
+            raise
+        bitcode, outputs = to_h2_qir(h2_package)
+    context = {
+        "shots": str(shots),
+        "package_sha256": fingerprint,
+        "program_format": "qir",
+        "qir_outputs": json.dumps(outputs, sort_keys=True, separators=(",", ":")),
+    }
+    if guarded:
+        context.update(
+            shot_success_tag=SHOT_SUCCESS_TAG,
+            shot_origin=str(_H2_SHOT_ORIGIN),
+            h2_package_sha256=hashlib.sha256(h2_package.to_bytes()).hexdigest(),
+        )
+    try:
+        return PreparedH2Submission(bitcode, context)
+    except ValueError as exc:
+        raise ExecutionError("Invalid H2 shot guard output contract") from exc
 
 
 def _status_name(status: Any) -> str:
@@ -629,29 +853,21 @@ class NexusTransport:
                 )
             return self._named_project
 
-    def submit(self, package: Package, shots: int) -> NexusExecutionHandle:
-        """Select the device format and submit exactly one execution request.
+    def _submission_configuration(
+        self, destination: _NexusDestination
+    ) -> tuple[Any, dict[str, Any]]:
+        """Resolve native configuration and validate per-program cost settings.
 
         Args:
-            package (Package): Instrumented HUGR package with a closed entry point.
-            shots (int): Positive number of shots to execute.
+            destination (_NexusDestination): Actual device and upload format.
 
         Returns:
-            NexusExecutionHandle: Handle returned without waiting for results.
+            tuple[Any, dict[str, Any]]: Native config and optional SDK settings.
 
         Raises:
-            ValueError: If the number of shots or destination is invalid.
-            ImportError: If H2 conversion dependencies are unavailable.
-            ExecutionError: If the program cannot be converted for H2 or a
-                syntax checker cannot verify its required shot-success guard.
-            Exception: If authentication, project resolution, upload,
-                compilation, or submission fails.
+            ValueError: If cost limits are invalid, conflicting, or absent for Helios.
         """
-        _validate_positive_integer(shots, "shots")
-        fingerprint = hashlib.sha256(package.to_bytes()).hexdigest()
         options = self.options
-        destination = _destination(options)
-        target, program_format = destination.target, destination.program_format
         config = options.backend_config
         native_cost = getattr(config, "max_cost", None)
         if native_cost is not None:
@@ -666,58 +882,15 @@ class NexusTransport:
                 "specify one limit or use equal values"
             )
         max_cost = options.max_cost if options.max_cost is not None else native_cost
-        if program_format == "hugr" and max_cost is None:
+        if destination.program_format == "hugr" and max_cost is None:
             raise ValueError("Helios submission requires an explicit max_cost")
         if config is None:
             config = (
-                self._client.HeliosConfig(system_name=target)
-                if program_format == "hugr"
-                else self._client.QuantinuumConfig(device_name=target)
+                self._client.HeliosConfig(system_name=destination.target)
+                if destination.program_format == "hugr"
+                else self._client.QuantinuumConfig(device_name=destination.target)
             )
-        name = f"{options.name}-{uuid4().hex}"
-        context = {"shots": str(shots), "package_sha256": fingerprint}
-        if program_format == "qir":
-            h2_package, guarded = normalize_h2_shots(
-                package, shots, destination.shot_origin
-            )
-            if guarded and target.endswith("SC"):
-                raise ExecutionError(
-                    "H2 syntax checkers return synthetic zero results and cannot "
-                    "verify shot-index guards; use an H2 emulator or hardware"
-                )
-            try:
-                bitcode, outputs = to_h2_qir(h2_package)
-            except _H2AbortError:
-                h2_package, guarded = prepare_h2_shot_range(
-                    package, shots, destination.shot_origin
-                )
-                if not guarded:
-                    raise
-                bitcode, outputs = to_h2_qir(h2_package)
-            context.update(
-                program_format="qir",
-                qir_outputs=json.dumps(outputs, sort_keys=True, separators=(",", ":")),
-            )
-            if guarded:
-                context.update(
-                    shot_success_tag=SHOT_SUCCESS_TAG,
-                    shot_origin=str(destination.shot_origin),
-                    h2_package_sha256=hashlib.sha256(h2_package.to_bytes()).hexdigest(),
-                )
-            try:
-                _qir_success_tag(
-                    context, parse_qir_output_manifest(context["qir_outputs"])
-                )
-            except ValueError as exc:
-                raise ExecutionError("Invalid H2 shot guard output contract") from exc
-            project = self._submission_project()
-            program = self._client.qir.upload(qir=bitcode, name=name, project=project)
-        else:
-            project = self._submission_project()
-            program = self._client.hugr.upload(
-                hugr_package=package, name=name, project=project
-            )
-        kwargs = {
+        settings = {
             key: value
             for key, value in {
                 "max_cost": max_cost,
@@ -728,14 +901,44 @@ class NexusTransport:
             }.items()
             if value is not None
         }
+        return config, settings
+
+    def _start_execution(
+        self,
+        *,
+        program: Any,
+        project: Any,
+        config: Any,
+        settings: Mapping[str, Any],
+        name: str,
+        target: str,
+        context: Mapping[str, str],
+    ) -> NexusExecutionHandle:
+        """Start one uploaded program and retain its exact restoration context.
+
+        Args:
+            program (Any): Uploaded native program reference.
+            project (Any): Resolved Nexus project reference.
+            config (Any): Validated native device configuration.
+            settings (Mapping[str, Any]): Optional per-program SDK settings.
+            name (str): Exact program and execution name.
+            target (str): Actual submitted device.
+            context (Mapping[str, str]): Matching shot and result metadata.
+
+        Returns:
+            NexusExecutionHandle: Handle for the single execution request.
+
+        Raises:
+            Exception: If the Nexus SDK cannot start execution.
+        """
         native = self._client.start_execute_job(
             programs=[program],
-            n_shots=[int(shots)],
+            n_shots=[int(context["shots"])],
             backend_config=config,
             name=name,
             project=project,
             valid_check=True,
-            **kwargs,
+            **settings,
         )
         reference = ExecutionReference(
             provider="quantinuum-nexus",
@@ -743,7 +946,139 @@ class NexusTransport:
             target=target,
             context=context,
         )
-        return NexusExecutionHandle(self._client, native, reference, options)
+        return NexusExecutionHandle(self._client, native, reference, self.options)
+
+    def submit(self, package: Package, shots: int) -> NexusExecutionHandle:
+        """Prepare the selected device format and submit one execution request.
+
+        Args:
+            package (Package): Instrumented HUGR package with a closed entry point.
+            shots (int): Positive number of shots to execute.
+
+        Returns:
+            NexusExecutionHandle: Handle returned without waiting for results.
+
+        Raises:
+            ValueError: If shots, destination, or cost settings are invalid.
+            ImportError: If H2 conversion dependencies are unavailable.
+            ExecutionError: If conversion fails or a syntax checker cannot
+                verify the required shot-success guard.
+            Exception: If authentication, project resolution, upload, or submission fails.
+        """
+        _validate_positive_integer(shots, "shots")
+        destination = _destination(self.options)
+        config, settings = self._submission_configuration(destination)
+        name = f"{self.options.name}-{uuid4().hex}"
+        if destination.program_format == "qir":
+            return self._send_prepared(
+                prepare_h2_submission(package, shots),
+                name=name,
+                destination=destination,
+                config=config,
+                settings=settings,
+            )
+        context = {
+            "shots": str(shots),
+            "package_sha256": hashlib.sha256(package.to_bytes()).hexdigest(),
+        }
+        project = self._submission_project()
+        program = self._client.hugr.upload(
+            hugr_package=package, name=name, project=project
+        )
+        return self._start_execution(
+            program=program,
+            project=project,
+            config=config,
+            settings=settings,
+            name=name,
+            target=destination.target,
+            context=context,
+        )
+
+    def submit_prepared(
+        self, prepared: PreparedH2Submission, *, name: str
+    ) -> NexusExecutionHandle:
+        """Submit saved H2 bytes unchanged with an exact caller-owned name.
+
+        Args:
+            prepared (PreparedH2Submission): Validated bytes and fixed shot context.
+            name (str): Complete non-empty program and execution name. No suffix
+                is added, so callers can use it to match an uncertain submission.
+
+        Returns:
+            NexusExecutionHandle: Handle for the single Nexus execution request.
+
+        Raises:
+            TypeError: If prepared is not a PreparedH2Submission.
+            ValueError: If name, device, shot origin, or cost settings are invalid.
+            ExecutionError: If a syntax checker cannot verify the required guard.
+            Exception: If authentication, project resolution, upload, or submission fails.
+        """
+        if not isinstance(prepared, PreparedH2Submission):
+            raise TypeError("prepared must be a PreparedH2Submission")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("name must be a non-empty string")
+        destination = _destination(self.options)
+        if destination.program_format != "qir":
+            raise ValueError("Prepared H2 submissions require an H2 destination")
+        config, settings = self._submission_configuration(destination)
+        return self._send_prepared(
+            prepared,
+            name=name,
+            destination=destination,
+            config=config,
+            settings=settings,
+        )
+
+    def _send_prepared(
+        self,
+        prepared: PreparedH2Submission,
+        *,
+        name: str,
+        destination: _NexusDestination,
+        config: Any,
+        settings: Mapping[str, Any],
+    ) -> NexusExecutionHandle:
+        """Check device compatibility and send the prepared bytes once.
+
+        Args:
+            prepared (PreparedH2Submission): Validated final bytes and context.
+            name (str): Exact program and execution name.
+            destination (_NexusDestination): Resolved H2 device and shot origin.
+            config (Any): Validated native device configuration.
+            settings (Mapping[str, Any]): Validated optional SDK settings.
+
+        Returns:
+            NexusExecutionHandle: Handle for the single execution request.
+
+        Raises:
+            ValueError: If the saved shot origin differs from the destination.
+            ExecutionError: If a syntax checker cannot verify the required guard.
+            Exception: If authentication, project resolution, upload, or submission fails.
+        """
+        origin = prepared.context.get("shot_origin")
+        if origin is not None and origin != str(destination.shot_origin):
+            raise ValueError(
+                "Prepared H2 shot origin is incompatible with the destination"
+            )
+        if prepared.context.get(
+            "shot_success_tag"
+        ) is not None and destination.target.endswith("SC"):
+            raise ExecutionError(
+                "H2 syntax checkers return synthetic zero results and cannot "
+                "verify shot-index guards; use an H2 emulator or hardware"
+            )
+        project = self._submission_project()
+        program = self._client.qir.upload(qir=prepared.qir, name=name, project=project)
+        return self._start_execution(
+            program=program,
+            project=project,
+            config=config,
+            settings=settings,
+            name=name,
+            target=destination.target,
+            context=prepared.context,
+        )
 
     def retrieve(self, reference: ExecutionReference) -> NexusExecutionHandle:
         """Restore an execution without uploading or rerunning its program.

@@ -57,6 +57,85 @@ references retain output labels so a later process can recover the same typed
 values without converting or submitting the program again. Existing Helios
 references remain compatible.
 
+## Save exact H2 bytes before submission
+
+Use `prepare_h2_submission(package, shots=1024)` with the same bound,
+zero-argument HUGR `Package` with recorded outputs that `HugrExecutor.submit`
+accepts. Preparation runs locally and preserves the original package. It
+normalizes shot reads, applies the existing table-proof fallback when required,
+and returns the final QIR bytes and complete tagged-result recovery context.
+It requires no Nexus client, authentication, or project.
+
+Save the binary bytes separately from the JSON metadata before submitting:
+
+```python
+import json
+from pathlib import Path
+
+from hugr.package import Package
+from qamomile.hugr import (
+    HugrExecutor,
+    NexusExecutionOptions,
+    PreparedH2Submission,
+    prepare_h2_submission,
+)
+
+package = Package.from_bytes(Path("bound-instrumented.hugr").read_bytes())
+prepared = prepare_h2_submission(package, shots=100)
+Path("program.bc").write_bytes(prepared.qir)
+Path("prepared.json").write_text(json.dumps(prepared.to_dict()))
+request = {"name": "my-h2-run-001", "target": "H2-1E"}
+Path("request.json").write_text(json.dumps(request))
+
+executor = HugrExecutor(
+    "nexus",
+    options=NexusExecutionOptions(system_name=request["target"], project="qamomile-demo"),
+)
+handle = executor.submit_prepared(prepared, name=request["name"])
+print(handle.result())
+```
+
+`submit_prepared` sends `prepared.qir` unchanged and uses the saved shot count.
+Its required `name` is the complete program and job name, with no random suffix.
+The executor supplies the actual device, project, credentials, cost limit, and
+polling settings. A compatible H2 executor can submit the same bytes with a
+separate name. Syntax-check targets continue to reject programs with required
+shot-success guards before authentication or upload. Ordinary `submit` uses
+the same preparation and send path while retaining its generated name suffix.
+
+`PreparedH2Submission` is frozen, and its `context` is a detached read-only
+mapping. `shots` and `qir_sha256` are derived properties. `to_dict()` returns
+version `1`, `qir_sha256`, `context`, and `prepared_sha256`. The combined checksum
+covers canonical JSON metadata containing the version, QIR digest, and complete
+context. These checksums detect accidental corruption; they provide no proof
+of authenticity. `from_dict` validates the schema, checksums, LLVM bitcode
+magic, and recovery contract locally. Unknown string context fields survive
+round trips; unsupported versions and extra top-level fields fail validation.
+
+If the submission response is lost, find the existing execute-job ID through
+your own Nexus lookup and attach it to the saved payload:
+
+```python
+loaded = PreparedH2Submission.from_dict(
+    json.loads(Path("prepared.json").read_text()),
+    qir=Path("program.bc").read_bytes(),
+)
+request = json.loads(Path("request.json").read_text())
+reference = loaded.reference(job_id="caller-found-execute-job-id", target=request["target"])
+restored = executor.retrieve(reference)
+print(restored.result())
+```
+
+Use the device that actually received the job as `target`. Each submission
+attempts a new upload and execute request. Qamomile does not deduplicate calls
+by name. Resolve an uncertain response through lookup before making another
+submission.
+Restoration uses the saved output labels and guard metadata, checks every
+required success marker, and hides the private marker from returned rows.
+This low-level interface returns one tag-to-value dictionary per shot.
+Typed `HugrExecutable.restore` still requires its existing ABI and job snapshot
+metadata; preparation from a bare package does not create that metadata.
+
 This H2 adapter supports Boolean public outputs, including fixed-size
 containers of these values. Public floating-point outputs are rejected before
 upload because H2 does not support their QIR output operation. Unsigned integer
