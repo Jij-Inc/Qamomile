@@ -18,7 +18,7 @@ from qamomile.circuit.transpiler import (
     TargetPrecision,
 )
 from qamomile.circuit.transpiler.job import SampleJob
-from qamomile.hugr import HugrExecutor, HugrTranspiler
+from qamomile.hugr import HugrExecutor, HugrTranspiler, NexusExecutionOptions
 from qamomile.hugr._nexus import NexusTransport
 from qamomile.hugr.executable import _HugrSampleJob
 from tests.hugr.test_expval import _measurement, _mock_helios_client, _rotated
@@ -52,7 +52,7 @@ def test_shared_shot_policy_submits_and_restores(
         "qamomile.hugr.execution._NexusTransport",
         lambda options: NexusTransport(options, client=client),
     )
-    executor = HugrExecutor("helios")
+    executor = HugrExecutor("helios", options=NexusExecutionOptions(max_cost=1.0))
     job = energy_program.run(executor, bindings={"theta": 0.0}, **arguments)
     assert client.start_execute_job.call_args.kwargs["n_shots"] == [shots]
     assert job.result() == pytest.approx(1.0, abs=1e-12)
@@ -100,7 +100,13 @@ def test_ordinary_run_ignores_unused_estimation(monkeypatch):
         lambda options: NexusTransport(options, client=client),
     )
     program = HugrTranspiler().transpile(_measurement)
-    assert program.run(HugrExecutor("helios"), estimation=Exact()).result() is False
+    assert (
+        program.run(
+            HugrExecutor("helios", options=NexusExecutionOptions(max_cost=1.0)),
+            estimation=Exact(),
+        ).result()
+        is False
+    )
     assert client.start_execute_job.call_args.kwargs["n_shots"] == [1]
     assert not program.has_parameters
     assert program.parameter_names == []
@@ -136,7 +142,11 @@ def test_cancellation_errors_preserve_submission_failure(monkeypatch):
         parameters=["theta"],
     )
     with pytest.raises(RuntimeError, match="third term submission failed") as caught:
-        program.run(HugrExecutor("helios"), {"theta": 0.0}, estimation=ShotBased(1))
+        program.run(
+            HugrExecutor("helios", options=NexusExecutionOptions(max_cost=1.0)),
+            {"theta": 0.0},
+            estimation=ShotBased(1),
+        )
     assert caught.value is failure
     assert [call.args[0] for call in client.jobs.cancel.call_args_list] == [
         second,
@@ -160,7 +170,7 @@ def test_restore_rejects_malformed_shots_before_retrieval(
         "qamomile.hugr.execution._NexusTransport",
         lambda options: NexusTransport(options, client=client),
     )
-    executor = HugrExecutor("helios")
+    executor = HugrExecutor("helios", options=NexusExecutionOptions(max_cost=1.0))
     snapshot = energy_program.run(executor, {"theta": 0.0}, shots=1).snapshot()
     reference = snapshot.executions[0]
     context = dict(reference.context)

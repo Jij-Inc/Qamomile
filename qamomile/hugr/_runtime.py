@@ -16,7 +16,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -27,6 +27,9 @@ from qamomile.circuit.transpiler import (
     dict_param_key,
     flatten_user_bindings,
 )
+
+if TYPE_CHECKING:
+    from hugr.package import Package
 
 
 class _Kind(StrEnum):
@@ -492,13 +495,13 @@ class PreparedExecution:
     """Hold a submission package and its independent output reconstruction.
 
     Args:
-        package (Any): HUGR package with a zero-argument reporting entrypoint.
+        package (Package): HUGR package with a zero-argument reporting entrypoint.
         output_tags (tuple[str, ...]): Stable required scalar output tags.
         _outputs (tuple[_Schema, ...]): Public output schemas in port order.
         _inputs (tuple[tuple[str, _Schema], ...]): Runtime names and input schemas.
     """
 
-    package: Any
+    package: Package
     output_tags: tuple[str, ...]
     _outputs: tuple[_Schema, ...]
     _inputs: tuple[tuple[str, _Schema], ...] = ()

@@ -9,7 +9,7 @@ import tempfile
 import threading
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.transpiler import (
     CompletedExecutionHandle,
@@ -25,6 +25,9 @@ from qamomile.hugr._nexus import (
     NexusExecutionOptions,
     NexusTransport as _NexusTransport,
 )
+
+if TYPE_CHECKING:
+    from hugr.package import Package
 
 
 class HugrExecutionTarget(StrEnum):
@@ -293,14 +296,14 @@ class HugrExecutor:
         )
 
     def submit(
-        self, package: Any, shots: int = 1024
+        self, package: Package, shots: int = 1024
     ) -> ExecutionHandle[list[dict[str, Any]]]:
         """Submit a zero-argument HUGR entrypoint with recorded outputs.
 
         Use ``HugrExecutable`` for ABI-aware runtime arguments and typed jobs.
 
         Args:
-            package (Any): HUGR package with a zero-argument ``main`` function.
+            package (Package): HUGR package with a zero-argument ``main`` function.
             shots (int): Number of repetitions, default ``1024``.
 
         Returns:

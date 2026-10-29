@@ -22,6 +22,7 @@ from qamomile.circuit.transpiler import (
     QKernelLike,
 )
 from qamomile.circuit.transpiler.errors import TargetCapabilityError
+from qamomile.hugr import NexusExecutionOptions
 from qamomile.hugr._expval import ShotExpectationPlan, prepare_expval
 from qamomile.hugr.lowerer import HugrTarget
 
@@ -386,7 +387,7 @@ def _mock_helios_client(rows_by_term: list[list[tuple[int, ...]]]) -> Any:
         job.id: QsysResult(
             [
                 [
-                    (f"qamomile.output.{index}.0", bool(value))
+                    (f"USER:BOOL:qamomile.output.{index}.0", bool(value))
                     for index, value in enumerate(row)
                 ]
                 for row in rows
@@ -440,7 +441,7 @@ def test_helios_expectation_aggregates_and_restores_independent_term_jobs(monkey
         bindings={"observable": 0.5 * qm_o.X(0) * qm_o.Y(1) + 0.2 * qm_o.Z(0) + 0.7},
         parameters=["theta"],
     )
-    executor = HugrExecutor("helios")
+    executor = HugrExecutor("helios", options=NexusExecutionOptions(max_cost=1.0))
     job = executable.run(executor, bindings={"theta": 0.9}, shots=4)
     assert client.start_execute_job.call_count == 2
     assert all(
@@ -479,7 +480,11 @@ def test_helios_expectation_cancels_submitted_terms_when_later_submission_fails(
         _rotated, bindings={"observable": qm_o.X(0) + qm_o.Z(0)}, parameters=["theta"]
     )
     with pytest.raises(RuntimeError, match="second term rejected"):
-        executable.run(HugrExecutor("helios"), bindings={"theta": 0.9}, shots=1)
+        executable.run(
+            HugrExecutor("helios", options=NexusExecutionOptions(max_cost=1.0)),
+            bindings={"theta": 0.9},
+            shots=1,
+        )
     client.jobs.cancel.assert_called_once_with(first)
 
 
@@ -506,7 +511,7 @@ def test_helios_expectation_cancel_attempts_all_terms_after_provider_errors(
         bindings={"observable": qm_o.X(0) + qm_o.Y(0) + qm_o.Z(0)},
         parameters=["theta"],
     )
-    executor = HugrExecutor("helios")
+    executor = HugrExecutor("helios", options=NexusExecutionOptions(max_cost=1.0))
     job = executable.run(executor, bindings={"theta": 0.9}, shots=1)
     if restored:
         job = executable.restore(executor, job.snapshot(), bindings={"theta": 0.9})
@@ -584,7 +589,7 @@ def test_expectation_restore_rejects_different_observable(monkeypatch, observabl
     original = HugrTranspiler().transpile(
         _rotated, bindings={"observable": qm_o.X(0) + qm_o.Z(0)}, parameters=["theta"]
     )
-    executor = HugrExecutor("helios")
+    executor = HugrExecutor("helios", options=NexusExecutionOptions(max_cost=1.0))
     snapshot = original.run(executor, bindings={"theta": 0.9}, shots=1).snapshot()
     altered = HugrTranspiler().transpile(
         _rotated, bindings={"observable": observable}, parameters=["theta"]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock, create_autospec
 
@@ -17,7 +18,7 @@ from hugr.qsystem.result import QsysResult
 
 from qamomile.circuit.transpiler.errors import ExecutionError
 from qamomile.circuit.transpiler.execution_handle import ExecutionReference, JobStatus
-from qamomile.hugr._nexus import NexusExecutionOptions, NexusTransport
+from qamomile.hugr._nexus import NexusExecutionOptions, NexusTransport, _decode_results
 
 pytestmark = pytest.mark.hugr
 
@@ -28,21 +29,42 @@ def _package():
     Returns:
         SimpleNamespace: Package-shaped object exposing deterministic bytes.
     """
-    return SimpleNamespace(to_bytes=lambda: b"test-hugr-package")
+    return SimpleNamespace(modules=(), to_bytes=lambda: b"test-hugr-package")
 
 
-def _client(records=None, status="COMPLETED"):
+def _raw_records(records):
+    """Represent normalized user fixtures as explicitly prefixed RAW records."""
+    raw = []
+    for shot in records:
+        entries = []
+        for tag, value in shot:
+            primitive = value[0] if isinstance(value, list) and value else value
+            kind = (
+                "BOOL"
+                if isinstance(primitive, bool)
+                else "FLOAT"
+                if isinstance(primitive, float)
+                else "INT"
+            )
+            entries.append((f"USER:{kind}:{tag}", value))
+        raw.append(entries)
+    return raw
+
+
+def _client(records=None, status="COMPLETED", *, raw_records=False):
     """Build a SDK-shaped client that never creates network connections.
 
     Args:
         records (list | None): Tagged shot records, or one default Boolean shot.
         status (str): Initial provider status, defaulting to completed.
+        raw_records (bool): Whether records already have RAW namespace prefixes.
 
     Returns:
         SimpleNamespace: Nexus-shaped client whose service calls are mocks.
     """
     native = SimpleNamespace(id="test-job-id", job_type="execute")
-    downloaded = QsysResult(records if records is not None else [[("result", True)]])
+    records = records if records is not None else [[("result", True)]]
+    downloaded = QsysResult(records if raw_records else _raw_records(records))
     return SimpleNamespace(
         login=Mock(),
         context=SimpleNamespace(
@@ -122,7 +144,7 @@ def test_submission_is_nonblocking_and_forwards_native_settings():
 def test_default_config_and_unique_submission_names():
     """Construct the documented Helios config and avoid Nexus name collisions."""
     client = _client()
-    transport = NexusTransport(client=client)
+    transport = NexusTransport(NexusExecutionOptions(max_cost=1.0), client=client)
     transport.submit(_package(), 1)
     transport.submit(_package(), 1)
     assert client.HeliosConfig.call_args.kwargs == {"system_name": "Helios-1"}
@@ -137,7 +159,9 @@ def test_typed_results_preserve_arrays_scalars_and_shot_order():
         [("bits", [False, True]), ("integer", 3), ("fraction", -0.125)],
     ]
     client = _client(records)
-    handle = NexusTransport(client=client).submit(_package(), 2)
+    handle = NexusTransport(NexusExecutionOptions(max_cost=1.0), client=client).submit(
+        _package(), 2
+    )
     assert handle.result() == [dict(shot) for shot in records]
     assert handle.result() == [dict(shot) for shot in records]
     client.jobs.results.assert_called_once_with(handle.native, allow_incomplete=False)
@@ -164,7 +188,9 @@ def test_typed_results_preserve_arrays_scalars_and_shot_order():
 def test_provider_status_mapping(provider_status, status):
     """Preserve lifecycle distinctions for every documented Nexus state."""
     client = _client(status=provider_status)
-    handle = NexusTransport(client=client).submit(_package(), 1)
+    handle = NexusTransport(NexusExecutionOptions(max_cost=1.0), client=client).submit(
+        _package(), 1
+    )
     assert handle.status() == status
     assert handle.raw_status().status == provider_status
 
@@ -172,7 +198,9 @@ def test_provider_status_mapping(provider_status, status):
 def test_timeout_leaves_remote_job_active_and_can_be_retried():
     """A local timeout neither cancels nor resubmits the existing execution."""
     client = _client(status="RUNNING")
-    handle = NexusTransport(client=client).submit(_package(), 1)
+    handle = NexusTransport(NexusExecutionOptions(max_cost=1.0), client=client).submit(
+        _package(), 1
+    )
     with pytest.raises(TimeoutError):
         handle.result(timeout=0)
     client.jobs.cancel.assert_not_called()
@@ -186,7 +214,7 @@ def test_configured_default_timeout_is_used():
     """Respect a configured zero wait limit while preserving explicit overrides."""
     client = _client(status="QUEUED")
     handle = NexusTransport(
-        NexusExecutionOptions(timeout_seconds=0), client=client
+        NexusExecutionOptions(max_cost=1.0, timeout_seconds=0), client=client
     ).submit(_package(), 1)
     with pytest.raises(TimeoutError):
         handle.result()
@@ -198,7 +226,9 @@ def test_configured_default_timeout_is_used():
 def test_unsuccessful_jobs_do_not_return_partial_results_or_retry(provider_status):
     """Do not report a completed sample from failed or cancelled job items."""
     client = _client(status=provider_status)
-    handle = NexusTransport(client=client).submit(_package(), 1)
+    handle = NexusTransport(NexusExecutionOptions(max_cost=1.0), client=client).submit(
+        _package(), 1
+    )
     with pytest.raises(ExecutionError, match=provider_status):
         handle.result()
     with pytest.raises(ExecutionError, match=provider_status):
@@ -214,7 +244,9 @@ def test_unsuccessful_jobs_do_not_return_partial_results_or_retry(provider_statu
 def test_cancel_uses_provider_request_without_claiming_immediate_completion():
     """Observe asynchronous cancellation through a later status call."""
     client = _client(status="RUNNING")
-    handle = NexusTransport(client=client).submit(_package(), 1)
+    handle = NexusTransport(NexusExecutionOptions(max_cost=1.0), client=client).submit(
+        _package(), 1
+    )
     handle.cancel()
     client.jobs.cancel.assert_called_once_with(handle.native)
     assert handle.status() == JobStatus.RUNNING
@@ -225,9 +257,13 @@ def test_cancel_uses_provider_request_without_claiming_immediate_completion():
 def test_roundtrip_reference_restores_job_without_submission():
     """Restore saved job identifiers and fetch their original output."""
     client = _client()
-    original = NexusTransport(client=client).submit(_package(), 1)
+    original = NexusTransport(
+        NexusExecutionOptions(max_cost=1.0), client=client
+    ).submit(_package(), 1)
     reference = ExecutionReference.from_dict(original.references()[0].to_dict())
-    restored = NexusTransport(client=client).retrieve(reference)
+    restored = NexusTransport(
+        NexusExecutionOptions(max_cost=1.0), client=client
+    ).retrieve(reference)
     client.jobs.get.assert_called_once_with(id="test-job-id")
     assert restored.result() == [{"result": True}]
     client.hugr.upload.assert_called_once()
@@ -248,7 +284,9 @@ def test_invalid_reference_rejected_before_provider_lookup(reference):
     """Reject foreign or incomplete restoration references locally."""
     client = _client()
     with pytest.raises(ValueError):
-        NexusTransport(client=client).retrieve(reference)
+        NexusTransport(NexusExecutionOptions(max_cost=1.0), client=client).retrieve(
+            reference
+        )
     client.login.assert_not_called()
     client.projects.get_or_create.assert_not_called()
     client.jobs.get.assert_not_called()
@@ -260,7 +298,9 @@ def test_restore_rejects_compilation_job():
     client.jobs.get.return_value = SimpleNamespace(job_type="compile")
     reference = ExecutionReference("quantinuum-nexus", ("id",), context={"shots": "1"})
     with pytest.raises(ValueError, match="execute job"):
-        NexusTransport(client=client).retrieve(reference)
+        NexusTransport(NexusExecutionOptions(max_cost=1.0), client=client).retrieve(
+            reference
+        )
 
 
 @pytest.mark.parametrize(
@@ -275,7 +315,9 @@ def test_restore_rejects_compilation_job():
 def test_incomplete_or_ambiguous_result_records_fail(records, shots, message):
     """Reject missing shots and duplicate tags instead of silently corrupting output."""
     client = _client(records)
-    handle = NexusTransport(client=client).submit(_package(), shots)
+    handle = NexusTransport(NexusExecutionOptions(max_cost=1.0), client=client).submit(
+        _package(), shots
+    )
     with pytest.raises(ExecutionError, match=message):
         handle.result()
     assert handle.status() == JobStatus.FAILED
@@ -286,7 +328,9 @@ def test_result_count_must_match_one_program(count):
     """Reject absent or extra result references from a one-program submission."""
     client = _client()
     client.jobs.results.return_value *= count
-    handle = NexusTransport(client=client).submit(_package(), 1)
+    handle = NexusTransport(NexusExecutionOptions(max_cost=1.0), client=client).submit(
+        _package(), 1
+    )
     with pytest.raises(ExecutionError, match="exactly one result"):
         handle.result()
 
@@ -296,7 +340,9 @@ def test_non_hugr_results_are_rejected(raw):
     """Do not reinterpret unrelated SDK result formats as HUGR output."""
     client = _client()
     client.jobs.results.return_value[0].download_result.return_value = raw
-    handle = NexusTransport(client=client).submit(_package(), 1)
+    handle = NexusTransport(NexusExecutionOptions(max_cost=1.0), client=client).submit(
+        _package(), 1
+    )
     with pytest.raises(ExecutionError, match="QsysResult"):
         handle.result()
 
@@ -306,7 +352,9 @@ def test_invalid_shots_do_not_upload(shots):
     """Validate requested shots before remote state can change."""
     client = _client()
     with pytest.raises(ValueError, match="shots"):
-        NexusTransport(client=client).submit(_package(), shots)
+        NexusTransport(NexusExecutionOptions(max_cost=1.0), client=client).submit(
+            _package(), shots
+        )
     client.login.assert_not_called()
     client.context.get_active_project.assert_not_called()
     client.projects.get_or_create.assert_not_called()
@@ -350,7 +398,7 @@ def test_nexus_import_is_optional(monkeypatch):
         raise ImportError(name)
 
     monkeypatch.setattr("qamomile.hugr._nexus.importlib.import_module", missing)
-    NexusExecutionOptions()
+    NexusExecutionOptions(max_cost=1.0)
     with pytest.raises(ImportError, match=r"qamomile\[hugr\]"):
         NexusTransport()
 
@@ -360,7 +408,11 @@ def test_installed_sdk_contract_without_network():
     """Autospec the supported SDK so argument names and result conversion stay real."""
     qnx = pytest.importorskip("qnexus")
     from qnexus.models.job_status import JobStatus as NexusStatus, JobStatusEnum
-    from qnexus.models.references import ExecuteJobRef, ExecutionResultRef
+    from qnexus.models.references import (
+        ExecuteJobRef,
+        ExecutionResultRef,
+        ResultVersions,
+    )
 
     client = _client()
     client.login = create_autospec(qnx.login)
@@ -384,14 +436,15 @@ def test_installed_sdk_contract_without_network():
     )
     ref = create_autospec(ExecutionResultRef, instance=True)
     ref.download_result.return_value = QsysResult(
-        [[("number", 5), ("bits", [True, False])]]
+        _raw_records([[("number", 5), ("bits", [True, False])]])
     )
     client.jobs.results = create_autospec(qnx.jobs.results, return_value=[ref])
     client.jobs.cancel = create_autospec(qnx.jobs.cancel)
     client.jobs.get = create_autospec(qnx.jobs.get, return_value=native)
-    transport = NexusTransport(client=client)
+    transport = NexusTransport(NexusExecutionOptions(max_cost=1.0), client=client)
     handle = transport.submit(_package(), 1)
     assert handle.result() == [{"number": 5, "bits": [True, False]}]
+    ref.download_result.assert_called_once_with(version=ResultVersions.RAW)
     assert transport.retrieve(handle.references()[0]).native is native
     handle.cancel()
     client.login.assert_called_once_with()
@@ -411,7 +464,9 @@ def test_polling_progresses_to_completion_without_resubmission(monkeypatch):
     ]
     pauses = []
     monkeypatch.setattr("qamomile.hugr._nexus.time.sleep", pauses.append)
-    handle = NexusTransport(client=client).submit(_package(), 1)
+    handle = NexusTransport(NexusExecutionOptions(max_cost=1.0), client=client).submit(
+        _package(), 1
+    )
     assert handle.result() == [{"result": True}]
     assert len(pauses) == 2
     client.start_execute_job.assert_called_once()
@@ -422,7 +477,9 @@ def test_uncertain_submission_failure_never_retries():
     client = _client()
     client.start_execute_job.side_effect = ConnectionError("lost response")
     with pytest.raises(ConnectionError, match="lost response"):
-        NexusTransport(client=client).submit(_package(), 1)
+        NexusTransport(NexusExecutionOptions(max_cost=1.0), client=client).submit(
+            _package(), 1
+        )
     client.start_execute_job.assert_called_once()
     client.jobs.results.assert_not_called()
 
@@ -434,7 +491,9 @@ def test_transient_retrieval_failure_can_retry_existing_job():
         ConnectionError("temporarily unavailable"),
         SimpleNamespace(status="COMPLETED"),
     ]
-    handle = NexusTransport(client=client).submit(_package(), 1)
+    handle = NexusTransport(NexusExecutionOptions(max_cost=1.0), client=client).submit(
+        _package(), 1
+    )
     with pytest.raises(ConnectionError):
         handle.result()
     assert handle.result() == [{"result": True}]
@@ -444,7 +503,9 @@ def test_transient_retrieval_failure_can_retry_existing_job():
 def test_result_lock_timeout_does_not_cancel_remote_execution():
     """Bound concurrent callers' local waits without touching the active job."""
     client = _client()
-    handle = NexusTransport(client=client).submit(_package(), 1)
+    handle = NexusTransport(NexusExecutionOptions(max_cost=1.0), client=client).submit(
+        _package(), 1
+    )
     handle._lock.acquire()
     try:
         with pytest.raises(TimeoutError):
@@ -456,20 +517,158 @@ def test_result_lock_timeout_does_not_cancel_remote_execution():
 
 
 def test_raw_user_tags_match_service_normalized_output():
-    """Handle SDK results both before and after service prefix normalization."""
+    """Decode explicitly requested RAW records using the native scalar tag kinds."""
     client = _client(
-        [[("USER:BOOL:bit", True), ("USER:FLOAT:angle", 0.25), ("USER:UINT:count", 2)]]
+        [
+            [
+                ("USER:BOOL:bit", True),
+                ("USER:FLOAT:angle", 0.25),
+                ("USER:UINT:count", 2),
+                ("USER:INT:answer", 14),
+            ]
+        ],
+        raw_records=True,
     )
-    result = NexusTransport(client=client).submit(_package(), 1).result()
-    assert result == [{"bit": True, "angle": 0.25, "count": 2}]
+    result = (
+        NexusTransport(NexusExecutionOptions(max_cost=1.0), client=client)
+        .submit(_package(), 1)
+        .result()
+    )
+    assert result == [{"bit": True, "angle": 0.25, "count": 2, "answer": 14}]
 
 
 def test_prefix_normalization_cannot_overwrite_an_existing_tag():
-    """Reject a raw tag colliding with a service-normalized output."""
-    client = _client([[("USER:BOOL:bit", True), ("bit", False)]])
-    handle = NexusTransport(client=client).submit(_package(), 1)
+    """Reject different raw types that normalize to the same public output name."""
+    client = _client(
+        [[("USER:BOOL:bit", True), ("USER:UINT:bit", 1)]], raw_records=True
+    )
+    handle = NexusTransport(NexusExecutionOptions(max_cost=1.0), client=client).submit(
+        _package(), 1
+    )
     with pytest.raises(ExecutionError, match="ambiguous"):
         handle.result()
+
+
+@pytest.mark.parametrize("json_roundtrip", [False, True])
+def test_raw_metrics_are_ignored_before_user_cardinality_checks(json_roundtrip):
+    """Model robustness includes repeated metrics alongside ordered user outputs."""
+    records = [
+        [
+            ("USER:BOOL:bit", True),
+            ("METRICS:INT:emulator:shot_number", 0),
+            ("METRICS:INT:emulator:shot_number", 1),
+            ("METRICS:BOOL:runtime:LEAKAGE_REPUMP", 0),
+            ("METRICS:FLOAT:runtime:DD_IDLING_THRESHOLD_NS", 0.0),
+            ("METRICS:FLOAT:runtime:experimental:RXY_PHI_VARIANCE", 0.125),
+            ("USER:INT:answer", 14),
+        ]
+    ]
+    if json_roundtrip:
+        records = json.loads(json.dumps(records))
+    assert _decode_results(QsysResult(records), 1, raw_format=True) == [
+        {"bit": True, "answer": 14}
+    ]
+
+
+def test_metrics_reported_in_hugr_issue_3233_are_not_public_outputs():
+    records = [
+        [
+            ("USER:BOOL:bit", True),
+            ("METRICS:INT:RXY_COUNT", 1666),
+            ("METRICS:FLOAT:RXY_PHI_MEAN", 2.3825944284578044),
+            ("METRICS:INT:SHOTTIME_MICROSECONDS", 2716441.52),
+        ]
+    ]
+    raw = QsysResult(json.loads(json.dumps(records)))
+    assert _decode_results(raw, 1, raw_format=True) == [{"bit": True}]
+
+
+@pytest.mark.parametrize("code", [0, 42, 1001])
+@pytest.mark.parametrize("restored", [False, True])
+def test_raw_exit_rejects_even_complete_user_outputs_without_resubmission(
+    code, restored
+):
+    """Provider completion does not guarantee that a shot reached its natural end."""
+    client = _client(
+        [[("USER:BOOL:result", True), ("EXIT:INT:Postselection failed", code)]],
+        raw_records=True,
+    )
+    transport = NexusTransport(NexusExecutionOptions(max_cost=1.0), client=client)
+    handle = transport.submit(_package(), 1)
+    if restored:
+        reference = ExecutionReference.from_dict(
+            json.loads(json.dumps(handle.references()[0].to_dict()))
+        )
+        handle = transport.retrieve(reference)
+    with pytest.raises(ExecutionError, match="shot terminated"):
+        handle.result()
+    with pytest.raises(ExecutionError, match="shot terminated"):
+        handle.result()
+    assert handle.status() == JobStatus.FAILED
+    client.hugr.upload.assert_called_once()
+    client.start_execute_job.assert_called_once()
+    assert client.jobs.results.call_count == 1
+
+
+@pytest.mark.parametrize("prefix", ["_EXCEPTION", "_STDERR", "_STDOUT"])
+def test_raw_exception_context_is_rejected(prefix):
+    """Diagnostic records never masquerade as ordinary complete user output."""
+    records = [[("USER:BOOL:result", True), (f"{prefix}:INT:", 65)]]
+    with pytest.raises(ExecutionError, match="execution error context"):
+        _decode_results(QsysResult(records), 1, raw_format=True)
+
+
+@pytest.mark.parametrize(
+    ("tag", "value"),
+    [
+        ("METRICS:UINT:runtime:MEAS_COUNT", 1),
+        ("METRICS:BAD:runtime:MEAS_COUNT", 1),
+        ("METRICS:INT", 1),
+        ("METRICS:INT:", 1),
+        ("METRICS:INT:runtime:MEAS_COUNT", [1]),
+        ("METRICS:FLOAT:runtime:DD_IDLING_THRESHOLD_NS", "0.0"),
+    ],
+)
+def test_raw_malformed_metrics_are_rejected(tag, value):
+    """Only the documented primitive metric types and complete names are ignored."""
+    with pytest.raises(ExecutionError, match="malformed HUGR metric"):
+        _decode_results(QsysResult([[(tag, value)]]), 1, raw_format=True)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "METRICS:INT:runtime:MEAS_COUNT",
+        "JOB_total_shots",
+        "USER:BOOL:literal",
+        "EXIT:INT:reason",
+        "_EXCEPTION:INT:message",
+    ],
+)
+def test_raw_user_names_preserve_system_like_labels(name):
+    """Classify the raw namespace before removing exactly one USER prefix."""
+    result = _decode_results(
+        QsysResult([[(f"USER:UINT:{name}", 7)]]), 1, raw_format=True
+    )
+    assert result == [{name: 7}]
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["METRICS:INT:runtime:MEAS_COUNT", "EXIT:INT:reason", "USER:BOOL:literal"],
+)
+def test_default_format_treats_all_output_names_literally(name):
+    """DEFAULT strips the protocol prefix, so names cannot classify metadata."""
+    assert _decode_results(QsysResult([[(name, 7)]]), 1) == [{name: 7}]
+
+
+@pytest.mark.parametrize(
+    "tag", ["JOB_total_shots", "JOB:INT:shots", "bit", "USER:ARRAY:x"]
+)
+def test_raw_unknown_namespaces_and_types_are_rejected(tag):
+    """Unrecognized raw records cannot be silently discarded or treated as users."""
+    with pytest.raises(ExecutionError, match="unsupported output tag"):
+        _decode_results(QsysResult([[(tag, 1)]]), 1, raw_format=True)
 
 
 @pytest.mark.parametrize("capacity", [1, np.int64(2), np.uint32(4)])
@@ -484,7 +683,7 @@ def test_integral_capacity_reaches_the_real_sdk_http_boundary(monkeypatch, capac
     http.post.side_effect = ConnectionError("mock execution boundary")
     monkeypatch.setattr("qnexus.client.jobs._execute.get_nexus_client", lambda: http)
     options = NexusExecutionOptions(
-        project=SimpleNamespace(id="project"), n_qubits=capacity
+        max_cost=1.0, project=SimpleNamespace(id="project"), n_qubits=capacity
     )
 
     with pytest.raises(ConnectionError, match="mock execution boundary"):
@@ -497,6 +696,11 @@ def test_integral_capacity_reaches_the_real_sdk_http_boundary(monkeypatch, capac
     assert http.post.call_args.args == ("/api/jobs/v1beta3",)
     definition = http.post.call_args.kwargs["json"]["data"]["attributes"]["definition"]
     assert definition["items"] == [
-        {"program_id": "uploaded-program", "n_shots": 1, "n_qubits": int(capacity)}
+        {
+            "program_id": "uploaded-program",
+            "n_shots": 1,
+            "n_qubits": int(capacity),
+            "max_cost": 1.0,
+        }
     ]
     assert type(definition["items"][0]["n_qubits"]) is int

@@ -15,7 +15,12 @@ from qamomile.circuit.transpiler import (
     RunJob,
     TargetCapabilityError,
 )
-from qamomile.hugr import HugrExecutor, HugrTranspiler, SeleneExecutionOptions
+from qamomile.hugr import (
+    HugrExecutor,
+    HugrTranspiler,
+    NexusExecutionOptions,
+    SeleneExecutionOptions,
+)
 from qamomile.hugr._expval import ShotExpectationWorkflow, prepare_expval
 from qamomile.hugr._nexus import NexusTransport
 from tests.hugr.test_expval import _calling_expectation, _mock_helios_client
@@ -233,7 +238,7 @@ def _helios(monkeypatch, rows):
         "qamomile.hugr.execution._NexusTransport",
         lambda options: NexusTransport(options, client=client),
     )
-    return HugrExecutor("helios"), client
+    return HugrExecutor("helios", options=NexusExecutionOptions(max_cost=1.0)), client
 
 
 def test_expectation_helpers_preserve_unrelated_quantum_calls():

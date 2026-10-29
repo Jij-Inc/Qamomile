@@ -5,6 +5,11 @@ HUGR package. It deliberately bypasses circuit segmentation and CircuitProgram
 so function boundaries, typed dataflow, and hybrid control can be preserved.
 Generated quantum operations use the same ``tket.*`` extensions as Guppy,
 making the result interoperable with the Guppy/HUGR ecosystem.
+
+Destructive measurements consume qubits with ``MeasureFree``. Projections
+retain their measured state with ``Measure``. Direct measurement/reset pairs
+use ``MeasureReset`` when their quantum wire and ordering permit fusion.
+Opaque measurement bits are converted to the existing native Boolean carrier.
 """
 
 from qamomile.hugr._nexus import NexusExecutionOptions, NexusRegion

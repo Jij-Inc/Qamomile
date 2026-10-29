@@ -88,6 +88,7 @@ from qamomile.circuit.transpiler import (
     pair_block_operands,
     validate_program_graph_semantics,
 )
+from qamomile.hugr._measurement import fuse_measure_reset, measure_free
 
 _QuantumOrigin: TypeAlias = tuple[str, int | None]
 _QuantumFootprint: TypeAlias = frozenset[_QuantumOrigin]
@@ -288,8 +289,11 @@ def _lower_module(program: PreparedModule, plan: HugrCompilationPlan) -> Any:
         bindings=program.bindings,
     )
 
+    fuse_measure_reset(module.hugr)
     extensions = [
         tket_exts.quantum(),
+        tket_exts.qsystem(),
+        tket_exts.futures(),
         tket_exts.rotation(),
         tket_exts.bool(),
         tket_exts.global_phase(),
@@ -2730,6 +2734,8 @@ def _select_classical_element(
     )
     [in_bounds] = builder.add_op(compare, index, size)
     valid = builder.add_if(in_bounds, index, *elements)
+    if element_type in (tys.Bool, _hugr_uint_type()):
+        valid.conditional_node.metadata["qamomile.classical_selection.v1"] = 1
     selected = _select_in_bounds(valid, valid.inputs()[0], list(valid.inputs()[1:]), 0)
     valid.set_outputs(selected)
     invalid = valid.add_else()
@@ -3446,8 +3452,6 @@ def _lower_measure(
         EmitError: If an array measurement has no array result or an operand
             wire cannot be resolved.
     """
-    from tket_exts import quantum
-
     operand = operation.operands[0]
     is_array = isinstance(operand, ArrayValue)
     if is_array and not isinstance(operation.results[0], ArrayValue):
@@ -3456,8 +3460,7 @@ def _lower_measure(
     wires = resolved if is_array else [resolved]
     bits = []
     for wire in wires:
-        qubit, bit = builder.add_op(quantum.measure, wire)
-        builder.add_op(quantum.qFree, qubit)
+        bit = measure_free(builder, wire)
         bits.append(bit)
     # Views and SSA versions can share a physical wire under different keys.
     # Retire all measured aliases in one pass so block cleanup cannot free a
@@ -3492,8 +3495,6 @@ def _lower_measure_qfixed(
         EmitError: If the fixed-point carrier is not a nonempty qubit array or
             its declared bit width disagrees with the carrier width.
     """
-    from tket_exts import quantum
-
     from hugr import tys
     from hugr.std.float import FLOAT_OPS_EXTENSION, FLOAT_T, FloatVal
     from hugr.std.int import CONVERSIONS_EXTENSION, int_t
@@ -3525,8 +3526,7 @@ def _lower_measure_qfixed(
     )
     [total] = builder.load(FloatVal(0.0))
     for index, wire in enumerate(carrier):
-        qubit, bit = builder.add_op(quantum.measure, wire)
-        builder.add_op(quantum.qFree, qubit)
+        bit = measure_free(builder, wire)
         for key, live_wire in list(live_qubits.items()):
             if live_wire == wire:
                 live_qubits.pop(key)
@@ -3600,8 +3600,6 @@ def _lower_measure_qint(
         EmitError: If the operand or result type is invalid, the width is
             unresolved or outside zero to 64, or the carrier width disagrees.
     """
-    from tket_exts import quantum
-
     if (
         len(operation.operands) != 1
         or not isinstance(operation.operands[0].type, QUIntType)
@@ -3617,8 +3615,7 @@ def _lower_measure_qint(
         raise EmitError("HUGR QInt measurement width disagrees with its qubit carrier")
     bits = []
     for wire in carrier:
-        qubit, bit = builder.add_op(quantum.measure, wire)
-        builder.add_op(quantum.qFree, qubit)
+        bit = measure_free(builder, wire)
         bits.append(bit)
     consumed = set(carrier)
     for key, wire in list(live_qubits.items()):

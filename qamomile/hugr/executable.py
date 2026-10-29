@@ -18,6 +18,7 @@ from qamomile.circuit.transpiler import (
     CompletedExecutionHandle,
     CompositeExecutionHandle,
     EstimationAccuracy,
+    ExecutionError,
     ExecutionHandle,
     ExecutionReference,
     ExecutionSnapshot,
@@ -26,6 +27,7 @@ from qamomile.circuit.transpiler import (
     Job,
     JobKind,
     JobSnapshot,
+    JobStatus,
     MappedExecutionHandle,
     ProgramABI,
     RunJob,
@@ -263,10 +265,29 @@ class _DecodedExecutionHandle(MappedExecutionHandle[list[dict[str, Any]], list[A
             prepared (_PreparedExecution): Submission schema.
             shots (int): Expected number of shots.
         """
-        super().__init__(source, partial(_decode_rows, prepared=prepared, shots=shots))
+        super().__init__(source, partial(self._decode, prepared=prepared, shots=shots))
+        self._decode_error: ExecutionError | None = None
         self._abi_sha256 = prepared.abi_sha256
         self._package_sha256 = hashlib.sha256(prepared.package.to_bytes()).hexdigest()
         self._shots = shots
+
+    def _decode(
+        self, rows: list[dict[str, Any]], prepared: _PreparedExecution, shots: int
+    ) -> list[Any]:
+        """Keep output-schema failures terminal without caching retrieval errors."""
+        if self._decode_error is not None:
+            raise self._decode_error
+        try:
+            return _decode_rows(rows, prepared, shots)
+        except (TypeError, ValueError, RuntimeError) as error:
+            self._decode_error = ExecutionError(f"HUGR result decoding failed: {error}")
+            raise self._decode_error from error
+
+    def status(self) -> JobStatus:
+        """Report incompatible public results as failed execution."""
+        if self._decode_error is not None:
+            return JobStatus.FAILED
+        return super().status()
 
     def references(self) -> tuple[ExecutionReference, ...]:
         """Attach shape-aware ABI identity to the provider references.

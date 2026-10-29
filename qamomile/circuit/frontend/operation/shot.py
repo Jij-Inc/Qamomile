@@ -8,18 +8,22 @@ from qamomile.circuit.ir.value import Value
 
 
 def get_current_shot() -> UInt:
-    """Read the zero-based shot index within the current program execution.
+    """Read the current shot number supplied by the execution target.
 
     Repeated reads in one shot return the same value. HUGR targets implement
     this device context; circuit SDK targets reject it during compilation.
-    Local Selene starts at zero for each sample submission. Nexus forwards
-    native indices; provider-internal splitting and retries are not assigned
-    Qamomile offsets. Restoring a job retrieves existing results without
-    another submission.
+    Local Selene starts at zero for each sample submission. H2 execution
+    subtracts the internal device origin of one from every shot read,
+    independently of table access, and checks the raw device number before
+    running user operations. Helios uses an internal zero-origin policy and
+    preserves device shot reads unchanged; its hardware origin is unverified.
+    Provider-internal splitting and retries are not assigned Qamomile offsets.
+    Restoring a job retrieves existing results without another submission.
 
     Returns:
-        UInt: Device-supplied index, suitable for runtime classical operations
-            and fixed-size classical parameter-table selection.
+        UInt: Logical shot number under the target's internal origin policy.
+            Supports runtime classical operations and fixed-size classical
+            parameter-table selection.
 
     Raises:
         RuntimeError: If called outside an active qkernel trace.

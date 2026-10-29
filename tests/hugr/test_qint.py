@@ -275,8 +275,8 @@ def test_qint_supported_widths_validate_without_quantum_simulation(
     compiled = getattr(HugrTranspiler(), method)(_bound_qint, bindings={"width": width})
     counts = _operation_counts(compiled.artifact)
     assert counts["tket.quantum.QAlloc"] == width
-    assert counts["tket.quantum.Measure"] == width
-    assert counts["tket.quantum.QFree"] == width
+    assert counts["tket.quantum.MeasureFree"] == width
+    assert counts["tket.quantum.QFree"] == 0
     assert isinstance(compiled.abi.output_values[0].type, UIntType)
     assert not any("float" in name for name in counts)
     assert not any(
@@ -349,8 +349,8 @@ def test_qint_callable_abi_executes_on_selene(tmp_path, width: int) -> None:
     executable = HugrTranspiler().transpile(_called_qint, bindings={"width": width})
     counts = _operation_counts(executable.artifact)
     assert counts["tket.quantum.QAlloc"] == width
-    assert counts["tket.quantum.Measure"] == width
-    assert counts["tket.quantum.QFree"] == width
+    assert counts["tket.quantum.MeasureFree"] == width
+    assert counts["tket.quantum.QFree"] == 0
     assert (
         sum(
             isinstance(data.op, ops.Call)
@@ -392,8 +392,8 @@ def test_qint_bit_order_and_residual_carriers_execute_on_selene(
     executable = HugrTranspiler().transpile(kernel)
     counts = _operation_counts(executable.artifact)
     assert counts["tket.quantum.QAlloc"] == allocations
-    assert counts["tket.quantum.Measure"] == measurements
-    assert counts["tket.quantum.QFree"] == allocations
+    assert counts["tket.quantum.MeasureFree"] == measurements
+    assert counts["tket.quantum.QFree"] == allocations - measurements
     executor = HugrExecutor(options=SeleneExecutionOptions(build_dir=tmp_path, seed=17))
     assert executable.run(executor).result() == expected
 
@@ -446,4 +446,4 @@ def test_serialized_qint_calls_keep_the_hugr_width_boundary(width):
         compiled = HugrTranspiler().compile(
             restored, bindings={"width": width, "tag": 0}
         )
-        assert _operation_counts(compiled.artifact)["tket.quantum.Measure"] == width
+        assert _operation_counts(compiled.artifact)["tket.quantum.MeasureFree"] == width

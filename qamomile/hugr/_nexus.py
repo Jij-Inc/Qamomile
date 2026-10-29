@@ -13,7 +13,7 @@ import time
 from collections.abc import Mapping
 from enum import StrEnum
 from numbers import Integral
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from qamomile.circuit.transpiler import (
@@ -22,8 +22,16 @@ from qamomile.circuit.transpiler import (
     ExecutionReference,
     JobStatus,
 )
-from qamomile.hugr._qir import to_h2_qir
+from qamomile.hugr._qir import _H2AbortError, to_h2_qir
 from qamomile.hugr._qir_results import decode_qir_results, parse_qir_output_manifest
+from qamomile.hugr._shot_range import (
+    SHOT_SUCCESS_TAG,
+    normalize_h2_shots,
+    prepare_h2_shot_range,
+)
+
+if TYPE_CHECKING:
+    from hugr.package import Package
 
 _NEXUS_STATUS_MAP: Mapping[str, JobStatus] = {
     "SUBMITTED": JobStatus.PENDING,
@@ -47,6 +55,15 @@ class NexusRegion(StrEnum):
 
 
 @dataclasses.dataclass(frozen=True)
+class _NexusDestination:
+    """Keep device-specific execution conventions inside the transport."""
+
+    target: str
+    program_format: Literal["hugr", "qir"]
+    shot_origin: int
+
+
+@dataclasses.dataclass(frozen=True)
 class NexusExecutionOptions:
     """Configure execution on a Helios or H2 target through Nexus.
 
@@ -63,10 +80,17 @@ class NexusExecutionOptions:
         system_name (str): Device name, defaulting to ``Helios-1``. Helios
             receives HUGR; H2 receives automatically converted QIR. H2 requires
             Python 3.11 or 3.12 with the ``hugr`` extra and Bit public outputs.
+            Every H2 shot read uses a zero-based logical index, normalized from
+            the internal device origin before QIR conversion. Helios uses an
+            internal zero-based origin policy and preserves shot reads without
+            rewriting the upload; its device origin remains unverified.
         name (str): Program and job name prefix. Each submission receives a
             unique suffix, including separate expectation measurement jobs.
         max_cost (float | None): Optional maximum HQC cost for each submitted
-            program. This is not an aggregate expectation-estimation budget.
+            program. Required when submitting to Helios; saved jobs can be
+            restored without it. A deprecated native config limit is used
+            when omitted, and conflicting limits are rejected. This is not
+            an aggregate expectation-estimation budget.
         n_qubits (int | None): Optional maximum qubit count passed to Nexus.
         credential_name (str | None): Name of a credential already in Nexus.
         user_group (str | None): Nexus user group for scheduling.
@@ -120,14 +144,14 @@ class NexusExecutionOptions:
         _destination(self)
 
 
-def _destination(options: NexusExecutionOptions) -> tuple[str, str]:
+def _destination(options: NexusExecutionOptions) -> _NexusDestination:
     """Resolve the actual device and submission format before provider calls.
 
     Args:
         options (NexusExecutionOptions): Native config or device-name selection.
 
     Returns:
-        tuple[str, str]: Device name and ``hugr`` or ``qir`` format.
+        _NexusDestination: Target, program format, and internal shot origin.
 
     Raises:
         ValueError: If a device or native config family is unsupported.
@@ -147,10 +171,10 @@ def _destination(options: NexusExecutionOptions) -> tuple[str, str]:
     if isinstance(name, str):
         if re.fullmatch(r"Helios-[A-Za-z0-9][A-Za-z0-9-]*", name):
             if config is None or kind == "HeliosConfig":
-                return name, "hugr"
+                return _NexusDestination(name, "hugr", 0)
         if re.fullmatch(r"H2-(?:[1-9][0-9]*(?:E|SC)?|Emulator)", name):
             if config is None or kind == "QuantinuumConfig":
-                return name, "qir"
+                return _NexusDestination(name, "qir", 1)
     raise ValueError("Nexus execution requires a matching Helios or H2 device config")
 
 
@@ -189,6 +213,44 @@ def _validate_positive_integer(value: Any, name: str) -> None:
         raise ValueError(f"{name} must be a positive integer")
 
 
+def _qir_success_tag(
+    context: Mapping[str, str], outputs: Mapping[str, tuple[str, int]]
+) -> str | None:
+    """Read the required success output from a saved execution reference.
+
+    Args:
+        context (Mapping[str, str]): Saved execution settings, including shots
+            and the origin used when the submitted program was prepared.
+        outputs (Mapping[str, tuple[str, int]]): Validated QIR output manifest.
+
+    Returns:
+        str | None: Private Boolean tag to check on every shot and omit from
+        public results, or ``None`` for an unguarded program.
+
+    Raises:
+        ValueError: If the success output or origin is missing, malformed,
+            inconsistent, or outside the unsigned 64-bit shot range.
+    """
+    success_tag = context.get("shot_success_tag")
+    shot_origin = context.get("shot_origin")
+    if success_tag is None:
+        if shot_origin is not None or SHOT_SUCCESS_TAG in outputs:
+            raise ValueError("QIR shot marker requires a mandatory success output")
+        return None
+    if (
+        not isinstance(success_tag, str)
+        or not success_tag
+        or not isinstance(shot_origin, str)
+        or re.fullmatch(r"0|[1-9][0-9]*", shot_origin) is None
+        or outputs.get(success_tag) != ("bool", 1)
+        or (SHOT_SUCCESS_TAG in outputs and success_tag != SHOT_SUCCESS_TAG)
+    ):
+        raise ValueError("Invalid H2 shot guard contract")
+    if int(shot_origin) + int(context["shots"]) >= 2**64:
+        raise ValueError("H2 shot guard range must fit unsigned 64-bit integers")
+    return success_tag
+
+
 def _status_name(status: Any) -> str:
     """Read the enum value from a Nexus status record.
 
@@ -214,12 +276,39 @@ def _map_status(status: Any) -> JobStatus:
     return _NEXUS_STATUS_MAP.get(_status_name(status), JobStatus.UNKNOWN)
 
 
-def _decode_results(raw: Any, shots: int) -> list[dict[str, Any]]:
+def _raw_output_tag(tag: str, values: list[Any]) -> str | None:
+    """Classify a RAW record before interpreting its user-provided name."""
+    parts = tag.split(":", 2)
+    if parts[0] in ("EXIT", "_EXCEPTION", "_STDERR", "_STDOUT"):
+        raise ExecutionError(
+            f"Nexus HUGR shot terminated or contains execution error context: {tag}"
+        )
+    if len(parts) == 3 and parts[0] == "USER":
+        if parts[1] in ("BOOL", "INT", "UINT", "FLOAT") and parts[2]:
+            return parts[2]
+    if parts[0] == "METRICS":
+        if (
+            len(parts) == 3
+            and parts[1] in ("BOOL", "INT", "FLOAT")
+            and parts[2]
+            and all(type(value) in (bool, int, float) for value in values)
+        ):
+            return None
+        raise ExecutionError(f"Nexus returned a malformed HUGR metric: {tag}")
+    raise ExecutionError(f"Nexus returned an unsupported output tag: {tag}")
+
+
+def _decode_results(
+    raw: Any, shots: int, *, raw_format: bool = False
+) -> list[dict[str, Any]]:
     """Preserve typed tagged outputs without overwriting repeated records.
 
     Args:
         raw (Any): Native HUGR ``QsysResult`` returned by Nexus.
         shots (int): Required number of completed shots.
+        raw_format (bool): Whether the result was downloaded with RAW version 4.
+            RAW records retain their namespace and type prefixes. The default
+            treats every tag as a literal user name from DEFAULT version 3.
 
     Returns:
         list[dict[str, Any]]: One tag-to-value mapping per shot.
@@ -242,17 +331,18 @@ def _decode_results(raw: Any, shots: int) -> list[dict[str, Any]]:
         collated = shot.collate_tags()
         record = {}
         for tag, values in collated.items():
-            if not isinstance(tag, str) or len(values) != 1:
+            if not isinstance(tag, str):
+                raise ExecutionError(
+                    f"Nexus returned an invalid HUGR output tag: {tag!r}"
+                )
+            if raw_format:
+                tag = _raw_output_tag(tag, values)
+                if tag is None:
+                    continue
+            if len(values) != 1:
                 raise ExecutionError(
                     f"Nexus output tag {tag!r} must have exactly one value per shot"
                 )
-            if tag.startswith("USER:"):
-                parts = tag.split(":", 2)
-                if len(parts) != 3 or parts[1] not in ("BOOL", "FLOAT", "UINT"):
-                    raise ExecutionError(
-                        f"Nexus returned an unsupported output tag: {tag}"
-                    )
-                tag = parts[2]
             if tag in record:
                 raise ExecutionError(f"Nexus output tag {tag!r} is ambiguous")
             record[tag] = values[0]
@@ -351,16 +441,29 @@ class NexusExecutionHandle(ExecutionHandle[list[dict[str, Any]]]):
                     "Nexus must return exactly one result for one submitted program"
                 )
                 raise self._result_error
-            raw = refs[0].download_result()
+            is_qir = self._reference.context.get("program_format") == "qir"
+            if is_qir:
+                raw = refs[0].download_result()
+            else:
+                from qnexus.models.references import ResultVersions
+
+                raw = refs[0].download_result(version=ResultVersions.RAW)
             try:
                 shots = int(self._reference.context["shots"])
-                if self._reference.context.get("program_format") == "qir":
+                if is_qir:
                     outputs = parse_qir_output_manifest(
                         self._reference.context["qir_outputs"]
                     )
-                    self._result = decode_qir_results(raw, shots, outputs)
+                    success_tag = _qir_success_tag(self._reference.context, outputs)
+                    self._result = (
+                        decode_qir_results(
+                            raw, shots, outputs, required_success_tag=success_tag
+                        )
+                        if success_tag is not None
+                        else decode_qir_results(raw, shots, outputs)
+                    )
                 else:
-                    self._result = _decode_results(raw, shots)
+                    self._result = _decode_results(raw, shots, raw_format=True)
             except ExecutionError as exc:
                 self._result_error = exc
                 raise
@@ -526,11 +629,11 @@ class NexusTransport:
                 )
             return self._named_project
 
-    def submit(self, package: Any, shots: int) -> NexusExecutionHandle:
+    def submit(self, package: Package, shots: int) -> NexusExecutionHandle:
         """Select the device format and submit exactly one execution request.
 
         Args:
-            package (Any): Instrumented HUGR package with a closed entry point.
+            package (Package): Instrumented HUGR package with a closed entry point.
             shots (int): Positive number of shots to execute.
 
         Returns:
@@ -539,15 +642,32 @@ class NexusTransport:
         Raises:
             ValueError: If the number of shots or destination is invalid.
             ImportError: If H2 conversion dependencies are unavailable.
-            ExecutionError: If the program cannot be converted for H2.
+            ExecutionError: If the program cannot be converted for H2 or a
+                syntax checker cannot verify its required shot-success guard.
             Exception: If authentication, project resolution, upload,
                 compilation, or submission fails.
         """
         _validate_positive_integer(shots, "shots")
         fingerprint = hashlib.sha256(package.to_bytes()).hexdigest()
         options = self.options
-        target, program_format = _destination(options)
+        destination = _destination(options)
+        target, program_format = destination.target, destination.program_format
         config = options.backend_config
+        native_cost = getattr(config, "max_cost", None)
+        if native_cost is not None:
+            _validate_seconds(native_cost, "backend_config.max_cost", True)
+        if (
+            options.max_cost is not None
+            and native_cost is not None
+            and options.max_cost != native_cost
+        ):
+            raise ValueError(
+                "max_cost conflicts with backend_config.max_cost; "
+                "specify one limit or use equal values"
+            )
+        max_cost = options.max_cost if options.max_cost is not None else native_cost
+        if program_format == "hugr" and max_cost is None:
+            raise ValueError("Helios submission requires an explicit max_cost")
         if config is None:
             config = (
                 self._client.HeliosConfig(system_name=target)
@@ -557,11 +677,39 @@ class NexusTransport:
         name = f"{options.name}-{uuid4().hex}"
         context = {"shots": str(shots), "package_sha256": fingerprint}
         if program_format == "qir":
-            bitcode, outputs = to_h2_qir(package)
+            h2_package, guarded = normalize_h2_shots(
+                package, shots, destination.shot_origin
+            )
+            if guarded and target.endswith("SC"):
+                raise ExecutionError(
+                    "H2 syntax checkers return synthetic zero results and cannot "
+                    "verify shot-index guards; use an H2 emulator or hardware"
+                )
+            try:
+                bitcode, outputs = to_h2_qir(h2_package)
+            except _H2AbortError:
+                h2_package, guarded = prepare_h2_shot_range(
+                    package, shots, destination.shot_origin
+                )
+                if not guarded:
+                    raise
+                bitcode, outputs = to_h2_qir(h2_package)
             context.update(
                 program_format="qir",
                 qir_outputs=json.dumps(outputs, sort_keys=True, separators=(",", ":")),
             )
+            if guarded:
+                context.update(
+                    shot_success_tag=SHOT_SUCCESS_TAG,
+                    shot_origin=str(destination.shot_origin),
+                    h2_package_sha256=hashlib.sha256(h2_package.to_bytes()).hexdigest(),
+                )
+            try:
+                _qir_success_tag(
+                    context, parse_qir_output_manifest(context["qir_outputs"])
+                )
+            except ValueError as exc:
+                raise ExecutionError("Invalid H2 shot guard output contract") from exc
             project = self._submission_project()
             program = self._client.qir.upload(qir=bitcode, name=name, project=project)
         else:
@@ -572,7 +720,7 @@ class NexusTransport:
         kwargs = {
             key: value
             for key, value in {
-                "max_cost": options.max_cost,
+                "max_cost": max_cost,
                 "n_qubits": options.n_qubits,
                 "credential_name": options.credential_name,
                 "user_group": options.user_group,
@@ -625,11 +773,16 @@ class NexusTransport:
             raise ValueError("Nexus reference has an unsupported program format")
         if program_format == "qir":
             try:
-                parse_qir_output_manifest(reference.context["qir_outputs"])
+                outputs = parse_qir_output_manifest(reference.context["qir_outputs"])
+                _qir_success_tag(reference.context, outputs)
             except (KeyError, ValueError) as exc:
                 raise ValueError(
                     "Nexus reference must contain valid QIR outputs"
                 ) from exc
+        elif any(
+            name in reference.context for name in ("shot_success_tag", "shot_origin")
+        ):
+            raise ValueError("H2 shot guard contract requires QIR results")
         self._authenticate()
         native = self._client.jobs.get(id=reference.job_ids[0])
         kind = getattr(native, "job_type", None)
