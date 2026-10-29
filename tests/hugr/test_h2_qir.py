@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -12,7 +13,7 @@ import pytest
 
 import qamomile.circuit as qmc
 import qamomile.observable as qm_o
-from qamomile.circuit.transpiler import JobSnapshot
+from qamomile.circuit.transpiler import JobSnapshot, JobStatus
 from qamomile.circuit.transpiler.errors import ExecutionError
 from qamomile.hugr import HugrExecutor, HugrTranspiler, NexusExecutionOptions
 from qamomile.hugr._nexus import NexusTransport
@@ -280,19 +281,46 @@ def test_provider_metadata_failure_recovers_after_reload_without_resubmission(
 
 
 @pytest.mark.parametrize("target", ["H2-1SC", "H2-2SC"])
-def test_guarded_syntax_checker_is_rejected_before_provider_operations(
-    monkeypatch, target
-):
+def test_guarded_syntax_checker_preserves_cost_and_restoration(monkeypatch, target):
+    """SC jobs keep their guards and lifecycle without exposing synthetic samples."""
+    from qamomile.hugr._shot_range import SHOT_SUCCESS_TAG
     from tests.hugr.test_current_shot import _read_bits
 
+    pyqir = _require_converter()
     client = _install_h2_client(monkeypatch, ["qamomile.output.0.0"], [[0], [0]])
     program = HugrTranspiler().transpile(_read_bits, bindings={"values": [False, True]})
+    original = program.artifact.to_bytes()
     executor = HugrExecutor("nexus", options=NexusExecutionOptions(system_name=target))
-    with pytest.raises(ExecutionError, match="syntax checkers.*synthetic zero"):
-        program.sample(executor, shots=2)
-    client.login.assert_not_called()
-    client.qir.upload.assert_not_called()
-    client.start_execute_job.assert_not_called()
+    job = program.sample(executor, shots=2)
+    bitcode = client.qir.upload.call_args.kwargs["qir"]
+    ir = str(pyqir.Module.from_bitcode(pyqir.Context(), bitcode))
+    assert SHOT_SUCCESS_TAG in ir
+    assert "@abort" not in ir
+    assert program.artifact.to_bytes() == original
+    assert job.status() is JobStatus.COMPLETED
+    assert job.raw_status().cost == 1.25
+    assert job.metadata()["cost"] == 1.25
+    saved = JobSnapshot.from_dict(json.loads(json.dumps(job.snapshot().to_dict())))
+    reference = saved.executions[0]
+    assert reference.target == target
+    assert reference.context["shot_success_tag"] == SHOT_SUCCESS_TAG
+    assert reference.context["shot_origin"] == "1"
+    monkeypatch.setattr(
+        "qamomile.hugr._nexus.to_h2_qir",
+        Mock(side_effect=AssertionError("Restoration must not reconvert")),
+    )
+    restored = program.restore(HugrExecutor("nexus"), saved)
+    for handle in (job, restored):
+        with pytest.raises(ExecutionError, match="syntax-check.*measurement"):
+            handle.result()
+        assert handle.status() is JobStatus.COMPLETED
+        assert handle.snapshot().to_dict() == saved.to_dict()
+    restored.cancel()
+    client.jobs.cancel.assert_called_once_with(restored.native)
+    client.jobs.results.assert_not_called()
+    assert client.login.call_count == 2
+    client.qir.upload.assert_called_once()
+    client.start_execute_job.assert_called_once()
 
 
 @pytest.mark.parametrize("layout", ["scalar", "blocked", "interleaved"])

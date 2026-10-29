@@ -233,13 +233,12 @@ def test_h2_submission_preserves_settings_names_and_original_fingerprint(convert
     "error",
     [ImportError("converter unavailable"), ExecutionError("unsupported program")],
 )
-def test_conversion_failure_has_no_remote_submission(converter, error):
+@pytest.mark.parametrize("target", ["H2-1E", "H2-1SC"])
+def test_conversion_failure_has_no_remote_submission(converter, error, target):
     """Fail before either upload operation when H2 conversion cannot succeed."""
     client = _client()
     converter.side_effect = error
-    transport = NexusTransport(
-        NexusExecutionOptions(system_name="H2-1E"), client=client
-    )
+    transport = NexusTransport(NexusExecutionOptions(system_name=target), client=client)
     with pytest.raises(type(error), match=str(error)):
         transport.submit(_package(), 1)
     client.login.assert_not_called()
@@ -248,6 +247,23 @@ def test_conversion_failure_has_no_remote_submission(converter, error):
     client.qir.upload.assert_not_called()
     client.hugr.upload.assert_not_called()
     client.start_execute_job.assert_not_called()
+
+
+def test_syntax_checker_without_shot_reads_does_not_return_synthetic_samples(converter):
+    """SC measurement retrieval is unavailable even when no shot guard is needed."""
+    client = _client()
+    converter.return_value = (_BITCODE, {"left": ("bool", 1)})
+    client.jobs.results.return_value[0].download_result.return_value = SimpleNamespace(
+        get_bitlist=Mock(return_value=[SimpleNamespace(reg_name="left", index=[0])]),
+        get_shots=Mock(return_value=[[0]]),
+    )
+    handle = NexusTransport(
+        NexusExecutionOptions(system_name="H2-1SC"), client=client
+    ).submit(_package(), 1)
+    with pytest.raises(ExecutionError, match="syntax-check.*measurement"):
+        handle.result()
+    assert handle.status() is JobStatus.COMPLETED
+    client.jobs.results.assert_not_called()
 
 
 def test_h2_conversion_precedes_authentication_and_project_resolution(converter):
