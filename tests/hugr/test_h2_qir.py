@@ -404,3 +404,32 @@ def test_real_converter_expectation_uses_bit_outputs_and_restores(monkeypatch, l
     )
     client.qir.upload.assert_called_once()
     client.start_execute_job.assert_called_once()
+
+
+def test_syntax_checker_expectation_preserves_each_cost_and_restoration(monkeypatch):
+    """SC expectation jobs retain every term without producing an expectation value."""
+    _require_converter()
+    pytest.importorskip("pytket")
+    client = _install_h2_client(monkeypatch, ["qamomile.output.0.0"], [[0], [0], [0]])
+    program = HugrTranspiler().transpile(
+        _rotated,
+        bindings={"observable": qm_o.Z(0) + qm_o.X(0)},
+        parameters=["theta"],
+    )
+    executor = HugrExecutor(
+        "nexus", options=NexusExecutionOptions(system_name="H2-1SC")
+    )
+    bindings = {"theta": 0.25}
+    job = program.run(executor, bindings=bindings, shots=3)
+    assert job.status() is JobStatus.COMPLETED
+    assert [child["cost"] for child in job.metadata()["children"]] == [1.25, 1.25]
+    saved = JobSnapshot.from_dict(json.loads(json.dumps(job.snapshot().to_dict())))
+    restored = program.restore(HugrExecutor("nexus"), saved, bindings)
+    for handle in (job, restored):
+        with pytest.raises(ExecutionError, match="syntax-check.*measurement"):
+            handle.result()
+        assert handle.status() is JobStatus.COMPLETED
+        assert handle.snapshot().to_dict() == saved.to_dict()
+    assert client.qir.upload.call_count == 2
+    assert client.start_execute_job.call_count == 2
+    client.jobs.results.assert_not_called()

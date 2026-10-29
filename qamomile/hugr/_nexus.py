@@ -353,6 +353,9 @@ def _decode_results(
 class NexusExecutionHandle(ExecutionHandle[list[dict[str, Any]]]):
     """Adapt one Nexus execute job without resubmitting unsuccessful work.
 
+    H2 syntax-check jobs expose status, cost, and restoration references, but
+    their synthetic outputs are unavailable as measurement results.
+
     Args:
         client (Any): Imported ``qnexus`` module or a compatible test client.
         native (Any): Native Nexus execute-job reference.
@@ -398,13 +401,20 @@ class NexusExecutionHandle(ExecutionHandle[list[dict[str, Any]]]):
         Raises:
             ValueError: If the timeout is invalid.
             TimeoutError: If the lock or status wait exceeds the deadline.
-            ExecutionError: If the remote job fails, is cancelled, or returns
-                malformed or incomplete results.
+            ExecutionError: If the saved target is an H2 syntax checker, or
+                the remote job fails, is cancelled, or returns malformed or
+                incomplete results.
             Exception: If the Nexus SDK cannot retrieve status or results.
         """
         effective = self._options.timeout_seconds if timeout is None else timeout
         if effective is not None:
             _validate_seconds(effective, "timeout", True)
+        target = self._reference.target
+        if target is not None and re.fullmatch(r"H2-[1-9][0-9]*SC", target):
+            raise ExecutionError(
+                "H2 syntax-check jobs do not provide measurement results; "
+                "use status(), raw_status(), or metadata() for syntax status and cost"
+            )
         deadline = None if effective is None else time.monotonic() + effective
         acquired = (
             self._lock.acquire()
@@ -642,8 +652,7 @@ class NexusTransport:
         Raises:
             ValueError: If the number of shots or destination is invalid.
             ImportError: If H2 conversion dependencies are unavailable.
-            ExecutionError: If the program cannot be converted for H2 or a
-                syntax checker cannot verify its required shot-success guard.
+            ExecutionError: If the program cannot be converted for H2.
             Exception: If authentication, project resolution, upload,
                 compilation, or submission fails.
         """
@@ -680,11 +689,6 @@ class NexusTransport:
             h2_package, guarded = normalize_h2_shots(
                 package, shots, destination.shot_origin
             )
-            if guarded and target.endswith("SC"):
-                raise ExecutionError(
-                    "H2 syntax checkers return synthetic zero results and cannot "
-                    "verify shot-index guards; use an H2 emulator or hardware"
-                )
             try:
                 bitcode, outputs = to_h2_qir(h2_package)
             except _H2AbortError:

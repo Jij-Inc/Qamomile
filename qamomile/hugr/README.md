@@ -51,6 +51,23 @@ Supported H2 names are numbered hardware, emulator, and syntax-check targets
 such as `H2-1`, `H2-1E`, and `H2-1SC`, plus `H2-Emulator`. Unsupported device
 families are rejected before upload.
 
+Select an H2 syntax checker with the same `sample`, `run`, or executor `submit`
+interface used for hardware and emulators. Shot-dependent programs retain the
+same shot-number normalization, runtime range guard, and private success output
+in their submitted QIR. Local conversion and range validation still happen
+before upload.
+
+H2 syntax-check jobs provide compiler status and cost instead of measurement
+results. Refresh their provider state with `job.status()` or `job.raw_status()`;
+`job.metadata()` then includes `cost` when the provider supplies it. Cancellation
+and `job.snapshot()` work through the existing job interface. Expectation jobs
+group each measurement job's metadata under `children`. For all H2
+syntax-check jobs, `job.result()` raises `ExecutionError` without downloading
+synthetic measurements or changing a completed job to failed. This behavior
+also applies after restoration, using the target saved in the snapshot.
+Hardware and emulator results continue to require the private success output
+for every guarded shot.
+
 Runtime bindings, typed sampling, expectation estimation, cancellation, and
 job restoration use the existing HUGR execution interface. H2 restoration
 references retain output labels so a later process can recover the same typed
