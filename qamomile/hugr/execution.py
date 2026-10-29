@@ -385,7 +385,6 @@ class HugrExecutor:
         Raises:
             TypeError: If prepared has an incompatible type.
             ValueError: If the destination is local or not H2, or settings are invalid.
-            ExecutionError: If an H2 syntax checker cannot verify the shot guard.
             Exception: If provider upload or submission fails.
         """
         if self._nexus is None:

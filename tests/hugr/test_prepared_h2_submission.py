@@ -429,10 +429,10 @@ def test_prepared_submit_rejects_incompatible_guard_origin_before_authentication
 
 
 @pytest.mark.parametrize("fallback", [False, True])
-def test_final_prepared_guard_rejects_syntax_checker_before_authentication(
+def test_final_prepared_guard_preserves_syntax_checker_submission(
     monkeypatch, converted, fallback
 ):
-    """Reject guards produced by normalization or fallback proof at the send boundary."""
+    """Send normalized and fallback guards while keeping syntax-check results unavailable."""
     guarded = SimpleNamespace(to_bytes=lambda: b"guarded-hugr-package")
     monkeypatch.setattr(
         "qamomile.hugr._nexus.normalize_h2_shots",
@@ -451,11 +451,15 @@ def test_final_prepared_guard_rejects_syntax_checker_before_authentication(
     transport = NexusTransport(
         NexusExecutionOptions(system_name="H2-1SC"), client=client
     )
-    with pytest.raises(ExecutionError, match="syntax checkers.*synthetic zero"):
-        transport.submit_prepared(prepared, name="caller-check-001")
-    client.login.assert_not_called()
-    client.qir.upload.assert_not_called()
-    client.start_execute_job.assert_not_called()
+    handle = transport.submit_prepared(prepared, name="caller-check-001")
+    assert client.qir.upload.call_args.kwargs["qir"] == prepared.qir
+    assert handle.references()[0].context == prepared.context
+    with pytest.raises(ExecutionError, match="syntax-check.*measurement"):
+        handle.result()
+    client.login.assert_called_once()
+    client.qir.upload.assert_called_once()
+    client.start_execute_job.assert_called_once()
+    client.jobs.results.assert_not_called()
 
 
 @pytest.mark.parametrize("prepared_call", [False, True])

@@ -39,6 +39,7 @@ TUTORIAL_PATTERNS = [
 OPTIONAL_SKIP_MODULES: dict[str, tuple[str, ...]] = {
     "vqe_for_hydrogen": ("openfermion",),
     "braket_support": ("braket",),
+    "hugr_support": ("hugr", "tket_exts", "selene_sim"),
     "cudaq_support": ("cudaq",),
     "qsci": ("quri_parts",),
     "quri_parts_support": ("quri_parts.qulacs",),

@@ -21,6 +21,12 @@ MaxCut QAOAをCUDA-Qへトランスパイルし、サンプリングと期待値
 :::
 
 :::{card}
+:header: **HUGRサポート**
+:link: hugr_support
+回路をHUGRへ変換し、Seleneでのローカル実行とNexus経由でのH2実機への送信を紹介します。
+:::
+
+:::{card}
 :header: **OMMX Quantum Benchmarksの活用: Qamomileによる量子アルゴリズムの実装とベンチマーク**
 :link: ommx_quantum_benchmarks_qaoa
 OMMX Quantum Benchmarksから取得したLABSインスタンス上でQAOAを動かし、SCIPと比較します。

@@ -577,6 +577,9 @@ def _decode_results(
 class NexusExecutionHandle(ExecutionHandle[list[dict[str, Any]]]):
     """Adapt one Nexus execute job without resubmitting unsuccessful work.
 
+    H2 syntax-check jobs expose status, cost, and restoration references, but
+    their synthetic outputs are unavailable as measurement results.
+
     Args:
         client (Any): Imported ``qnexus`` module or a compatible test client.
         native (Any): Native Nexus execute-job reference.
@@ -622,13 +625,20 @@ class NexusExecutionHandle(ExecutionHandle[list[dict[str, Any]]]):
         Raises:
             ValueError: If the timeout is invalid.
             TimeoutError: If the lock or status wait exceeds the deadline.
-            ExecutionError: If the remote job fails, is cancelled, or returns
-                malformed or incomplete results.
+            ExecutionError: If the saved target is an H2 syntax checker, or
+                the remote job fails, is cancelled, or returns malformed or
+                incomplete results.
             Exception: If the Nexus SDK cannot retrieve status or results.
         """
         effective = self._options.timeout_seconds if timeout is None else timeout
         if effective is not None:
             _validate_seconds(effective, "timeout", True)
+        target = self._reference.target
+        if target is not None and re.fullmatch(r"H2-[1-9][0-9]*SC", target):
+            raise ExecutionError(
+                "H2 syntax-check jobs do not provide measurement results; "
+                "use status(), raw_status(), or metadata() for syntax status and cost"
+            )
         deadline = None if effective is None else time.monotonic() + effective
         acquired = (
             self._lock.acquire()
@@ -961,8 +971,7 @@ class NexusTransport:
         Raises:
             ValueError: If shots, destination, or cost settings are invalid.
             ImportError: If H2 conversion dependencies are unavailable.
-            ExecutionError: If conversion fails or a syntax checker cannot
-                verify the required shot-success guard.
+            ExecutionError: If H2 conversion fails.
             Exception: If authentication, project resolution, upload, or submission fails.
         """
         _validate_positive_integer(shots, "shots")
@@ -1011,7 +1020,6 @@ class NexusTransport:
         Raises:
             TypeError: If prepared is not a PreparedH2Submission.
             ValueError: If name, device, shot origin, or cost settings are invalid.
-            ExecutionError: If a syntax checker cannot verify the required guard.
             Exception: If authentication, project resolution, upload, or submission fails.
         """
         if not isinstance(prepared, PreparedH2Submission):
@@ -1053,20 +1061,12 @@ class NexusTransport:
 
         Raises:
             ValueError: If the saved shot origin differs from the destination.
-            ExecutionError: If a syntax checker cannot verify the required guard.
             Exception: If authentication, project resolution, upload, or submission fails.
         """
         origin = prepared.context.get("shot_origin")
         if origin is not None and origin != str(destination.shot_origin):
             raise ValueError(
                 "Prepared H2 shot origin is incompatible with the destination"
-            )
-        if prepared.context.get(
-            "shot_success_tag"
-        ) is not None and destination.target.endswith("SC"):
-            raise ExecutionError(
-                "H2 syntax checkers return synthetic zero results and cannot "
-                "verify shot-index guards; use an H2 emulator or hardware"
             )
         project = self._submission_project()
         program = self._client.qir.upload(qir=prepared.qir, name=name, project=project)
