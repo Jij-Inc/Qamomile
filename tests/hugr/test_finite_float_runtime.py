@@ -17,6 +17,8 @@ from qamomile.circuit.transpiler import (
     CompilationMetadata,
     CompiledProgram,
     CompletedExecutionHandle,
+    ExecutionError,
+    JobStatus,
     ProgramABI,
 )
 
@@ -153,9 +155,11 @@ def test_public_jobs_reject_nonfinite_provider_outputs(
     job = getattr(executable, operation)(
         executor, bindings={"value": float_abi.wrap(0.5)}, shots=3
     )
-    with pytest.raises(ValueError, match="must be finite") as error:
+    with pytest.raises(ExecutionError, match="must be finite") as error:
         job.result()
     assert repr(float_abi.prepared.output_tags[-1]) in str(error.value)
+    assert isinstance(error.value.__cause__, ValueError)
+    assert job.status() is JobStatus.FAILED
 
 
 @pytest.mark.parametrize(

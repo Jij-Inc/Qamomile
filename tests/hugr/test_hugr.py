@@ -2224,7 +2224,8 @@ def test_hugr_preserves_three_control_phase_with_clean_ancillas() -> None:
     names = _hugr_operation_names(package)
     assert names.count("tket.quantum.Toffoli") == 2
     assert names.count("tket.quantum.QAlloc") == 5
-    assert names.count("tket.quantum.QFree") == 5
+    assert names.count("tket.quantum.QFree") == 1
+    assert names.count("tket.quantum.MeasureFree") == 4
     assert names.count("tket.quantum.Rz") == 1
     assert names.count("tket.quantum.CRz") == 1
     assert names.count("tket.global_phase.global_phase") == 1
@@ -2248,7 +2249,8 @@ def test_hugr_repeats_four_control_phase_cascade_for_power() -> None:
     names = _hugr_operation_names(package)
     assert names.count("tket.quantum.Toffoli") == 8
     assert names.count("tket.quantum.QAlloc") == 9
-    assert names.count("tket.quantum.QFree") == 9
+    assert names.count("tket.quantum.QFree") == 4
+    assert names.count("tket.quantum.MeasureFree") == 5
     assert names.count("tket.quantum.Rz") == 2
     assert names.count("tket.quantum.CRz") == 2
     assert names.count("tket.global_phase.global_phase") == 2
@@ -2272,7 +2274,8 @@ def test_hugr_inverts_three_control_phase_cascade() -> None:
     names = _hugr_operation_names(package)
     assert names.count("tket.quantum.Toffoli") == 2
     assert names.count("tket.quantum.QAlloc") == 5
-    assert names.count("tket.quantum.QFree") == 5
+    assert names.count("tket.quantum.QFree") == 1
+    assert names.count("tket.quantum.MeasureFree") == 4
     assert names.count("tket.quantum.CRz") == 1
     assert _hugr_float_constants(package) == pytest.approx(
         [-0.25 / math.pi, -0.5 / math.pi, -1.0 / math.pi],
@@ -2294,7 +2297,8 @@ def test_hugr_preserves_three_control_phase_in_nested_static_for() -> None:
     names = _hugr_operation_names(package)
     assert names.count("tket.quantum.Toffoli") == 8
     assert names.count("tket.quantum.QAlloc") == 8
-    assert names.count("tket.quantum.QFree") == 8
+    assert names.count("tket.quantum.QFree") == 4
+    assert names.count("tket.quantum.MeasureFree") == 4
     assert names.count("tket.quantum.Rz") == 4
     assert names.count("tket.quantum.CRz") == 4
     assert names.count("tket.global_phase.global_phase") == 4
@@ -2380,7 +2384,9 @@ def test_hugr_publishes_vector_controls_from_runtime_regions(
     names = _hugr_operation_names(package)
     assert names.count("tket.quantum.Toffoli") == 2 * applications
     assert names.count("tket.global_phase.global_phase") == applications
-    assert names.count("tket.quantum.QAlloc") == names.count("tket.quantum.QFree")
+    assert names.count("tket.quantum.QAlloc") == (
+        names.count("tket.quantum.QFree") + names.count("tket.quantum.MeasureFree")
+    )
 
 
 @pytest.mark.hugr
@@ -2491,7 +2497,7 @@ def test_hugr_zero_power_preserves_targets_across_synthetic_body_exits() -> None
         node
         for node, data in graph.nodes()
         if callable(name := getattr(data.op, "name", None))
-        and str(name()) == "tket.quantum.Measure"
+        and str(name()) == "tket.quantum.MeasureFree"
     ]
 
     assert len(allocations) == len(measurements) == 3

@@ -4,6 +4,8 @@ Public QIR Boolean outputs have width one. Nexus H2 stores each Boolean in a
 64-bit register with the value at index zero; single-column SDK results are
 also accepted. Labels identify public output leaves independently of provider
 column order. Decoding costs O(shots * recorded bits).
+The provider's job and chunk shot counters are accepted as bookkeeping and
+omitted unless explicitly declared as program outputs.
 """
 
 from __future__ import annotations
@@ -16,6 +18,10 @@ from typing import Any
 import numpy as np
 
 from qamomile.circuit.transpiler import ExecutionError
+
+_PROVIDER_METADATA_REGISTERS = frozenset(
+    {"JOB_total_shots", "JOB_shotnum", "JOB_chunk_total_shots", "JOB_chunk_shotnum"}
+)
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -114,11 +120,15 @@ def _register_columns(
             from the supported single-column and complete 64-bit forms.
     """
     registers: dict[str, dict[int, int]] = {}
+    unexpected: dict[str, None] = {}
     for column, bit in enumerate(bits):
         tag = getattr(bit, "reg_name", None)
         index = getattr(bit, "index", None)
-        if not isinstance(tag, str) or tag not in outputs:
-            raise ExecutionError(f"Unexpected QIR result register: {tag!r}")
+        if not isinstance(tag, str) or (
+            tag not in outputs and tag not in _PROVIDER_METADATA_REGISTERS
+        ):
+            unexpected[repr(tag)] = None
+            continue
         if (
             not isinstance(index, (list, tuple))
             or len(index) != 1
@@ -132,6 +142,10 @@ def _register_columns(
         if position in register:
             raise ExecutionError(f"Duplicate QIR result bit for {tag!r}")
         register[position] = column
+    if unexpected:
+        raise ExecutionError(
+            "Unexpected QIR result register(s): " + ", ".join(unexpected)
+        )
     columns: dict[str, int] = {}
     for tag in outputs:
         register = registers.get(tag)
@@ -150,7 +164,11 @@ def _register_columns(
 
 
 def decode_qir_results(
-    raw: Any, shots: int, outputs: Mapping[str, tuple[str, int]]
+    raw: Any,
+    shots: int,
+    outputs: Mapping[str, tuple[str, int]],
+    *,
+    required_success_tag: str | None = None,
 ) -> list[dict[str, Any]]:
     """Decode H2 SDK bit registers into the existing tagged-result contract.
 
@@ -158,6 +176,8 @@ def decode_qir_results(
         raw (Any): Native ``pytket.backends.BackendResult`` with shot readouts.
         shots (int): Required positive number of shots.
         outputs (Mapping[str, tuple[str, int]]): Tags mapped to ``("bool", 1)``.
+        required_success_tag (str | None): Private Boolean register that must
+            be true on every shot and is omitted from public records.
 
     Returns:
         list[dict[str, Any]]: One tag-to-Python-bool mapping per shot.
@@ -171,6 +191,10 @@ def decode_qir_results(
     if isinstance(count, bool) or not isinstance(count, Integral) or count <= 0:
         raise ValueError("shots must be a positive integer")
     outputs = _validate_outputs(outputs)
+    if required_success_tag is not None and (
+        not isinstance(required_success_tag, str) or required_success_tag not in outputs
+    ):
+        raise ValueError("QIR success marker must be declared in the output manifest")
     get_bits = getattr(raw, "get_bitlist", None)
     get_shots = getattr(raw, "get_shots", None)
     if not callable(get_bits) or not callable(get_shots):
@@ -195,10 +219,20 @@ def decode_qir_results(
         readouts.dtype.kind not in "biu" or np.any((readouts != 0) & (readouts != 1))
     ):
         raise ExecutionError("QIR shot readouts must contain only integer bits")
+    if required_success_tag is not None:
+        success = readouts[:, columns[required_success_tag]]
+        failed = np.flatnonzero(success != 1)
+        if failed.size:
+            raise ExecutionError(
+                "H2 shot range check failed at result row "
+                f"{int(failed[0])}; no execution results can be returned"
+            )
     records = []
     for row in readouts:
         record = {}
         for tag in outputs:
+            if tag == required_success_tag:
+                continue
             record[tag] = bool(row[columns[tag]])
         records.append(record)
     return records

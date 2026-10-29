@@ -37,6 +37,7 @@ from qamomile.hugr import (
     HugrExecutable,
     HugrExecutor,
     HugrTranspiler,
+    NexusExecutionOptions,
     SeleneExecutionOptions,
 )
 from qamomile.hugr._nexus import NexusTransport
@@ -496,6 +497,9 @@ def test_restore_accepts_equivalent_whole_and_indexed_bindings(
         ],
         ("qamomile.output.2.0", whole["label"]),
     ]
+    from tests.hugr.test_nexus import _raw_records
+
+    records = _raw_records([records])[0]
     shots = 1 if operation == "run" else 3
     native = SimpleNamespace(id="binding-job", job_type="execute")
     client = SimpleNamespace(
@@ -514,7 +518,7 @@ def test_restore_accepts_equivalent_whole_and_indexed_bindings(
             results=Mock(
                 return_value=[
                     SimpleNamespace(
-                        download_result=lambda: QsysResult([records] * shots)
+                        download_result=Mock(return_value=QsysResult([records] * shots))
                     )
                 ]
             ),
@@ -524,7 +528,7 @@ def test_restore_accepts_equivalent_whole_and_indexed_bindings(
         "qamomile.hugr.execution._NexusTransport",
         lambda options: NexusTransport(options, client=client),
     )
-    executor = HugrExecutor("helios")
+    executor = HugrExecutor("helios", options=NexusExecutionOptions(max_cost=1.0))
     job = getattr(rotations, operation)(executor, bindings=whole, shots=shots)
     indexed = dict(reversed(list(flatten_user_bindings(whole).items())))
     restored = rotations.restore(executor, job.snapshot(), bindings=indexed)

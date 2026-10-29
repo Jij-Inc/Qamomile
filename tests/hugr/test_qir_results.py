@@ -256,3 +256,173 @@ def test_manifest_validation_precedes_provider_access():
     with pytest.raises(ValueError, match="Unsupported"):
         decode_qir_results(raw, 1, {"float": ("float", 64)})
     raw.get_bitlist.assert_not_called()
+
+
+def test_guarded_results_require_all_shots_to_succeed_and_hide_the_marker():
+    marker = "__qamomile_h2_shot_success_v1"
+    raw = _result([_bit(marker, 0), _bit("bit", 0)], [[1, 0], [1, 1]])
+    outputs = {"bit": ("bool", 1), marker: ("bool", 1)}
+
+    assert decode_qir_results(raw, 2, outputs, required_success_tag=marker) == [
+        {"bit": False},
+        {"bit": True},
+    ]
+
+
+@pytest.mark.parametrize("success", [[0, 1], [1, 0]])
+def test_one_failed_guard_rejects_the_entire_execution(success):
+    marker = "__qamomile_h2_shot_success_v1"
+    raw = _result([_bit("bit", 0), _bit(marker, 0)], [[1, value] for value in success])
+    with pytest.raises(ExecutionError, match="no execution results"):
+        decode_qir_results(
+            raw,
+            2,
+            {"bit": ("bool", 1), marker: ("bool", 1)},
+            required_success_tag=marker,
+        )
+
+
+def test_guard_only_result_preserves_empty_public_output():
+    marker = "__qamomile_h2_shot_success_v1"
+    raw = _result([_bit(marker, 0)], [[1], [1]])
+    assert decode_qir_results(
+        raw, 2, {marker: ("bool", 1)}, required_success_tag=marker
+    ) == [{}, {}]
+
+
+def test_missing_guard_readouts_cannot_be_treated_as_success():
+    marker = "__qamomile_h2_shot_success_v1"
+    raw = _result([_bit("bit", 0)], [[1]])
+    with pytest.raises(ExecutionError, match="Missing"):
+        decode_qir_results(
+            raw,
+            1,
+            {"bit": ("bool", 1), marker: ("bool", 1)},
+            required_success_tag=marker,
+        )
+    raw.get_shots.assert_not_called()
+
+
+def test_success_marker_contract_is_checked_before_provider_access():
+    raw = _result([], [])
+    with pytest.raises(ValueError, match="success marker"):
+        decode_qir_results(raw, 1, {}, required_success_tag="missing")
+    raw.get_bitlist.assert_not_called()
+
+
+@pytest.mark.parametrize("metadata_column", [0, 1, 2])
+@pytest.mark.parametrize(
+    "metadata_tag",
+    ["JOB_total_shots", "JOB_shotnum", "JOB_chunk_total_shots", "JOB_chunk_shotnum"],
+)
+def test_job_metadata_does_not_shift_public_or_guard_columns(
+    metadata_column, metadata_tag
+):
+    marker = "__qamomile_h2_shot_success_v1"
+    bits = [_bit("flag", 0), _bit(marker, 0)]
+    bits.insert(metadata_column, _bit(metadata_tag, 0))
+    rows = [[0, 1], [1, 1]]
+    for row in rows:
+        row.insert(metadata_column, 0)
+    raw = _result(bits, rows)
+    assert decode_qir_results(
+        raw, 2, {"flag": ("bool", 1), marker: ("bool", 1)}, required_success_tag=marker
+    ) == [{"flag": False}, {"flag": True}]
+    raw.get_shots.assert_called_once_with(cbits=bits)
+
+
+@pytest.mark.parametrize("success", [0, None])
+@pytest.mark.parametrize(
+    "metadata_tag",
+    ["JOB_total_shots", "JOB_shotnum", "JOB_chunk_total_shots", "JOB_chunk_shotnum"],
+)
+def test_job_metadata_cannot_replace_a_success_marker(success, metadata_tag):
+    marker = "__qamomile_h2_shot_success_v1"
+    bits = [_bit(metadata_tag, 0), _bit("flag", 0)]
+    row = [1, 1]
+    if success is not None:
+        bits.append(_bit(marker, 0))
+        row.append(success)
+    raw = _result(bits, [row])
+    with pytest.raises(ExecutionError, match="Missing|shot range check failed"):
+        decode_qir_results(
+            raw,
+            1,
+            {"flag": ("bool", 1), marker: ("bool", 1)},
+            required_success_tag=marker,
+        )
+
+
+def test_unknown_job_registers_are_still_rejected():
+    raw = _result([_bit("JOB_unknown", 0), _bit("flag", 0)], [[1, 0]])
+    with pytest.raises(ExecutionError, match="Unexpected.*JOB_unknown"):
+        decode_qir_results(raw, 1, {"flag": ("bool", 1)})
+
+
+def test_unexpected_register_error_reports_all_unknown_names():
+    raw = _result(
+        [_bit("JOB_unknown", 0), _bit("other", 0), _bit("JOB_unknown", 1)], []
+    )
+    with pytest.raises(ExecutionError) as error:
+        decode_qir_results(raw, 1, {})
+    assert str(error.value).count("JOB_unknown") == 1
+    assert "other" in str(error.value)
+    raw.get_shots.assert_not_called()
+
+
+@pytest.mark.parametrize("interleaved", [False, True])
+@pytest.mark.parametrize("metadata_width", [32, 64])
+def test_native_provider_metadata_registers_are_not_public_results(
+    interleaved, metadata_width
+):
+    pytest.importorskip("pytket")
+    from pytket.backends.backendresult import BackendResult
+    from pytket.circuit import Bit
+    from pytket.utils.outcomearray import OutcomeArray
+
+    marker = "__qamomile_h2_shot_success_v1"
+    widths = {
+        "flag": 64,
+        "JOB_total_shots": metadata_width,
+        "JOB_shotnum": metadata_width,
+        "JOB_chunk_total_shots": metadata_width,
+        "JOB_chunk_shotnum": metadata_width,
+        marker: 64,
+    }
+    positions = (
+        [
+            (tag, index)
+            for index in reversed(range(64))
+            for tag, width in widths.items()
+            if index < width
+        ]
+        if interleaved
+        else [
+            (tag, index)
+            for tag, width in widths.items()
+            for index in reversed(range(width))
+        ]
+    )
+    raw = BackendResult(
+        c_bits=[Bit(tag, index) for tag, index in positions],
+        shots=OutcomeArray.from_readouts(
+            np.array(
+                [
+                    [
+                        ((2 >> index) & 1)
+                        if tag in ("JOB_total_shots", "JOB_chunk_total_shots")
+                        else (((shot + 1) >> index) & 1)
+                        if tag in ("JOB_shotnum", "JOB_chunk_shotnum")
+                        else int(index == 0 and (tag == marker or shot == 1))
+                        for tag, index in positions
+                    ]
+                    for shot in range(2)
+                ],
+                dtype=np.uint8,
+            )
+        ),
+    )
+    raw = BackendResult.from_dict(raw.to_dict())
+    assert decode_qir_results(
+        raw, 2, {"flag": ("bool", 1), marker: ("bool", 1)}, required_success_tag=marker
+    ) == [{"flag": False}, {"flag": True}]

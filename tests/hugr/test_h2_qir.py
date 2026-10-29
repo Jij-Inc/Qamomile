@@ -235,6 +235,66 @@ def test_real_converter_typed_array_sample_and_restore(monkeypatch, indices, lay
     assert reference.context["package_sha256"] == hashlib.sha256(expected).hexdigest()
 
 
+def test_provider_metadata_failure_recovers_after_reload_without_resubmission(
+    monkeypatch,
+):
+    import importlib
+
+    import qamomile.hugr._qir_results as qir_results
+    from tests.hugr.test_current_shot import _read_bits
+
+    _require_converter()
+    pytest.importorskip("pytket")
+    marker = "__qamomile_h2_shot_success_v1"
+    client = _install_h2_client(
+        monkeypatch,
+        [
+            "JOB_total_shots",
+            marker,
+            "JOB_shotnum",
+            "qamomile.output.0.0",
+            "JOB_chunk_total_shots",
+            "JOB_chunk_shotnum",
+        ],
+        [[0, 1, 1, 0, 0, 1], [0, 1, 0, 1, 0, 0]],
+        layout="interleaved",
+    )
+    program = HugrTranspiler().transpile(_read_bits, bindings={"values": [False, True]})
+    executor = HugrExecutor("nexus", options=NexusExecutionOptions(system_name="H2-1E"))
+    job = program.sample(executor, shots=2)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            qir_results, "_PROVIDER_METADATA_REGISTERS", frozenset({"JOB_total_shots"})
+        )
+        with pytest.raises(ExecutionError, match="Unexpected.*JOB_shotnum"):
+            job.result()
+    with pytest.raises(ExecutionError, match="Unexpected.*JOB_shotnum"):
+        job.result()
+    saved = JobSnapshot.from_dict(job.snapshot().to_dict())
+    importlib.reload(qir_results)
+    recovered = program.restore(executor, saved)
+    assert recovered.result().results == [(False, 1), (True, 1)]
+    assert client.jobs.results.call_count == 2
+    client.qir.upload.assert_called_once()
+    client.start_execute_job.assert_called_once()
+
+
+@pytest.mark.parametrize("target", ["H2-1SC", "H2-2SC"])
+def test_guarded_syntax_checker_is_rejected_before_provider_operations(
+    monkeypatch, target
+):
+    from tests.hugr.test_current_shot import _read_bits
+
+    client = _install_h2_client(monkeypatch, ["qamomile.output.0.0"], [[0], [0]])
+    program = HugrTranspiler().transpile(_read_bits, bindings={"values": [False, True]})
+    executor = HugrExecutor("nexus", options=NexusExecutionOptions(system_name=target))
+    with pytest.raises(ExecutionError, match="syntax checkers.*synthetic zero"):
+        program.sample(executor, shots=2)
+    client.login.assert_not_called()
+    client.qir.upload.assert_not_called()
+    client.start_execute_job.assert_not_called()
+
+
 @pytest.mark.parametrize("layout", ["scalar", "blocked", "interleaved"])
 def test_real_converter_typed_tuple_restores_native_sdk_registers(monkeypatch, layout):
     """A saved tuple execution restores by tags without reuploading or resubmitting."""

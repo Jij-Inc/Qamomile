@@ -312,9 +312,7 @@ def test_h2_unguarded_lookup_has_actionable_converter_error():
     """The pinned converter cannot lower bounds panic to valid H2 QIR."""
     pytest.importorskip("hugr_qir")
     p = _table_program(_unguarded_mask, "masks", 2)
-    with pytest.raises(
-        ExecutionError, match=r"Guard table access.*index < table.shape"
-    ):
+    with pytest.raises(ExecutionError, match=r"automatic shot-range preparation"):
         to_h2_qir(prepare_execution(p._compiled, {"masks": [0, 1]}).package)
 
 
@@ -366,8 +364,17 @@ def test_h2_typed_snapshot_restores_decoded_results_without_submission(monkeypat
     pytest.importorskip("pytket")
     from tests.hugr.test_h2_qir import _install_h2_client
 
-    tags = ["qamomile.output.0.0", "qamomile.output.0.1"]
-    client = _install_h2_client(monkeypatch, tags, [[1, 0]] * 3)
+    monkeypatch.setattr(
+        "qamomile.hugr._nexus.prepare_h2_shot_range",
+        lambda *args: pytest.fail(
+            "Convertible manually guarded tables must not require a table proof"
+        ),
+    )
+
+    from qamomile.hugr._shot_range import SHOT_SUCCESS_TAG
+
+    tags = ["qamomile.output.0.0", "qamomile.output.0.1", SHOT_SUCCESS_TAG]
+    client = _install_h2_client(monkeypatch, tags, [[1, 0, 1]] * 3)
     p = _table_program(_masked_proposal, "masks", 6, n=2)
     bindings = {"masks": [0, 1, 1, 0, 1, 1]}
     executor = HugrExecutor("nexus", options=NexusExecutionOptions(system_name="H2-1E"))

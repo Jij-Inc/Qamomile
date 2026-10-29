@@ -21,7 +21,7 @@ from qamomile.circuit.transpiler import (
     RunJob,
 )
 from qamomile.circuit.transpiler.execution_snapshot import ExecutionSnapshot
-from qamomile.hugr import HugrExecutor, HugrTranspiler
+from qamomile.hugr import HugrExecutor, HugrTranspiler, NexusExecutionOptions
 from qamomile.hugr._nexus import NexusTransport
 from qamomile.hugr._runtime import prepare_execution
 from qamomile.hugr.executable import _DecodedExecutionHandle
@@ -216,7 +216,7 @@ def test_mixed_term_snapshots_keep_order_without_waiting_or_resubmitting(
         "qamomile.hugr.execution._NexusTransport",
         lambda options: NexusTransport(options, client=client),
     )
-    executor = HugrExecutor("helios")
+    executor = HugrExecutor("helios", options=NexusExecutionOptions(max_cost=1.0))
     submit = executor.submit
     calls = []
 
@@ -345,7 +345,7 @@ def test_hugr_rejects_nested_execution_groups_without_retrieval(monkeypatch):
         "qamomile.hugr.execution._NexusTransport",
         lambda options: NexusTransport(options, client=client),
     )
-    executor = HugrExecutor("helios")
+    executor = HugrExecutor("helios", options=NexusExecutionOptions(max_cost=1.0))
     saved = _round_trip(program.run(executor, {"theta": 0.0}, shots=1))
     nested = ExecutionSnapshot("composite", children=(saved.execution,))
     with pytest.raises(ValueError, match="execution layout"):

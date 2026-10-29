@@ -350,13 +350,17 @@ def test_public_parameter_shapes_preserve_runtime_matrix_contents(tmp_path) -> N
 
 
 def _remote_executor(
-    monkeypatch: pytest.MonkeyPatch, records: list[list[tuple[str, Any]]]
+    monkeypatch: pytest.MonkeyPatch,
+    records: list[list[tuple[str, Any]]],
+    *,
+    raw_records: bool = False,
 ) -> tuple[HugrExecutor, Any]:
     """Create a SDK-shaped fake that passes tagged results through the real transport.
 
     Args:
         monkeypatch (pytest.MonkeyPatch): Fixture replacing SDK construction.
         records (list[list[tuple[str, object]]]): Result records for each shot.
+        raw_records (bool): Whether records already retain RAW protocol prefixes.
 
     Returns:
         tuple[HugrExecutor, SimpleNamespace]: Executor and observable fake client.
@@ -367,7 +371,9 @@ def _remote_executor(
     from hugr.qsystem.result import QsysResult
 
     from qamomile.hugr._nexus import NexusTransport
+    from tests.hugr.test_nexus import _raw_records
 
+    downloaded = QsysResult(records if raw_records else _raw_records(records))
     native = SimpleNamespace(id="sample-job", job_type="execute")
     client = SimpleNamespace(
         login=Mock(),
@@ -386,9 +392,7 @@ def _remote_executor(
             status=Mock(return_value=SimpleNamespace(status="COMPLETED")),
             results=Mock(
                 return_value=[
-                    SimpleNamespace(
-                        download_result=Mock(return_value=QsysResult(records))
-                    )
+                    SimpleNamespace(download_result=Mock(return_value=downloaded))
                 ]
             ),
         ),
@@ -397,7 +401,7 @@ def _remote_executor(
         "qamomile.hugr.execution._NexusTransport",
         lambda options: NexusTransport(options, client=client),
     )
-    return HugrExecutor("helios"), client
+    return HugrExecutor("helios", options=NexusExecutionOptions(max_cost=1.0)), client
 
 
 @pytest.mark.parametrize("operation", ["run", "sample"])
@@ -433,6 +437,119 @@ def test_helios_typed_jobs_restore_without_resubmitting(monkeypatch, operation) 
         executable.restore(
             executor, job.snapshot(), bindings={"theta": 2.0, "label": 8}
         )
+
+
+@pytest.mark.parametrize("operation", ["run", "sample"])
+def test_helios_raw_metrics_preserve_typed_results_after_restore(
+    monkeypatch, operation
+):
+    """Native RAW metadata cannot contaminate typed public results or snapshots."""
+    from qnexus.models.references import ResultVersions
+
+    executable = HugrTranspiler().transpile(_complex, parameters=["theta", "label"])
+    record = [
+        ("USER:BOOL:qamomile.output.0.0", True),
+        ("METRICS:INT:emulator:shot_number", 0),
+        ("USER:BOOL:qamomile.output.0.1", False),
+        ("USER:BOOL:qamomile.output.0.2", True),
+        ("METRICS:INT:emulator:shot_number", 1),
+        ("METRICS:BOOL:runtime:LEAKAGE_REPUMP", 0),
+        ("USER:FLOAT:qamomile.output.1.0", 0.5),
+        ("USER:UINT:qamomile.output.2.0", 9),
+    ]
+    count = 1 if operation == "run" else 3
+    executor, client = _remote_executor(monkeypatch, [record] * count, raw_records=True)
+    bindings = {"theta": 1.0, "label": 8}
+    job = (
+        executable.run(executor, bindings=bindings)
+        if operation == "run"
+        else executable.sample(executor, shots=count, bindings=bindings)
+    )
+    restored = executable.restore(executor, job.snapshot(), bindings=bindings)
+    expected = ((True, False, True), 0.5, 9)
+    if operation == "run":
+        assert restored.result() == expected
+    else:
+        assert restored.result().results == [(expected, count)]
+    client.jobs.results.return_value[0].download_result.assert_called_once_with(
+        version=ResultVersions.RAW
+    )
+    client.hugr.upload.assert_called_once()
+    client.start_execute_job.assert_called_once()
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_helios_raw_metrics_do_not_fill_missing_public_outputs(monkeypatch, complete):
+    """The protocol filter leaves the existing typed output contract strict."""
+    executable = HugrTranspiler().transpile(_rotation, parameters=["theta"])
+    record = [("METRICS:BOOL:runtime:LEAKAGE_REPUMP", 1)]
+    if complete:
+        record.append(("USER:BOOL:qamomile.output.0.0", True))
+    executor, _ = _remote_executor(monkeypatch, [record], raw_records=True)
+    job = executable.run(executor, bindings={"theta": 0.5})
+    if complete:
+        assert job.result() is True
+    else:
+        from qamomile.circuit.transpiler import ExecutionError, JobStatus
+
+        with pytest.raises(ExecutionError, match="Missing HUGR output tags"):
+            job.result()
+        assert job.status() is JobStatus.FAILED
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("record", [[("other", True)], [("qamomile.output.0.0", 3)]])
+def test_public_decode_failure_is_terminal_and_restore_can_recover(
+    monkeypatch, asynchronous, record
+):
+    import asyncio
+    import json
+
+    from hugr.qsystem.result import QsysResult
+
+    from qamomile.circuit.transpiler import ExecutionError, JobSnapshot, JobStatus
+
+    program = HugrTranspiler().transpile(_rotation, bindings={"theta": 0.0})
+    executor, client = _remote_executor(monkeypatch, [record])
+    job = program.sample(executor, shots=1)
+    errors = []
+    for _ in range(2):
+        with pytest.raises(
+            ExecutionError, match="HUGR result decoding failed"
+        ) as error:
+            if asynchronous:
+                asyncio.run(job.result_async())
+            else:
+                job.result()
+        errors.append(error.value)
+        assert job.status() is JobStatus.FAILED
+    assert errors[0] is errors[1]
+    assert job.raw_status().status == "COMPLETED"
+    client.jobs.results.assert_called_once()
+    saved = JobSnapshot.from_dict(json.loads(json.dumps(job.snapshot().to_dict())))
+    client.jobs.results.return_value[0].download_result.return_value = QsysResult(
+        [[("USER:BOOL:qamomile.output.0.0", True)]]
+    )
+    restored = program.restore(HugrExecutor("nexus"), saved)
+    assert restored.result().results == [(True, 1)]
+    assert restored.status() is JobStatus.COMPLETED
+    client.start_execute_job.assert_called_once()
+    client.hugr.upload.assert_called_once()
+
+
+def test_public_result_timeout_remains_retryable(monkeypatch):
+    from qamomile.circuit.transpiler import JobStatus
+
+    program = HugrTranspiler().transpile(_rotation, bindings={"theta": 0.0})
+    executor, client = _remote_executor(monkeypatch, [[("qamomile.output.0.0", True)]])
+    client.jobs.status.return_value.status = "RUNNING"
+    job = program.sample(executor, shots=1)
+    with pytest.raises(TimeoutError):
+        job.result(timeout=0)
+    assert job.status() is JobStatus.RUNNING
+    client.jobs.status.return_value.status = "COMPLETED"
+    assert job.result().results == [(True, 1)]
+    client.start_execute_job.assert_called_once()
 
 
 @pytest.mark.parametrize("operation", ["run", "sample"])

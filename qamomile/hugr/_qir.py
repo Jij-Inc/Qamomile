@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import importlib
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from qamomile.circuit.transpiler import ExecutionError
 
+if TYPE_CHECKING:
+    from hugr.package import Package
 
-def to_h2_qir(package: Any) -> tuple[bytes, dict[str, tuple[str, int]]]:
+
+class _H2AbortError(ExecutionError):
+    """Identify an abort call rejected by the H2 converter's validator."""
+
+
+def to_h2_qir(package: Package) -> tuple[bytes, dict[str, tuple[str, int]]]:
     """Convert an instrumented package without changing its public output tags.
 
     This adapter records Boolean results. H2 permits constant floating-point
@@ -18,7 +25,7 @@ def to_h2_qir(package: Any) -> tuple[bytes, dict[str, tuple[str, int]]]:
     preserve unsigned values safely.
 
     Args:
-        package (Any): HUGR package with a closed ``main`` and tagged outputs.
+        package (Package): HUGR package with a closed ``main`` and tagged outputs.
 
     Returns:
         tuple[bytes, dict[str, tuple[str, int]]]: QIR bitcode and each output
@@ -77,14 +84,15 @@ def to_h2_qir(package: Any) -> tuple[bytes, dict[str, tuple[str, int]]]:
             validate_hugr=True,
         )
     except Exception as exc:
-        hint = ""
         if "@abort()" in str(exc):
-            hint = (
+            raise _H2AbortError(
+                f"H2 QIR conversion failed: {exc}"
                 " The installed hugr-qir converter lowers runtime bounds failure "
-                "to abort(), which H2 QIR validation rejects. Guard table access "
-                "with index < table.shape[0] and define the fallback explicitly."
-            )
-        raise ExecutionError(f"H2 QIR conversion failed: {exc}{hint}") from exc
+                "to abort(), which H2 QIR validation rejects. For fixed UInt or Bit "
+                "tables indexed by get_current_shot(), use the H2 executor's "
+                "automatic shot-range preparation before submission."
+            ) from exc
+        raise ExecutionError(f"H2 QIR conversion failed: {exc}") from exc
     if not isinstance(bitcode, bytes) or not bitcode.startswith(b"BC\xc0\xde"):
         raise ExecutionError("H2 QIR conversion did not produce LLVM bitcode")
     _validate_h2_classical_instructions(bitcode)
