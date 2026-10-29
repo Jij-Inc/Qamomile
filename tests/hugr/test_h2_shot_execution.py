@@ -607,7 +607,7 @@ def test_convertible_manual_guard_needs_no_limited_table_proof(monkeypatch):
     assert dict(job.result().results) == {False: 2, True: 2}
 
 
-def test_helios_uploads_copied_shot_correction_without_h2_normalization(monkeypatch):
+def test_helios_uploads_unchanged_shot_program_without_h2_normalization(monkeypatch):
     from qamomile.hugr._nexus import NexusTransport
     from tests.hugr.test_h2_nexus import _client
 
@@ -625,8 +625,8 @@ def test_helios_uploads_copied_shot_correction_without_h2_normalization(monkeypa
     )
     executor.submit(prepared.package, _SHOTS)
     uploaded = client.hugr.upload.call_args.kwargs["hugr_package"]
-    assert uploaded is not prepared.package
-    assert uploaded.to_bytes() != before
+    assert uploaded is prepared.package
+    assert uploaded.to_bytes() == before
     assert SHOT_SUCCESS_TAG.encode() not in uploaded.to_bytes()
     assert prepared.package.to_bytes() == before
     normalize.assert_not_called()

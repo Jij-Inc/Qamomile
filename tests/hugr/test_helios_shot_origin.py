@@ -1,11 +1,10 @@
-"""Execute uploaded Helios HUGR under the assumed one-based device policy."""
+"""Execute unchanged Helios HUGR uploads under the zero-based device policy."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 from collections import Counter
-from copy import deepcopy
 from unittest.mock import Mock
 
 import pytest
@@ -14,11 +13,7 @@ pytest.importorskip("hugr")
 pytest.importorskip("tket_exts")
 pytest.importorskip("selene_sim")
 
-from hugr import tys
-from hugr.build.dfg import Dfg
-from hugr.cli import validate
 from hugr.qsystem.result import QsysResult
-from hugr.std.int import INT_OPS_EXTENSION
 
 import qamomile.circuit as qmc
 from qamomile.circuit.transpiler import JobSnapshot
@@ -30,14 +25,12 @@ from qamomile.hugr import (
 )
 from qamomile.hugr._nexus import NexusTransport
 from qamomile.hugr._runtime import prepare_execution
-from qamomile.hugr._shot_range import SHOT_SUCCESS_TAG, normalize_helios_shots
-from qamomile.hugr.lowerer import _hugr_uint_type, _hugr_uint_value
+from qamomile.hugr._shot_range import SHOT_SUCCESS_TAG
 from tests.hugr.test_nexus import _client
 
 pytestmark = pytest.mark.hugr
 
 _SHOTS = 4
-_SHOT_OP = "tket.qsystem.utils.GetCurrentShot"
 
 
 @qmc.qkernel
@@ -91,30 +84,6 @@ def _no_shot() -> tuple[qmc.Bit, qmc.UInt, qmc.Float]:
     return qmc.measure(qmc.qubit("q")), qmc.uint(7), qmc.float_(0.25)
 
 
-def _assume_one_based_device(package):
-    """Shift simulator reads before the uploaded graph consumes each raw value."""
-    shifted = deepcopy(package)
-    uint = _hugr_uint_type()
-    add = INT_OPS_EXTENSION.get_op("iadd").instantiate(
-        list(uint.args), concrete_signature=tys.FunctionType([uint, uint], [uint])
-    )
-    for graph in shifted.modules:
-        for node, data in list(graph.nodes()):
-            name = getattr(data.op, "name", None)
-            if not callable(name) or name() != _SHOT_OP:
-                continue
-            consumers = list(graph.linked_ports(node.out(0)))
-            for consumer in reversed(consumers):
-                graph.delete_link(node.out(0), consumer)
-            builder = Dfg._new_existing(graph, data.parent)
-            one = builder.load(_hugr_uint_value(1))[0]
-            raw = builder.add_op(add, node.out(0), one)[0]
-            for consumer in consumers:
-                graph.add_link(raw, consumer)
-    validate(shifted.to_bytes())
-    return shifted
-
-
 def _record_kinds(package):
     kinds = {
         "tket.result.result_bool": "BOOL",
@@ -156,7 +125,7 @@ def selene():
         ),
     ],
 )
-def test_uploaded_helios_hugr_corrects_assumed_one_based_reads(
+def test_uploaded_helios_hugr_preserves_zero_based_reads(
     monkeypatch, selene, kernel, bindings, expected
 ):
     program = HugrTranspiler().transpile(kernel, bindings=bindings)
@@ -171,26 +140,18 @@ def test_uploaded_helios_hugr_corrects_assumed_one_based_reads(
     assert [
         tuple(row[tag] for tag in prepared.output_tags) for row in original_rows
     ] == expected_rows
-    if kernel is _indices:
-        uncorrected = selene.submit(
-            _assume_one_based_device(prepared.package), _SHOTS
-        ).result()
-        assert [
-            tuple(row[tag] for tag in prepared.output_tags) for row in uncorrected
-        ] == [(i, i, 2 * i + 3) for i in range(1, _SHOTS + 1)]
-
     client = _client()
     uploads = []
     rows_by_upload = []
 
     def upload(*, hugr_package, **kwargs):
         uploads.append(hugr_package)
-        assert hugr_package.to_bytes() != package_before
+        assert hugr_package.to_bytes() == package_before
         assert SHOT_SUCCESS_TAG.encode() not in hugr_package.to_bytes()
         assert b"qamomile.h2_shot_range.v1" not in hugr_package.to_bytes()
         kinds = _record_kinds(hugr_package)
         assert kinds == original_kinds
-        rows = selene.submit(_assume_one_based_device(hugr_package), _SHOTS).result()
+        rows = selene.submit(hugr_package, _SHOTS).result()
         rows_by_upload.append(rows)
         downloaded = QsysResult(
             [
@@ -223,7 +184,6 @@ def test_uploaded_helios_hugr_corrects_assumed_one_based_reads(
             for row in rows_by_upload[-1]
         ] == expected_rows
         assert all(set(row) == set(prepared.output_tags) for row in rows_by_upload[-1])
-    assert uploads[0] is not uploads[1]
     assert uploads[0].to_bytes() == uploads[1].to_bytes()
     assert prepared.package.to_bytes() == package_before
     assert program._compiled.artifact.to_bytes() == artifact_before
@@ -256,26 +216,30 @@ def test_uploaded_helios_hugr_corrects_assumed_one_based_reads(
     assert program._compiled.artifact.to_bytes() == artifact_before
 
 
-def test_repeated_helios_normalization_copies_the_same_original_once(selene):
+def test_repeated_helios_submissions_reuse_the_unchanged_package(selene):
     prepared = prepare_execution(HugrTranspiler().compile(_indices))
     before = prepared.package.to_bytes()
-    normalized = [normalize_helios_shots(prepared.package, 1) for _ in range(2)]
-    assert normalized[0] is not prepared.package
-    assert normalized[1] is not prepared.package
-    assert normalized[0] is not normalized[1]
-    assert normalized[0].to_bytes() == normalized[1].to_bytes()
-    for package in normalized:
-        rows = selene.submit(_assume_one_based_device(package), _SHOTS).result()
+    client = _client()
+    transport = NexusTransport(
+        NexusExecutionOptions(system_name="Helios-1E", max_cost=1.0), client=client
+    )
+    for _ in range(2):
+        transport.submit(prepared.package, _SHOTS)
+        uploaded = client.hugr.upload.call_args.kwargs["hugr_package"]
+        assert uploaded is prepared.package
+        assert uploaded.to_bytes() == before
+        rows = selene.submit(uploaded, _SHOTS).result()
         assert [tuple(row[tag] for tag in prepared.output_tags) for row in rows] == [
             (i, i, 2 * i + 3) for i in range(_SHOTS)
         ]
+    assert client.hugr.upload.call_count == 2
+    assert client.start_execute_job.call_count == 2
     assert prepared.package.to_bytes() == before
 
 
 def test_helios_without_shot_reads_uploads_the_unchanged_package(monkeypatch, selene):
     prepared = prepare_execution(HugrTranspiler().compile(_no_shot))
     before = prepared.package.to_bytes()
-    assert normalize_helios_shots(prepared.package, 1) is prepared.package
     client = _client()
     monkeypatch.setattr(
         "qamomile.hugr.execution._NexusTransport",

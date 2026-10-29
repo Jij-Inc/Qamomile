@@ -1,4 +1,4 @@
-"""Normalize Nexus shot indices and prove H2 table bounds before QIR conversion."""
+"""Normalize H2 shot indices and prove table bounds before QIR conversion."""
 
 from __future__ import annotations
 
@@ -329,36 +329,6 @@ def _normalize_shot_reads(graph: Hugr, origin: int) -> None:
         normalized = _binary(builder, "isub", node.out(0), _integer(builder, origin))
         for consumer in consumers:
             graph.add_link(normalized, consumer)
-
-
-def normalize_helios_shots(package: Package, origin: int) -> Package:
-    """Normalize Helios shot reads on an independent upload package.
-
-    Args:
-        package (Package): Original bound package with unnormalized shot reads.
-        origin (int): Assumed first raw Helios shot number from internal policy.
-            This assumption is not a verified device contract.
-
-    Returns:
-        Package: Validated independent package with zero-based shot reads, or the
-        original package when it contains no shot reads.
-
-    Raises:
-        HugrCliError: If the normalized package fails HUGR validation.
-    """
-    if not any(
-        _name(data.op) == _SHOT_OP
-        for graph in package.modules
-        for _, data in graph.nodes()
-    ):
-        return package
-    from hugr.cli import validate
-
-    result = deepcopy(package)
-    for graph in result.modules:
-        _normalize_shot_reads(graph, origin)
-    validate(result.to_bytes())
-    return result
 
 
 def _guard(graph: Hugr, origin: int, shots: int) -> None:

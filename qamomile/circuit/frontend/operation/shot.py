@@ -12,11 +12,11 @@ def get_current_shot() -> UInt:
 
     Repeated reads in one shot return the same value. HUGR targets implement
     this device context; circuit SDK targets reject it during compilation.
-    Local Selene starts at zero for each sample submission. Nexus execution
-    subtracts the internal device origin from every H2 and Helios shot read,
-    independently of table access. The current origin is one for both targets;
-    the Helios value is an adopted assumption, not a verified device property.
-    H2 also checks the raw device number before running user operations.
+    Local Selene starts at zero for each sample submission. H2 execution
+    subtracts the internal device origin of one from every shot read,
+    independently of table access, and checks the raw device number before
+    running user operations. Helios uses an internal zero-origin policy and
+    preserves device shot reads unchanged; its hardware origin is unverified.
     Provider-internal splitting and retries are not assigned Qamomile offsets.
     Restoring a job retrieves existing results without another submission.
 

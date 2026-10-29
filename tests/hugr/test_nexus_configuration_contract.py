@@ -85,8 +85,8 @@ def test_shot_origin_is_not_a_public_option():
     [
         ("H2-1E", None, "H2-1E", 1),
         ("H2-1", None, "H2-1", 1),
-        ("Helios-1E", None, "Helios-1E", 1),
-        ("Helios-1", None, "Helios-1", 1),
+        ("Helios-1E", None, "Helios-1E", 0),
+        ("Helios-1", None, "Helios-1", 0),
         (
             "Helios-1",
             SimpleNamespace(type="QuantinuumConfig", device_name="H2-1E"),
@@ -97,7 +97,7 @@ def test_shot_origin_is_not_a_public_option():
             "H2-1E",
             SimpleNamespace(type="HeliosConfig", system_name="Helios-1"),
             "Helios-1",
-            1,
+            0,
         ),
     ],
 )

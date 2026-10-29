@@ -27,7 +27,6 @@ from qamomile.hugr._qir_results import decode_qir_results, parse_qir_output_mani
 from qamomile.hugr._shot_range import (
     SHOT_SUCCESS_TAG,
     normalize_h2_shots,
-    normalize_helios_shots,
     prepare_h2_shot_range,
 )
 
@@ -82,9 +81,9 @@ class NexusExecutionOptions:
             receives HUGR; H2 receives automatically converted QIR. H2 requires
             Python 3.11 or 3.12 with the ``hugr`` extra and Bit public outputs.
             Every H2 shot read uses a zero-based logical index, normalized from
-            the internal device origin before QIR conversion. Helios shot reads
-            use an internal one-based origin assumption and are normalized on
-            the upload copy; that origin has not been verified on the device.
+            the internal device origin before QIR conversion. Helios uses an
+            internal zero-based origin policy and preserves shot reads without
+            rewriting the upload; its device origin remains unverified.
         name (str): Program and job name prefix. Each submission receives a
             unique suffix, including separate expectation measurement jobs.
         max_cost (float | None): Optional maximum HQC cost for each submitted
@@ -172,7 +171,7 @@ def _destination(options: NexusExecutionOptions) -> _NexusDestination:
     if isinstance(name, str):
         if re.fullmatch(r"Helios-[A-Za-z0-9][A-Za-z0-9-]*", name):
             if config is None or kind == "HeliosConfig":
-                return _NexusDestination(name, "hugr", 1)
+                return _NexusDestination(name, "hugr", 0)
         if re.fullmatch(r"H2-(?:[1-9][0-9]*(?:E|SC)?|Emulator)", name):
             if config is None or kind == "QuantinuumConfig":
                 return _NexusDestination(name, "qir", 1)
@@ -714,10 +713,9 @@ class NexusTransport:
             project = self._submission_project()
             program = self._client.qir.upload(qir=bitcode, name=name, project=project)
         else:
-            helios_package = normalize_helios_shots(package, destination.shot_origin)
             project = self._submission_project()
             program = self._client.hugr.upload(
-                hugr_package=helios_package, name=name, project=project
+                hugr_package=package, name=name, project=project
             )
         kwargs = {
             key: value
