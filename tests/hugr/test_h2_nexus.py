@@ -140,6 +140,11 @@ def test_same_executor_selects_format_from_device(
             "H2-1E",
             "hugr",
         ),
+        (
+            SimpleNamespace(type="QuantinuumConfig", device_name="H2-1E"),
+            "H2-1SC",
+            "qir",
+        ),
     ],
 )
 def test_native_config_overrides_device_name(
@@ -147,6 +152,15 @@ def test_native_config_overrides_device_name(
 ):
     """Select both device and program format from an explicitly supplied config."""
     client = _client()
+    if program_format == "qir":
+        converter.return_value = (_BITCODE, {"left": ("bool", 1)})
+        result = client.jobs.results.return_value[0]
+        result.download_result.return_value = SimpleNamespace(
+            get_bitlist=Mock(
+                return_value=[SimpleNamespace(reg_name="left", index=[0])]
+            ),
+            get_shots=Mock(return_value=[[1]]),
+        )
     options = NexusExecutionOptions(
         system_name=system_name, backend_config=config, max_cost=1.0
     )
@@ -160,6 +174,12 @@ def test_native_config_overrides_device_name(
     assert converter.call_count == int(program_format == "qir")
     client.HeliosConfig.assert_not_called()
     client.QuantinuumConfig.assert_not_called()
+    if handle.references()[0].target == "H2-1SC":
+        with pytest.raises(ExecutionError, match="syntax-check.*measurement"):
+            handle.result()
+        client.jobs.results.assert_not_called()
+    else:
+        assert handle.result() == [{"left": True}]
 
 
 def test_h2_submission_preserves_settings_names_and_original_fingerprint(converter):
@@ -233,13 +253,12 @@ def test_h2_submission_preserves_settings_names_and_original_fingerprint(convert
     "error",
     [ImportError("converter unavailable"), ExecutionError("unsupported program")],
 )
-def test_conversion_failure_has_no_remote_submission(converter, error):
+@pytest.mark.parametrize("target", ["H2-1E", "H2-1SC"])
+def test_conversion_failure_has_no_remote_submission(converter, error, target):
     """Fail before either upload operation when H2 conversion cannot succeed."""
     client = _client()
     converter.side_effect = error
-    transport = NexusTransport(
-        NexusExecutionOptions(system_name="H2-1E"), client=client
-    )
+    transport = NexusTransport(NexusExecutionOptions(system_name=target), client=client)
     with pytest.raises(type(error), match=str(error)):
         transport.submit(_package(), 1)
     client.login.assert_not_called()
@@ -248,6 +267,23 @@ def test_conversion_failure_has_no_remote_submission(converter, error):
     client.qir.upload.assert_not_called()
     client.hugr.upload.assert_not_called()
     client.start_execute_job.assert_not_called()
+
+
+def test_syntax_checker_without_shot_reads_does_not_return_synthetic_samples(converter):
+    """SC measurement retrieval is unavailable even when no shot guard is needed."""
+    client = _client()
+    converter.return_value = (_BITCODE, {"left": ("bool", 1)})
+    client.jobs.results.return_value[0].download_result.return_value = SimpleNamespace(
+        get_bitlist=Mock(return_value=[SimpleNamespace(reg_name="left", index=[0])]),
+        get_shots=Mock(return_value=[[0]]),
+    )
+    handle = NexusTransport(
+        NexusExecutionOptions(system_name="H2-1SC"), client=client
+    ).submit(_package(), 1)
+    with pytest.raises(ExecutionError, match="syntax-check.*measurement"):
+        handle.result()
+    assert handle.status() is JobStatus.COMPLETED
+    client.jobs.results.assert_not_called()
 
 
 def test_h2_conversion_precedes_authentication_and_project_resolution(converter):
@@ -302,8 +338,9 @@ def test_invalid_format_or_manifest_is_rejected_before_lookup(context):
     client.hugr.upload.assert_not_called()
 
 
+@pytest.mark.parametrize("restore_target", ["Helios-1", "H2-1SC"])
 def test_h2_reference_restores_without_conversion_or_resubmission(
-    monkeypatch, converter
+    monkeypatch, converter, restore_target
 ):
     """Restore the stored result format independently of the transport's current device."""
     client = _client()
@@ -317,7 +354,9 @@ def test_h2_reference_restores_without_conversion_or_resubmission(
     client.jobs.results.return_value[0].download_result.return_value = raw
     decode = Mock(return_value=[{"left": True, "right": False}])
     monkeypatch.setattr("qamomile.hugr._nexus.decode_qir_results", decode)
-    restored = NexusTransport(client=client).retrieve(reference)
+    restored = NexusTransport(
+        NexusExecutionOptions(system_name=restore_target), client=client
+    ).retrieve(reference)
     assert restored.result() == [{"left": True, "right": False}]
     decode.assert_called_once_with(raw, 1, _OUTPUTS)
     restored.cancel()

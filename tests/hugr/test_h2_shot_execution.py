@@ -426,7 +426,8 @@ def test_public_sample_and_restore_use_real_guarded_qir(monkeypatch, marker):
     client.start_execute_job.assert_called_once()
 
 
-def test_public_sample_rejects_a_short_table_before_provider_calls(monkeypatch):
+@pytest.mark.parametrize("target", ["H2-1E", "H2-1SC"])
+def test_public_sample_rejects_a_short_table_before_provider_calls(monkeypatch, target):
     pytest.importorskip("pytket")
     from tests.hugr.test_h2_qir import _install_h2_client
 
@@ -434,7 +435,7 @@ def test_public_sample_rejects_a_short_table_before_provider_calls(monkeypatch):
     program = HugrTranspiler().transpile(
         _direct_uint, bindings={"values": [0, 1, 0, 1]}
     )
-    executor = HugrExecutor("nexus", options=NexusExecutionOptions(system_name="H2-1E"))
+    executor = HugrExecutor("nexus", options=NexusExecutionOptions(system_name=target))
     with pytest.raises(ExecutionError, match="exceeds table length"):
         program.sample(executor, shots=_SHOTS + 1)
     client.login.assert_not_called()
@@ -633,17 +634,25 @@ def test_helios_uploads_unchanged_shot_program_without_h2_normalization(monkeypa
     client.qir.upload.assert_not_called()
 
 
-def test_h2_syntax_checker_rejects_normalized_no_array_program_before_auth(monkeypatch):
+def test_h2_syntax_checker_uploads_normalized_no_array_program(monkeypatch):
+    """SC receives the same guarded QIR as an ordinary H2 execution."""
     from qamomile.hugr._nexus import NexusTransport
     from tests.hugr.test_h2_nexus import _client
 
     client = _client()
     prepared = prepare_execution(HugrTranspiler().compile(_shot_without_array))
+    before = prepared.package.to_bytes()
+    guarded, required = normalize_h2_shots(prepared.package, _SHOTS, 1)
+    expected, outputs = to_h2_qir(guarded)
+    assert required
+    assert SHOT_SUCCESS_TAG in outputs
     transport = NexusTransport(
         NexusExecutionOptions(system_name="H2-1SC"), client=client
     )
-    with pytest.raises(ExecutionError, match="synthetic zero results"):
-        transport.submit(prepared.package, _SHOTS)
-    client.login.assert_not_called()
-    client.qir.upload.assert_not_called()
-    client.start_execute_job.assert_not_called()
+    handle = transport.submit(prepared.package, _SHOTS)
+    assert client.qir.upload.call_args.kwargs["qir"] == expected
+    assert handle.references()[0].context["shot_success_tag"] == SHOT_SUCCESS_TAG
+    assert prepared.package.to_bytes() == before
+    client.login.assert_called_once()
+    client.qir.upload.assert_called_once()
+    client.start_execute_job.assert_called_once()
