@@ -15,6 +15,12 @@ Solve a portfolio selection problem with `GASConverter`, driving the Grover thre
 :::
 
 :::{card}
+:header: **Channel Assignment with Grover Adaptive Search**
+:link: gas_channel_assignment
+Formulate the wireless channel assignment problem as a one-hot QUBO and a binary-encoded HUBO, compare their qubit counts, and solve the HUBO with `GASConverter` using real-valued coefficients.
+:::
+
+:::{card}
 :header: **Hamiltonian Simulation with Suzuki–Trotter (Rabi oscillation)**
 :link: hamiltonian_simulation
 Trotter–Suzuki product formulas on the Rabi model with empirical convergence orders.
