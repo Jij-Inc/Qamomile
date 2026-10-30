@@ -21,6 +21,12 @@ Trotter–Suzuki product formulas on the Rabi model with empirical convergence o
 :::
 
 :::{card}
+:header: **Grover search algorithm**
+:link: grover_search
+Implement Grover search from scratch and with `qmc.grover_search`, then compare probability amplification and oracle-query scaling.
+:::
+
+:::{card}
 :header: **Hybrid Quantum Neural Network (HQNN)**
 :link: hybrid_qnn
 End-to-end CNN + quantum variational circuit on Fashion-MNIST with the parameter shift rule.
