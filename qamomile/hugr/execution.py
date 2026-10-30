@@ -7,6 +7,7 @@ import hashlib
 import math
 import tempfile
 import threading
+from collections.abc import Mapping, Sequence
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -24,6 +25,8 @@ from qamomile.circuit.transpiler import (
 from qamomile.hugr._nexus import (
     NexusExecutionOptions,
     NexusTransport as _NexusTransport,
+    _H2Batch,
+    _H2Submission,
 )
 
 if TYPE_CHECKING:
@@ -367,6 +370,49 @@ class HugrExecutor:
                 f"Selene returned {len(samples)} shots; expected {shots}"
             )
         return CompletedExecutionHandle(samples)
+
+    def _prepare_h2_submissions(
+        self,
+        packages: Sequence[Package],
+        shots: int,
+        contexts: Sequence[Mapping[str, str]],
+        reusable: tuple[_H2Submission, ...] = (),
+    ) -> _H2Batch | None:
+        """Prepare an entire H2 operation without provider side effects.
+
+        Args:
+            packages (Sequence[Package]): Ordered bound and instrumented packages.
+            shots (int): Positive repetitions per package.
+            contexts (Sequence[Mapping[str, str]]): Typed restoration identities.
+            reusable (tuple[_H2Submission, ...]): Latest compatible operation.
+
+        Returns:
+            _H2Batch | None: Prepared H2 requests, or None for Selene and Helios.
+
+        Raises:
+            Exception: If local validation or QIR conversion fails.
+        """
+        if self._nexus is None:
+            return None
+        return self._nexus._prepare_h2_submissions(packages, shots, contexts, reusable)
+
+    def _send_h2_submission(
+        self, batch: _H2Batch, index: int
+    ) -> ExecutionHandle[list[dict[str, Any]]]:
+        """Send one request from an already prepared H2 operation.
+
+        Args:
+            batch (_H2Batch): Local payloads and provider settings for this call.
+            index (int): Ordered submission position.
+
+        Returns:
+            ExecutionHandle[list[dict[str, Any]]]: Deferred tagged result rows.
+
+        Raises:
+            Exception: If authentication or provider submission fails.
+        """
+        assert self._nexus is not None
+        return self._nexus._send_h2_submission(batch, index)
 
     def retrieve(
         self, reference: ExecutionReference

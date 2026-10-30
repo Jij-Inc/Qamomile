@@ -107,6 +107,7 @@ def test_local_tagged_rows_restore_typed_results_without_executor_calls(operatio
     ]
     shots = 1 if operation == "run" else 3
     executor = Mock(spec=HugrExecutor)
+    executor._prepare_h2_submissions.return_value = None
     executor.submit.return_value = CompletedExecutionHandle(rows * shots)
     bindings = {"theta": 1.0, "label": 8}
     job = (
@@ -276,6 +277,7 @@ def test_constant_only_expectations_restore_without_execution(structured):
     )
     bindings = {"values": [0.3, 2.0]} if structured else {"theta": 0.3}
     executor = Mock(spec=HugrExecutor)
+    executor._prepare_h2_submissions.return_value = None
     job = program.run(executor, bindings, shots=1)
     saved = _round_trip(job)
     restored = program.restore(executor, saved, bindings)
@@ -325,6 +327,7 @@ def test_corrupt_local_envelopes_fail_without_provider_calls(field, value, messa
     """Malformed raw rows and restoration context cannot produce partial results."""
     program = HugrTranspiler().transpile(_complex, parameters=["theta", "label"])
     executor = Mock(spec=HugrExecutor)
+    executor._prepare_h2_submissions.return_value = None
     executor.submit.return_value = CompletedExecutionHandle([])
     bindings = {"theta": 1.0, "label": 8}
     saved = _round_trip(program.run(executor, bindings))
@@ -357,6 +360,7 @@ def test_restore_revalidates_mutated_local_snapshot_values():
     """Mutable containers cannot bypass the supported-value boundary on restore."""
     program = HugrTranspiler().transpile(_complex, parameters=["theta", "label"])
     executor = Mock(spec=HugrExecutor)
+    executor._prepare_h2_submissions.return_value = None
     executor.submit.return_value = CompletedExecutionHandle([])
     bindings = {"theta": 1.0, "label": 8}
     saved = _round_trip(program.run(executor, bindings))

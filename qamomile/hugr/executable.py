@@ -7,10 +7,12 @@ import json
 from collections.abc import Mapping
 from contextlib import ExitStack
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from types import TracebackType
-from typing import Any
+from typing import Any, Literal
+
+import numpy as np
 
 from qamomile.circuit.transpiler import (
     CompilationMetadata,
@@ -39,6 +41,7 @@ from qamomile.hugr._expval import (
     ShotExpectationPlan as _ShotExpectationPlan,
     ShotExpectationWorkflow as _ShotExpectationWorkflow,
 )
+from qamomile.hugr._nexus import _H2Batch, _H2Submission
 from qamomile.hugr._runtime import (
     PreparedExecution as _PreparedExecution,
     _runtime_input_names,
@@ -195,6 +198,53 @@ def _bindings_fingerprint(bindings: Mapping[str, Any]) -> str:
     """
     data = ExecutionSnapshot(
         ExecutionSnapshotKind.LOCAL, value=flatten_user_bindings(dict(bindings))
+    ).to_dict()
+    return hashlib.sha256(
+        json.dumps(data, sort_keys=True, allow_nan=False).encode()
+    ).hexdigest()
+
+
+def _qir_bindings_fingerprint(bindings: Mapping[str, Any]) -> str:
+    """Identify all normalized inputs, including dictionaries with nonstring keys.
+
+    Args:
+        bindings (Mapping[str, Any]): Owned runtime values validated by the ABI.
+
+    Returns:
+        str: Digest for in-memory QIR reuse without changing snapshot identities.
+
+    Raises:
+        TypeError: If a normalized value cannot be safely serialized.
+        ValueError: If a normalized value is not finite or exceeds supported nesting.
+    """
+
+    def encode(value: Any) -> Any:
+        """Represent dictionary keys and array schemas as serializable values.
+
+        Args:
+            value (Any): Normalized scalar or container, possibly nested.
+
+        Returns:
+            Any: Equivalent structure with only string-keyed dictionaries.
+        """
+        if isinstance(value, np.ndarray):
+            return {
+                "array": encode(value.tolist()),
+                "shape": value.shape,
+                "dtype": value.dtype.str,
+            }
+        if isinstance(value, Mapping):
+            return {
+                "items": tuple(
+                    (encode(key), encode(item)) for key, item in value.items()
+                )
+            }
+        if isinstance(value, (tuple, list)):
+            return tuple(encode(item) for item in value)
+        return value
+
+    data = ExecutionSnapshot(
+        ExecutionSnapshotKind.LOCAL, value=encode(bindings)
     ).to_dict()
     return hashlib.sha256(
         json.dumps(data, sort_keys=True, allow_nan=False).encode()
@@ -422,6 +472,23 @@ class _ExpectationExecutionHandle(MappedExecutionHandle[Any, Any]):
         )
 
 
+@dataclass(frozen=True)
+class _QIRGeneration:
+    """Own the latest complete logical H2 operation as an immutable record.
+
+    Args:
+        operation (Literal["sample", "run"]): Public operation that generated QIR.
+        shots (int | None): Sample count, or None for run operations.
+        bindings_sha256 (str): Identity of all normalized runtime argument values.
+        submissions (tuple[_H2Submission, ...]): All payloads in execution order.
+    """
+
+    operation: Literal["sample", "run"]
+    shots: int | None
+    bindings_sha256: str
+    submissions: tuple[_H2Submission, ...]
+
+
 class HugrExecutable:
     """Execute a HUGR artifact through a destination-independent typed API.
 
@@ -443,6 +510,7 @@ class HugrExecutable:
         )
         self._expectation: _ShotExpectationPlan | _ShotExpectationWorkflow | None = None
         self._terms: tuple[CompiledProgram[Any], ...] = ()
+        self._latest_qir: _QIRGeneration | None = None
 
     @classmethod
     def _for_expectation(
@@ -478,6 +546,109 @@ class HugrExecutable:
             Any: HUGR package, or tuple of packages for an expectation program.
         """
         return self._compiled.artifact
+
+    @property
+    def qir(self) -> bytes | tuple[bytes, ...] | None:
+        """Return the last successfully prepared H2 operation's exact QIR.
+
+        A complete generation replaces the previous record before authentication
+        or upload. Network failures retain it, while local preparation failures,
+        Helios, Selene, and constant-only expectations leave it unchanged.
+
+        Returns:
+            bytes | tuple[bytes, ...] | None: One immutable payload, ordered
+            payloads for a multi-term expectation, or None before H2 preparation.
+        """
+        latest = self._latest_qir
+        if latest is None:
+            return None
+        payloads = tuple(submission.qir for submission in latest.submissions)
+        return payloads[0] if len(payloads) == 1 else payloads
+
+    @property
+    def qir_info(self) -> dict[str, Any] | None:
+        """Return detached JSON-compatible metadata for the latest H2 operation.
+
+        Each submission includes its full generated name, actual target, QIR
+        digest, and string-valued restoration context. The context includes ABI
+        and expectation identities before any remote call. Runtime bindings and
+        job IDs are not stored. Supply the original bindings and independently
+        found job IDs to the existing snapshot and restore interface.
+
+        Returns:
+            dict[str, Any] | None: Version-one metadata with operation, shots,
+            and ordered submissions, or None before H2 preparation. Mutating
+            this dictionary cannot affect retained QIR or later submissions.
+        """
+        latest = self._latest_qir
+        if latest is None:
+            return None
+        return {
+            "version": 1,
+            "operation": latest.operation,
+            "shots": latest.shots,
+            "submissions": [
+                {
+                    "provider": "quantinuum-nexus",
+                    "name": submission.name,
+                    "target": submission.target,
+                    "qir_sha256": hashlib.sha256(submission.qir).hexdigest(),
+                    "context": dict(submission.context),
+                }
+                for submission in latest.submissions
+            ],
+        }
+
+    def _prepare_h2_operation(
+        self,
+        executor: HugrExecutor,
+        prepared: tuple[_PreparedExecution, ...],
+        shots: int,
+        operation: Literal["sample", "run"],
+        runtime: Mapping[str, Any],
+        expectation_sha256: str | None = None,
+    ) -> _H2Batch | None:
+        """Publish complete H2 metadata once local preparation has succeeded.
+
+        Args:
+            executor (HugrExecutor): Destination and per-call provider settings.
+            prepared (tuple[_PreparedExecution, ...]): Ordered bound term packages.
+            shots (int): Repetitions for each submitted package.
+            operation (Literal["sample", "run"]): Public operation being performed.
+            runtime (Mapping[str, Any]): All normalized runtime argument values.
+            expectation_sha256 (str | None): Complete expectation recipe identity.
+
+        Returns:
+            _H2Batch | None: Locally owned requests, or None for non-H2 execution.
+
+        Raises:
+            Exception: If local validation or QIR generation fails. The previous
+                generation remains available in this case.
+        """
+        bindings_sha256 = _qir_bindings_fingerprint(runtime)
+        latest = self._latest_qir
+        reusable = (
+            latest.submissions
+            if latest is not None
+            and latest.operation == operation
+            and latest.bindings_sha256 == bindings_sha256
+            else ()
+        )
+        contexts = tuple({"abi_sha256": term.abi_sha256} for term in prepared)
+        if expectation_sha256 is not None:
+            for context in contexts:
+                context["expectation_sha256"] = expectation_sha256
+        batch = executor._prepare_h2_submissions(
+            tuple(term.package for term in prepared), shots, contexts, reusable
+        )
+        if batch is not None:
+            self._latest_qir = _QIRGeneration(
+                operation,
+                shots if operation == "sample" else None,
+                bindings_sha256,
+                batch.submissions,
+            )
+        return batch
 
     @property
     def abi(self) -> ProgramABI:
@@ -548,10 +719,17 @@ class HugrExecutable:
         _validate_shots(shots)
         if self._expectation is not None:
             raise ValueError("Expectation programs use run(..., estimation=...)")
-        prepared = _prepare_execution(self._compiled, bindings)
-        handle = _DecodedExecutionHandle(
-            executor.submit(prepared.package, shots), prepared, shots
+        runtime = resolve_runtime_bindings(self._compiled, bindings)
+        prepared = _prepare_execution(self._compiled, runtime)
+        batch = self._prepare_h2_operation(
+            executor, (prepared,), shots, "sample", runtime
         )
+        raw = (
+            executor._send_h2_submission(batch, 0)
+            if batch is not None
+            else executor.submit(prepared.package, shots)
+        )
+        handle = _DecodedExecutionHandle(raw, prepared, shots)
         return _HugrSampleJob(handle, shots)
 
     def run(
@@ -589,17 +767,24 @@ class HugrExecutable:
         if self._expectation is None:
             if shots is not None:
                 _validate_shots(shots)
-            prepared = _prepare_execution(self._compiled, bindings)
-            decoded = _DecodedExecutionHandle(
-                executor.submit(prepared.package, 1), prepared, 1
+            runtime = resolve_runtime_bindings(self._compiled, bindings)
+            prepared = _prepare_execution(self._compiled, runtime)
+            batch = self._prepare_h2_operation(executor, (prepared,), 1, "run", runtime)
+            raw = (
+                executor._send_h2_submission(batch, 0)
+                if batch is not None
+                else executor.submit(prepared.package, 1)
             )
+            decoded = _DecodedExecutionHandle(raw, prepared, 1)
             return RunJob.from_handle(
                 MappedExecutionHandle(decoded, _single_result, snapshot_source=True)
             )
         shots = _resolve_estimation_shots(estimation, shots)
         runtime = resolve_runtime_bindings(self._compiled, bindings)
         reconstruct = partial(self._aggregate_expectation, bindings=runtime)
-        prepared_terms = [_prepare_execution(term, runtime) for term in self._terms]
+        prepared_terms = tuple(
+            _prepare_execution(term, runtime) for term in self._terms
+        )
         if not prepared_terms:
             return self._expectation_job(
                 _ConstantExpectationHandle(
@@ -609,10 +794,17 @@ class HugrExecutable:
                 )
             )
         fingerprint = self._expectation_fingerprint()
+        batch = self._prepare_h2_operation(
+            executor, prepared_terms, shots, "run", runtime, fingerprint
+        )
         handles = []
         with ExitStack() as cleanup:
-            for prepared in prepared_terms:
-                raw = executor.submit(prepared.package, shots)
+            for index, prepared in enumerate(prepared_terms):
+                raw = (
+                    executor._send_h2_submission(batch, index)
+                    if batch is not None
+                    else executor.submit(prepared.package, shots)
+                )
                 cleanup.push(partial(_cancel_after_submission_error, raw))
                 handles.append(_DecodedExecutionHandle(raw, prepared, shots))
             cleanup.pop_all()

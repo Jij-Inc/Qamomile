@@ -901,9 +901,10 @@ def test_empty_array_public_jobs_preserve_shape_and_element_type(
     monkeypatch.setattr(
         "qamomile.hugr.execution._NexusTransport",
         lambda options: SimpleNamespace(
+            _prepare_h2_submissions=lambda *args: None,
             submit=lambda package, shots: CompletedExecutionHandle(
                 _decode_results(QsysResult([[] for _ in range(shots)]), shots)
-            )
+            ),
         ),
     )
     compiled = _identity_program(_array_value(shape, element_type), tys.Tuple())

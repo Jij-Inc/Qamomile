@@ -10,6 +10,12 @@ Destructive measurements consume qubits with ``MeasureFree``. Projections
 retain their measured state with ``Measure``. Direct measurement/reset pairs
 use ``MeasureReset`` when their quantum wire and ordering permit fusion.
 Opaque measurement bits are converted to the existing native Boolean carrier.
+
+``HugrExecutable.qir`` and ``qir_info`` expose the latest complete H2 payloads
+and detached restoration metadata from ordinary ``sample`` and ``run`` calls.
+These records are ready before authentication or upload and survive a lost
+submission response. Compatible consecutive H2 calls reuse the exact bytes.
+Existing typed jobs, snapshots, and restoration keep their usual contracts.
 """
 
 from qamomile.hugr._nexus import NexusExecutionOptions, NexusRegion
