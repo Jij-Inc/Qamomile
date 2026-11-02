@@ -8,6 +8,14 @@ build:
     nodejs: "24"
   jobs:
     pre_create_environment:
+      # The repository's Rust pin can be newer than RTD's built-in choices.
+      - |
+        set -eu
+        rust_version="$(python -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+        asdf install rust "$rust_version"
+        asdf global rust "$rust_version"
+      - cargo --version
+      - rustc --version
       - asdf plugin add uv
       - asdf install uv latest
       - asdf global uv latest
