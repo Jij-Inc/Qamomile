@@ -3,6 +3,8 @@
 [![PyPI version](https://badge.fury.io/py/qamomile.svg)](https://badge.fury.io/py/qamomile)
 ![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)
 
+**Documentation:** [English](https://jij-inc-qamomile.readthedocs-hosted.com/latest/en/) | [日本語](https://jij-inc-qamomile.readthedocs-hosted.com/latest/ja/)
+
 > [!WARNING]
 > Qamomile is under active development. Its APIs may still change before the
 > first stable release.
