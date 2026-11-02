@@ -35,24 +35,23 @@
 #
 # This notebook runs that whole loop on a graph-partitioning instance and
 # demonstrates how to use the Qamomile library through the
-# `QSVTEigenstateFilterConverter`: build the block encoding, probe one
+# `QSVTEigenstateFilterExperiment`: build the block encoding, probe one
 # threshold, then let the binary search locate the ground energy on its own.
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install "qamomile[qiskit,visualization]" networkx
+# # !pip install "qamomile[qiskit]" jijmodeling matplotlib networkx
 
 # %%
 import jijmodeling as jm
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
-from qiskit_aer import AerSimulator
 
-import qamomile.circuit as qmc
-from qamomile.circuit.algorithm.qsvt_eigenstate_filter import qsvt_filter_projector
-from qamomile.optimization.qsvt_eigenstate_filter import QSVTEigenstateFilterConverter
-from qamomile.qiskit import QiskitTranspiler
+from qamomile.optimization import OMMXProblem, QSVTEigenstateFilterExperiment
+from qamomile.qiskit import Aer
+from qamomile.stdlib import qsvt, qsvt_filter_projector, synthesize_sign_filter
+from qamomile.visualization import draw
 
 SEED = 42
 
@@ -142,7 +141,8 @@ instance = problem.eval(instance_data)
 #
 # $$R(\phi_0),\; U,\; R(\phi_1),\; U^\dagger,\; \dots$$
 #
-# and leaves $p\!\left((H - \mu I)/\alpha'\right)$ in the same block. Choosing
+# and encodes a polynomial response in the same block. Extracting its real
+# component gives $p\!\left((H - \mu I)/\alpha'\right)$. Choosing
 # $p$ to approximate the sign function,
 #
 # $$p\!\left(\frac{H - \mu I}{\alpha'}\right) \approx
@@ -153,13 +153,16 @@ instance = problem.eval(instance_data)
 #
 # A reflection is not yet a projector, but $P_\mu = (I - R)/2$ is, and it is a
 # sum of two unitaries, so a Hadamard test on one extra qubit realises it
-# probabilistically. Starting from the uniform superposition
+# probabilistically. The implementation also uses one extra qubit to extract
+# the real component of the QSVT response; this qubit must also measure zero.
+# Starting from the uniform superposition
 # $|\varphi_0\rangle = H^{\otimes n}|0\rangle$, the fraction of shots with every
 # ancilla measuring zero estimates
 #
-# $$P(\mu)=\lVert P_\mu |\varphi_0\rangle \rVert^2 = \frac{\#\{i : E_i < \mu\}}{2^n},$$
+# $$P(\mu)=\lVert P_\mu |\varphi_0\rangle \rVert^2 \approx \frac{\#\{i : E_i < \mu\}}{2^n},$$
 #
-# the fraction of the spectrum below $\mu$. That single number is the predicate
+# the fraction of the spectrum below $\mu$ in the ideal sign-filter limit.
+# That single number is the predicate
 # a classical binary search needs: it is bounded away from zero exactly when an
 # eigenstate below $\mu$ carries weight in $|\varphi_0\rangle$.
 #
@@ -184,8 +187,10 @@ instance = problem.eval(instance_data)
 # ## Implementation with Qamomile
 #
 # Qamomile provides the eigenstate-filtering algorithm described above as
-# `QSVTEigenstateFilterConverter` in `qamomile.optimization.qsvt_eigenstate_filter`.
-# The converter builds the block encoding of the problem Hamiltonian, synthesizes
+# `QSVTEigenstateFilterExperiment` in `qamomile.optimization.qsvt_eigenstate_filter`.
+# `OMMXProblem.from_instance` converts the modeled problem into a binary model,
+# retaining the default constraint penalties. The experiment builds the block
+# encoding of the problem Hamiltonian, synthesizes
 # the filter phases, assembles the probe circuit, and post-selects and decodes the
 # measured samples, so the whole procedure runs directly from the problem
 # instance. Below, we first use it to test one threshold, then open up the
@@ -202,24 +207,24 @@ instance = problem.eval(instance_data)
 # threshold gets chosen against.
 
 # %%
-converter = QSVTEigenstateFilterConverter(instance)
-transpiler = QiskitTranspiler()
-# One seeded executor for every circuit on this page, so the printed numbers are
+optimization_problem = OMMXProblem.from_instance(instance)
+model = optimization_problem.model
+spin = model.to_ising()
+energy_offset = float(spin.constant)
+normalization = sum(abs(coeff) for coeff in spin.coefficients.values())
+# One seeded backend for every circuit on this page, so the printed numbers are
 # reproducible from one run to the next.
-executor = transpiler.executor(
-    backend=AerSimulator(seed_simulator=SEED, max_parallel_threads=1)
-)
+backend = Aer(seed_transpiler=SEED)
 
-low = converter.energy_offset - converter.normalization
-high = converter.energy_offset + converter.normalization
-print(f"alpha={converter.normalization}  offset={converter.energy_offset}")
+low = energy_offset - normalization
+high = energy_offset + normalization
+print(f"alpha={normalization}  offset={energy_offset}")
 print(f"every eigenvalue lies in [{low}, {high}]")
 
 # Reference spectrum: the Ising operator is diagonal, so we can read the exact
 # energies off directly and check the search against them later.
 # !!! This is only a check and the computation takes exponential time in general.
-spin = converter.spin_model
-energies = np.full(1 << spin.num_bits, float(spin.constant))
+energies = np.full(1 << spin.num_variables, float(spin.constant))
 for state in range(energies.size):
     for word, coeff in spin.coefficients.items():
         parity = sum((state >> i) & 1 for i in word) & 1
@@ -234,7 +239,7 @@ assert low <= energies.min() and energies.max() <= high
 # %% [markdown]
 # ### One threshold
 #
-# `transpile` bakes $\mu$ into the circuit, so each threshold needs its own
+# The experiment bakes $\mu$ into the circuit, so each threshold needs its own
 # compilation. The filter keeps the eigenspace below $\mu$ by default, which is
 # what a search for the minimum eigenvalue (ground energy) wants.
 #
@@ -244,7 +249,7 @@ assert low <= energies.min() and energies.max() <= high
 #
 # :::{note}
 # If not chosen, `degree` and `delta` are set to a default value by the
-# converter.
+# experiment.
 # :::
 #
 # The resolution is given by
@@ -262,23 +267,29 @@ assert low <= energies.min() and energies.max() <= high
 # $\Delta = \frac{|4-3|}{3 + |4 - 6|} = 1/5$, a choice of `delta=8` matches the
 # transition to the gap and `degree=21` represents it. A bad pairing is not a
 # silent loss of accuracy: it is rejected outright by the $|p| \le 1$ check.
+#
+# We use 8,000 shots per probe because the search also visits $\mu=3.5$, where
+# the finite polynomial gives a success probability of about $0.02198$, close
+# to the predicate threshold $\tau=0.015625$. With only 2,000 shots, sampling
+# fluctuations can cross that threshold even when the circuit implements the
+# intended polynomial correctly. Increasing the shot count reduces that risk
+# without changing the polynomial or the paired-probe search below.
 
 # %%
 DEGREE, DELTA = 21, 8
-SHOTS = 2000
-print(f"probe filter: degree={DEGREE}, delta={DELTA} -> {DEGREE + 1} phases")
+SHOTS = 8000
+probe_polynomial = synthesize_sign_filter(degree=DEGREE, delta=DELTA)
+print(
+    f"probe filter: degree={DEGREE}, delta={DELTA} -> {len(probe_polynomial.phases.phases)} phases"
+)
 
 
 def probe(mu, shots=SHOTS):
     """Estimate the fraction of the spectrum below `mu`."""
-    executable = converter.transpile(
-        transpiler,
-        mu=mu,
-        degree=DEGREE,
-        delta=DELTA,
+    experiment = QSVTEigenstateFilterExperiment(
+        model, mu=mu, polynomial=probe_polynomial
     )
-    result = executable.sample(executor, shots=shots).result()
-    return converter.success_probability(result)
+    return experiment.run(on=backend, shots=shots, seed=SEED).success_probability
 
 
 # Two of the 64 states sit at the ground energy, so the predicate saturates at
@@ -294,35 +305,37 @@ assert abs(sampled_p4 - exact_p4) < shot_noise + 0.01
 
 # %% [markdown]
 # An external library, `pyqsp`, computes the phase factors corresponding to the
-# polynomial approximation defined by our parameters.
+# polynomial approximation defined by our parameters. `synthesize_sign_filter`
+# asks Rust to independently verify the real polynomial and its phase response
+# before accepting the candidate.
 #
-# The converter builds the quantum circuit of the projector. The circuit is run
+# The experiment builds the quantum circuit of the projector. The circuit is run
 # and we compute the success probability from the sample counts with the
-# `success_probability` method. (The exact computation above is only a reference
+# returned `success_probability` value. (The exact computation above is only a reference
 # used to check the precision.)
 
 # %% [markdown]
 # ### Building blocks
 #
-# `transpile` composes three circuits, each wrapping the previous one. Drawing
+# The experiment composes three circuits, each wrapping the previous one. Drawing
 # them in that order shows how a block encoding becomes a projector.
 #
 # To keep the pictures readable the phase vector is shortened to four entries
 # (instead of the 22 used above).
+# The viewer initially folds implementation loops; its controls can show the
+# loop bodies or expand the circuit.
 
 # %%
 DRAW_MU = 4.0
 
-# `_shifted_encoding` is internal: it is not part of the converter's public API,
-# but it is the descriptor every circuit below is built from, so the drawings
-# match the circuit that actually runs at this threshold.
-shifted = converter._shifted_encoding(DRAW_MU)
-n_signal = shifted.num_signal_qubits
-n_system = shifted.num_system_qubits
-
 # Four phases instead of the 22 the degree-21 filter uses; only the count
 # affects the circuit's shape, not the values.
 phi_demo = [0.1, 0.2, 0.3, 0.4]
+drawing_experiment = QSVTEigenstateFilterExperiment(model, mu=DRAW_MU, phases=phi_demo)
+# The public descriptor is the same one used to build the executable probe.
+shifted = drawing_experiment.shifted_encoding
+n_signal = shifted.signal_width
+n_system = shifted.system_width
 
 print(f"alpha' = {shifted.normalization}   signal={n_signal}  system={n_system}")
 
@@ -342,52 +355,32 @@ print(f"alpha' = {shifted.normalization}   signal={n_signal}  system={n_system}"
 # block is useful, which is why every shot must be post-selected on it.
 
 # %%
-@qmc.qkernel
-def block_encoding() -> qmc.Vector[qmc.Bit]:
-    """Apply the block encoding of (H - mu*I) / alpha' to |0>."""
-    signal = qmc.qubit_array(n_signal, "signal")
-    system = qmc.qubit_array(n_system, "system")
-    signal, system = shifted.unitary(signal, system)
-    return qmc.measure(signal)
-
-
-block_encoding.draw(inline=True, inline_depth=1, fold_loops=False)
+draw(shifted.unitary, inline_depth=0, loops="folded")
 
 
 # %% [markdown]
 # #### 2. The QSVT alternation
 #
-# Given the block encoding, `qmc.qsvt` applies
+# Given the block encoding, `qsvt` applies
 #
 # $$R(\phi_0),\; U,\; R(\phi_1),\; U^\dagger,\; R(\phi_2),\; U,\; \dots$$
 #
 # with $U$ the block encoding built above and $R(\phi) = e^{i\phi(2\Pi - I)}$,
 # where $\Pi$ projects the signal register onto all zero. The primitive owns the
-# whole sequence: it allocates its own rotation auxiliary qubit, alternates $U$
-# with $U^\dagger$, and applies the phases.
+# whole sequence: it alternates $U$ with $U^\dagger$ and applies the phases.
 #
 # The effect is to replace the encoded operator by a polynomial of it. With the
-# phases `pyqsp` produced, that polynomial approximates $\mathrm{sign}$, so the
-# good block becomes a reflection about the eigenspace on one side of $\mu$.
+# phases `pyqsp` produced, the real component approximates $\mathrm{sign}$.
+# Extracting that real component therefore gives an approximate reflection
+# about the eigenspace on one side of $\mu$.
 
 # %%
-@qmc.qkernel
-def qsvt_reflector(
-    phi: qmc.Vector[qmc.Float],
-) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
-    """QSVT alternation implementing sign((H - mu*I) / alpha')."""
-    signal = qmc.qubit_array(n_signal, "signal")
-    system = qmc.qubit_array(n_system, "system")
-    signal, system = qmc.qsvt(signal, system, phi, shifted)
-    return qmc.measure(signal), qmc.measure(system)
-
-
-qsvt_reflector.draw(phi=phi_demo, inline=True, inline_depth=0, fold_loops=False)
+draw(qsvt(shifted, phases=phi_demo), inline_depth=0, loops="folded")
 
 # %% [markdown]
 # #### 3. The Lin & Tong projector
 #
-# The goal is to turn the reflection into the projection $P_\mu = (I \pm R)/2$.
+# The goal is to turn the reflection into the projection $P_\mu = (I - R)/2$.
 # However, this projector is **not unitary**, so no circuit can simply apply it.
 #
 # The trick is that it is a sum of two unitaries, $I$ and $R$, so a Hadamard test
@@ -397,18 +390,13 @@ qsvt_reflector.draw(phi=phi_demo, inline=True, inline_depth=0, fold_loops=False)
 # and a second Hadamard interferes the two branches. Measuring the probe qubit as
 # zero heralds the branch where $P_\mu$ was applied; that is why the algorithm has
 # a success probability at all, and why the post-selection is on the probe **and**
-# the signal register together.
+# the signal register together. The real-component extraction adds another
+# success qubit before this step, so the implementation post-selects on both
+# extra qubits and the original signal register.
 
 # %%
-qsvt_filter_projector(shifted).draw(
-    proj=1,
-    signal=n_signal,
-    system=n_system,
-    phi=phi_demo,
-    inline=True,
-    inline_depth=0,
-    fold_loops=False,
-)
+projector = qsvt_filter_projector(shifted, phases=phi_demo)
+draw(projector.unitary, inline_depth=0, loops="folded")
 
 
 # %% [markdown]
@@ -418,6 +406,7 @@ qsvt_filter_projector(shifted).draw(
 # single bit "the grid point $x_k$ sees the retained eigenspace", and the loop
 # consumes those bits in consecutive pairs, as described in the Algorithm
 # section.
+
 
 # %%
 def binary_search_ground_energy(success_prob, low, high, gamma, h=1.0):
@@ -452,7 +441,10 @@ def binary_search_ground_energy(success_prob, low, high, gamma, h=1.0):
     while U - L > 3:
         k = (L + U) // 2
         bk, bk1 = B(k), B(k + 1)
-        print(f"  k={k}: B({grid[k]:+.2f})={bk}  B({grid[k + 1]:+.2f})={bk1}", end="  ->  ")
+        print(
+            f"  k={k}: B({grid[k]:+.2f})={bk}  B({grid[k + 1]:+.2f})={bk1}",
+            end="  ->  ",
+        )
         if bk == 1 and bk1 == 1:  # lambda_0 < x_k+1
             U = k + 1
             print(f"(1,1) U<-{U}  [{grid[L]:+.2f}, {grid[U]:+.2f}]")
@@ -490,7 +482,9 @@ def binary_search_ground_energy(success_prob, low, high, gamma, h=1.0):
 gamma = np.sqrt(degeneracy / energies.size)
 x_lower, x_upper = binary_search_ground_energy(probe, low, high, gamma=gamma, h=1.0)
 
-print(f"\nlambda_0 in [{x_lower:+.2f}, {x_upper:+.2f}]   true lambda_0 = {ground_energy:+.2f}")
+print(
+    f"\nlambda_0 in [{x_lower:+.2f}, {x_upper:+.2f}]   true lambda_0 = {ground_energy:+.2f}"
+)
 assert x_lower <= ground_energy <= x_upper
 
 # %% [markdown]
@@ -499,37 +493,39 @@ assert x_lower <= ground_energy <= x_upper
 # and that is why `degree=21` was enough for every probe. To keep *only* the
 # ground eigenspace, at $\mu = 3.5$ the optimal resolution is $\Delta = 0.09$
 # rather than the $0.20$ used by the search, so the final decode exploits a
-# sharper polynomial. Raising `degree` alone does not help: `degree=61` with a
-# mismatched `delta=20` scores worse (85%) than `degree=41` with `delta=11`
-# (91%).
+# sharper polynomial. Raising `degree` alone does not guarantee a sharper
+# transition: `degree` and `delta` must be chosen together so the polynomial
+# stays bounded and resolves the gap. The observed ground-state fraction also
+# depends on the polynomial response and the sampled shots, so we check it
+# explicitly below.
 # :::
 
 # %%
 # The predicate needed degree 21; extracting the state itself needs a sharper
 # filter at the same threshold.
 DECODE_DEGREE, DECODE_DELTA = 41, 11
+decode_polynomial = synthesize_sign_filter(degree=DECODE_DEGREE, delta=DECODE_DELTA)
 print(
-    f"decode filter: degree={DECODE_DEGREE}, delta={DECODE_DELTA} -> {DECODE_DEGREE + 1} phases"
+    f"decode filter: degree={DECODE_DEGREE}, delta={DECODE_DELTA} -> {len(decode_polynomial.phases.phases)} phases"
 )
 
-executable = converter.transpile(
-    transpiler,
-    mu=x_upper,
-    degree=DECODE_DEGREE,
-    delta=DECODE_DELTA,
+decode_experiment = QSVTEigenstateFilterExperiment(
+    model, mu=x_upper, polynomial=decode_polynomial
 )
-result = executable.sample(executor, shots=20000).result()
-sampleset = converter.decode_to_binary_sampleset(result)
+run = decode_experiment.run(on=backend, shots=20000, seed=SEED)
+result = run.execution.result
+sampleset = run.samples
+assert sampleset is not None
 
-kept = sum(sampleset.num_occurrences)
+kept = sampleset.total_occurrences
 optimal = sum(
-    n
-    for e, n in zip(sampleset.energy, sampleset.num_occurrences)
-    if np.isclose(e, ground_energy)
+    sample.occurrences
+    for sample in sampleset.samples
+    if np.isclose(sample.energy, ground_energy)
 )
 print(f"kept {kept} of {result.shots} shots, {optimal / kept:.1%} at the ground energy")
 
-best = max(zip(sampleset.samples, sampleset.num_occurrences), key=lambda z: z[1])[0]
+best = max(sampleset.samples, key=lambda sample: sample.occurrences).values
 side = sorted(v for v, bit in best.items() if bit == 1)
 cut = sum(1 for u, v in edge_list if best[u] != best[v])
 print(f"most sampled partition: {side} | cut={cut}")
@@ -571,11 +567,11 @@ plt.show()
 # In this notebook, we:
 #
 # - Solved a graph-partitioning instance end to end with
-#   `QSVTEigenstateFilterConverter`, recovering the unique optimal split of the
+#   `QSVTEigenstateFilterExperiment`, recovering the unique optimal split of the
 #   triangular prism.
 # - Saw why the algorithm is probabilistic: $P_\mu = (I - R)/2$ is not unitary,
 #   so a Hadamard test realises it and every shot must be post-selected on the
-#   probe and signal registers together.
+#   probe, real-component extraction, and signal registers together.
 # - Saw that every knob traces back to one number, the normalized gap
 #   $\Delta = \min_i |E_i - \mu| / \alpha'$, which is also why holding the Ising
 #   constant out of the block encoding matters and why `normalization` and

@@ -10,14 +10,15 @@ import griffe
 from .config import ApiGenConfig
 from .crossref import CrossRefRegistry
 from .discovery import (
+    collect_submodules_recursive,
     discover_subpackages,
     get_immediate_submodules,
     get_public_non_module_members,
-    resolve_member,
     is_public,
-    collect_submodules_recursive,
+    resolve_member,
 )
 from .pages import generate_flat_page, generate_index_page, generate_split_pages
+from .realizations import generate_realizations_table
 from .toc import build_toc_entries, inject_toc
 
 
@@ -149,6 +150,8 @@ def main(config: ApiGenConfig | None = None) -> None:
             content = generate_flat_page(
                 pkg, full_name, package_dir, config, page_path, registry
             )
+            if name == "lowering":
+                content += generate_realizations_table()
             out_file = config.output_dir / f"{name}.md"
             out_file.write_text(content)
             line_count = content.count("\n")

@@ -1,11 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: py:percent,ipynb
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -32,16 +33,11 @@
 #
 # **Prerequisites**: the content of [the first part](quantum_error_correction.ipynb) (syndrome measurement, Pauli errors, the term "stabilizer").
 
-# %%
-# Install the latest Qamomile from pip.
-# # !pip install "qamomile[qiskit]"
-# # or
-# # !uv add "qamomile[qiskit]"
-
 # %% [markdown]
 # ## 1. Stabilizer Formalism
 #
 # In the first part, we called parity operators such as $Z_0Z_1$ and $X_0X_1$ **stabilizers**. We first formalize this term.
+
 
 # %% [markdown]
 # ### 1.1 What Is a Stabilizer
@@ -54,6 +50,7 @@
 #
 # For example, the codewords of the bit-flip code are $\lvert000\rangle$ and $\lvert111\rangle$. Applying $Z_0Z_1$ gives $Z_0Z_1\lvert000\rangle=\lvert000\rangle$ and $Z_0Z_1\lvert111\rangle=(-1)(-1)\lvert111\rangle=\lvert111\rangle$ — neither changes. So $Z_0Z_1$ is a stabilizer of the bit-flip code.
 
+
 # %% [markdown]
 # ### 1.2 Generators and the Syndrome
 #
@@ -65,6 +62,7 @@
 # - When an error $E$ occurs, the measured value of any generator that **anticommutes** with $E$ flips to $-1$.
 #
 # This pattern of $\pm1$ (written as $0/1$ in bits) is the **syndrome**. The values we extracted into ancilla qubits in the first part were exactly the measurement results of stabilizer generators. Seeing which generators turned $-1$ tells us the location and type of the error.
+
 
 # %% [markdown]
 # ### 1.3 The First Part's Codes as Stabilizers
@@ -79,6 +77,7 @@
 #
 # The bit-flip code has only $Z$-type generators, and the phase-flip code only $X$-type generators. Shor's code has both, with the $Z$-type detecting $X$ errors and the $X$-type detecting $Z$ errors. This structure of "holding $X$-type and $Z$-type generators separately" leads to the CSS construction in the next section.
 
+
 # %% [markdown]
 # ### 1.4 $[[n,k,d]]$ and the Code Distance
 #
@@ -91,9 +90,24 @@
 # A code of distance $d$ can correct up to $\lfloor(d-1)/2\rfloor$ errors. Correcting any single-qubit error requires $d\ge3$. The 3-qubit codes from the first part had $d=1$ and Shor's code had $d=3$. The Steane code we are about to build is $[[7,1,3]]$.
 
 # %% [markdown]
+# ## Installation
+#
+# ```bash
+# pip install qamomile
+# ```
+
+# %%
+# Install the latest Qamomile through pip!
+# # !pip install qamomile
+
+# %%
+import qamomile as qm
+
+# %% [markdown]
 # ## 2. From Classical Hamming Codes to CSS Codes
 #
 # A **CSS code (Calderbank-Shor-Steane code)** is a way to build quantum codes systematically from classical error-correcting codes. The Steane code is its flagship example, based on the classical Hamming code.
+
 
 # %% [markdown]
 # ### 2.1 The Classical Hamming [7,4,3] Code
@@ -111,12 +125,14 @@
 #
 # A 7-bit word $c$ is a codeword if and only if $Hc=0$ (its parity with every row is even).
 
+
 # %% [markdown]
 # ### 2.2 How the Columns Point to the Error Location
 #
 # Look closely at the columns of $H$: column $j$ is the binary representation of the number $j+1$ (column 0 is $001$, column 1 is $010$, …, column 6 is $111$).
 #
 # When a single-bit error occurs at position $j$, $Hc$ equals exactly column $j$. So reading the three bits of $Hc$ as a binary number gives the error location directly. This is the mechanism by which the classical Hamming code pinpoints the error location in one shot.
+
 
 # %% [markdown]
 # ### 2.3 The CSS Construction: $X$-Type and $Z$-Type Stabilizers
@@ -127,6 +143,7 @@
 # - **$X$-type stabilizers**: read the same rows as operators placing $X$. Detects $Z$ errors.
 #
 # An $X$ error anticommutes with the $Z$-type stabilizers, and a $Z$ error anticommutes with the $X$-type stabilizers. So the $Z$-type locate the $X$ errors and the $X$-type locate the $Z$ errors, each in exactly the same way as the classical Hamming code. The "correct $X$ and $Z$ independently" seen in Shor's code in the first part comes out automatically from the classical code here.
+
 
 # %% [markdown]
 # ### 2.4 The Six Generators of the Steane Code
@@ -144,49 +161,9 @@
 #
 # With 7 physical qubits and 6 generators, the number of logical qubits protected is $7-6=1$. This is the Steane $[[7,1,3]]$ code.
 
+
 # %% [markdown]
 # Before getting into the implementation, we load Qamomile and the Qiskit integration and define helper functions. `_bits7`, `_passes_hamming_checks`, and `_is_steane_zero_word` are utilities that decide whether a measurement outcome is a Hamming codeword or a $\lvert0_L\rangle$ codeword. They are not central to QEC, so feel free to skip them.
-
-# %%
-import os
-
-import qamomile.circuit as qmc
-from qamomile.qiskit import QiskitTranspiler
-
-transpiler = QiskitTranspiler()
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-encoding_shots = 1 if docs_test_mode else 1024
-correction_shots = 1 if docs_test_mode else 128
-
-# Create a seeded backend for reproducible documentation output.
-from qiskit_aer import AerSimulator
-
-_seeded_backend = AerSimulator(seed_simulator=42, max_parallel_threads=1)
-_seeded_executor = transpiler.executor(backend=_seeded_backend)
-
-
-def _bits7(outcome) -> list[int]:
-    """Return the outcome as a list of 7 bits in qubit-index order."""
-    if isinstance(outcome, (list, tuple)):
-        return list(outcome)
-    return [(outcome >> i) & 1 for i in range(7)]
-
-
-def _passes_hamming_checks(outcome) -> bool:
-    """Return whether the outcome is a Hamming [7,4,3] codeword (passes all 3 parity checks)."""
-    bits = _bits7(outcome)
-    h_checks = [
-        bits[3] ^ bits[4] ^ bits[5] ^ bits[6],
-        bits[1] ^ bits[2] ^ bits[5] ^ bits[6],
-        bits[0] ^ bits[2] ^ bits[4] ^ bits[6],
-    ]
-    return all(check == 0 for check in h_checks)
-
-
-def _is_steane_zero_word(outcome) -> bool:
-    """Return whether the outcome is a |0_L> codeword (an even-weight Hamming codeword)."""
-    return _passes_hamming_checks(outcome) and sum(_bits7(outcome)) % 2 == 0
-
 
 # %% [markdown]
 # ## 3. Encoding the Logical $\lvert0_L\rangle$
@@ -199,41 +176,11 @@ def _is_steane_zero_word(outcome) -> bool:
 #
 # Here $C$ is the set of Hamming codewords and $w(c)$ is the weight. There are 8 even-weight Hamming codewords, so this is an 8-term superposition.
 
+
 # %% [markdown]
 # ### 3.2 The Encoding Circuit
 #
 # The following circuit builds $\lvert0_L\rangle$ from $\lvert0\rangle^{\otimes7}$. It writes in the three $X$-type stabilizer patterns ($X_3X_4X_5X_6$, $X_1X_2X_5X_6$, $X_0X_2X_4X_6$) one by one with Hadamard and CNOT gates.
-
-
-# %%
-@qmc.qkernel
-def encode_steane_zero(data: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-    # Write in the X3 X4 X5 X6 pattern.
-    data[3] = qmc.h(data[3])
-    data[3], data[4] = qmc.cx(data[3], data[4])
-    data[3], data[5] = qmc.cx(data[3], data[5])
-    data[3], data[6] = qmc.cx(data[3], data[6])
-
-    # Write in the X1 X2 X5 X6 pattern.
-    data[1] = qmc.h(data[1])
-    data[1], data[2] = qmc.cx(data[1], data[2])
-    data[1], data[5] = qmc.cx(data[1], data[5])
-    data[1], data[6] = qmc.cx(data[1], data[6])
-
-    # Write in the X0 X2 X4 X6 pattern.
-    data[0] = qmc.h(data[0])
-    data[0], data[2] = qmc.cx(data[0], data[2])
-    data[0], data[4] = qmc.cx(data[0], data[4])
-    data[0], data[6] = qmc.cx(data[0], data[6])
-    return data
-
-
-# %%
-@qmc.qkernel
-def encode_zero_and_measure() -> qmc.Vector[qmc.Bit]:
-    data = qmc.qubit_array(7, name="data")
-    data = encode_steane_zero(data)
-    return qmc.measure(data)
 
 
 # %% [markdown]
@@ -241,20 +188,82 @@ def encode_zero_and_measure() -> qmc.Vector[qmc.Bit]:
 #
 # We measure the encoder's output and check that every observed bitstring is an even-weight Hamming codeword (a $\lvert0_L\rangle$ codeword).
 
+
 # %%
-print("Encode and measure |0_L>")
-exe = transpiler.transpile(encode_zero_and_measure)
-result = exe.sample(_seeded_executor, shots=encoding_shots).result()
-total = sum(count for _, count in result.results)
-valid = sum(count for outcome, count in result.results if _is_steane_zero_word(outcome))
-print(f"  |0_L> codeword ratio: {valid / total:.3f}")
-print(f"  distinct codewords observed: {len(result.results)}")
-# The Steane |0_L> is an equal superposition of exactly 8 even-weight
-# Hamming codewords, so every shot reads a valid |0_L> codeword and the
-# distribution covers at most those 8 outcomes.
-assert total == encoding_shots
-assert valid == total
-assert len(result.results) <= 8
+@qm.qkernel
+def steane_encode_zero(
+    state: qm.Q[qm.Bits[10]],  # type: ignore[valid-type]
+) -> qm.Q[qm.Bits[10]]:  # type: ignore[valid-type]
+    """Encode the final seven components as the Steane logical zero.
+
+    Args:
+        state (qm.Q[qm.Bits[10]]): Three syndrome and seven data qubits.
+
+    Returns:
+        qm.Q[qm.Bits[10]]: State with components 3 through 9 encoded as logical zero.
+    """
+
+    state = qm.h(state, target=6)
+    for target in (7, 8, 9):
+        state = qm.cx(state, control=6, target=target)
+    state = qm.h(state, target=4)
+    for target in (5, 8, 9):
+        state = qm.cx(state, control=4, target=target)
+    state = qm.h(state, target=3)
+    for target in (5, 7, 9):
+        state = qm.cx(state, control=3, target=target)
+    return state
+
+
+@qm.qkernel
+def steane_extract_bit_syndrome(
+    state: qm.Q[qm.Bits[10]],  # type: ignore[valid-type]
+) -> qm.Q[qm.Bits[10]]:  # type: ignore[valid-type]
+    """Extract one Steane bit-error syndrome coherently.
+
+    Args:
+        state (qm.Q[qm.Bits[10]]): Encoded data and three clean syndrome qubits.
+
+    Returns:
+        qm.Q[qm.Bits[10]]: Data with the syndrome in components 0 through 2.
+    """
+
+    for data in (3, 4, 5, 6):
+        state = qm.cx(state, control=data + 3, target=0)
+    for data in (1, 2, 5, 6):
+        state = qm.cx(state, control=data + 3, target=1)
+    for data in (0, 2, 4, 6):
+        state = qm.cx(state, control=data + 3, target=2)
+    return state
+
+
+@qm.qkernel
+def steane_extract_phase_syndrome(
+    state: qm.Q[qm.Bits[10]],  # type: ignore[valid-type]
+) -> qm.Q[qm.Bits[10]]:  # type: ignore[valid-type]
+    """Extract one Steane phase-error syndrome coherently.
+
+    Args:
+        state (qm.Q[qm.Bits[10]]): Encoded data and three clean syndrome qubits.
+
+    Returns:
+        qm.Q[qm.Bits[10]]: Data with the syndrome in components 0 through 2.
+    """
+
+    state = qm.h(state, target=0)
+    for data in (3, 4, 5, 6):
+        state = qm.cx(state, control=0, target=data + 3)
+    state = qm.h(state, target=0)
+    state = qm.h(state, target=1)
+    for data in (1, 2, 5, 6):
+        state = qm.cx(state, control=1, target=data + 3)
+    state = qm.h(state, target=1)
+    state = qm.h(state, target=2)
+    for data in (0, 2, 4, 6):
+        state = qm.cx(state, control=2, target=data + 3)
+    state = qm.h(state, target=2)
+    return state
+
 
 # %% [markdown]
 # ## 4. Syndrome Measurement and Correction
@@ -267,6 +276,7 @@ assert len(result.results) <= 8
 # - Measuring the $X$-type stabilizers gives the syndrome for $Z$ errors.
 #
 # Each is a 3-bit syndrome, and the column mechanism of the Hamming matrix seen in 2.2 applies directly.
+
 
 # %% [markdown]
 # ### 4.2 The Syndrome Table
@@ -286,6 +296,7 @@ assert len(result.results) <= 8
 #
 # The $(s_2,s_1,s_0)$ obtained from the $Z$-type stabilizers points to the $X$ error location, and the one from the $X$-type points to the $Z$ error location.
 
+
 # %% [markdown]
 # ### 4.3 Implementation
 #
@@ -293,139 +304,278 @@ assert len(result.results) <= 8
 
 
 # %%
-@qmc.qkernel
-def steane_run(
-    error_type: qmc.UInt,
-    error_pos: qmc.UInt,
-) -> qmc.Vector[qmc.Bit]:
-    # Allocate 7 data qubits and 6 ancilla qubits for syndrome measurement.
-    data = qmc.qubit_array(7, name="data")
-    anc = qmc.qubit_array(6, name="anc")
+def _steane_syndrome_correction(
+    target: int,
+    *,
+    pauli: int,
+) -> qm.QKernel:
+    """Construct one coherent three-bit syndrome correction.
 
-    # Encode into |0_L>.
-    data = encode_steane_zero(data)
+    Args:
+        target: Data component corrected by this syndrome value.
+        pauli: Pauli selector: one X, two Y, three Z.
 
-    # Inject the X / Y / Z error specified by error_type / error_pos.
-    for i in qmc.range(7):
-        if (error_type == 1) & (error_pos == i):  # 1: X error
-            data[i] = qmc.x(data[i])
-        if (error_type == 2) & (error_pos == i):  # 2: Y error
-            data[i] = qmc.y(data[i])
-        if (error_type == 3) & (error_pos == i):  # 3: Z error
-            data[i] = qmc.z(data[i])
+    Returns:
+        Unary correction with its syndrome pattern closed in.
+    """
 
-    # Z-type stabilizers: measure the X-error syndrome (sx_2, sx_1, sx_0).
-    data[3], anc[0] = qmc.cx(data[3], anc[0])
-    data[4], anc[0] = qmc.cx(data[4], anc[0])
-    data[5], anc[0] = qmc.cx(data[5], anc[0])
-    data[6], anc[0] = qmc.cx(data[6], anc[0])
-    sx_2 = qmc.measure(anc[0])
+    syndrome_value = target + 1
+    zero_controls = tuple(
+        offset for offset, mask in enumerate((4, 2, 1)) if syndrome_value & mask == 0
+    )
 
-    data[1], anc[1] = qmc.cx(data[1], anc[1])
-    data[2], anc[1] = qmc.cx(data[2], anc[1])
-    data[5], anc[1] = qmc.cx(data[5], anc[1])
-    data[6], anc[1] = qmc.cx(data[6], anc[1])
-    sx_1 = qmc.measure(anc[1])
+    if pauli == 1:
 
-    data[0], anc[2] = qmc.cx(data[0], anc[2])
-    data[2], anc[2] = qmc.cx(data[2], anc[2])
-    data[4], anc[2] = qmc.cx(data[4], anc[2])
-    data[6], anc[2] = qmc.cx(data[6], anc[2])
-    sx_0 = qmc.measure(anc[2])
+        @qm.qkernel
+        def correct_data(
+            data: qm.Q[qm.Bits[7]],  # type: ignore[valid-type]
+        ) -> qm.Q[qm.Bits[7]]:  # type: ignore[valid-type]
+            return qm.x(data, target=target)
 
-    # X-type stabilizers: measure the Z-error syndrome (sz_2, sz_1, sz_0).
-    anc[3] = qmc.h(anc[3])
-    anc[3], data[3] = qmc.cx(anc[3], data[3])
-    anc[3], data[4] = qmc.cx(anc[3], data[4])
-    anc[3], data[5] = qmc.cx(anc[3], data[5])
-    anc[3], data[6] = qmc.cx(anc[3], data[6])
-    anc[3] = qmc.h(anc[3])
-    sz_2 = qmc.measure(anc[3])
+    elif pauli == 2:
 
-    anc[4] = qmc.h(anc[4])
-    anc[4], data[1] = qmc.cx(anc[4], data[1])
-    anc[4], data[2] = qmc.cx(anc[4], data[2])
-    anc[4], data[5] = qmc.cx(anc[4], data[5])
-    anc[4], data[6] = qmc.cx(anc[4], data[6])
-    anc[4] = qmc.h(anc[4])
-    sz_1 = qmc.measure(anc[4])
+        @qm.qkernel
+        def correct_data(
+            data: qm.Q[qm.Bits[7]],  # type: ignore[valid-type]
+        ) -> qm.Q[qm.Bits[7]]:  # type: ignore[valid-type]
+            return qm.y(data, target=target)
 
-    anc[5] = qmc.h(anc[5])
-    anc[5], data[0] = qmc.cx(anc[5], data[0])
-    anc[5], data[2] = qmc.cx(anc[5], data[2])
-    anc[5], data[4] = qmc.cx(anc[5], data[4])
-    anc[5], data[6] = qmc.cx(anc[5], data[6])
-    anc[5] = qmc.h(anc[5])
-    sz_0 = qmc.measure(anc[5])
+    else:
 
-    # X-component correction: apply X at the location pointed to by (sx_2, sx_1, sx_0).
-    if (~sx_2) & (~sx_1) & sx_0:
-        data[0] = qmc.x(data[0])
-    if (~sx_2) & sx_1 & (~sx_0):
-        data[1] = qmc.x(data[1])
-    if (~sx_2) & sx_1 & sx_0:
-        data[2] = qmc.x(data[2])
-    if sx_2 & (~sx_1) & (~sx_0):
-        data[3] = qmc.x(data[3])
-    if sx_2 & (~sx_1) & sx_0:
-        data[4] = qmc.x(data[4])
-    if sx_2 & sx_1 & (~sx_0):
-        data[5] = qmc.x(data[5])
-    if sx_2 & sx_1 & sx_0:
-        data[6] = qmc.x(data[6])
+        @qm.qkernel
+        def correct_data(
+            data: qm.Q[qm.Bits[7]],  # type: ignore[valid-type]
+        ) -> qm.Q[qm.Bits[7]]:  # type: ignore[valid-type]
+            return qm.z(data, target=target)
 
-    # Z-component correction: apply Z at the location pointed to by (sz_2, sz_1, sz_0).
-    if (~sz_2) & (~sz_1) & sz_0:
-        data[0] = qmc.z(data[0])
-    if (~sz_2) & sz_1 & (~sz_0):
-        data[1] = qmc.z(data[1])
-    if (~sz_2) & sz_1 & sz_0:
-        data[2] = qmc.z(data[2])
-    if sz_2 & (~sz_1) & (~sz_0):
-        data[3] = qmc.z(data[3])
-    if sz_2 & (~sz_1) & sz_0:
-        data[4] = qmc.z(data[4])
-    if sz_2 & sz_1 & (~sz_0):
-        data[5] = qmc.z(data[5])
-    if sz_2 & sz_1 & sz_0:
-        data[6] = qmc.z(data[6])
+    if not zero_controls:
 
-    return qmc.measure(data)
+        @qm.qkernel
+        def active_correction(
+            state: qm.Q[qm.Bits[10]],  # type: ignore[valid-type]
+        ) -> qm.Q[qm.Bits[10]]:  # type: ignore[valid-type]
+            syndrome, data = qm.split_at(state, 3)
+            syndrome, data = qm.control(correct_data, syndrome, data)
+            return qm.concat(syndrome, data)
 
+        return active_correction
+
+    @qm.qkernel
+    def correct(
+        state: qm.Q[qm.Bits[10]],  # type: ignore[valid-type]
+    ) -> qm.Q[qm.Bits[10]]:  # type: ignore[valid-type]
+        syndrome, data = qm.split_at(state, 3)
+        for control in zero_controls:
+            syndrome = qm.x(syndrome, target=control)
+        syndrome, data = qm.control(correct_data, syndrome, data)
+        for control in zero_controls:
+            syndrome = qm.x(syndrome, target=control)
+        return qm.concat(syndrome, data)
+
+    return correct
+
+
+def _steane_correction(pauli: int) -> qm.QKernel:
+    """Compose all seven nonzero syndrome corrections.
+
+    Args:
+        pauli: Pauli selector: one X, two Y, three Z.
+
+    Returns:
+        Total coherent correction for one Pauli component.
+    """
+
+    @qm.qkernel
+    def identity(
+        state: qm.Q[qm.Bits[10]],  # type: ignore[valid-type]
+    ) -> qm.Q[qm.Bits[10]]:  # type: ignore[valid-type]
+        return state
+
+    current = identity
+    for target in range(7):
+        previous = current
+        correction = _steane_syndrome_correction(target, pauli=pauli)
+
+        @qm.qkernel
+        def append_correction(
+            state: qm.Q[qm.Bits[10]],  # type: ignore[valid-type]
+        ) -> qm.Q[qm.Bits[10]]:  # type: ignore[valid-type]
+            return correction(previous(state))
+
+        current = append_correction
+    return current
+
+
+_STEANE_X_CORRECTION = _steane_correction(1)
+_STEANE_Y_CORRECTION = _steane_correction(2)
+_STEANE_Z_CORRECTION = _steane_correction(3)
+
+# %% [markdown]
+# ## Compose one statically selected error experiment
+#
+# A $Y=iXZ$ error contains both bit and phase components. The representative
+# case below extracts the bit syndrome and applies the matching coherent $Y$
+# correction. The other static branches use the corresponding $X$ or $Z$
+# extraction and the same generated correction structure.
+
+
+# %%
+@qm.qkernel
+def steane_code_samples(
+    error_kind: qm.Const[qm.Int],
+    error_position: qm.Const[qm.Int],
+) -> qm.Shot[qm.Bits[10]]:  # type: ignore[valid-type]
+    """Correct one statically selected Pauli error in the Steane code.
+
+    Args:
+        error_kind (qm.Const[qm.Int]): Pauli selector: one X, two Y, three Z.
+        error_position (qm.Const[qm.Int]): Erroneous data-qubit index.
+
+    Returns:
+        qm.Shot[qm.Bits[10]]: Corrected codeword and retained syndrome.
+    """
+
+    state = steane_encode_zero(qm.qubits(10))
+    if error_kind == 1:
+        state = qm.x(state, target=error_position + 3)
+        state = steane_extract_bit_syndrome(state)
+        state = _STEANE_X_CORRECTION(state)
+    if error_kind == 2:
+        state = qm.y(state, target=error_position + 3)
+        state = steane_extract_bit_syndrome(state)
+        state = _STEANE_Y_CORRECTION(state)
+    if error_kind == 3:
+        state = qm.z(state, target=error_position + 3)
+        state = steane_extract_phase_syndrome(state)
+        state = _STEANE_Z_CORRECTION(state)
+    return qm.measure(state)
+
+
+@qm.qkernel
+def steane_transversal_h(
+    state: qm.Q[qm.Bits[10]],  # type: ignore[valid-type]
+) -> qm.Q[qm.Bits[10]]:  # type: ignore[valid-type]
+    """Apply the logical Hadamard transversally to the Steane data.
+
+    Args:
+        state (qm.Q[qm.Bits[10]]): Three syndrome and seven encoded data qubits.
+
+    Returns:
+        qm.Q[qm.Bits[10]]: State after one Hadamard on every data component.
+    """
+
+    for target in range(3, 10):
+        state = qm.h(state, target=target)
+    return state
+
+
+@qm.qkernel
+def steane_logical_plus_state() -> qm.Q[qm.Bits[10]]:  # type: ignore[valid-type]
+    """Prepare logical plus by a transversal Hadamard on logical zero.
+
+    Returns:
+        qm.Q[qm.Bits[10]]: Three clean syndrome qubits and logical plus data.
+    """
+
+    return steane_transversal_h(steane_encode_zero(qm.qubits(10)))
+
+
+# %% [markdown]
+# ## Inspect, estimate, compile, and execute
+#
+# We select a $Y$ error on data position three. This one case exercises both
+# Pauli components while staying within four deterministic shots. Rust proves a
+# peak width of ten, 21 `CX` operations, and seven coherent calls from the same
+# specialized body. The logical Hadamard remains a separate seven-gate resource
+# witness and starts no second simulator.
+
+# %%
+ERROR_KIND = 2
+ERROR_POSITION = 3
+SHOTS = 4
+
+program = steane_code_samples.specialize(
+    **{
+        "error_kind": ERROR_KIND,
+        "error_position": ERROR_POSITION,
+    }
+)
+inspection = program.inspect()
+study = qm.resources.logical(program)
+transversal_study = qm.resources.logical(steane_transversal_h)
+
+assert "quantum.steane" not in inspection
+assert "quantum.error_correction" not in inspection
+assert study.metric(qm.resources.LOGICAL_PEAK_QUBITS).numeric_enclosure() == (10, 10)
+assert study.metric(
+    qm.resources.logical_operation_count("quantum.cx")
+).numeric_enclosure() == (21, 21)
+assert study.metric(
+    qm.resources.logical_operation_count("qcore.control_call")
+).numeric_enclosure() == (7, 7)
+assert transversal_study.metric(qm.resources.LOGICAL_GATES).numeric_enclosure() == (
+    7,
+    7,
+)
+assert qm.resources.ResourceStudy.from_bytes(study.to_bytes()) == study
+
+endpoint = qm.Reference()
+artifact = qm.compile(program, to=endpoint.target)
+record = qm.run(artifact, on=endpoint, shots=SHOTS, seed=2)
+
+logical_x = qm.X(3) * qm.X(4) * qm.X(5) * qm.X(6) * qm.X(7) * qm.X(8) * qm.X(9)
+logical_plus_x = qm.expectation(
+    steane_logical_plus_state,
+    logical_x,
+    on=endpoint,
+    shots=4,
+    seed=3,
+)
+assert logical_plus_x.value == 1.0
+
+# %% [markdown]
+# The retained syndrome is the big-endian bit pattern of `error_position + 1`.
+# Every data outcome must remain an even-weight Hamming codeword, which is the
+# computational support of the Steane logical zero.
+
+
+# %%
+def is_steane_zero_word(bits: tuple[int, ...]) -> bool:
+    """Return whether seven bits form a Steane logical-zero codeword.
+
+    Args:
+        bits: Seven data bits in source order.
+
+    Returns:
+        True for an even-weight word satisfying all Hamming checks.
+    """
+
+    return (
+        len(bits) == 7
+        and (bits[3] ^ bits[4] ^ bits[5] ^ bits[6]) == 0
+        and (bits[1] ^ bits[2] ^ bits[5] ^ bits[6]) == 0
+        and (bits[0] ^ bits[2] ^ bits[4] ^ bits[6]) == 0
+        and sum(bits) % 2 == 0
+    )
+
+
+syndrome_value = ERROR_POSITION + 1
+expected_syndrome = tuple(int(bool(syndrome_value & mask)) for mask in (4, 2, 1))
+
+print("corrected counts:", record.result.counts)
+print("retained syndrome:", expected_syndrome)
+
+assert artifact.parameter_abi.slots == ()
+assert record.artifact is artifact
+assert record.result.shots == SHOTS
+assert all(bits[:3] == expected_syndrome for bits in record.result.counts)
+assert all(is_steane_zero_word(bits[3:10]) for bits in record.result.counts)
 
 # %% [markdown]
 # ### 4.4 Verification: All 21 Single Errors
 #
 # We try all 21 single errors — $X$, $Y$, $Z$ on each of the seven qubits. After correction, every measured bitstring should return to a $\lvert0_L\rangle$ codeword.
 
-# %%
-print("Steane code: correct X/Y/Z on all 7 locations")
-print(f"  {'err':4s} | {'pos':5s} | |0_L> codeword")
-print(f"  {'-' * 4}-+-{'-' * 5}-+-{'-' * 14}")
-error_cases = [
-    (name, error_type, pos)
-    for name, error_type in [("X", 1), ("Y", 2), ("Z", 3)]
-    for pos in range(7)
-]
-if docs_test_mode:
-    error_cases = [("X", 1, 0), ("Y", 2, 3), ("Z", 3, 6)]
-
-for name, error_type, pos in error_cases:
-    exe = transpiler.transpile(
-        steane_run,
-        bindings={"error_type": error_type, "error_pos": pos},
-    )
-    result = exe.sample(_seeded_executor, shots=correction_shots).result()
-    total = sum(count for _, count in result.results)
-    valid = sum(
-        count for outcome, count in result.results if _is_steane_zero_word(outcome)
-    )
-    print(f"  {name:4s} | q[{pos}]  | {valid / total:.3f}")
-    # Steane corrects every single Pauli error on any of the 7 qubits,
-    # so the post-correction state lies entirely in the |0_L> code
-    # space — every shot reads a valid codeword.
-    assert total == correction_shots
-    assert valid == total
 
 # %% [markdown]
 # A ratio of 1.000 means the state returned to the $\lvert0_L\rangle$ code space for that single Pauli error. A $Y=iXZ$ error triggers both the $X$-component and the $Z$-component correction, but in a CSS code these two are independent, so it is corrected as is.
@@ -445,6 +595,7 @@ for name, error_type, pos in error_cases:
 #
 # This follows from the $X$-type and $Z$-type stabilizers of the Steane code having the same Hamming pattern — from the CSS construction using the same matrix $H$.
 
+
 # %% [markdown]
 # ### 5.2 Verifying the Logical Hadamard
 #
@@ -454,65 +605,12 @@ for name, error_type, pos in error_cases:
 # $\lvert+_L\rangle$ is a superposition of $\lvert0_L\rangle$ and $\lvert1_L\rangle$. While $\lvert0_L\rangle$ consists of even-weight Hamming codewords, $\lvert1_L\rangle$ consists of odd-weight Hamming codewords. So measuring $\lvert+_L\rangle$ produces Hamming codewords of both even and odd weight (whereas $\lvert0_L\rangle$ produces only even-weight ones).
 
 
-# %%
-@qmc.qkernel
-def transversal_h_to_plus() -> qmc.Vector[qmc.Bit]:
-    data = qmc.qubit_array(7, name="data")
-    data = encode_steane_zero(data)
-    # Apply the transversal Hadamard once: |0_L> -> |+_L>.
-    data = qmc.h(data)
-    return qmc.measure(data)
-
-
-# %%
-print("Transversal H: |0_L> -> |+_L>")
-exe = transpiler.transpile(transversal_h_to_plus)
-result = exe.sample(_seeded_executor, shots=encoding_shots).result()
-total = sum(count for _, count in result.results)
-hamming = sum(
-    count for outcome, count in result.results if _passes_hamming_checks(outcome)
-)
-odd = sum(count for outcome, count in result.results if sum(_bits7(outcome)) % 2 == 1)
-print(f"  Hamming codeword ratio: {hamming / total:.3f}")
-print(f"  odd-weight (|1_L>) fraction: {odd / total:.3f}")
-# |+_L> is an equal superposition of all 16 Hamming codewords, so every
-# shot reads some Hamming codeword and the odd-weight half (|1_L>) shows
-# up roughly half the time — 5% window > 1024-shot standard error of < 0.02.
-assert total == encoding_shots
-assert hamming == total
-assert len(result.results) <= 16
-if not docs_test_mode:
-    assert abs(odd / total - 0.5) < 0.05
-
 # %% [markdown]
 # The Hamming codeword ratio is 1.000, and odd-weight codewords appear about half the time. Unlike $\lvert0_L\rangle$, which produces only even-weight codewords, this confirms the state has moved to $\lvert+_L\rangle$.
 #
 # **Property 2: applying $\bar H$ twice returns to the identity ($\bar H^2 = I$).**
 # Applying $H^{\otimes7}$ twice to $\lvert0_L\rangle$ should return to $\lvert0_L\rangle$.
 
-
-# %%
-@qmc.qkernel
-def transversal_h_round_trip() -> qmc.Vector[qmc.Bit]:
-    data = qmc.qubit_array(7, name="data")
-    data = encode_steane_zero(data)
-    # Apply the transversal Hadamard twice: H^2 = I, so it returns to |0_L>.
-    data = qmc.h(data)
-    data = qmc.h(data)
-    return qmc.measure(data)
-
-
-# %%
-print("Transversal H round trip: |0_L> -> H -> H -> |0_L>")
-exe = transpiler.transpile(transversal_h_round_trip)
-result = exe.sample(_seeded_executor, shots=encoding_shots).result()
-total = sum(count for _, count in result.results)
-valid = sum(count for outcome, count in result.results if _is_steane_zero_word(outcome))
-print(f"  |0_L> codeword ratio: {valid / total:.3f}")
-# H^2 = I, so the round trip restores |0_L> exactly — every shot reads a
-# |0_L> codeword.
-assert total == encoding_shots
-assert valid == total
 
 # %% [markdown]
 # The ratio is 1.000 — two transversal Hadamards return to $\lvert0_L\rangle$. The seven physical $H$ gates indeed act as the logical $\bar H$.

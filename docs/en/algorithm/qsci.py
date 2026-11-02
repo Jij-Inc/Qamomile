@@ -1,11 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: py:percent,ipynb
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -13,6 +14,10 @@
 # ---
 
 # %% [markdown]
+# ---
+# tags: [algorithm, sample-based]
+# ---
+#
 # ---
 # tags: [algorithm, sample-based]
 # ---
@@ -49,20 +54,28 @@
 # vectorised Z-basis routine `subspace_hamiltonian` (XOR / parity, no
 # matrix products).
 
+# %% [markdown]
+# ## Installation
+#
+# ```bash
+# pip install qamomile
+# ```
+
 # %%
+# Install the latest Qamomile through pip!
+# # !pip install qamomile
+
+# %%
+import itertools
 import os
 
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.optimize import minimize
 
-import qamomile.circuit as qmc
-import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.basic import cx_entangling_layer, ry_layer
-from qamomile.linalg import solve_subspace
-from qamomile.quri_parts import QuriPartsExecutor, QuriPartsTranspiler
-
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+import qamomile as qm
+from qamomile.measurement import Estimator
+from qamomile.quri_parts import Qulacs, QuriParts
 
 # %% [markdown]
 # ## A small test Hamiltonian
@@ -79,95 +92,94 @@ docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 # QSCI reference.
 
 # %%
-n_qubits = 4
-J = 1.0
-h_field = 0.7
+N_QUBITS = 4
+FIELD = 0.7
+HAMILTONIAN = qm.Hamiltonian.zero(num_qubits=N_QUBITS)
+for index in range(N_QUBITS - 1):
+    HAMILTONIAN = HAMILTONIAN - qm.Z(index) * qm.Z(index + 1)
+for index in range(N_QUBITS):
+    HAMILTONIAN = HAMILTONIAN - FIELD * qm.X(index)
 
-H = qm_o.Hamiltonian(num_qubits=n_qubits)
-for i in range(n_qubits - 1):
-    H += qm_o.Z(i) * qm_o.Z(i + 1) * (-J)
-for i in range(n_qubits):
-    H += qm_o.X(i) * (-h_field)
+ALL_CONFIGURATIONS = tuple(itertools.product((0, 1), repeat=N_QUBITS))
+exact_matrix = qm.linalg.subspace_hamiltonian(ALL_CONFIGURATIONS, HAMILTONIAN)
+EXACT_ENERGY = float(np.linalg.eigvalsh(exact_matrix)[0])
 
-exact_eigvals = np.linalg.eigvalsh(H.to_numpy())
-E_exact = float(exact_eigvals[0])
-print(f"Exact ground state energy: {E_exact:.6f}")
-# eigvalsh returns ascending eigenvalues, so exact_eigvals[0] is the ground
-# state. The 4-qubit TFIM Hilbert space is 2^n_qubits-dimensional.
-assert H.num_qubits == n_qubits
-assert exact_eigvals.shape == (2**n_qubits,)
-assert E_exact == float(exact_eigvals.min())
+assert HAMILTONIAN.num_qubits == N_QUBITS
+assert HAMILTONIAN.is_hermitian
+assert exact_matrix.shape == (2**N_QUBITS, 2**N_QUBITS)
+print(f"Exact ground-state energy: {EXACT_ENERGY:+.6f}")
 
 # %% [markdown]
-# ## Hardware-efficient ansatz
+# ## Hardware-efficient Ansatz
 #
-# A simple alternating-layer ansatz: each layer applies $R_y$ to every
-# qubit followed by a linear chain of CX gates, plus a final $R_y$
-# layer. We define three helper kernels:
-#
-# - `ansatz_state` builds the $|\psi(\theta)\rangle$ qubit register;
-# - `ansatz_energy` returns $\langle\psi|H|\psi\rangle$ for VQE;
-# - `ansatz_measure` measures the state in the computational basis for
-#   QSCI sampling.
+# A simple alternating-layer ansatz applies RY to every quantum bit, followed
+# by a linear CX chain, twice, and finishes with one more RY layer. The three
+# layers use twelve runtime parameters in total. We define a state-returning
+# program for VQE and a measurement program for QSCI sampling.
 
 
 # %%
-@qmc.qkernel
-def ansatz_state(
-    n: qmc.UInt,
-    reps: qmc.UInt,
-    thetas: qmc.Vector[qmc.Float],
-) -> qmc.Vector[qmc.Qubit]:
-    q = qmc.qubit_array(n, name="q")
-    for r in qmc.range(reps):
-        q = ry_layer(q, thetas, r * n)
-        q = cx_entangling_layer(q)
-    final_base = reps * n
-    q = ry_layer(q, thetas, final_base)
-    return q
+@qm.qkernel
+def qsci_state(
+    thetas: qm.Param[qm.Vector[qm.Real, 12]],  # type: ignore[valid-type]
+) -> qm.Q[qm.Bits[4]]:  # type: ignore[valid-type]
+    """Prepare one runtime-rebindable four-qubit QSCI trial state.
+
+    Args:
+        thetas (qm.Param[qm.Vector[qm.Real, 12]]): Runtime RY angles.
+
+    Returns:
+        qm.Q[qm.Bits[4]]: Prepared trial state.
+    """
+
+    state = qm.qubits(4)
+    for repetition in range(2):
+        for target in range(4):
+            state = qm.ry(state, thetas[repetition * 4 + target], target=target)
+        for control in range(3):
+            state = qm.cx(state, control=control, target=control + 1)
+    for target in range(4):
+        state = qm.ry(state, thetas[8 + target], target=target)
+    return state
 
 
-@qmc.qkernel
-def ansatz_energy(
-    n: qmc.UInt,
-    reps: qmc.UInt,
-    thetas: qmc.Vector[qmc.Float],
-    H: qmc.Observable,
-) -> qmc.Float:
-    q = ansatz_state(n, reps, thetas)
-    return qmc.expval(q, H)
+@qm.qkernel
+def qsci_samples(
+    thetas: qm.Param[qm.Vector[qm.Real, 12]],  # type: ignore[valid-type]
+) -> qm.Shot[qm.Bits[4]]:  # type: ignore[valid-type]
+    """Sample one runtime-rebindable QSCI trial state.
 
+    Args:
+        thetas (qm.Param[qm.Vector[qm.Real, 12]]): Runtime RY angles.
 
-@qmc.qkernel
-def ansatz_measure(
-    n: qmc.UInt,
-    reps: qmc.UInt,
-    thetas: qmc.Vector[qmc.Float],
-) -> qmc.Vector[qmc.Bit]:
-    q = ansatz_state(n, reps, thetas)
-    return qmc.measure(q)
+    Returns:
+        qm.Shot[qm.Bits[4]]: Computational-basis configuration per shot.
+    """
+
+    return qm.measure(qsci_state(thetas))
 
 
 # %% [markdown]
-# ## Compile both kernels with QURI Parts
+# ## Compile Both Programs with QURI Parts
+#
+# The specialized program contains ordinary calls and no QSCI-specific
+# operation. Rust derives twelve rotations and six CX gates from the visible
+# body. The QURI Parts artifact retains only `thetas` in its runtime ABI.
 
 # %%
-transpiler = QuriPartsTranspiler()
-executor = QuriPartsExecutor()
+program = qm.specialize(qsci_samples)
+inspection = program.inspect()
+study = qm.resources.logical(program)
 
-reps = 2
-n_params = (reps + 1) * n_qubits
+assert "qcore.call" in inspection
+assert "quantum.qsci" not in inspection
+assert study.metric(qm.resources.LOGICAL_GATES).numeric_enclosure() == (18, 18)
+assert qm.resources.ResourceStudy.from_bytes(study.to_bytes()) == study
 
-energy_exec = transpiler.transpile(
-    ansatz_energy,
-    bindings={"n": n_qubits, "reps": reps, "H": H},
-    parameters=["thetas"],
-)
-sample_exec = transpiler.transpile(
-    ansatz_measure,
-    bindings={"n": n_qubits, "reps": reps},
-    parameters=["thetas"],
-)
+sample_endpoint = Qulacs()
+artifact = qm.compile(program, to=QuriParts())
+assert tuple(slot.name for slot in artifact.parameter_abi.slots) == ("thetas",)
+assert artifact.format == "quri-parts.logical-circuit.v2"
 
 # %% [markdown]
 # ## Step 1: Prepare $|\psi_{\mathrm{in}}\rangle$ via a quick VQE
@@ -179,29 +191,49 @@ sample_exec = transpiler.transpile(
 # informative for a given $K$. We run only a handful of COBYLA
 # iterations.
 
-
 # %%
-def cost_fn(params: np.ndarray) -> float:
-    return energy_exec.run(executor, bindings={"thetas": list(params)}).result()
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+expectation_endpoint = qm.Reference()
+vqe_shots = 4 if docs_test_mode else 128
+energy_estimator = Estimator(qsci_state, HAMILTONIAN, grouping="qwc")
+cost_history = []
+
+
+def cost_function(parameters):
+    """Estimate the trial-state energy at one variational point."""
+
+    estimate = energy_estimator.estimate(
+        on=expectation_endpoint,
+        parameters={"thetas": tuple(float(value) for value in parameters)},
+        shots=vqe_shots,
+        seed=10 + len(cost_history),
+    )
+    cost_history.append(estimate.value)
+    return estimate.value
 
 
 rng = np.random.default_rng(0)
-init_params = rng.uniform(0, 2 * np.pi, n_params)
-assert init_params.shape == (n_params,)
-
-maxiter = max(n_params + 2, 5 if docs_test_mode else 80)
-result = minimize(
-    cost_fn,
-    init_params,
+initial_parameters = rng.uniform(0.0, 2.0 * np.pi, 12)
+max_iterations = 14 if docs_test_mode else 80
+optimization = minimize(
+    cost_function,
+    initial_parameters,
     method="COBYLA",
-    options={"maxiter": maxiter, "rhobeg": 0.5},
+    options={"maxiter": max_iterations, "rhobeg": 0.5},
 )
-opt_params = result.x
-print(f"VQE energy = {result.fun:+.6f}   (gap to E_exact: {result.fun - E_exact:.4e})")
-# Variational principle: any VQE energy is an upper bound on E_exact, no
-# matter how short the COBYLA budget.
-assert result.fun >= E_exact - 1e-9
-assert opt_params.shape == (n_params,)
+optimized_parameters = tuple(float(value) for value in optimization.x)
+
+print(
+    f"VQE energy = {optimization.fun:+.6f} "
+    f"(gap to E_exact: {optimization.fun - EXACT_ENERGY:+.4e})"
+)
+
+assert np.isfinite(optimization.fun)
+assert len(optimized_parameters) == 12
+assert len(cost_history) == optimization.nfev
+
+# %% [markdown]
+# Finite-shot energy estimates can fall below the exact ground energy due to sampling noise. The variational bound applies to the true expectation, not every estimate or the minimum selected during optimization. The exact subspace diagonalization below has a different error source.
 
 # %% [markdown]
 # ## Step 2: Sample bitstrings in the Z basis
@@ -211,22 +243,31 @@ assert opt_params.shape == (n_params,)
 # `subspace_hamiltonian` expects.
 
 # %%
-shots = 1 if docs_test_mode else 4000
-sample_results = (
-    sample_exec.sample(executor, bindings={"thetas": list(opt_params)}, shots=shots)
-    .result()
-    .results
-)
-sample_results.sort(key=lambda bc: bc[1], reverse=True)
-print(f"Distinct bitstrings sampled: {len(sample_results)}")
-for bits, c in sample_results[:5]:
-    print(f"  {bits}  count={c}")
-# Distinct bitstrings cannot exceed the dimension of the Hilbert space,
-# every shot is accounted for, and each bitstring is n_qubits long.
-assert len(sample_results) <= 2**n_qubits
-assert sum(c for _, c in sample_results) == shots
-assert all(len(bits) == n_qubits for bits, _ in sample_results)
+SHOTS = 128 if docs_test_mode else 4_000
 
+record = qm.run(
+    artifact,
+    on=sample_endpoint,
+    parameters={"thetas": optimized_parameters},
+    shots=SHOTS,
+    seed=2,
+)
+counts = record.result.counts
+configurations = tuple(
+    bits
+    for bits, _ in sorted(
+        counts.items(),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+)
+
+print("sample counts:", counts)
+
+assert record.artifact is artifact
+assert sum(counts.values()) == SHOTS
+assert len(configurations) <= 2**N_QUBITS
+assert all(len(bits) == N_QUBITS for bits in configurations)
 
 # %% [markdown]
 # ## Step 3 + 4: Build the QSCI subspace and diagonalize
@@ -240,32 +281,45 @@ assert all(len(bits) == n_qubits for bits, _ in sample_results)
 # for every $K$.
 
 # %%
-unique_bitstrings = [bits for bits, _ in sample_results]
-K_max = len(unique_bitstrings)
-ks = sorted({k for k in (1, 2, 4, 8, 16, K_max) if k <= K_max})
+SUBSPACE_SIZES = tuple(
+    size
+    for size in (1, 2, 4, 8, 16, len(configurations))
+    if size <= len(configurations)
+)
+energies = tuple(
+    float(qm.linalg.solve_subspace(configurations[:size], HAMILTONIAN)[0][0])
+    for size in SUBSPACE_SIZES
+)
+for size, energy in zip(SUBSPACE_SIZES, energies):
+    print(f"K={size}: E_QSCI={energy:+.12f}")
+print(f"E_exact={EXACT_ENERGY:+.12f}")
 
-energies = [float(solve_subspace(unique_bitstrings[:K], H)[0][0]) for K in ks]
-
-for K, E in zip(ks, energies):
-    print(f"K = {K:3d}   E_QSCI = {E:+.6f}   gap = {E - E_exact:+.3e}")
-
-assert all(E >= E_exact - 1e-9 for E in energies), "variational bound violated"
-# Cauchy interlacing: enlarging the subspace can only lower (or keep) the
-# minimum eigenvalue, so QSCI energies are monotonically non-increasing in K.
-assert all(energies[i] >= energies[i + 1] - 1e-9 for i in range(len(energies) - 1))
-assert len(energies) == len(ks)
+assert all(left >= right - 1e-12 for left, right in zip(energies, energies[1:]))
+assert all(energy >= EXACT_ENERGY - 1e-12 for energy in energies)
 
 # %%
-fig, ax = plt.subplots(figsize=(6, 4))
-ax.plot(ks, energies, "-o", label=r"$E_{\mathrm{QSCI}}$")
-ax.axhline(E_exact, color="black", linestyle="--", label=r"$E_{\mathrm{exact}}$")
-ax.set_xlabel("Subspace size $K$")
-ax.set_ylabel("Energy")
-ax.set_title("QSCI convergence — 4-qubit TFIM ($J{=}1,\\;h{=}0.7$)")
-ax.legend()
-ax.grid(True, alpha=0.3)
+plt.figure(figsize=(6, 4))
+plt.plot(SUBSPACE_SIZES, energies, "-o", label=r"$E_{\mathrm{QSCI}}$")
+plt.axhline(EXACT_ENERGY, color="black", linestyle="--", label=r"$E_{\mathrm{exact}}$")
+plt.xlabel("Subspace size $K$")
+plt.ylabel("Energy")
+plt.title("QSCI convergence — 4-qubit TFIM")
+plt.legend()
+plt.grid(True, alpha=0.3)
 plt.tight_layout()
 plt.show()
+
+# %% [markdown]
+# ## Summary
+#
+# - `Q[Bits[4]]`, `Param[Vector[Real, 12]]`, and `Shot[Bits[4]]` make ownership,
+#   staging, and result width explicit.
+# - One source defines inspection, exact logical resources, compilation, and
+#   sampling; QSCI adds no compiler operation or backend branch.
+# - Rust projects the same immutable Hamiltonian onto the sampled states before
+#   the host eigensolve.
+# - A continuous COBYLA VQE selects the state; QURI Parts/Qulacs sampling builds
+#   a subspace no larger than the full 16-state Hilbert space.
 
 # %% [markdown]
 # ## Notes

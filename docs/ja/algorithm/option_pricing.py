@@ -1,16 +1,15 @@
 # ---
 # jupyter:
 #   jupytext:
-#     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
 #       jupytext_version: 1.19.1
 #   kernelspec:
-#     display_name: Python (qamomile)
+#     display_name: Python 3
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
@@ -25,20 +24,38 @@
 # これまでオプションプライシングには古典モンテカルロ法が用いられてきましたが、これは目標精度 $\epsilon$ を達成するための必要なオラクルの呼び出し回数が $\mathcal{O} (\epsilon^{-2})$ でした。
 # これに対し、量子振幅推定は $\mathcal{O} (\epsilon^{-1})$ で済み、2次の高速化をもたらすアルゴリズムであることが知られています。
 # そこで本記事では、量子振幅推定によるオプションおよびオプションポートフォリオプライシング手法{cite:p}`10.22331/q-2020-07-06-291`の理解と実装についてまとめました。オプションプライシングの例を通して、Qamomileの使い方を学びましょう。
+#
+
+# %% [markdown]
+# ## インストール
+#
+# Qamomile distributionをインストールします。
+#
+# ```bash
+# pip install qamomile
+# ```
 
 # %%
-# Install the latest Qamomile through pip! 
-# #!pip install qamomile
+# Install the latest Qamomile through pip!
+# # !pip install qamomile
 
 # %%
+import math
+import os
+
 import numpy as np
-from scipy.optimize import minimize_scalar
-import matplotlib.pyplot as plt
-from qiskit_aer import AerSimulator
 
-import qamomile.circuit as qmc
-from qamomile.circuit.stdlib import amplitude_encoding
-from qamomile.qiskit import QiskitTranspiler
+import qamomile as qm
+from qamomile.stdlib import (
+    amplitude_angles,
+    amplitude_encoding,
+    amplitude_encoding_from_angles,
+    uniformly_controlled_angles,
+    uniformly_controlled_ry,
+    uniformly_controlled_ry_from_angles,
+)
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 # %% [markdown]
 # ## 背景
@@ -54,7 +71,7 @@ from qamomile.qiskit import QiskitTranspiler
 # 金融リスクの計算は、大きな需要があります。
 # モンテカルロ (MC) 計算はその中心的な計算手法であり、Value at Risk (VaR) の推定や店頭デリバティブの価格決定など、幅広く用いられています。
 # しかしその誤差は $\varepsilon = \mathcal{O} (M^{-1/2})$ で減衰するという欠点があります。
-# ここで $M$ はサンプル数です。  
+# ここで $M$ はサンプル数です。
 # 対象となる確率分布が量子状態として準備される場合、量子振幅推定 (QAE) により、期待値などの統計量を $\mathcal{O} (M^{-1})$ の誤差で推定できることが知られています。
 # これは先ほどの古典MCに対し、二次の高速化をもたらすことがわかります。
 #
@@ -63,7 +80,7 @@ from qamomile.qiskit import QiskitTranspiler
 # モンテカルロプライシングの量子アルゴリズムの理論的枠組みを示した先行研究として、{cite:p}`10.1103/PhysRevA.98.022321`があります。
 # この論文は、プライシング計算において、古典に対し2次高速化が得られることを理論的に示しました。
 # そして、特にヨーロピアンオプションとアジアンオプションに対して数値シミュレーションを行い、その有効性を示しました。
-# しかし、その成果は理論的な枠組みの提示と数値シミュレーションに留まり、実機での実行は示されていません。  
+# しかし、その成果は理論的な枠組みの提示と数値シミュレーションに留まり、実機での実行は示されていません。
 # もう一つの重要な先行研究として、{cite:p}`10.1038/s41534-019-0130-6`があります。
 # これはプライシングに対してではなく、VaR や Conditional Value at Risk (CVaR) に QAE を適用した研究です。
 # モンテカルロプライシングのペイオフ計算を改良し、必要量子ビット数・ゲート数の大幅な削減に成功しました{cite:p}`10.1103/PhysRevA.98.022321`。
@@ -80,7 +97,7 @@ from qamomile.qiskit import QiskitTranspiler
 # 演算子 $\mathcal{A}$ が
 #
 # $$
-# \mathcal{A} \vert 0 \rangle_{n+1} 
+# \mathcal{A} \vert 0 \rangle_{n+1}
 # = \sum_{i=0}^{2^n - 1} \sqrt{1-f(S_i)} \sqrt{p_i} \vert S_i \rangle \vert 0 \rangle + \sum_{i=0}^{2^n - 1} \sqrt{f(S_i)} \sqrt{p_i} \vert S_i \rangle \vert 1 \rangle \tag{1}
 # $$
 #
@@ -123,369 +140,477 @@ from qamomile.qiskit import QiskitTranspiler
 #
 # という目標振幅角を直接適用します。
 # $S < K$ では定数角 $\pi/4 - c$、$S \geq K$ では線形増加という区分線形構造を、正確に符号化することができます。
+#
 
 # %% [markdown]
 # ## Qamomileによる実装
 #
-# ### 分布の準備
+# ### 分布の準備とoptionの離散化
 #
-# それでは、オプションプライシングの実装{cite:p}`10.22331/q-2020-07-06-291`を見ていきましょう。
-# ここではまず、幾何ブラウン運動下にある満期 $S_T$ の対数正規分布を離散化したものを準備し、これを株価のデータとします。
+# 権利行使価格$K=100$のヨーロピアン・コールを考えます。満期時の価格は、
+# リスク中立確率$0.75$で$80$、確率$0.25$で$120$になる2点を残します。
+# 現金ペイオフ$\max(S_T-K,0)$を最大値$20$で割ると、正規化ペイオフ表は
+# $(0,1)$になります。
+#
+# 1つのアドレス量子ビットで2つの価格を表し、1つのペイオフ量子ビットで正規化した
+# 期待ペイオフを表します。この2量子ビットのwitnessだけで、状態ロード、ペイオフの
+# multiplexing、随伴合成、増幅、実行時パラメータbinding、結果decode、資源見積もりを
+# 確認できます。gridを増やしても座標vectorが変わるだけで、programming modelは
+# 変わりません。
 
 # %%
-n_qubits = 4
-S0, K, r, sigma, T = 2.0, 1.9, 0.05, 0.4, 40 / 365
-mu  = (r - 0.5 * sigma**2) * T
-std = sigma * np.sqrt(T)
-S_min = float(S0 * np.exp(mu - 3 * std))
-S_max = float(S0 * np.exp(mu + 3 * std))
-S_grid = np.linspace(S_min, S_max, 2**n_qubits)
+asset_prices = (80.0, 120.0)
+probabilities = (0.75, 0.25)
+strike = 100.0
+risk_free_rate = 0.05
+maturity = 1.0
 
-def lognpdf(S):
-    return (np.exp(-(np.log(S / S0) - mu)**2 / (2 * std**2))
-            / (S * std * np.sqrt(2 * np.pi)))
+cash_payoffs = tuple(max(price - strike, 0.0) for price in asset_prices)
+payoff_scale = max(cash_payoffs)
+normalized_payoffs = tuple(payoff / payoff_scale for payoff in cash_payoffs)
+expected_cash_payoff = sum(
+    probability * payoff
+    for probability, payoff in zip(probabilities, cash_payoffs, strict=True)
+)
+exact_price = math.exp(-risk_free_rate * maturity) * expected_cash_payoff
 
-probs = lognpdf(S_grid)
-probs /= probs.sum()
-amps  = np.sqrt(probs)   # Möttönen エンコード用の振幅 √p_i
-
-c     = 0.25             # スケーリングパラメータ
-F_max = float(S_max - K)
-
-# ── 目標振幅角 ──
-payoff       = np.maximum(S_grid - K, 0.0)
-alpha_target = np.pi / 4 - c + 2 * c * payoff / F_max   # shape: (2^n,)
-
-# ── 参照値 ──
-# exact_E_f: 数値積分による厳密な期待ペイオフ(離散格子上の積分値)
-exact_E_f  = float(np.sum(probs * payoff))
-exact_fair = np.exp(-r * T) * exact_E_f
-
-# P1 の厳密値: Σ_i p_i sin²(α_i)  ← 線形近似を使わない
-P1_exact  = float(np.sum(probs * np.sin(alpha_target)**2))
-
-# P1 の近似値
-E_ftilde  = 2 * exact_E_f / F_max - 1
-P1_approx = c * E_ftilde + 0.5
-
-print(f"期待ペイオフ(数値積分):     {exact_E_f:.6f}")
-print(f"フェアバリュー(参照値):     {exact_fair:.6f}")
-print(f"P1 厳密値:                 {P1_exact:.6f}")
-print(f"P1 近似値(線形近似):        {P1_approx:.6f}")
-print(f"P1 近似誤差:               {abs(P1_exact - P1_approx):.6f}")
-
+assert probabilities == (0.75, 0.25)
+assert normalized_payoffs == (0.0, 1.0)
+assert expected_cash_payoff == 5.0
 
 # %% [markdown]
-# ### ペイオフ演算子の実装
+# 標準ライブラリの座標変換はRustで実行されます。`amplitude_angles`は確率の平方根を
+# とった振幅を正規化し、その位相を保持します。`uniformly_controlled_angles`は、
+# 望むbranch回転を、再利用可能なペイオフmultiplexerが使うcyclic Gray-walk座標へ
+# 変換します。
 #
-# アルゴリズムの部分で示したように、コールオプションのペイオフ $f(S) = \max(S-K, 0)$ は $K$ で折れ曲がる区分線形関数です。
-# そのため、格子点ごとに異なる目標振幅角
-#
-# $$
-# \alpha(S_i) = \frac{\pi}{4} - c + \frac{2c\,\max(S_i - K,\, 0)}{S_\mathrm{max} - K}
-# $$
-#
-# をペイオフ量子ビットに適用する必要があります。
-# UCR-Y は各基底状態 $\vert i \rangle$ に対して独立な振幅角 $\alpha(S_i)$ を適用できるため、$K$ を境とした区分線形構造を正確に符号化することができます。
-# 以下では、この UCR-Y を $R_y$ と CNOT のみで分解する実装を示しています。
+# 得られたscalarは実行時の`Param`値です。そのため、同じshapeを持つ別の分布や
+# ペイオフ表へ型付きbodyを変更せずに、回路を1回compileしてrebindできます。
 
 # %%
-# ── UCR-Y ゲートリストを事前計算(Python レベルの再帰) ──
-def _ucry_recursive(angles, ctrl_indices, tgt_index, gates):
-    """UCR-Y の再帰的 demultiplexing。ゲートを ('ry'|'cx', ...) のリストに積む。"""
-    if len(ctrl_indices) == 0:
-        if abs(angles[0]) > 1e-12:
-            gates.append(('ry', tgt_index, angles[0]))
-        return
-    m = len(angles) // 2
-    a = [(angles[i] + angles[i + m]) / 2 for i in range(m)]
-    b = [(angles[i] - angles[i + m]) / 2 for i in range(m)]
-    _ucry_recursive(a, ctrl_indices[:-1], tgt_index, gates)
-    gates.append(('cx', ctrl_indices[-1], tgt_index))
-    _ucry_recursive(b, ctrl_indices[:-1], tgt_index, gates)
-    gates.append(('cx', ctrl_indices[-1], tgt_index))
-
-# UCR-Y の回転角 = 2 × 振幅角(qmc.ry の定義 Ry(θ)|0⟩ = cos(θ/2)|0⟩ + sin(θ/2)|1⟩ より)
-ucry_gates = []
-_ucry_recursive(
-    (2 * alpha_target).tolist(),   # 振幅角 α を 2 倍して渡す
-    list(range(n_qubits)),         # コントロール: q_S[0..n-1]
-    n_qubits,                      # ターゲット: payoff qubit (インデックス n_qubits)
-    ucry_gates
+distribution = amplitude_angles(
+    tuple(math.sqrt(probability) for probability in probabilities)
+)
+payoff_angles = uniformly_controlled_angles(
+    tuple(2.0 * math.asin(math.sqrt(payoff)) for payoff in normalized_payoffs)
 )
 
-# UCR-Y の随伴ゲートリスト(逆順 + Ry 角度反転)
-ucry_inv_gates = []
-for gate in reversed(ucry_gates):
-    if gate[0] == 'ry':
-        ucry_inv_gates.append(('ry', gate[1], -gate[2]))
-    else:  # CNOT は自己逆
-        ucry_inv_gates.append(gate)
+prepare_distribution = amplitude_encoding_from_angles(1)
+encode_payoff = uniformly_controlled_ry_from_angles(1)
 
-print(f"UCR-Y ゲート数: {len(ucry_gates)} (Ry + CNOT)")
-
-# UCR-Y を @qkernel 内から呼ぶための関数 
-def _make_ucry_func(gate_list):
-    """UCR-Y ゲートリストを順に適用する関数を返す。"""
-    def apply_ucry(q_S, q_p):
-        for gate in gate_list:
-            if gate[0] == 'ry':
-                q_p = qmc.ry(q_p, gate[2])
-            else:                                       # 'cx': CNOT
-                q_S[gate[1]], q_p = qmc.cx(q_S[gate[1]], q_p)
-        return q_S, q_p
-    return apply_ucry
-
-apply_payoff_ucr     = _make_ucry_func(ucry_gates)      # F  (ペイオフ回路)
-apply_payoff_ucr_inv = _make_ucry_func(ucry_inv_gates)  # F† (ペイオフ随伴)
-
+parameters = {
+    "distribution_ry": distribution.ry,
+    "distribution_rz": distribution.rz,
+    "distribution_phase": distribution.phase,
+    "payoff_angles": payoff_angles,
+}
 
 # %% [markdown]
-# ### 分布の読み込みの実装
+# ### payoffとdistribution loadingの実装
 #
-# そして先ほど準備した株価データを読み込む演算と、そのエルミート演算を実装しましょう。
-# Qamomileには、振幅符号化の関数`amplitude_encoding`が標準で備わっています。
+# `option_state`は2成分のowned stateを消費します。`split_at`で資産アドレスとペイオフ
+# 量子ビットを分け、分布ユニタリでアドレスを準備し、`concat`で成分を結合してから
+# ペイオフmultiplexerを適用します。すべての幅と実行時vector長は関数型の一部です。
+
 
 # %%
-# ── P_X と P_X†(分布ロードとその随伴) ──
-@qmc.qkernel
-def load_distribution(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-    """P_X: 対数正規分布を Möttönen でロード"""
-    q = amplitude_encoding(q, amps.tolist())
-    return q
+@qm.qkernel
+def option_state(
+    state: qm.Q[qm.Bits[2]],  # type: ignore[valid-type]
+    distribution_ry: qm.Param[qm.Vector[qm.Real, 1]],  # type: ignore[valid-type]
+    distribution_rz: qm.Param[qm.Vector[qm.Real, 1]],  # type: ignore[valid-type]
+    distribution_phase: qm.Param[qm.Real],
+    payoff_angles: qm.Param[qm.Vector[qm.Real, 2]],  # type: ignore[valid-type]
+) -> qm.Q[qm.Bits[2]]:  # type: ignore[valid-type]
+    """Prepare a two-point call-option payoff amplitude.
 
-# qmc.inverse で随伴を自動生成
-load_distribution_inv = qmc.inverse(load_distribution)
+    Args:
+        state (qm.Q[qm.Bits[2]]): Asset-address and payoff qubits.
+        distribution_ry (qm.Param[qm.Vector[qm.Real, 1]]): Runtime magnitude
+            coordinate for the risk-neutral distribution.
+        distribution_rz (qm.Param[qm.Vector[qm.Real, 1]]): Runtime relative
+            phase coordinate for the distribution.
+        distribution_phase (qm.Param[qm.Real]): Runtime global phase.
+        payoff_angles (qm.Param[qm.Vector[qm.Real, 2]]): Runtime Gray-walk
+            coordinates for the normalized payoff.
+
+    Returns:
+        qm.Q[qm.Bits[2]]: State whose final component encodes expected payoff.
+    """
+
+    asset, payoff = qm.split_at(state, 1)
+    asset = prepare_distribution(
+        asset,
+        distribution_ry,
+        distribution_rz,
+        distribution_phase,
+    )
+    return encode_payoff(qm.concat(asset, payoff), payoff_angles)
+
+
+@qm.qkernel
+def option_samples(
+    distribution_ry: qm.Param[qm.Vector[qm.Real, 1]],  # type: ignore[valid-type]
+    distribution_rz: qm.Param[qm.Vector[qm.Real, 1]],  # type: ignore[valid-type]
+    distribution_phase: qm.Param[qm.Real],
+    payoff_angles: qm.Param[qm.Vector[qm.Real, 2]],  # type: ignore[valid-type]
+    iterations: qm.Const[qm.Int],
+) -> qm.Shot[qm.Bits[2]]:  # type: ignore[valid-type]
+    """Sample the option amplitude after fixed Grover iterations.
+
+    Args:
+        distribution_ry (qm.Param[qm.Vector[qm.Real, 1]]): Distribution
+            magnitude coordinate.
+        distribution_rz (qm.Param[qm.Vector[qm.Real, 1]]): Distribution phase
+            coordinate.
+        distribution_phase (qm.Param[qm.Real]): Distribution global phase.
+        payoff_angles (qm.Param[qm.Vector[qm.Real, 2]]): Payoff multiplexer
+            coordinates.
+        iterations (qm.Const[qm.Int]): Compile-time Grover iteration count.
+
+    Returns:
+        qm.Shot[qm.Bits[2]]: Asset-address and payoff measurement.
+    """
+
+    state = option_state(
+        qm.qubits(2),
+        distribution_ry,
+        distribution_rz,
+        distribution_phase,
+        payoff_angles,
+    )
+    for _ in range(iterations):
+        state = qm.z(state, target=1)
+        state = qm.adjoint(
+            option_state,
+            state,
+            distribution_ry,
+            distribution_rz,
+            distribution_phase,
+            payoff_angles,
+        )
+        state = qm.x(state, target=0)
+        state = qm.x(state, target=1)
+        state = qm.cz(state, control=0, target=1)
+        state = qm.x(state, target=0)
+        state = qm.x(state, target=1)
+        state = option_state(
+            state,
+            distribution_ry,
+            distribution_rz,
+            distribution_phase,
+            payoff_angles,
+        )
+    return qm.measure(state)
 
 
 # %% [markdown]
-# この分布読み込みと、UCR-Y を施すことで、コールオプションのペイオフをペイオフ量子ビット振幅に変換する回路を構築します。
-# `num_shots` の回数だけ測定を行い、ペイオフ量子ビットが $\vert 1 \rangle$ になる確率 $P_1$ を推定します。
-# そして(3)の近似式 $P_1 \approx \frac{1}{2} + c\mathbb{E}[\tilde{f}]$ から、ペイオフの期待値を算出します。
-# ここで算出された $P_1$ の値が理論値と近い値となることを示すことで、ペイオフ回路が正しく機能していることを確認しています。
-
-# %%
-@qmc.qkernel
-def payoff_call() -> qmc.Bit:
-    q_S = qmc.qubit_array(n_qubits, "q_S")
-    q_p = qmc.qubit(name="q_p")
-
-    # (1) 分布ロード: P_X
-    q_S = load_distribution(q_S)
-
-    # (2) UCR-Y ペイオフ回路: F
-    #     |i⟩|0⟩ → |i⟩(cos α(i)|0⟩ + sin α(i)|1⟩)
-    #     α(i) = π/4 - c + 2c*max(S_i-K, 0) / (S_max-K)
-    #     S < K: 定数角 π/4 - c  /  S >= K: 線形増加
-    q_S, q_p = apply_payoff_ucr(q_S, q_p)
-
-    _ = qmc.measure(q_S)
-    return qmc.measure(q_p)
-
-
-num_shots      = 4096
-transpiler_qmc = QiskitTranspiler()
-simulator      = AerSimulator(seed_simulator=42)
-executor_qmc   = transpiler_qmc.executor(simulator)
-exe_k0 = transpiler_qmc.transpile(payoff_call)   # バインディング不要
-res_k0 = exe_k0.sample(executor_qmc, shots=num_shots).result()
-
-ones_k0 = 0
-for q, num in res_k0.results:
-    if q == 1:
-        ones_k0 += num
-P1_k0 = ones_k0 / num_shots
-
-print(f"\n[Qamomile k=0]")
-print(f"P1 測定値:              {P1_k0:.4f}")
-print(f"P1 厳密値(参照):     {P1_exact:.4f}")
-print(f"P1 近似値:          {P1_approx:.4f}")
-print("→ 測定値が厳密値に近ければペイオフ回路は正しく動いています")
-
+# `iterations`は回路構造を変える`Const`であり、specialize時に固定します。分布と
+# ペイオフ座標はartifactのinvocation ABIに残る`Param`です。この2段階を混同する、
+# `state`を複製する、operationが返すsuccessorを捨てる、といった誤りはbackend
+# loweringより前にrejectされます。
 
 # %% [markdown]
-# ### 量子振幅推定の実装
+# ### 増幅programのinspectionと見積もり
 #
-# 振幅推定のためのGrover演算子 $\mathcal{Q} = \mathcal{A} \mathcal{S}_0 \mathcal{A}^\dagger \mathcal{S}_\chi$ を $k$ 回適用する量子回路を構築しましょう。
-# $k$ 回適用した量子状態において、ペイオフ量子ビットが $\vert 1 \rangle$ になる確率 $P_1^{(k)} = \sin^2 ((2k+1) \theta_\alpha)$ を求めます。
+# 1反復のprogramは、準備、位相marking、自動導出した随伴、reflection、再度の準備を
+# 通常の関数として合成したものです。金融専用のcompiler instructionやbackend pathは
+# ありません。
 
 # %%
-def build_Ak_kernel(k: int):
-    """A · Q^k を構築する。mcx により n_qubits に依らず単一定義。"""
+baseline_program = qm.specialize(option_samples, iterations=0)
+amplified_program = qm.specialize(option_samples, iterations=1)
+inspection = amplified_program.inspect()
+study = qm.resources.logical(amplified_program)
 
-    @qmc.qkernel
-    def Ak() -> qmc.Bit:
-        q_S = qmc.qubit_array(n_qubits, "q_S")
-        q_p = qmc.qubit(name="q_p")
+assert "qcore.adjoint_call" in inspection
+assert "quantum.option_pricing" not in inspection
+assert study.metric(qm.resources.LOGICAL_ROTATION_GATES).numeric_enclosure() == (
+    12,
+    12,
+)
+assert study.metric(
+    qm.resources.logical_operation_count("quantum.cx")
+).numeric_enclosure() == (4, 4)
+assert study.metric(
+    qm.resources.logical_operation_count("quantum.cz")
+).numeric_enclosure() == (1, 1)
+assert study.metric(qm.resources.LOGICAL_TWO_QUBIT_GATES).numeric_enclosure() == (
+    7,
+    7,
+)
+assert qm.resources.ResourceStudy.from_bytes(study.to_bytes()) == study
 
-        # ── A = P_X · F ──
-        q_S = load_distribution(q_S)
-        q_S, q_p = apply_payoff_ucr(q_S, q_p)
+# %% [markdown]
+# これらのcountは、実際に実行する同じspecialized call graphから得られます。随伴は
+# inverse gate listのcopyではなく、estimatorもoption pricing専用の別管理formulaを
+# 使いません。
 
-        # ── Q を k 回適用 ──
-        for _ in range(k):
+# %% [markdown]
+# ### 振幅推定work scalingの再現
+#
+# [](https://doi.org/10.48550/arXiv.2310.03011)のSection 14.2は、
+# $O(1/\epsilon^2)$回のincoherentな古典sampleと$O(1/\epsilon)$回のcoherentな
+# walk-operator applicationを比較します。このtutorialは教科書的QPE circuitではなく
+# likelihood-based amplitude estimationを使いますが、Grover powerを1つ増やすたびに
+# preparation inverse、2個のreflection、1個のpreparationが加わります。resource
+# algebraは1度のsymbolic解析からこの有限サイズのaffine costを検証できます。下の
+# 各rowではiteration countを代入するだけです。
 
-            # S_χ: payoff qubit が |1⟩ のとき位相 -1
-            q_p = qmc.z(q_p)
+# %%
+amplitude_scaling_study = qm.resources.logical(option_samples)
+amplitude_studies = tuple(
+    amplitude_scaling_study.evaluate(iterations=iterations) for iterations in range(5)
+)
+amplitude_scaling = tuple(
+    (
+        resource_study.metric(qm.resources.LOGICAL_ROTATION_GATES).numeric_enclosure()[
+            0
+        ],
+        resource_study.metric(
+            qm.resources.logical_operation_count("quantum.cx")
+        ).numeric_enclosure()[0],
+        resource_study.metric(
+            qm.resources.logical_operation_count("quantum.cz")
+        ).numeric_enclosure()[0],
+        resource_study.metric(qm.resources.LOGICAL_WORK).numeric_enclosure()[0],
+    )
+    for resource_study in amplitude_studies
+)
 
-            # A† = F† · P_X†
-            q_S, q_p = apply_payoff_ucr_inv(q_S, q_p)
-            q_S = load_distribution_inv(q_S)
+for iterations, (rotations, cnot_gates, controlled_z, work) in enumerate(
+    amplitude_scaling
+):
+    assert rotations == 4 + 8 * iterations
+    assert cnot_gates == 2 + 2 * iterations
+    assert controlled_z == iterations
+    assert work == 9 + 20 * iterations
 
-            # S₀: |0…0⟩ のとき位相 -1
-            # X で全反転 → MCZ(= H · MCX · H)→ X で戻す
-            # コントロール = q_S 全体、ターゲット = q_p。アンシラ不要。
-            q_S = qmc.x(q_S)
-            q_p = qmc.x(q_p)
-            q_p = qmc.h(q_p)
-            q_S[0:n_qubits], q_p = qmc.mcx(q_S[0:n_qubits], q_p)
-            q_p = qmc.h(q_p)
-            q_S = qmc.x(q_S)
-            q_p = qmc.x(q_p)
+print("amplitude-estimation scaling (k: rotations, CX, CZ, work):", amplitude_scaling)
 
-            # A
-            q_S = load_distribution(q_S)
-            q_S, q_p = apply_payoff_ucr(q_S, q_p)
+# %% [markdown]
+# 4個の有限metricはすべてGrover powerについてaffineです。したがって、この固定した
+# preparationでは$M=\Theta(1/\epsilon)$回のcoherent walkを使うscheduleのlogical
+# workは$\Theta(1/\epsilon)$となり、サーベイのquantum側と一致します。このcircuit
+# study自体はstatistical success boundを証明せず、classical likelihood optimization
+# costも含みません。
 
-        _ = qmc.measure(q_S)
-        return qmc.measure(q_p)
+# %% [markdown]
+# ### quantum amplitude estimationの実装
+#
+# 同じprogram familyの2つのmemberをReference backend向けにcompileします。baselineは
+# $a=\sin^2\theta$を推定し、Groverを1回適用したprogramは$\sin^2(3\theta)$を
+# 推定します。厳密値$a=1/4$では後者が1になるため、増幅bodyを明確に検査できます。
 
-    return Ak
-    
-k_list      = [0, 1, 2, 4, 8, 16]
-shots_per_k = 2048
+# %%
+reference = qm.Reference()
+baseline_artifact = qm.compile(baseline_program, to=reference)
+amplified_artifact = qm.compile(amplified_program, to=reference)
 
-transpiler_q = QiskitTranspiler()
-executor_q   = transpiler_q.executor(simulator)
-h_list, N_list = [], []
+baseline = qm.run(
+    baseline_artifact,
+    on=reference,
+    parameters=parameters,
+    shots=128,
+    seed=2,
+).result
+amplified = qm.run(
+    amplified_artifact,
+    on=reference,
+    parameters=parameters,
+    shots=4,
+    seed=2,
+).result
 
-# P1 の理論値には線形近似値ではなく厳密値を使用
-theta_a_theory = np.arcsin(np.sqrt(max(0.0, min(1.0, P1_exact))))
-print()
-for k in k_list:
-    kernel = build_Ak_kernel(k)
-    exe    = transpiler_q.transpile(kernel)   # バインディング不要
-    result = exe.sample(executor_q, shots=shots_per_k).result()
+baseline_successes = sum(
+    count for bits, count in baseline.counts.items() if bits[1] == 1
+)
+amplified_successes = sum(
+    count for bits, count in amplified.counts.items() if bits[1] == 1
+)
+observations = (
+    (0, baseline_successes, baseline.shots),
+    (1, amplified_successes, amplified.shots),
+)
 
-    ones = 0
-    for q, num in result.results:
-        if q == 1:
-            ones += num
-    h_list.append(ones)
-    N_list.append(shots_per_k)
-    P1_k  = ones / shots_per_k
-    P1_th = np.sin((2*k + 1) * theta_a_theory)**2
-    print(f"k={k:2d}: P1 測定={P1_k:.4f}  理論値(厳密)={P1_th:.4f}")
-
+assert baseline.shots == 128
+assert amplified.counts == {(1, 1): 4}
 
 # %% [markdown]
 # ## 結果
 #
-# 複数の $k$ での測定データ (二項分布) をベースに、$P_1^{(k)} = \sin^2 ((2k+1) \theta_\alpha)$ というモデルに対する最尤推定を実施しましょう。
-# これにより振幅角 $\theta_\alpha$ を推定し、さらに $P_1 = \sin^2 \theta_\alpha$ を計算します。
-# そしてこの $P_1$ からペイオフの期待値 $\mathbb{E}[f(S)]$ を計算し、無リスク金利で割り引くことで、オプションのフェアバリューを算出します。
-# 最後に、厳密計算から求めた参照値との比較を行っています。
-
-# %%
-# ============================================================
-# 4. 最尤推定(MLE)
-# ============================================================
-def neg_log_lik(theta: float) -> float:
-    """
-    負の対数尤度:
-      -Σ_k [h_k log sin²((2k+1)θ) + (N_k - h_k) log cos²((2k+1)θ)]
-    """
-    ll = 0.0
-    for k, h, N in zip(k_list, h_list, N_list):
-        s2 = float(np.clip(np.sin((2*k + 1) * theta)**2, 1e-12, 1 - 1e-12))
-        ll += h * np.log(s2) + (N - h) * np.log(1 - s2)
-    return -ll
-
-opt       = minimize_scalar(neg_log_lik, bounds=(0, np.pi / 2), method='bounded')
-theta_hat = opt.x
-a_hat     = np.sin(theta_hat)**2
-
-# P1 → E[f(S)] の逆算(式5 の線形近似を使用、近似バイアスは O(c²))
-# E[f̃] ≈ (P1 - 1/2) / c, E[f] = F_max/2 * (E[f̃] + 1)
-E_ftilde_hat = (a_hat - 0.5) / c
-E_f_hat      = (E_ftilde_hat + 1) * F_max / 2
-fair_hat     = np.exp(-r * T) * E_f_hat
-
-print(f"\n===== 推定結果 =====")
-print(f"推定 P1:          {a_hat:.6f}  "
-      f"(厳密値 {P1_exact:.6f}, 近似値 {P1_approx:.6f})")
-print(f"推定 E[f(S)]:     {E_f_hat:.6f}  (参照値 {exact_E_f:.6f})")
-print(f"推定フェアバリュー: {fair_hat:.6f}  (参照値 {exact_fair:.6f})")
-print(f"絶対誤差:          {abs(fair_hat - exact_fair):.6f}")
-
-# %% [markdown]
-# 量子回路により推定して得た値 `E[f(S)]` が参照値と異なっているのは
+# ### ホスト側で推定して割り引く
+#
+# 最尤推定は通常の古典処理です。Pythonに置くことで量子・古典の境界が明確になり、
+# 数値optimizerをcompiler semanticsとしてencodeすることも避けられます。観測
+# $(h_k,N_k)$に対して次を最大化します。
 #
 # $$
-# \mathbb{E}[f] = \frac{F_\mathrm{max}}{2} \left( \frac{P_1 - \frac{1}{2}}{c} + 1 \right)
-# $$ 
+# \prod_k p_k(\theta)^{h_k}(1-p_k(\theta))^{N_k-h_k},\qquad
+# p_k(\theta)=\sin^2((2k+1)\theta).
+# $$
+
+
+# %%
+def negative_log_likelihood(theta: float) -> float:
+    """Return the binomial negative log likelihood for all Grover powers.
+
+    Args:
+        theta (float): Candidate amplitude angle in the open first quadrant.
+
+    Returns:
+        float: Negative log likelihood for the measured observations.
+    """
+
+    total = 0.0
+    for iterations, successes, shots in observations:
+        probability = math.sin((2 * iterations + 1) * theta) ** 2
+        probability = min(max(probability, 1e-12), 1.0 - 1e-12)
+        total -= successes * math.log(probability)
+        total -= (shots - successes) * math.log(1.0 - probability)
+    return total
+
+
+theta_candidates = tuple(index * math.pi / (2 * 4096) for index in range(1, 4096))
+theta_hat = min(theta_candidates, key=negative_log_likelihood)
+amplitude_hat = math.sin(theta_hat) ** 2
+payoff_hat = payoff_scale * amplitude_hat
+price_hat = math.exp(-risk_free_rate * maturity) * payoff_hat
+
+sampling_error = 6.0 * math.sqrt(0.25 * 0.75 / baseline.shots)
+assert abs(amplitude_hat - 0.25) <= sampling_error
+
+print("measured Grover data:", observations)
+print(f"estimated normalized payoff: {amplitude_hat:.6f}")
+print(f"estimated option price:       {price_hat:.6f}")
+print(f"exact discretized price:      {exact_price:.6f}")
+
+# %% [markdown]
+# 最後に現金ペイオフscaleを掛け、割引率$e^{-rT}$を掛ける処理は量子programの外側に
+# 残します。より細かいgridでは、2つの実行時座標vectorを置き換えてアドレス量子
+# ビットを増やしますが、型付きの準備・増幅・推定・割引という分解は変わりません。
+
+# %% [markdown]
+# ### 元の16-point log-normal optionを復元する
 #
-# のように近似したことによるものです。
-# ここで $F_\mathrm{max} = S_\mathrm{max} - K$ です。
-# 実際に、推定された $\mathbb{E}[\hat{f}]$ と参照値との差において、近似誤差がどのくらい寄与しているかをみてみましょう。
-# %%
-total_error = E_f_hat - exact_E_f
-approximation_error = F_max / 2 * (P1_exact - P1_approx) / c
-statistical_error = total_error - approximation_error
-error_magnitude_sum = abs(approximation_error) + abs(statistical_error)
-approximation_share = abs(approximation_error) / error_magnitude_sum
-
-print(f"近似誤差: {approximation_error:.6f}")
-print(f"統計誤差: {statistical_error:.6f}")
-print(f"誤差の絶対値に占める近似誤差の割合: {approximation_share:.1%}")
-
-# %% [markdown]
-# この例では、誤差の大半が近似によるものであることがわかります。
-# 残りの部分は統計誤差です。
-# これは量子振幅推定部分の測定回数を増やすことで、減少させることができます。
-# しかし測定回数を増やすと計算実行時間が増大するため、注意が必要です。  
-# 最後に、対数尤度関数 $\log \mathcal{L} (\sin^2 \theta)$と、$P_1^{(k)}$ をプロットしてみましょう。
-# 左図は対数尤度関数と、最尤推定値および厳密計算による理論値も示しています。
-# 右図は、推定した$\hat{\theta}$を代入した正弦二乗曲線 $P_1^{(k)} = \sin^2 ((2k+1) \hat{\theta})$ と測定値を重ねて描画しています。
+# 上のcompactなwitnessでは各回路componentを容易にinspectできます。ここでは元の読者向け金融modelも実行します。4つのaddress qubitに16-pointへ離散化したlog-normalな満期価格分布を保持し、strikeを1.9、payoff angleを元の$c=0.25$の線形化構成にします。APIを変えずに、同じprepare、Grover amplification、maximum-likelihood、discount workflowを適用します。
 
 # %%
-# ============================================================
-# 5. 可視化
-# ============================================================
-theta_grid = np.linspace(1e-4, np.pi / 2 - 1e-4, 400)
-ll_grid    = np.array([-neg_log_lik(t) for t in theta_grid])
-a_grid     = np.sin(theta_grid)**2
+FULL_ADDRESS_QUBITS = 4
+FULL_TOTAL_QUBITS = 5
+spot = 2.0
+full_strike = 1.9
+full_rate = 0.05
+volatility = 0.4
+full_maturity = 40.0 / 365.0
+drift = (full_rate - 0.5 * volatility**2) * full_maturity
+deviation = volatility * math.sqrt(full_maturity)
+minimum_price = spot * math.exp(drift - 3.0 * deviation)
+maximum_price = spot * math.exp(drift + 3.0 * deviation)
+price_grid = np.linspace(minimum_price, maximum_price, 2**FULL_ADDRESS_QUBITS)
+full_probabilities = np.exp(
+    -((np.log(price_grid / spot) - drift) ** 2) / (2.0 * deviation**2)
+) / (price_grid * deviation * math.sqrt(2.0 * math.pi))
+full_probabilities /= full_probabilities.sum()
+full_payoffs = np.maximum(price_grid - full_strike, 0.0)
+full_payoff_scale = maximum_price - full_strike
+scale_c = 0.25
+target_amplitudes = (
+    math.pi / 4.0 - scale_c + 2.0 * scale_c * full_payoffs / full_payoff_scale
+)
+full_exact_payoff = float(np.sum(full_probabilities * full_payoffs))
+full_exact_price = math.exp(-full_rate * full_maturity) * full_exact_payoff
 
-fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+prepare_full_distribution = amplitude_encoding(
+    tuple(math.sqrt(float(value)) for value in full_probabilities)
+)
+encode_full_payoff = uniformly_controlled_ry(
+    tuple(2.0 * float(value) for value in target_amplitudes)
+)
 
-axes[0].plot(a_grid, ll_grid, color='steelblue')
-axes[0].axvline(a_hat,     color='red',   ls='--',
-                label=f'estimate  {a_hat:.4f}')
-axes[0].axvline(P1_exact,  color='navy',  ls=':',
-                label=f'exact P1  {P1_exact:.4f}')
-axes[0].axvline(P1_approx, color='green', ls='-.',
-                label=f'approx P1 {P1_approx:.4f}')
-axes[0].set_xlabel('a = sin²(θ)')
-axes[0].set_ylabel('log-likelihood')
-axes[0].set_title('MLAE likelihood')
-axes[0].legend()
 
-k_smooth = np.linspace(0, max(k_list), 500)
-P1_sine_curve = np.sin((2 * k_smooth + 1) * theta_hat)**2
-axes[1].plot(k_smooth, P1_sine_curve, '-', color='steelblue',
-             label=rf'$\sin^2((2k+1)\hat{{\theta}})$ ($\hat{{\theta}}={theta_hat:.3f}$)')
-axes[1].plot(k_list, [h / N for h, N in zip(h_list, N_list)],
-             'o', color='red', zorder=5, label='measured value')
-axes[1].set_xlabel('k  (Grover iterations)')
-axes[1].set_ylabel('P₁ estimation')
-axes[1].set_title('P₁^(k) = sin²((2k+1)θ̂)')
-axes[1].legend()
+@qm.qkernel
+def flip_target(target: qm.Q[qm.Bits[1]]) -> qm.Q[qm.Bits[1]]:  # type: ignore[valid-type]
+    """Flip one target used by the multi-controlled zero reflection."""
 
-plt.tight_layout()
-plt.show()
+    return qm.x(target)
 
-# %% [markdown]
-# MLAE により、対数尤度が最大となる付近を推定できていることがわかります。
+
+@qm.qkernel
+def full_option_state(
+    state: qm.Q[qm.Bits[5]],  # type: ignore[valid-type]
+) -> qm.Q[qm.Bits[5]]:  # type: ignore[valid-type]
+    """Prepare the original 16-point distribution and scaled payoff."""
+
+    address, payoff = qm.split_at(state, 4)
+    address = prepare_full_distribution(address)
+    return encode_full_payoff(qm.concat(address, payoff))
+
+
+@qm.qkernel
+def full_option_samples(
+    iterations: qm.Const[qm.Int],
+) -> qm.Shot[qm.Bits[5]]:  # type: ignore[valid-type]
+    """Sample the full option model after fixed Grover iterations."""
+
+    state = full_option_state(qm.qubits(5))
+    for _ in range(iterations):
+        state = qm.z(state, target=4)
+        state = qm.adjoint(full_option_state, state)
+        for index in range(5):
+            state = qm.x(state, target=index)
+        controls, target = qm.split_at(state, 4)
+        target = qm.h(target)
+        controls, target = qm.control(flip_target, controls, target)
+        target = qm.h(target)
+        state = qm.concat(controls, target)
+        for index in range(5):
+            state = qm.x(state, target=index)
+        state = full_option_state(state)
+    return qm.measure(state)
+
+
+full_shots = 32 if docs_test_mode else 256
+full_observations: list[tuple[int, int, int]] = []
+for power in (0, 1):
+    full_program = qm.specialize(full_option_samples, iterations=power)
+    full_artifact = qm.compile(full_program, to=reference)
+    full_result = qm.run(
+        full_artifact,
+        on=reference,
+        shots=full_shots,
+        seed=20 + power,
+    ).result
+    successes = sum(
+        count
+        for bits, count in full_result.counts.items()
+        if bits[FULL_TOTAL_QUBITS - 1] == 1
+    )
+    full_observations.append((power, successes, full_result.shots))
+
+
+def full_negative_log_likelihood(theta: float) -> float:
+    """Return the likelihood objective for the full option observations."""
+
+    total = 0.0
+    for power, successes, shots in full_observations:
+        probability = math.sin((2 * power + 1) * theta) ** 2
+        probability = min(max(probability, 1e-12), 1.0 - 1e-12)
+        total -= successes * math.log(probability)
+        total -= (shots - successes) * math.log(1.0 - probability)
+    return total
+
+
+full_theta_hat = min(theta_candidates, key=full_negative_log_likelihood)
+full_probability_hat = math.sin(full_theta_hat) ** 2
+scaled_payoff_hat = (full_probability_hat - 0.5) / scale_c
+full_payoff_hat = full_payoff_scale * (scaled_payoff_hat + 1.0) / 2.0
+full_price_hat = math.exp(-full_rate * full_maturity) * full_payoff_hat
+
+print("16-point Grover data:", full_observations)
+print(f"16-point estimated price: {full_price_hat:.6f}")
+print(f"16-point reference price: {full_exact_price:.6f}")
+assert abs(full_price_hat - full_exact_price) < (0.5 if docs_test_mode else 0.2)
 
 # %% [markdown]
 # ## まとめ

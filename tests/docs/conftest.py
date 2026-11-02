@@ -6,3 +6,8 @@ import os
 # intentionally unconditional so a developer's interactive backend cannot open
 # a window and block an unattended test run.
 os.environ["MPLBACKEND"] = "Agg"
+os.environ["KMP_USE_SHM"] = "0"
+
+import matplotlib  # noqa: E402
+
+matplotlib.use("Agg", force=True)

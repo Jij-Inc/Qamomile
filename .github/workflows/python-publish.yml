@@ -19,7 +19,7 @@ env:
   UV_VERSION: "0.11.32"
 
 jobs:
-  build:
+  build-source:
     if: >-
       ${{
         github.event_name == 'workflow_dispatch' ||
@@ -31,6 +31,8 @@ jobs:
       }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      version: ${{ steps.distribution-version.outputs.version }}
     permissions:
       contents: read
     steps:
@@ -71,23 +73,218 @@ jobs:
         # Load the validator from the main branch fetched above.
         run: git show "refs/remotes/origin/main:.github/scripts/release/validate-tag-and-export-version.sh" | bash -s
 
-      - name: Build distributions without workspace sources
-        run: uv build --no-sources
+      - name: Build the self-contained source distribution
+        run: uv build --sdist --no-sources
+
+      - name: Export the built distribution version
+        id: distribution-version
+        shell: bash
+        run: |
+          shopt -s nullglob
+          source_archives=(dist/qamomile-*.tar.gz)
+          if [[ "${#source_archives[@]}" -ne 1 ]]; then
+            echo "Expected exactly one Qamomile source archive." >&2
+            exit 1
+          fi
+          source_name="${source_archives[0]#dist/qamomile-}"
+          echo "version=${source_name%.tar.gz}" >> "${GITHUB_OUTPUT}"
 
       - name: Check distribution metadata
         run: uvx twine check --strict dist/*
 
-      - name: Verify distributions
-        run: .github/scripts/verify-distributions.sh
+      - name: Verify the source distribution
+        run: uv run --isolated --no-project python .github/scripts/verify-distributions.py dist --sdist-only
 
       - name: Upload verified distributions
         # v4.6.2 = https://github.com/actions/upload-artifact/releases/tag/v4.6.2
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: python-distributions
+          name: source-distribution
           path: dist/
           if-no-files-found: error
           retention-days: 7
+
+  build-wheels:
+    needs: build-source
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            build: cp311-manylinux_x86_64
+          - name: macos-x86_64
+            runner: macos-15-intel
+            build: cp311-macosx_x86_64
+          - name: macos-arm64
+            runner: macos-15
+            build: cp311-macosx_arm64
+          - name: windows-x86_64
+            runner: windows-latest
+            build: cp311-win_amd64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      EXPECTED_VERSION: ${{ needs.build-source.outputs.version }}
+      CIBW_BUILD: ${{ matrix.build }}
+      CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+      CIBW_BEFORE_ALL_LINUX: >-
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+        sh -s -- -y --profile minimal --default-toolchain 1.98.0
+      CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH"'
+    steps:
+      - name: Check out the release source
+        # v4.4.0 = https://github.com/actions/checkout/releases/tag/v4.4.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Set up Python
+        # v5.6.0 = https://github.com/actions/setup-python/releases/tag/v5.6.0
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        # v5.4.2 = https://github.com/astral-sh/setup-uv/releases/tag/v5.4.2
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+
+      - name: Download the verified source distribution
+        # v4.3.0 = https://github.com/actions/download-artifact/releases/tag/v4.3.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: source-distribution
+          path: dist
+
+      - name: Install the locked Rust toolchain
+        if: ${{ runner.os != 'Linux' }}
+        shell: bash
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          rustc --version
+
+      - name: Preserve the Rust macOS deployment minimum
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: rustc --print=deployment-target >> "${GITHUB_ENV}"
+
+      - name: Extract the verified source outside the checkout
+        shell: python
+        run: |
+          import os
+          import tarfile
+          from pathlib import Path
+
+          archives = list(Path("dist").glob("qamomile-*.tar.gz"))
+          assert len(archives) == 1, "Expected exactly one source archive"
+          destination = Path(os.environ["RUNNER_TEMP"]) / "qamomile-wheel-source"
+          with tarfile.open(archives[0]) as archive:
+              archive.extractall(destination, filter="data")
+          sources = list(destination.glob("qamomile-*"))
+          assert len(sources) == 1, "Expected exactly one source directory"
+          assert not (sources[0] / ".git").exists()
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              output.write(f"WHEEL_SOURCE={sources[0]}\n")
+
+      - name: Build one combined ABI3 wheel from the source archive
+        working-directory: ${{ env.WHEEL_SOURCE }}
+        shell: bash
+        run: >-
+          uvx --from cibuildwheel==3.3.1 cibuildwheel .
+          --output-dir "${GITHUB_WORKSPACE}/dist"
+
+      - name: Check combined wheel metadata
+        shell: bash
+        run: uvx twine check --strict dist/*.whl
+
+      - name: Verify installed distribution
+        shell: bash
+        run: .github/scripts/verify-distributions.sh
+
+      - name: Upload the verified combined wheel
+        # v4.6.2 = https://github.com/actions/upload-artifact/releases/tag/v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: wheel-${{ matrix.name }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 7
+
+  verify-installed-docs:
+    needs: [build-source, build-wheels]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      EXPECTED_VERSION: ${{ needs.build-source.outputs.version }}
+      MPLBACKEND: Agg
+    steps:
+      - name: Check out the release source
+        # v4.4.0 = https://github.com/actions/checkout/releases/tag/v4.4.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        # v5.6.0 = https://github.com/actions/setup-python/releases/tag/v5.6.0
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        # v5.4.2 = https://github.com/astral-sh/setup-uv/releases/tag/v5.4.2
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-suffix: ${{ github.job }}
+
+      - name: Download the verified Linux wheel
+        # v4.3.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: wheel-linux-x86_64
+          path: dist
+
+      - name: Export locked documentation dependencies
+        shell: bash
+        run: >-
+          uv export --frozen --no-default-groups --group docs
+          --no-emit-workspace --no-hashes --no-annotate
+          --no-header --output-file "${RUNNER_TEMP}/docs-requirements.txt"
+
+      - name: Install release wheels in an isolated environment
+        shell: bash
+        run: |
+          docs_environment="${RUNNER_TEMP}/qamomile-installed-docs"
+          uv venv "${docs_environment}"
+          shopt -s nullglob
+          root_wheels=(dist/qamomile-*.whl)
+          if [[ "${#root_wheels[@]}" -ne 1 ]]; then
+            echo "Expected exactly one combined Qamomile wheel." >&2
+            exit 1
+          fi
+          docs_python="${docs_environment}/bin/python"
+          uv pip install \
+            --python "${docs_python}" \
+            --requirement "${RUNNER_TEMP}/docs-requirements.txt" \
+            "${root_wheels[0]}"
+          echo "DOCS_PYTHON=${docs_python}" >> "${GITHUB_ENV}"
+
+      - name: Execute documentation against installed wheels
+        run: >-
+          "${DOCS_PYTHON}" -I .github/scripts/verify-installed-docs.py
+          --docs-root docs --expected-version "${EXPECTED_VERSION}"
 
   publish:
     if: >-
@@ -96,7 +293,7 @@ jobs:
         github.event_name == 'release' &&
         github.event.release.draft == false
       }}
-    needs: build
+    needs: [build-source, build-wheels, verify-installed-docs]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions: {}
@@ -112,8 +309,16 @@ jobs:
         # v4.3.0 = https://github.com/actions/download-artifact/releases/tag/v4.3.0
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: python-distributions
+          name: source-distribution
           path: dist
+
+      - name: Download verified combined wheels
+        # v4.3.0 = https://github.com/actions/download-artifact/releases/tag/v4.3.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
 
       - name: Install uv
         # v5.4.2 = https://github.com/astral-sh/setup-uv/releases/tag/v5.4.2
@@ -125,4 +330,4 @@ jobs:
       - name: Publish to PyPI
         env:
           UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-        run: uv publish
+        run: uv publish --check-url https://pypi.org/simple dist/*

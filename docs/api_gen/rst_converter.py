@@ -59,7 +59,7 @@ def _convert_block_directives(text: str) -> str:
             # Collect indented content
             math_lines = _collect_indented_block(lines, i, indent)
             i += len(math_lines)
-            content = "\n".join(l.strip() for l in math_lines)
+            content = "\n".join(item.strip() for item in math_lines)
             if content:
                 result.append(f"{' ' * indent}$$")
                 result.append(content)
@@ -80,13 +80,17 @@ def _convert_block_directives(text: str) -> str:
             # Dedent code content
             if code_lines:
                 min_indent = min(
-                    (len(l) - len(l.lstrip()) for l in code_lines if l.strip()),
+                    (
+                        len(item) - len(item.lstrip())
+                        for item in code_lines
+                        if item.strip()
+                    ),
                     default=0,
                 )
-                dedented = [l[min_indent:] for l in code_lines]
+                dedented = [item[min_indent:] for item in code_lines]
                 prefix = " " * indent
                 result.append(f"{prefix}```python")
-                result.extend(f"{prefix}{l}" for l in dedented)
+                result.extend(f"{prefix}{item}" for item in dedented)
                 result.append(f"{prefix}```")
                 result.append("")
             continue
@@ -99,7 +103,7 @@ def _convert_block_directives(text: str) -> str:
                 i += 1
             note_lines = _collect_indented_block(lines, i, indent)
             i += len(note_lines)
-            content = "\n".join(l.strip() for l in note_lines)
+            content = "\n".join(item.strip() for item in note_lines)
             prefix = " " * indent
             result.append(f"{prefix}:::{{note}}")
             result.append(content)
@@ -115,7 +119,7 @@ def _convert_block_directives(text: str) -> str:
                 i += 1
             warn_lines = _collect_indented_block(lines, i, indent)
             i += len(warn_lines)
-            content = "\n".join(l.strip() for l in warn_lines)
+            content = "\n".join(item.strip() for item in warn_lines)
             prefix = " " * indent
             result.append(f"{prefix}:::{{warning}}")
             result.append(content)

@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package qamomile.proto;
+
+import "qcore.proto";
+
+message ExecutionContextEntryProto {
+  string key = 1;
+  string value = 2;
+}
+
+message ExecutionReferenceProto {
+  string provider = 1;
+  repeated string job_ids = 2;
+  string target = 3;
+  bool has_target = 4;
+  string group_id = 5;
+  bool has_group_id = 6;
+  repeated ExecutionContextEntryProto context = 7;
+}
+
+message ExecutionSnapshotNodeProto {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    REMOTE = 1;
+    LOCAL = 2;
+    COMPOSITE = 3;
+  }
+
+  Kind kind = 1;
+  ExecutionReferenceProto reference = 2;
+  LiteralProto local_value = 3;
+  repeated ExecutionSnapshotNodeProto children = 4;
+}
+
+message ExecutionSnapshotProto {
+  uint32 schema_major = 1;
+  uint32 schema_minor = 2;
+  string artifact_kind = 3;
+  ExecutionSnapshotNodeProto root = 4;
+  bytes snapshot_digest = 5;
+}

@@ -1,11 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -17,152 +18,237 @@
 # tags: [integration]
 # ---
 #
-# # Amazon Braketサポート
+# # Amazon Braket Support
 #
-# このページでは、Qamomileの量子カーネルをAmazon Braketネイティブ回路へ
-# トランスパイルし、ローカルシミュレータでサンプリングと期待値計算を実行します。
-# リモート実行時も、同じexecutor境界へAWSデバイスを渡せます。
+# QamomileはAmazon Braketをrealization境界に保ちます。ユーザーは1つの型付きQamomile programを書き、`Braket` targetがportable OpenQASM 3をemitし、`BraketLocal`が分離されたlocal-simulator workerで実行します。`BraketDevice` endpointを使うと、AWS sessionやdevice objectをQCoreへ入れずに、互換性のあるartifactをmanaged deviceへsubmitできます。
+#
+# このページでは、Braketのdynamic OpenQASM routeをstatic logical-circuit統合と区別するため、measurement feedbackを使います。source-levelの意味、linear ownership、resource、result shapeを所有するのは引き続きRustです。
+
+# %% [markdown]
+# ## インストール
+#
+# ```bash
+# pip install "qamomile[braket]"
+# ```
 
 # %%
-# Amazon Braket対応を含む最新のQamomileをインストールします。
+# Install the latest Qamomile and its Amazon Braket integration through pip!
 # # !pip install "qamomile[braket]"
 
 # %%
 import math
 
-import qamomile.circuit as qmc
-import qamomile.observable as qm_o
-from qamomile.braket import BraketExecutionOptions, BraketTranspiler
+import qamomile as qm
+
+from qamomile.persistence import deserialize, serialize
+from qamomile.braket import Braket, BraketLocal, load_openqasm
 
 # %% [markdown]
-# ## Qamomileで回路を作る
+# ## Qamomileで構築する
 #
-# ランタイムパラメータはBraket回路内にシンボリックなまま残ります。executorは
-# Braketネイティブの`inputs` APIで値を送り、provider側のコンパイルと
-# パラメータ処理を維持します。
+# runtime parameterはemitted Braket program内でsymbolicなまま保持されます。
+# endpointはinvocation時に値を渡すため、provider側のcompileとparameter handlingを
+# 維持しながら、1つのimmutable artifactを再利用できます。
+
 
 # %%
-@qmc.qkernel
-def parameterized_bell(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
+@qm.qkernel
+def parameterized_bell(
+    theta: qm.Param[qm.Real],
+) -> qm.Shot[qm.Bits[2]]:  # type: ignore[valid-type]
     """Prepare and measure a parameterized Bell-like state.
 
     Args:
-        theta (qmc.Float): Rotation angle.
+        theta (qm.Param[qm.Real]): Rotation angle in radians.
 
     Returns:
-        qmc.Vector[qmc.Bit]: Two measured output bits.
+        qm.Shot[qm.Bits[2]]: Two measured output bits.
     """
-    q = qmc.qubit_array(2, "q")
-    q[0] = qmc.ry(q[0], theta)
-    q[0], q[1] = qmc.cx(q[0], q[1])
-    return qmc.measure(q)
+
+    state = qm.qubits(2)
+    state = qm.ry(state, theta, target=0)
+    state = qm.cx(state, control=0, target=1)
+    return qm.measure(state)
 
 
-@qmc.qkernel
-def plus_expectation(observable: qmc.Observable) -> qmc.Float:
-    """Prepare a plus state and evaluate an observable.
+# %% [markdown]
+# ## Braketへtranspileする
+#
+# `Braket` targetはportableなOpenQASM 3をemitします。terminal measurementは
+# Qamomileのresult ABIに保持され、endpointがBraketのmeasured-qubit orderを
+# 一貫してnormalizeできます。
 
-    Args:
-        observable (qmc.Observable): Observable to evaluate.
+# %%
+bell_program = qm.specialize(parameterized_bell)
+bell_artifact = qm.compile(bell_program, to=Braket())
+bell_source = load_openqasm(bell_artifact)
+
+assert bell_artifact.format == "braket.openqasm3.v1"
+assert tuple(slot.name for slot in bell_artifact.parameter_abi.slots) == ("theta",)
+print(bell_source)
+assert "input float[64] p0;" in bell_source
+
+# %% [markdown]
+# ## localで実行する
+#
+# `BraketLocal`はisolated worker内でBraketのlocal simulatorを作ります。
+# 同じartifactを異なる`theta`で繰り返しinvokeできます。
+
+# %%
+bell_result = qm.run(
+    bell_artifact,
+    on=BraketLocal(),
+    parameters={"theta": math.pi},
+    shots=32,
+    seed=0,
+).result
+
+assert bell_result.counts == {(1, 1): 32}
+print(bell_result.counts)
+
+# %% [markdown]
+# ## 型付きfeedback programを1つ書く
+#
+# `measure_z`はshot-time Booleanと同じaffine量子状態を返します。その後、通常のPython `if`構文で2番目の量子ビットに対する操作を選択します。両branchは所有された状態を1つだけ返します。実行時のmeasurement eventは3つですが、最後のmeasurementが返す公開resultは2 bitです。
+
+
+# %%
+@qm.qkernel
+def correlated_feedback() -> qm.Shot[qm.Bits[2]]:  # type: ignore[valid-type]
+    """Correlate two output bits through measurement feedback.
 
     Returns:
-        qmc.Float: Observable expectation value.
+        qm.Shot[qm.Bits[2]]: Two equal bits in Qamomile source order.
     """
-    q = qmc.qubit_array(1, "q")
-    q[0] = qmc.h(q[0])
-    return qmc.expval(q, observable)
+
+    state = qm.qubits(2)
+    state = qm.h(state, target=0)
+    flag, state = qm.measure_z(state, 0)
+    if flag:
+        state = qm.x(state, target=1)
+    else:
+        state = qm.z(state, target=1)
+    return qm.measure(state)
+
+
+program = correlated_feedback.specialize()
+study = qm.resources.logical(program)
+
+assert study.metric(qm.resources.LOGICAL_GATES).numeric_enclosure() == (2, 2)
+assert study.metric(qm.resources.LOGICAL_PEAK_QUBITS).numeric_enclosure() == (2, 2)
 
 # %% [markdown]
-# ## Braketへトランスパイルする
+# ## 一度コンパイルして実行対象を保持する
 #
-# `BraketTranspiler`はネイティブな`braket.circuits.Circuit`を生成します。
-# 終端測定はQamomile側の結果マッピングとして保持され、executorがBraketの
-# 測定量子ビット順を一貫した形へ正規化します。
+# `qm.compile`は、Braket OpenQASM Program、SDKオブジェクトの所有者、コンパイラが導出したABIとリソース情報を保持する`CompiledProgram`を返します。通常の実行では保存・復元を行いません。以下の`serialize`と`deserialize`は、必要な場合だけ`qamomile.persistence`で保存する例です。復元時には新しい実行対象を生成するため、Pythonオブジェクトの等値ではなくコンパイル識別子を比較します。
 
 # %%
-transpiler = BraketTranspiler()
-executable = transpiler.transpile(parameterized_bell, parameters=["theta"])
-braket_circuit = executable.quantum_circuit
+target = Braket()
+artifact = qm.compile(program, to=target)
+restored = deserialize(serialize(artifact))
 
-assert type(braket_circuit).__module__.startswith("braket.")
-assert {str(parameter) for parameter in braket_circuit.parameters} == {"theta"}
-print(braket_circuit)
+assert artifact.format == "braket.openqasm3.v1"
+assert restored.execution_identity == artifact.execution_identity
+assert artifact.execution_identity == qm.compile(program, to=target).execution_identity
+assert artifact.result_abi.width == 2
 
 # %% [markdown]
-# ## ローカルで実行する
-#
-# デバイスを省略すると、executorはBraketの`LocalSimulator`を作成します。
+# `load_openqasm`は明示的なinspection helperであり、別のcompilerやexecution pathではありません。非公開のfeedback measurementは`c[0]`を使い、最後の2つのmeasurementは残りのnative bitを使います。result ABIは宣言された2 bit値だけを保持し、source順序を所有します。
 
 # %%
-executor = transpiler.executor()
-sample_job = executable.sample(
-    executor,
-    shots=128,
-    bindings={"theta": math.pi},
+source = load_openqasm(restored)
+
+print(source)
+
+assert source.startswith("OPENQASM 3.0;")
+assert "bit[3] c;" in source
+assert "if (c[0])" in source
+assert "c[1] = measure" in source
+assert "c[2] = measure" in source
+
+# %% [markdown]
+# ## 分離されたlocal simulatorで実行する
+#
+# `BraketLocal`がSDK simulatorを構築するのはworker process内だけです。endpointはコンパイル済みOpenQASMを実行し、Braket nativeのq0-first resultを1回だけ正規化して、共通の型付き`SampleResult`を返します。このlocal profileはsimulator seedの再現性を約束しないため、portable seedを明示的に0にします。
+
+# %%
+record = qm.run(
+    restored,
+    on=BraketLocal(),
+    shots=32,
+    seed=0,
 )
-sample = sample_job.result()
 
-assert sample.results == [((1, 1), 128)]
-print(sample.results)
+print(record.result.counts)
 
-# %%
-energy_program = transpiler.transpile(
-    plus_expectation,
-    bindings={"observable": qm_o.X(0)},
-)
-energy = energy_program.run(executor).result()
-
-assert abs(energy - 1.0) < 1e-10
-print("<X> =", energy)
+assert record.artifact is restored
+assert sum(record.result.counts.values()) == 32
+assert set(record.result.counts) <= {(0, 0), (1, 1)}
+assert all(left == right for left, right in record.result.counts)
 
 # %% [markdown]
-# ## AWSデバイスを使う
+# ## 同じlocal endpointでexpectation valueを評価する
 #
-# `AwsDevice`を`transpiler.executor(device)`へ渡すと、同じjob APIを
-# リモートでも利用できます。submit後は結果取得を待たずにjobが返り、正規化された
-# status、キャンセル、native task、task ARN参照を利用できます。
+# samplingはBraket専用の特別なAPIではありません。状態を返すsourceはQamomile共通のexpectation contractで評価でき、observable measurement workは同じOpenQASM targetへloweringされます。plus stateに対する$X$の厳密なexpectationは1です。
+
+
+# %%
+@qm.qkernel
+def plus_state() -> qm.Q[qm.Bits[1]]:  # type: ignore[valid-type]
+    """Prepare a one-qubit plus state.
+
+    Returns:
+        qm.Q[qm.Bits[1]]: Owned plus state.
+    """
+
+    return qm.h(qm.qubits(1), target=0)
+
+
+plus_x = qm.expectation(
+    plus_state,
+    qm.X(0),
+    on=BraketLocal(),
+    shots=8,
+    seed=0,
+)
+print("<X> =", plus_x.value)
+assert plus_x.value == 1.0
+
+# %% [markdown]
+# ## 互換性のあるprogramをmanaged deviceへrouteする
+#
+# live deviceはendpoint内だけに残ります。`BraketDevice.target`はimmutableなdevice capabilityとcalibration snapshotをartifact fingerprintへ反映しますが、SDK object、credential、taskはpersistent program dataへ入りません。managed deviceはlocalのdynamic-control capabilityやportable seed contractを約束しません。そのためQamomileはsubmit前にcapabilityを確認し、requestを暗黙に弱めず`seed=0`を要求します。
 #
 # ```python
 # from braket.aws import AwsDevice
+# from qamomile.braket import BraketDevice
 #
 # device = AwsDevice("your-device-arn")
-# options = BraketExecutionOptions(
-#     s3_destination_folder=("your-bucket", "qamomile-results"),
+# endpoint = BraketDevice(
+#     device,
 #     poll_timeout_seconds=600,
 #     poll_interval_seconds=2,
-#     batch_max_retries=0,
 # )
-# aws_executor = transpiler.executor(device, options=options)
-# job = executable.sample(aws_executor, shots=1_000, bindings={"theta": 0.4})
-# print(job.status(), job.raw_status())
-# references = job.references()
-#
-# # 別processでexecutorを再作成し、raw task resultを復元します。
-# restored = aws_executor.restore(references[0])
-# counts = restored.result()
-#
-# # キャンセルはbest effortで、task参照は失われません。
-# job.cancel()
+# job = qm.submit(your_static_program, on=endpoint, shots=100, seed=0)
+# print(job.job_id, job.status)
+# result = job.result()
+# print(result.counts)
+# job.cancel()  # best effort; the task reference remains available
 # ```
 #
-# retryは追加の課金taskを作る可能性があるため、batch再送はデフォルトで無効です。
-# 意図的に再送する場合だけ`batch_max_retries`を設定してください。
-# `poll_timeout_seconds`はproviderのpolling制限と、ローカルで結果を待つデフォルト時間を設定します。`result(timeout=...)`を明示すると、このデフォルト値を上書きします。timeout時もremote taskはキャンセルされません。非同期待機には`await job.result_async()`を利用できます。
-#
-# リモートタスクにはAWS認証情報とS3出力先が必要で、費用が発生する場合があります。
-# そのため、このページではローカルシミュレータだけを実行します。
+# remote submissionには設定済みAWS credentialが必要で、費用が発生する場合があるため、このページでは実行しません。local endpointとmanaged endpointは同じ`run`と型付きresult contractに従います。
 
 # %% [markdown]
-# ## 制約
+# ## 制限事項
 #
-# 現在のBraketエンジンは静的なgate-model回路を対象としています。測定結果に依存する`if`や`while`のcontrol flow、mid-circuit reset、およびそれらの操作を必要とするアルゴリズムには対応していません。これには、modular算術やShorアルゴリズムのうちresetに依存する実行経路が含まれます。そのようなプログラムは静的回路へ書き換えるか、必要なdynamic-circuit primitiveを提供するエンジンを選択してください。
+# local OpenQASM simulatorは上で示したdynamic feedbackを受け付けます。managed deviceは固有のimmutable capability snapshotをadvertiseし、defaultの`BraketDevice` contractはdynamic branchとresetを除外するため、そのprogramはsubmission前のcapability checkで失敗します。remote taskにはAWS credentialが必要で、costが発生する場合があり、portable random seedも保証されません。device選択、polling limit、cancellation、retry policyはquantum programへ埋め込まずendpoint境界に置きます。
 
 # %% [markdown]
 # ## まとめ
 #
-# - `BraketTranspiler`はBraketネイティブ回路とフリーパラメータを生成します。
-# - `BraketExecutor`は結果取得を待たず、サンプリングとHamiltonian期待値計算を
-#   native taskとしてsubmitします。
-# - jobはstatus、キャンセル、native task、復元可能なAWS task参照を公開し、
-#   batch retryは明示的かつ回数制限付きです。
-# - `AwsDevice`を注入すれば、Qamomileカーネルを再コンパイルせず実行先を切り替えられます。
+# - QCoreはfeedback programの唯一のpersistentな意味であり続けます。
+# - `Braket`はSDK objectを保存せず、deterministicなOpenQASM 3をemitします。
+# - shot-time controlはBraketのemission境界でのみloweringされます。
+# - `BraketLocal`はlocal simulationを分離し、native bit順序を正規化します。
+# - `BraketDevice`はlive device、credential、task、capability snapshotをendpoint境界に保ちます。
+# - 実行ページは最大2量子ビットで、32 sampling shotsとboundedな8-shot expectation evaluationだけを使います。

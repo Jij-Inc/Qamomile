@@ -28,27 +28,26 @@
 # 本チュートリアルでは、この手順をグラフ分割問題に適用し、ブロックエンコーディングの構築、単一の閾値での評価、二分探索による基底エネルギーの推定までを示します。
 
 # %%
-# 最新のQamomileをpipからインストールします！
-# # !pip install "qamomile[qiskit,visualization]" networkx
+# Install the latest Qamomile through pip!
+# # !pip install "qamomile[qiskit]" jijmodeling matplotlib networkx
 
 # %%
 import jijmodeling as jm
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
-from qiskit_aer import AerSimulator
 
-import qamomile.circuit as qmc
-from qamomile.circuit.algorithm.qsvt_eigenstate_filter import qsvt_filter_projector
-from qamomile.optimization.qsvt_eigenstate_filter import QSVTEigenstateFilterConverter
-from qamomile.qiskit import QiskitTranspiler
+from qamomile.optimization import OMMXProblem, QSVTEigenstateFilterExperiment
+from qamomile.qiskit import Aer
+from qamomile.stdlib import qsvt, qsvt_filter_projector, synthesize_sign_filter
+from qamomile.visualization import draw
 
 SEED = 42
 
 # %% [markdown]
 # ## 問題設定
 #
-# グラフ分割は、頂点を同じ大きさの2つのグループへ分けながら、切断される辺の数をできるだけ少なくする問題です。ここでは等サイズ制約のもとで切断辺数を最小化します。この制約は`to_hubo`がペナルティ項として目的関数に取り込みます。
+# グラフ分割は、頂点を同じ大きさの2つのグループへ分けながら、切断される辺の数をできるだけ少なくする問題です。ここでは等サイズ制約のもとで切断辺数を最小化します。この制約は`OMMXProblem.from_instance`がペナルティ項として目的関数に取り込みます。
 #
 # グラフ分割問題そのものの詳細は[QAOAによるグラフ分割](qaoa_graph_partition)を参照してください。
 
@@ -59,15 +58,15 @@ problem = jm.Problem("Graph Partitioning")
 @problem.update
 def _(problem: jm.DecoratedProblem):
     V = problem.Dim()
-    E = problem.Natural(ndim=2)  # 辺のリスト: [[u1,v1], [u2,v2], ...]
+    E = problem.Natural(ndim=2)  # edge list: [[u1,v1], [u2,v2], ...]
     x = problem.BinaryVar(shape=(V,))
 
-    # 目的関数: 分割間で切断される辺の数を最小化する
+    # Objective: minimize edges cut between partitions
     problem += (
         E.rows().map(lambda e: x[e[0]] * (1 - x[e[1]]) + x[e[1]] * (1 - x[e[0]])).sum()
     )
 
-    # 制約: 2つの分割のサイズを等しくする
+    # Constraint: equal partition sizes
     problem += problem.Constraint("Equal Partition", x.sum() == V / 2)
 
 
@@ -75,10 +74,10 @@ problem
 
 # %%
 num_nodes = 6
-# 三角柱グラフ: 三角形{0, 3, 4}と{1, 2, 5}を完全マッチング(0-5, 1-4, 2-3)で
-# つないだものです。2つの三角形を分ければ切れるのはマッチングの3辺だけで、
-# それ以外の等分割はどれも三角形を壊してより多くの辺を切るため、最適な分割は
-# 一意に定まります。
+# Triangular prism: the triangles {0, 3, 4} and {1, 2, 5} joined by a perfect
+# matching (0-5, 1-4, 2-3). Separating the two triangles cuts only the three
+# matching edges; every other equal split breaks a triangle and cuts more, so
+# the optimal partition is unique.
 edge_list = [
     [0, 3],
     [0, 4],
@@ -114,22 +113,22 @@ instance = problem.eval(instance_data)
 #
 # ブロックエンコーディングは、ユニタリでない演算子をより大きなユニタリ$U$の1つのブロックとして埋め込みます。LCUは$H - \mu I$をPauli列の重み付き和として書くことでこれを構築します。その代償が正規化定数$\alpha'$であり、実際にエンコードされるのは正規化された演算子$(H - \mu I) / \alpha'$です。そのスペクトルは$[-1, 1]$に収まります。このブロックは、ancillaレジスタ、すなわち*signal*レジスタがすべて0と測定されることで選択されます。
 #
-# 続いてQSVTは、エンコードされた演算子をその多項式で置き換えます。位相$\Phi$が与えられると、次の交替列を適用し、
+# 続いてQSVTは、エンコードされた演算子に多項式の応答を作用させます。位相$\Phi$が与えられると、次の交替列を適用し、
 #
 # $$R(\phi_0),\; U,\; R(\phi_1),\; U^\dagger,\; \dots$$
 #
-# 同じブロックに$p\!\left((H - \mu I)/\alpha'\right)$を残します。ここで$p$としてsign関数の近似を選べば、
+# 複素応答を得ます。補助量子ビットを1つ使ってその実部を取り出すと、$p\!\left((H - \mu I)/\alpha'\right)$を実現できます。ここで$p$としてsign関数の近似を選べば、
 #
 # $$p\!\left(\frac{H - \mu I}{\alpha'}\right) \approx
 # \operatorname{sign}\!\left(\frac{H - \mu I}{\alpha'}\right),$$
 #
-# このブロックは*鏡映*$R$になります。すなわち$\mu$より下の固有空間には$-1$として、上の固有空間には$+1$として作用します。
+# 理想的なsign関数の極限では、このブロックは*鏡映*$R$になります。すなわち$\mu$より下の固有空間には$-1$として、上の固有空間には$+1$として作用します。有限次数では近似であり、滑らかなフィルタになります。
 #
-# 鏡映はまだprojectorではありませんが、$P_\mu = (I - R)/2$はprojectorであり、しかも2つのユニタリの和なので、量子ビットを1つ追加したHadamard testによって確率的に実現できます。一様重ね合わせ$|\varphi_0\rangle = H^{\otimes n}|0\rangle$から出発したとき、すべてのancillaが0と測定されるショットの割合は次の量を推定します。
+# 鏡映はまだprojectorではありませんが、$P_\mu = (I - R)/2$はprojectorであり、Hadamard testによって確率的に実現できます。実装では実部を取り出す量子ビットとは別にprobe量子ビットを1つ使うため、入力のブロックエンコーディングに合計2つの補助量子ビットを追加します。一様重ね合わせ$|\varphi_0\rangle = H^{\otimes n}|0\rangle$から出発したとき、すべてのancillaが0と測定されるショットの割合は次の量を推定します。
 #
-# $$P(\mu)=\lVert P_\mu |\varphi_0\rangle \rVert^2 = \frac{\#\{i : E_i < \mu\}}{2^n},$$
+# $$P(\mu)=\lVert P_\mu |\varphi_0\rangle \rVert^2 \approx \frac{\#\{i : E_i < \mu\}}{2^n},$$
 #
-# これは$\mu$より下にあるスペクトルの割合です。この値を、古典的な二分探索で探索方向を決める判定条件として用います。$|\varphi_0\rangle$のなかで$\mu$より下の固有状態が重みを持つときに限り、この値は0から離れた値をとります。
+# 理想的なsignフィルタの極限では、これは$\mu$より下にあるスペクトルの割合です。この値を、古典的な二分探索で探索方向を決める判定条件として用います。$|\varphi_0\rangle$のなかで$\mu$より下の固有状態が重みを持つときに限り、この値は0から離れた値をとります。
 #
 # 探索そのものはLin and TongのAlgorithm 1{cite:p}`10.48550/arXiv.2002.12508`です。固有値は$[c-\alpha, c+\alpha)$に存在します。ここで$\alpha$は$H$単体の正規化定数、$c$はその定数項です。ある閾値$\mu$を基底エネルギー$\lambda_0$と比較して考えます。$\mu$が$[c-\alpha, \lambda_0)$にあるときは固有値がすべて除かれ、$P(\mu)=0$となります。区間$[\lambda_0,\lambda_1)$では基底の固有空間だけが残り、縮退度を$d$として$\gamma^2 = d/2^n$を与えます。$\lambda_1$より上では確率は増える一方です。したがって探索は$[c-\alpha,c+\alpha)$を間隔$h$のグリッドに分割し、$P(\mu)$が$\tau = \gamma^2/2$を超えるかどうかで進む方向を決めます。
 #
@@ -138,31 +137,31 @@ instance = problem.eval(instance_data)
 # %% [markdown]
 # ## Qamomileによる実装
 #
-# Qamomileは、上で説明した固有状態フィルタリングのアルゴリズムを`qamomile.optimization.qsvt_eigenstate_filter`の`QSVTEigenstateFilterConverter`として提供しています。このコンバーターは問題ハミルトニアンのブロックエンコーディングの構築、フィルタの位相の計算、probe回路の組み立て、そして測定サンプルのpost-selectionとデコードまでを行うため、手順全体を問題インスタンスから直接実行できます。以下ではまずこれを使って閾値を1つ試し、次にコンバーターが組み立てる構成要素を順に見て、最後に二分探索を実行します。
+# Qamomileは、上で説明した固有状態フィルタリングのアルゴリズムを`qamomile.optimization.qsvt_eigenstate_filter`の`QSVTEigenstateFilterExperiment`として提供しています。`OMMXProblem.from_instance`で問題インスタンスをモデルに変換し、元の制約ペナルティを保持します。`synthesize_sign_filter`でフィルタを合成します。実験は問題ハミルトニアンのブロックエンコーディングの構築、probe回路の組み立て、そして測定サンプルのpost-selectionとデコードまでを行うため、手順全体を問題インスタンスから実行できます。以下ではまずこれを使って閾値を1つ試し、次に実験が組み立てる構成要素を順に見て、最後に二分探索を実行します。
 #
 # ただし内部のパラメータの多くが解の品質を左右するため、以下ではそれぞれのパラメータと選び方を説明します。
 #
 # イジングハミルトニアンの定数項はブロックエンコーディングから除いてあります。この手法の性能は正規化定数$\alpha$に依存しており、恒等演算子の項はこの値を大きくしてしまうためです。一方で定数のオフセットはすべての固有値を等しくずらすだけなので、どの状態が最良かは変わりません。`normalization`($\alpha$)と`energy_offset`($c$)の2つが揃ってスペクトルの範囲を与え、閾値はこの区間のなかから選ぶことになります。
 
 # %%
-converter = QSVTEigenstateFilterConverter(instance)
-transpiler = QiskitTranspiler()
-# 本ページのすべての回路で同じseed付きexecutorを使い、実行ごとに表示される
-# 数値が再現するようにします。
-executor = transpiler.executor(
-    backend=AerSimulator(seed_simulator=SEED, max_parallel_threads=1)
-)
+optimization_problem = OMMXProblem.from_instance(instance)
+model = optimization_problem.model
+spin = model.to_ising()
+energy_offset = float(spin.constant)
+normalization = sum(abs(coeff) for coeff in spin.coefficients.values())
+# One seeded backend for every circuit on this page, so the printed numbers are
+# reproducible from one run to the next.
+backend = Aer(seed_transpiler=SEED)
 
-low = converter.energy_offset - converter.normalization
-high = converter.energy_offset + converter.normalization
-print(f"alpha={converter.normalization}  offset={converter.energy_offset}")
+low = energy_offset - normalization
+high = energy_offset + normalization
+print(f"alpha={normalization}  offset={energy_offset}")
 print(f"every eigenvalue lies in [{low}, {high}]")
 
-# 参照用スペクトル: イジング演算子は対角なので、正確なエネルギーを直接読み取って
-# あとから探索結果を検証できます。
-# !!! これは検証のためだけの計算であり、一般には指数時間かかります。
-spin = converter.spin_model
-energies = np.full(1 << spin.num_bits, float(spin.constant))
+# Reference spectrum: the Ising operator is diagonal, so we can read the exact
+# energies off directly and check the search against them later.
+# !!! This is only a check and the computation takes exponential time in general.
+energies = np.full(1 << spin.num_variables, float(spin.constant))
 for state in range(energies.size):
     for word, coeff in spin.coefficients.items():
         parity = sum((state >> i) & 1 for i in word) & 1
@@ -177,12 +176,12 @@ assert low <= energies.min() and energies.max() <= high
 # %% [markdown]
 # ### 閾値を1つ試す
 #
-# `transpile`は$\mu$を回路に埋め込むため、閾値ごとに個別のコンパイルが必要です。フィルタはデフォルトで$\mu$より下の固有空間を残します。これは最小固有値(基底エネルギー)を探索したい場合に必要な向きです。
+# `QSVTEigenstateFilterExperiment`は$\mu$を回路に埋め込むため、閾値ごとに個別のコンパイルが必要です。正の`scale`で合成したフィルタは$\mu$より下の固有空間を残します。これは最小固有値(基底エネルギー)を探索したい場合に必要な向きです。
 #
 # `degree`と`delta`は対で決まります。`delta`は多項式の遷移領域の幅を定め、`degree`はChebyshev展開の次数で、その遷移を表現できるだけ大きくとる必要があります。
 #
 # :::{note}
-# 指定しない場合、`degree`と`delta`にはConverterがデフォルト値を設定します。
+# 指定しない場合、`degree`と`delta`には実験がデフォルト値を設定します。
 # :::
 #
 # 分解能は次の式で与えられます。
@@ -194,61 +193,61 @@ assert low <= energies.min() and energies.max() <= high
 # ここで$E_i$は固有値で、その他のパラメータはこれまでに定義したものです。分解能を知るには基底エネルギーを事前に知っている必要がある、という状況がしばしば起こります。実際には分解能を上回るように、値を推測するか上界を見積もることになります。`degree`はおおよそ$O(1/\Delta)$で増えます。
 #
 # 以下では$\mu=4$としてアルゴリズムを実演します。このとき上回るべき分解能は$\Delta = \frac{|4-3|}{3 + |4 - 6|} = 1/5$であり、`delta=8`とすれば遷移領域の幅がこのギャップに合い、`degree=21`でそれを表現できます。対の取り方を誤っても精度が静かに落ちるわけではなく、$|p| \le 1$のチェックによってその場で棄却されます。
+#
+# 各閾値での測定は8,000回にします。探索では$\mu=3.5$も調べますが、そのときの有限次数の多項式による成功確率は約$0.02198$で、判定境界$\tau=0.015625$に近いためです。2,000回の測定では、回路が意図した多項式を正しく実装していても、測定のばらつきによってこの境界を下回ることがあります。測定回数を増やせば、多項式や後述する2点ずつの探索手順を変えずに、そのリスクを減らせます。
 
 # %%
 DEGREE, DELTA = 21, 8
-SHOTS = 2000
-print(f"probe filter: degree={DEGREE}, delta={DELTA} -> {DEGREE + 1} phases")
+SHOTS = 8000
+probe_polynomial = synthesize_sign_filter(degree=DEGREE, delta=DELTA)
+print(
+    f"probe filter: degree={DEGREE}, delta={DELTA} -> {len(probe_polynomial.phases.phases)} phases"
+)
 
 
 def probe(mu, shots=SHOTS):
-    """`mu`より下にあるスペクトルの割合を推定します。"""
-    executable = converter.transpile(
-        transpiler,
-        mu=mu,
-        degree=DEGREE,
-        delta=DELTA,
+    """Estimate the fraction of the spectrum below `mu`."""
+    experiment = QSVTEigenstateFilterExperiment(
+        model, mu=mu, polynomial=probe_polynomial
     )
-    result = executable.sample(executor, shots=shots).result()
-    return converter.success_probability(result)
+    return experiment.run(on=backend, shots=shots, seed=SEED).success_probability
 
 
-# 64状態のうち2つが基底エネルギーにあるため、muがそこを超えると判定条件の値は
-# 2 / 64で頭打ちになります。
+# Two of the 64 states sit at the ground energy, so the predicate saturates at
+# 2 / 64 once mu clears it.
 sampled_p4 = probe(4.0)
 exact_p4 = float((energies < 4.0).mean())
 print(f"p(mu=4.0) = {sampled_p4:.4f}   (exact: {exact_p4:.4f})")
 
-# ショットノイズ6標準偏差ぶんに、有限次数のsign近似のぼやけに対する小さな余裕を
-# 加えた許容幅です。
+# Six standard deviations of shot noise, plus a small allowance for the blur of
+# a finite-degree sign approximation.
 shot_noise = 6.0 * np.sqrt(exact_p4 * (1.0 - exact_p4) / SHOTS)
 assert abs(sampled_p4 - exact_p4) < shot_noise + 0.01
 
 # %% [markdown]
-# パラメータから定まる多項式近似に対応する位相因子の計算には、外部ライブラリの`pyqsp`を使っています。
+# パラメータから定まる多項式近似に対応する位相因子の計算には、外部ライブラリの`pyqsp`を使っています。Rust側が位相列の応答を独立に計算し、実装される実多項式と目標多項式の誤差を検証します。この検証が保証するのは多項式の実装誤差であり、不連続なsign関数に対する近似誤差ではありません。
 #
-# Converterはprojectorの量子回路を構築します。その回路を実行し、サンプルのカウントから`success_probability`メソッドで成功確率を求めます。(上の厳密計算は精度を確認するための参照値です)
+# 実験はprojectorの量子回路を構築します。その回路を`run`で実行し、結果の`success_probability`から成功確率を求めます。(上の厳密計算は精度を確認するための参照値です)
 
 # %% [markdown]
 # ### 構成要素
 #
-# `transpile`は3つの回路を入れ子に合成します。その順に描画すると、ブロックエンコーディングがどのようにprojectorへ変わっていくかが分かります。
+# 実験は3つの回路を入れ子に合成します。その順に描画すると、ブロックエンコーディングがどのようにprojectorへ変わっていくかが分かります。
 #
 # 図を読みやすく保つため、位相ベクトルは4要素に短くしてあります(上で使った22要素ではありません)。
+# 最初は実装内部のループを折りたたんで表示します。図の操作欄からループの本体を表示したり、回路を展開したりできます。
 
 # %%
 DRAW_MU = 4.0
 
-# `_shifted_encoding`は内部APIであり、Converterの公開APIには含まれません。
-# ただし以下の回路はすべてこのdescriptorから構築されるため、この閾値で実際に
-# 動く回路と図が一致します。
-shifted = converter._shifted_encoding(DRAW_MU)
-n_signal = shifted.num_signal_qubits
-n_system = shifted.num_system_qubits
-
-# degree=21のフィルタが使う22個ではなく4個の位相を使います。回路の形に効くのは
-# 位相の個数だけで、値そのものは影響しません。
+# Four phases instead of the 22 the degree-21 filter uses; only the count
+# affects the circuit's shape, not the values.
 phi_demo = [0.1, 0.2, 0.3, 0.4]
+drawing_experiment = QSVTEigenstateFilterExperiment(model, mu=DRAW_MU, phases=phi_demo)
+# The public descriptor is the same one used to build the executable probe.
+shifted = drawing_experiment.shifted_encoding
+n_signal = shifted.signal_width
+n_system = shifted.system_width
 
 print(f"alpha' = {shifted.normalization}   signal={n_signal}  system={n_system}")
 
@@ -261,60 +260,33 @@ print(f"alpha' = {shifted.normalization}   signal={n_signal}  system={n_system}"
 # 得られるのは、左上のブロック、つまりsignalレジスタがすべて0と測定される部分が$(H - \mu I)/\alpha'$となるようなユニタリです。そのブロックの外側は利用できないため、すべてのショットをそこでpost-selectする必要があります。
 
 # %%
-@qmc.qkernel
-def block_encoding() -> qmc.Vector[qmc.Bit]:
-    """(H - mu*I) / alpha'のブロックエンコーディングを|0>に作用させます。"""
-    signal = qmc.qubit_array(n_signal, "signal")
-    system = qmc.qubit_array(n_system, "system")
-    signal, system = shifted.unitary(signal, system)
-    return qmc.measure(signal)
-
-
-block_encoding.draw(inline=True, inline_depth=1, fold_loops=False)
+draw(shifted.unitary, inline_depth=0, loops="folded")
 
 
 # %% [markdown]
 # #### 2. QSVTの交替列
 #
-# ブロックエンコーディングが与えられると、`qmc.qsvt`は次を適用します。
+# ブロックエンコーディングが与えられると、`qsvt`は次を適用します。
 #
 # $$R(\phi_0),\; U,\; R(\phi_1),\; U^\dagger,\; R(\phi_2),\; U,\; \dots$$
 #
-# ここで$U$は上で構築したブロックエンコーディング、$R(\phi) = e^{i\phi(2\Pi - I)}$であり、$\Pi$はsignalレジスタをすべて0の状態へ射影します。この一連の列はすべてprimitiveが担当します。位相回転用の補助量子ビットを自前で確保し、$U$と$U^\dagger$を交互に並べ、位相を適用します。
+# ここで$U$は上で構築したブロックエンコーディング、$R(\phi) = e^{i\phi(2\Pi - I)}$であり、$\Pi$はsignalレジスタをすべて0の状態へ射影します。この一連の列は`qsvt`が担当します。$U$と$U^\dagger$を交互に並べ、位相を適用します。
 #
-# その効果は、encodeされた演算子をその多項式で置き換えることです。`pyqsp`が生成した位相を使うと、この多項式は$\mathrm{sign}$を近似するため、良いブロックは$\mu$の片側の固有空間に関する鏡映になります。
+# その効果は、encodeされた演算子に複素多項式の応答を作用させることです。`pyqsp`が生成した位相を使い、補助量子ビットで実部を取り出すと、この実多項式は$\mathrm{sign}$を近似するため、良いブロックは$\mu$の片側の固有空間に関する鏡映を近似します。
 
 # %%
-@qmc.qkernel
-def qsvt_reflector(
-    phi: qmc.Vector[qmc.Float],
-) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
-    """sign((H - mu*I) / alpha')を実現するQSVTの交替列です。"""
-    signal = qmc.qubit_array(n_signal, "signal")
-    system = qmc.qubit_array(n_system, "system")
-    signal, system = qmc.qsvt(signal, system, phi, shifted)
-    return qmc.measure(signal), qmc.measure(system)
-
-
-qsvt_reflector.draw(phi=phi_demo, inline=True, inline_depth=0, fold_loops=False)
+draw(qsvt(shifted, phases=phi_demo), inline_depth=0, loops="folded")
 
 # %% [markdown]
 # #### 3. Lin & Tongのprojector
 #
-# 目標は、この鏡映を射影$P_\mu = (I \pm R)/2$に変えることです。しかしこのprojectorは**ユニタリではない**ため、回路でそのまま適用することはできません。
+# 目標は、この鏡映を射影$P_\mu = (I - R)/2$に変えることです。しかしこのprojectorは**ユニタリではない**ため、回路でそのまま適用することはできません。
 #
-# 鍵になるのは、これが$I$と$R$という2つのユニタリの和である点です。そのためHadamard testを使えば確率的に実現できます。このテストでは*probe量子ビット*と呼ぶancillaを1つ使い、恒等演算子の分岐と鏡映の分岐をコヒーレントに選択させます。probe量子ビットを重ね合わせにし、その制御のもとでQSVTの鏡映を作用させ、2つ目のHadamardで2つの分岐を干渉させます。probe量子ビットが0と測定されれば、$P_\mu$が作用した分岐であることが分かります。このアルゴリズムに成功確率という概念があるのはそのためであり、post-selectionをprobeとsignalレジスタの**両方**に対して行う理由もここにあります。
+# 鍵になるのは、恒等演算子とQSVTの応答を干渉させる点です。そのためHadamard testを使えば確率的に実現できます。まず補助量子ビットを1つ使ってQSVT応答の実部$p$を取り出し、もう1つの*probe量子ビット*で恒等演算子の分岐とその実応答の分岐をコヒーレントに選択させます。probe量子ビットを重ね合わせにし、その制御のもとで実応答を作用させ、2つ目のHadamardで2つの分岐を干渉させます。入力のsignalレジスタに加えて、この2つの補助量子ビットが0と測定されれば、$(I-p)/2$が作用した分岐であることが分かります。このアルゴリズムに成功確率という概念があるのはそのためであり、post-selectionを**すべての補助量子ビット**に対して行う理由もここにあります。
 
 # %%
-qsvt_filter_projector(shifted).draw(
-    proj=1,
-    signal=n_signal,
-    system=n_system,
-    phi=phi_demo,
-    inline=True,
-    inline_depth=0,
-    fold_loops=False,
-)
+projector = qsvt_filter_projector(shifted, phases=phi_demo)
+draw(projector.unitary, inline_depth=0, loops="folded")
 
 
 # %% [markdown]
@@ -322,19 +294,20 @@ qsvt_filter_projector(shifted).draw(
 #
 # ここまでで、古典的な探索に必要なものは判定条件だけになりました。`B(k)`は「グリッド点$x_k$が残すべき固有空間を捉えている」という1ビットで、ループはアルゴリズムの節で述べたとおり、このビットを連続する2つずつ組にして消費します。
 
+
 # %%
 def binary_search_ground_energy(success_prob, low, high, gamma, h=1.0):
-    """Lin & TongのAlgorithm 1: (B_k, B_k+1)を組にした評価。
+    """Algorithm 1 of Lin & Tong: paired (B_k, B_k+1) probes.
 
-    グリッドx_k = low + (k + 0.5) * h: 半セル分ずらすことで閾値が固有値の
-    あいだに来ます。判定条件の比較は狭義なので、固有値の上にちょうど乗った閾値は
-    0と判定されてしまうためです。B_k = 1となるのは、推定確率が
-    tau = gamma**2 / 2を超えるときです。
+    Grid x_k = low + (k + 0.5) * h: the half-cell offset keeps thresholds
+    between candidate energies, since the strict comparison in the predicate
+    would read zero on a threshold sitting exactly on an eigenvalue. B_k = 1
+    iff the estimated probability exceeds tau = gamma**2 / 2.
 
-    組で評価するループは最大4セルまで範囲を狭めます。そこから線形に走査して
-    仕上げるので、返される範囲は1セル幅になります。
-    戻り値は(x_L, x_U)で、x_L <= lambda_0 <= x_Uを満たします。左端を含むのは、
-    基底エネルギーがちょうど`low`にある場合でも範囲に収めるためです。
+    The paired-probe loop narrows to at most four cells; a linear scan over
+    those finishes the job, so the returned bracket is one cell wide.
+    Returns (x_L, x_U) with x_L <= lambda_0 <= x_U -- closed on the left so a
+    ground energy sitting exactly on `low` is still bracketed.
     """
     n_grid = int(round((high - low) / h))
     grid = [low + (k + 0.5) * h for k in range(n_grid)]
@@ -342,7 +315,7 @@ def binary_search_ground_energy(success_prob, low, high, gamma, h=1.0):
     cache = {}
 
     def B(k):
-        # 番兵: B_-1 = 0 (下に何もない)、B_G = 1 (すべてが下にある)。
+        # Boundary sentinels: B_-1 = 0 (nothing below), B_G = 1 (all below).
         if not 0 <= k < n_grid:
             return 0 if k < 0 else 1
         if k not in cache:
@@ -355,7 +328,10 @@ def binary_search_ground_energy(success_prob, low, high, gamma, h=1.0):
     while U - L > 3:
         k = (L + U) // 2
         bk, bk1 = B(k), B(k + 1)
-        print(f"  k={k}: B({grid[k]:+.2f})={bk}  B({grid[k + 1]:+.2f})={bk1}", end="  ->  ")
+        print(
+            f"  k={k}: B({grid[k]:+.2f})={bk}  B({grid[k + 1]:+.2f})={bk1}",
+            end="  ->  ",
+        )
         if bk == 1 and bk1 == 1:  # lambda_0 < x_k+1
             U = k + 1
             print(f"(1,1) U<-{U}  [{grid[L]:+.2f}, {grid[U]:+.2f}]")
@@ -371,10 +347,10 @@ def binary_search_ground_energy(success_prob, low, high, gamma, h=1.0):
             print(f"(1,0) -> [{grid[L]:+.2f}, {grid[U]:+.2f}]")
             break
 
-    # 1セルまで絞り込みます。判定条件が最初に立つグリッド点が、基底の固有空間を
-    # まだ捉えている最小の閾値です。スペクトルの下界でクリップすることで範囲が
-    # 物理的に意味のあるものになります。`low`より下に固有値は存在しないので、
-    # そこを評価する必要はありません。
+    # Tighten to a single cell: the first grid point whose predicate fires is
+    # the smallest threshold that still sees the ground eigenspace. Clamping to
+    # the spectrum bound keeps the bracket physical -- no probe is needed below
+    # `low`, because no eigenvalue can be there.
     for k in range(L, U + 1):
         if B(k):
             print(f"  refine: first B=1 at k={k} ({grid[k]:+.2f})")
@@ -391,40 +367,42 @@ def binary_search_ground_energy(success_prob, low, high, gamma, h=1.0):
 gamma = np.sqrt(degeneracy / energies.size)
 x_lower, x_upper = binary_search_ground_energy(probe, low, high, gamma=gamma, h=1.0)
 
-print(f"\nlambda_0 in [{x_lower:+.2f}, {x_upper:+.2f}]   true lambda_0 = {ground_energy:+.2f}")
+print(
+    f"\nlambda_0 in [{x_lower:+.2f}, {x_upper:+.2f}]   true lambda_0 = {ground_energy:+.2f}"
+)
 assert x_lower <= ground_energy <= x_upper
 
 # %% [markdown]
 # :::{note}
-# 二分探索で$P(\mu)>\tau$を判定するだけならフィルタがぼやけていても許容できるため、どの評価でも`degree=21`で十分でした。一方、基底の固有空間*だけ*を残そうとすると、$\mu = 3.5$では最適な分解能が探索時の$0.20$ではなく$\Delta = 0.09$になるため、最後のデコードではより鋭い多項式を使います。`degree`だけを上げても改善しません。`degree=61`に噛み合わない`delta=20`を組み合わせると、`degree=41`と`delta=11`の組(91%)より悪い85%になります。
+# 二分探索で$P(\mu)>\tau$を判定するだけならフィルタがぼやけていても許容できるため、どの評価でも`degree=21`で十分でした。一方、基底の固有空間*だけ*を残そうとすると、$\mu = 3.5$では最適な分解能が探索時の$0.20$ではなく$\Delta = 0.09$になるため、最後のデコードではより鋭い多項式を使います。`degree`だけを上げても遷移が鋭くなるとは限りません。多項式が有界であり、必要なギャップを区別できるよう、`degree`と`delta`を組み合わせて選びます。観測される基底状態の割合は多項式の応答と測定のばらつきにも依存するため、以下で明示的に確認します。
 # :::
 
 # %%
-# 判定条件の評価にはdegree 21で足りましたが、状態そのものを取り出すには同じ閾値でも
-# より鋭いフィルタが必要です。
+# The predicate needed degree 21; extracting the state itself needs a sharper
+# filter at the same threshold.
 DECODE_DEGREE, DECODE_DELTA = 41, 11
+decode_polynomial = synthesize_sign_filter(degree=DECODE_DEGREE, delta=DECODE_DELTA)
 print(
-    f"decode filter: degree={DECODE_DEGREE}, delta={DECODE_DELTA} -> {DECODE_DEGREE + 1} phases"
+    f"decode filter: degree={DECODE_DEGREE}, delta={DECODE_DELTA} -> {len(decode_polynomial.phases.phases)} phases"
 )
 
-executable = converter.transpile(
-    transpiler,
-    mu=x_upper,
-    degree=DECODE_DEGREE,
-    delta=DECODE_DELTA,
+decode_experiment = QSVTEigenstateFilterExperiment(
+    model, mu=x_upper, polynomial=decode_polynomial
 )
-result = executable.sample(executor, shots=20000).result()
-sampleset = converter.decode_to_binary_sampleset(result)
+run = decode_experiment.run(on=backend, shots=20000, seed=SEED)
+result = run.execution.result
+sampleset = run.samples
+assert sampleset is not None
 
-kept = sum(sampleset.num_occurrences)
+kept = sampleset.total_occurrences
 optimal = sum(
-    n
-    for e, n in zip(sampleset.energy, sampleset.num_occurrences)
-    if np.isclose(e, ground_energy)
+    sample.occurrences
+    for sample in sampleset.samples
+    if np.isclose(sample.energy, ground_energy)
 )
 print(f"kept {kept} of {result.shots} shots, {optimal / kept:.1%} at the ground energy")
 
-best = max(zip(sampleset.samples, sampleset.num_occurrences), key=lambda z: z[1])[0]
+best = max(sampleset.samples, key=lambda sample: sample.occurrences).values
 side = sorted(v for v, bit in best.items() if bit == 1)
 cut = sum(1 for u, v in edge_list if best[u] != best[v])
 print(f"most sampled partition: {side} | cut={cut}")
@@ -433,8 +411,8 @@ assert optimal / kept > 0.85
 assert cut == 3 and len(side) == num_nodes // 2
 
 # %%
-# 復元された分割を入力グラフと同じレイアウトで描画します。ノードの色がどちら側かを
-# 表し、破線が最小化の対象である切断された辺です。
+# Draw the recovered partition on the same layout as the input graph: node
+# colour is the side, and the cut edges are the objective being minimised.
 cut_edges = [(u, v) for u, v in G.edges() if best[u] != best[v]]
 kept_edges = [(u, v) for u, v in G.edges() if best[u] == best[v]]
 
@@ -463,6 +441,6 @@ plt.show()
 #
 # 本notebookでは次のことを行いました。
 #
-# - `QSVTEigenstateFilterConverter`を使ってグラフ分割問題のインスタンスをend-to-endで解き、三角柱グラフの一意な最適分割を復元しました。
-# - このアルゴリズムが確率的である理由を確認しました。$P_\mu = (I - R)/2$はユニタリではないためHadamard testで実現され、すべてのショットをprobeとsignalレジスタの両方でpost-selectする必要があります。
+# - `QSVTEigenstateFilterExperiment`を使ってグラフ分割問題のインスタンスをend-to-endで解き、三角柱グラフの一意な最適分割を復元しました。
+# - このアルゴリズムが確率的である理由を確認しました。$P_\mu = (I - R)/2$はユニタリではないためHadamard testで実現され、すべてのショットをprobe、実部を取り出す量子ビット、元のsignalレジスタでpost-selectする必要があります。
 # - すべてのパラメータが、正規化されたギャップ$\Delta = \min_i |E_i - \mu| / \alpha'$という1つの数値に帰着することを見ました。イジングの定数項をブロックエンコーディングから除くことが重要なのも、`normalization`と`energy_offset`が対で報告されるのも、このためです。

@@ -1,1 +1,0 @@
-"""QURI Parts transpiler tests."""

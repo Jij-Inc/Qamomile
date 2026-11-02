@@ -152,15 +152,17 @@ def test_cudaq_sessions_default_native_thread_pools_to_one() -> None:
     configure_cudaq_thread_limits("cudaq", environ)
 
     assert environ == {variable: "1" for variable in NATIVE_THREAD_LIMIT_ENV}
+    assert environ["OMP_THREAD_LIMIT"] == "1"
 
 
 def test_cudaq_thread_limits_preserve_explicit_settings() -> None:
     """An explicit developer thread limit remains authoritative."""
-    environ = {"OMP_NUM_THREADS": "3"}
+    environ = {"OMP_NUM_THREADS": "3", "OMP_THREAD_LIMIT": "3"}
 
     configure_cudaq_thread_limits("cudaq", environ)
 
     assert environ["OMP_NUM_THREADS"] == "3"
+    assert environ["OMP_THREAD_LIMIT"] == "3"
     assert environ["VECLIB_MAXIMUM_THREADS"] == "1"
 
 

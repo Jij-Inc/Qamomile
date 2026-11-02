@@ -1,583 +1,349 @@
-r"""Build QSVT eigenstate-filtering circuits for combinatorial problems.
+"""Immutable eigenstate-filter experiments over Rust-owned optimization models.
 
-The converter compiles a QUBO/HUBO problem into the sampling circuit of the
-Lin & Tong (2020, arXiv:2002.12508) ground-energy algorithm: the Ising cost
-Hamiltonian is block encoded, shifted by :math:`-\mu I`, filtered with a QSVT
-approximation of the sign function, and probed with one Hadamard-test qubit.
-The fraction of shots with all ancillas zero estimates
-:math:`\lVert P_{<\mu}\lvert\varphi_0\rangle\rVert^2`, which is the predicate a
-classical binary search over :math:`\mu` needs. The search itself stays outside
-the library — the converter only emits quantum programs.
-
-By default the filter keeps the eigenspace *below* the threshold, so the search
-converges on the ground energy. That is the orientation every OMMX problem
-wants: ``Instance.to_hubo`` negates a maximization into a minimization before
-the converter ever sees it, so the optimum is always the smallest eigenvalue.
-Passing a positive ``scale`` to :meth:`QSVTEigenstateFilterConverter.transpile` inverts
-the filter into a largest-eigenvalue search; nothing else about the circuit
-changes.
+Thresholds close ordinary stdlib source into portable programs. Rust owns model
+conversion, phase verification, block planning, compilation, success statistics,
+and decoded energies. Classical threshold searches remain application code.
 """
 
 from __future__ import annotations
 
-import contextlib
-import io
-import logging
 import math
-from collections.abc import Iterator
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import Generic, TypeVar
 
-import numpy as np
-import ommx.v1
-from numpy.polynomial.chebyshev import chebval
+import qamomile as qm
+from qamomile.compilation import (
+    CompilationTarget,
+    CompiledProgram,
+    ExecutionEndpoint,
+    RunRecord,
+    SampleResult,
+)
+from qamomile.ir import Program
+from qamomile.observable import Hamiltonian
+from qamomile.stdlib import BlockEncoding, CertifiedQSVTPolynomial, QSVTPhases
+from qamomile.stdlib.pauli import pauli_block_encoding
+from qamomile.stdlib.qsvt_eigenstate_filter import (
+    qsvt_filter_projector,
+    synthesize_sign_filter,
+)
+from qamomile.stdlib.signals import Signal, SuccessEstimate, estimate_success, sample
 
-import qamomile.circuit as qmc
-import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.qsvt_eigenstate_filter import qsvt_filter_probe
-from qamomile.circuit.transpiler.executable import ExecutableProgram
-from qamomile.circuit.transpiler.job import SampleResult
-from qamomile.circuit.transpiler.transpiler import Transpiler
+from .model import BinaryModel, DecodedSamples, VarType
+from .qaoa import OptimizationExperimentIdentity
 
-from .binary_model import BinarySampleSet
-from .converter import MathematicalProblemConverter
-
-DEFAULT_POLYNOMIAL_DEGREE = 61
-"""Degree of the sign-function approximation used when none is given."""
-
-DEFAULT_TRANSITION_WIDTH = 20
-"""``pyqsp`` ``delta`` parameter controlling the sharpness of the step."""
-
-DEFAULT_POLYNOMIAL_SCALE = -1.10
-"""Rescaling applied to the sign polynomial before phase extraction.
-
-The sign fixes the filter's orientation, because negating the polynomial
-negates the reflection :math:`R` and so swaps :math:`(I + R)/2` for its
-complement. The negative default keeps the eigenstates *below* the threshold,
-which is what a ground-state search wants; pass a positive ``scale`` to keep
-those above it instead. The magnitude sharpens the step.
-"""
-
-MAX_POLYNOMIAL_SCALE = 1.2
-r"""Cheap upper bound on ``scale``, checked before any ``pyqsp`` call.
-
-This rejects obvious nonsense early but is *not* authoritative: how much
-headroom ``ensure_bounded`` leaves under :math:`\lvert p \rvert \le 1` depends
-on ``degree`` and ``delta`` as well, so no bound on ``scale`` alone can decide
-it. :data:`POLYNOMIAL_BOUND_SAMPLES` describes the check that can.
-"""
-
-POLYNOMIAL_BOUND_SAMPLES = 4001
-r"""Grid resolution for the authoritative :math:`\lvert p \rvert \le 1` check.
-
-QSP can only realize polynomials bounded by one on :math:`[-1, 1]`. Whether
-``scale`` times ``pyqsp``'s sign approximation clears that bar is a joint
-property of ``degree``, ``delta`` and ``scale``, so :meth:`_qsp_phases`
-measures it on this many uniform samples rather than inferring it. Sampling
-costs microseconds against a multi-second phase optimization, and running it
-first means a violating combination fails loudly instead of returning phases
-that encode nothing.
-"""
-
-_LOGGER = logging.getLogger(__name__)
+_Domain = TypeVar("_Domain", bound=VarType)
 
 
-@contextlib.contextmanager
-def _pyqsp_output_to_logger() -> Iterator[None]:
-    """Route ``pyqsp``'s unconditional prints into this module's logger.
-
-    ``pyqsp`` reports progress with bare ``print`` calls that no flag turns
-    off: ``PolyGenerator`` stores a ``verbose`` argument it never consults, and
-    ``sym_qsp`` prints one line per optimization iteration regardless of the
-    ``verbose`` passed to ``QuantumSignalProcessingPhases``. Capturing
-    ``sys.stdout`` is therefore the only way to keep phase synthesis quiet.
-
-    Nothing is dropped: every captured line is logged at ``DEBUG``, including
-    output produced before an exception, so a failed synthesis still leaves its
-    diagnostics behind.
-
-    Redirection replaces ``sys.stdout`` process-wide for the duration of the
-    block, so concurrent threads printing at the same time are captured too.
-
-    Yields:
-        None: With ``sys.stdout`` redirected for the body of the block.
-    """
-    buffer = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(buffer):
-            yield
-    finally:
-        for line in buffer.getvalue().splitlines():
-            if line.strip():
-                _LOGGER.debug("%s", line)
-
-
-class QSVTEigenstateFilterConverter(MathematicalProblemConverter):
-    r"""Converter for QSVT eigenstate filtering (Lin & Tong ground-energy search).
-
-    The problem's Ising Hamiltonian :math:`H` is block encoded once with
-    :func:`~qamomile.circuit.ising_z_block_encoding`. Each threshold
-    :math:`\mu` then composes a second LCU for :math:`H - \mu I` and compiles
-    its own probe circuit, because the LCU amplitudes — and hence :math:`\mu` —
-    are baked in at compile time.
-
-    A typical binary-search step therefore looks like: :meth:`transpile` for the
-    current :math:`\mu`, sample the program, read :meth:`success_probability`,
-    and — once the search has converged — :meth:`decode` the same result to get
-    the filtered states themselves.
+@dataclass(frozen=True, slots=True)
+class QSVTFilterRun(Generic[_Domain]):
+    """One identified execution and its conditional problem samples.
 
     Attributes:
-        encoding (qmc.LCUBlockEncoding): Block encoding of the cost
-            Hamiltonian's non-constant part, built during construction.
-        normalization (float): Its subnormalization :math:`\alpha`. Together
-            with :attr:`energy_offset` it bounds the spectrum: every eigenvalue
-            lies in :math:`[c - \alpha, c + \alpha]`, so the pair sets the
-            binary-search grid.
-        energy_offset (float): The spin model's constant :math:`c`, held out of
-            the encoding and folded into the threshold instead. Thresholds
-            passed to :meth:`transpile` stay in the problem's own energy units,
-            constant included.
-
-    Example:
-        >>> from qamomile.optimization.binary_model import BinaryModel
-        >>> from qamomile.optimization.qsvt_eigenstate_filter import (
-        ...     QSVTEigenstateFilterConverter,
-        ... )
-        >>> model = BinaryModel.from_higher_ising({(0,): 1.0, (0, 1): -1.0})
-        >>> converter = QSVTEigenstateFilterConverter(model)
-        >>> converter.normalization
-        2.0
+        identity (OptimizationExperimentIdentity): Exact model/program identity.
+        execution (RunRecord): Complete compiled execution record.
+        success (SuccessEstimate): Native-derived success fraction and interval.
+        samples (DecodedSamples | None): Successful model-domain observations,
+            or None when no shot succeeded. Failures remain in execution.result.
     """
 
+    identity: OptimizationExperimentIdentity
+    execution: RunRecord
+    success: SuccessEstimate
+    samples: DecodedSamples[_Domain] | None
+
     def __post_init__(self) -> None:
-        r"""Block encode the spin model's non-constant part once, up front.
-
-        The constant term is deliberately kept out of the encoding and stored
-        in :attr:`energy_offset` instead. It shifts every eigenvalue equally,
-        so it changes neither the eigenvectors nor their order and says nothing
-        about which state is best, yet as an identity term it would consume
-        subnormalization budget — the very quantity that sets how finely the
-        filter can resolve :math:`\mu`. :meth:`_shifted_encoding` folds it into
-        the threshold instead, where it costs nothing.
-        """
-        self.energy_offset = float(self.spin_model.constant)
-        self.encoding = qmc.ising_z_block_encoding(
-            dict(self.spin_model.coefficients), self.spin_model.num_bits
-        )
-        self.normalization = self.encoding.normalization
-        self._phase_cache: dict[tuple[int, float, float], list[float]] = {}
-
-    def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
-        """Report that this converter exposes no cost Hamiltonian.
-
-        The Ising cost Hamiltonian is block encoded internally (see
-        :meth:`__post_init__`) and consumed by the QSVT sign filter; it is
-        never handed back as a Pauli observable. Following the base-class
-        convention for converters that do not use a cost Hamiltonian, this
-        always raises.
-
-        Returns:
-            qm_o.Hamiltonian: Never returns.
+        """Reject mismatched artifacts and conditional sample counts.
 
         Raises:
-            NotImplementedError: Always; the converter does not expose a cost
-                Hamiltonian.
+            TypeError: If a supplied value has the wrong public type.
+            ValueError: If the artifact, success, or observation count differs.
         """
-        raise NotImplementedError(
-            "QSVTEigenstateFilterConverter does not expose a cost Hamiltonian; "
-            "the Ising operator is block encoded internally for the QSVT sign "
-            "filter."
-        )
+        if not isinstance(self.identity, OptimizationExperimentIdentity):
+            raise TypeError("filter run identity is invalid")
+        if not isinstance(self.execution, RunRecord):
+            raise TypeError("filter run execution must be a RunRecord")
+        if self.execution.artifact.source_digest.hex() != self.identity.program_digest:
+            raise ValueError("filter run artifact does not match its experiment")
+        if not isinstance(self.execution.result, SampleResult):
+            raise TypeError("filter run requires a sampling result")
+        if not isinstance(self.success, SuccessEstimate):
+            raise TypeError("filter run success must be a SuccessEstimate")
+        if self.success != estimate_success(self.execution.result):
+            raise ValueError("filter run success does not match its execution")
+        if self.samples is not None and not isinstance(self.samples, DecodedSamples):
+            raise TypeError("filter run samples must be DecodedSamples or None")
+        observations = 0 if self.samples is None else self.samples.total_occurrences
+        if observations != self.success.successes:
+            raise ValueError("filter run samples do not match its successful shots")
 
-    def num_ancilla_bits(self, mu: float) -> int:
-        r"""Width of the post-selected ancilla block for one threshold.
+    @property
+    def success_probability(self) -> float:
+        """Return the fraction of all shots passing the complete filter."""
+        return self.success.probability
 
-        The probe circuit's post-selected block is the projector qubit plus the
-        signal register of the shifted encoding. It depends on ``mu``: at
-        :math:`\mu =` :attr:`energy_offset` the residual shift vanishes and the
-        identity term drops out of the LCU (a zero-coefficient term is removed
-        before normalization), leaving a narrower signal register than any
-        other threshold. Pass the same ``mu`` that produced the results being
-        interpreted.
 
-        Args:
-            mu (float): Energy threshold, as passed to :meth:`transpile`.
+@dataclass(frozen=True, slots=True)
+class QSVTEigenstateFilterExperiment(Generic[_Domain]):
+    r"""Close an energy threshold into a portable eigenstate-filter program.
 
-        Returns:
-            int: Number of leading measured bits that must all be zero for a
-                shot to fall in the filtered block.
-        """
-        return 1 + self._shifted_encoding(mu).num_signal_qubits
+    The positive sign approximation keeps energies below mu through
+    ``(I - p((H - mu I) / alpha')) / 2``. Extracting the real polynomial
+    component prevents the unselected complex QSP response from contributing
+    to success. Use OMMXProblem.model for OMMX problems and evaluate the
+    successful samples with that problem separately.
 
-    def _shifted_encoding(self, mu: float) -> qmc.LCUBlockEncoding:
-        r"""Compose a block encoding of :math:`H - \mu I`.
+    Args:
+        model (BinaryModel): Immutable BINARY or SPIN objective.
+        mu (float): Finite threshold in model energy units, including its offset.
+        polynomial (CertifiedQSVTPolynomial | None): Explicit Rust-replayed
+            certificate, mutually exclusive with phases.
+        phases (Sequence[float] | QSVTPhases | None): Projector phases without
+            an asserted sign-approximation error.
+        degree (int): Odd synthesis degree, default 61; ignored with phase input.
+        delta (float): Positive pyqsp transition sharpness, default 20.
+        scale (float): Nonzero polynomial scale, default 1.10. Positive keeps
+            lower energies and negative keeps higher energies.
 
-        Written as an LCU *of block encodings*, so the Hamiltonian is decomposed
-        once and every threshold reuses it. Because :attr:`encoding` holds
-        :math:`H - cI` rather than :math:`H` (see :meth:`__post_init__`, where
-        :math:`c` is :attr:`energy_offset`), the identity term carries the
-        residual shift:
+    Raises:
+        TypeError: If model, threshold, or phase input has the wrong type.
+        ValueError: If the model is empty, threshold is nonfinite, phase inputs
+            conflict, or polynomial generation or native verification fails.
+    """
 
-        .. math:: H - \mu I = 1 \cdot (H - cI) + (c - \mu) \cdot I
+    model: BinaryModel[_Domain]
+    mu: float
+    polynomial: CertifiedQSVTPolynomial | None = field(default=None, kw_only=True)
+    phases: Sequence[float] | QSVTPhases | None = field(default=None, kw_only=True)
+    degree: int = field(default=61, kw_only=True)
+    delta: float = field(default=20.0, kw_only=True)
+    scale: float = field(default=1.10, kw_only=True)
+    energy_offset: float = field(init=False)
+    encoding: BlockEncoding = field(init=False, repr=False, compare=False)
+    shifted_encoding: BlockEncoding = field(init=False, repr=False, compare=False)
+    filter_encoding: BlockEncoding = field(init=False, repr=False, compare=False)
+    program: Program = field(init=False, repr=False, compare=False)
 
-        giving :math:`\alpha' = \alpha + \lvert\mu - c\rvert`. Encoding the
-        constant instead would cost :math:`\lvert c\rvert + \lvert\mu\rvert`,
-        which the triangle inequality never makes smaller and which is far
-        larger whenever :math:`\mu` sits near :math:`c` — the usual case, since
-        the spectrum is centred on its own constant.
-
-        Args:
-            mu (float): Energy threshold to subtract, in the units of the
-                problem's Ising Hamiltonian — constant included, so callers
-                never see the offset bookkeeping.
-
-        Returns:
-            qmc.LCUBlockEncoding: Descriptor of the shifted operator, with its
-                own flat signal register.
-        """
-        identity = qmc.identity_block_encoding(self.encoding.num_system_qubits)
-        return qmc.lcu_block_encoding(
-            [
-                qmc.LCUBlockEncodingTerm(1.0, self.encoding),
-                qmc.LCUBlockEncodingTerm(self.energy_offset - float(mu), identity),
-            ]
-        )
-
-    def _qsp_phases(
-        self,
-        degree: int = DEFAULT_POLYNOMIAL_DEGREE,
-        delta: float = DEFAULT_TRANSITION_WIDTH,
-        scale: float = DEFAULT_POLYNOMIAL_SCALE,
-    ) -> list[float]:
-        r"""Compute reflection-convention phases approximating the sign function.
-
-        ``pyqsp`` builds an odd polynomial approximation of
-        :math:`\mathrm{sign}(x)` and returns its phases in the Wx (signal
-        rotation) convention. They are converted to the projector-rotation
-        convention :func:`~qamomile.circuit.qsvt` consumes,
-        :math:`R(\phi) = e^{i\phi(2\Pi - I)}`: the raw ``sym_qsp`` output is
-        first turned into a genuine Wx sequence by adding :math:`\pi/4` to the
-        two end phases, then mapped by adding :math:`(2d - 1)\pi/4` to the first
-        phase, subtracting :math:`\pi/2` from every interior phase and
-        :math:`\pi/4` from the last, and wrapping into :math:`[-\pi, \pi)`.
-        Results are cached per ``(degree, delta, scale)``; they do not depend on
-        :math:`\mu`, so a cache hit skips synthesis and prints nothing.
-
-        A cache miss logs one summary line naming the filter shape being
-        built at ``INFO``. ``pyqsp``'s own progress prints are captured and
-        logged at ``DEBUG`` instead (see :func:`_pyqsp_output_to_logger`); raise
-        ``logging.getLogger("qamomile.optimization.qsvt_eigenstate_filter")``
-        to ``INFO`` for the summary or ``DEBUG`` for the polynomial fit and
-        convergence trace.
-
-        Args:
-            degree (int): Odd degree of the sign approximation. Higher degree
-                sharpens the step and lengthens the circuit linearly.
-            delta (float): ``pyqsp`` transition-width parameter: the larger it
-                is, the steeper the step near the origin.
-            scale (float): Factor applied to the polynomial coefficients before
-                phase extraction. Its sign fixes the filter's orientation — the
-                negative default keeps the eigenstates *below* the threshold —
-                and its magnitude sharpens the step, ``pyqsp``'s
-                ``ensure_bounded`` leaving headroom under the QSP bound
-                :math:`\lvert p \rvert \le 1`. Magnitudes above
-                :data:`MAX_POLYNOMIAL_SCALE` push the polynomial outside that
-                bound and are rejected.
-
-        Returns:
-            list[float]: ``degree + 1`` phases in the reflection convention,
-                ready to bind as ``phi``.
+    def __post_init__(self) -> None:
+        """Build source from canonical native models and checked filter data.
 
         Raises:
-            ValueError: If ``degree`` is not a positive odd integer, ``delta``
-                is not positive and finite, ``scale`` is zero, non-finite, or
-                exceeds :data:`MAX_POLYNOMIAL_SCALE` in magnitude, or the
-                scaled polynomial breaks the QSP bound
-                :math:`\lvert p \rvert \le 1` (measured on
-                :data:`POLYNOMIAL_BOUND_SAMPLES` points). ``bool`` is rejected
-                for all three: it satisfies every numeric comparison below
-                while meaning nothing as a degree, a width, or a rescaling.
+            TypeError: If host fields or required native support are invalid.
+            ValueError: If threshold arithmetic or the filter contract fails.
+            ImportError: If optional default phase synthesis is unavailable.
         """
-        if (
-            isinstance(degree, bool)
-            or not isinstance(degree, int)
-            or degree < 1
-            or degree % 2 == 0
-        ):
-            raise ValueError(f"degree must be a positive odd int; got {degree!r}.")
-        # Negated comparisons so NaN, which compares false either way, is
-        # rejected rather than passed through to pyqsp. isfinite then rules out
-        # the infinities, which do satisfy the comparisons.
-        if isinstance(delta, bool) or not delta > 0.0 or not math.isfinite(delta):
-            raise ValueError(f"delta must be positive and finite; got {delta!r}.")
-        if (
-            isinstance(scale, bool)
-            or not math.isfinite(scale)
-            or not 0.0 < abs(scale) <= MAX_POLYNOMIAL_SCALE
-        ):
-            raise ValueError(
-                f"|scale| must be finite and lie in (0, {MAX_POLYNOMIAL_SCALE}]; "
-                f"got {scale!r}. Larger magnitudes push the sign polynomial "
-                "outside the QSP bound |p| <= 1 and the extracted phases become "
-                "meaningless."
+        if not isinstance(self.model, BinaryModel):
+            raise TypeError("model must be a qamomile.optimization.BinaryModel")
+        if self.model.num_variables <= 0:
+            raise ValueError("eigenstate filtering requires at least one variable")
+        if isinstance(self.mu, bool) or not isinstance(self.mu, (int, float)):
+            raise TypeError("mu must be a real number")
+        mu = float(self.mu)
+        if not math.isfinite(mu):
+            raise ValueError("mu must be finite")
+        if self.phases is not None and self.polynomial is not None:
+            raise ValueError("phases and polynomial are mutually exclusive")
+        phases = self.phases
+        if phases is not None and not isinstance(phases, QSVTPhases):
+            phases = QSVTPhases(tuple(phases))
+        polynomial = self.polynomial
+        if phases is None and polynomial is None:
+            polynomial = synthesize_sign_filter(
+                degree=self.degree, delta=self.delta, scale=self.scale
             )
+        cost = self.model.hamiltonian
+        encoding = pauli_block_encoding(
+            Hamiltonian(cost.terms, num_qubits=cost.num_qubits)
+        )
+        shifted = pauli_block_encoding(cost - mu)
+        filtered = qsvt_filter_projector(shifted, phases=phases, polynomial=polynomial)
+        width = self.model.num_variables
 
-        key = (degree, float(delta), float(scale))
-        cached = self._phase_cache.get(key)
-        if cached is not None:
-            return list(cached)
+        @qm.qkernel
+        def uniform(state: qm.Q[qm.Bits[width]]) -> qm.Q[qm.Bits[width]]:  # type: ignore[valid-type]  # noqa: F821
+            """Prepare the uniform superposition on the logical model register.
 
-        from pyqsp.angle_sequence import QuantumSignalProcessingPhases
-        from pyqsp.poly import PolySign
+            Args:
+                state (qm.Q[qm.Bits[width]]): Owned zero-state model register.
 
-        # Synthesis blocks for seconds inside transpile, so record which filter
-        # is being built. INFO rather than stdout: a library has no business
-        # writing to a downstream application's console, and the log level is
-        # already the toggle.
-        _LOGGER.info(
-            "synthesizing sign filter: degree=%s, delta=%s, scale=%s -> %s phases",
-            degree,
-            delta,
-            scale,
-            degree + 1,
+            Returns:
+                qm.Q[qm.Bits[width]]: Uniform model state.
+            """
+            for i in range(width):
+                state = qm.h(state, target=i)
+            return state
+
+        probe = sample(Signal.from_block_encoding(filtered), source=uniform)
+        object.__setattr__(self, "mu", mu)
+        object.__setattr__(self, "phases", phases)
+        object.__setattr__(self, "polynomial", polynomial)
+        object.__setattr__(self, "energy_offset", cost.constant.real)
+        object.__setattr__(self, "encoding", encoding)
+        object.__setattr__(self, "shifted_encoding", shifted)
+        object.__setattr__(self, "filter_encoding", filtered)
+        object.__setattr__(self, "program", probe.specialize())
+
+    @property
+    def normalization(self) -> float:
+        """Return the nonconstant cost encoding's spectrum-bound scale."""
+        return self.encoding.normalization
+
+    @property
+    def num_ancilla_bits(self) -> int:
+        """Return the complete filter workspace width for this threshold."""
+        return self.filter_encoding.signal_width
+
+    @property
+    def identity(self) -> OptimizationExperimentIdentity:
+        """Return Rust-owned model and program digests for this experiment."""
+        return OptimizationExperimentIdentity(
+            "qamomile.qsvt_eigenstate_filter.v1",
+            self.model.semantic_digest,
+            self.program.semantic_digest,
         )
 
-        with _pyqsp_output_to_logger():
-            generated, _ = PolySign().generate(
-                degree=degree,
-                delta=delta,
-                ensure_bounded=True,
-                return_scale=True,
-                chebyshev_basis=True,
-            )
-            coefficients = [scale * float(c) for c in np.asarray(generated).ravel()]
-            # Reject an out-of-bounds polynomial before paying for sym_qsp:
-            # its phases would be silently meaningless, not merely imprecise.
-            grid = np.linspace(-1.0, 1.0, POLYNOMIAL_BOUND_SAMPLES)
-            peak = float(np.abs(chebval(grid, coefficients)).max())
-            if peak > 1.0 + 1e-9:
-                raise ValueError(
-                    f"scale={scale!r} drives the degree-{degree} delta={delta!r} "
-                    f"sign approximation to |p|={peak:.4f}, outside the QSP "
-                    "bound |p| <= 1, so the extracted phases would not "
-                    "approximate the sign function. Lower |scale|, raise "
-                    "degree, or lower delta. delta sets the width of the "
-                    "transition and degree must be large enough to represent "
-                    "it, so delta far above degree/3 is the usual cause."
-                )
-            wx_phases, _, _ = QuantumSignalProcessingPhases(
-                coefficients, method="sym_qsp", chebyshev_basis=True
-            )
-
-        # sym_qsp raw output -> genuine Wx sequence.
-        wx = np.array(wx_phases, dtype=float)
-        wx[0] += math.pi / 4
-        wx[-1] += math.pi / 4
-
-        # Genuine Wx -> projector-rotation (reflection) convention.
-        degree_out = len(wx) - 1
-        reflection = np.empty_like(wx)
-        reflection[0] = wx[0] + (2 * degree_out - 1) * math.pi / 4
-        reflection[1:-1] = wx[1:-1] - math.pi / 2
-        reflection[-1] = wx[-1] - math.pi / 4
-        reflection = (reflection + math.pi) % (2 * math.pi) - math.pi
-
-        phases = [float(phase) for phase in reflection]
-        self._phase_cache[key] = list(phases)
-        return phases
-
-    def transpile(
-        self,
-        transpiler: Transpiler,
-        *,
-        mu: float,
-        degree: int = DEFAULT_POLYNOMIAL_DEGREE,
-        delta: float = DEFAULT_TRANSITION_WIDTH,
-        scale: float = DEFAULT_POLYNOMIAL_SCALE,
-        phi: list[float] | None = None,
-    ) -> ExecutableProgram:
-        r"""Transpile the probe circuit for one energy threshold.
-
-        The emitted circuit prepares the uniform superposition on the system
-        register, applies :math:`P_{<\mu}` through the QSVT sign filter, and
-        measures the projector, signal, and system registers in that order.
-
-        Both ``mu`` and ``phi`` are compile-time data: the threshold sets the
-        LCU amplitudes and the phase count sets the circuit structure, so each
-        threshold needs its own ``transpile`` call.
+    def decode(self, result: SampleResult) -> DecodedSamples[_Domain] | None:
+        """Decode successful payloads in the original model's variable domain.
 
         Args:
-            transpiler (Transpiler): Backend transpiler to use.
-            mu (float): Energy threshold. With the default ``scale`` the
-                filter keeps eigenstates of the cost Hamiltonian with energy
-                below ``mu``; a positive ``scale`` keeps those above it.
-            degree (int): Degree of the sign approximation, passed to
-                :meth:`_qsp_phases`. Ignored when ``phi`` is given.
-            delta (float): Transition-width parameter, passed to
-                :meth:`_qsp_phases`. Ignored when ``phi`` is given.
-            scale (float): Polynomial rescaling, passed to :meth:`_qsp_phases`.
-                Ignored when ``phi`` is given.
-            phi (list[float] | None): Precomputed reflection-convention phases.
-                Defaults to None, meaning they are computed with ``pyqsp``.
-                When given it must hold an even number of at least two finite
-                phases — the sign approximation is an odd polynomial, so its
-                phase count is even, and an empty sequence describes no
-                alternation at all. Values are angles in radians and are not
-                wrapped, so any real magnitude is accepted.
+            result (SampleResult): Typed success-first probe observations.
 
         Returns:
-            ExecutableProgram: Compiled probe circuit for this threshold. Its
-                post-selected ancilla block is ``num_ancilla_bits(mu)`` wide.
+            DecodedSamples | None: Native-decoded successful assignments, or
+            None when the complete filter accepted no observation.
 
         Raises:
-            ValueError: If ``phi`` is empty, has odd or fewer than two entries,
-                or holds a non-finite phase; or if the phase-synthesis
-                arguments are out of range or jointly break the QSP bound (see
-                :meth:`_qsp_phases`).
+            TypeError: If the result lacks the success-first typed ABI.
+            ValueError: If payload width differs from the model width.
         """
-        phases = (
-            list(phi) if phi is not None else self._qsp_phases(degree, delta, scale)
+        if not isinstance(result, SampleResult):
+            raise TypeError("result must be a qamomile.SampleResult")
+        if result.width != self.model.num_variables + 1:
+            raise ValueError("filter result payload width does not match its model")
+        success = estimate_success(result)
+        if success.successes == 0:
+            return None
+        conditional = SampleResult.from_counts(
+            backend=result.backend,
+            counts={
+                bits[1:]: count for bits, count in result.counts.items() if bits[0]
+            },
+            worker_pid=result.worker_pid,
+            expected_width=self.model.num_variables,
         )
-        if len(phases) < 2 or len(phases) % 2 != 0:
-            raise ValueError(
-                "phi must hold an even number of at least two phases "
-                f"(odd polynomial degree); got {len(phases)}."
-            )
-        # A NaN or infinite phase compiles into a rotation angle the backend
-        # will either reject far downstream or silently turn into garbage, so
-        # it is caught here where the offending value is still nameable.
-        if not all(math.isfinite(phase) for phase in phases):
-            raise ValueError(
-                "phi must hold finite phases; got "
-                f"{[phase for phase in phases if not math.isfinite(phase)]!r}."
-            )
+        return self.model.decode(conditional)
 
-        return transpiler.transpile(
-            qsvt_filter_probe(self._shifted_encoding(mu)),
-            bindings={"phi": phases},
+    def success_probability(self, result: SampleResult) -> float:
+        """Estimate the fraction of all shots passing the complete filter.
+
+        Args:
+            result (SampleResult): Typed success-first probe observations.
+
+        Returns:
+            float: Native-derived observed success fraction.
+
+        Raises:
+            TypeError: If result lacks the success-first typed ABI.
+            ValueError: If payload width differs from the model width.
+        """
+        if not isinstance(result, SampleResult):
+            raise TypeError("result must be a qamomile.SampleResult")
+        if result.width != self.model.num_variables + 1:
+            raise ValueError("filter result payload width does not match its model")
+        return estimate_success(result).probability
+
+    def compile(
+        self, *, to: CompilationTarget
+    ) -> CompiledQSVTEigenstateFilterExperiment[_Domain]:
+        """Compile this threshold for repeated launches on one target.
+
+        Args:
+            to (CompilationTarget): Artifact target for the source program.
+
+        Returns:
+            CompiledQSVTEigenstateFilterExperiment: Reusable compiled experiment.
+        """
+        return CompiledQSVTEigenstateFilterExperiment(
+            self, qm.compile(self.program, to=to)
         )
 
-    @staticmethod
-    def _postselect(
-        samples: SampleResult[tuple[list[int], list[int], list[int]]],
-    ) -> tuple[list[tuple[list[int], int]], int]:
-        """Keep the shots whose projector and signal registers measured zero.
+    def run(
+        self, *, on: ExecutionEndpoint, shots: int, seed: int = 0
+    ) -> QSVTFilterRun[_Domain]:
+        """Compile, execute, and decode this threshold.
 
         Args:
-            samples (SampleResult[tuple[list[int], list[int], list[int]]]): Raw
-                probe results, each value holding the projector, signal, and
-                system bits in that order.
+            on (ExecutionEndpoint): Compatible execution endpoint.
+            shots (int): Positive observation count.
+            seed (int): Endpoint sampling seed, default zero.
 
         Returns:
-            tuple[list[tuple[list[int], int]], int]: The surviving
-                ``(system_bits, count)`` pairs and the number of shots they
-                account for.
+            QSVTFilterRun: Full execution and conditional problem samples.
+        """
+        return self.compile(to=on.target).run(on=on, shots=shots, seed=seed)
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledQSVTEigenstateFilterExperiment(Generic[_Domain]):
+    """One immutable threshold experiment compiled for an execution target.
+
+    Args:
+        experiment (QSVTEigenstateFilterExperiment): Retained source experiment.
+        artifact (CompiledProgram): Artifact for exactly that program.
+    """
+
+    experiment: QSVTEigenstateFilterExperiment[_Domain]
+    artifact: CompiledProgram
+
+    def __post_init__(self) -> None:
+        """Reject an artifact compiled from a different experiment.
 
         Raises:
-            ValueError: If a result value is not a three-register tuple.
+            TypeError: If a constructor argument has the wrong type.
+            ValueError: If source and artifact identities differ.
         """
-        kept: list[tuple[list[int], int]] = []
-        kept_shots = 0
-        for value, count in samples.results:
-            if not isinstance(value, tuple) or len(value) != 3:
-                raise ValueError(
-                    "Expected probe results as (projector, signal, system) "
-                    f"tuples; got {value!r}."
-                )
-            projector_bits, signal_bits, system_bits = value
-            if any(projector_bits) or any(signal_bits):
-                continue
-            kept.append((list(system_bits), count))
-            kept_shots += count
-        return kept, kept_shots
+        if not isinstance(self.experiment, QSVTEigenstateFilterExperiment):
+            raise TypeError("compiled filter requires a QSVTEigenstateFilterExperiment")
+        if not isinstance(self.artifact, CompiledProgram):
+            raise TypeError("compiled filter requires a CompiledProgram")
+        if self.artifact.source_digest.hex() != self.experiment.identity.program_digest:
+            raise ValueError("compiled artifact does not match filter experiment")
 
-    def success_probability(
-        self,
-        samples: SampleResult[tuple[list[int], list[int], list[int]]],
-    ) -> float:
-        r"""Estimate :math:`\lVert P_{<\mu}\lvert\varphi_0\rangle\rVert^2`.
+    @property
+    def identity(self) -> OptimizationExperimentIdentity:
+        """Return the retained source experiment identity."""
+        return self.experiment.identity
 
-        This is the quantity the Lin & Tong binary search thresholds: it is
-        bounded away from zero exactly when an eigenstate on the kept side of
-        :math:`\mu` — below it by default — carries weight in the uniform
-        superposition.
+    def run(
+        self, *, on: ExecutionEndpoint, shots: int, seed: int = 0
+    ) -> QSVTFilterRun[_Domain]:
+        """Execute the retained artifact and preserve its success denominator.
 
         Args:
-            samples (SampleResult[tuple[list[int], list[int], list[int]]]): Raw
-                probe results for one threshold.
+            on (ExecutionEndpoint): Endpoint for the compiled target.
+            shots (int): Positive observation count.
+            seed (int): Endpoint sampling seed, default zero.
 
         Returns:
-            float: Fraction of shots with all ancilla bits zero, or ``0.0``
-                when no shots were taken.
+            QSVTFilterRun: Execution, native success estimate, and decoded samples.
 
         Raises:
-            ValueError: If a result value is not a three-register tuple.
+            TypeError: If the probe unexpectedly returns a nonsampling result.
         """
-        _, kept_shots = self._postselect(samples)
-        if samples.shots <= 0:
-            return 0.0
-        return kept_shots / samples.shots
-
-    def decode_to_binary_sampleset(  # type: ignore[override]
-        self,
-        samples: SampleResult[tuple[list[int], list[int], list[int]]],
-    ) -> BinarySampleSet:
-        """Decode the post-selected system measurements into problem samples.
-
-        Shots whose projector or signal bits are non-zero missed the filtered
-        block and carry no information about the retained subspace, so they
-        are dropped before the usual SPIN/BINARY decoding runs. Use
-        :meth:`success_probability` on the same result to recover how many were
-        discarded.
-
-        The payload type narrows the base class's flat ``list[int]`` per shot
-        to the probe's three-register tuple, which is what
-        :func:`~qamomile.circuit.algorithm.qsvt_filter_probe` actually returns.
-        The base signature therefore cannot type this override, and the
-        shape is still validated at runtime by :meth:`_postselect`.
-
-        Args:
-            samples (SampleResult[tuple[list[int], list[int], list[int]]]): Raw
-                probe results, each value holding the projector, signal, and
-                system bits in that order, as returned by the kernel built by
-                :func:`~qamomile.circuit.algorithm.qsvt_filter_probe`.
-
-        Returns:
-            BinarySampleSet: Post-selected samples in the converter's original
-                vartype, with energies from the problem's model.
-
-        Raises:
-            ValueError: If a result value is not a three-register tuple.
-        """
-        kept, kept_shots = self._postselect(samples)
-        return super().decode_to_binary_sampleset(
-            SampleResult(results=kept, shots=kept_shots)
+        execution = qm.run(self.artifact, on=on, shots=shots, seed=seed)
+        if not isinstance(execution.result, SampleResult):
+            raise TypeError("eigenstate filter returned a nonsampling result")
+        return QSVTFilterRun(
+            self.identity,
+            execution,
+            estimate_success(execution.result),
+            self.experiment.decode(execution.result),
         )
 
-    def decode(  # type: ignore[override]
-        self,
-        samples: SampleResult[tuple[list[int], list[int], list[int]]],
-    ) -> BinarySampleSet | ommx.v1.SampleSet:
-        """Decode probe results, post-selecting before the base conversion.
 
-        Behaviour is the base class's: an :class:`ommx.v1.SampleSet` for a
-        converter built from an :class:`ommx.v1.Instance`, a
-        :class:`BinarySampleSet` for one built from a
-        :class:`~qamomile.optimization.binary_model.BinaryModel`. Only the
-        accepted payload differs — this converter's probe returns three
-        registers per shot rather than one flat bitstring, so the base
-        signature cannot describe it. The post-selection itself happens in
-        :meth:`decode_to_binary_sampleset`, which the base implementation
-        calls.
-
-        Args:
-            samples (SampleResult[tuple[list[int], list[int], list[int]]]): Raw
-                probe results, each value holding the projector, signal, and
-                system bits in that order.
-
-        Returns:
-            BinarySampleSet | ommx.v1.SampleSet: Post-selected samples, in
-                whichever form matches the converter's input.
-
-        Raises:
-            ValueError: If a result value is not a three-register tuple.
-        """
-        return super().decode(samples)  # type: ignore[arg-type]
+__all__ = [
+    "CompiledQSVTEigenstateFilterExperiment",
+    "QSVTEigenstateFilterExperiment",
+    "QSVTFilterRun",
+]

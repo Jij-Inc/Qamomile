@@ -21,7 +21,7 @@ jobs:
   zuban:
     name: zuban-check
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 10
     steps:
       - name: Check out the repository
         # v4.4.0 = https://github.com/actions/checkout/releases/tag/v4.4.0
@@ -41,9 +41,17 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
+          cache-suffix: ${{ github.job }}
 
       - name: Install dependencies
-        run: uv sync --frozen --group dev --extra hugr
+        # The checked package includes every backend adapter, so type checking
+        # needs their SDKs, but not the executable documentation dependencies.
+        run: >-
+          uv sync --frozen --no-default-groups --group typecheck
+          --extra visualization --extra qiskit --extra cirq --extra quri_parts
+          --extra braket --extra cudaq-cu12 --extra hugr --extra quration --extra qir
 
       - name: Type check with Zuban
-        run: uv run zuban check qamomile/ tests/typecheck/
+        run: >-
+          uv run --no-sync zuban check
+          qamomile/ tests/typecheck/

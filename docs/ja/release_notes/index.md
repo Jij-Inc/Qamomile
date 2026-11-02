@@ -4,6 +4,7 @@ slug: release-notes
 
 # リリースノート
 
+- [v0.16.0 RC1](v0_16_0_rc1) — Rustによるコンパイラの中核、実行・リソース推定APIの刷新、stdlibの拡充、Cirq連携とQIRの直接出力
 - [v0.15.2](v0_15_2) — QSVTによる低エネルギー状態の選択、Nexus経由のQuantinuum H2実行、ショット番号に応じたHUGRプログラム
 - [v0.15.1](v0_15_1) — Grover Adaptive Searchの探索回路生成、IBM Quantumの実機やHUGRでの実行、`QInt`による符号なし整数の測定、ローカル結果を含むジョブの復元
 - [v0.15.0](v0_15_0) — 回路幅・種類別深さ・推定根拠を追跡するリソース推定、Amazon Braketサポート、Oracle変換の合成とエンジン共通の非同期実行ライフサイクル

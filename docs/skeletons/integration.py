@@ -28,7 +28,7 @@
 
 # %%
 # Put every import used by the notebook here.
-# import qamomile.circuit as qmc
+# import qamomile as qm
 
 # %% [markdown]
 # ## Integration Target
@@ -48,7 +48,7 @@
 # through the integration target.
 
 # %%
-# Define the Qamomile qkernel, observable, model, or converter here.
+# Define the Qamomile function, observable, model, or integration object here.
 
 # %% [markdown]
 # ## Connect

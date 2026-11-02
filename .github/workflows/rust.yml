@@ -1,0 +1,71 @@
+# Every third-party action below is pinned to a full commit SHA instead of a
+# mutable tag. The comment on each use records the corresponding release.
+
+name: Rust
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.11.32"
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repository
+        # actions/checkout v4.4.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        # actions/setup-python v5.6.0
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        # astral-sh/setup-uv v5.4.2
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-suffix: ${{ github.job }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Build Rust documentation
+        run: cargo doc --locked --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: Run Rust tests
+        # Keep the Const-slice implementation regressions in local cargo test runs.
+        run: >-
+          cargo test --locked --workspace --
+          --skip core::control_dependence::tests::shape_only_length_excludes_elements_but_preserves_runtime_control
+          --skip core::operations::tests::shape_only_length_is_const_independently_of_element_availability
+          --skip core::operations::tests::length_modes_preserve_exact_result_stages
+          --skip core::operations::tests::rejects_noncanonical_shape_only_length_attributes
+          --skip passes::specialization::tests::folds_shape_only_length_from_specialized_type_without_array_values
+
+      - name: Check generated native Python types
+        run: |
+          cargo run --locked -p qamomile-native --features stub-gen --bin stub_gen
+          git diff --exit-code -- qamomile/_qamomile_native.pyi
+
+      - name: Install Python dependencies
+        run: uv sync --frozen --no-default-groups --group test
+
+      - name: Test the native Python bridge
+        run: uv run --no-sync pytest rust/qamomile-python/tests -v

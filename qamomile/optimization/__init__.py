@@ -1,43 +1,59 @@
-"""Domain-specific helper layer for quantum combinatorial optimization.
+"""Quantum-agnostic optimization models and experiment boundaries.
 
-Design center
--------------
-
-This package turns classical combinatorial optimization problems
-(OMMX ``Instance`` or Qamomile ``BinaryModel``) into quantum programs and
-decodes measurement results back into classical solutions. It hosts the
-converter family: ``QAOAConverter`` (``qaoa.py``, QUBO/Ising and HUBO via
-phase gadgets), ``FQAOAConverter`` (``fqaoa.py``, fermionic mixers with
-particle-number constraints), the QRAC converters (``qrao/``),
-``PCEConverter`` (``pce.py``, Pauli correlation encoding),
-``GASConverter`` (``gas.py``, oracle-based Grover Adaptive Search over
-QFT-encoded QUBO/HUBO arithmetic), and ``QSVTEigenstateFilterConverter``
-(``qsvt_eigenstate_filter.py``, QSVT eigenstate filtering for the Lin & Tong
-ground-energy search).
-
-Layering constraint (inviolable)
---------------------------------
-
-``optimization → circuit ← engines``. This package is a *consumer* of
-``qamomile.circuit``'s public transpiler and algorithm APIs
-(``Transpiler``, ``ExecutableProgram``, ``qamomile.circuit.algorithm``
-ansatz builders) — it must never be imported by ``qamomile.circuit`` or
-by engine packages, and it must never reach into circuit internals
-(passes, IR rewriting). A converter builds a qkernel / Hamiltonian and
-hands it to whatever engine ``Transpiler`` the caller supplies; engine
-choice stays out of this layer entirely.
-
-Extension points
-----------------
-
-- New algorithms subclass ``MathematicalProblemConverter``
-  (``converter.py``), whose ``normalize_problem_input`` is the single
-  canonical entry point for OMMX/BinaryModel intake (deep-copy +
-  ``to_hubo`` semantics live there, in exactly one place). Converters
-  whose contract genuinely differs (no single cost Hamiltonian, no
-  ``SampleResult`` decode — e.g. PCE) may skip the base class, but
-  should still delegate intake to ``normalize_problem_input``.
-- ``binary_model/`` is the problem representation; ``post_process/``
-  holds classical refinement of decoded samples. Both are
-  quantum-agnostic and must stay importable without any SDK installed.
+This package consumes Qamomile's public observable and execution values. It
+does not participate in source compilation or backend lowering, so problem
+normalization and result decoding remain usable without an SDK backend.
 """
+
+from .fqaoa import CompiledFQAOAExperiment, FQAOAExperiment
+from .gas import CompiledGASExperiment, GASExperiment
+from .local_search import LocalSearch, LocalSearchMethod
+from .model import (
+    BinaryDomain,
+    BinaryModel,
+    DecodedSample,
+    DecodedSamples,
+    SpinDomain,
+    VarType,
+)
+from .ommx import OMMXEvaluation, OMMXProblem
+from .pce import PauliCorrelationEncoding
+from .qaoa import (
+    CompiledQAOAExperiment,
+    OptimizationExperimentIdentity,
+    OptimizationRun,
+    QAOAExperiment,
+)
+from .qrac import QRACEncoding, QRACVariant
+from .qsvt_eigenstate_filter import (
+    CompiledQSVTEigenstateFilterExperiment,
+    QSVTEigenstateFilterExperiment,
+    QSVTFilterRun,
+)
+
+__all__ = [
+    "BinaryDomain",
+    "BinaryModel",
+    "CompiledFQAOAExperiment",
+    "CompiledGASExperiment",
+    "CompiledQAOAExperiment",
+    "CompiledQSVTEigenstateFilterExperiment",
+    "DecodedSample",
+    "DecodedSamples",
+    "FQAOAExperiment",
+    "GASExperiment",
+    "LocalSearch",
+    "LocalSearchMethod",
+    "OptimizationExperimentIdentity",
+    "OptimizationRun",
+    "OMMXEvaluation",
+    "OMMXProblem",
+    "PauliCorrelationEncoding",
+    "QAOAExperiment",
+    "QRACEncoding",
+    "QRACVariant",
+    "QSVTEigenstateFilterExperiment",
+    "QSVTFilterRun",
+    "SpinDomain",
+    "VarType",
+]

@@ -25,39 +25,33 @@
 # solution is found {cite:p}`10.22331/q-2021-04-08-428`.
 #
 # This page solves an unconstrained **portfolio selection** problem with
-# Qamomile's `GASConverter`.
+# Qamomile's immutable `BinaryModel` and `GASExperiment`.
 #
 # The tutorial is built on the following structure:
 #
-# 1. Formulate the problem with [JijModeling](https://jij-inc-jijmodeling-tutorials-en.readthedocs-hosted.com/en/latest/introduction.html).
-# 2. Create an instance with concrete data.
-# 3. Use `GASConverter` to build the Grover circuit for the current threshold.
+# 1. Formulate the polynomial objective as a `BinaryModel`.
+# 2. Create the nine-asset instance with concrete data.
+# 3. Use `GASExperiment` to build the Grover circuit for the current threshold.
 # 4. Sample it, keep the best candidate, and repeat until a stopping criterion
 #    is reached. GAS is a hybrid loop, not a single circuit.
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install "qamomile[qiskit,visualization]"
+# # !pip install "qamomile[qiskit]"
 
 # %%
 import itertools
+import math
 import os
-import random
-from typing import Any
 
-import jijmodeling as jm
 import numpy as np
-from qiskit_aer import AerSimulator
 
-import qamomile.circuit as qmc
-from qamomile.circuit.algorithm.gas import (
-    apply_function_preparation_qubo,
-    diffusion_op,
-    grover_algorithm,
-)
-from qamomile.circuit.visualization import MatplotlibDrawer
-from qamomile.optimization.gas import GASConverter
-from qamomile.qiskit import QiskitTranspiler
+import qamomile as qm
+from qamomile.optimization import BinaryModel, GASExperiment
+from qamomile.qiskit import Aer
+from qamomile.stdlib import grover_iteration_count
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 # %% [markdown]
 # ## Background
@@ -73,6 +67,7 @@ from qamomile.qiskit import QiskitTranspiler
 # value than the current threshold, the classical layer updates $y$ to that
 # value. This process repeats, with the quantum circuit answering one fixed
 # question at a time and the classical layer updating the threshold.
+
 
 # %% [markdown]
 # ## Problem Settings
@@ -95,24 +90,6 @@ from qamomile.qiskit import QiskitTranspiler
 # \end{equation}
 
 
-# %%
-@jm.Problem.define("Portfolio Optimization (Unconstrained)")
-def portfolio_problem(problem: jm.DecoratedProblem):
-    n = problem.Length(description="Number of assets")
-    q = problem.Float("q", description="Risk aversion factor")
-    mu = problem.Float("mu", shape=(n,), description="Expected returns vector")
-    Sigma = problem.Float("Sigma", shape=(n, n), description="Covariance matrix")
-
-    x = problem.BinaryVar("x", shape=(n,), description="1 if asset i is selected")
-
-    problem += (
-        q * jm.sum(Sigma[i, j] * x[i] * x[j] for i in n for j in n)
-        - jm.sum(mu[i] * x[i] for i in n)
-    )
-
-
-portfolio_problem
-
 # %% [markdown]
 # The instance below has 9 assets:
 #
@@ -128,44 +105,69 @@ portfolio_problem
 # | Asset 8 | 25              | 16         |
 # | Asset 9 | 3               | 13         |
 
-# %%
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-num_assets = 3 if docs_test_mode else 9
-q = 1
-mu = np.array([22, 4, 19, 3, 23, 2, 5, 25, 3], dtype=int)
-Sigma = np.array([
-    [12, -3,  4,  0, -2,  3,  0,  2, -1],
-    [-3, 15,  0,  5,  1, -4,  2,  0,  3],
-    [ 4,  0, 10, -6,  3,  2, -1,  4,  0],
-    [ 0,  5, -6, 18, -4,  0,  3, -2,  5],
-    [-2,  1,  3, -4, 14,  2, -3,  0,  2],
-    [ 3, -4,  2,  0,  2, 20,  4, -3,  1],
-    [ 0,  2, -1,  3, -3,  4, 11,  2, -2],
-    [ 2,  0,  4, -2,  0, -3,  2, 16, -4],
-    [-1,  3,  0,  5,  2,  1, -2, -4, 13],
-], dtype=int)
-mu = mu[:num_assets]
-Sigma = Sigma[:num_assets, :num_assets]
-
-assert mu.shape == (num_assets,)
-assert Sigma.shape == (num_assets, num_assets)
-assert np.array_equal(Sigma, Sigma.T), "the covariance matrix must be symmetric"
 
 # %% [markdown]
-# Evaluating the JijModeling problem with that data yields an OMMX instance.
+# The coefficient table below produces the same immutable binary model directly.
 
 # %%
-instance = portfolio_problem.eval({
-    "n": num_assets,
-    "q": int(q),
-    "mu": mu.tolist(),
-    "Sigma": Sigma.tolist(),
-})
+expected_returns = np.array([22, 4, 19, 3, 23, 2, 5, 25, 3], dtype=int)
+covariance = np.array(
+    [
+        [12, -3, 4, 0, -2, 3, 0, 2, -1],
+        [-3, 15, 0, 5, 1, -4, 2, 0, 3],
+        [4, 0, 10, -6, 3, 2, -1, 4, 0],
+        [0, 5, -6, 18, -4, 0, 3, -2, 5],
+        [-2, 1, 3, -4, 14, 2, -3, 0, 2],
+        [3, -4, 2, 0, 2, 20, 4, -3, 1],
+        [0, 2, -1, 3, -3, 4, 11, 2, -2],
+        [2, 0, 4, -2, 0, -3, 2, 16, -4],
+        [-1, 3, 0, 5, 2, 1, -2, -4, 13],
+    ],
+    dtype=int,
+)
+risk_aversion = 1
 
-assert len(instance.decision_variables) == num_assets
-# The all-zero portfolio buys nothing, so its objective must be exactly 0.
-empty_portfolio = instance.evaluate({i: 0 for i in range(num_assets)}).objective
-assert np.isclose(empty_portfolio, 0.0, atol=1e-9, rtol=0.0)
+
+def portfolio_model(num_assets: int) -> BinaryModel:
+    terms: dict[tuple[int, ...], float] = {}
+    for left in range(num_assets):
+        terms[(left,)] = float(
+            risk_aversion * covariance[left, left] - expected_returns[left]
+        )
+        for right in range(left + 1, num_assets):
+            coefficient = float(2 * risk_aversion * covariance[left, right])
+            if coefficient:
+                terms[(left, right)] = coefficient
+    return BinaryModel.from_hubo(terms, variables=tuple(range(num_assets)))
+
+
+full_model = portfolio_model(9)
+MODEL_ASSETS = 3 if docs_test_mode else 9
+model = portfolio_model(MODEL_ASSETS)
+
+assert full_model.num_variables == 9
+assert model.num_variables == MODEL_ASSETS
+
+energies = {
+    bits: model.energy(bits)
+    for bits in itertools.product((0, 1), repeat=model.num_variables)
+}
+optimal_bits, optimal_energy = min(energies.items(), key=lambda item: item[1])
+
+print("exact optimum:", optimal_bits, optimal_energy)
+assert optimal_bits == ((1, 0, 1) if docs_test_mode else (1, 0, 0, 0, 1, 0, 0, 1, 0))
+assert optimal_energy == (-11.0 if docs_test_mode else -28.0)
+
+full_energies = {
+    bits: full_model.energy(bits)
+    for bits in itertools.product((0, 1), repeat=full_model.num_variables)
+}
+full_optimal_bits, full_optimal_energy = min(
+    full_energies.items(), key=lambda item: item[1]
+)
+print("nine-asset exact optimum:", full_optimal_bits, full_optimal_energy)
+assert full_optimal_bits == (1, 0, 0, 0, 1, 0, 0, 1, 0)
+assert full_optimal_energy == -28.0
 
 # %% [markdown]
 # ## Algorithm
@@ -204,278 +206,238 @@ assert np.isclose(empty_portfolio, 0.0, atol=1e-9, rtol=0.0)
 # answers it by sampling the iteration count from a range that grows slowly
 # whenever a round brings no improvement.
 
-# %% [markdown]
-# ## Implementation
-#
-# Qamomile provides the quantum circuits used in GAS through `GASConverter`.
-# This section introduces its usage and the operations that make up the
-# circuit, then combines them with a classical loop to implement GAS.
-#
-# `GASConverter` takes an OMMX instance and converts it into a problem in
-# QUBO/HUBO form. Its `transpile()` method builds, for a given transpiler,
-# the Grover circuit used by the adaptive search.
-
-# %%
-converter = GASConverter(instance)
-transpiler = QiskitTranspiler()
-
-assert converter.binary_model.num_bits == num_assets
 
 # %% [markdown]
-# ### Implementing the Grover circuit
+# ## Build one fixed-threshold round
 #
-# `GASConverter.transpile()` internally builds the sampling qkernel below and
-# feeds it to the transpiler. For visualization we can call
-# `Transpiler.to_block` and `MatplotlibDrawer.draw` on that same qkernel.
+# Suppose the current classical candidate has energy $-10$. The next oracle must
+# therefore mark assignments with $f(x) < -10$. In documentation-test mode,
+# only the three-asset optimum qualifies. Normal execution uses the original
+# nine-asset problem and the same fixed-threshold round.
 #
-# The output-register width is not a free parameter: it has to hold
-# $f(x) - y$ for every $x$, or the two's-complement encoding wraps around and
-# flips the very sign bit the oracle tests. `required_output_bits()` reports
-# the width `transpile()` would choose for a given threshold.
+# `GASExperiment` is a host-side experiment boundary, not a second quantum
+# decorator. It closes the model and threshold into a verified `Program`.
+# Its circuit uses ordinary Qamomile composition and reversible integer
+# arithmetic; there is no GAS-specific IR operation or backend implementation.
 
 # %%
-output_bits = converter.required_output_bits(y=0)
-print(f"Output register width for y=0: {output_bits} qubits")
-
-assert output_bits >= 2
-
-
-# %%
-@qmc.qkernel
-def sampling_grover_algorithm(
-    n: qmc.UInt,
-    m: qmc.UInt,
-    y: qmc.Float,
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    iters: qmc.UInt = 1,
-) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
-    q_output, q_input = grover_algorithm(n, m, y, linear, quad, iters)
-    return qmc.measure(q_output), qmc.measure(q_input)
-
-
-block = transpiler.to_block(
-    sampling_grover_algorithm,
-    bindings={
-        # Number of input qubits = number of binary variables
-        "n": converter.binary_model.num_bits,
-        # Number of output qubits, as computed by the converter
-        "m": output_bits,
-        # Oracle threshold: distinguish states for f(x) < y by reversing their phase
-        "y": 0,
-        "linear": converter.binary_model.linear,
-        "quad": converter.binary_model.quad,
-        # Number of Grover iterations (can be tuned)
-        "iters": 1,
-    },
-)
-block = transpiler.inline(block)
-
-assert len(block.operations) > 0, "the inlined Grover block must not be empty"
-
-MatplotlibDrawer(block).draw(fold_loops=False)
-
-# %% [markdown]
-# ### Inspecting the building blocks
-#
-# $A_y$ prepares $\sum_x \ket{x, f(x) - y}$ from QFT phase encodings:
-
-# %%
-preparation_figure = apply_function_preparation_qubo.draw(
-    q_output=output_bits,
-    q_input=converter.binary_model.num_bits,
-    y=0,
-    linear=converter.binary_model.linear,
-    quad=converter.binary_model.quad,
-    inline=True,
-    inline_depth=None,
-    fold_loops=False,
+threshold = -10.0
+experiment = GASExperiment(
+    model,
+    threshold=threshold,
+    iterations=1,
 )
 
-assert preparation_figure.get_axes(), "the drawn preparation circuit must not be empty"
-preparation_figure
+print("output bits:", experiment.resolved_output_bits)
+print("program digest:", experiment.program.semantic_digest)
+
+inspection = experiment.program.inspect()
+assert "quantum.gas" not in inspection
+assert "qcore.control_call" in inspection
 
 # %% [markdown]
-# and $D$ reflects the input register about the uniform superposition:
+# ### Reproduce amplitude-amplification scaling
+#
+# Section 14.1 of [](https://doi.org/10.48550/arXiv.2310.03011) gives
+# $m=O(a^{-1})$ Grover iterations for initial success amplitude $a$. With one
+# marked item among $N=2^n$, $a=N^{-1/2}$ and therefore $m=O(\sqrt N)$.
+# Qamomile's bounded planner returns the usual
+# $\lfloor(\pi/4)\sqrt{2^n}\rfloor$ count without a floating-point overflow.
 
 # %%
-diffusion_figure = diffusion_op.draw(
-    q_input=converter.binary_model.num_bits,
-    inline=True,
-    inline_depth=None,
-    fold_loops=False,
-)
+grover_plans = {width: grover_iteration_count(width) for width in range(2, 11)}
+for width, iterations in grover_plans.items():
+    assert iterations == math.floor((math.pi / 4.0) * math.sqrt(2**width))
 
-assert diffusion_figure.get_axes(), "the drawn diffusion circuit must not be empty"
-diffusion_figure
+print("Grover plans (n: iterations):", grover_plans)
 
 # %% [markdown]
-# ### The classical layer
-#
-# Qamomile's `GASConverter` provides functionality to construct a Grover circuit
-# for a given threshold and convert measurement results into candidate
-# solutions. However, it does not include the classical logic that controls
-# the overall search: evaluating candidates, updating the threshold, adjusting
-# the number of Grover iterations, and checking the stopping condition.
-# To perform optimization with GAS, you therefore need to implement this logic
-# yourself. The function below is an example of such an implementation.
-#
-# It implements the classical outer loop of GAS, using `converter.transpile()`
-# and `converter.decode()` as its quantum primitives. It starts from a random
-# candidate $x$ with $y = f(x)$, samples the Grover circuit, and updates the
-# incumbent whenever a sample is better. The search stops after
-# `max_no_improvement` consecutive rounds without improvement.
-#
-# - `converter.transpile(transpiler, y=y, num_iterations=num_iterations)` builds
-#   the Grover circuit for the current threshold $y$ and the specified number
-#   of Grover iterations.
-# - `executable.sample(executor, shots=256)` runs it on the backend. Even for
-#   Grover, multiple shots are needed because NISQ quantum devices are noisy.
-# - `converter.decode(result)` maps the raw bitstring counts back to decision
-#   variable assignments.
-
+# For a fixed GAS threshold, the full state preparation, oracle, inverse, and
+# reflection body is repeated once per Grover iteration. The compiler derives
+# exact semantic work from that body. Gate-family upper bounds are intentionally
+# left open because controlled coherent-arithmetic transforms do not yet have a
+# complete logical gate profile. `GASExperiment` deliberately exposes a closed
+# program, so two endpoint studies determine the affine intercept and slope;
+# the remaining displayed rows are arithmetic, not repeated compiler analyses.
 
 # %%
-def grover_adaptive_search(
-    converter: Any,
-    transpiler: Any,
-    lamb: float,
-    max_no_improvement: int = 5,
-    shots: int = 256,
-    seed: int = 900,
-):
-    ##########################################################
-    #                   Initialization                       #
-    ##########################################################
-
-    random.seed(seed)
-    n = converter.binary_model.num_bits
-    k = 1  # Controls the upper bound of the Grover iteration count sampled per step
-    x_int = random.randint(0, 2**n - 1)
-    x = [int(b) for b in format(x_int, f"0{n}b")]
-    y = converter.instance.evaluate({i: x_i for i, x_i in enumerate(x)}).objective
-
-    current_iter = 0
-    no_improvement_count = 0
-
-    print("[GAS] Initialization")
-    print(f"[GAS] n={n}, lambda={lamb}")
-    print(f"[GAS] Start state: x={x}, y={y}, k={k}")
-
-    executor = transpiler.executor(
-        backend=AerSimulator(seed_simulator=seed, max_parallel_threads=None)
+gas_endpoint_studies = tuple(
+    qm.resources.logical(
+        GASExperiment(model, threshold=threshold, iterations=iterations).program
     )
-
-    ############################################################
-    #                     Main Loop                            #
-    ############################################################
-
-    while no_improvement_count < max_no_improvement:
-        # Sample t uniformly in {0, ..., ceil(k)-1}; avoid empty range when k == 1
-        num_iterations = random.randrange(max(1, int(np.ceil(k))))
-        print(
-            f"\n[GAS] Iteration {current_iter + 1} | current y={y}, k={k:.6f}, "
-            f"Grover iters={num_iterations}"
-        )
-
-        ####################################################
-        #       Call to the Quantum Grover Circuit         #
-        ####################################################
-
-        executable = converter.transpile(
-            transpiler, y=y, num_iterations=num_iterations
-        )
-
-        # We run the circuit several times since NISQ hardware is noisy
-        job = executable.sample(executor, shots=shots)
-        result = job.result()
-        sample_set = converter.decode(result)
-
-        # Extract x and y from the best sample
-        x_vals = sample_set.best_feasible.extract_decision_variables("x")
-        candidate_x = [
-            int(round(x_vals.get((i,), x_vals.get(i, 0.0)))) for i in range(n)
-        ]
-        candidate_y = float(sample_set.best_feasible.objective)
-
-        print(f"[GAS] Candidate: x={candidate_x}, y={candidate_y}")
-
-        if candidate_y < y:
-            print("[GAS] Improvement found -> accepting candidate and resetting k to 1")
-            x = candidate_x
-            y = candidate_y
-            k = 1
-            no_improvement_count = 0
-        else:
-            old_k = k
-            k = lamb * k
-            no_improvement_count += 1
-            print(
-                f"[GAS] No improvement -> keeping current solution and scaling "
-                f"k: {old_k:.6f} -> {k:.6f}"
-            )
-
-        current_iter += 1
-
-    print(f"\n[GAS] Finished after {current_iter} iterations. Best found: x={x}, y={y}")
-
-    return x, y
-
-
-# %% [markdown]
-# ## Result
-#
-# In this section, we run GAS on the portfolio selection problem and verify
-# the result by comparing the resulting objective value with the optimum
-# obtained by brute-force search.
-#
-# `lamb` sets how fast the sampling range for the Grover iteration count grows,
-# and `max_no_improvement` fixes the stopping criterion.
-
-# %%
-x, y = grover_adaptive_search(
-    converter=converter,
-    transpiler=transpiler,
-    lamb=1.2,
-    max_no_improvement=2 if docs_test_mode else 5,
-    shots=16 if docs_test_mode else 256,
-    seed=0 if docs_test_mode else 900,
+    for iterations in (0, 1)
 )
-selected = [i + 1 for i, xi in enumerate(x) if xi == 1]
-print(f"Selected assets: {selected}, objective value: {y}")
+gas_endpoint_work = tuple(
+    study.metric(qm.resources.LOGICAL_WORK).numeric_enclosure()
+    for study in gas_endpoint_studies
+)
+gas_endpoint_gate_bounds = tuple(
+    study.metric(qm.resources.LOGICAL_GATES).numeric_enclosure()
+    for study in gas_endpoint_studies
+)
 
-assert len(x) == num_assets
-assert all(xi in (0, 1) for xi in x)
-assert np.isclose(
-    y,
-    instance.evaluate({i: xi for i, xi in enumerate(x)}).objective,
-    atol=1e-9,
-    rtol=0.0,
-), "the reported objective must match the returned assignment"
+assert all(lower == upper for lower, upper in gas_endpoint_work)
+assert all(upper is None for _, upper in gas_endpoint_gate_bounds)
+work_base = gas_endpoint_work[0][0]
+work_step = gas_endpoint_work[1][0] - work_base
+gate_base = gas_endpoint_gate_bounds[0][0]
+gate_step = gas_endpoint_gate_bounds[1][0] - gate_base
+gas_work = tuple(
+    (work_base + iterations * work_step, work_base + iterations * work_step)
+    for iterations in range(4)
+)
+gas_gate_bounds = tuple(
+    (gate_base + iterations * gate_step, None) for iterations in range(4)
+)
+
+print("GAS semantic work for 0..3 iterations:", gas_work)
+print("GAS logical-gate bounds for 0..3 iterations:", gas_gate_bounds)
 
 # %% [markdown]
-# The search stops once the solution has not improved for `max_no_improvement`
-# rounds, which is a heuristic rule — it does not by itself prove that the
-# returned solution is optimal. With $9$ assets, we can enumerate all
-# $2^9 = 512$ assignments, so let's verify the result against an exact
-# brute-force reference.
+# The loop structure gives an affine cost in $m$ for this concrete Grover body;
+# the two studies supply its finite coefficients. Composing it with
+# $m=\Theta(\sqrt N)$ reproduces the survey's
+# query scaling. The partial gate enclosures are also useful evidence: Qamomile
+# reports the missing transform profile by name instead of silently treating it
+# as zero or as an exact target gate count.
+
+# %% [markdown]
+# Integer coefficients are encoded exactly. For real coefficients,
+# `GASExperiment` quantizes the complete model and threshold together and
+# exposes both `effective_model` and `quantization_scale`. Set
+# `approximate_real_coefficients=False` to reject noninteger arithmetic instead.
+# `output_bits` is normally inferred from a safe two's-complement bound; an
+# explicitly undersized register is rejected rather than silently wrapping.
+
+# %% [markdown]
+# ## Compile once and sample
+#
+# The experiment follows the same lifecycle as the rest of Qamomile. Compile
+# its closed program for the endpoint target, then reuse the compiled artifact.
+# Documentation tests use the built-in reference endpoint. Normal execution
+# follows the original tutorial through local Qiskit Aer.
 
 # %%
-brute_force_x, brute_force_y = min(
+endpoint = qm.Reference() if docs_test_mode else Aer()
+compiled = experiment.compile(to=endpoint.target)
+shots = 32 if docs_test_mode else 256
+run = compiled.run(on=endpoint, shots=shots, seed=7)
+
+for sample in run.samples.samples:
+    print(sample.assignment, sample.energy, sample.occurrences)
+
+best = run.samples.lowest
+assert best.assignment == tuple(enumerate(optimal_bits))
+assert best.energy == optimal_energy
+if docs_test_mode:
+    assert best.occurrences > shots * 0.75
+assert run.execution.artifact is compiled.artifact
+assert run.identity == compiled.identity == experiment.identity
+
+# %% [markdown]
+# `run.samples` is a typed `DecodedSamples` value. It preserves original
+# variable IDs, objective values, and multiplicities; backend adapters do not
+# reinterpret the optimization model.
+#
+# To see the amplification rather than only its final answer, compare the same
+# threshold with zero Grover iterations. That program prepares the uniform
+# decision superposition but performs no amplification.
+
+# %%
+baseline = GASExperiment(model, threshold=threshold, iterations=0).run(
+    on=endpoint,
+    shots=shots,
+    seed=7,
+)
+
+baseline_optimum_count = next(
     (
-        (list(bits), instance.evaluate({i: b for i, b in enumerate(bits)}).objective)
-        for bits in itertools.product([0, 1], repeat=num_assets)
+        sample.occurrences
+        for sample in baseline.samples.samples
+        if sample.assignment == best.assignment
     ),
-    key=lambda candidate: candidate[1],
+    0,
 )
 
-print(f"GAS         : x={x}, objective={y}")
-print(f"Brute force : x={brute_force_x}, objective={brute_force_y}")
+print("uniform optimum count:", baseline_optimum_count)
+print("amplified optimum count:", best.occurrences)
+assert best.occurrences > baseline_optimum_count
 
-assert np.isclose(y, brute_force_y, atol=1e-9, rtol=0.0), (
-    f"GAS returned objective {y}, but the true optimum is {brute_force_y}"
+# %% [markdown]
+# ## The adaptive outer loop
+#
+# GAS is adaptive because the host chooses a new threshold after each sampled
+# round. A typical loop performs these steps:
+#
+# 1. evaluate the current classical candidate and use its energy as `threshold`;
+# 2. choose a bounded Grover iteration count;
+# 3. create and compile the corresponding immutable `GASExperiment`;
+# 4. sample it, inspect `run.samples.lowest`, and lower the threshold only when
+#    the candidate improves it.
+#
+# Threshold and iteration count change circuit structure, so they are explicit
+# experiment configuration rather than launch-time `Param` values. Within one
+# round, the resulting artifact is reusable and retains an exact problem/program
+# identity.
+
+
+# %%
+def adaptive_search(
+    binary_model: BinaryModel,
+    *,
+    initial_threshold: float,
+    max_rounds: int,
+    shots_per_round: int,
+) -> tuple[tuple[tuple[int, int], ...], float, tuple[float, ...]]:
+    threshold = initial_threshold
+    best_assignment = tuple((index, 0) for index in range(binary_model.num_variables))
+    history = [threshold]
+
+    for round_index in range(max_rounds):
+        round_experiment = GASExperiment(
+            binary_model,
+            threshold=threshold,
+            iterations=1,
+        )
+        round_result = round_experiment.run(
+            on=endpoint,
+            shots=shots_per_round,
+            seed=11 + round_index,
+        )
+        candidate = round_result.samples.lowest
+        if candidate.energy < threshold:
+            threshold = candidate.energy
+            best_assignment = candidate.assignment
+        history.append(threshold)
+        if threshold == optimal_energy:
+            break
+
+    return best_assignment, threshold, tuple(history)
+
+
+adaptive_assignment, adaptive_energy, threshold_history = adaptive_search(
+    model,
+    initial_threshold=0.0,
+    max_rounds=4,
+    shots_per_round=shots,
 )
-print("\nGAS matched the brute-force optimum.")
+
+print("threshold history:", threshold_history)
+assert adaptive_assignment == tuple(enumerate(optimal_bits))
+assert adaptive_energy == optimal_energy
+assert all(
+    next_threshold <= current_threshold
+    for current_threshold, next_threshold in zip(
+        threshold_history,
+        threshold_history[1:],
+    )
+)
+
+# %% [markdown]
+# The executable search reaches the exact optimum and records a monotonically
+# non-increasing threshold history. Normal execution uses the original
+# nine-asset formulation throughout; documentation tests reduce only the model
+# width and execution budget.
 
 # %% [markdown]
 # ## Summary
@@ -485,8 +447,8 @@ print("\nGAS matched the brute-force optimum.")
 # - Solved an unconstrained portfolio problem with Grover Adaptive Search,
 #   where the quantum circuit answers "which $x$ satisfy $f(x) < y$?" and a
 #   classical loop updates the threshold $y$ when a better candidate is found.
-# - Used `GASConverter` for the quantum part of GAS: `transpile()` builds the
+# - Used `GASExperiment` for the quantum part of GAS: `compile()` builds the
 #   Grover circuit for the current threshold and number of Grover iterations,
-#   and `decode()` maps bitstring counts back to decision variables through OMMX.
+#   and `run()` decodes sampled bitstrings in the original variable order.
 # - Ran GAS on a portfolio selection problem and verified that the resulting
 #   objective value matched the optimum obtained by brute-force search.

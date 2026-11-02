@@ -17,39 +17,17 @@
 # tags: [algorithm, encoding, primitive]
 # ---
 #
+# ---
+# tags: [algorithm, encoding, primitive]
+# ---
+#
 # # Möttönen Amplitude Encoding
 #
 # This notebook prepares real and complex amplitude vectors with Qamomile's
 # explicit Möttönen construction, verifies the resulting states and gate counts,
 # and shows when to choose the method-specific API instead of generic amplitude
 # encoding.
-
-# %%
-# Install the latest Qamomile through pip!
-# # !pip install qamomile
-
-# %%
-import os
-
-import numpy as np
-from qiskit.quantum_info import Statevector
-
-import qamomile.circuit as qmc
-import qamomile.observable as qm_o
-from qamomile.circuit.stdlib import (
-    amplitude_encoding,
-    mottonen_amplitude_encoding,
-    mottonen_amplitude_encoding_from_angles,
-)
-from qamomile.linalg import (
-    compute_mottonen_amplitude_encoding_ry_angles,
-    compute_mottonen_amplitude_encoding_rz_angles,
-)
-from qamomile.qiskit import QiskitTranspiler
-
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-
-# %% [markdown]
+#
 # ## Background
 #
 # **Amplitude encoding** prepares an $n$-qubit state from a unit-norm complex
@@ -63,17 +41,10 @@ docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 # $$
 #
 # Möttönen amplitude encoding is one algorithm that realizes this
-# state-preparation map. Other algorithms can realize the same map, so Qamomile
-# provides one API that explicitly requests Möttönen's method and another that
-# requests state preparation without prescribing the method:
-#
-# - `mottonen_amplitude_encoding(...)` explicitly requests Qamomile's Möttönen
-#   construction. Use it when the decomposition, resource counts, or synthesis
-#   method are part of the program's intent.
-# - `amplitude_encoding(...)` expresses only the target state. An engine may use
-#   its native state-preparation operation. Qamomile currently uses the
-#   Möttönen construction as the portable fallback, but that fallback is not a
-#   method guarantee of the generic API.
+# state-preparation map. The current stdlib exposes one portable
+# `amplitude_encoding(...)` implementation, and that name means the explicit
+# Möttönen/Gray-walk construction described here. Target adapters do not
+# silently replace it with an unrelated native state-preparation method.
 #
 # The explicit implementation follows the uniformly controlled rotation
 # construction of Möttönen, Vartiainen, Bergholm, and Salomaa
@@ -85,6 +56,25 @@ docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 # If the input qubits are not in $|0\rangle^{\otimes n}$, neither API
 # generally guarantees the output state.
 # :::
+
+# %% [markdown]
+# ## Installation
+#
+# Install the Qamomile distribution:
+#
+# ```bash
+# pip install qamomile
+# ```
+
+# %%
+# Install the latest Qamomile through pip!
+# # !pip install qamomile
+
+# %%
+import math
+
+import qamomile as qm
+from qamomile.stdlib import amplitude_angles, amplitude_encoding_from_angles
 
 # %% [markdown]
 # ## Problem Settings
@@ -100,38 +90,8 @@ docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 # even if an engine chooses a different global phase.
 
 # %%
-transpiler = QiskitTranspiler()
-executor = transpiler.executor()
-
-ATOL_STATEVECTOR = 1e-8
-ATOL_SHOT = 0.05
-
-
-def fidelity(prepared: np.ndarray, target: np.ndarray) -> float:
-    """Return the phase-invariant fidelity between two statevectors."""
-    return float(np.abs(np.vdot(prepared, target)) ** 2)
-
-
-def normalize(amplitudes: list[float] | list[complex]) -> np.ndarray:
-    """Return a unit-norm copy of an amplitude vector."""
-    if any(isinstance(value, complex) for value in amplitudes):
-        array = np.asarray(amplitudes, dtype=complex)
-    else:
-        array = np.asarray(amplitudes, dtype=float)
-    return array / np.linalg.norm(array)
-
-
-def statevector_of(kernel: qmc.QKernel, **bindings) -> np.ndarray:
-    """Transpile a kernel and return its final statevector."""
-    circuit = transpiler.to_circuit(kernel, bindings=bindings or None)
-    stripped = circuit.remove_final_measurements(inplace=False)
-    assert stripped is not None
-    return Statevector.from_instruction(stripped).data
-
-
-amps_real = [1.0, 2.0, 3.0, 4.0]
-amps_signed = [1.0, -1.0, 1.0, -1.0]
-amps_complex = [1 + 0j, 1 + 1j, 1 - 1j, 0 + 2j]
+positive_amplitudes = (1.0, 2.0, 3.0, 4.0)
+signed_amplitudes = (1.0, -1.0, 1.0, -1.0)
 
 # %% [markdown]
 # ## Algorithm
@@ -162,329 +122,277 @@ amps_complex = [1 + 0j, 1 + 1j, 1 - 1j, 0 + 2j]
 # state-preparation half implemented here. Qamomile also retains the plain
 # per-stage decomposition instead of applying inter-cascade `CNOT`
 # cancellation.
+#
+# ### Derive reusable coordinates
+#
+# We prepare the two-qubit complex vector
+#
+# $$
+# (1,\;1+i,\;1-i,\;2i).
+# $$
+#
+# Its squared norm is nine, so the computational-basis probabilities are
+# $(1,2,2,4)/9$. `amplitude_angles` accepts the unnormalized vector and returns
+# an immutable value containing three $R_y$ angles, three $R_z$ angles, and one
+# retained global phase.
+
+# %%
+amplitudes = (
+    1.0 + 0.0j,
+    1.0 + 1.0j,
+    1.0 - 1.0j,
+    0.0 + 2.0j,
+)
+coordinates = amplitude_angles(amplitudes)
+
+assert coordinates.width == 2
+assert len(coordinates.ry) == 3
+assert len(coordinates.rz) == 3
+assert all(math.isfinite(value) for value in coordinates.ry)
+assert all(math.isfinite(value) for value in coordinates.rz)
+assert math.isfinite(coordinates.phase)
+print(coordinates)
+
+# %% [markdown]
+# Coordinate synthesis is host-side preprocessing over finite classical data.
+# It crosses one required Rust boundary and does not create a Python numerical
+# fallback. Invalid length, nonfinite input, the zero vector, or an excessive
+# width fails before QCore construction.
 
 # %% [markdown]
 # ## Implementation
 #
-# ### Bind amplitudes at transpile time
-#
-# A real or signed-real amplitude vector can be declared as a qkernel
-# `Vector[Float]` argument. When concrete values are supplied through
-# `bindings` at transpile time, Qamomile automatically normalizes the
-# amplitudes and generates the Möttönen angles and gate sequence.
-
-
-# %%
-@qmc.qkernel
-def prepare_from_amplitudes(
-    amplitudes: qmc.Vector[qmc.Float],
-) -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(2, "q")
-    q = mottonen_amplitude_encoding(q, amplitudes)
-    return qmc.measure(q)
-
-
-prepare_from_amplitudes.draw(fold_loops=False, amplitudes=amps_real)
-
-# %% [markdown]
-# The unexpanded circuit keeps the method-specific operation as one composite
-# gate. Passing `expand_composite=True` exposes its elementary $R_y$, $R_z$, and
-# `CNOT` sequence. The real circuit has no $R_z$ phase cascade.
-
-# %%
-prepare_from_amplitudes.draw(
-    fold_loops=False,
-    expand_composite=True,
-    amplitudes=amps_real,
-)
-
-# %% [markdown]
-# Because `Vector[Float]` holds only real values, a complex amplitude vector
-# cannot be bound directly. For complex input, compute the Möttönen angles
-# outside the qkernel and pass them to the angle API below as two
-# `Vector[Float]` arguments.
-#
-# Leaving `amplitudes` in `parameters` is also invalid because operations
-# such as `atan2(|a_1|, |a_0|)` need concrete values during tracing. For a
-# circuit that can be rebound at runtime, precompute the Möttönen angles and use
-# the angle API below.
-
-# %%
-try:
-    transpiler.transpile(prepare_from_amplitudes, parameters=["amplitudes"])
-except ValueError as exc:
-    print(f"ValueError: {exc}")
-    raised = True
-else:
-    raised = False
-assert raised, "expected ValueError when amplitudes is a runtime parameter"
-
-# %% [markdown]
 # ### Compile once with runtime-rebindable angles
 #
-# `mottonen_amplitude_encoding_from_angles(...)` takes the Möttönen angles
-# computed by the caller. Because those angles can remain runtime parameters, one
-# compiled circuit can prepare many amplitude vectors. The function emits the
-# elementary rotations and `CNOT` gates directly rather than wrapping them in a
-# composite operation.
-#
-# The previous name `amplitude_encoding_from_angles(...)` remains available as a
-# compatibility wrapper. New code should use the method-specific name because the
-# supplied angles and emitted gate sequence are specifically Möttönen's.
-
+# `amplitude_encoding_from_angles(2)` fixes only the two-qubit topology. The
+# coordinates remain aggregate runtime parameters, so one artifact can prepare
+# many vectors without recompilation. Their shapes are part of the function
+# type and the generated launch ABI.
 
 # %%
-@qmc.qkernel
-def prepare_from_angles(
-    ry_angles: qmc.Vector[qmc.Float], rz_angles: qmc.Vector[qmc.Float]
-) -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(2, "q")
-    q = mottonen_amplitude_encoding_from_angles(q, ry_angles, rz_angles)
-    return qmc.measure(q)
+encode = amplitude_encoding_from_angles(2)
 
 
-complex_ry_angles = compute_mottonen_amplitude_encoding_ry_angles(amps_complex).tolist()
-complex_rz_angles = compute_mottonen_amplitude_encoding_rz_angles(amps_complex).tolist()
+@qm.qkernel
+def prepared_state(
+    ry_angles: qm.Param[qm.Vector[qm.Real, 3]],
+    rz_angles: qm.Param[qm.Vector[qm.Real, 3]],
+    phase: qm.Param[qm.Real],
+) -> qm.Q[qm.Bits[2]]:
+    """Prepare one two-qubit state from Möttönen coordinates.
 
-prepare_from_angles.draw(
-    fold_loops=False,
-    ry_angles=complex_ry_angles,
-    rz_angles=complex_rz_angles,
-)
+    Args:
+        ry_angles (qm.Param[qm.Vector[qm.Real, 3]]): Magnitude-cascade angles.
+        rz_angles (qm.Param[qm.Vector[qm.Real, 3]]): Relative-phase angles.
+        phase (qm.Param[qm.Real]): Retained global phase.
+
+    Returns:
+        qm.Q[qm.Bits[2]]: Prepared two-qubit state.
+    """
+
+    return encode(qm.qubits(2), ry_angles, rz_angles, phase)
+
+
+@qm.qkernel
+def prepared_samples(
+    ry_angles: qm.Param[qm.Vector[qm.Real, 3]],
+    rz_angles: qm.Param[qm.Vector[qm.Real, 3]],
+    phase: qm.Param[qm.Real],
+) -> qm.Shot[qm.Bits[2]]:
+    """Measure the reusable two-qubit preparation.
+
+    Args:
+        ry_angles (qm.Param[qm.Vector[qm.Real, 3]]): Magnitude-cascade angles.
+        rz_angles (qm.Param[qm.Vector[qm.Real, 3]]): Relative-phase angles.
+        phase (qm.Param[qm.Real]): Retained global phase.
+
+    Returns:
+        qm.Shot[qm.Bits[2]]: Sampled computational-basis state.
+    """
+
+    return qm.measure(prepared_state(ry_angles, rz_angles, phase))
+
+
+# %% [markdown]
+# For a vector fixed at compile time, `amplitude_encoding(amplitudes)` returns a
+# closed unary transform instead. Both forms use the same Rust coordinates and
+# ordinary gate vocabulary; choose the runtime form only when artifact reuse is
+# useful.
 
 # %% [markdown]
 # ### Build kernels for resource checks
 #
-# These helpers create real and complex Möttönen circuits over several register
-# sizes. Using the explicit API ensures that engine-native state preparation
-# cannot change the construction whose resources we are measuring.
-
+# The verified program contains no amplitude-preparation opcode. Resource
+# analysis composes its ordinary rotations and controlled operations directly.
 
 # %%
-def make_real_kernel(n_qubits: int) -> qmc.QKernel:
-    """Build a real-input Möttönen state-preparation kernel."""
+program = qm.specialize(prepared_samples)
+study = qm.resources.logical(program)
+inspection = program.inspect()
 
-    @qmc.qkernel
-    def kernel(amplitudes: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
-        q = qmc.qubit_array(n_qubits, "q")
-        q = mottonen_amplitude_encoding(q, amplitudes)
-        return qmc.measure(q)
+assert "quantum.amplitude" not in inspection
+assert study.metric(qm.resources.LOGICAL_ROTATION_GATES).numeric_enclosure() == (
+    6,
+    6,
+)
+assert study.metric(
+    qm.resources.logical_operation_count("quantum.cx")
+).numeric_enclosure() == (4, 4)
 
-    return kernel
-
-
-def make_complex_kernel(n_qubits: int) -> qmc.QKernel:
-    """Build a complex-input Möttönen state-preparation kernel."""
-
-    @qmc.qkernel
-    def kernel(
-        ry_angles: qmc.Vector[qmc.Float],
-        rz_angles: qmc.Vector[qmc.Float],
-    ) -> qmc.Vector[qmc.Bit]:
-        q = qmc.qubit_array(n_qubits, "q")
-        q = mottonen_amplitude_encoding_from_angles(q, ry_angles, rz_angles)
-        return qmc.measure(q)
-
-    return kernel
-
+# %% [markdown]
+# A general $n$-qubit complex preparation uses $2(2^n-1)$ rotations and
+# $2(2^n-2)$ `CX` gates in this decomposition. The exponential cost is visible
+# in the estimate rather than hidden behind a backend-native instruction.
 
 # %% [markdown]
 # ## Result
 #
-# ### State fidelity
+# ### State magnitudes
 #
-# Real and signed-real inputs use amplitude `bindings`, while the complex
-# input uses angle `bindings`. All three reproduce their normalized target up
-# to global phase.
+# Compilation seals the three aggregate parameter slots. `bindings()` produces
+# exactly the matching launch mapping, including the global phase.
 
 # %%
-for label, target_amplitudes in (
-    ("real", amps_real),
-    ("signed real", amps_signed),
-):
-    prepared = statevector_of(
-        prepare_from_amplitudes,
-        amplitudes=target_amplitudes,
-    )
-    target = normalize(target_amplitudes)
-    value = fidelity(prepared, target)
-    print(f"{label:>11s} fidelity = {value:.8f}")
-    assert np.isclose(value, 1.0, atol=ATOL_STATEVECTOR)
-
-prepared_complex = statevector_of(
-    prepare_from_angles,
-    ry_angles=complex_ry_angles,
-    rz_angles=complex_rz_angles,
+reference = qm.Reference()
+artifact = qm.compile(program, to=reference)
+parameters = coordinates.bindings()
+record = qm.run(
+    artifact,
+    on=reference,
+    parameters=parameters,
+    shots=128,
+    seed=2,
 )
-complex_fidelity = fidelity(prepared_complex, normalize(amps_complex))
-print(f"{'complex':>11s} fidelity = {complex_fidelity:.8f}")
-assert np.isclose(complex_fidelity, 1.0, atol=ATOL_STATEVECTOR)
+
+assert tuple(slot.name for slot in artifact.parameter_abi.slots) == (
+    "ry_angles",
+    "rz_angles",
+    "phase",
+)
+assert record.result.shots == 128
+assert sum(record.result.counts.values()) == 128
+
+expected_probabilities = {
+    (0, 0): 1.0 / 9.0,
+    (1, 0): 2.0 / 9.0,
+    (0, 1): 2.0 / 9.0,
+    (1, 1): 4.0 / 9.0,
+}
+for bits, expected in expected_probabilities.items():
+    sampling_bound = 5.0 * math.sqrt(expected * (1.0 - expected) / record.result.shots)
+    assert abs(record.result.probability(bits) - expected) <= sampling_bound
+
+observed_probabilities = {
+    bits: record.result.probability(bits) for bits in expected_probabilities
+}
+print("sampled probabilities:", observed_probabilities)
 
 # %% [markdown]
 # ### Runtime rebinding
 #
-# The compiled two-qubit complex circuit has six runtime rotation parameters:
-# three $R_y$ angles and three $R_z$ angles. We reuse it for three target vectors
-# and compare the sampled probabilities with $|a_i|^2$.
+# The same artifact can prepare all three targets because only the six
+# rotation angles and global phase change. Structure, result ABI, and target
+# payload stay fixed.
 
 # %%
-executable = transpiler.transpile(
-    prepare_from_angles, parameters=["ry_angles", "rz_angles"]
-)
-n_runtime_params = len(executable.compiled_quantum[0].circuit.parameters)
-print(f"runtime parameters in compiled circuit: {n_runtime_params}")
-assert n_runtime_params == 2 * (2**2 - 1)
-
-shots = 1 if docs_test_mode else 8192
 for trial_amplitudes in (
-    [1.0, 0.0, 0.0, 1.0],
-    [3.0, 4.0, 0.0, 0.0],
-    [1 + 0j, 1j, -1 + 0j, -1j],
+    positive_amplitudes,
+    signed_amplitudes,
+    amplitudes,
 ):
-    ry_values = compute_mottonen_amplitude_encoding_ry_angles(trial_amplitudes).tolist()
-    rz_values = compute_mottonen_amplitude_encoding_rz_angles(trial_amplitudes).tolist()
-    counts = (
-        executable.sample(
-            executor,
-            shots=shots,
-            bindings={"ry_angles": ry_values, "rz_angles": rz_values},
-        )
-        .result()
-        .results
+    trial_coordinates = amplitude_angles(trial_amplitudes)
+    trial_record = qm.run(
+        artifact,
+        on=reference,
+        parameters=trial_coordinates.bindings(),
+        shots=128,
+        seed=3,
     )
-    observed = np.zeros(4)
-    for bits, count in counts:
-        index = sum(int(bit) << i for i, bit in enumerate(bits))
-        observed[index] = count / shots
-    expected_probabilities = np.abs(normalize(trial_amplitudes)) ** 2
-    max_deviation = float(np.max(np.abs(observed - expected_probabilities)))
-    print(f"amps={str(trial_amplitudes):<48s} max|p_obs - p_exp| = {max_deviation:.4f}")
-    assert sum(count for _, count in counts) == shots
-    if not docs_test_mode:
-        assert max_deviation < ATOL_SHOT
+    norm = sum(abs(value) ** 2 for value in trial_amplitudes)
+    for index, value in enumerate(trial_amplitudes):
+        bits = (index & 1, (index >> 1) & 1)
+        expected = abs(value) ** 2 / norm
+        bound = 5.0 * math.sqrt(expected * (1.0 - expected) / trial_record.result.shots)
+        assert abs(trial_record.result.probability(bits) - expected) <= bound
 
 # %% [markdown]
-# ### Resource formula
+# Sampling checks magnitudes. Sign and complex phase require an interference
+# witness, which is why the next section evaluates observables as well.
+
+# %% [markdown]
+# ## Verify relative phase
 #
-# `estimate_resources()` expands the composite metadata and agrees with the
-# Möttönen formulas for every tested register size.
+# Computational-basis probabilities cannot distinguish complex phases. The
+# observable $Y_0X_1$ has exact expectation $8/9$ for this vector, so it gives a
+# phase-sensitive witness using the same `prepared_state` implementation.
 
 # %%
-print(f"{'n':>3s} | {'real(rot/CNOT)':>16s} | {'complex(rot/CNOT)':>20s}")
-print(f"{'---':>3s} | {'---':>16s} | {'---':>20s}")
-for n_qubits in (2, 3, 4, 5):
-    real_amplitudes = np.ones(2**n_qubits).tolist()
-    complex_amplitudes = (np.ones(2**n_qubits) + 1j * np.arange(2**n_qubits)).tolist()
-    real_resources = qmc.estimate_resources(
-        make_real_kernel(n_qubits).build(amplitudes=real_amplitudes)
-    )
-    complex_resources = qmc.estimate_resources(
-        make_complex_kernel(n_qubits).build(
-            ry_angles=compute_mottonen_amplitude_encoding_ry_angles(
-                complex_amplitudes
-            ).tolist(),
-            rz_angles=compute_mottonen_amplitude_encoding_rz_angles(
-                complex_amplitudes
-            ).tolist(),
-        )
-    )
-    real_rotations = int(real_resources.gates.rotation_gates)
-    real_cnots = int(real_resources.gates.two_qubit)
-    complex_rotations = int(complex_resources.gates.rotation_gates)
-    complex_cnots = int(complex_resources.gates.two_qubit)
-    print(
-        f"{n_qubits:>3d} | "
-        f"{f'{real_rotations} / {real_cnots}':>16s} | "
-        f"{f'{complex_rotations} / {complex_cnots}':>20s}"
-    )
-
-    assert real_rotations == 2**n_qubits - 1
-    assert real_cnots == 2**n_qubits - 2
-    assert complex_rotations == 2 * (2**n_qubits - 1)
-    assert complex_cnots == 2 * (2**n_qubits - 2)
-
-# %% [markdown]
-# Both rotation and `CNOT` counts grow as $O(2^n)$ in the number of qubits.
-# This exponential circuit cost is an important constraint when choosing
-# amplitude encoding for larger classical vectors.
-
-# %% [markdown]
-# ### Composition with an observable
-#
-# The explicit state-preparation operation composes with the rest of a qkernel.
-# For $(1, 2, 3, 4)$ in Qamomile's little-endian ordering,
-#
-# $$
-# \langle Z_0 \rangle
-# = \frac{1 + 9 - 4 - 16}{30}
-# = -\frac{1}{3}.
-# $$
-
-
-# %%
-@qmc.qkernel
-def expval_kernel(
-    amplitudes: qmc.Vector[qmc.Float],
-    observable: qmc.Observable,
-) -> qmc.Float:
-    q = qmc.qubit_array(2, "q")
-    q = mottonen_amplitude_encoding(q, amplitudes)
-    return qmc.expval(q, observable)
-
-
-hamiltonian = qm_o.Z(0) + 0.0 * qm_o.Z(1)
-expval_executable = transpiler.transpile(
-    expval_kernel,
-    bindings={"amplitudes": amps_real, "observable": hamiltonian},
+phase_witness = qm.expectation(
+    prepared_state,
+    qm.Y(0) * qm.X(1),
+    on=reference,
+    parameters=parameters,
+    shots=64,
+    seed=2,
 )
-expval_result = expval_executable.run(executor).result()
-print(f"<Z_0> = {float(expval_result):+.6f}")
-assert np.isclose(float(expval_result), -1.0 / 3.0, atol=ATOL_STATEVECTOR)
+expected_phase_witness = 8.0 / 9.0
+phase_sampling_bound = 5.0 * math.sqrt(
+    (1.0 - expected_phase_witness**2) / phase_witness.shots
+)
 
-# %% [markdown]
-# ## Qamomile Built-ins
-#
-# Qamomile provides both generic and method-specific state-preparation helpers.
-# Choose between them according to whether only the prepared state or also the
-# synthesis method belongs to the program's contract:
-#
-# | Goal | API |
-# |---|---|
-# | Prepare a target state and allow engine-native synthesis | `amplitude_encoding(q, amplitudes)` |
-# | Require Qamomile's Möttönen construction | `mottonen_amplitude_encoding(q, amplitudes)` |
-# | Bind real amplitudes at transpile time while retaining the Möttönen method | `mottonen_amplitude_encoding(q, amps)` with `bindings={"amps": [...]}` |
-# | Reuse one Möttönen circuit with runtime angle bindings | `mottonen_amplitude_encoding_from_angles(q, ry, rz)` with `parameters=[...]` |
-# | Keep existing code working during migration | `amplitude_encoding_from_angles(...)` (compatibility wrapper) |
-#
-# The generic and explicit amplitude APIs prepare the same target state, but a
-# engine is free to realize only the generic operation with a different
-# state-preparation synthesis.
-
+assert abs(phase_witness.value - expected_phase_witness) <= phase_sampling_bound
+print(f"<Y0 X1>: {phase_witness.value:.3f}")
 
 # %%
-@qmc.qkernel
-def prepare_generic(
-    amplitudes: qmc.Vector[qmc.Float],
-) -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(2, "q")
-    q = amplitude_encoding(q, amplitudes)
-    return qmc.measure(q)
-
-
-generic_state = statevector_of(prepare_generic, amplitudes=amps_real)
-assert np.isclose(
-    fidelity(generic_state, normalize(amps_real)), 1.0, atol=ATOL_STATEVECTOR
+positive_coordinates = amplitude_angles(positive_amplitudes)
+signed_coordinates = amplitude_angles(signed_amplitudes)
+positive_witness = qm.expectation(
+    prepared_state,
+    qm.Z(0),
+    on=reference,
+    parameters=positive_coordinates.bindings(),
+    shots=64,
+    seed=4,
 )
+signed_witness = qm.expectation(
+    prepared_state,
+    qm.X(0),
+    on=reference,
+    parameters=signed_coordinates.bindings(),
+    shots=64,
+    seed=4,
+)
+
+assert abs(positive_witness.value + 1.0 / 3.0) <= 5.0 * math.sqrt(
+    (1.0 - (1.0 / 3.0) ** 2) / positive_witness.shots
+)
+assert abs(signed_witness.value + 1.0) <= 0.1
+
+# %% [markdown]
+# For $(1,2,3,4)$, $\langle Z_0\rangle=-1/3$. For
+# $(1,-1,1,-1)$, $\langle X_0\rangle=-1$, which proves that the negative signs
+# survive even though computational-basis probabilities cannot see them.
+
+# %% [markdown]
+# ## Fixed amplitudes versus reusable angles
+#
+# `amplitude_encoding(amplitudes)` computes and closes the coordinates at
+# Python factory time. Use it when the target vector is part of program
+# structure. `amplitude_encoding_from_angles(width)` fixes only the topology and
+# leaves typed angle vectors in the runtime ABI, as this page does. Both are the
+# same Möttönen synthesis and therefore have the same gate-count formulas.
 
 # %% [markdown]
 # ## Summary
 #
-# In this notebook, we:
+# - Rust owns normalization, exact-phase coordinates, Gray-walk topology, and
+#   width budgets.
+# - Aggregate `Param[Vector[Real, 3]]` annotations make the reusable ABI typed.
+# - The program is ordinary `RY`, `RZ`, `CX`, and global-phase composition.
+# - The same source supports exact logical resources, compilation, sampling,
+#   and phase-sensitive expectation values.
+# - One artifact is rebound across positive, signed-real, and complex targets.
+# - All executable evidence stays at two qubits; wider scaling is symbolic.
 #
-# - Passed real amplitudes and Möttönen angles as qkernel arguments and checked
-#   unit fidelity for real and complex states.
-# - Verified the $O(2^n)$ rotation and `CNOT` counts of Qamomile's construction.
-# - Reused one compiled circuit through the canonical
-#   `mottonen_amplitude_encoding_from_angles(...)` API.
-# - Distinguished method-agnostic `amplitude_encoding(...)` from the
-#   method-specific APIs used when Möttönen synthesis is part of the intent.
+# Next, [Multidimensional QFT](multidimensional_qft.ipynb) composes state
+# preparation with independent Fourier transforms along two logical axes.

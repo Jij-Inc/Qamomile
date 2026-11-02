@@ -19,332 +19,399 @@
 #
 # # Your First Quantum Kernel
 #
-# This chapter introduces the basic workflow for a first-time Qamomile user to define and run a quantum kernel. Note that this chapter does not dive into quantum computing fundamentals or quantum algorithm details.
+# This chapter introduces the basic workflow for defining and running your first quantum kernel in Qamomile. It does not go into the fundamentals of quantum computing or the details of quantum algorithms.
 #
 # ## What is Qamomile?
 #
-# Qamomile is a quantum circuit SDK that lets you write quantum programs in Python, then run them on any supported quantum SDK (Qiskit, QuriParts, and more in plan). It uses a **typed, symbolic** approach: you write a Python function decorated with `@qkernel`, and Qamomile traces it into an intermediate representation that can be analyzed, visualized, and transpiled.
+# Qamomile is a source-compiled functional quantum programming language embedded in Python.
 #
-# The core workflow is a simple pipeline:
+# You define a quantum kernel by decorating a Python function with `@qm.qkernel`. Type annotations are required for a quantum kernel’s arguments and return value. Qamomile uses those annotations to check type consistency before execution.
 #
-# ```
-# @qkernel define  →  draw() / estimate_resources()  →  transpile()  →  sample() / run()  →  .result()
-# ```
+# Qamomile reads the kernel’s source code, validates it, and converts it into an intermediate representation that can be analyzed, saved, and compiled for supported quantum SDKs such as Qiskit, QURI Parts, and CUDA-Q.
 #
-# - **Define**: Write a qkernel function with type annotations.
-# - **Inspect**: Visualize the circuit with `draw()`, or estimate costs with `estimate_resources()`.
-# - **Transpile**: Transpile the qkernel into an executable for your chosen quantum SDK.
-# - **Execute**: Run it with `sample()` (for measured bits) or `run()` (for expectation values).
-# - **Read results**: Call `.result()` to get the output.
+# Qamomile can also handle expressions symbolically, allowing them to contain parameters whose values are not yet specified.
 #
-# You do not need every step every time — use what fits your task.
+# The basic workflow for the examples in this chapter is:
+#
+# - **Define:** Write a type-annotated Python function decorated with `@qm.qkernel`.
+# - **Run:** Use `record = qm.run(...)` to compile and execute the kernel and receive a `RunRecord` containing the execution result.
+# - **Read the result:** Use `record.result` to retrieve the result of the run.
+#
+# The same quantum kernel can be used both to run a computation and to estimate requirements such as qubit counts and logical gate counts before execution. Qamomile also provides explicit compilation and tools for examining a program before compilation. We will explore these after completing the basic workflow.
 
 # %% [markdown]
 # ## Installation
 #
-# For normal use:
+# This tutorial uses Qiskit Aer to simulate quantum computations. No quantum hardware is needed.
 #
-# ```bash
-# pip install "qamomile[qiskit,visualization]"
-# ```
-#
-# In this tutorial we use Qiskit as the concrete quantum SDK. QuriParts is also supported, and more quantum SDKs will be added over time.
+# Remove the leading `#` from the following line and run the cell to install Qamomile together with Qiskit and Aer:
 
 # %%
-# Install the latest Qamomile through pip!
-# # !pip install "qamomile[qiskit,visualization]"
+# # !pip install "qamomile[qiskit]"
 
 # %%
 import math
 import os
 
-import qamomile.circuit as qmc
-from qamomile.qiskit import QiskitTranspiler
+import qamomile as qm
+from qamomile.qiskit import Aer, load_circuit
 
-transpiler = QiskitTranspiler()
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 sample_shots = 1 if docs_test_mode else 256
 
 # %% [markdown]
-# ## First QKernel: The Biased Coin
+# ## Basic Workflow
 #
-# A **QKernel** is a Python function decorated with `@qmc.qkernel`. It describes a quantum circuit using typed handles and gate operations.
-# > A handle is an "identifier" or "token" that indirectly references some resource or object.
+# ### First QKernel: The Biased Coin
 #
-# Let's build the simplest possible example: a single qubit rotated by an angle `theta`, then measured. Depending on `theta`, the qubit is biased toward `0` or `1` — like a biased coin.
+# A **QKernel** in Qamomile is a Python function decorated with `@qm.qkernel`. It describes a quantum computation using typed values and gate operations.
+#
+# Let's start with a simple example: rotate a single qubit by an angle `theta`, then measure it. By changing `theta`, we can change the probabilities of measuring `0` or `1`, much like adjusting the bias of a coin.
 
 
 # %%
-@qmc.qkernel
-def biased_coin(theta: qmc.Float) -> qmc.Bit:
-    # Create a single qubit handle named "q"
-    q = qmc.qubit(name="q")
+@qm.qkernel
+def biased_coin(
+    theta: qm.Param[qm.Real],
+) -> qm.Shot[qm.Bits[1]]:  # type: ignore[valid-type]
+    # Create a single owned quantum state.
+    state = qm.qubits(1)
 
-    # Apply an RY rotation — this biases the qubit
-    q = qmc.ry(q, theta)
+    # Apply an RY rotation. This biases the measured result.
+    state = qm.ry(state, theta)
 
-    # Measure and return the result as a classical Bit
-    return qmc.measure(q)
+    # Measure and return one classical bit.
+    return qm.measure(state)
 
-
-# %% [markdown]
-# Key things to notice:
-#
-# - **Type annotations are required**. `theta: qmc.Float` says theta is a
-#   floating-point parameter. The return type `qmc.Bit` says this qkernel
-#   produces one classical bit.
-# - `qmc.qubit(name="q")` creates a qubit handle. The `name` appears
-#   in circuit diagrams.
-# - `q = qmc.ry(q, theta)` applies the RY gate and reassigns `q`.
-#   This reassignment is important — we will explain why shortly.
-# - **`qmc.measure(q)`** measures the qubit state and returns a `Bit`.
 
 # %% [markdown]
-# ## Inspect Before Running
+# :::{note}
+# Some Python type checkers do not recognize `qm.Shot[qm.Bits[1]]` as a valid type annotation. The `# type: ignore[valid-type]` comment suppresses that message on this line without changing how the kernel runs or disabling Qamomile's own type checking.
+# :::
 #
-# Before executing, you can inspect your qkernel. `draw()` shows the circuit diagram:
+# **Key things to notice:**
 #
-# > **Note**: `draw()` visualizes the circuit at Qamomile's IR level. When transpiling to a quantum SDK (e.g., Qiskit), the gates may be decomposed or optimized through the transpiling process, so the actual executed circuit can differ from what `draw()` shows. Use `transpiler.to_circuit()` to see the circuit in the target SDK's format.
+# - **Type annotations are required.** In `theta: qm.Param[qm.Real]`, `qm.Real` specifies the value’s type (a floating-point number), while `qm.Param[...]` indicates that its value is supplied at execution time. This lets you choose a rotation angle `theta` for each run. The return type `qm.Shot[qm.Bits[1]]` indicates that this kernel returns a one-bit value from each execution (shot). In this example, that value is the measurement result returned by `qm.measure(state)`.
+# - `qm.qubits(1)` creates a one-qubit quantum state.
+# - `state = qm.ry(state, theta)` applies an RY rotation and receives the updated state under the same variable name, `state`. Subsequent operations use this updated value; the old value passed to the gate cannot be reused.
+# - `qm.measure(state)` measures the qubit and returns a classical bit.
+
+# %% [markdown]
+# ### Run the Kernel
+#
+# In this example, `parameters` specifies the rotation angle `theta`, and `shots` specifies how many times to repeat the computation.
+#
+# We can pass `biased_coin` directly to `qm.run(...)`. Qamomile handles the necessary validation and compilation internally.
+#
+# Here, `Aer()` creates an endpoint for the Qiskit Aer simulator. An endpoint specifies where the computation will run.
+
+# %% [markdown]
+# :::{note}
+# A kernel passed to `qm.run(...)` must have classical inputs and outputs, including any nested values. The caller receives classical data, such as measurement results, as the computation’s output. Within a kernel, calls to other quantum kernels can pass quantum states as arguments and return values.
+#
+# Classical computation and branching on measurement results within a single execution (shot) can be written inside a quantum kernel. Results from multiple shots are aggregated outside the kernel. [Tutorial 05](05_execution_models.ipynb) introduces `statistics` and `Estimator` for statistical analysis and expectation-value estimation.
+# :::
 
 # %%
-biased_coin.draw(theta=0.6)
+# Choose an execution endpoint.
+endpoint = Aer()
 
-# %% [markdown]
-# You can also check the cost of a qkernel before running it. `estimate_resources()` reports qubit count and gate counts:
-
-# %%
-est = biased_coin.estimate_resources()
-print("qubits:", est.qubits)
-assert est.qubits == 1
-print("total gates:", est.gates.total)
-assert est.gates.total == 1
-
-# %% [markdown]
-# For this simple qkernel the numbers are concrete, but for parameterized qkernels they become symbolic SymPy expressions — we will explore this in detail in [Tutorial 02](02_parameterized_kernels.ipynb).
-
-# %% [markdown]
-# ## The Execution Pipeline
-#
-# Now let's actually run this qkernel. The process has three steps:
-#
-# 1. **Transpile**: Transpile the qkernel into an executable object with a user-specific quantum SDK.
-# 2. **Execute**: Call `sample()` to run it with specific parameter values.
-# 3. **Read results**: Call `.result()` on the returned Job.
-#
-# Here is the code, then we explain each part:
-
-# %%
-# Step 1: Transpile
-# parameters=["theta"] tells the transpiler: "theta will be provided later,
-# keep it as a sweepable parameter in the transpiled circuit."
-exe = transpiler.transpile(biased_coin, parameters=["theta"])
-
-# Step 2: Execute
-# bindings={"theta": ...} provides the concrete value for theta.
-# shots=256 means we run the circuit 256 times.
-# The default executor (transpiler.executor()) uses a local simulator, but you can plug in
-# your own custom executor (e.g., for real hardware or cloud services).
-job = exe.sample(
-    transpiler.executor(),
+# Run the circuit sample_shots times.
+record = qm.run(
+    biased_coin,
+    on=endpoint,
+    parameters={"theta": math.pi / 4},
     shots=sample_shots,
-    bindings={"theta": math.pi / 4},
+    seed=7,
 )
 
-# Step 3: Read results
-# .result() blocks until the job completes and returns a SampleResult.
-result = job.result()
+# Retrieve the SampleResult containing the measurements.
+result = record.result
 
-print("sample results:", result.results)
+print("sample counts:", result.counts)
 assert result.shots == sample_shots
-assert sum(count for _, count in result.results) == sample_shots
+assert sum(result.counts.values()) == sample_shots
 
 # %% [markdown]
-# Let's unpack the three concepts:
+# Let's look at the key parts:
 #
-# - **`parameters=["theta"]`** at transpile time declares which qkernel inputs
-#   remain as tunable knobs in the transpiled program. Inputs *not* listed here
-#   must be provided via `bindings` at transpile time (we will see this in Tutorial 02).
+# - **`parameters={"theta": math.pi / 4}`** sets the rotation angle to π/4 radians for this run.
 #
-# - **`bindings={"theta": math.pi / 4}`** at execution time fills in the
-#   concrete value for the parameter.
-#   The default executor uses a local simulator,
-#   but you may swap in a custom executor (e.g., real hardware or
-#   a cloud service) without changing your code.
+# - **`shots=sample_shots`** specifies how many times to repeat the computation. With `sample_shots` set to 256, this example produces 256 measurement results, each containing one classical bit.
 #
-# - **`.result()`**: `sample()` returns a **Job** object, not the result
-#   directly. Calling `.result()` waits for the job to finish and returns a
-#   `SampleResult`.
+# - **`seed=7`** sets the simulator's random seed, making repeated runs with the same settings reproducible.
+#
+# - **`record.result`** provides the execution result. `qm.run(...)` waits for execution to finish before returning a `RunRecord`. In this example, its result is a `SampleResult` containing measurement results in Qamomile’s data format.
+#
+# In this example, you can specify `theta` for each run. [Tutorial 02](02_parameterized_kernels.ipynb) explains the parameter types and when their values are supplied.
 
 # %% [markdown]
-# ## Reading `SampleResult`
+# ### Reading `SampleResult`
 #
-# `result.results` is a `list[tuple[T, int]]` where:
+# In the previous section, we assigned `record.result` to `result`. For this kernel, `result` is an instance of `SampleResult`, which holds measurement results in Qamomile’s data format. Its properties and methods let us read measurement counts, find the most common outcome, and estimate probabilities.
 #
-# - `T` is the measured output type (here, `int` — `0` or `1` for a `Bit`)
-# - `int` is the count: how many times that outcome appeared
+# Let's start with `result.counts`, a read-only mapping where:
 #
-# For example, `[(0, 150), (1, 106)]` means outcome `0` appeared 150 times and outcome `1` appeared 106 times out of 256 shots.
+# - Each key is a measured outcome, represented as a tuple of bits. Here, the one-bit outcomes are `(0,)` and `(1,)`.
+# - Each value is the number of shots that produced that outcome.
+#
+# For example, `{(0,): 214, (1,): 42}` means that `0` was measured 214 times and `1` was measured 42 times, for a total of 256 shots.
 
 # %%
-for value, count in result.results:
+for value, count in result.counts.items():
     print(f"  outcome={value}, count={count}")
 
 # %% [markdown]
-# `SampleResult` also provides convenience methods:
+# You can also use `SampleResult` to summarize and interpret the results:
+#
+# - **`result.most_likely`** returns the most frequently observed outcome.
+# - **`result.probability((1,))`** estimates the probability of measuring `1` by dividing its count by the total number of shots.
+# - **`result.values`** provides a read-only mapping from decoded outcomes to their counts, using the kernel's declared return type. For this kernel, it has the same contents as `result.counts`.
 
 # %%
-# Most common outcome
-print("most common:", result.most_common(1))
+# Most common outcome, with deterministic tie breaking.
+print("most likely:", result.most_likely)
 
-# Probability distribution
-print("probabilities:", result.probabilities())
+# Estimated probability of measuring 1.
+print("P(1):", result.probability((1,)))
+
+# Counts decoded according to the kernel's return type.
+print("typed values:", result.values)
 
 # %% [markdown]
-# ## Inspecting the Transpiled Circuit
+# ## Additional Features
 #
-# `to_circuit()` transpiles a qkernel with **all** parameters bound and returns the quantum SDK-native circuit (e.g., a Qiskit `QuantumCircuit`). This is useful for debugging — you can see exactly how the circuit looks in the target SDK.
+# The basic workflow is now complete. The following sections use the same kernel to show how to compile it separately, examine it before compilation, and inspect the resulting circuit.
+#
+# ### Compile Explicitly
+#
+# `qm.compile(...)` accepts a quantum kernel and returns a compiled program that can be reused for multiple runs. In the example below, we pass `biased_coin` and store the returned `CompiledProgram` instance in `artifact`. This `artifact` can be passed to `qm.run(...)`.
+#
+# `endpoint.target` specifies the format and settings required by the endpoint. Here, it selects compilation for Qiskit Aer.
 
 # %%
-qiskit_circuit = transpiler.to_circuit(
-    biased_coin,
-    bindings={"theta": math.pi / 4},
+artifact = qm.compile(biased_coin, to=endpoint.target)
+compiled_record = qm.run(
+    artifact,
+    on=endpoint,
+    parameters={"theta": math.pi / 4},
+    shots=sample_shots,
+    seed=7,
 )
+assert compiled_record.result.counts == result.counts
+
+# %% [markdown]
+# The compiled `artifact` retains `theta` as a parameter. You can reuse it with a different rotation angle by changing `parameters` in `qm.run(...)`.
+#
+# If another endpoint requires a different compilation target, compile the kernel for that target before running it.
+
+# %% [markdown]
+# ### Before You Compile
+#
+# Before compiling a kernel, you can validate it, look at the program it describes, and estimate its resource requirements. You can do this without choosing a backend or running the quantum computation.
+#
+# #### Validate the Kernel
+#
+# `qm.specialize(...)` applies the supplied `Const` inputs and creates a verified `Program`, checking types and quantum-state usage. This is useful when you want to examine the program before compilation.
+
+# %%
+program = qm.specialize(biased_coin)
+
+# %% [markdown]
+# Here, `biased_coin` has no `Const` inputs, so no additional values are needed. A separate call to `qm.specialize(...)` is optional: when a kernel is passed directly to `qm.compile(...)`, specialization and validation happen internally. You can also compile the resulting `Program` by writing `qm.compile(program, to=endpoint.target)`.
+#
+# #### Look at the Program
+#
+# `program.inspect()` shows the program’s operations and types as text. `qm.resources.logical(program)` estimates requirements such as qubit counts and logical gate counts. We will focus on resource estimation in the example below.
+
+# %% [markdown]
+# #### Estimate Resources
+#
+# `qm.resources.logical(program)` estimates the program’s logical resource requirements. Here, we check the maximum number of qubits in use at once and the number of logical gates:
+
+# %%
+study = qm.resources.logical(program)
+peak_qubits = study.metric(qm.resources.LOGICAL_PEAK_QUBITS)
+logical_gates = study.metric(qm.resources.LOGICAL_GATES)
+
+print("peak logical qubits:", peak_qubits)
+assert peak_qubits.numeric_enclosure() == (1, 1)
+print("logical gates:", logical_gates)
+assert logical_gates.numeric_enclosure() == (1, 1)
+
+# %% [markdown]
+# This kernel uses one qubit and one logical gate: the RY rotation. These are logical resource estimates; they do not include the physical resources needed to run on a particular quantum computer. See [Resource Estimation](04_resource_estimation.ipynb) for more detail.
+
+# %% [markdown]
+# ### Inspecting the Compiled Circuit
+#
+# You can also look at the circuit produced by compilation. `load_circuit(artifact)`, imported from `qamomile.qiskit`, returns a copy of the Qiskit circuit stored in the compiled artifact.
+#
+# In the code below, `qiskit_circuit` is an instance of Qiskit's `QuantumCircuit`. Printing it shows the circuit's gates and measurements, which is useful for checking its structure and debugging.
+
+# %%
+qiskit_circuit = load_circuit(artifact)
 print(qiskit_circuit)
 assert qiskit_circuit.num_qubits == 1
 assert qiskit_circuit.num_clbits == 1
 
 # %% [markdown]
-# ## Multi-Qubit Example
+# In the printed circuit, `p0` represents the kernel's `theta` parameter. The compiled circuit keeps this parameter symbolic even after a run; `qm.run(...)` supplies its value for each execution.
+
+# %% [markdown]
+# ### Multi-Qubit Example
 #
-# Let's use more than one qubit. This example introduces two new things:
+# Let's extend the example to two qubits. We will apply a Hadamard gate to the first qubit, followed by a CNOT gate, then measure both qubits.
+
+
+# %%
+@qm.qkernel
+def two_qubit_demo() -> qm.Shot[qm.Bits[2]]:  # type: ignore[valid-type]
+    state = qm.qubits(2)
+    state = qm.h(state, target=0)
+    state = qm.cx(state, control=0, target=1)
+    return qm.measure(state)
+
+
+# %% [markdown]
+# Here, `qm.qubits(2)` creates a state containing two qubits. Qubit indices start at zero:
 #
-# - **`qubit_array(n)`** to allocate multiple qubits at once
-# - **`cx()`** (the CNOT gate), a two-qubit gate that returns **both** handles
-
-
-# %%
-@qmc.qkernel
-def two_qubit_demo() -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(2, name="q")
-
-    q[0] = qmc.h(q[0])  # Apply H to q[0]
-    q[0], q[1] = qmc.cx(q[0], q[1])  # Apply CNOT on q[0], q[1]
-
-    return qmc.measure(q)
-
+# - `target=0` selects the first qubit for the Hadamard gate.
+# - `control=0, target=1` selects the first qubit as the control and the second as the target of the CNOT gate.
+#
+# `qm.measure(state)` measures both qubits. The return type, `qm.Shot[qm.Bits[2]]`, indicates that each shot produces two classical bits.
+#
+# For this kernel, we can pass `two_qubit_demo` directly to `qm.run(...)`. It handles validation, compilation, and execution using the same Aer endpoint as before.
 
 # %%
-two_qubit_demo.draw()
-
-# %%
-demo_result = (
-    transpiler.transpile(two_qubit_demo)
-    .sample(
-        transpiler.executor(),
-        shots=sample_shots,
-    )
-    .result()
+demo_record = qm.run(
+    two_qubit_demo,
+    on=endpoint,
+    shots=sample_shots,
+    seed=11,
 )
+demo_result = demo_record.result
 
-for outcome, count in demo_result.results:
+for outcome, count in demo_result.counts.items():
     print(f"  outcome={outcome}, count={count}")
 assert demo_result.shots == sample_shots
-assert sum(count for _, count in demo_result.results) == sample_shots
+assert sum(demo_result.counts.values()) == sample_shots
 # Bell state |Phi+>: only (0,0) and (1,1) outcomes appear.
-assert all(outcome in {(0, 0), (1, 1)} for outcome, _ in demo_result.results)
+assert set(demo_result.counts) <= {(0, 0), (1, 1)}
 
 # %% [markdown]
-# Notice two patterns here:
+# The Bell state prepared by this circuit ideally produces only `(0, 0)` and `(1, 1)` when measured, each with probability 1/2. The noiseless simulator used here samples this probability distribution.
 #
-# - **`qubit_array(2)`** creates multiple qubits in one call. You access
-#   them by index: `q[0]`, `q[1]`. In Tutorial 02 we will make the size
-#   symbolic with `qubit_array(n)`.
-# - **Two-qubit gates return both handles**: `q[0], q[1] = qmc.cx(q[0], q[1])`.
-#   Both sides must be reassigned.
+# With a finite number of shots, the two outcomes need not occur equally often.
 #
-# This brings us to an important rule.
+# This example uses a fixed number of qubits. In Tutorial 02, we will make that number configurable with a `Const[Int]` input.
+#
+# Notice that both the Hadamard gate and the CNOT gate return an updated state, which we receive under the same name, `state`. The next section explains why subsequent operations must use the updated state.
 
 # %% [markdown]
-# ## The Affine Type System
+# ### The Linear Type System
 #
-# In Qamomile, quantum handles are **affine-typed**: once a gate consumes a handle, you **must** use the returned handle for all subsequent operations.
+# Qamomile uses a **linear type system** to track quantum states. A gate consumes the state value it receives and returns an updated state value. Once consumed, the old value cannot be used again.
 #
-# - Single-qubit gate: `q = qmc.h(q)` — reassign the same variable.
-# - Two-qubit gate: `q0, q1 = qmc.cx(q0, q1)` — reassign both variables.
+# In our examples, we receive the updated state under the same variable name:
 #
-# ### Why affine, not linear?
+# - Single-qubit gate: `state = qm.h(state)`
+# - Two-qubit gate: `state = qm.cx(state, control=0, target=1)`
 #
-# In quantum computing, if you use a qubit for a temporary computation and leave it entangled with the rest of the system without cleaning it up, subsequent operations on other qubits can be affected in unexpected ways. Strictly speaking, a **linear type** system (where every handle must be used exactly once) would be the safest model — it would force you to always "uncompute" (reverse) temporary qubits before discarding them.
+# You can also assign the returned state to a different variable. What matters is that subsequent operations use the updated value.
 #
-# However, enforcing linear types in Python would make simple programs awkward to write. Qamomile chooses **affine types** instead: a handle must be used **at most** once, but you are allowed to drop it. This keeps the API Pythonic — you can write natural code without ceremony.
+# #### Why linear?
 #
-# > **Trade-off**: if you allocate a temporary qubit, entangle it with your main qubit, and then forget about the temporary qubit, the physics still applies — that leftover temporary qubit will pollute your results. The transpiler won't catch this for you. So remember: **if you entangle a temporary qubit, uncompute it before you stop using it.**
+# Qamomile’s linear type system tracks how quantum state values are passed between operations and detects reuse of consumed values before execution. This prevents code from treating the old and updated states as independently usable values. It also checks that quantum states that are no longer used are handled appropriately. In the examples above, `qm.measure(state)` consumes the final quantum state and returns classical data.
 #
-# If you forget to reassign, you get an error. Here is what happens:
+# Temporary qubits need care: they may remain entangled with the rest of the computation, affecting interference and final measurement probabilities. **Uncomputation** reverses a temporary computation to remove unwanted entanglement. You can explicitly apply the inverse of a unitary helper with `qm.adjoint(...)`.
+#
+# Qamomile also supports **automatic uncomputation**. If a state has been assigned to a variable but is no longer used, the compiler attempts to uncompute and release it. If it cannot verify the necessary cleanup, it reports an error.
+#
+# If you intentionally want to discard a state, use `qm.discard(state)`. This explicitly consumes the state without uncomputing it: discarding a qubit does not undo the operations that entangled it with other qubits.
+#
+# For example, the following kernel ignores the state returned by the Hadamard gate:
+
+
+# %%
+@qm.qkernel
+def bad_rebind() -> qm.Shot[qm.Bits[1]]:  # type: ignore[valid-type]
+    state = qm.qubits(1)
+    qm.h(state)  # Oops: the returned state is left unused.
+    state = qm.x(state)  # This still refers to the old state.
+    return qm.measure(state)
+
+
+# %% [markdown]
+# We can check this kernel with `qm.specialize(...)` without running it:
 
 # %%
 try:
-
-    @qmc.qkernel
-    def bad_rebind() -> qmc.Bit:
-        q = qmc.qubit(name="q")
-        qmc.h(q)  # Oops: we consumed q but didn't capture the result
-        q = qmc.x(q)  # This uses the stale (already consumed) handle
-        return qmc.measure(q)
-
-    bad_rebind.draw()
-except Exception as e:
-    print(f"Error type: {type(e).__name__}")
-    print(f"Error message: {e}")
-    assert type(e).__name__ == "QubitConsumedError"
+    qm.specialize(bad_rebind)
+except qm.FrontendError as error:
+    print(f"Error type: {type(error).__name__}")
+    print(f"Error message: {error}")
+    assert "unused expression has non-Unit type" in str(error)
 
 # %% [markdown]
-# The fix is simple: always write `q = qmc.h(q)`, not just `qmc.h(q)`.
+# The `unused expression` error refers to `qm.h(state)`, whose return value is ignored. Change this line to `state = qm.h(state)` so that the following `qm.x(state)` call uses the updated state.
 
 # %% [markdown]
-# ## Summary
-#
-# You now know how to:
-#
-# - Define a qkernel with `@qmc.qkernel`
-# - Create qubits, apply gates, and measure
-# - Visualize with `draw()`
-# - Execute with `transpile()` → `sample()` → `.result()`
-# - Read `SampleResult` outcomes
-# - Inspect the transpiled circuit with `to_circuit()`
-# - Follow the affine type system (`q = qmc.gate(q)`)
-# - Estimate resources with `estimate_resources()`
-#
 # ## Supported Quantum SDKs
 #
-# Qamomile transpiles the same `@qkernel` to different quantum SDKs. Currently supported:
+# Qamomile supports several quantum SDKs and compilation targets. The available options are:
 #
-# | Quantum SDK | Status | Notes |
-# |---------|--------|-------|
-# | **Qiskit** | Supported | Full gate set, control flow, observables |
-# | **QuriParts** | Supported | Full gate set, observables |
-# | **CUDA-Q** | Supported | GPU-accelerated simulation. Supported: for-loops (unrolled), runtime `if`/`if-else`/`while` (via `cudaq.run()`) |
+# | SDK / target | Status | Notes |
+# |---|---|---|
+# | **Qiskit** | Supported | Qiskit circuits, Aer simulation, and execution on compatible Qiskit backends |
+# | **QURI Parts** | Supported | QURI Parts circuits, Qulacs simulation, and execution through QURI Parts samplers |
+# | **CUDA-Q** | Supported | CUDA-Q kernels and execution on available CUDA-Q simulation targets |
+# | **Cirq** | Supported | Cirq circuits, local simulation, and execution through compatible samplers and Google Quantum Engine |
+# | **Amazon Braket** | Supported | Local simulation and execution on compatible Amazon Braket devices |
+# | **Quration (PyQret)** | Supported | Local simulation and resource estimation for fault-tolerant quantum computing |
+# | **HUGR** | Supported | HUGR compilation, local Selene simulation, and Helios execution through Quantinuum Nexus |
+# | **qBraid** | Supported via Qiskit | Execution of compiled Qiskit circuits on compatible qBraid devices |
+# | **QIR** | Export only | QIR 1.0 Base Profile output for execution by an external QIR-compatible system |
 #
-# > **Note**: Runtime measurement-dependent control flow (`if bit:`, `if/else`, `while bit:`) is supported on both Qiskit and CUDA-Q. The `while` loop condition **must** be a measurement result (`Bit` from `qmc.measure()`); classical variables, constants, and comparisons are not supported as while conditions. On CUDA-Q, all circuits are compiled as `@cudaq.kernel` decorated functions. Static circuits (without runtime control flow) are executed via `cudaq.sample()` / `cudaq.observe()`, while circuits with runtime measurement-dependent branching are executed via `cudaq.run()`. Compile-time constant conditions for `if` statements are statically resolved on all engines.
+# :::{note}
+# Available features depend on the chosen backend. For example, using a measurement result to decide which gate to apply next requires support for measurement-dependent control flow. Conditions determined by `Const` inputs are resolved at compile time.
+# :::
 #
 # ### CUDA-Q Platform Support
 #
-# CUDA-Q is supported on the following environments:
+# CUDA-Q supports the following environments:
 #
 # | Environment | Status | Notes |
-# |---------|--------|-------|
-# | Linux | Supported | Native path |
-# | macOS ARM64 (Apple silicon) | Supported | CPU-only simulation; Intel macOS unsupported |
-# | Windows via WSL2 | Supported | Install and run inside the WSL2 Linux environment |
-# | Native Windows | Unsupported | Use WSL2 instead |
-# | macOS x86_64 (Intel) | Unsupported | Apple silicon only |
+# |---|---|---|
+# | **Linux** | Supported | CPU simulation; GPU acceleration requires a supported NVIDIA GPU and compatible CUDA environment |
+# | **macOS ARM64 (Apple silicon)** | Supported | CPU-only local simulation |
+# | **Windows via WSL2** | Supported | Install and run inside the WSL2 Linux environment |
+# | **Native Windows** | Unsupported | Use WSL2 |
+# | **macOS x86_64 (Intel)** | Unsupported | macOS support requires Apple silicon |
+#
+# Platform requirements follow the [CUDA-Q installation documentation](https://nvidia.github.io/cuda-quantum/0.14.0/using/install/local_installation.html).
+#
+# ## Summary
+#
+# The basic workflow is to define a quantum kernel with `@qm.qkernel` and type annotations, execute it with `qm.run(...)`, and read its result through `record.result`. For the sampling examples here, `SampleResult` provides counts and estimated probabilities.
+#
+# You also learned how to:
+#
+# - Compile a kernel separately and reuse the compiled program with different parameter values.
+# - Use optional specialization, inspection, and logical resource estimation before compilation.
+# - Examine the compiled Qiskit circuit with `load_circuit(...)`.
+# - Work with multiple qubits and use updated quantum states correctly.
+# - Distinguish uncomputation from explicit discard.
 #
 # ## Next Chapters
 #
-# 1. [Parameterized QKernels](02_parameterized_kernels.ipynb) — structure vs runtime parameters, the bind/sweep pattern
-# 2. [Vector Slicing](03_vector_slicing.ipynb) — `VectorView`, slice assignment, nested slices, passing views to helper kernels
-# 3. [Controlled Gates](04_controlled_gates.ipynb) — `qmc.control` for built-in gates and sub-kernels, concrete vs symbolic control counts
-# 4. [Resource Estimation](05_resource_estimation.ipynb) — symbolic cost analysis, gate breakdowns, comparing designs
-# 5. [Execution Models](06_execution_models.ipynb) — `sample()` vs `run()`, observables, bit ordering
-# 6. [Classical Flow Patterns](07_classical_flow_patterns.ipynb) — loops, sparse data, branching
-# 7. [Reuse Patterns](08_reuse_patterns.ipynb) — helper qkernels, composite gates, stubs
+# The following chapters build on the workflow introduced here:
+#
+# 2. [Parameterized Quantum Kernels](02_parameterized_kernels.ipynb) — Distinguish circuit structure from runtime parameters, and reuse a compiled program with different parameter values.
+# 3. [Coherent Control with qm.control](03_controlled_gates.ipynb) — Apply controlled versions of unitary kernels using one or more control qubits.
+# 4. [Resource Estimation](04_resource_estimation.ipynb) — Estimate logical resources such as qubit counts, gate counts, and depth, and understand symbolic estimates and their limitations.
+# 5. [Execution, Statistics, and Observable Estimation](05_execution_models.ipynb) — Work with individual shots and repeated samples, summarize measurement results, and estimate observable expectation values.
+# 6. [Classical Control Flow Patterns](06_classical_flow_patterns.ipynb) — Use loops, sparse interaction data, and conditional branches, including branches based on measurement results.
+# 7. [Reuse Patterns: QKernel Composition and Composite Gates](07_reuse_patterns.ipynb) — Compose helper kernels and composite gates, pass kernels as arguments, and declare functions without implementation bodies for resource estimation.
+#
+# For operations on part of a qubit array, see [Working with Qubit Arrays](../usage/qubit_arrays.ipynb).

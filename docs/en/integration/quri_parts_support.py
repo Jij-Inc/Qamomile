@@ -1,11 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -19,550 +20,544 @@
 #
 # # QURI Parts Support
 #
-# This page shows how to use Qamomile's [QURI Parts](https://quri-parts.qunasys.com/) quantum SDK integration through a concrete optimization problem.
-# In this tutorial, we use QAOA optimization for a small MaxCut instance as an example. We transpile a Qamomile qkernel to a QURI Parts circuit, then run sampling and expectation-value evaluation.
-# `QuriPartsExecutor` uses [Qulacs](https://docs.qulacs.org/), a fast C++ state-vector simulator, by default, so the examples below run on a local CPU without any extra configuration.
+# This page shows how to use Qamomile's QURI Parts integration through a
+# concrete optimization problem. We use QAOA for the same small MaxCut
+# instance as the algorithm tutorial, compile one typed program to a portable
+# logical circuit, and run sampling and expectation-value evaluation with
+# Qulacs. We also demonstrate QURI Parts noise and sampler integration.
+#
+# Qamomile keeps QURI Parts at the realization boundary. QCore remains the only
+# persistent program semantics; the adapter constructs SDK circuit and
+# simulator objects only when an invocation is launched.
+
+# %% [markdown]
+# ## Installation
+#
+# ```bash
+# pip install "qamomile[quri_parts]"
+# ```
 
 # %%
-# Install the latest Qamomile with the QURI Parts extras through pip.
-# # !pip install "qamomile[quri_parts,visualization]"
+# Install the latest Qamomile and its QURI Parts integration through pip!
+# # !pip install "qamomile[quri_parts]"
 
 # %%
-# Collect every library used in this tutorial in one place.
-from collections import Counter
+import math
 import os
+from collections import Counter
 
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
-from quri_parts.circuit.noise import (  # type: ignore[import-not-found]
-    DepolarizingNoise,
-    NoiseModel,
+from quri_parts.circuit.noise import DepolarizingNoise, NoiseModel
+from quri_parts.core.operator import PAULI_IDENTITY, Operator, pauli_label
+from quri_parts.core.state import (
+    GeneralCircuitQuantumState,
+    ParametricCircuitQuantumState,
 )
-from quri_parts.circuit.utils.circuit_drawer import (  # type: ignore[import-not-found]
-    draw_circuit,
+from quri_parts.qulacs.estimator import (
+    create_qulacs_vector_estimator,
+    create_qulacs_vector_parametric_estimator,
 )
-from quri_parts.qulacs.sampler import (  # type: ignore[import-not-found]
-    create_qulacs_noisesimulator_sampler,
-)
+from quri_parts.qulacs.sampler import create_qulacs_noisesimulator_sampler
 from scipy.optimize import minimize
 
-import qamomile.circuit as qmc
-import qamomile.observable as qm_o
-from qamomile.optimization.binary_model import BinaryModel
-from qamomile.quri_parts import QuriPartsExecutor, QuriPartsTranspiler
-from qamomile.quri_parts.observable import hamiltonian_to_quri_operator
+import qamomile as qm
+
+from qamomile.persistence import deserialize, serialize
+from qamomile.optimization import BinaryModel, QAOAExperiment
+from qamomile.quri_parts import (
+    Qulacs,
+    QuriParts,
+    QuriPartsSampler,
+    load_circuit,
+    load_logical_circuit,
+)
+from qamomile.stdlib import qaoa_state
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+
+# %% [markdown]
+# ## Author one runtime-parametric quantum state
+#
+# `entangled_state` is the sole state-preparation definition. The sampling
+# function composes it with measurement, while expectation evaluation consumes
+# the state directly. `theta` stays a typed runtime parameter in both workflows.
+
+# %%
+@qm.qkernel
+def entangled_state(
+    theta: qm.Param[qm.Real],
+) -> qm.Q[qm.Bits[2]]:  # type: ignore[valid-type]
+    """Prepare one runtime-parametric two-qubit entangled state.
+
+    Args:
+        theta (qm.Param[qm.Real]): First-qubit Y-rotation angle in radians.
+
+    Returns:
+        qm.Q[qm.Bits[2]]: Affine two-qubit state in Qamomile source order.
+    """
+
+    state = qm.qubits(2)
+    state = qm.ry(state, theta, target=0)
+    return qm.cx(state, control=0, target=1)
+
+
+@qm.qkernel
+def entangled_sample(
+    theta: qm.Param[qm.Real],
+) -> qm.Shot[qm.Bits[2]]:  # type: ignore[valid-type]
+    """Measure the shared entangled state.
+
+    Args:
+        theta (qm.Param[qm.Real]): First-qubit Y-rotation angle in radians.
+
+    Returns:
+        qm.Shot[qm.Bits[2]]: Bits in Qamomile source order.
+    """
+
+    return qm.measure(entangled_state(theta))
+
+
+sample_program = entangled_sample.specialize()
+study = qm.resources.logical(sample_program)
+
+assert study.metric(qm.resources.LOGICAL_GATES).numeric_enclosure() == (2, 2)
+assert study.metric(qm.resources.LOGICAL_PEAK_QUBITS).numeric_enclosure() == (2, 2)
+
+# %% [markdown]
+# ## Compile once and retain the executable
+#
+# `qm.compile` returns a process-local `CompiledProgram` containing the QURI Parts circuit,
+# its SDK lifetime owners, and compiler-derived ABI and resource facts. Ordinary
+# execution does not export or restore it. The optional `serialize`/`deserialize`
+# calls below demonstrate saving through `qamomile.persistence`; loading creates
+# a new executable owner. Compare compilation identities, not Python objects.
+
+# %%
+target = QuriParts()
+artifact = qm.compile(sample_program, to=target)
+restored = deserialize(serialize(artifact))
+
+assert artifact.format == "quri-parts.logical-circuit.v2"
+assert restored.execution_identity == artifact.execution_identity
+assert artifact.execution_identity == qm.compile(sample_program, to=target).execution_identity
+assert tuple(slot.name for slot in artifact.parameter_abi.slots) == ("theta",)
+assert artifact.result_abi.width == 2
+
+# %% [markdown]
+# `load_logical_circuit` is an explicit inspection helper. It decodes the
+# adapter payload as ordinary data; it does not construct a second program or
+# bypass the common execution contract. Runtime parameter expressions and
+# measurement destinations remain inside this portable representation until
+# launch.
+
+# %%
+logical = load_logical_circuit(restored)
+operations = [instruction["op"] for instruction in logical["body"]]
+
+print("schema:", logical["schema"])
+print("width :", logical["width"])
+print("ops   :", operations)
+
+assert logical["schema"] == 2
+assert logical["width"] == 2
+assert operations.count("ry") == 1
+assert operations.count("cx") == 1
+assert operations.count("measure") == 2
+
+# %% [markdown]
+# ## Reuse the artifact on isolated Qulacs
+#
+# Passing an artifact to `qm.run` does not invoke the compiler again. The
+# endpoint validates the invocation, materializes a QURI Parts circuit inside a
+# worker, binds `theta`, samples Qulacs, and normalizes native bit order once at
+# the adapter boundary. The returned `SampleResult` uses the same typed result
+# contract as every other Qamomile endpoint.
+
+# %%
+endpoint = Qulacs()
+cases = ((0.0, (0, 0)), (math.pi, (1, 1)))
+
+for theta, expected in cases:
+    record = qm.run(
+        restored,
+        on=endpoint,
+        parameters={"theta": theta},
+        shots=8,
+        seed=7,
+    )
+    print(f"theta={theta:.6f} -> {record.result.counts}")
+    assert record.artifact is restored
+    assert record.result.counts == {expected: 8}
+    assert record.result.values == {expected: 8}
 
 # %% [markdown]
 # ## The MaxCut problem
 #
-# We use the same small 5-node graph from the [QAOA for MaxCut tutorial](../algorithm/qaoa_maxcut.ipynb) so the focus stays on the QURI Parts integration.
-# Maximizing $\sum_{(i,j) \in E}(1 - s_i s_j)/2$ is equivalent, up to a constant, to *minimizing* the antiferromagnetic Ising Hamiltonian $H_C = \sum_{(i,j) \in E} s_i s_j$.
-# For unweighted MaxCut, every $J_{ij} = 1$ and every $h_i = 0$, so we pass these coefficients directly to `BinaryModel.from_ising`.
-# We use the model object for the `quad` / `linear` dictionaries passed to the QAOA qkernel and for decoding measurements back into spin values $(+1 / -1)$.
+# We use the same small five-node, six-edge graph from the
+# [QAOA for MaxCut tutorial](../algorithm/qaoa_maxcut.ipynb). Maximizing
+# $\sum_{(i,j)\in E}(1-s_i s_j)/2$ is equivalent, up to a constant, to
+# minimizing $H_C=\sum_{(i,j)\in E}s_i s_j$. The graph therefore maps directly
+# to an immutable Ising `BinaryModel`.
+#
+# ## Building the QAOA ansatz
+#
+# The ansatz prepares a uniform superposition, alternates cost and mixer layers
+# three times, and measures in the computational basis. `QAOAExperiment`
+# supplies that same composition while leaving `gammas` and `betas` as runtime
+# parameters. Normal execution retains the continuous COBYLA optimization;
+# documentation tests reduce only the execution budgets.
 
 # %%
-# Build the MaxCut graph and convert it to an Ising BinaryModel.
-G = nx.Graph()
-G.add_edges_from([(0, 1), (0, 2), (1, 2), (1, 3), (2, 3), (3, 4)])
-num_nodes = G.number_of_nodes()
+MAXCUT_EDGES = ((0, 1), (0, 2), (1, 2), (1, 3), (2, 3), (3, 4))
+graph = nx.Graph(MAXCUT_EDGES)
+positions = nx.spring_layout(graph, seed=42)
 
-ising_quad: dict[tuple[int, int], float] = {
-    tuple(sorted((i, j))): 1.0 for i, j in G.edges()
-}
-ising_linear: dict[int, float] = {}
-spin_model = BinaryModel.from_ising(linear=ising_linear, quad=ising_quad)
-# The problem structure is fully determined by the graph: one quad term per edge
-# and no linear terms for unweighted MaxCut. Assert so a regression in
-# `BinaryModel.from_ising` is caught when this notebook runs in CI.
-assert len(spin_model.quad) == G.number_of_edges()
-assert len(spin_model.linear) == 0
+maxcut_model = BinaryModel.from_ising(
+    {edge: 0.5 for edge in MAXCUT_EDGES},
+    constant=-len(MAXCUT_EDGES) / 2.0,
+    variables=range(5),
+)
+LAYERS = 1 if docs_test_mode else 3
+qaoa_experiment = QAOAExperiment(maxcut_model, layers=LAYERS)
+compiled_qaoa = qaoa_experiment.compile(to=endpoint.target)
 
-pos = nx.spring_layout(G, seed=42)
 plt.figure(figsize=(5, 4))
 nx.draw(
-    G,
-    pos,
+    graph,
+    positions,
     with_labels=True,
     node_color="white",
     node_size=700,
     edgecolors="black",
 )
-plt.title(f"MaxCut graph: {num_nodes} nodes, {G.number_of_edges()} edges")
+plt.title(
+    f"MaxCut graph: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges"
+)
 plt.show()
 
 # %% [markdown]
-# ## Building the QAOA ansatz with `@qkernel`
-#
-# We write reusable qkernels for the QAOA layers and the sampling ansatz.
-# The recipe is the same as in the [QAOA for MaxCut tutorial](../algorithm/qaoa_maxcut.ipynb). After preparing a uniform superposition in the computational basis, we alternately apply cost and mixer layers $p$ times, then measure in the computational basis.
-# The expectation-value qkernel is introduced later in the `run()` section so the circuit diagram below shows the sampling ansatz directly rather than a wrapper around a state-preparation helper.
-#
-# :::{tip}
-# Qamomile's rotation gates follow the $e^{-i\theta/2}$ convention.
-# We pass $2\beta$ to `rx`, $2J_{ij}\gamma$ to `rzz`, and $2h_i\gamma$ to `rz`.
-# The $1/2$ then cancels in every case, giving the textbook
-# $e^{-i\beta X}$ mixer and $e^{-i\gamma H_C}$ cost unitary exactly.
-# :::
-
+# The portable logical circuit keeps the two QAOA angle vectors unbound. The
+# artifact can therefore be reused at every optimizer coordinate without
+# rebuilding the program or circuit.
 
 # %%
-# Define the reusable qkernels that make up QAOA.
-@qmc.qkernel
-def superposition(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
-    # Prepare a uniform superposition over all graph nodes.
-    q = qmc.qubit_array(n, name="q")
-    for i in qmc.range(n):
-        q[i] = qmc.h(q[i])
-    return q
+qaoa_logical = load_logical_circuit(compiled_qaoa.artifact)
+qaoa_operations = [instruction["op"] for instruction in qaoa_logical["body"]]
 
-
-@qmc.qkernel
-def cost_layer(
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    q: qmc.Vector[qmc.Qubit],
-    gamma: qmc.Float,
-) -> qmc.Vector[qmc.Qubit]:
-    # Encode quadratic and linear Ising terms as phase rotations.
-    for (i, j), Jij in quad.items():
-        q[i], q[j] = qmc.rzz(q[i], q[j], angle=2.0 * Jij * gamma)
-    for i, hi in linear.items():
-        q[i] = qmc.rz(q[i], angle=2.0 * hi * gamma)
-    return q
-
-
-@qmc.qkernel
-def mixer_layer(
-    q: qmc.Vector[qmc.Qubit],
-    beta: qmc.Float,
-) -> qmc.Vector[qmc.Qubit]:
-    # Mix amplitudes with X rotations on every qubit.
-    n = q.shape[0]
-    for i in qmc.range(n):
-        q[i] = qmc.rx(q[i], angle=2.0 * beta)
-    return q
-
-
-@qmc.qkernel
-def qaoa_ansatz(
-    p: qmc.UInt,
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    n: qmc.UInt,
-    gammas: qmc.Vector[qmc.Float],
-    betas: qmc.Vector[qmc.Float],
-) -> qmc.Vector[qmc.Bit]:
-    # Measure the final QAOA state for sampling.
-    q = superposition(n)
-    for layer in qmc.range(p):
-        q = cost_layer(quad, linear, q, gammas[layer])
-        q = mixer_layer(q, betas[layer])
-    return qmc.measure(q)
-
-
-# %% [markdown]
-# `qaoa_ansatz.draw(...)` renders the Qamomile circuit diagram.
-# We pass concrete values for the arguments that determine the problem structure (`p`, `quad`, `linear`, `n`) so the layered shape is visible.
-# Meanwhile, `gammas` / `betas` are left as parameters whose values are supplied later.
-
-# %%
-# Draw the Qamomile-level QAOA ansatz for the fixed problem shape.
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-p = 1 if docs_test_mode else 3  # number of QAOA layers
-qaoa_ansatz.draw(
-    p=p,
-    quad=spin_model.quad,
-    linear=spin_model.linear,
-    n=num_nodes,
+print("QAOA width:", qaoa_logical["width"])
+print("QAOA operations:", Counter(qaoa_operations))
+assert qaoa_logical["width"] == 5
+assert tuple(slot.name for slot in compiled_qaoa.artifact.parameter_abi.slots) == (
+    "gammas",
+    "betas",
 )
 
 # %% [markdown]
-# ## Transpile to QURI Parts
+# ## Sampling and continuous optimization
 #
-# `QuriPartsTranspiler` is used with `transpile()` the same way as any other quantum SDK.
-# We bind the arguments that determine the problem structure and keep `gammas` / `betas` as runtime parameters.
+# Each objective evaluation reuses `compiled_qaoa`, samples Qulacs, and
+# minimizes the occurrence-weighted mean Ising energy. The normal page follows
+# main with three QAOA layers; the CI path uses one layer and fewer shots.
 
 # %%
-# Create a seeded QURI Parts executor and transpile the ansatz once.
-transpiler = QuriPartsTranspiler()
-# Passing a `seed` makes the Qulacs sampler reproducible: two `sample(...)`
-# calls with the same seed and circuit return identical shot counts. Omit it
-# (or pass `seed=None`) for non-deterministic sampling.
-executor = QuriPartsExecutor(seed=42)
+OBJECTIVE_SHOTS = 8 if docs_test_mode else 2_000
+OPTIMIZER_ITERATIONS = 4 if docs_test_mode else 100
+objective_history: list[float] = []
 
-executable = transpiler.transpile(
-    qaoa_ansatz,
-    bindings={
-        "p": p,
-        "quad": spin_model.quad,
-        "linear": spin_model.linear,
-        "n": num_nodes,
-    },
-    parameters=["gammas", "betas"],
-)
 
-# %% [markdown]
-# `executable.get_first_circuit()` returns the generated QURI Parts circuit.
-# The returned circuit is a QURI Parts `LinearMappedParametricQuantumCircuit`, and the $2p$ QAOA angles (`gammas[0..p-1]`, `betas[0..p-1]`) remain available as named runtime parameters.
-# We can confirm that with `type(...)` and the parameter count, then inspect the circuit directly with QURI Parts' built-in `draw_circuit`.
+def cost_function(parameters: np.ndarray) -> float:
+    """Return sampled mean MaxCut energy for one QAOA coordinate vector."""
 
-# %%
-# Inspect the generated QURI Parts circuit and verify its qubit and parameter counts.
-quri_circuit = executable.get_first_circuit()
-# Here, transpile() generates exactly one quantum segment.
-assert quri_circuit is not None
-# `qubit_count` and `parameter_count` are fully determined by the problem setting:
-# one qubit per graph node, and one runtime parameter per (gamma | beta) per layer.
-assert quri_circuit.qubit_count == num_nodes
-assert quri_circuit.parameter_count == 2 * p
-print(type(quri_circuit).__name__)
-print("qubit_count    :", quri_circuit.qubit_count)
-print("parameter_count:", quri_circuit.parameter_count)
+    run = compiled_qaoa.run(
+        on=endpoint,
+        gammas=tuple(float(value) for value in parameters[:LAYERS]),
+        betas=tuple(float(value) for value in parameters[LAYERS:]),
+        shots=OBJECTIVE_SHOTS,
+        seed=42 + len(objective_history),
+    )
+    objective_history.append(run.samples.mean_energy)
+    return run.samples.mean_energy
 
-draw_circuit(quri_circuit, line_length=200)
 
-# %% [markdown]
-# Each runtime parameter remains unbound until execution time.
-# That means binding `gammas` / `betas` is treated as a parameter-value update on the QURI Parts side rather than a circuit rebuild.
-# The problem structure, such as the Ising coefficients, qubit count, and number of layers, is fixed when the circuit is transpiled, leaving only the variational angles as runtime inputs.
-
-# %% [markdown]
-# ## Sampling QAOA with `QuriPartsExecutor`
-#
-# `executable.sample(executor, bindings=..., shots=...)` returns a `SampleJob`.
-# Calling `.result()` gives a `SampleResult`, which `BinaryModel.decode_from_sampleresult` decodes into a `BinarySampleSet` of spin variables $(+1 / -1)$.
-# This lets us count cut edges without any additional conversion.
-# `QuriPartsExecutor()` runs against the Qulacs state-vector simulator by default.
-
-# %%
-# Choose reproducible initial angles and keep docs-test runs short.
 rng = np.random.default_rng(42)
-init_params = rng.uniform(-np.pi / 2, np.pi / 2, 2 * p)
-init_gammas = list(init_params[:p])
-init_betas = list(init_params[p:])
-sample_shots = 1 if docs_test_mode else 2000
-maxiter = 4 if docs_test_mode else 100
+initial_parameters = rng.uniform(-math.pi / 2.0, math.pi / 2.0, 2 * LAYERS)
+optimization = minimize(
+    cost_function,
+    initial_parameters,
+    method="COBYLA",
+    options={"maxiter": OPTIMIZER_ITERATIONS, "rhobeg": 0.5},
+)
+optimized_gammas = tuple(float(value) for value in optimization.x[:LAYERS])
+optimized_betas = tuple(float(value) for value in optimization.x[LAYERS:])
 
-# Sample the parameterized executable and decode bitstrings to Ising energies.
-sample_result = executable.sample(
-    executor,
-    bindings={"gammas": init_gammas, "betas": init_betas},
-    shots=sample_shots,
-).result()
-
-decoded = spin_model.decode_from_sampleresult(sample_result)
-print(f"Mean energy at random init: {decoded.energy_mean():+.4f}")
-
-# %% [markdown]
-# ## Optimizing the QAOA parameters
-#
-# A QAOA optimization loop reuses the same `executable` across many `(gammas, betas)` vectors.
-# Call `transpiler.transpile()` once, then call `executable.sample()` many times.
-# In this example, we define the sampling and decoding work as `cost_fn()` and optimize it with SciPy's `minimize` function.
-# The classical optimizer updates `(gammas, betas)` while lowering the mean sampled Ising energy.
-# Each iteration reuses the same `executable` and `QuriPartsExecutor`.
+print("QAOA objective history:", objective_history)
+print("optimized gammas:", optimized_gammas)
+print("optimized betas:", optimized_betas)
+assert len(objective_history) == optimization.nfev
 
 # %%
-# Reuse one executable inside the classical objective function.
-cost_history: list[float] = []
-
-
-def cost_fn(params: np.ndarray) -> float:
-    result = executable.sample(
-        executor,
-        bindings={"gammas": list(params[:p]), "betas": list(params[p:])},
-        shots=sample_shots,
-    ).result()
-    energy = spin_model.decode_from_sampleresult(result).energy_mean()
-    cost_history.append(energy)
-    return energy
-
-
-# Optimize the sampled mean energy with COBYLA.
-res = minimize(cost_fn, init_params, method="COBYLA", options={"maxiter": maxiter})
-
-opt_gammas = list(res.x[:p])
-opt_betas = list(res.x[p:])
-print(f"Optimized mean energy: {res.fun:+.4f}")
-print(f"Optimal gammas       : {[round(float(v), 4) for v in opt_gammas]}")
-print(f"Optimal betas        : {[round(float(v), 4) for v in opt_betas]}")
-
-# %%
-# Plot the objective values collected during optimization.
 plt.figure(figsize=(8, 4))
-plt.plot(cost_history, color="#2696EB")
-plt.xlabel("Iteration")
+plt.plot(objective_history, color="#2696EB")
+plt.xlabel("Energy evaluation")
 plt.ylabel("Cost (mean Ising energy)")
-plt.title("QAOA optimization on Qulacs via `QuriPartsExecutor`")
+plt.title("QAOA optimization on Qulacs through QURI Parts")
 plt.tight_layout()
 plt.show()
 
 # %% [markdown]
-# Because the `QuriPartsExecutor` above was constructed with `seed=42`, the Qulacs sampler is reproducible, so re-running this page yields the same optimization trajectory and final energy; drop the `seed` argument to recover the original non-deterministic behavior.
-# The optimizer should converge close to the ground-state energy of $H_C$ on this 5-node graph.
-# The optimized parameters from this run (`opt_gammas`, `opt_betas`) are reused throughout the rest of this page.
-
-# %% [markdown]
-# ## Expectation values with `run()`
+# ## Final distribution and best cut
 #
-# In Qamomile, you write expectation values in a qkernel with `qmc.expval(...)`.
-# When this is transpiled to QURI Parts, it becomes an executable object that can be called with `ExecutableProgram.run(executor, bindings=...)`.
-# `run()` uses Qamomile's recorded parameter information to bind runtime parameters before calling the QURI Parts estimator.
-#
-# First build a Qamomile `Hamiltonian` for $H_C = \sum_{(i,j) \in E} Z_i Z_j$.
-# Then transpile the expectation-value qkernel and evaluate it at the optimized QAOA parameters.
+# The optimized artifact is sampled again with the main tutorial's 2,000-shot
+# normal budget. Decoded spin values identify the partition and its cut size.
 
 # %%
-# Build the Qamomile Hamiltonian that matches the MaxCut Ising cost.
-cost_hamiltonian = qm_o.Hamiltonian()
-for (i, j), Jij in spin_model.quad.items():
-    cost_hamiltonian.add_term(
-        (qm_o.PauliOperator(qm_o.Pauli.Z, i), qm_o.PauliOperator(qm_o.Pauli.Z, j)),
-        Jij,
-    )
-for i, hi in spin_model.linear.items():
-    cost_hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
-
-# Define the expectation-value qkernel.
-@qmc.qkernel
-def qaoa_expval(
-    p: qmc.UInt,
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    n: qmc.UInt,
-    gammas: qmc.Vector[qmc.Float],
-    betas: qmc.Vector[qmc.Float],
-    obs: qmc.Observable,
-) -> qmc.Float:
-    q = superposition(n)
-    for layer in qmc.range(p):
-        q = cost_layer(quad, linear, q, gammas[layer])
-        q = mixer_layer(q, betas[layer])
-    return qmc.expval(q, obs)
-
-
-# Transpile the expectation-value qkernel and evaluate it with `run()`.
-expval_executable = transpiler.transpile(
-    qaoa_expval,
-    bindings={
-        "p": p,
-        "quad": spin_model.quad,
-        "linear": spin_model.linear,
-        "n": num_nodes,
-        "obs": cost_hamiltonian,
-    },
-    parameters=["gammas", "betas"],
+FINAL_SHOTS = 32 if docs_test_mode else 2_000
+best_qaoa_run = compiled_qaoa.run(
+    on=endpoint,
+    gammas=optimized_gammas,
+    betas=optimized_betas,
+    shots=FINAL_SHOTS,
+    seed=113,
 )
-energy_via_run = expval_executable.run(
-    executor,
-    bindings={"gammas": opt_gammas, "betas": opt_betas},
-).result()
+best_qaoa_sample = best_qaoa_run.samples.lowest
+best_spins = best_qaoa_sample.values
+best_cut = sum(best_spins[left] != best_spins[right] for left, right in MAXCUT_EDGES)
 
-print(f"Executable.run() expectation: {energy_via_run:+.10f}")
-print(f"sample mean energy          : {res.fun:+.4f}")
-assert np.isfinite(energy_via_run)
+energy_counts = Counter()
+for sample in best_qaoa_run.samples.samples:
+    energy_counts[sample.energy] += sample.occurrences
+
+print("best observed MaxCut sample:", best_qaoa_sample)
+print("best observed cut:", best_cut)
+assert best_qaoa_run.samples.total_occurrences == FINAL_SHOTS
+assert best_qaoa_sample.energy == -float(best_cut)
+
+# %%
+energies = sorted(energy_counts)
+figure, axes = plt.subplots(1, 2, figsize=(11, 4))
+axes[0].bar(energies, [energy_counts[energy] for energy in energies], width=0.6)
+axes[0].axvline(
+    best_qaoa_run.samples.mean_energy,
+    color="#2B2B2B",
+    linestyle="--",
+    label=f"mean = {best_qaoa_run.samples.mean_energy:+.3f}",
+)
+axes[0].set_xlabel("Ising energy")
+axes[0].set_ylabel("Frequency")
+axes[0].set_title("Optimized QAOA distribution")
+axes[0].legend()
+
+node_colors = [
+    "#2696EB" if best_spins[node] == 1 else "#EA9B26" for node in graph.nodes()
+]
+edge_colors = [
+    "r" if best_spins[left] != best_spins[right] else "b"
+    for left, right in MAXCUT_EDGES
+]
+nx.draw(
+    graph,
+    positions,
+    ax=axes[1],
+    with_labels=True,
+    node_color=node_colors,
+    edge_color=edge_colors,
+    node_size=700,
+    edgecolors="black",
+)
+axes[1].set_title(f"Best partition (cut = {best_cut})")
+figure.tight_layout()
+plt.show()
 
 # %% [markdown]
-# `ExecutableProgram.run(...)` is the recommended route when you work through the Qamomile API.
-# Direct `executor.estimate(...)` and `executor.estimate_expectation(...)` calls are still available when you intentionally manage QURI Parts circuits yourself.
-# On the `run()` path, Qamomile binds the named runtime parameters before the estimator call, so you do not need to manage QURI Parts' flat parameter order yourself.
+# ## Evaluate an observable from the same state source
 #
-# The next section opens that lower-level path and shows how QURI Parts handles unbound and already-bound circuits differently.
+# `qm.expectation` consumes the same standard-library QAOA state composition.
+# Rust derives the grouped Pauli measurement work while QURI Parts and Qulacs
+# remain the realization and execution route.
+
+# %%
+energy_estimate = qm.expectation(
+    qaoa_state,
+    maxcut_model.hamiltonian,
+    on=endpoint,
+    parameters={"gammas": optimized_gammas, "betas": optimized_betas},
+    shots=16 if docs_test_mode else 4_096,
+    seed=211,
+    grouping="qwc",
+    width=maxcut_model.num_variables,
+    layers=LAYERS,
+    hamiltonian=maxcut_model.hamiltonian,
+)
+
+print(
+    f"QURI Parts expectation: {energy_estimate.value:+.6f} "
+    f"± {energy_estimate.standard_error:.6f}"
+)
+assert math.isfinite(energy_estimate.value)
 
 # %% [markdown]
 # ## Advanced QURI Parts features
 #
+# ### Unbound and bound expectation circuits
+#
 # QURI Parts exposes both parametric and non-parametric estimator paths.
-# Qamomile normally hides that distinction behind `ExecutableProgram.run(...)` or `executor.estimate(...)`, but direct `estimate_expectation(...)` calls are useful when you need full control over the QURI Parts circuit.
-
-# %% [markdown]
-# ### Expectation values: unbound circuits and bound circuits
+# `load_circuit` projects the portable artifact to an immutable
+# `LinearMappedParametricQuantumCircuit`; the artifact itself remains portable
+# data. The runtime coordinates are flattened in their first gate-use order,
+# with names retained on QURI Parts' input parameters.
 #
-# `QuriPartsExecutor.estimate_expectation(circuit, hamiltonian, param_values)` computes expectation values with QURI Parts.
-# It chooses between two QURI Parts estimators depending on the **state of the circuit it receives**:
-#
-# - **Unbound parametric circuit**: the circuit produced by `transpile()` still keeps its parameters as free variables.
-#   QURI Parts' `apply_circuit` wraps it as a `ParametricCircuitQuantumState`, and the executor calls QURI Parts' **parametric estimator**.
-#   In this case, `param_values` is used to bind the parameters at evaluation time.
-# - **Bound circuit, or a circuit with no parameters from the start**: once parameters are fixed to concrete values, for example with `circuit.bind_parameters([...])`, the same `apply_circuit` call returns a `GeneralCircuitQuantumState`.
-#   In this case, the executor calls QURI Parts' **non-parametric estimator**, and `param_values` is ignored.
-#
-# This distinction helps when estimating computation cost.
-# The parametric estimator is a good fit for optimization loops that evaluate the same circuit many times with different parameters, because it avoids a circuit copy at each iteration.
-# If the parameters are already fixed to concrete values, the non-parametric estimator can be more efficient because it avoids parametric-circuit bookkeeping.
-#
-# QURI Parts treats `measure` as a no-op at the circuit level.
-# Therefore, the parametric circuit generated by `transpiler.transpile(qaoa_ansatz, ...)` can be used directly as the QAOA state preparation circuit for $|\boldsymbol{\gamma}, \boldsymbol{\beta}\rangle$.
-# We can pass it to `estimate_expectation` together with the cost Hamiltonian to compute $\langle H_C \rangle$ without sampling noise.
-# In a QAOA optimizer, you can keep the same circuit and replace `executable.sample()` plus decoding with `executor.estimate(circuit, hamiltonian, params=...)`.
-#
-# To try both paths directly, convert the Hamiltonian from the previous section to a QURI Parts operator and call `estimate_expectation` for each circuit variant.
+# An unbound circuit works with a parametric estimator and can be reused across
+# optimizer coordinates without making a bound copy. Calling
+# `bind_parameters` produces the corresponding bound circuit for a
+# non-parametric estimator. Terminal measurement is omitted from this state
+# preparation projection, as expected by QURI Parts' estimator state objects.
 
 # %%
-# Convert the observable to a QURI Parts operator for direct estimation.
-quri_H = hamiltonian_to_quri_operator(cost_hamiltonian)
+quri_hamiltonian = Operator()
+quri_hamiltonian.add_term(PAULI_IDENTITY, -len(MAXCUT_EDGES) / 2.0)
+for left, right in MAXCUT_EDGES:
+    quri_hamiltonian.add_term(pauli_label(f"Z{left} Z{right}"), 0.5)
 
-# The unbound parametric circuit straight out of transpiler.transpile().
-unbound_circuit = executable.get_first_circuit()
-assert unbound_circuit is not None
+unbound_circuit = load_circuit(compiled_qaoa.artifact)
+parameter_names = tuple(
+    parameter.name for parameter in unbound_circuit.param_mapping.in_params
+)
+named_values = {
+    **{f"gammas[{index}]": optimized_gammas[index] for index in range(LAYERS)},
+    **{f"betas[{index}]": optimized_betas[index] for index in range(LAYERS)},
+}
+flat_parameters = [named_values[name] for name in parameter_names]
+
 print(f"unbound type           : {type(unbound_circuit).__name__}")
 print(f"unbound parameter_count: {unbound_circuit.parameter_count}")
+print(f"circuit parameter order: {parameter_names}")
+assert unbound_circuit.parameter_count == 2 * LAYERS
 
-# QURI Parts requires the runtime parameters as a flat list in the order
-# they were registered on the circuit, which is the first-use order during
-# circuit generation. For QAOA that means gammas[0], betas[0], gammas[1], betas[1],
-# ..., interleaved per layer, NOT all gammas followed by all betas.
-# Read the order from the executable and build the flat list by lookup so
-# we never have to guess the convention.
-named_values = {f"gammas[{i}]": opt_gammas[i] for i in range(p)}
-named_values.update({f"betas[{i}]": opt_betas[i] for i in range(p)})
-flat_params = [named_values[name] for name in executable.parameter_names]
-# The runtime parameter set is the 2p QAOA angles.
-assert len(executable.parameter_names) == 2 * p
-assert len(flat_params) == 2 * p
-print(f"circuit parameter order: {executable.parameter_names}")
+bound_circuit = unbound_circuit.bind_parameters(flat_parameters)
+print(f"bound type             : {type(bound_circuit).__name__}")
 
-# Manually bind the same numeric values using QURI Parts' native binding operation.
-bound_circuit = unbound_circuit.bind_parameters(flat_params)
-print(f"bound   type           : {type(bound_circuit).__name__}")
-
-# Path 1: unbound -> parametric estimator. param_values is used.
-energy_unbound = executor.estimate_expectation(
-    unbound_circuit, quri_H, flat_params
+parametric_state = ParametricCircuitQuantumState(
+    maxcut_model.num_variables,
+    unbound_circuit,
 )
+energy_unbound = create_qulacs_vector_parametric_estimator()(
+    quri_hamiltonian,
+    parametric_state,
+    flat_parameters,
+).value.real
 
-# Path 2: bound -> non-parametric estimator. param_values is ignored.
-energy_bound = executor.estimate_expectation(bound_circuit, quri_H, [])
+bound_state = GeneralCircuitQuantumState(
+    maxcut_model.num_variables,
+    circuit=bound_circuit,
+)
+energy_bound = create_qulacs_vector_estimator()(
+    quri_hamiltonian,
+    bound_state,
+).value.real
 
-print(f"parametric  estimator: {energy_unbound:+.10f}")
-print(f"non-param.  estimator: {energy_bound:+.10f}")
+print(f"parametric estimator: {energy_unbound:+.10f}")
+print(f"non-param. estimator: {energy_bound:+.10f}")
 assert np.isclose(energy_unbound, energy_bound, atol=1e-10)
-assert np.isclose(energy_via_run, energy_unbound, atol=1e-10)
 
 # %% [markdown]
-# Both paths agree to numerical precision.
-# They evaluate the same QAOA state against the same Ising cost Hamiltonian.
-# The resulting noise-free expectation value at the optimized parameters should also match the sample-mean energy printed earlier within shot noise.
-# This path selection is hidden inside Qamomile's `executor.estimate()` interface, so you normally do not need to think about it.
-# Call `estimate_expectation` directly only when you need to manage the QURI Parts circuit yourself.
-#
-# `executor.estimate(circuit, hamiltonian, params=...)` is the easier method when you want to pass an existing QURI Parts circuit but keep Qamomile's Hamiltonian object.
-# It accepts a `qamomile.observable.Hamiltonian` directly, converts it automatically, and then calls `estimate_expectation`.
-
-# %%
-# Use the estimator that accepts a Qamomile Hamiltonian directly.
-energy_via_estimate = executor.estimate(
-    unbound_circuit, cost_hamiltonian, params=flat_params
-)
-print(f"executor.estimate     : {energy_via_estimate:+.10f}")
-assert np.isclose(energy_via_estimate, energy_unbound, atol=1e-10)
+# Both SDK estimator routes evaluate the same QAOA state and agree to numerical
+# precision. `qm.expectation` remains the backend-neutral route; direct QURI
+# Parts estimators are available when an application intentionally manages SDK
+# circuits or injects another estimator.
 
 # %% [markdown]
-# ## Using other QURI Parts samplers and estimators
+# ## Use another QURI Parts sampler
 #
-# `QuriPartsExecutor()` lazily creates the default Qulacs state-vector sampler and parametric estimator on first use.
-# To swap QURI Parts' sampler or estimator, pass it through `QuriPartsTranspiler.executor(sampler=..., estimator=...)`, or instantiate `QuriPartsExecutor(sampler=..., estimator=...)` directly.
-# The custom executor can be used anywhere `executor` appeared above.
-# Swapping the sampler does not require re-transpiling the kernel.
-# Custom samplers must return nonnegative whole measurement counts; fractional weights, including fractional outputs from ideal samplers, raise `ValueError`.
-# The executable carries the circuit, while the executor carries the sampler or estimator used for execution.
+# `QuriPartsSampler` accepts a QURI Parts sampler callable while keeping that
+# live SDK object outside the portable artifact. The same `compiled_qaoa`
+# artifact can therefore run through a simulator, noise model, or provider
+# sampler without recompilation. A live sampler has no portable seed contract,
+# so this endpoint uses `seed=0` and leaves reproducibility to the injected
+# sampler.
 #
-# As a concrete example, we build a noisy sampler with QURI Parts' Qulacs `NoiseSimulator`.
-# Then we compare the noiseless and noisy sample-mean energies at the **same** optimized parameters.
-# With depolarizing noise applied to every gate, the noisy mean energy should drift away from the noise-free value.
-# This confirms that the swapped sampler is actually being used.
+# The original tutorial demonstrated this extension point with Qulacs'
+# `NoiseSimulator`. We restore the same comparison here: the optimized
+# parameters and artifact stay fixed, and only the sampler changes.
 
 # %%
-# Build a Qulacs noise-simulator sampler and inject it into the executor.
 noise_model = NoiseModel([DepolarizingNoise(error_prob=0.02)])
 noisy_sampler = create_qulacs_noisesimulator_sampler(noise_model)
-noisy_executor = transpiler.executor(sampler=noisy_sampler)
+noisy_endpoint = QuriPartsSampler(noisy_sampler, label="noise-simulator")
 
-# Run the same executable on the noiseless and noisy samplers.
-clean_result = executable.sample(
-    executor,
-    bindings={"gammas": opt_gammas, "betas": opt_betas},
-    shots=sample_shots,
-).result()
-noisy_result = executable.sample(
-    noisy_executor,
-    bindings={"gammas": opt_gammas, "betas": opt_betas},
-    shots=sample_shots,
-).result()
+noisy_qaoa_run = compiled_qaoa.run(
+    on=noisy_endpoint,
+    gammas=optimized_gammas,
+    betas=optimized_betas,
+    shots=FINAL_SHOTS,
+    seed=0,
+)
 
-# Decode both sample sets to compare their mean Ising energies.
-clean_decoded = spin_model.decode_from_sampleresult(clean_result)
-noisy_decoded = spin_model.decode_from_sampleresult(noisy_result)
-clean_energy = clean_decoded.energy_mean()
-noisy_energy = noisy_decoded.energy_mean()
+clean_energy = best_qaoa_run.samples.mean_energy
+noisy_energy = noisy_qaoa_run.samples.mean_energy
 print(f"noiseless sampler mean energy: {clean_energy:+.4f}")
 print(f"noisy     sampler mean energy: {noisy_energy:+.4f}")
+assert noisy_qaoa_run.samples.total_occurrences == FINAL_SHOTS
 
 # %% [markdown]
-# Because both sampler runs return shot counts, we can compare their sampled energy distributions directly.
-# The vertical line in each subplot marks the sample mean energy.
+# Both runs return ordinary Qamomile sample sets, so their energy distributions
+# can be compared directly. Depolarizing noise pushes the state toward the
+# maximally mixed state; increasing the error probability therefore tends to
+# pull this Ising energy toward zero.
 
 # %%
+def energy_distribution(samples):
+    """Aggregate an optimization sample set by energy."""
 
-
-def energy_distribution(decoded_samples):
-    counts: Counter[float] = Counter()
-    for energy, occ in zip(decoded_samples.energy, decoded_samples.num_occurrences):
-        counts[energy] += occ
-    energies = sorted(counts.keys())
+    counts = Counter()
+    for sample in samples.samples:
+        counts[sample.energy] += sample.occurrences
+    energies = sorted(counts)
     return energies, [counts[energy] for energy in energies]
 
 
-fig, axes = plt.subplots(1, 2, figsize=(11, 4), sharey=True)
-for ax, decoded_samples, mean_energy, title, color in [
-    (axes[0], clean_decoded, clean_energy, "Noiseless sampler", "#2696EB"),
+figure, axes = plt.subplots(1, 2, figsize=(11, 4), sharey=True)
+for axis, samples, mean_energy, title, color in (
+    (axes[0], best_qaoa_run.samples, clean_energy, "Noiseless sampler", "#2696EB"),
     (
         axes[1],
-        noisy_decoded,
+        noisy_qaoa_run.samples,
         noisy_energy,
         "NoiseSimulator sampler",
         "#FF8A3D",
     ),
-]:
-    energies, counts = energy_distribution(decoded_samples)
-    ax.bar(energies, counts, width=0.6, color=color)
-    ax.axvline(
+):
+    distribution_energies, distribution_counts = energy_distribution(samples)
+    axis.bar(distribution_energies, distribution_counts, width=0.6, color=color)
+    axis.axvline(
         mean_energy,
         color="#2B2B2B",
         linestyle="--",
         linewidth=1.5,
         label=f"mean = {mean_energy:+.3f}",
     )
-    ax.set_xticks(energies)
-    ax.set_title(title)
-    ax.set_xlabel("Ising energy")
-    ax.legend()
+    axis.set_xticks(distribution_energies)
+    axis.set_title(title)
+    axis.set_xlabel("Ising energy")
+    axis.legend()
 
 axes[0].set_ylabel("Frequency")
-fig.suptitle("Sampled energy distributions by QURI Parts sampler")
-fig.tight_layout()
+figure.suptitle("Sampled energy distributions by QURI Parts sampler")
+figure.tight_layout()
 plt.show()
-
-# %% [markdown]
-# Depolarizing noise pushes the QAOA state toward the maximally mixed state.
-# In that limit, every spin configuration is equally likely, and the mean of $H_C$ converges to $0$.
-# The noisy mean energy is therefore closer to 0, meaning higher, than the noiseless one.
-# Increasing `error_prob` or adding more noise channels pushes the noisy energy further toward $0$.
-# Setting `error_prob=0.0` recovers the noiseless value within shot noise.
-# The same pattern applies when swapping in any other QURI Parts sampler, such as a remote device, a density-matrix simulator, or a stochastic state-vector sampler.
-# In all cases, the kernel does not need to be transpiled again.
 
 # %% [markdown]
 # ## Summary
 #
-# - `QuriPartsTranspiler().transpile(kernel, bindings=..., parameters=[...])` converts the qkernel to a QURI Parts `LinearMappedParametricQuantumCircuit`, which can be inspected with QURI Parts' `draw_circuit`.
-# - `QuriPartsExecutor` supports `executable.sample()` for QAOA-style sampling, `executable.run()` for qkernels that return `qmc.expval(...)`, and direct `executor.estimate(...)` calls for circuit-level expectation values against the Qulacs state-vector simulator by default.
-# - `estimate_expectation` switches between QURI Parts' parametric and non-parametric estimators depending on whether the input circuit still has free parameters. Usually, `executor.estimate()` lets you use this behavior without thinking about the switch.
-# - Custom samplers and estimators, including QURI Parts' `NoiseSimulator`-backed sampler, can be passed through `transpiler.executor(...)` without re-transpiling the kernel.
-
-# %% [markdown]
-# ### See also
-#
-# - [CUDA-Q Support](cudaq_support.ipynb) covers the same MaxCut QAOA workflow with CUDA-Q.
-# - [Qiskit Support](qiskit_support.ipynb) covers the same workflow on Qiskit, including Aer simulators, Qiskit primitives, and native Qiskit circuit features.
+# - QCore is the sole persistent meaning of the typed source program.
+# - `QuriParts` emits deterministic portable data, not a stored SDK object.
+# - One artifact accepts multiple runtime parameter values on isolated Qulacs.
+# - Sampling and expectation reuse one state-preparation definition and the
+#   common Qamomile result contracts.
+# - The page runs the original five-node, three-layer continuous MaxCut
+#   optimization, final distribution, partition, and expectation workflow.
+# - `load_circuit` restores direct unbound/bound QURI Parts circuit inspection
+#   and both native estimator paths without storing an SDK object in artifacts.
+# - The same artifact also runs through an injected QURI Parts
+#   `NoiseSimulator` sampler for the original noise comparison.

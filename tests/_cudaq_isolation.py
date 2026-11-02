@@ -1,17 +1,10 @@
 """Keep CUDA-Q out of pytest processes that will not run CUDA-Q tests.
 
-Why this exists: ``cudaq`` imports ``torch`` at import time, and torch,
-qiskit-aer, and cudaq each bundle their own copy of LLVM's OpenMP runtime
-(``libomp.dylib``). Loading more than one OpenMP runtime into a single
-process is undefined behavior; on macOS arm64 it manifests as a
-segmentation fault inside AerSimulator's worker threads once the
-cudaq/torch libraries are resident. The minimal reproduction is running
-``tests/transpiler/engines/test_cudaq.py`` before
-``tests/transpiler/test_pauli_evolve_vector_observable.py``: the former's
-module-level ``pytest.importorskip("cudaq")`` executes during collection
-even when every cudaq test is deselected by the default
-``-m "not docs and not quri_parts and not cudaq"`` addopts, and the
-latter then crashes inside AerSimulator.
+Why this exists: ``cudaq`` imports ``torch`` at import time, and SDK packages
+may bundle incompatible copies of LLVM's OpenMP runtime. Loading more than one
+OpenMP runtime into a single process is undefined behavior and can manifest as
+a simulator crash. Qamomile therefore keeps module-level CUDA-Q imports out of
+ordinary test processes and bounds native thread pools in dedicated runs.
 
 The fix has two halves, enforced by ``tests/test_cudaq_import_isolation.py``:
 
@@ -33,6 +26,7 @@ from typing import MutableMapping
 
 NATIVE_THREAD_LIMIT_ENV: tuple[str, ...] = (
     "OMP_NUM_THREADS",
+    "OMP_THREAD_LIMIT",
     "OPENBLAS_NUM_THREADS",
     "MKL_NUM_THREADS",
     "VECLIB_MAXIMUM_THREADS",
@@ -43,12 +37,7 @@ NATIVE_THREAD_LIMIT_ENV: tuple[str, ...] = (
 #: module scope, i.e. during collection. Every entry must also carry
 #: ``pytestmark = pytest.mark.cudaq``; tests/test_cudaq_import_isolation.py
 #: keeps this table in sync with the actual test sources.
-CUDAQ_MODULE_LEVEL_IMPORTERS: frozenset[str] = frozenset(
-    {
-        "tests/transpiler/engines/test_cudaq.py",
-        "tests/transpiler/engines/test_cudaq_frontend.py",
-    }
-)
+CUDAQ_MODULE_LEVEL_IMPORTERS: frozenset[str] = frozenset()
 
 
 @lru_cache(maxsize=None)

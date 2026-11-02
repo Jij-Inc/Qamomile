@@ -1,6 +1,9 @@
 """Test that tutorial files execute without errors."""
 
+import importlib.util
 import runpy
+import subprocess
+import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -17,9 +20,7 @@ except ImportError:
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 # Tutorials that require credentials or remote side effects and are skipped in CI.
-SKIP_TUTORIALS: dict[str, str] = {
-    "en/integration/qbraid_executor": "Requires a qBraid API key.",
-}
+SKIP_TUTORIALS: dict[str, str] = {}
 
 TUTORIAL_PATTERNS = [
     "docs/en/tutorial/**/*.py",
@@ -44,11 +45,13 @@ OPTIONAL_SKIP_MODULES: dict[str, tuple[str, ...]] = {
     "qsci": ("quri_parts",),
     "quri_parts_support": ("quri_parts.qulacs",),
     "hybrid_qnn": ("torch",),
-    "ommx_quantum_benchmarks_qaoa": (
-        "ommx_quantum_benchmarks",
-        "ommx_pyscipopt_adapter",
-    ),
+    "ommx_quantum_benchmarks_qaoa": ("ommx_quantum_benchmarks",),
 }
+
+# CUDA-Q imports Torch and its OpenMP runtime. Execute its page in a fresh
+# process so optional-dependency discovery and the documentation harness do not
+# mix that runtime with native libraries already loaded by pytest.
+SUBPROCESS_TUTORIALS = frozenset({"cudaq_support"})
 
 
 def discover_tutorial_files() -> list[Path]:
@@ -186,10 +189,27 @@ def test_tutorial_executes_without_error(tutorial_file: Path, tmp_path, monkeypa
     for stem, modules in OPTIONAL_SKIP_MODULES.items():
         if stem in tutorial_file.stem:
             for module in modules:
-                pytest.importorskip(module)
+                if module == "cudaq":
+                    if importlib.util.find_spec(module) is None:
+                        pytest.skip(f"could not import {module!r}")
+                else:
+                    pytest.importorskip(module)
 
     try:
-        if tutorial_file.suffix == ".ipynb":
+        if tutorial_file.stem in SUBPROCESS_TUTORIALS:
+            completed = subprocess.run(
+                [sys.executable, str(tutorial_file)],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=600,
+            )
+            if completed.returncode != 0:
+                detail = (completed.stderr or completed.stdout).strip()[-4000:]
+                pytest.fail(
+                    f"Tutorial subprocess exited with {completed.returncode}: {detail}"
+                )
+        elif tutorial_file.suffix == ".ipynb":
             execute_notebook(tutorial_file)
         else:
             runpy.run_path(str(tutorial_file), run_name="__main__")

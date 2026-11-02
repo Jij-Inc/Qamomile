@@ -128,7 +128,7 @@ def generate_index_page(
     lines = [
         "# API Reference",
         "",
-        "Complete API reference for the Qamomile package.",
+        "API reference for the public `qamomile` package.",
         "",
         "## Packages",
         "",

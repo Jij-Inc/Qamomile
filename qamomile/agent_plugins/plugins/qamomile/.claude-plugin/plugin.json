@@ -1,0 +1,14 @@
+{
+  "name": "qamomile",
+  "version": "0.2.0",
+  "description": "Author, execute, and estimate quantum programs with Qamomile.",
+  "author": {
+    "name": "Jij Inc."
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "quantum",
+    "qamomile",
+    "optimization"
+  ]
+}

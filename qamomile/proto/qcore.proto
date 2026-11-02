@@ -1,0 +1,228 @@
+syntax = "proto3";
+
+package qamomile.proto;
+
+message SourceSpanProto {
+  string uri = 1;
+  uint32 start_line = 2;
+  uint32 start_column = 3;
+  uint32 end_line = 4;
+  uint32 end_column = 5;
+}
+
+message DimensionProto {
+  oneof value {
+    uint64 fixed = 1;
+    string symbol = 2;
+  }
+}
+
+message TypeProto {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    SCALAR = 1;
+    ARRAY = 2;
+    PRODUCT = 3;
+    RECORD = 4;
+    QUANTUM = 5;
+    STAGED = 6;
+    FIXED = 7;
+    FUNCTION = 8;
+  }
+
+  Kind kind = 1;
+  string name = 2;
+  repeated TypeProto arguments = 3;
+  repeated DimensionProto dimensions = 4;
+  repeated string field_names = 5;
+}
+
+message LiteralProto {
+  message Complex {
+    double real = 1;
+    double imaginary = 2;
+  }
+
+  message Sequence {
+    repeated LiteralProto values = 1;
+  }
+
+  message Mapping {
+    repeated Entry entries = 1;
+  }
+
+  message Entry {
+    string key = 1;
+    LiteralProto value = 2;
+  }
+
+  oneof value {
+    bool unit_value = 1;
+    bool bool_value = 2;
+    sint64 int_value = 3;
+    double real_value = 4;
+    string string_value = 5;
+    bytes bytes_value = 6;
+    Sequence tuple_value = 7;
+    Mapping mapping_value = 8;
+    Complex complex_value = 9;
+    bytes bigint_value = 10;
+  }
+}
+
+message AttributeProto {
+  string name = 1;
+  LiteralProto value = 2;
+}
+
+message RegionRefProto {
+  uint64 root = 1;
+  repeated string projections = 2;
+}
+
+message ValueProto {
+  uint64 id = 1;
+  TypeProto type = 2;
+  string hint = 3;
+  RegionRefProto region = 4;
+  bool has_region = 5;
+}
+
+message TerminatorProto {
+  string kind = 1;
+  repeated uint64 operands = 2;
+  repeated AttributeProto attributes = 3;
+  SourceSpanProto span = 4;
+}
+
+message BlockProto {
+  repeated ValueProto arguments = 1;
+  repeated OperationProto operations = 2;
+  TerminatorProto terminator = 3;
+}
+
+message RegionProto {
+  repeated BlockProto blocks = 1;
+}
+
+message OperationProto {
+  string opcode = 1;
+  repeated uint64 operands = 2;
+  repeated ValueProto results = 3;
+  repeated AttributeProto attributes = 4;
+  repeated RegionProto regions = 5;
+  reserved 6;
+  SourceSpanProto span = 7;
+  // Untrusted provenance and tolerance rows erased from semantic identity.
+  repeated AttributeProto intent = 8;
+}
+
+message ParameterProto {
+  string name = 1;
+  ValueProto value = 2;
+  LiteralProto default_value = 3;
+  bool has_default = 4;
+}
+
+message FunctionProto {
+  string symbol = 1;
+  repeated ParameterProto parameters = 2;
+  TypeProto result_type = 3;
+  BlockProto body = 4;
+  reserved 5 to 8;
+  SourceSpanProto span = 9;
+  string asserted_kind = 10;
+  bool external = 11;
+  // Untrusted provenance and tolerance rows erased from semantic identity.
+  repeated AttributeProto intent = 12;
+}
+
+message ConstantProto {
+  string name = 1;
+  TypeProto type = 2;
+  LiteralProto value = 3;
+}
+
+message BindingProto {
+  string name = 1;
+  LiteralProto value = 2;
+}
+
+message QCorePackageProto {
+  uint32 schema_major = 1;
+  uint32 schema_minor = 2;
+  string artifact_kind = 3;
+  string module_name = 4;
+  repeated FunctionProto functions = 5;
+  repeated ConstantProto constants = 6;
+  reserved 7 to 8;
+  string entrypoint = 9;
+  repeated BindingProto const_bindings = 10;
+  bytes package_digest = 11;
+}
+
+message ParameterSlotProto {
+  string name = 1;
+  TypeProto type = 2;
+  LiteralProto default_value = 3;
+  bool has_default = 4;
+}
+
+message ParameterABIProto {
+  repeated ParameterSlotProto slots = 1;
+}
+
+message ResultABIProto {
+  TypeProto type = 1;
+  repeated uint32 source_order = 2;
+  uint32 native_width = 3;
+}
+
+message CompilationReportProto {
+  reserved 1;
+  repeated string stages = 2;
+  reserved 3 to 6;
+  repeated string assumptions = 7;
+  repeated string warnings = 8;
+  bytes resource_study = 9;
+}
+
+message ArtifactProto {
+  uint32 schema_major = 1;
+  uint32 schema_minor = 2;
+  string format = 3;
+  bytes payload = 4;
+  reserved 5;
+  string target_fingerprint = 6;
+  ParameterABIProto parameter_abi = 7;
+  ResultABIProto result_abi = 8;
+  CompilationReportProto report = 9;
+  repeated AttributeProto metadata = 10;
+  reserved 11;
+  bytes artifact_digest = 12;
+  reserved 13;
+  repeated string execution_requirements = 14;
+  reserved 15;
+}
+
+message PolynomialTermProto {
+  repeated string variables = 1;
+  double coefficient = 2;
+}
+
+message OptimizationProblemProto {
+  enum Domain {
+    DOMAIN_UNSPECIFIED = 0;
+    BINARY = 1;
+    SPIN = 2;
+  }
+
+  uint32 schema_major = 1;
+  uint32 schema_minor = 2;
+  string artifact_kind = 3;
+  Domain domain = 4;
+  repeated PolynomialTermProto terms = 5;
+  double constant = 6;
+  repeated string variables = 7;
+  bytes problem_digest = 8;
+}

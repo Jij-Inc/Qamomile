@@ -1,16 +1,16 @@
 """Configure repository-wide pytest collection and command-line options.
 
-The collection hook isolates the CUDA-Q runtime, which drags in torch and a
-third copy of the OpenMP runtime alongside the copies bundled by torch and
-qiskit-aer, and the configure hook bounds CUDA-Q native thread pools. See
-``tests/_cudaq_isolation.py`` for the full background and
-``tests/test_cudaq_import_isolation.py`` for the guard that keeps the module
-table in sync. The command-line options let documentation CI select only the
-runnable pages changed by a docs-only pull request.
+The collection hook isolates the CUDA-Q runtime, which drags in torch and an
+OpenMP runtime. The configure hook bounds CUDA-Q native thread pools and gives
+Matplotlib and Zig persistent pytest caches. Qamomile backend workload bounds live in
+``tests/qamomile/conftest.py`` beside the single active implementation. The
+command-line options let documentation CI select only the runnable pages
+changed by a docs-only pull request.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -44,17 +44,24 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Limit implicit native thread pools in CUDA-Q test sessions.
+    """Install repository-wide caches and simulator resource bounds.
 
     CUDA-Q loads an OpenMP runtime and its simulator may otherwise consume
     every available CPU core. Dedicated ``-m cudaq`` runs contain many
     simulation cases, so unconstrained native pools can saturate several
     cores for minutes. Explicit environment settings remain authoritative.
+    Matplotlib uses pytest's persistent cache so isolated drawer tests do not
+    rebuild the font index on every process. Selene configures Zig's local cache
+    itself; its child process inherits this writable global cache instead of
+    requiring access to the user's home cache during sandboxed tests.
 
     Args:
         config (pytest.Config): Active pytest configuration containing the
             marker expression.
     """
+    os.environ.setdefault("MPLCONFIGDIR", str(config.cache.mkdir("matplotlib")))
+    if "ZIG_GLOBAL_CACHE_DIR" not in os.environ:
+        os.environ["ZIG_GLOBAL_CACHE_DIR"] = str(config.cache.mkdir("zig-global"))
     configure_cudaq_thread_limits(config.getoption("markexpr") or "")
 
 

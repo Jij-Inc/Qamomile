@@ -4,110 +4,116 @@ slug: algorithm
 
 # Algorithms
 
-Concrete quantum algorithm examples built with Qamomile.
+Quantum algorithms implemented with Qamomile, with checks for their results.
 
 ::::{grid} 1 1 1 1
 
 :::{card}
-:header: **Grover Adaptive Search for Combinatorial Polynomial Binary Optimization**
+:header: **Grover Adaptive Search**
 :link: grover_adaptive_search
-Solve a portfolio selection problem with `GASConverter`, driving the Grover threshold from a classical outer loop and checking the result against brute force.
+Minimize a binary portfolio objective with `BinaryModel`, a Grover oracle, and a classical threshold-update loop.
 :::
 
 :::{card}
-:header: **Hamiltonian Simulation with Suzuki–Trotter (Rabi oscillation)**
+:header: **Hamiltonian Simulation**
 :link: hamiltonian_simulation
-Trotter–Suzuki product formulas on the Rabi model with empirical convergence orders.
+Simulate Rabi oscillations with a Suzuki product formula and compare the result with the analytic solution.
 :::
 
 :::{card}
-:header: **Hybrid Quantum Neural Network (HQNN)**
+:header: **Hybrid Quantum Neural Network**
 :link: hybrid_qnn
-End-to-end CNN + quantum variational circuit on Fashion-MNIST with the parameter shift rule.
+Combine a quantum circuit with PyTorch and train it using parameter-shift gradients.
 :::
 
 :::{card}
 :header: **Möttönen Amplitude Encoding**
-:link: mottonen_amplitude_encoding.ipynb
-Learn how to use Möttönen amplitude encoding in Qamomile to prepare arbitrary quantum states. This tutorial introduces state preparation based on `amplitude_encoding` and `mottonen_amplitude_encoding`.
+:link: mottonen_amplitude_encoding
+Prepare a quantum state from classical amplitudes and verify its measurement probabilities.
 :::
 
 :::{card}
 :header: **Option Pricing with Quantum Amplitude Estimation**
 :link: option_pricing
-An example of option pricing with quantum amplitude estimation (QAE) in Qamomile. It encodes stock-price data into amplitudes, implements amplitude estimation with the Grover operator, and runs a numerical option-pricing simulation.
+Encode an asset distribution and payoff, estimate the expected payoff, and calculate a discounted option price.
 :::
 
 :::{card}
-:header: **Multidimensional QFT for Estimating Nanosheet Material Properties**
+:header: **Multidimensional Quantum Fourier Transform**
 :link: multidimensional_qft
-This example implements a multidimensional quantum Fourier transform with Qamomile. For nanosheet material characterization, it uses a multidimensional QFT with data preprocessing to run a nanosheet simulation.
+Apply a reusable QFT to each logical axis of a quantum register.
 :::
 
 :::{card}
 :header: **Pauli Correlation Encoding**
 :link: pce_maxcut
-An example of using Pauli Correlation Encoding (PCE) with Qamomile. It solves MaxCut for a 20-node graph using 3-qubit PCE and compares the result with the exact solution.
+Encode a four-variable MaxCut problem with two qubits and recover a partition from estimated Pauli correlations.
 :::
 
 :::{card}
-:header: **QAOA for Graph Partitioning**
+:header: **QAOA for Constrained Graph Partitioning**
 :link: qaoa_graph_partition
-End-to-end optimization example using OMMX, JijModeling, and `QAOAConverter`.
+Formulate a constrained problem with JijModeling and OMMX, run QAOA, and check feasibility and objective values.
 :::
 
 :::{card}
-:header: **QAOA for MaxCut: Building the Circuit from Scratch**
+:header: **QAOA for MaxCut**
 :link: qaoa_maxcut
-Build a QAOA circuit from scratch to solve MaxCut, then compare with the built-in `qaoa_state`.
+Build QAOA from reusable functions and decode a cut of a four-vertex cycle.
 :::
 
 :::{card}
-:header: **Quantum-enhanced Markov chain Monte Carlo**
-:link: qe_mcmc
-Implement Quantum-enhanced MCMC using Trotter-decomposed time evolution.
-:::
-
-:::{card}
-:header: **QSVT Eigenstate Filtering**
+:header: **QSVT Eigenstate Filtering for Graph Partitioning**
 :link: qsvt_eigenstate_filter_graph_partitioning
-Filter a block-encoded cost Hamiltonian with a QSVT sign approximation, and drive a Lin & Tong binary search with the post-selection rate.
+Build a real-polynomial eigenstate filter, estimate its success probability, and recover a balanced graph partition.
 :::
 
 :::{card}
-:header: **Quantum Selected Configuration Interaction (QSCI)**
+:header: **Quantum-Enhanced Markov Chain Monte Carlo**
+:link: qe_mcmc
+Use a quantum time-evolution circuit to propose classical samples and verify detailed balance.
+:::
+
+:::{card}
+:header: **Quantum Selected Configuration Interaction**
 :link: qsci
-Sample bitstrings from a quantum state, build an effective Hamiltonian, and diagonalize it classically with a strict variational guarantee.
+Sample trial states, construct their subspace Hamiltonian, and solve for a variational energy.
+:::
+
+:::{card}
+:header: **Quantum Singular Value Transformation (QSVT)**
+:link: qsvt
+Block encode a non-Hermitian matrix, apply a degree-two singular-value polynomial, verify the projected matrix, and estimate logical resources.
 :::
 
 :::{card}
 :header: **Introduction to Quantum Error Correction**
 :link: quantum_error_correction
-3-qubit bit-flip/phase-flip codes, Shor's 9-qubit code, and stabilizers.
+Encode a logical state, detect a single bit flip, and correct it while preserving the logical amplitudes.
 :::
 
 :::{card}
 :header: **Quantum Phase Estimation (QPE)**
 :link: qpe
-This example implements quantum phase estimation with Qamomile. It introduces two approaches for a 4x4 unitary matrix: a from-scratch implementation and the built-in `qpe` helper. It also compares the precision and required gate count as the number of counting qubits increases.
+Implement quantum phase estimation from individual operations and with `phase_estimation` from `qamomile.stdlib`, then compare precision and logical gate counts.
 :::
 
 :::{card}
 :header: **Quantum Kernel Classification**
 :link: quantum_kernel_classification
-Use quantum feature maps and kernel methods for classification on the make_circles dataset.
+Estimate a quantum overlap kernel and use it with a support-vector classifier.
 :::
 
 :::{card}
-:header: **Stabilizer Formalism and the Steane Code**
+:header: **Stabilizers and the Steane Code**
 :link: steane_code
-CSS construction, syndrome decoding, and transversal Hadamard.
+Construct the Steane code and use its syndrome to correct a Pauli error.
 :::
 
 :::{card}
-:header: **Variational Quantum Eigensolver (VQE) for the Hydrogen Molecule**
+:header: **VQE for the Hydrogen Molecule**
 :link: vqe_for_hydrogen
-Build a molecular Hamiltonian with OpenFermion and find the ground state energy via VQE.
+Build a molecular Hamiltonian and optimize a two-qubit trial state to estimate its ground-state energy.
 :::
 
 ::::

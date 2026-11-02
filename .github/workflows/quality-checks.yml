@@ -32,9 +32,20 @@ jobs:
 
   python-test:
     name: Python Test
-    needs: changes
+    # Keep the first Rust rollout fail-closed even while the trusted base
+    # verifier predates RUST_RESULT: a failed Rust job skips this already
+    # required Python job, which the base verifier rejects.
+    needs:
+      - changes
+      - rust
     if: ${{ needs.changes.outputs.full_ci_required == 'true' }}
     uses: ./.github/workflows/_quality-python.yml
+
+  rust:
+    name: Rust
+    needs: changes
+    if: ${{ needs.changes.outputs.full_ci_required == 'true' }}
+    uses: ./.github/workflows/rust.yml
 
   docs-test:
     name: Docs Test
@@ -59,6 +70,7 @@ jobs:
     needs:
       - changes
       - python-test
+      - rust
       - docs-test
       - ruff
       - zuban
@@ -74,6 +86,7 @@ jobs:
       DOCS_CHANGED: ${{ needs.changes.outputs.docs_changed }}
       # Get the github official results from the other jobs.
       PYTHON_TEST_RESULT: ${{ needs.python-test.result }}
+      RUST_RESULT: ${{ needs.rust.result }}
       DOCS_TEST_RESULT: ${{ needs.docs-test.result }}
       RUFF_RESULT: ${{ needs.ruff.result }}
       ZUBAN_RESULT: ${{ needs.zuban.result }}

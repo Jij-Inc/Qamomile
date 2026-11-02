@@ -156,7 +156,7 @@ else
       ;;
   esac
 
-  # Iniitalise the files with settings of removing them all automatically when 
+  # Iniitalise the files with settings of removing them all automatically when
   # the process is finished.
   changed_paths_file="$(mktemp)"
   ci_skip_paths_file="$(mktemp)"

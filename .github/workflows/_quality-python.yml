@@ -16,24 +16,17 @@ permissions:
 
 env:
   UV_VERSION: "0.11.32"
+  PYTHON_VERSION: "3.11"
 
 jobs:
-  # CI keeps one end-to-end smoke path per installable transpiler. Quration is
-  # omitted because PyQret is not provided by the locked dependency sources.
-  # Each matrix job pins UV_PYTHON so `uv run` cannot fall back to the
-  # repository's .python-version. `--no-sync` then preserves the engine extra
-  # installed for that matrix entry instead of recreating its environment.
+  # CI runs the Qamomile core suite in the base environment and each optional
+  # backend suite in its matching dependency job.
   base-test:
-    name: Qiskit smoke (Python ${{ matrix.python-version }})
+    name: Qamomile and Qiskit smoke
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.12", "3.13"]
     env:
       MPLBACKEND: Agg
-      UV_PYTHON: ${{ matrix.python-version }}
     steps:
       - name: Check out the repository
         # v4.4.0 = https://github.com/actions/checkout/releases/tag/v4.4.0
@@ -45,7 +38,7 @@ jobs:
         # v5.6.0 = https://github.com/actions/setup-python/releases/tag/v5.6.0
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
         # v5.4.2 = https://github.com/astral-sh/setup-uv/releases/tag/v5.4.2
@@ -53,31 +46,34 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
+          cache-suffix: ${{ github.job }}
 
       - name: Install base dependencies
-        run: uv sync --frozen --python "${{ matrix.python-version }}" --group dev
+        # Unmarked cross-engine tests also exercise Cirq in the base suite.
+        run: >-
+          uv sync --frozen --no-default-groups --group test-core
+          --extra qiskit --extra cirq
 
       - name: Verify Qiskit dependencies
         run: uv run --no-sync python -c "import qiskit"
 
-      - name: Transpile and execute with Qiskit
+      - name: Run Qamomile conformance tests
+        # Keep the Const-slice and Param-cast regression matrix local.
         run: >-
-          uv run --no-sync pytest
-          -m "ci_smoke and not quri_parts and not cudaq"
-          tests/circuit/test_frontend_cross_engine_execution.py
+          uv run --no-sync pytest tests/qamomile
+          --ignore=tests/qamomile/test_const_slice_iteration_regressions.py
+          --ignore=tests/qamomile/test_const_slice_iteration_backends.py
+          --ignore=tests/qamomile/test_param_real_cast.py
+          --deselect="tests/qamomile/test_skill_cli.py::test_skill_examples_execute_from_packaged_sources[integer-rotation-offset-0]"
+          --deselect="tests/qamomile/test_skill_cli.py::test_skill_examples_execute_from_packaged_sources[integer-rotation-offset-1]"
           -v
 
   quri-parts-test:
-    name: QURI Parts smoke (Python ${{ matrix.python-version }})
+    name: QURI Parts smoke
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.12", "3.13"]
     env:
       MPLBACKEND: Agg
-      UV_PYTHON: ${{ matrix.python-version }}
     steps:
       - name: Check out the repository
         # v4.4.0 = https://github.com/actions/checkout/releases/tag/v4.4.0
@@ -89,7 +85,7 @@ jobs:
         # v5.6.0 = https://github.com/actions/setup-python/releases/tag/v5.6.0
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
         # v5.4.2 = https://github.com/astral-sh/setup-uv/releases/tag/v5.4.2
@@ -97,33 +93,25 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
+          cache-suffix: ${{ github.job }}
 
       - name: Install dependencies with quri-parts
-        run: >-
-          uv sync --frozen --python "${{ matrix.python-version }}"
-          --group dev --extra quri_parts
+        run: uv sync --frozen --no-default-groups --group test --extra quri_parts
 
       - name: Verify QURI Parts dependencies
         run: uv run --no-sync python -c "import quri_parts, quri_parts.qulacs"
 
-      - name: Transpile and execute with QURI Parts
+      - name: Run Qamomile QURI Parts tests
         run: >-
           uv run --no-sync pytest
-          -m "ci_smoke and quri_parts"
-          tests/circuit/test_frontend_cross_engine_execution.py
+          -m "quri_parts and not backend_slow"
+          tests/qamomile/test_quri_parts_backend.py
           -v
 
-  braket-test:
-    name: Amazon Braket smoke (Python ${{ matrix.python-version }})
+  qir-test:
+    name: QIR export and execution
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.12", "3.13"]
-    env:
-      MPLBACKEND: Agg
-      UV_PYTHON: ${{ matrix.python-version }}
     steps:
       - name: Check out the repository
         # v4.4.0 = https://github.com/actions/checkout/releases/tag/v4.4.0
@@ -135,7 +123,7 @@ jobs:
         # v5.6.0 = https://github.com/actions/setup-python/releases/tag/v5.6.0
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
         # v5.4.2 = https://github.com/astral-sh/setup-uv/releases/tag/v5.4.2
@@ -143,33 +131,148 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
+          cache-suffix: ${{ github.job }}
+
+      - name: Install QIR generator and local consumer
+        # Qiskit supplies reference operators for the QIR equivalence tests.
+        run: >-
+          uv sync --frozen --no-default-groups --group test --group qir-test
+          --extra qir --extra qiskit
+
+      - name: Verify QIR dependencies
+        run: uv run --no-sync python -c "import pyqir, qirrunner"
+
+      - name: Verify and execute exported QIR
+        run: >-
+          uv run --no-sync pytest -m qir
+          tests/qamomile/test_qir_backend.py
+          tests/qamomile/test_skill_cli.py
+          -v
+
+  quration-test:
+    name: Quration smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      MPLBACKEND: Agg
+    steps:
+      - name: Check out the repository
+        # v4.4.0 = https://github.com/actions/checkout/releases/tag/v4.4.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        # v5.6.0 = https://github.com/actions/setup-python/releases/tag/v5.6.0
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        # v5.4.2 = https://github.com/astral-sh/setup-uv/releases/tag/v5.4.2
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-suffix: ${{ github.job }}
+
+      - name: Install dependencies with quration
+        # Qiskit supplies reference states for the Quration equivalence tests.
+        run: uv sync --frozen --no-default-groups --group test --extra quration --extra qiskit
+
+      - name: Verify Quration dependencies
+        run: uv run --no-sync python -c "import pyqret"
+
+      - name: Run Qamomile Quration tests
+        run: >-
+          uv run --no-sync pytest
+          -m "quration"
+          tests/qamomile/test_quration_backend.py
+          -v
+
+  cirq-test:
+    name: Cirq and Google QVM smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      MPLBACKEND: Agg
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-suffix: ${{ github.job }}
+
+      - name: Install dependencies with Cirq
+        run: uv sync --frozen --no-default-groups --group test --extra cirq
+
+      - name: Verify Cirq dependencies
+        run: uv run --no-sync python -c "import cirq, cirq_google"
+
+      - name: Run Qamomile Cirq tests
+        run: >-
+          uv run --no-sync pytest
+          -m "cirq and not backend_slow"
+          tests/qamomile/test_cirq_backend.py
+          -v
+
+  braket-test:
+    name: Amazon Braket smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      MPLBACKEND: Agg
+    steps:
+      - name: Check out the repository
+        # v4.4.0 = https://github.com/actions/checkout/releases/tag/v4.4.0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        # v5.6.0 = https://github.com/actions/setup-python/releases/tag/v5.6.0
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        # v5.4.2 = https://github.com/astral-sh/setup-uv/releases/tag/v5.4.2
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-suffix: ${{ github.job }}
 
       - name: Install dependencies with Amazon Braket
-        run: >-
-          uv sync --frozen --python "${{ matrix.python-version }}"
-          --group dev --extra braket
+        run: uv sync --frozen --no-default-groups --group test --extra braket
 
       - name: Verify Amazon Braket dependencies
         run: uv run --no-sync python -c "import braket.circuits, braket.devices"
 
-      - name: Transpile and execute with Amazon Braket
+      - name: Run Qamomile Amazon Braket tests
         run: >-
           uv run --no-sync pytest
-          -m "ci_smoke and braket"
-          tests/circuit/test_frontend_cross_engine_execution.py
+          -m "braket and not backend_slow"
+          tests/qamomile/test_braket_backend.py
           -v
 
   hugr-test:
-    name: HUGR smoke (Python ${{ matrix.python-version }})
+    name: HUGR smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+    timeout-minutes: 20
     env:
       MPLBACKEND: Agg
-      UV_PYTHON: ${{ matrix.python-version }}
     steps:
       - name: Check out the repository
         # v4.4.0 = https://github.com/actions/checkout/releases/tag/v4.4.0
@@ -181,7 +284,7 @@ jobs:
         # v5.6.0 = https://github.com/actions/setup-python/releases/tag/v5.6.0
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
         # v5.4.2 = https://github.com/astral-sh/setup-uv/releases/tag/v5.4.2
@@ -189,33 +292,40 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
+          cache-suffix: ${{ github.job }}
 
       - name: Install dependencies with HUGR
-        run: >-
-          uv sync --frozen --python "${{ matrix.python-version }}"
-          --group dev --extra hugr
+        run: uv sync --frozen --no-default-groups --group test --extra hugr
 
       - name: Verify HUGR dependencies
-        run: uv run --no-sync python -c "import hugr, selene_sim, qnexus"
+        run: uv run --no-sync python -c "import hugr, selene_sim"
 
-      - name: Transpile and execute HUGR with Selene
+      - name: Run Qamomile HUGR tests
         run: >-
           uv run --no-sync pytest
-          -m "ci_smoke and hugr"
-          tests/hugr/
+          -m "hugr and not hugr_slow and not guppy"
+          tests/qamomile/test_hugr_backend.py
+          -v
+
+      - name: Install Guppy-compatible HUGR dependencies
+        run: uv sync --frozen --no-default-groups --group test --extra guppy
+
+      - name: Verify Guppy dependencies
+        run: uv run --no-sync python -c "import guppylang, hugr, tket_exts"
+
+      - name: Link Qamomile libraries from Guppy
+        run: >-
+          uv run --no-sync pytest
+          -m "hugr and guppy"
+          tests/qamomile/test_hugr_backend.py
           -v
 
   cudaq-test-ubuntu:
-    name: CUDA-Q smoke (Python ${{ matrix.python-version }})
+    name: CUDA-Q smoke
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.12", "3.13"]
     env:
       MPLBACKEND: Agg
-      UV_PYTHON: ${{ matrix.python-version }}
     steps:
       - name: Check out the repository
         # v4.4.0 = https://github.com/actions/checkout/releases/tag/v4.4.0
@@ -227,7 +337,7 @@ jobs:
         # v5.6.0 = https://github.com/actions/setup-python/releases/tag/v5.6.0
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
         # v5.4.2 = https://github.com/astral-sh/setup-uv/releases/tag/v5.4.2
@@ -235,18 +345,17 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
+          cache-suffix: ${{ github.job }}
 
       - name: Install dependencies with CUDA-Q
-        run: >-
-          uv sync --frozen --python "${{ matrix.python-version }}"
-          --group dev --extra cudaq-cu12
+        run: uv sync --frozen --no-default-groups --group test --extra cudaq-cu12
 
       - name: Verify CUDA-Q dependencies
         run: uv run --no-sync python -c "import cudaq"
 
-      - name: Transpile and execute with CUDA-Q
+      - name: Run Qamomile CUDA-Q tests
         run: >-
           uv run --no-sync pytest
-          -m "ci_smoke and cudaq"
-          tests/circuit/test_frontend_cross_engine_execution.py
+          -m "cudaq and not backend_slow"
+          tests/qamomile/test_cudaq_backend.py
           -v

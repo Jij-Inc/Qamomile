@@ -15,6 +15,8 @@ class ApiGenConfig:
     github_base_url: str = "https://github.com/Jij-Inc/Qamomile/blob/main"
     docstring_style: str = "google"
     multiline_sig_width: int = 80
+    excluded_subpackages: frozenset[str] = frozenset({"proto"})
+    included_modules: tuple[str, ...] = ("lowering", "statistics", "measurement")
 
     @property
     def repo_root(self) -> Path:

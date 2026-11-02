@@ -1,1000 +1,490 @@
-"""Submit instrumented HUGR programs to Helios or H2 through Nexus."""
+"""Quantinuum Nexus endpoint for direct HUGR execution on Helios."""
 
 from __future__ import annotations
 
-import dataclasses
-import hashlib
 import importlib
-import json
 import math
-import re
 import threading
-import time
-from collections.abc import Mapping, Sequence
-from enum import StrEnum
-from numbers import Integral
-from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Literal
-from uuid import uuid4
+import uuid
+from collections import Counter
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
+from typing import Any
 
-from qamomile.circuit.transpiler import (
-    ExecutionError,
-    ExecutionHandle,
+from qamomile.compilation import (
+    CapabilitySnapshot,
+    CompiledProgram,
+    CompletedJob,
     ExecutionReference,
+    ExecutionSnapshot,
+    ExecutionSnapshotKind,
+    Invocation,
+    Job,
     JobStatus,
+    SampleResult,
 )
-from qamomile.hugr._qir import _H2AbortError, to_h2_qir
-from qamomile.hugr._qir_results import decode_qir_results, parse_qir_output_manifest
-from qamomile.hugr._shot_range import (
-    SHOT_SUCCESS_TAG,
-    normalize_h2_shots,
-    prepare_h2_shot_range,
-)
+from qamomile.errors import ExecutionError
 
-if TYPE_CHECKING:
-    from hugr.package import Package
+from ._execution import load_package
+from ._profile import CAPABILITIES, FORMAT
+from ._target import Hugr
 
-_H2_SHOT_ORIGIN = 1
-_H2_TARGET = re.compile(r"H2-(?:[1-9][0-9]*(?:E|SC)?|Emulator)")
-
-_NEXUS_STATUS_MAP: Mapping[str, JobStatus] = {
-    "SUBMITTED": JobStatus.PENDING,
-    "RETRYING": JobStatus.PENDING,
-    "QUEUED": JobStatus.QUEUED,
+_STATUS_MAP: Mapping[str, JobStatus] = {
+    "SUBMITTED": JobStatus.SUBMITTED,
+    "RETRYING": JobStatus.SUBMITTED,
+    "QUEUED": JobStatus.SUBMITTED,
     "RUNNING": JobStatus.RUNNING,
-    "COMPLETED": JobStatus.COMPLETED,
-    "CANCELLING": JobStatus.CANCELLING,
+    "CANCELLING": JobStatus.RUNNING,
     "CANCELLED": JobStatus.CANCELLED,
+    "COMPLETED": JobStatus.COMPLETED,
     "ERROR": JobStatus.FAILED,
     "TERMINATED": JobStatus.FAILED,
     "DEPLETED": JobStatus.FAILED,
 }
 
 
-class NexusRegion(StrEnum):
-    """Select a supported Nexus execution region."""
-
-    US = "us"
-    SG = "sg"
-
-
-@dataclasses.dataclass(frozen=True)
-class _NexusDestination:
-    """Keep device-specific execution conventions inside the transport."""
-
-    target: str
-    program_format: Literal["hugr", "qir"]
-    shot_origin: int
-
-
-@dataclasses.dataclass(frozen=True)
-class NexusExecutionOptions:
-    """Configure execution on a Helios or H2 target through Nexus.
+@dataclass(frozen=True, slots=True)
+class HeliosOptions:
+    """Configure one Nexus Helios execution boundary.
 
     Args:
-        project (Any | None): Nexus project name or native ``qnexus`` project
-            reference. A name is looked up or created when submitting a job.
-            ``None`` uses the active Nexus project, or looks up or creates
-            ``qamomile`` if no project is active. Authentication is automatic
-            on the first submission or restoration; an initial login may
-            require browser approval.
-        backend_config (Any | None): Native ``qnexus.HeliosConfig`` or H2
-            ``qnexus.QuantinuumConfig`` with optional device settings. Its
-            ``system_name`` or ``device_name`` overrides ``system_name`` below.
-        system_name (str): Device name, defaulting to ``Helios-1``. Helios
-            receives HUGR; H2 receives automatically converted QIR. H2 requires
-            Python 3.11 or 3.12 with the ``hugr`` extra and Bit public outputs.
-            Every H2 shot read uses a zero-based logical index, normalized from
-            the internal device origin before QIR conversion. Helios uses an
-            internal zero-based origin policy and preserves shot reads without
-            rewriting the upload; its device origin remains unverified.
-        name (str): Program and job name prefix. Each submission receives a
-            unique suffix, including separate expectation measurement jobs.
-        max_cost (float | None): Optional maximum HQC cost for each submitted
-            program. Required when submitting to Helios; saved jobs can be
-            restored without it. A deprecated native config limit is used
-            when omitted, and conflicting limits are rejected. This is not
-            an aggregate expectation-estimation budget.
-        n_qubits (int | None): Optional maximum qubit count passed to Nexus.
-        credential_name (str | None): Name of a credential already in Nexus.
-        user_group (str | None): Nexus user group for scheduling.
-        target_region (str | NexusRegion | None): Execution region, ``us`` or ``sg``.
-        poll_interval_seconds (float): Positive local status polling interval.
-        timeout_seconds (float | None): Default local status-wait deadline.
-            ``None`` waits indefinitely. Timing out never cancels a job.
+        project: Optional native Nexus project reference.
+        backend_config: Optional native ``HeliosConfig``.
+        system_name: Helios device or emulator name.
+        name: Human-readable upload and execution name prefix.
+        max_cost: Optional maximum HQC cost for the submission.
+        n_qubits: Optional maximum qubit count supplied to Nexus.
+        credential_name: Name of a credential already stored by Nexus.
+        user_group: Optional scheduling group.
+        target_region: Optional ``"us"`` or ``"sg"`` execution region.
+        timeout: Default nonnegative local result wait in seconds.
 
     Raises:
-        ValueError: If a numeric option, project name, region, or config is invalid.
+        ValueError: If an option is empty, nonfinite, or out of range.
     """
 
-    project: Any | None = None
-    backend_config: Any | None = None
+    project: Any | None = field(default=None, repr=False, compare=False)
+    backend_config: Any | None = field(default=None, repr=False, compare=False)
     system_name: str = "Helios-1"
     name: str = "qamomile-hugr"
     max_cost: float | None = None
     n_qubits: int | None = None
-    credential_name: str | None = None
+    credential_name: str | None = field(default=None, repr=False, compare=False)
     user_group: str | None = None
-    target_region: str | NexusRegion | None = None
-    poll_interval_seconds: float = 1.0
-    timeout_seconds: float | None = None
+    target_region: str | None = None
+    timeout: float | None = None
 
     def __post_init__(self) -> None:
-        """Validate settings before any provider operation.
+        """Validate local policy without contacting Nexus.
 
         Raises:
-            ValueError: If a numeric option, name, region, or config is invalid.
+            ValueError: If any configured value is invalid.
         """
-        for name in ("system_name", "name"):
-            if not isinstance(getattr(self, name), str) or not getattr(self, name):
-                raise ValueError(f"{name} must be a non-empty string")
-        if isinstance(self.project, str) and not self.project.strip():
-            raise ValueError("project name must be a non-empty string")
-        _validate_seconds(self.poll_interval_seconds, "poll_interval_seconds", False)
-        if self.timeout_seconds is not None:
-            _validate_seconds(self.timeout_seconds, "timeout_seconds", True)
+
+        if not self.system_name or not self.name:
+            raise ValueError("system_name and name must be nonempty")
         if self.max_cost is not None:
-            _validate_seconds(self.max_cost, "max_cost", True)
-        if self.n_qubits is not None:
-            _validate_positive_integer(self.n_qubits, "n_qubits")
-            object.__setattr__(self, "n_qubits", int(self.n_qubits))
-        if self.target_region is not None:
+            _validate_nonnegative(self.max_cost, "max_cost")
+        if self.n_qubits is not None and (
+            isinstance(self.n_qubits, bool)
+            or not isinstance(self.n_qubits, int)
+            or self.n_qubits <= 0
+        ):
+            raise ValueError("n_qubits must be a positive integer")
+        if self.target_region not in {None, "us", "sg"}:
+            raise ValueError("target_region must be 'us', 'sg', or None")
+        if self.timeout is not None:
+            _validate_nonnegative(self.timeout, "timeout")
+        if self.backend_config is not None and (
+            getattr(self.backend_config, "type", None) != "HeliosConfig"
+            or not getattr(self.backend_config, "system_name", None)
+        ):
+            raise ValueError("backend_config must be a qnexus HeliosConfig")
+
+
+@dataclass(frozen=True, slots=True)
+class Helios:
+    """Submit result-instrumented HUGR artifacts to Helios through Nexus.
+
+    Args:
+        options: Nexus submission and local waiting policy.
+        client: Optional qnexus-compatible client for controlled environments.
+
+    Raises:
+        ImportError: If qnexus is unavailable and no client is provided.
+    """
+
+    options: HeliosOptions = HeliosOptions()
+    client: Any | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Load qnexus without authenticating or submitting work.
+
+        Raises:
+            ImportError: If the optional qnexus dependency is unavailable.
+        """
+
+        if self.client is None:
             try:
-                object.__setattr__(
-                    self, "target_region", NexusRegion(self.target_region)
+                client = importlib.import_module("qnexus")
+            except ImportError as error:
+                raise ImportError(
+                    'Helios execution requires pip install "qamomile[hugr]"'
+                ) from error
+            object.__setattr__(self, "client", client)
+
+    @property
+    def name(self) -> str:
+        """Return the target-scoped endpoint identity."""
+
+        return f"hugr.helios.{self._system_name}"
+
+    @property
+    def target(self) -> Hugr:
+        """Return the HUGR target with ordered QSystem result records."""
+
+        return Hugr(record_results=True)
+
+    @property
+    def capabilities(self) -> CapabilitySnapshot:
+        """Return the direct HUGR execution capability snapshot."""
+
+        return CapabilitySnapshot(FORMAT, CAPABILITIES)
+
+    @property
+    def _system_name(self) -> str:
+        """Return the configured native or shorthand Helios system name."""
+
+        config = self.options.backend_config
+        return str(getattr(config, "system_name", self.options.system_name))
+
+    def launch(self, artifact: CompiledProgram, invocation: Invocation) -> Job:
+        """Upload and asynchronously submit one closed HUGR artifact.
+
+        Args:
+            artifact: Result-instrumented HUGR package for :attr:`target`.
+            invocation: Rust-normalized shots and portable seed policy.
+
+        Returns:
+            Job: Remote Nexus job with cancellation and snapshot support.
+
+        Raises:
+            ExecutionError: If the artifact or invocation is incompatible.
+        """
+
+        if artifact.format != FORMAT:
+            raise ExecutionError(
+                f"Q8640: Helios accepts {FORMAT!r}, got {artifact.format!r}"
+            )
+        metadata = dict(artifact.metadata.entries)
+        if metadata.get("record_results") is not True:
+            raise ExecutionError(
+                "Q8641: Helios requires a HUGR target with result recording"
+            )
+        if invocation.parameters.entries:
+            raise ExecutionError("Q8642: Helios received unresolved parameters")
+        if invocation.seed != 0:
+            raise ExecutionError(
+                "Q8643: Helios does not provide a portable seed contract; use seed=0"
+            )
+        client = self.client
+        assert client is not None
+        config = self.options.backend_config
+        if config is None:
+            config_type = getattr(client, "HeliosConfig", None)
+            if not callable(config_type):
+                config_type = getattr(
+                    getattr(client, "models", None), "HeliosConfig", None
                 )
-            except ValueError as error:
-                raise ValueError("target_region must be 'us', 'sg', or None") from error
-        _destination(self)
-
-
-def _destination(options: NexusExecutionOptions) -> _NexusDestination:
-    """Resolve the actual device and submission format before provider calls.
-
-    Args:
-        options (NexusExecutionOptions): Native config or device-name selection.
-
-    Returns:
-        _NexusDestination: Target, program format, and internal shot origin.
-
-    Raises:
-        ValueError: If a device or native config family is unsupported.
-    """
-    config = options.backend_config
-    kind = getattr(config, "type", None)
-    if config is None:
-        name = options.system_name
-    elif kind == "HeliosConfig":
-        name = getattr(config, "system_name", None)
-    elif kind == "QuantinuumConfig":
-        name = getattr(config, "device_name", None)
-    else:
-        raise ValueError(
-            "backend_config must be a qnexus.HeliosConfig or H2 QuantinuumConfig"
+            if not callable(config_type):
+                raise TypeError("qnexus must expose HeliosConfig")
+            config = config_type(system_name=self.options.system_name)
+        name = f"{self.options.name}-{uuid.uuid4().hex}"
+        package = load_package(artifact)
+        uploaded = client.hugr.upload(
+            hugr_package=package,
+            name=name,
+            project=self.options.project,
         )
-    if isinstance(name, str):
-        if re.fullmatch(r"Helios-[A-Za-z0-9][A-Za-z0-9-]*", name):
-            if config is None or kind == "HeliosConfig":
-                return _NexusDestination(name, "hugr", 0)
-        if _H2_TARGET.fullmatch(name):
-            if config is None or kind == "QuantinuumConfig":
-                return _NexusDestination(name, "qir", _H2_SHOT_ORIGIN)
-    raise ValueError("Nexus execution requires a matching Helios or H2 device config")
+        optional = {
+            key: value
+            for key, value in {
+                "credential_name": self.options.credential_name,
+                "max_cost": self.options.max_cost,
+                "n_qubits": self.options.n_qubits,
+                "target_region": self.options.target_region,
+                "user_group": self.options.user_group,
+            }.items()
+            if value is not None
+        }
+        native = client.start_execute_job(
+            programs=[uploaded],
+            n_shots=[invocation.shots],
+            backend_config=config,
+            name=name,
+            project=self.options.project,
+            valid_check=True,
+            **optional,
+        )
+        reference = ExecutionReference.create(
+            provider="quantinuum-nexus",
+            job_ids=(str(native.id),),
+            target=str(config.system_name),
+            context={
+                "compilation_identity": artifact.execution_identity,
+                "kind": "sample",
+                "shots": str(invocation.shots),
+            },
+        )
+        return _HeliosJob(client, native, artifact, self.options, reference)
+
+    def restore(
+        self,
+        snapshot: ExecutionSnapshot | ExecutionReference,
+        *,
+        artifact: CompiledProgram,
+    ) -> Job:
+        """Restore one existing Nexus job without upload or resubmission.
+
+        Args:
+            snapshot: Remote snapshot or direct Nexus reference.
+            artifact: Exact HUGR artifact used for the original submission.
+
+        Returns:
+            Job: Handle to the existing Nexus execution.
+
+        Raises:
+            ValueError: If the reference and artifact do not match this endpoint.
+            TypeError: If Nexus returns a non-execution job.
+        """
+
+        if (
+            artifact.format != FORMAT
+            or artifact.target_fingerprint != self.target.fingerprint
+        ):
+            raise ValueError("artifact does not match this Helios target")
+        if isinstance(snapshot, ExecutionSnapshot) and (
+            snapshot.kind is ExecutionSnapshotKind.LOCAL
+        ):
+            result = snapshot.result
+            if (
+                not isinstance(result, SampleResult)
+                or result.result_abi != artifact.result_abi
+                or result.backend != self.name
+            ):
+                raise ValueError("local snapshot does not match this Helios artifact")
+            return CompletedJob(f"{self.name}.restored", result)
+        reference = _snapshot_reference(snapshot)
+        if (
+            reference.provider != "quantinuum-nexus"
+            or len(reference.job_ids) != 1
+            or reference.target != self._system_name
+            or reference.context_values.get("kind") != "sample"
+        ):
+            raise ValueError("snapshot does not identify this Helios endpoint")
+        digest = artifact.execution_identity
+        if reference.context_values.get("compilation_identity") != digest:
+            raise ValueError("artifact does not match the snapshotted Helios job")
+        try:
+            shots = int(reference.context_values["shots"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("Helios snapshot context is invalid") from error
+        if shots <= 0:
+            raise ValueError("Helios snapshot shots must be positive")
+        client = self.client
+        assert client is not None
+        native = client.jobs.get(id=reference.job_ids[0])
+        job_type = getattr(getattr(native, "job_type", None), "value", None)
+        if job_type not in {None, "execute"}:
+            raise TypeError("Nexus reference does not identify an execute job")
+        return _HeliosJob(client, native, artifact, self.options, reference)
 
 
-def _validate_seconds(value: float, name: str, allow_zero: bool) -> None:
-    """Validate a finite numeric setting.
+@dataclass(frozen=True, slots=True)
+class _HeliosJob:
+    """Translate one Nexus execute job into the common Job ABI."""
 
-    Args:
-        value (float): Numeric value to validate.
-        name (str): Argument name used in the error.
-        allow_zero (bool): Whether zero is accepted.
+    client: Any = field(repr=False, compare=False)
+    native: Any = field(repr=False, compare=False)
+    artifact: CompiledProgram = field(repr=False)
+    options: HeliosOptions = field(repr=False)
+    reference: ExecutionReference
+    _result: SampleResult | None = field(
+        init=False, default=None, repr=False, compare=False
+    )
+    _lock: threading.Lock = field(
+        init=False, default_factory=threading.Lock, repr=False, compare=False
+    )
 
-    Raises:
-        ValueError: If the value is nonnumeric, nonfinite, or out of range.
-    """
+    @property
+    def job_id(self) -> str:
+        """Return the Nexus execute-job identity."""
+
+        return self.reference.job_ids[0]
+
+    @property
+    def status(self) -> JobStatus:
+        """Fetch and normalize the current Nexus status."""
+
+        if self._result is not None:
+            return JobStatus.COMPLETED
+        try:
+            return _nexus_status(self.client.jobs.status(self.native))
+        except Exception as error:
+            raise ExecutionError(f"Q8644: Nexus status failed: {error}") from error
+
+    def result(self, timeout: float | None = None) -> SampleResult:
+        """Wait for and decode one QSystem result through the sealed ABI.
+
+        Args:
+            timeout: Nonnegative local wait in seconds, defaulting to options.
+
+        Returns:
+            SampleResult: Logical source-ordered counts.
+
+        Raises:
+            ValueError: If the timeout is invalid.
+            TimeoutError: If the local Nexus wait expires.
+            ExecutionError: If execution or result decoding fails.
+        """
+
+        effective = self.options.timeout if timeout is None else timeout
+        if effective is not None:
+            _validate_nonnegative(effective, "timeout")
+        with self._lock:
+            if self._result is not None:
+                return self._result
+            try:
+                waited = self.client.jobs.wait_for(self.native, timeout=effective)
+            except Exception as error:
+                if (
+                    "timeout" in type(error).__name__.lower()
+                    or "timed out" in str(error).lower()
+                ):
+                    raise TimeoutError("Helios execution result timed out") from error
+                raise ExecutionError(f"Q8645: Nexus wait failed: {error}") from error
+            status = _nexus_status(waited)
+            if status is not JobStatus.COMPLETED:
+                raise ExecutionError(f"Q8645: Helios job ended as {status.value}")
+            try:
+                refs = self.client.jobs.results(self.native, allow_incomplete=False)
+                if len(refs) != 1:
+                    raise ValueError("Nexus returned an unexpected result count")
+                raw = refs[0].download_result()
+                shots = int(self.reference.context_values["shots"])
+                counts = _decode_qsystem_counts(
+                    raw,
+                    shots=shots,
+                    width=self.artifact.result_abi.width,
+                )
+                result = SampleResult.from_counts(
+                    backend=f"hugr.helios.{self.reference.target}",
+                    counts=counts,
+                    expected_width=self.artifact.result_abi.width,
+                )
+                result = replace(result, result_abi=self.artifact.result_abi)
+                object.__setattr__(self, "_result", result)
+                return result
+            except ExecutionError:
+                raise
+            except Exception as error:
+                raise ExecutionError(f"Q8646: invalid Nexus result: {error}") from error
+
+    def cancel(self) -> None:
+        """Request cancellation unless the remote job is already terminal."""
+
+        if self.status in {
+            JobStatus.CANCELLED,
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+        }:
+            return
+        try:
+            self.client.jobs.cancel(self.native)
+        except Exception as error:
+            raise ExecutionError(
+                f"Q8647: Nexus cancellation failed: {error}"
+            ) from error
+
+    def snapshot(self) -> ExecutionSnapshot:
+        """Capture a cached local result or a secret-free Nexus reference."""
+
+        with self._lock:
+            if self._result is not None:
+                return ExecutionSnapshot.completed(self._result)
+        return ExecutionSnapshot.remote(self.reference)
+
+    def metadata(self) -> Mapping[str, object]:
+        """Return detached, non-secret execution metadata."""
+
+        return {
+            "job_id": self.job_id,
+            "provider": self.reference.provider,
+            "shots": int(self.reference.context_values["shots"]),
+            "target": self.reference.target,
+        }
+
+
+def _validate_nonnegative(value: object, name: str) -> None:
+    """Validate one finite nonnegative timeout or budget."""
+
     if (
         isinstance(value, bool)
         or not isinstance(value, (int, float))
         or not math.isfinite(value)
-        or (value < 0 if allow_zero else value <= 0)
+        or value < 0
     ):
-        qualifier = "non-negative" if allow_zero else "positive"
-        raise ValueError(f"{name} must be a {qualifier} finite number")
+        raise ValueError(f"{name} must be a non-negative finite number")
 
 
-def _validate_positive_integer(value: Any, name: str) -> None:
-    """Validate a positive count without accepting booleans.
+def _nexus_status(value: object) -> JobStatus:
+    """Map one qnexus status record into the portable lifecycle."""
 
-    Args:
-        value (Any): Count to validate.
-        name (str): Argument name used in the error.
-
-    Raises:
-        ValueError: If the count is not a positive integer.
-    """
-    if isinstance(value, bool) or not isinstance(value, Integral) or value <= 0:
-        raise ValueError(f"{name} must be a positive integer")
+    status = getattr(value, "status", value)
+    name = str(getattr(status, "value", getattr(status, "name", status))).upper()
+    return _STATUS_MAP.get(name, JobStatus.FAILED)
 
 
-def _qir_success_tag(
-    context: Mapping[str, str], outputs: Mapping[str, tuple[str, int]]
-) -> str | None:
-    """Read the required success output from a saved execution reference.
+def _decode_qsystem_counts(
+    raw: object,
+    *,
+    shots: int,
+    width: int,
+) -> dict[tuple[int, ...], int]:
+    """Decode ordered ``qamomile`` result tags into source-ordered counts."""
 
-    Args:
-        context (Mapping[str, str]): Saved execution settings, including shots
-            and the origin used when the submitted program was prepared.
-        outputs (Mapping[str, tuple[str, int]]): Validated QIR output manifest.
-
-    Returns:
-        str | None: Private Boolean tag to check on every shot and omit from
-        public results, or ``None`` for an unguarded program.
-
-    Raises:
-        ValueError: If the success output or origin is missing, malformed,
-            inconsistent, or outside the unsigned 64-bit shot range.
-    """
-    success_tag = context.get("shot_success_tag")
-    shot_origin = context.get("shot_origin")
-    if success_tag is None:
-        if shot_origin is not None or SHOT_SUCCESS_TAG in outputs:
-            raise ValueError("QIR shot marker requires a mandatory success output")
-        return None
-    if (
-        not isinstance(success_tag, str)
-        or not success_tag
-        or not isinstance(shot_origin, str)
-        or re.fullmatch(r"0|[1-9][0-9]*", shot_origin) is None
-        or outputs.get(success_tag) != ("bool", 1)
-        or (SHOT_SUCCESS_TAG in outputs and success_tag != SHOT_SUCCESS_TAG)
-    ):
-        raise ValueError("Invalid H2 shot guard contract")
-    if int(shot_origin) + int(context["shots"]) >= 2**64:
-        raise ValueError("H2 shot guard range must fit unsigned 64-bit integers")
-    return success_tag
-
-
-@dataclasses.dataclass(frozen=True)
-class _H2Submission:
-    """Own one final H2 payload and the identity of its submission attempt.
-
-    Args:
-        qir (bytes): Normalized and guarded LLVM bitcode sent to Nexus.
-        context (Mapping[str, str]): Complete result and restoration metadata.
-        name (str): Generated full program and job name.
-        target (str): Actual H2 destination for this attempt.
-        shot_origin (int): Conversion convention, including unguarded programs.
-    """
-
-    qir: bytes
-    context: Mapping[str, str]
-    name: str
-    target: str
-    shot_origin: int
-
-    def __post_init__(self) -> None:
-        """Detach context from its producer and prevent later changes."""
-        object.__setattr__(self, "context", MappingProxyType(dict(self.context)))
-
-
-@dataclasses.dataclass(frozen=True)
-class _H2Batch:
-    """Keep one call's prepared submissions and provider settings together.
-
-    Args:
-        submissions (tuple[_H2Submission, ...]): Complete ordered payloads.
-        config (Any): Native device configuration for this call.
-        settings (Mapping[str, Any]): Validated optional SDK settings.
-    """
-
-    submissions: tuple[_H2Submission, ...]
-    config: Any
-    settings: Mapping[str, Any]
-
-
-def _prepare_h2_qir(
-    package: Package, shots: int, shot_origin: int
-) -> tuple[bytes, dict[str, str]]:
-    """Prepare final H2 bitcode and recovery metadata without contacting Nexus.
-
-    Shot normalization and fallback table proofs leave the original package
-    unchanged. No provider operation runs during preparation.
-
-    Args:
-        package (Package): Bound HUGR package with closed, instrumented ``main``.
-        shots (int): Positive repetition count.
-        shot_origin (int): Device shot index used by normalization and guards.
-
-    Returns:
-        tuple[bytes, dict[str, str]]: Final bytes and matching result context.
-
-    Raises:
-        ValueError: If the repetition count is invalid.
-        ImportError: If H2 conversion dependencies are unavailable.
-        ExecutionError: If normalization, conversion, or output contracts fail.
-    """
-    _validate_positive_integer(shots, "shots")
-    fingerprint = hashlib.sha256(package.to_bytes()).hexdigest()
-    h2_package, guarded = normalize_h2_shots(package, shots, shot_origin)
-    try:
-        bitcode, outputs = to_h2_qir(h2_package)
-    except _H2AbortError:
-        h2_package, guarded = prepare_h2_shot_range(package, shots, shot_origin)
-        if not guarded:
-            raise
-        bitcode, outputs = to_h2_qir(h2_package)
-    context = {
-        "shots": str(shots),
-        "package_sha256": fingerprint,
-        "program_format": "qir",
-        "qir_outputs": json.dumps(outputs, sort_keys=True, separators=(",", ":")),
-    }
-    if guarded:
-        context.update(
-            shot_success_tag=SHOT_SUCCESS_TAG,
-            shot_origin=str(shot_origin),
-            h2_package_sha256=hashlib.sha256(h2_package.to_bytes()).hexdigest(),
-        )
-    try:
-        _qir_success_tag(context, parse_qir_output_manifest(context["qir_outputs"]))
-    except ValueError as exc:
-        raise ExecutionError("Invalid H2 shot guard output contract") from exc
-    return bitcode, context
-
-
-def _status_name(status: Any) -> str:
-    """Read the enum value from a Nexus status record.
-
-    Args:
-        status (Any): Native ``qnexus.models.job_status.JobStatus`` record.
-
-    Returns:
-        str: Provider status name, preserving unknown future names.
-    """
-    value = getattr(status, "status", status)
-    return str(getattr(value, "value", value))
-
-
-def _map_status(status: Any) -> JobStatus:
-    """Map the documented Nexus states to shared execution states.
-
-    Args:
-        status (Any): Native Nexus status record.
-
-    Returns:
-        JobStatus: Normalized state, or ``UNKNOWN`` for a future provider state.
-    """
-    return _NEXUS_STATUS_MAP.get(_status_name(status), JobStatus.UNKNOWN)
-
-
-def _raw_output_tag(tag: str, values: list[Any]) -> str | None:
-    """Classify a RAW record before interpreting its user-provided name."""
-    parts = tag.split(":", 2)
-    if parts[0] in ("EXIT", "_EXCEPTION", "_STDERR", "_STDOUT"):
-        raise ExecutionError(
-            f"Nexus HUGR shot terminated or contains execution error context: {tag}"
-        )
-    if len(parts) == 3 and parts[0] == "USER":
-        if parts[1] in ("BOOL", "INT", "UINT", "FLOAT") and parts[2]:
-            return parts[2]
-    if parts[0] == "METRICS":
-        if (
-            len(parts) == 3
-            and parts[1] in ("BOOL", "INT", "FLOAT")
-            and parts[2]
-            and all(type(value) in (bool, int, float) for value in values)
-        ):
-            return None
-        raise ExecutionError(f"Nexus returned a malformed HUGR metric: {tag}")
-    raise ExecutionError(f"Nexus returned an unsupported output tag: {tag}")
-
-
-def _decode_results(
-    raw: Any, shots: int, *, raw_format: bool = False
-) -> list[dict[str, Any]]:
-    """Preserve typed tagged outputs without overwriting repeated records.
-
-    Args:
-        raw (Any): Native HUGR ``QsysResult`` returned by Nexus.
-        shots (int): Required number of completed shots.
-        raw_format (bool): Whether the result was downloaded with RAW version 4.
-            RAW records retain their namespace and type prefixes. The default
-            treats every tag as a literal user name from DEFAULT version 3.
-
-    Returns:
-        list[dict[str, Any]]: One tag-to-value mapping per shot.
-
-    Raises:
-        ExecutionError: If results have an incompatible format, repeated tags,
-            or a shot count different from the submitted request.
-    """
     native_shots = getattr(raw, "results", None)
-    if not isinstance(native_shots, list):
-        raise ExecutionError("Nexus did not return a HUGR QsysResult")
-    if len(native_shots) != shots:
+    if not isinstance(native_shots, list) or len(native_shots) != shots:
         raise ExecutionError(
-            f"Nexus returned {len(native_shots)} shots; expected {shots}"
+            f"Q8646: Nexus returned {len(native_shots) if isinstance(native_shots, list) else 'invalid'} shots; expected {shots}"
         )
-    records = []
+    counts: Counter[tuple[int, ...]] = Counter()
     for shot in native_shots:
-        if not callable(getattr(shot, "collate_tags", None)):
-            raise ExecutionError("Nexus returned an invalid HUGR shot record")
-        collated = shot.collate_tags()
-        record = {}
-        for tag, values in collated.items():
-            if not isinstance(tag, str):
-                raise ExecutionError(
-                    f"Nexus returned an invalid HUGR output tag: {tag!r}"
-                )
-            if raw_format:
-                tag = _raw_output_tag(tag, values)
-                if tag is None:
-                    continue
-            if len(values) != 1:
-                raise ExecutionError(
-                    f"Nexus output tag {tag!r} must have exactly one value per shot"
-                )
-            if tag in record:
-                raise ExecutionError(f"Nexus output tag {tag!r} is ambiguous")
-            record[tag] = values[0]
-        records.append(record)
-    return records
-
-
-class NexusExecutionHandle(ExecutionHandle[list[dict[str, Any]]]):
-    """Adapt one Nexus execute job without resubmitting unsuccessful work.
-
-    H2 syntax-check jobs expose status, cost, and restoration references, but
-    their synthetic outputs are unavailable as measurement results.
-
-    Args:
-        client (Any): Imported ``qnexus`` module or a compatible test client.
-        native (Any): Native Nexus execute-job reference.
-        reference (ExecutionReference): Secret-free job restoration reference.
-        options (NexusExecutionOptions): Local polling and timeout policy.
-    """
-
-    def __init__(
-        self,
-        client: Any,
-        native: Any,
-        reference: ExecutionReference,
-        options: NexusExecutionOptions,
-    ) -> None:
-        """Store a submitted or restored execution.
-
-        Args:
-            client (Any): Nexus SDK client module.
-            native (Any): Native execute-job reference.
-            reference (ExecutionReference): Validated reference including shots.
-            options (NexusExecutionOptions): Local waiting policy.
-        """
-        self._client = client
-        self._native = native
-        self._reference = reference
-        self._options = options
-        self._result: list[dict[str, Any]] | None = None
-        self._result_error: ExecutionError | None = None
-        self._lock = threading.Lock()
-        self._last_status: Any = getattr(native, "last_status_detail", None)
-
-    def result(self, timeout: float | None = None) -> list[dict[str, Any]]:
-        """Wait for complete results, leaving timed-out jobs active remotely.
-
-        Args:
-            timeout (float | None): Non-negative local wait limit in seconds.
-                ``None`` uses the options default. Network request duration is
-                controlled separately by the Nexus SDK's HTTP configuration.
-
-        Returns:
-            list[dict[str, Any]]: Typed output records in shot order.
-
-        Raises:
-            ValueError: If the timeout is invalid.
-            TimeoutError: If the lock or status wait exceeds the deadline.
-            ExecutionError: If the saved target is an H2 syntax checker, or
-                the remote job fails, is cancelled, or returns malformed or
-                incomplete results.
-            Exception: If the Nexus SDK cannot retrieve status or results.
-        """
-        effective = self._options.timeout_seconds if timeout is None else timeout
-        if effective is not None:
-            _validate_seconds(effective, "timeout", True)
-        target = self._reference.target
-        if target is not None and re.fullmatch(r"H2-[1-9][0-9]*SC", target):
-            raise ExecutionError(
-                "H2 syntax-check jobs do not provide measurement results; "
-                "use status(), raw_status(), or metadata() for syntax status and cost"
-            )
-        deadline = None if effective is None else time.monotonic() + effective
-        acquired = (
-            self._lock.acquire()
-            if effective is None
-            else self._lock.acquire(timeout=float(effective))
-        )
-        if not acquired:
-            raise TimeoutError("Nexus execution result timed out")
-        try:
-            if self._result is not None:
-                return self._result
-            if self._result_error is not None:
-                raise self._result_error
-            while True:
-                status = self.status()
-                if status == JobStatus.COMPLETED:
-                    break
-                if status in (JobStatus.FAILED, JobStatus.CANCELLED):
-                    self._result_error = ExecutionError(
-                        "Nexus job did not complete: " + _status_name(self._last_status)
-                    )
-                    raise self._result_error
-                remaining = None if deadline is None else deadline - time.monotonic()
-                if remaining is not None and remaining <= 0:
-                    raise TimeoutError("Nexus execution result timed out")
-                time.sleep(
-                    self._options.poll_interval_seconds
-                    if remaining is None
-                    else min(self._options.poll_interval_seconds, remaining)
-                )
-            refs = self._client.jobs.results(self._native, allow_incomplete=False)
-            if len(refs) != 1:
-                self._result_error = ExecutionError(
-                    "Nexus must return exactly one result for one submitted program"
-                )
-                raise self._result_error
-            is_qir = self._reference.context.get("program_format") == "qir"
-            if is_qir:
-                raw = refs[0].download_result()
-            else:
-                from qnexus.models.references import ResultVersions
-
-                raw = refs[0].download_result(version=ResultVersions.RAW)
-            try:
-                shots = int(self._reference.context["shots"])
-                if is_qir:
-                    outputs = parse_qir_output_manifest(
-                        self._reference.context["qir_outputs"]
-                    )
-                    success_tag = _qir_success_tag(self._reference.context, outputs)
-                    self._result = (
-                        decode_qir_results(
-                            raw, shots, outputs, required_success_tag=success_tag
-                        )
-                        if success_tag is not None
-                        else decode_qir_results(raw, shots, outputs)
-                    )
-                else:
-                    self._result = _decode_results(raw, shots, raw_format=True)
-            except ExecutionError as exc:
-                self._result_error = exc
-                raise
-            return self._result
-        finally:
-            self._lock.release()
-
-    def status(self) -> JobStatus:
-        """Return the latest normalized provider status.
-
-        Returns:
-            JobStatus: Current provider state or a cached terminal result state.
-
-        Raises:
-            Exception: If the Nexus SDK cannot retrieve the job status.
-        """
-        if self._result_error is not None:
-            if _map_status(self._last_status) == JobStatus.CANCELLED:
-                return JobStatus.CANCELLED
-            return JobStatus.FAILED
-        if self._result is not None:
-            return JobStatus.COMPLETED
-        return _map_status(self.raw_status())
-
-    def raw_status(self) -> object:
-        """Fetch provider status details without changing the remote job.
-
-        Returns:
-            object: Native Nexus status record with queue, time, and cost data.
-
-        Raises:
-            Exception: If the Nexus SDK cannot retrieve the job status.
-        """
-        self._last_status = self._client.jobs.status(self._native)
-        return self._last_status
-
-    def cancel(self) -> None:
-        """Request cancellation and let later status calls observe the outcome.
-
-        Raises:
-            Exception: If the Nexus SDK cannot request job cancellation.
-        """
-        self._client.jobs.cancel(self._native)
-
-    def references(self) -> tuple[ExecutionReference, ...]:
-        """Return the identifiers required to restore this job.
-
-        Returns:
-            tuple[ExecutionReference, ...]: One secret-free Nexus reference.
-        """
-        return (self._reference,)
-
-    def metadata(self) -> Mapping[str, Any]:
-        """Return non-secret metadata from the most recently observed status.
-
-        Returns:
-            Mapping[str, Any]: Provider, job, target, shots, queue, and cost data.
-        """
-        metadata: dict[str, Any] = {
-            "provider": self._reference.provider,
-            "job_id": self._reference.job_ids[0],
-            "target": self._reference.target,
-            "shots": int(self._reference.context["shots"]),
-        }
-        for key in ("queue_position", "cost"):
-            value = getattr(self._last_status, key, None)
-            if value is not None:
-                metadata[key] = value
-        return metadata
-
-    @property
-    def native(self) -> object:
-        """Expose the native Nexus execute-job reference.
-
-        Returns:
-            object: Submitted or restored ``ExecuteJobRef``.
-        """
-        return self._native
-
-
-class NexusTransport:
-    """Submit closed HUGR entry points to Helios or convert them for H2.
-
-    The caller supplies an execution wrapper with runtime values connected to
-    the unchanged parameterized body and with explicit output records. Nexus
-    HUGR submission has no separate entry-point argument field. This transport owns
-    lazy authentication and project resolution without changing the SDK's
-    active project. Local validation precedes authentication and remote calls.
-
-    Args:
-        options (NexusExecutionOptions | None): Submission and polling settings.
-        client (Any | None): Optional SDK-compatible client for contract tests.
-
-    Raises:
-        ImportError: If the optional Nexus SDK is unavailable.
-    """
-
-    def __init__(
-        self,
-        options: NexusExecutionOptions | None = None,
-        *,
-        client: Any | None = None,
-    ) -> None:
-        """Load the SDK without authenticating or submitting any remote work.
-
-        Args:
-            options (NexusExecutionOptions | None): Submission configuration.
-            client (Any | None): Injected SDK-compatible client for testing.
-
-        Raises:
-            ImportError: If ``qnexus`` is unavailable.
-        """
-        self.options = options or NexusExecutionOptions()
-        if client is None:
-            try:
-                client = importlib.import_module("qnexus")
-            except ImportError as exc:
-                raise ImportError(
-                    "Nexus execution requires qnexus; install qamomile[hugr]"
-                ) from exc
-        self._client = client
-        self._session_lock = threading.Lock()
-        self._authenticated = False
-        self._named_project: Any | None = None
-
-    def _authenticate(self) -> None:
-        """Reuse saved Nexus credentials or start login once per transport.
-
-        Failed authentication leaves the transport available for a later retry.
-        The execution target region is independent of the SDK's login region.
-
-        Raises:
-            Exception: If Nexus authentication fails.
-        """
-        with self._session_lock:
-            if not self._authenticated:
-                self._client.login()
-                self._authenticated = True
-
-    def _submission_project(self) -> Any:
-        """Resolve a project for upload without changing the SDK active project.
-
-        Explicit references are preserved, and an active project is read on
-        every submission. Named or default projects are resolved once after
-        successful authentication.
-
-        Returns:
-            Any: Native Nexus project reference for upload and execution.
-
-        Raises:
-            Exception: If authentication or project lookup or creation fails.
-        """
-        self._authenticate()
-        project = self.options.project
-        if project is None:
-            project = self._client.context.get_active_project(project_required=False)
-        if project is not None and not isinstance(project, str):
-            return project
-        with self._session_lock:
-            if self._named_project is None:
-                self._named_project = self._client.projects.get_or_create(
-                    name=project or "qamomile"
-                )
-            return self._named_project
-
-    def _submission_configuration(
-        self, destination: _NexusDestination
-    ) -> tuple[Any, dict[str, Any]]:
-        """Resolve native configuration and validate per-program cost settings.
-
-        Args:
-            destination (_NexusDestination): Actual device and upload format.
-
-        Returns:
-            tuple[Any, dict[str, Any]]: Native config and optional SDK settings.
-
-        Raises:
-            ValueError: If cost limits are invalid, conflicting, or absent for Helios.
-        """
-        options = self.options
-        config = options.backend_config
-        native_cost = getattr(config, "max_cost", None)
-        if native_cost is not None:
-            _validate_seconds(native_cost, "backend_config.max_cost", True)
-        if (
-            options.max_cost is not None
-            and native_cost is not None
-            and options.max_cost != native_cost
-        ):
-            raise ValueError(
-                "max_cost conflicts with backend_config.max_cost; "
-                "specify one limit or use equal values"
-            )
-        max_cost = options.max_cost if options.max_cost is not None else native_cost
-        if destination.program_format == "hugr" and max_cost is None:
-            raise ValueError("Helios submission requires an explicit max_cost")
-        if config is None:
-            config = (
-                self._client.HeliosConfig(system_name=destination.target)
-                if destination.program_format == "hugr"
-                else self._client.QuantinuumConfig(device_name=destination.target)
-            )
-        settings = {
-            key: value
-            for key, value in {
-                "max_cost": max_cost,
-                "n_qubits": options.n_qubits,
-                "credential_name": options.credential_name,
-                "user_group": options.user_group,
-                "target_region": options.target_region,
-            }.items()
-            if value is not None
-        }
-        return config, settings
-
-    def _start_execution(
-        self,
-        *,
-        program: Any,
-        project: Any,
-        config: Any,
-        settings: Mapping[str, Any],
-        name: str,
-        target: str,
-        context: Mapping[str, str],
-    ) -> NexusExecutionHandle:
-        """Start one uploaded program and retain its exact restoration context.
-
-        Args:
-            program (Any): Uploaded native program reference.
-            project (Any): Resolved Nexus project reference.
-            config (Any): Validated native device configuration.
-            settings (Mapping[str, Any]): Optional per-program SDK settings.
-            name (str): Exact program and execution name.
-            target (str): Actual submitted device.
-            context (Mapping[str, str]): Matching shot and result metadata.
-
-        Returns:
-            NexusExecutionHandle: Handle for the single execution request.
-
-        Raises:
-            Exception: If the Nexus SDK cannot start execution.
-        """
-        native = self._client.start_execute_job(
-            programs=[program],
-            n_shots=[int(context["shots"])],
-            backend_config=config,
-            name=name,
-            project=project,
-            valid_check=True,
-            **settings,
-        )
-        reference = ExecutionReference(
-            provider="quantinuum-nexus",
-            job_ids=(str(native.id),),
-            target=target,
-            context=context,
-        )
-        return NexusExecutionHandle(self._client, native, reference, self.options)
-
-    def submit(self, package: Package, shots: int) -> NexusExecutionHandle:
-        """Prepare the selected device format and submit one execution request.
-
-        Args:
-            package (Package): Instrumented HUGR package with a closed entry point.
-            shots (int): Positive number of shots to execute.
-
-        Returns:
-            NexusExecutionHandle: Handle returned without waiting for results.
-
-        Raises:
-            ValueError: If shots, destination, or cost settings are invalid.
-            ImportError: If H2 conversion dependencies are unavailable.
-            ExecutionError: If H2 conversion fails.
-            Exception: If authentication, project resolution, upload, or submission fails.
-        """
-        _validate_positive_integer(shots, "shots")
-        batch = self._prepare_h2_submissions((package,), shots, ({},))
-        if batch is not None:
-            return self._send_h2_submission(batch, 0)
-        destination = _destination(self.options)
-        config, settings = self._submission_configuration(destination)
-        name = f"{self.options.name}-{uuid4().hex}"
-        context = {
-            "shots": str(shots),
-            "package_sha256": hashlib.sha256(package.to_bytes()).hexdigest(),
-        }
-        project = self._submission_project()
-        program = self._client.hugr.upload(
-            hugr_package=package, name=name, project=project
-        )
-        return self._start_execution(
-            program=program,
-            project=project,
-            config=config,
-            settings=settings,
-            name=name,
-            target=destination.target,
-            context=context,
-        )
-
-    def _prepare_h2_submissions(
-        self,
-        packages: Sequence[Package],
-        shots: int,
-        contexts: Sequence[Mapping[str, str]],
-        reusable: tuple[_H2Submission, ...] = (),
-    ) -> _H2Batch | None:
-        """Prepare every H2 payload and request setting before remote work.
-
-        Args:
-            packages (Sequence[Package]): Bound, instrumented packages in order.
-            shots (int): Positive repetitions per package.
-            contexts (Sequence[Mapping[str, str]]): Typed restoration identities.
-            reusable (tuple[_H2Submission, ...]): Immediately retained generation.
-                Reuse requires all package identities, counts, and origins to match.
-
-        Returns:
-            _H2Batch | None: Locally prepared H2 call, or None for Helios.
-
-        Raises:
-            ValueError: If shots, destination, or configuration is invalid.
-            ImportError: If H2 conversion dependencies are unavailable.
-            ExecutionError: If normalization or conversion fails.
-        """
-        _validate_positive_integer(shots, "shots")
-        destination = _destination(self.options)
-        if destination.program_format != "qir":
-            return None
-        config, settings = self._submission_configuration(destination)
-        fingerprints = tuple(
-            hashlib.sha256(package.to_bytes()).hexdigest() for package in packages
-        )
-        reuse = len(reusable) == len(packages) and all(
-            saved.context["package_sha256"] == fingerprint
-            and saved.context["shots"] == str(shots)
-            and saved.shot_origin == destination.shot_origin
-            for saved, fingerprint in zip(reusable, fingerprints)
-        )
-        submissions = []
-        for index, (package, context) in enumerate(
-            zip(packages, contexts, strict=True)
-        ):
-            if reuse:
-                bitcode, generated = reusable[index].qir, reusable[index].context
-            else:
-                bitcode, generated = _prepare_h2_qir(
-                    package, shots, destination.shot_origin
-                )
-            submissions.append(
-                _H2Submission(
-                    bitcode,
-                    {**generated, **context},
-                    f"{self.options.name}-{uuid4().hex}",
-                    destination.target,
-                    destination.shot_origin,
-                )
-            )
-        return _H2Batch(tuple(submissions), config, settings)
-
-    def _send_h2_submission(self, batch: _H2Batch, index: int) -> NexusExecutionHandle:
-        """Send one locally owned request without consulting latest program state.
-
-        Args:
-            batch (_H2Batch): Complete payloads and settings for this call.
-            index (int): Position of the submission within the logical operation.
-
-        Returns:
-            NexusExecutionHandle: Handle for the submitted remote execution.
-
-        Raises:
-            Exception: If authentication, project resolution, upload, or submission fails.
-        """
-        submission = batch.submissions[index]
-        project = self._submission_project()
-        program = self._client.qir.upload(
-            qir=submission.qir, name=submission.name, project=project
-        )
-        return self._start_execution(
-            program=program,
-            project=project,
-            config=batch.config,
-            settings=batch.settings,
-            name=submission.name,
-            target=submission.target,
-            context=submission.context,
-        )
-
-    def retrieve(self, reference: ExecutionReference) -> NexusExecutionHandle:
-        """Restore an execution without uploading or rerunning its program.
-
-        Args:
-            reference (ExecutionReference): Reference returned by this transport.
-
-        Returns:
-            NexusExecutionHandle: Restored handle for the existing remote job.
-
-        Raises:
-            ValueError: If the reference is incompatible or identifies a
-                non-execution job.
-            Exception: If authentication or retrieval of the existing job fails.
-        """
-        if reference.provider != "quantinuum-nexus" or len(reference.job_ids) != 1:
-            raise ValueError("Expected one quantinuum-nexus execution reference")
-        try:
-            shots = int(reference.context["shots"])
-        except (KeyError, ValueError) as exc:
-            raise ValueError(
-                "Nexus reference must contain a valid shots count"
-            ) from exc
-        _validate_positive_integer(shots, "reference shots")
-        program_format = reference.context.get("program_format", "hugr")
-        if program_format not in ("hugr", "qir"):
-            raise ValueError("Nexus reference has an unsupported program format")
-        if program_format == "qir":
-            try:
-                outputs = parse_qir_output_manifest(reference.context["qir_outputs"])
-                _qir_success_tag(reference.context, outputs)
-            except (KeyError, ValueError) as exc:
-                raise ValueError(
-                    "Nexus reference must contain valid QIR outputs"
-                ) from exc
-        elif any(
-            name in reference.context for name in ("shot_success_tag", "shot_origin")
-        ):
-            raise ValueError("H2 shot guard contract requires QIR results")
-        self._authenticate()
-        native = self._client.jobs.get(id=reference.job_ids[0])
-        kind = getattr(native, "job_type", None)
-        if getattr(kind, "value", kind) != "execute":
-            raise ValueError("Nexus reference does not identify an execute job")
-        return NexusExecutionHandle(self._client, native, reference, self.options)
+        collate = getattr(shot, "collate_tags", None)
+        if not callable(collate):
+            raise ExecutionError("Q8646: Nexus returned an invalid QSystem shot")
+        values = collate().get("qamomile")
+        if not isinstance(values, list) or len(values) != width:
+            raise ExecutionError("Q8646: Nexus result width disagrees with ResultABI")
+        bits = tuple(int(value) for value in values)
+        if any(bit not in {0, 1} for bit in bits):
+            raise ExecutionError("Q8646: Nexus result contains a non-bit value")
+        counts[bits] += 1
+    return dict(counts)
+
+
+def _snapshot_reference(
+    snapshot: ExecutionSnapshot | ExecutionReference,
+) -> ExecutionReference:
+    """Extract exactly one remote reference from restoration input."""
+
+    if isinstance(snapshot, ExecutionReference):
+        return snapshot
+    if not isinstance(snapshot, ExecutionSnapshot):
+        raise TypeError("restore expects an ExecutionSnapshot or ExecutionReference")
+    if snapshot.kind is not ExecutionSnapshotKind.REMOTE or snapshot.reference is None:
+        raise ValueError("restore expects exactly one remote execution snapshot")
+    return snapshot.reference
+
+
+__all__ = ["Helios", "HeliosOptions"]

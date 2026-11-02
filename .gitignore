@@ -1,6 +1,3 @@
-# For mpl test
-tests/circuit/visualization/baseline/*
-
 # Build-time scratch tree. ./docs/build.sh copies docs/<lang>/ here,
 # runs build_doc_tags.py and jupytext --update against the copy, then
 # mystmd builds from this dir. The committed source tree never receives

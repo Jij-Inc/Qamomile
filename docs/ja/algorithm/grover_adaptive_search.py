@@ -21,38 +21,32 @@
 #
 # Grover適応探索（GAS）は、二値変数上の多項式目的関数を最小化する手法です。Groverオラクルに「どの $x$ が $f(x) < y$ を満たすか」という1つの問いを繰り返し投げ、より良い解が見つかるたびに閾値 $y$ を下げていきます {cite:p}`10.22331/q-2021-04-08-428`。
 #
-# このページでは、Qamomileの`GASConverter`を使って制約なしの**ポートフォリオ選択**問題を解きます。
+# このページでは、Qamomileのimmutableな`BinaryModel`と`GASExperiment`を使って制約なしの**ポートフォリオ選択**問題を解きます。
 #
 # このチュートリアルは次の構成で進めます。
 #
-# 1. [JijModeling](https://jij-inc-jijmodeling-tutorials-en.readthedocs-hosted.com/en/latest/introduction.html)で問題を定式化します。
-# 2. 具体的なデータからインスタンスを作成します。
-# 3. `GASConverter`で現在の閾値に対応するGrover回路を構築します。
+# 1. 多項式目的関数を`BinaryModel`として定式化します。
+# 2. 具体的なデータから9資産のインスタンスを作成します。
+# 3. `GASExperiment`で現在の閾値に対応するGrover回路を構築します。
 # 4. サンプリングして最良の候補を保持し、停止条件を満たすまで繰り返します。GASは単一の回路ではなくハイブリッドなループです。
 
 # %%
 # 最新のQamomileをpipでインストールしましょう！
-# # !pip install "qamomile[qiskit,visualization]"
+# # !pip install "qamomile[qiskit]"
 
 # %%
 import itertools
+import math
 import os
-import random
-from typing import Any
 
-import jijmodeling as jm
 import numpy as np
-from qiskit_aer import AerSimulator
 
-import qamomile.circuit as qmc
-from qamomile.circuit.algorithm.gas import (
-    apply_function_preparation_qubo,
-    diffusion_op,
-    grover_algorithm,
-)
-from qamomile.circuit.visualization import MatplotlibDrawer
-from qamomile.optimization.gas import GASConverter
-from qamomile.qiskit import QiskitTranspiler
+import qamomile as qm
+from qamomile.optimization import BinaryModel, GASExperiment
+from qamomile.qiskit import Aer
+from qamomile.stdlib import grover_iteration_count
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 # %% [markdown]
 # ## 背景
@@ -60,6 +54,7 @@ from qamomile.qiskit import QiskitTranspiler
 # Grover探索は、目的の状態の位相を反転させて区別するオラクルを受け取り、振幅増幅によってその測定確率を高めます。これは判定問題を解く手続きです。固定された判定条件はどの状態が条件を満たすかを示すだけで、どれが最良かは示しません。
 #
 # GASは判定条件を変更することで、これを最小化に応用します。$f(x) < y$ を満たす候補に対応する量子状態の位相を反転させて区別し、候補をサンプリングします。候補の目的関数値が現在の閾値を下回る場合、古典レイヤーが $y$ をその値に更新します。量子回路が一度に1つの固定された問いに答え、古典レイヤーが閾値を更新するという処理を繰り返します。
+
 
 # %% [markdown]
 # ## 問題設定
@@ -79,24 +74,6 @@ from qamomile.qiskit import QiskitTranspiler
 # \end{equation}
 
 
-# %%
-@jm.Problem.define("Portfolio Optimization (Unconstrained)")
-def portfolio_problem(problem: jm.DecoratedProblem):
-    n = problem.Length(description="資産の数")
-    q = problem.Float("q", description="リスク回避係数")
-    mu = problem.Float("mu", shape=(n,), description="期待収益ベクトル")
-    Sigma = problem.Float("Sigma", shape=(n, n), description="共分散行列")
-
-    x = problem.BinaryVar("x", shape=(n,), description="資産iを選ぶ場合は1")
-
-    problem += (
-        q * jm.sum(Sigma[i, j] * x[i] * x[j] for i in n for j in n)
-        - jm.sum(mu[i] * x[i] for i in n)
-    )
-
-
-portfolio_problem
-
 # %% [markdown]
 # 以下のインスタンスは9個の資産を持ちます。
 #
@@ -112,44 +89,69 @@ portfolio_problem
 # | 資産8 | 25              | 16         |
 # | 資産9 | 3               | 13         |
 
-# %%
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-num_assets = 3 if docs_test_mode else 9
-q = 1
-mu = np.array([22, 4, 19, 3, 23, 2, 5, 25, 3], dtype=int)
-Sigma = np.array([
-    [12, -3,  4,  0, -2,  3,  0,  2, -1],
-    [-3, 15,  0,  5,  1, -4,  2,  0,  3],
-    [ 4,  0, 10, -6,  3,  2, -1,  4,  0],
-    [ 0,  5, -6, 18, -4,  0,  3, -2,  5],
-    [-2,  1,  3, -4, 14,  2, -3,  0,  2],
-    [ 3, -4,  2,  0,  2, 20,  4, -3,  1],
-    [ 0,  2, -1,  3, -3,  4, 11,  2, -2],
-    [ 2,  0,  4, -2,  0, -3,  2, 16, -4],
-    [-1,  3,  0,  5,  2,  1, -2, -4, 13],
-], dtype=int)
-mu = mu[:num_assets]
-Sigma = Sigma[:num_assets, :num_assets]
-
-assert mu.shape == (num_assets,)
-assert Sigma.shape == (num_assets, num_assets)
-assert np.array_equal(Sigma, Sigma.T), "共分散行列は対称でなければなりません"
 
 # %% [markdown]
-# JijModelingの問題を上記のデータで評価すると、OMMXインスタンスが得られます。
+# 以下の係数表から、同じimmutableなbinary modelを直接構築します。
 
 # %%
-instance = portfolio_problem.eval({
-    "n": num_assets,
-    "q": int(q),
-    "mu": mu.tolist(),
-    "Sigma": Sigma.tolist(),
-})
+expected_returns = np.array([22, 4, 19, 3, 23, 2, 5, 25, 3], dtype=int)
+covariance = np.array(
+    [
+        [12, -3, 4, 0, -2, 3, 0, 2, -1],
+        [-3, 15, 0, 5, 1, -4, 2, 0, 3],
+        [4, 0, 10, -6, 3, 2, -1, 4, 0],
+        [0, 5, -6, 18, -4, 0, 3, -2, 5],
+        [-2, 1, 3, -4, 14, 2, -3, 0, 2],
+        [3, -4, 2, 0, 2, 20, 4, -3, 1],
+        [0, 2, -1, 3, -3, 4, 11, 2, -2],
+        [2, 0, 4, -2, 0, -3, 2, 16, -4],
+        [-1, 3, 0, 5, 2, 1, -2, -4, 13],
+    ],
+    dtype=int,
+)
+risk_aversion = 1
 
-assert len(instance.decision_variables) == num_assets
-# 何も購入しないポートフォリオの目的関数値はちょうど0になります。
-empty_portfolio = instance.evaluate({i: 0 for i in range(num_assets)}).objective
-assert np.isclose(empty_portfolio, 0.0, atol=1e-9, rtol=0.0)
+
+def portfolio_model(num_assets: int) -> BinaryModel:
+    terms: dict[tuple[int, ...], float] = {}
+    for left in range(num_assets):
+        terms[(left,)] = float(
+            risk_aversion * covariance[left, left] - expected_returns[left]
+        )
+        for right in range(left + 1, num_assets):
+            coefficient = float(2 * risk_aversion * covariance[left, right])
+            if coefficient:
+                terms[(left, right)] = coefficient
+    return BinaryModel.from_hubo(terms, variables=tuple(range(num_assets)))
+
+
+full_model = portfolio_model(9)
+MODEL_ASSETS = 3 if docs_test_mode else 9
+model = portfolio_model(MODEL_ASSETS)
+
+assert full_model.num_variables == 9
+assert model.num_variables == MODEL_ASSETS
+
+energies = {
+    bits: model.energy(bits)
+    for bits in itertools.product((0, 1), repeat=model.num_variables)
+}
+optimal_bits, optimal_energy = min(energies.items(), key=lambda item: item[1])
+
+print("exact optimum:", optimal_bits, optimal_energy)
+assert optimal_bits == ((1, 0, 1) if docs_test_mode else (1, 0, 0, 0, 1, 0, 0, 1, 0))
+assert optimal_energy == (-11.0 if docs_test_mode else -28.0)
+
+full_energies = {
+    bits: full_model.energy(bits)
+    for bits in itertools.product((0, 1), repeat=full_model.num_variables)
+}
+full_optimal_bits, full_optimal_energy = min(
+    full_energies.items(), key=lambda item: item[1]
+)
+print("nine-asset exact optimum:", full_optimal_bits, full_optimal_energy)
+assert full_optimal_bits == (1, 0, 0, 0, 1, 0, 0, 1, 0)
+assert full_optimal_energy == -28.0
 
 # %% [markdown]
 # ## アルゴリズム
@@ -164,248 +166,211 @@ assert np.isclose(empty_portfolio, 0.0, atol=1e-9, rtol=0.0)
 #
 # 残る問題は、Grover演算子を何回適用するかです。GASはこれに対して、改善が得られなかったラウンドのたびに少しずつ広がる範囲から繰り返し回数をサンプリングすることで答えます。
 
-# %% [markdown]
-# ## 実装
-#
-# Qamomileは、GASに用いる量子回路の実装を`GASConverter`として提供しています。このセクションでは、その使い方と回路を構成する演算を紹介し、最後に古典計算のループと組み合わせてGASを実装します。
-#
-# `GASConverter`はOMMXインスタンスを受け取り、QUBO/HUBO形式の問題へ変換します。`transpile()`メソッドを使うと、指定したtranspilerに対して適応探索で使うGrover回路を構築できます。
-
-# %%
-converter = GASConverter(instance)
-transpiler = QiskitTranspiler()
-
-assert converter.binary_model.num_bits == num_assets
 
 # %% [markdown]
-# ### Grover回路の実装
+# ## 1回の固定閾値ラウンドの構築
 #
-# `GASConverter.transpile()`は内部で以下のサンプリング用量子カーネルを構築し、transpilerに渡します。可視化するには、同じ量子カーネルに対して`Transpiler.to_block`と`MatplotlibDrawer.draw`を使います。
+# 現在の古典的な候補のenergyが$-10$だとします。次のオラクルは$f(x) < -10$を満たす割り当てをmarkします。documentation testでは3資産の厳密解だけがこの条件を満たします。通常実行では元の9資産問題に同じ固定閾値ラウンドを適用します。
 #
-# 出力レジスタの幅は自由なパラメータではありません。すべての $x$ について $f(x) - y$ を保持できる必要があり、足りないと2の補数表現が巡回して、オラクルが判定している符号ビットそのものが反転してしまいます。`required_output_bits()`は、与えた閾値に対して`transpile()`が選ぶ幅を返します。
+# `GASExperiment`はhost側のexperiment境界であり、2つ目の量子decoratorではありません。modelと閾値をverified `Program`へ閉じます。回路は通常のQamomile合成と可逆整数算術だけで構成され、GAS専用のIR演算やbackend実装はありません。
 
 # %%
-output_bits = converter.required_output_bits(y=0)
-print(f"y=0に対する出力レジスタの幅: {output_bits} 量子ビット")
-
-assert output_bits >= 2
-
-
-# %%
-@qmc.qkernel
-def sampling_grover_algorithm(
-    n: qmc.UInt,
-    m: qmc.UInt,
-    y: qmc.Float,
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    iters: qmc.UInt = 1,
-) -> tuple[qmc.Vector[qmc.Bit], qmc.Vector[qmc.Bit]]:
-    q_output, q_input = grover_algorithm(n, m, y, linear, quad, iters)
-    return qmc.measure(q_output), qmc.measure(q_input)
-
-
-block = transpiler.to_block(
-    sampling_grover_algorithm,
-    bindings={
-        # 入力量子ビット数 = 二値変数の数
-        "n": converter.binary_model.num_bits,
-        # 出力量子ビット数（コンバータが計算した値）
-        "m": output_bits,
-        # オラクルの閾値：f(x) < y を満たす候補に対応する状態の位相を反転させて区別します
-        "y": 0,
-        "linear": converter.binary_model.linear,
-        "quad": converter.binary_model.quad,
-        # Groverの繰り返し回数（調整可能）
-        "iters": 1,
-    },
-)
-block = transpiler.inline(block)
-
-assert len(block.operations) > 0, "インライン展開したGroverブロックは空であってはなりません"
-
-MatplotlibDrawer(block).draw(fold_loops=False)
-
-# %% [markdown]
-# ### 構成要素の確認
-#
-# $A_y$ はQFTによる位相エンコーディングから $\sum_x \ket{x, f(x) - y}$ を準備します。
-
-# %%
-preparation_figure = apply_function_preparation_qubo.draw(
-    q_output=output_bits,
-    q_input=converter.binary_model.num_bits,
-    y=0,
-    linear=converter.binary_model.linear,
-    quad=converter.binary_model.quad,
-    inline=True,
-    inline_depth=None,
-    fold_loops=False,
+threshold = -10.0
+experiment = GASExperiment(
+    model,
+    threshold=threshold,
+    iterations=1,
 )
 
-assert preparation_figure.get_axes(), "描画した準備回路は空であってはなりません"
-preparation_figure
+print("output bits:", experiment.resolved_output_bits)
+print("program digest:", experiment.program.semantic_digest)
+
+inspection = experiment.program.inspect()
+assert "quantum.gas" not in inspection
+assert "qcore.control_call" in inspection
 
 # %% [markdown]
-# $D$ は入力レジスタを一様重ね合わせのまわりで反転させます。
+# ### 振幅増幅scalingの再現
+#
+# [](https://doi.org/10.48550/arXiv.2310.03011)のSection 14.1は、初期成功振幅
+# $a$に対して$m=O(a^{-1})$回のGrover iterationを与えます。$N=2^n$個のうち
+# 1個がmarked itemなら$a=N^{-1/2}$なので$m=O(\sqrt N)$です。Qamomileの
+# bounded plannerはfloating-point overflowなしに通常の
+# $\lfloor(\pi/4)\sqrt{2^n}\rfloor$を返します。
 
 # %%
-diffusion_figure = diffusion_op.draw(
-    q_input=converter.binary_model.num_bits,
-    inline=True,
-    inline_depth=None,
-    fold_loops=False,
-)
+grover_plans = {width: grover_iteration_count(width) for width in range(2, 11)}
+for width, iterations in grover_plans.items():
+    assert iterations == math.floor((math.pi / 4.0) * math.sqrt(2**width))
 
-assert diffusion_figure.get_axes(), "描画した拡散回路は空であってはなりません"
-diffusion_figure
+print("Grover plans (n: iterations):", grover_plans)
 
 # %% [markdown]
-# ### 古典レイヤー
-#
-# Qamomileの`GASConverter`は、指定した閾値に対するGrover回路の構築と、測定結果を候補解に変換する機能を提供します。一方、候補解の評価や閾値の更新、Grover反復回数の調整、停止条件の判定といった、探索全体を制御する古典計算部分は含まれていません。そのため、GASによる最適化を行うには、これらの処理を自分で実装する必要があります。以下の関数は、その実装例です。
-#
-# `converter.transpile()`と`converter.decode()`を量子プリミティブとして使い、GASの古典的な外側ループを実装しています。ランダムな候補 $x$ と $y = f(x)$ から始め、Grover回路をサンプリングし、より良いサンプルが得られるたびに暫定解を更新します。改善のないラウンドが`max_no_improvement`回続いた時点で探索を終了します。
-#
-# - `converter.transpile(transpiler, y=y, num_iterations=num_iterations)`は、現在の閾値 $y$ と指定したGrover反復回数に対応するGrover回路を構築します。
-# - `executable.sample(executor, shots=256)`はバックエンド上で回路を実行します。Groverであっても、NISQデバイスはノイジーであるため複数ショットが必要です。
-# - `converter.decode(result)`は生のビット列カウントを決定変数の割り当てにマッピングして返します。
-
+# 固定したGAS thresholdでは、state preparation、oracle、inverse、reflectionから
+# なるbody全体をGrover iterationごとに1回繰り返します。compilerはこのbodyから
+# exactなsemantic workを導出します。controlled coherent-arithmetic transformには
+# 完全なlogical gate profileがまだないため、gate-familyの上限は意図的にopenです。
+# `GASExperiment`は意図的にclosed programを公開するため、2つのendpoint studyから
+# affineな切片と傾きを求めます。残りの表示rowは算術であり、compiler解析の繰り返し
+# ではありません。
 
 # %%
-def grover_adaptive_search(
-    converter: Any,
-    transpiler: Any,
-    lamb: float,
-    max_no_improvement: int = 5,
-    shots: int = 256,
-    seed: int = 900,
-):
-    ##########################################################
-    #                        初期化                          #
-    ##########################################################
-
-    random.seed(seed)
-    n = converter.binary_model.num_bits
-    k = 1  # 各ステップでサンプリングするGrover繰り返し回数の上限を制御します
-    x_int = random.randint(0, 2**n - 1)
-    x = [int(b) for b in format(x_int, f"0{n}b")]
-    y = converter.instance.evaluate({i: x_i for i, x_i in enumerate(x)}).objective
-
-    current_iter = 0
-    no_improvement_count = 0
-
-    print("[GAS] 初期化")
-    print(f"[GAS] n={n}, lambda={lamb}")
-    print(f"[GAS] 初期状態: x={x}, y={y}, k={k}")
-
-    executor = transpiler.executor(
-        backend=AerSimulator(seed_simulator=seed, max_parallel_threads=None)
+gas_endpoint_studies = tuple(
+    qm.resources.logical(
+        GASExperiment(model, threshold=threshold, iterations=iterations).program
     )
-
-    ############################################################
-    #                      メインループ                        #
-    ############################################################
-
-    while no_improvement_count < max_no_improvement:
-        # tを{0, ..., ceil(k)-1}から一様にサンプリングします。k == 1のとき空の範囲になるのを避けます
-        num_iterations = random.randrange(max(1, int(np.ceil(k))))
-        print(
-            f"\n[GAS] イテレーション {current_iter + 1} | 現在のy={y}, k={k:.6f}, "
-            f"Grover繰り返し回数={num_iterations}"
-        )
-
-        ####################################################
-        #            Grover量子回路の呼び出し              #
-        ####################################################
-
-        executable = converter.transpile(
-            transpiler, y=y, num_iterations=num_iterations
-        )
-
-        # NISQハードウェアはノイジーであるため、回路を複数回実行します
-        job = executable.sample(executor, shots=shots)
-        result = job.result()
-        sample_set = converter.decode(result)
-
-        # 最良のサンプルからxとyを取り出します
-        x_vals = sample_set.best_feasible.extract_decision_variables("x")
-        candidate_x = [
-            int(round(x_vals.get((i,), x_vals.get(i, 0.0)))) for i in range(n)
-        ]
-        candidate_y = float(sample_set.best_feasible.objective)
-
-        print(f"[GAS] 候補: x={candidate_x}, y={candidate_y}")
-
-        if candidate_y < y:
-            print("[GAS] 改善を検出 -> 候補を採用し、kを1にリセットします")
-            x = candidate_x
-            y = candidate_y
-            k = 1
-            no_improvement_count = 0
-        else:
-            old_k = k
-            k = lamb * k
-            no_improvement_count += 1
-            print(
-                f"[GAS] 改善なし -> 現在の解を維持し、kをスケーリングします: "
-                f"{old_k:.6f} -> {k:.6f}"
-            )
-
-        current_iter += 1
-
-    print(f"\n[GAS] {current_iter} 回のイテレーション後に終了。最良解: x={x}, y={y}")
-
-    return x, y
-
-
-# %% [markdown]
-# ## 結果
-#
-# このセクションでは、ポートフォリオ選択問題にGASを実行し、得られた目的関数値を全探索による最適値と比較して結果を検証します。
-#
-# `lamb`はGrover繰り返し回数のサンプリング範囲が広がる速さを、`max_no_improvement`は停止条件を決めます。
-
-# %%
-x, y = grover_adaptive_search(
-    converter=converter,
-    transpiler=transpiler,
-    lamb=1.2,
-    max_no_improvement=2 if docs_test_mode else 5,
-    shots=16 if docs_test_mode else 256,
-    seed=0 if docs_test_mode else 900,
+    for iterations in (0, 1)
 )
-selected = [i + 1 for i, xi in enumerate(x) if xi == 1]
-print(f"選択された資産: {selected}, 目的関数値: {y}")
+gas_endpoint_work = tuple(
+    study.metric(qm.resources.LOGICAL_WORK).numeric_enclosure()
+    for study in gas_endpoint_studies
+)
+gas_endpoint_gate_bounds = tuple(
+    study.metric(qm.resources.LOGICAL_GATES).numeric_enclosure()
+    for study in gas_endpoint_studies
+)
 
-assert len(x) == num_assets
-assert all(xi in (0, 1) for xi in x)
-assert np.isclose(
-    y,
-    instance.evaluate({i: xi for i, xi in enumerate(x)}).objective,
-    atol=1e-9,
-    rtol=0.0,
-), "報告された目的関数値は返された割り当てと一致しなければなりません"
+assert all(lower == upper for lower, upper in gas_endpoint_work)
+assert all(upper is None for _, upper in gas_endpoint_gate_bounds)
+work_base = gas_endpoint_work[0][0]
+work_step = gas_endpoint_work[1][0] - work_base
+gate_base = gas_endpoint_gate_bounds[0][0]
+gate_step = gas_endpoint_gate_bounds[1][0] - gate_base
+gas_work = tuple(
+    (work_base + iterations * work_step, work_base + iterations * work_step)
+    for iterations in range(4)
+)
+gas_gate_bounds = tuple(
+    (gate_base + iterations * gate_step, None) for iterations in range(4)
+)
+
+print("GAS semantic work for 0..3 iterations:", gas_work)
+print("GAS logical-gate bounds for 0..3 iterations:", gas_gate_bounds)
 
 # %% [markdown]
-# 探索は`max_no_improvement`回続けて解が改善しなくなった時点で停止します。これはヒューリスティックな規則であり、それ自体が返された解の最適性を保証するものではありません。今回は資産が $9$ 個であり、$2^9 = 512$ 通りの割り当てをすべて列挙できるため、厳密な全探索の結果と照合して確認しましょう。
+# loop構造により、この具体的Grover bodyのcostは$m$についてaffineであり、2つの
+# studyがその有限係数を与えます。$m=\Theta(\sqrt N)$と合成するとサーベイのquery
+# scalingを再現します。部分的な
+# gate enclosureも重要なevidenceです。Qamomileは欠けているtransform profileを
+# name付きで報告し、zeroやexactなtarget gate countとして扱いません。
+
+# %% [markdown]
+# 整数係数は厳密にencodeされます。実数係数を使う場合、`GASExperiment`はmodel全体と閾値を同じscaleで量子化し、`effective_model`と`quantization_scale`を公開します。非整数算術を拒否するには`approximate_real_coefficients=False`を指定します。通常、`output_bits`は安全な2の補数範囲から推論されます。明示したregister幅が不足する場合、暗黙にwrapせずエラーになります。
+
+# %% [markdown]
+# ## 1度コンパイルしてsampling
+#
+# このexperimentはほかのQamomileプログラムと同じlifecycleを使います。closed programをendpointのtarget向けにコンパイルし、そのartifactを再利用します。documentation testでは組み込みReference endpointを使い、通常実行では元のtutorialと同じくlocal Qiskit Aerを使います。
 
 # %%
-brute_force_x, brute_force_y = min(
+endpoint = qm.Reference() if docs_test_mode else Aer()
+compiled = experiment.compile(to=endpoint.target)
+shots = 32 if docs_test_mode else 256
+run = compiled.run(on=endpoint, shots=shots, seed=7)
+
+for sample in run.samples.samples:
+    print(sample.assignment, sample.energy, sample.occurrences)
+
+best = run.samples.lowest
+assert best.assignment == tuple(enumerate(optimal_bits))
+assert best.energy == optimal_energy
+if docs_test_mode:
+    assert best.occurrences > shots * 0.75
+assert run.execution.artifact is compiled.artifact
+assert run.identity == compiled.identity == experiment.identity
+
+# %% [markdown]
+# `run.samples`は型付きの`DecodedSamples`値です。元の変数ID、目的関数値、出現回数を保持し、backend adapterが最適化modelを再解釈することはありません。
+#
+# 振幅増幅の効果を確認するため、同じ閾値でGrover反復を0回にした結果と比較します。このプログラムはdecision registerを一様重ね合わせにしますが、振幅増幅は行いません。
+
+# %%
+baseline = GASExperiment(model, threshold=threshold, iterations=0).run(
+    on=endpoint,
+    shots=shots,
+    seed=7,
+)
+
+baseline_optimum_count = next(
     (
-        (list(bits), instance.evaluate({i: b for i, b in enumerate(bits)}).objective)
-        for bits in itertools.product([0, 1], repeat=num_assets)
+        sample.occurrences
+        for sample in baseline.samples.samples
+        if sample.assignment == best.assignment
     ),
-    key=lambda candidate: candidate[1],
+    0,
 )
 
-print(f"GAS   : x={x}, 目的関数値={y}")
-print(f"全探索 : x={brute_force_x}, 目的関数値={brute_force_y}")
+print("uniform optimum count:", baseline_optimum_count)
+print("amplified optimum count:", best.occurrences)
+assert best.occurrences > baseline_optimum_count
 
-assert np.isclose(y, brute_force_y, atol=1e-9, rtol=0.0), (
-    f"GASは目的関数値 {y} を返しましたが、真の最適値は {brute_force_y} です"
+# %% [markdown]
+# ## 適応的な外側のループ
+#
+# GASが適応的なのは、samplingした各ラウンドの後でhostが新しい閾値を選ぶためです。一般的なループは次の手順で進みます。
+#
+# 1. 現在の古典的な候補を評価し、そのenergyを`threshold`に使います。
+# 2. boundedなGrover反復回数を選びます。
+# 3. 対応するimmutableな`GASExperiment`を作成してコンパイルします。
+# 4. samplingし、`run.samples.lowest`を確認します。候補が改善した場合だけ閾値を下げます。
+#
+# 閾値と反復回数は回路構造を変えるため、launch時の`Param`値ではなく明示的なexperiment設定です。1回のラウンド内では、生成したartifactを再利用でき、厳密なproblem/program identityを保持します。
+
+
+# %%
+def adaptive_search(
+    binary_model: BinaryModel,
+    *,
+    initial_threshold: float,
+    max_rounds: int,
+    shots_per_round: int,
+) -> tuple[tuple[tuple[int, int], ...], float, tuple[float, ...]]:
+    threshold = initial_threshold
+    best_assignment = tuple((index, 0) for index in range(binary_model.num_variables))
+    history = [threshold]
+
+    for round_index in range(max_rounds):
+        round_experiment = GASExperiment(
+            binary_model,
+            threshold=threshold,
+            iterations=1,
+        )
+        round_result = round_experiment.run(
+            on=endpoint,
+            shots=shots_per_round,
+            seed=11 + round_index,
+        )
+        candidate = round_result.samples.lowest
+        if candidate.energy < threshold:
+            threshold = candidate.energy
+            best_assignment = candidate.assignment
+        history.append(threshold)
+        if threshold == optimal_energy:
+            break
+
+    return best_assignment, threshold, tuple(history)
+
+
+adaptive_assignment, adaptive_energy, threshold_history = adaptive_search(
+    model,
+    initial_threshold=0.0,
+    max_rounds=4,
+    shots_per_round=shots,
 )
-print("\nGASは全探索の最適解と一致しました。")
+
+print("threshold history:", threshold_history)
+assert adaptive_assignment == tuple(enumerate(optimal_bits))
+assert adaptive_energy == optimal_energy
+assert all(
+    next_threshold <= current_threshold
+    for current_threshold, next_threshold in zip(
+        threshold_history,
+        threshold_history[1:],
+    )
+)
+
+# %% [markdown]
+# 実行したsearchは厳密解へ到達し、単調非増加の閾値履歴を記録します。通常実行では元の9資産の定式化を全体で使い、documentation testだけがmodel幅と実行budgetを縮小します。
 
 # %% [markdown]
 # ## まとめ
@@ -413,5 +378,5 @@ print("\nGASは全探索の最適解と一致しました。")
 # このノートブックでは、次のことを行いました。
 #
 # - 制約なしのポートフォリオ問題をGrover適応探索で解きました。量子回路が「どの $x$ が $f(x) < y$ を満たすか」に答え、古典ループがより良い候補を得たときに閾値 $y$ を更新します。
-# - GASをQamomileで実装する例を紹介しました。量子側の処理は`GASConverter`として提供されています。`transpile()`が現在の閾値とGrover反復回数に対応するGrover回路を構築し、`decode()`がビット列カウントをOMMXを通じて決定変数に戻します。
+# - GASをQamomileで実装する例を紹介しました。量子側の処理には`GASExperiment`を使います。`compile()`が現在の閾値とGrover反復回数に対応するGrover回路を構築し、`run()`がsamplingしたビット列を元の変数順へdecodeします。
 # - ポートフォリオ選択問題を例にGASを実行し、得られた目的関数値が全探索による最適値と一致することを確認しました。

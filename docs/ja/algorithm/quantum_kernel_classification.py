@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: py:percent,ipynb
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -29,6 +30,33 @@
 # 5. 古典的な線形カーネルとRBFカーネルと比較する。
 
 # %% [markdown]
+# ## インストール
+#
+# ```bash
+# pip install qamomile scikit-learn
+# ```
+
+# %%
+# 最新のQamomileをpipからインストールします！
+# # !pip install qamomile scikit-learn
+
+# %%
+import math
+import os
+
+import matplotlib.pyplot as plt
+import numpy as np
+from sklearn.datasets import make_circles
+from sklearn.metrics import accuracy_score
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.svm import SVC
+
+import qamomile as qm
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+
+# %% [markdown]
 # ## 背景: 量子カーネル法
 #
 # 量子カーネルは、2つのデータ点の量子特徴状態のオーバーラップを測定することで類似度を推定します:
@@ -39,25 +67,136 @@
 #
 # $|0^n\rangle$に$U(x')^\dagger U(x)$を適用し、全ゼロビット列が得られる確率を測定することでこのオーバーラップを推定します。得られたカーネル行列はSVMなどの任意のカーネルベース分類器に渡すことができます。
 
-# %%
-# # !pip install "qamomile[qiskit,visualization]" scikit-learn
 
 # %% [markdown]
 # ## ハイパーパラメータ
 
+
+# %% [markdown]
+# ## データセット
+#
+# scikit-learnの `make_circles` を使い、同心円状の2クラスデータを生成します。線形分類器が失敗する典型的な例です。
+
+
+# %% [markdown]
+# ## 古典的な前処理（特徴リフティング）
+#
+# 量子回路にデータをエンコードする前に、古典的な**特徴リフティング**を適用して元の2次元入力をより高次元の空間に写像します。生の特徴の非線形な組み合わせを追加することで、量子特徴マップがより豊かな構造を活用できるようにします。
+#
+# 2段階のパイプラインは以下の通りです:
+#
+# 1. 生の2次元座標を $[0, \pi]$ にスケーリング。
+# 2. 非線形特徴 $(x_0 - x_1)^2$ と $(x_0 + x_1)^2$ を構築し、それらも $[0, \pi]$ にスケーリング。
+#
+# これによりサンプルごとに4次元の特徴ベクトルが得られます:
+# $f(x) = [x_0, x_1, (x_0 - x_1)^2, (x_0 + x_1)^2]$。
+#
+# したがって量子カーネルは前処理後の特徴上で定義されます:
+#
+# $$
+# k(x, x') = |\langle 0^n | U(f(x'))^\dagger \, U(f(x)) | 0^n \rangle|^2
+# $$
+
+
+# %% [markdown]
+# ## 特徴マップ回路
+#
+# 特徴ブロック$U(x)$は、単一量子ビット回転とentangling gateでデータをencodeします。`qm.adjoint`は同じfeature-map bodyから正確な逆変換$U(x)^\dagger$を導出します。
+
+
+# %% [markdown]
+# ## オーバーラップカーネル回路
+#
+# 完全なカーネル回路は $U(x)$ の後に $U(x')^\dagger$ を適用します。
+# カーネル値 $k(x, x')$ は $|00\rangle$ を測定する確率です。
+#
+# 表現力を高めるために特徴ブロックを `layers` 回繰り返します。
+# `layers` は構造パラメータなので特殊化時にバインドします。
+
+
 # %%
-import math
-import os
+@qm.qkernel
+def classification_feature_map(
+    state: qm.Q[qm.Bits[2]],  # type: ignore[valid-type]
+    features: qm.Vector[qm.Real, 4],  # type: ignore[valid-type]
+) -> qm.Q[qm.Bits[2]]:  # type: ignore[valid-type]
+    """Encode one feature vector into an owned two-qubit state.
 
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+    Args:
+        state (qm.Q[qm.Bits[2]]): Owned two-qubit input state.
+        features (qm.Vector[qm.Real, 4]): Two scaled coordinates and two
+            nonlinear lifted coordinates.
 
-RANDOM_STATE = 7
-N_SAMPLES = 6 if docs_test_mode else 40
-TEST_SIZE = 1 / 3 if docs_test_mode else 0.25
+    Returns:
+        qm.Q[qm.Bits[2]]: Encoded two-qubit state.
+    """
 
-LAYERS = 2       # 特徴マップの繰り返し回数（トランスパイル時にバインド）
-SHOTS = 1 if docs_test_mode else 1024
-C_SVC = 1.0
+    for _ in range(2):
+        for index in range(2):
+            state = qm.h(state, target=index)
+            state = qm.rz(state, features[index], target=index)
+            state = qm.ry(state, features[index], target=index)
+        state = qm.cz(state, control=0, target=1)
+        state = qm.rzz(state, features[2], left=0, right=1)
+        state = qm.rz(state, features[3], target=0)
+        state = qm.rz(state, features[3], target=1)
+    return state
+
+
+@qm.qkernel
+def classification_overlap_state(
+    left: qm.Vector[qm.Real, 4],  # type: ignore[valid-type]
+    right: qm.Vector[qm.Real, 4],  # type: ignore[valid-type]
+) -> qm.Q[qm.Bits[2]]:  # type: ignore[valid-type]
+    """Build the reversible overlap witness for two feature vectors.
+
+    Args:
+        left (qm.Vector[qm.Real, 2]): First feature vector.
+        right (qm.Vector[qm.Real, 2]): Second feature vector.
+
+    Returns:
+        qm.Q[qm.Bits[2]]: State whose zero probability is the kernel value.
+    """
+
+    state = classification_feature_map(qm.qubits(2), left)
+    return qm.adjoint(classification_feature_map, state, right)
+
+
+@qm.qkernel
+def classification_overlap(
+    left: qm.Param[qm.Vector[qm.Real, 4]],  # type: ignore[valid-type]
+    right: qm.Param[qm.Vector[qm.Real, 4]],  # type: ignore[valid-type]
+) -> qm.Shot[qm.Bits[2]]:  # type: ignore[valid-type]
+    """Measure one runtime-rebindable overlap witness.
+
+    Args:
+        left (qm.Param[qm.Vector[qm.Real, 2]]): First runtime feature vector.
+        right (qm.Param[qm.Vector[qm.Real, 2]]): Second runtime feature vector.
+
+    Returns:
+        qm.Shot[qm.Bits[2]]: Two logical overlap-witness bits per shot.
+    """
+
+    return qm.measure(classification_overlap_state(left, right))
+
+
+# %% [markdown]
+# `qm.adjoint`はfeature-map bodyから逆変換を導出します。forward mapと同期する必要がある逆順gate listのcopyはなく、affineなstate ownershipが両方のcallにわたって検査されます。
+
+# %% [markdown]
+# ## 記述したbodyをinspectしてestimateする
+#
+# 特殊化により、inspectとresource analysisの両方で使うtarget-independentなprogramが得られます。bodyにはadjoint callがありますが、量子分類専用opcodeはありません。Rustは可視な2-layer forward/inverse feature mapから40 logical gatesを導出します。
+
+# %%
+program = qm.specialize(classification_overlap)
+inspection = program.inspect()
+study = qm.resources.logical(program)
+
+assert "qcore.adjoint_call" in inspection
+assert "quantum.classification" not in inspection
+assert study.metric(qm.resources.LOGICAL_GATES).numeric_enclosure() == (40, 40)
+assert qm.resources.ResourceStudy.from_bytes(study.to_bytes()) == study
 
 # %% [markdown]
 # ## データセット
@@ -65,46 +204,20 @@ C_SVC = 1.0
 # scikit-learnの `make_circles` を使い、同心円状の2クラスデータを生成します。線形分類器が失敗する典型的な例です。
 
 # %%
-import warnings
-
-import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.datasets import make_circles
-from sklearn.model_selection import train_test_split
-
-warnings.filterwarnings("ignore", message="FigureCanvasAgg is non-interactive")
-
-X_raw, y = make_circles(
+N_SAMPLES = 8 if docs_test_mode else 40
+X_raw, labels = make_circles(
     n_samples=N_SAMPLES,
-    noise=0.08,
-    factor=0.40,
-    random_state=RANDOM_STATE,
+    noise=0.04,
+    factor=0.4,
+    random_state=7,
 )
-assert X_raw.shape == (N_SAMPLES, 2)
-assert y.shape == (N_SAMPLES,)
-assert set(y.tolist()) == {0, 1}
-
 X_train_raw, X_test_raw, y_train, y_test = train_test_split(
-    X_raw, y,
-    test_size=TEST_SIZE,
-    random_state=RANDOM_STATE,
-    stratify=y,
+    X_raw,
+    labels,
+    test_size=0.25,
+    random_state=7,
+    stratify=labels,
 )
-# train + test 分割は全データを覆い、stratify が両クラスを保持する。
-assert len(X_train_raw) + len(X_test_raw) == N_SAMPLES
-assert X_train_raw.shape[1] == 2 and X_test_raw.shape[1] == 2
-assert set(y_train.tolist()) == {0, 1}
-assert set(y_test.tolist()) == {0, 1}
-
-plt.figure(figsize=(5, 4))
-plt.scatter(
-    X_train_raw[:, 0], X_train_raw[:, 1],
-    c=y_train, s=28, alpha=0.85,
-)
-plt.title("Training data (make_circles)")
-plt.xlabel("x1")
-plt.ylabel("x2")
-plt.show()
 
 # %% [markdown]
 # ## 古典的な前処理（特徴リフティング）
@@ -126,285 +239,140 @@ plt.show()
 # $$
 
 # %%
-from sklearn.preprocessing import MinMaxScaler
-
 angle_scaler = MinMaxScaler(feature_range=(0.0, math.pi), clip=True)
 pair_scaler = MinMaxScaler(feature_range=(0.0, math.pi), clip=True)
-
-X_train_ang = angle_scaler.fit_transform(X_train_raw)
-X_test_ang = angle_scaler.transform(X_test_raw)
-
-
-def lift_features(X_ang: np.ndarray) -> np.ndarray:
-    x0 = X_ang[:, 0]
-    x1 = X_ang[:, 1]
-    xdiff = (x0 - x1) ** 2
-    xsum = (x0 + x1) ** 2
-    return np.column_stack([x0, x1, xdiff, xsum])
+X_train_angles = angle_scaler.fit_transform(X_train_raw)
+X_test_angles = angle_scaler.transform(X_test_raw)
 
 
-F_train = lift_features(X_train_ang)
-F_test = lift_features(X_test_ang)
+def lift_features(values: np.ndarray) -> np.ndarray:
+    """Lift two scaled coordinates into four nonlinear circuit features.
 
-# 非線形ペア特徴のみスケーリング
+    Args:
+        values (np.ndarray): Two-column scaled input matrix.
+
+    Returns:
+        np.ndarray: Four-column matrix with two quadratic coordinates.
+    """
+
+    x0 = values[:, 0]
+    x1 = values[:, 1]
+    return np.column_stack((x0, x1, (x0 - x1) ** 2, (x0 + x1) ** 2))
+
+
+F_train = lift_features(X_train_angles)
+F_test = lift_features(X_test_angles)
 F_train[:, 2:4] = pair_scaler.fit_transform(F_train[:, 2:4])
 F_test[:, 2:4] = pair_scaler.transform(F_test[:, 2:4])
-# リフティングで (n, 2) -> (n, 4)、MinMaxScaler の clip=True により全要素が
-# [0, pi] に収まる。
+
+TRAIN_FEATURES = tuple(tuple(float(value) for value in row) for row in F_train)
+TEST_FEATURES = tuple(tuple(float(value) for value in row) for row in F_test)
+TRAIN_LABELS = tuple(int(label) for label in y_train)
+EXPECTED_LABELS = tuple(int(label) for label in y_test)
+SHOTS = 16 if docs_test_mode else 64
+
 assert F_train.shape == (len(X_train_raw), 4)
 assert F_test.shape == (len(X_test_raw), 4)
-assert F_train.min() >= 0.0 and F_train.max() <= math.pi + 1e-12
-assert F_test.min() >= 0.0 and F_test.max() <= math.pi + 1e-12
 
 # %% [markdown]
-# ## 特徴マップ回路
+# ## 1回コンパイルして繰り返し実行する
 #
-# 特徴ブロック $U(x)$ は、単一量子ビット回転とエンタングリングゲートでデータをエンコードします。また、ゲート順序を逆にし全角度を符号反転することで正確な逆変換 $U(x)^\dagger$ も実装します。
+# overlap programは1回だけcompileします。Gram matrixの全entryが異なるruntime vectorで同じartifactを再利用します。
 
 # %%
-import qamomile.circuit as qmc
+endpoint = qm.Reference()
+artifact = qm.compile(program, to=endpoint.target)
+kernel_runs: list[qm.RunRecord] = []
 
-
-@qmc.qkernel
-def feature_block(
-    q0: qmc.Qubit,
-    q1: qmc.Qubit,
-    x0: qmc.Float,
-    x1: qmc.Float,
-    xdiff: qmc.Float,
-    xsum: qmc.Float,
-) -> tuple[qmc.Qubit, qmc.Qubit]:
-    # 基底変換
-    q0 = qmc.h(q0)
-    q1 = qmc.h(q1)
-
-    # データエンコーディング
-    q0 = qmc.rz(q0, x0)
-    q1 = qmc.rz(q1, x1)
-    q0 = qmc.ry(q0, x0)
-    q1 = qmc.ry(q1, x1)
-
-    # エンタングリング/データ依存位相
-    q0, q1 = qmc.cz(q0, q1)
-    q0, q1 = qmc.rzz(q0, q1, xdiff)
-
-    # 追加の非線形位相
-    q0 = qmc.rz(q0, xsum)
-    q1 = qmc.rz(q1, xsum)
-
-    return q0, q1
-
-
-@qmc.qkernel
-def feature_block_dagger(
-    q0: qmc.Qubit,
-    q1: qmc.Qubit,
-    x0: qmc.Float,
-    x1: qmc.Float,
-    xdiff: qmc.Float,
-    xsum: qmc.Float,
-) -> tuple[qmc.Qubit, qmc.Qubit]:
-    # 逆順、角度を符号反転 (Float に単項マイナスがないため 0.0 - x を使用)
-    q1 = qmc.rz(q1, 0.0 - xsum)
-    q0 = qmc.rz(q0, 0.0 - xsum)
-
-    q0, q1 = qmc.rzz(q0, q1, 0.0 - xdiff)
-    q0, q1 = qmc.cz(q0, q1)
-
-    q1 = qmc.ry(q1, 0.0 - x1)
-    q0 = qmc.ry(q0, 0.0 - x0)
-    q1 = qmc.rz(q1, 0.0 - x1)
-    q0 = qmc.rz(q0, 0.0 - x0)
-
-    q1 = qmc.h(q1)
-    q0 = qmc.h(q0)
-
-    return q0, q1
-
-
-# %% [markdown]
-# ## オーバーラップカーネル回路
-#
-# 完全なカーネル回路は $U(x)$ の後に $U(x')^\dagger$ を適用します。
-# カーネル値 $k(x, x')$ は $|00\rangle$ を測定する確率です。
-#
-# 表現力を高めるために特徴ブロックを `layers` 回繰り返します。
-# `layers` は構造パラメータなのでトランスパイル時にバインドします。
-
-# %%
-@qmc.qkernel
-def overlap_kernel(
-    layers: qmc.UInt,
-    x0: qmc.Float,
-    x1: qmc.Float,
-    xdiff: qmc.Float,
-    xsum: qmc.Float,
-    xp0: qmc.Float,
-    xp1: qmc.Float,
-    xpdiff: qmc.Float,
-    xpsum: qmc.Float,
-) -> tuple[qmc.Bit, qmc.Bit]:
-    q0 = qmc.qubit(name="q0")
-    q1 = qmc.qubit(name="q1")
-
-    for _ in qmc.range(layers):
-        q0, q1 = feature_block(q0, q1, x0, x1, xdiff, xsum)
-
-    for _ in qmc.range(layers):
-        q0, q1 = feature_block_dagger(q0, q1, xp0, xp1, xpdiff, xpsum)
-
-    return qmc.measure(q0), qmc.measure(q1)
-
-# %% [markdown]
-# ## 回路の確認
-#
-# 具体的な値を渡して回路を可視化し、`estimate_resources` でゲート数を確認します。
-
-# %%
-overlap_kernel.draw(
-    layers=LAYERS,
-    x0=0.4, x1=1.1, xdiff=0.8, xsum=1.6,
-    xp0=0.9, xp1=0.7, xpdiff=0.2, xpsum=1.2,
-    fold_loops=False,
+assert tuple(slot.name for slot in artifact.parameter_abi.slots) == (
+    "left",
+    "right",
 )
 
-# %%
-est = overlap_kernel.estimate_resources()
-print("=== symbolic resource estimate ===")
-print("qubits:", est.qubits)
-print("total gates:", est.gates.total)
-# overlap 回路は layers にかかわらず常に 2 量子ビット上で動作する。
-assert est.qubits == 2
 
-# %% [markdown]
-# ## 一度トランスパイル、何度もバインド
-#
-# 構造パラメータ `layers` はトランスパイル時にバインドし、
-# データ特徴（`x0`, `x1`, ..., `xpsum`）はランタイムパラメータとして残します。これにより、同じコンパイル済み回路をすべてのデータペアに再利用できます。
+def kernel_value(
+    left: tuple[float, ...],
+    right: tuple[float, ...],
+    *,
+    seed: int,
+) -> float:
+    """Estimate one all-zero overlap through the shared artifact.
 
-# %%
-from qamomile.qiskit import QiskitTranspiler
+    Args:
+        left: First four-coordinate feature vector.
+        right: Second four-coordinate feature vector.
+        seed: Deterministic sampling seed.
 
-transpiler = QiskitTranspiler()
+    Returns:
+        Estimated squared overlap in the closed interval from zero to one.
+    """
 
-exe = transpiler.transpile(
-    overlap_kernel,
-    bindings={"layers": LAYERS},
-    parameters=[
-        "x0", "x1", "xdiff", "xsum",
-        "xp0", "xp1", "xpdiff", "xpsum",
-    ],
+    record = qm.run(
+        artifact,
+        on=endpoint,
+        parameters={"left": left, "right": right},
+        shots=SHOTS,
+        seed=seed,
+    )
+    kernel_runs.append(record)
+    return record.result.probability((0, 0))
+
+
+train_kernel_rows = [[0.0] * len(TRAIN_FEATURES) for _ in TRAIN_FEATURES]
+seed = 1
+for row in range(len(TRAIN_FEATURES)):
+    train_kernel_rows[row][row] = 1.0
+    for column in range(row):
+        value = kernel_value(
+            TRAIN_FEATURES[row],
+            TRAIN_FEATURES[column],
+            seed=seed,
+        )
+        seed += 1
+        train_kernel_rows[row][column] = value
+        train_kernel_rows[column][row] = value
+train_kernel_raw = np.asarray(train_kernel_rows, dtype=float)
+test_kernel = np.asarray(
+    [
+        [
+            kernel_value(point, training, seed=100 + row * 10 + column)
+            for column, training in enumerate(TRAIN_FEATURES)
+        ]
+        for row, point in enumerate(TEST_FEATURES)
+    ]
 )
 
-executor = transpiler.executor()
+expected_kernel_runs = len(TRAIN_FEATURES) * (len(TRAIN_FEATURES) - 1) // 2
+expected_kernel_runs += len(TEST_FEATURES) * len(TRAIN_FEATURES)
+assert len(kernel_runs) == expected_kernel_runs
+assert all(record.artifact is artifact for record in kernel_runs)
+assert sum(record.result.shots for record in kernel_runs) == (
+    expected_kernel_runs * SHOTS
+)
+
+
+def project_to_psd_correlation(matrix: np.ndarray) -> np.ndarray:
+    """Project a shot-noisy symmetric Gram matrix to a PSD correlation matrix."""
+
+    symmetric = 0.5 * (matrix + matrix.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(symmetric)
+    positive = np.maximum(eigenvalues, 1e-12)
+    projected = (eigenvectors * positive) @ eigenvectors.T
+    diagonal = np.sqrt(np.maximum(np.diag(projected), 1e-12))
+    projected = projected / np.outer(diagonal, diagonal)
+    projected = 0.5 * (projected + projected.T)
+    np.fill_diagonal(projected, 1.0)
+    return projected
+
+
+train_kernel = project_to_psd_correlation(train_kernel_raw)
+assert np.allclose(train_kernel, train_kernel.T)
+assert np.allclose(np.diag(train_kernel), 1.0)
+assert float(np.linalg.eigvalsh(train_kernel).min()) >= -1e-9
+assert test_kernel.min() >= 0.0 and test_kernel.max() <= 1.0
 
 # %% [markdown]
-# ## カーネル評価ユーティリティ
-#
-# 以下のヘルパー関数を定義します:
-# - サンプル結果から $|00\rangle$ の確率を取得する。
-# - 単一のカーネル値 $k(f, f')$ を計算する。
-# - 対称な訓練カーネル行列を構築する。
-# - 長方形のテストカーネル行列を構築する。
-# - ノイズの影響で半正定値性が崩れた場合に、有効な半正定値相関行列に射影する。
-
-# %%
-def zero_probability(sample_result) -> float:
-    total = 0
-    zero_zero = 0
-
-    for outcome, count in sample_result.results:
-        total += count
-        if outcome == (0, 0):
-            zero_zero += count
-
-    if total == 0:
-        return 0.0
-    return zero_zero / total
-
-
-def kernel_value(f: np.ndarray, fp: np.ndarray, shots: int = SHOTS) -> float:
-    result = exe.sample(
-        executor,
-        shots=shots,
-        bindings={
-            "x0": float(f[0]),
-            "x1": float(f[1]),
-            "xdiff": float(f[2]),
-            "xsum": float(f[3]),
-            "xp0": float(fp[0]),
-            "xp1": float(fp[1]),
-            "xpdiff": float(fp[2]),
-            "xpsum": float(fp[3]),
-        },
-    ).result()
-
-    return zero_probability(result)
-
-
-def train_kernel_matrix(F: np.ndarray, shots: int = SHOTS) -> np.ndarray:
-    n = len(F)
-    K = np.empty((n, n), dtype=float)
-
-    for i in range(n):
-        K[i, i] = 1.0
-        for j in range(i + 1, n):
-            val = kernel_value(F[i], F[j], shots=shots)
-            K[i, j] = val
-            K[j, i] = val
-
-    return K
-
-
-def cross_kernel_matrix(
-    F_left: np.ndarray, F_right: np.ndarray, shots: int = SHOTS
-) -> np.ndarray:
-    K = np.empty((len(F_left), len(F_right)), dtype=float)
-
-    for i, f in enumerate(F_left):
-        for j, fp in enumerate(F_right):
-            K[i, j] = kernel_value(f, fp, shots=shots)
-
-    return K
-
-
-def project_to_psd_correlation(K: np.ndarray, eps: float = 1e-12) -> np.ndarray:
-    K = 0.5 * (K + K.T)
-
-    eigvals, eigvecs = np.linalg.eigh(K)
-    eigvals = np.maximum(eigvals, eps)
-    K_psd = (eigvecs * eigvals) @ eigvecs.T
-
-    d = np.sqrt(np.maximum(np.diag(K_psd), eps))
-    K_psd = K_psd / np.outer(d, d)
-
-    K_psd = 0.5 * (K_psd + K_psd.T)
-    np.fill_diagonal(K_psd, 1.0)
-
-    return K_psd
-
-# %% [markdown]
-# ## グラム行列の計算
-#
-# 訓練カーネル行列（対称、$n \times n$）と
-# テストカーネル行列（長方形、$m \times n$）を計算します。
-#
-# > **Note:** このステップは $O(n^2)$ 個の量子回路を評価するため計算コストが高くなります。大規模なデータセットの場合はサブサンプリングや近似手法を検討してください。
-
-# %%
-K_train = train_kernel_matrix(F_train, shots=SHOTS)
-K_train = project_to_psd_correlation(K_train)
-# PSD 相関射影後、訓練 Gram 行列は対称・対角 1.0・半正定値 (eps 床より下に
-# 落ち込まない) のいずれも満たす。
-assert K_train.shape == (len(F_train), len(F_train))
-assert np.allclose(K_train, K_train.T)
-assert np.allclose(np.diag(K_train), 1.0)
-assert float(np.linalg.eigvalsh(K_train).min()) >= -1e-9
-
-K_test = cross_kernel_matrix(F_test, F_train, shots=SHOTS)
-# ショット数から推定された確率は常に [0, 1] に収まる。
-assert K_test.shape == (len(F_test), len(F_train))
-assert K_test.min() >= 0.0 and K_test.max() <= 1.0
+# 対称性から残りのtraining entryが得られ、self-overlapから対角成分は1になります。サイズ$n$の実用的なtraining集合には$O(n^2)$個のkernel値が必要です。batchingとmeasurement planningは実行上の関心事であり、新しいsource-language semanticsではありません。
 
 # %% [markdown]
 # ## 分類器の学習
@@ -415,33 +383,30 @@ assert K_test.min() >= 0.0 and K_test.max() <= 1.0
 # - **RBF SVC**: 古典的なガウシアンカーネルを使用（強力なベースライン）。
 
 # %%
-from sklearn.svm import SVC
-from sklearn.metrics import accuracy_score
+classifier = SVC(kernel="precomputed", C=1.0)
+classifier.fit(train_kernel, TRAIN_LABELS)
+predictions = classifier.predict(test_kernel)
 
-qsvc = SVC(kernel="precomputed", C=C_SVC)
-qsvc.fit(K_train, y_train)
-y_pred_qk = qsvc.predict(K_test)
+linear_classifier = SVC(kernel="linear", C=1.0)
+linear_classifier.fit(X_train_raw, y_train)
+linear_predictions = linear_classifier.predict(X_test_raw)
 
-linear_svc = SVC(kernel="linear", C=C_SVC)
-linear_svc.fit(X_train_raw, y_train)
-y_pred_linear = linear_svc.predict(X_test_raw)
+rbf_classifier = SVC(kernel="rbf", C=1.0, gamma="scale")
+rbf_classifier.fit(X_train_raw, y_train)
+rbf_predictions = rbf_classifier.predict(X_test_raw)
 
-rbf_svc = SVC(kernel="rbf", C=C_SVC, gamma="scale")
-rbf_svc.fit(X_train_raw, y_train)
-y_pred_rbf = rbf_svc.predict(X_test_raw)
+print("test kernel:", test_kernel)
+print("predicted labels:", predictions)
 
-print("=== test accuracy ===")
-print("Quantum kernel SVC :", accuracy_score(y_test, y_pred_qk))
-print("Linear SVC         :", accuracy_score(y_test, y_pred_linear))
-print("RBF SVC            :", accuracy_score(y_test, y_pred_rbf))
-# どの分類器もテスト点 1 つにつき 1 個の予測を返し、ラベルは訓練ラベル集合に
-# 収まる。
-assert y_pred_qk.shape == y_test.shape
-assert y_pred_linear.shape == y_test.shape
-assert y_pred_rbf.shape == y_test.shape
-assert set(y_pred_qk.tolist()).issubset({0, 1})
-assert set(y_pred_linear.tolist()).issubset({0, 1})
-assert set(y_pred_rbf.tolist()).issubset({0, 1})
+quantum_accuracy = accuracy_score(EXPECTED_LABELS, predictions)
+linear_accuracy = accuracy_score(EXPECTED_LABELS, linear_predictions)
+rbf_accuracy = accuracy_score(EXPECTED_LABELS, rbf_predictions)
+print("Quantum kernel SVC:", quantum_accuracy)
+print("Linear SVC:", linear_accuracy)
+print("RBF SVC:", rbf_accuracy)
+assert predictions.shape == y_test.shape
+assert linear_predictions.shape == y_test.shape
+assert rbf_predictions.shape == y_test.shape
 
 # %% [markdown]
 # ## 可視化
@@ -452,115 +417,67 @@ assert set(y_pred_rbf.tolist()).issubset({0, 1})
 # 3. 量子カーネル SVC の決定境界。
 # 4. 比較用の古典 RBF SVC の決定境界。
 
+
 # %% [markdown]
 # ### 決定境界ヘルパー
 
-# %%
-GRID_SIZE = 2 if docs_test_mode else 15
-
-
-def preprocess_for_kernel(X_raw_points: np.ndarray) -> np.ndarray:
-    X_ang = angle_scaler.transform(X_raw_points)
-    F = lift_features(X_ang)
-    F[:, 2:4] = pair_scaler.transform(F[:, 2:4])
-    return F
-
-
-def quantum_decision_grid(
-    clf: SVC,
-    X_train_features: np.ndarray,
-    x_min: float,
-    x_max: float,
-    y_min: float,
-    y_max: float,
-    grid_size: int = GRID_SIZE,
-    shots: int = SHOTS,
-):
-    xs = np.linspace(x_min, x_max, grid_size)
-    ys = np.linspace(y_min, y_max, grid_size)
-    xx, yy = np.meshgrid(xs, ys)
-
-    grid_points = np.column_stack([xx.ravel(), yy.ravel()])
-    F_grid = preprocess_for_kernel(grid_points)
-
-    K_grid = cross_kernel_matrix(F_grid, X_train_features, shots=shots)
-
-    zz = clf.predict(K_grid).reshape(xx.shape)
-    return xx, yy, zz
 
 # %% [markdown]
 # ### 結果のプロット
 
 # %%
+GRID_SIZE = 2 if docs_test_mode else 10
+
+
+def preprocess_for_kernel(raw_points: np.ndarray) -> np.ndarray:
+    """Apply the fitted scaling and nonlinear lift to new raw points."""
+
+    angles = angle_scaler.transform(raw_points)
+    features = lift_features(angles)
+    features[:, 2:4] = pair_scaler.transform(features[:, 2:4])
+    return features
+
+
 margin = 0.35
 x_min = X_raw[:, 0].min() - margin
 x_max = X_raw[:, 0].max() + margin
 y_min = X_raw[:, 1].min() - margin
 y_max = X_raw[:, 1].max() + margin
-
-xx_qk, yy_qk, zz_qk = quantum_decision_grid(
-    qsvc, F_train, x_min, x_max, y_min, y_max,
-    grid_size=GRID_SIZE, shots=SHOTS,
-)
-
-xx_cl, yy_cl = np.meshgrid(
+grid_x, grid_y = np.meshgrid(
     np.linspace(x_min, x_max, GRID_SIZE),
     np.linspace(y_min, y_max, GRID_SIZE),
 )
-grid_raw = np.column_stack([xx_cl.ravel(), yy_cl.ravel()])
-zz_lin = linear_svc.predict(grid_raw).reshape(xx_cl.shape)
-zz_rbf = rbf_svc.predict(grid_raw).reshape(xx_cl.shape)
-
-fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-
-# (a) 訓練データ
-ax = axes[0, 0]
-ax.scatter(X_train_raw[:, 0], X_train_raw[:, 1], c=y_train, s=28, alpha=0.85)
-ax.set_title("Training data")
-ax.set_xlabel("x1")
-ax.set_ylabel("x2")
-
-# (b) 訓練カーネル行列
-ax = axes[0, 1]
-im = ax.imshow(K_train, aspect="auto")
-ax.set_title("Quantum kernel matrix (train)")
-ax.set_xlabel("j")
-ax.set_ylabel("i")
-plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-
-# (c) 量子カーネル決定境界
-ax = axes[1, 0]
-ax.contourf(xx_qk, yy_qk, zz_qk, alpha=0.25)
-ax.scatter(
-    X_train_raw[:, 0], X_train_raw[:, 1],
-    c=y_train, s=28, alpha=0.9, label="train",
+raw_grid = np.column_stack((grid_x.ravel(), grid_y.ravel()))
+feature_grid = preprocess_for_kernel(raw_grid)
+grid_kernel = np.asarray(
+    [
+        [
+            kernel_value(
+                tuple(float(value) for value in point),
+                training,
+                seed=1_000 + row * len(TRAIN_FEATURES) + column,
+            )
+            for column, training in enumerate(TRAIN_FEATURES)
+        ]
+        for row, point in enumerate(feature_grid)
+    ]
 )
-ax.scatter(
-    X_test_raw[:, 0], X_test_raw[:, 1],
-    c=y_test, s=45, marker="x", label="test",
-)
-ax.set_title("Quantum kernel SVC boundary")
-ax.set_xlabel("x1")
-ax.set_ylabel("x2")
-ax.legend()
+quantum_boundary = classifier.predict(grid_kernel).reshape(grid_x.shape)
+rbf_boundary = rbf_classifier.predict(raw_grid).reshape(grid_x.shape)
 
-# (d) RBF ベースライン
-ax = axes[1, 1]
-ax.contourf(xx_cl, yy_cl, zz_rbf, alpha=0.25)
-ax.scatter(
-    X_train_raw[:, 0], X_train_raw[:, 1],
-    c=y_train, s=28, alpha=0.9, label="train",
-)
-ax.scatter(
-    X_test_raw[:, 0], X_test_raw[:, 1],
-    c=y_test, s=45, marker="x", label="test",
-)
-ax.set_title("RBF SVC boundary")
-ax.set_xlabel("x1")
-ax.set_ylabel("x2")
-ax.legend()
-
-plt.tight_layout()
+figure, axes = plt.subplots(2, 2, figsize=(10, 8))
+axes[0, 0].scatter(X_train_raw[:, 0], X_train_raw[:, 1], c=y_train)
+axes[0, 0].set_title("Training data")
+image = axes[0, 1].imshow(train_kernel, cmap="viridis", vmin=0.0, vmax=1.0)
+axes[0, 1].set_title("Quantum kernel matrix")
+figure.colorbar(image, ax=axes[0, 1])
+axes[1, 0].contourf(grid_x, grid_y, quantum_boundary, alpha=0.35)
+axes[1, 0].scatter(X_test_raw[:, 0], X_test_raw[:, 1], c=y_test)
+axes[1, 0].set_title("Quantum kernel SVC boundary")
+axes[1, 1].contourf(grid_x, grid_y, rbf_boundary, alpha=0.35)
+axes[1, 1].scatter(X_test_raw[:, 0], X_test_raw[:, 1], c=y_test)
+axes[1, 1].set_title("RBF SVC boundary")
+figure.tight_layout()
 plt.show()
 
 # %% [markdown]

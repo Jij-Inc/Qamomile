@@ -1,16 +1,15 @@
 # ---
 # jupyter:
 #   jupytext:
-#     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.18.1
 #   kernelspec:
-#     display_name: Python (qamomile)
+#     display_name: Python 3
 #     language: python
-#     name: qamomile
+#     name: python3
 # ---
 
 # %% [markdown]
@@ -24,26 +23,7 @@
 # Conventional QFT-based constructions, however, are limited when input data is not naturally defined on power-of-two grid sizes.
 # This article summarizes an implementation of a multidimensional QFT for inputs with arbitrary grid sizes, following the method proposed in [](https://doi.org/10.1039/d4cp04399e).
 # Through this multidimensional QFT implementation, you can learn how to use Qamomile for this kind of workflow.
-
-# %%
-# Install the latest Qamomile through pip!
-# # !pip install "qamomile[qiskit]"
-
-# %%
-import os
-
-import matplotlib.pyplot as plt
-import numpy as np
-
-import qamomile.circuit as qmc
-from qamomile.circuit.stdlib import mottonen_amplitude_encoding
-from qamomile.circuit.transpiler.job import SampleResult
-from qamomile.qiskit import QiskitTranspiler
-
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-sample_shots = 1 if docs_test_mode else 2**14
-
-# %% [markdown]
+#
 # ## Background
 #
 # ### Problem: Characterizing nanosheet materials
@@ -82,6 +62,63 @@ sample_shots = 1 if docs_test_mode else 2**14
 # Qamomile includes a standard implementation of one-dimensional QFT.
 # By using Qamomile's features, multidimensional QFT can also be implemented easily.
 #
+
+# %% [markdown]
+# ## Installation
+#
+# Install the Qamomile distribution:
+#
+# ```bash
+# pip install qamomile
+# ```
+
+# %%
+# Install the latest Qamomile through pip!
+# # !pip install qamomile
+
+# %%
+from __future__ import annotations
+
+import numpy as np
+
+import qamomile as qm
+from qamomile.stdlib import amplitude_encoding, qft
+
+# %% [markdown]
+# ## Encode a small two-dimensional input
+#
+# We use a $4\times4$ grid with little-endian flat index
+#
+# $$
+# j=x+4y.
+# $$
+#
+# The input is uniform along the $x$ axis and localized at $y=1$. Its
+# normalized state is therefore
+#
+# $$
+# \frac{1}{2}\sum_{x=0}^{3}|x\rangle|1\rangle.
+# $$
+#
+# The $x$-axis QFT must produce reciprocal coordinate zero. The localized
+# $y$ coordinate transforms to equal support over all four reciprocal values.
+
+# %%
+side = 4
+input_amplitudes = tuple(
+    1.0 if side <= index < 2 * side else 0.0 for index in range(side * side)
+)
+prepare = amplitude_encoding(input_amplitudes)
+
+assert len(input_amplitudes) == 16
+assert sum(value * value for value in input_amplitudes) == 4.0
+
+# %% [markdown]
+# `amplitude_encoding` normalizes the finite vector and closes Rust-derived
+# exact-phase coordinates into an ordinary unitary Qamomile function. The input
+# does not become an SDK state-preparation object.
+
+# %% [markdown]
 # ## Algorithm: QFT for multidimensional inputs with arbitrary periodicity
 #
 # Real-space crystal and nanosheet structures are not generally sampled on power-of-two grids.
@@ -108,247 +145,291 @@ sample_shots = 1 if docs_test_mode else 2**14
 # Here $(a_0, a_1, a_2, a_3, a_4) = (0.1881, 0.36923, 0.28702, 0.13077, 0.02488)$, $N$ is the total number of points in the dimension being considered, and $n$ is the point position $(n=0, 1, \dots, N-1)$.
 # In two dimensions, we multiply the input by a product such as $w_5(x) w_5(y)$.
 
+
+# %%
+def pad_center(array: np.ndarray, target_shape: tuple[int, int]) -> np.ndarray:
+    """Center-pad a two-dimensional array to one power-of-two shape."""
+
+    padding = []
+    for size, target in zip(array.shape, target_shape, strict=True):
+        total = target - size
+        padding.append(((total + 1) // 2, total // 2))
+    return np.pad(array, tuple(padding))
+
+
+def flat_top(size: int) -> np.ndarray:
+    """Return the five-term flat-top window used by the workflow."""
+
+    coefficients = np.array([0.1881, 0.36923, 0.28702, 0.13077, 0.02488])
+    positions = np.arange(size)
+    return sum(
+        (-1) ** order * coefficient * np.cos(2.0 * np.pi * order * positions / size)
+        for order, coefficient in enumerate(coefficients)
+    )
+
+
+source_side = 6
+x, y = np.meshgrid(
+    np.arange(source_side),
+    np.arange(source_side),
+    indexing="ij",
+)
+periodic_data = np.cos(np.pi * x / 2.0) * np.cos(np.pi * y / 2.0)
+padded_data = pad_center(periodic_data, (8, 8))
+window_2d = flat_top(8)[:, None] * flat_top(8)[None, :]
+windowed_data = padded_data * window_2d
+
+assert periodic_data.shape == (6, 6)
+assert padded_data.shape == (8, 8)
+assert windowed_data.shape == (8, 8)
+
 # %% [markdown]
 # ## Implementation with Qamomile
 #
-# Let us implement a quantum circuit for multidimensional QFT with Qamomile.
+# ### Factor, transform, and rejoin the axes
 #
-# ### Creating the input
+# `split_at(state, 2)` consumes `Q[Bits[4]]` and returns two owned `Q[Bits[2]]`
+# values in source order. Each component is consumed by the same `qft` call.
+# `concat` then consumes both results and reconstructs `Q[Bits[4]]`.
+
+
+# %%
+@qm.qkernel
+def two_axis_qft_state() -> qm.Q[qm.Bits[4]]:
+    """Prepare the grid and apply one QFT to each logical axis.
+
+    Returns:
+        qm.Q[qm.Bits[4]]: Reciprocal-grid state with two two-bit axes.
+    """
+
+    state = prepare(qm.qubits(4))
+    x_axis, y_axis = qm.split_at(state, 2)
+    x_axis = qft(x_axis, 2)
+    y_axis = qft(y_axis, 2)
+    return qm.concat(x_axis, y_axis)
+
+
+@qm.qkernel
+def two_axis_qft_samples() -> qm.Shot[qm.Bits[4]]:
+    """Measure the two-dimensional reciprocal coordinate.
+
+    Returns:
+        qm.Shot[qm.Bits[4]]: Two little-endian two-bit coordinates.
+    """
+
+    return qm.measure(two_axis_qft_state())
+
+
+# %% [markdown]
+# No slice aliases or overlapping views exist. A missing return, duplicated
+# component, reversed width equation, or second use of an owned state is a type
+# or ownership error before target lowering.
+
+# %% [markdown]
+# ## Inspect and estimate the same program
 #
-# First, create input data.
-# Here we use the following hypothetical periodic data.
+# The specialized QCore program retains one `qft` definition and two call
+# edges. Structural split and concatenation operations become checked zero-cost
+# reshapes; there is no multidimensional-QFT opcode or backend algorithm case.
 
 # %%
-Nx = 6
-Ny = 6
-xs = np.arange(Nx)
-ys = np.arange(Ny)
-X, Y = np.meshgrid(xs, ys, indexing="ij")
-f = np.cos(np.pi * X / 2) * np.cos(np.pi * Y / 2)
+program = qm.specialize(two_axis_qft_samples)
+inspection = program.inspect()
+qft_symbols = {
+    function.symbol
+    for function in program.functions
+    if function.symbol.rsplit(".", 1)[-1] == "qft"
+}
+
+assert len(qft_symbols) == 1
+assert inspection.count(f"callee='{next(iter(qft_symbols))}'") == 2
+assert "quantum.multidimensional_qft" not in inspection
+
+study = qm.resources.logical(program)
+assert study.metric(
+    qm.resources.logical_operation_count("quantum.h")
+).numeric_enclosure() == (4, 4)
+assert study.metric(
+    qm.resources.logical_operation_count("quantum.cp")
+).numeric_enclosure() == (2, 2)
+assert study.metric(
+    qm.resources.logical_operation_count("quantum.swap")
+).numeric_enclosure() == (2, 2)
+assert qm.resources.ResourceStudy.from_bytes(study.to_bytes()) == study
 
 # %% [markdown]
-# The created input data is two-dimensional data with simple periodicity.
-
-# %%
-im1 = plt.pcolormesh(f, cmap="viridis")
-cbar = plt.colorbar(im1)
-cbar.set_label("f", fontsize=14)
-plt.xlabel("x", fontsize=14)
-plt.ylabel("y", fontsize=14)
-plt.show()
-
+# The exact QFT contribution is derived from the same call graph that will be
+# lowered for execution. State-preparation work remains visible separately; no
+# backend-native box can cause the logical estimate to report zero.
 
 # %% [markdown]
-# #### Implementing zero-padded input
+# ### Reproduce the survey's QFT scaling
 #
-# Because this data size is not a power of two, the implemented QFT cannot be applied to it as is.
-# We therefore apply zero padding to extend the size to a power of two.
-# Here we use three qubits for each coordinate register, one for the $x$ direction and one for the $y$ direction.
-# In other words, we zero-pad the data so that each dimension has $2^3 = 8$ grid points.
+# Section 12 of [](https://doi.org/10.48550/arXiv.2310.03011) states that a
+# textbook QFT on $N=2^n$ amplitudes uses $O(\log N)$ qubits and
+# $O(\log^2 N)$ quantum gates. The circuit in that section consists of $n$
+# Hadamards, $n(n-1)/2$ controlled phase shifts, and $\lfloor n/2\rfloor$
+# final swaps. We can check those finite coefficients directly instead of
+# fitting a slope to five aggregate totals. The width remains symbolic while
+# the compiler analyzes the QFT body once; `evaluate` only substitutes the
+# widths displayed in the table below.
 
 
 # %%
-def padding_array(
-    array_2d: np.ndarray, num_x_target: int, num_y_target: int
-) -> np.ndarray:
-    num_x, num_y = array_2d.shape
-    pad_width_x = num_x_target - num_x
-    pad_width_y = num_y_target - num_y
-    pad_x_left = int(np.ceil(pad_width_x / 2.0))
-    pad_x_right = int(np.floor(pad_width_x / 2.0))
-    pad_y_left = int(np.ceil(pad_width_y / 2.0))
-    pad_y_right = int(np.floor(pad_width_y / 2.0))
-    array_2d_padding = np.pad(
-        array_2d, ((pad_x_left, pad_x_right), (pad_y_left, pad_y_right))
-    )
-    return array_2d_padding
+@qm.qkernel
+def surveyed_qft(width: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[width]]:
+    """Build the textbook QFT family used by the resource sweep."""
+
+    return qm.measure(qft(qm.qubits(width), width))
 
 
-Nqx = 3
-Nqy = 3
-Nx_target = 2**Nqx
-Ny_target = 2**Nqy
-f_padding = padding_array(f, Nx_target, Ny_target)
+qft_scaling_study = qm.resources.logical(surveyed_qft)
+
+
+def qft_resource_row(width: int) -> tuple[int, int, int, int]:
+    """Return exact textbook-QFT resource counts for one register width."""
+
+    qft_study = qft_scaling_study.evaluate(width=width)
+    hadamards = qft_study.metric(
+        qm.resources.logical_operation_count("quantum.h")
+    ).numeric_enclosure()
+    controlled_phases = qft_study.metric(
+        qm.resources.logical_operation_count("quantum.cp")
+    ).numeric_enclosure()
+    swaps = qft_study.metric(
+        qm.resources.logical_operation_count("quantum.swap")
+    ).numeric_enclosure()
+    peak = qft_study.metric(qm.resources.LOGICAL_PEAK_QUBITS).numeric_enclosure()
+    assert hadamards[0] == hadamards[1]
+    assert controlled_phases[0] == controlled_phases[1]
+    assert swaps[0] == swaps[1]
+    assert peak[0] == peak[1]
+    return hadamards[0], controlled_phases[0], swaps[0], peak[0]
+
+
+qft_scaling = {width: qft_resource_row(width) for width in range(2, 9)}
+for width, (hadamards, controlled_phases, swaps, peak) in qft_scaling.items():
+    assert hadamards == width
+    assert controlled_phases == width * (width - 1) // 2
+    assert swaps == width // 2
+    assert peak == width
+
+print("QFT scaling (n: H, CP, SWAP, peak qubits):", qft_scaling)
 
 # %% [markdown]
-# Let us inspect the zero-padded data.
-
-# %%
-im2 = plt.pcolor(f_padding, cmap="viridis")
-cbar = plt.colorbar(im2)
-cbar.set_label("f", fontsize=14)
-plt.xlabel("x", fontsize=14)
-plt.ylabel("y", fontsize=14)
-plt.show()
-
+# Qamomile reproduces the finite textbook circuit exactly. Therefore the
+# dominant controlled-phase count is $\Theta(n^2)=\Theta(\log^2 N)$ and the
+# peak width is $n=\log_2N$, matching the survey. This is a logical-circuit
+# comparison: amplitude loading and tomography are deliberately outside the
+# QFT body, just as the survey's caveat requires.
 
 # %% [markdown]
-# #### Implementing the flat-top window function
+# ## Compile and execute
 #
-# Next, implement a window function to suppress side lobes.
-
-
-# %%
-def w5(N: int) -> np.ndarray:
-    a = np.array([0.1881, 0.36923, 0.28702, 0.13077, 0.02488])
-    n = np.arange(N)
-    results = [(-1) ** k * a[k] * np.cos(2 * np.pi * k * n / N) for k in range(5)]
-    return sum(results)
-
-
-wx = w5(Nx_target)
-wy = w5(Ny_target)
-w2d = wx[:, None] * wy[None, :]
-
-# %% [markdown]
-# Let us plot the overall shape of the window function.
+# `ResultABI` preserves the four logical bits in source order. The first two
+# bits are the little-endian $x$ coordinate and the final two are the
+# little-endian $y$ coordinate, regardless of a backend's native bit order.
 
 # %%
-im3 = plt.pcolor(w2d, cmap="plasma")
-cbar = plt.colorbar(im3)
-cbar.set_label("Flat-top window function", fontsize=14)
-plt.xlabel("x", fontsize=14)
-plt.ylabel("y", fontsize=14)
-plt.show()
+reference = qm.Reference()
+artifact = qm.compile(program, to=reference)
+record = qm.run(
+    artifact,
+    on=reference,
+    shots=32,
+    seed=2,
+)
 
+observed_y = {
+    sum(bit << index for index, bit in enumerate(bits[2:]))
+    for bits in record.result.counts
+}
 
-# %% [markdown]
-# The plot shows a broadened shape that extracts only the central region while decaying gradually, helping suppress side lobes.
-# Now apply this window function to the zero-padded data and run the two-dimensional QFT.
-
-# %% [markdown]
-# ### Multidimensional QFT
-#
-# Use Qamomile's `qmc.qft` composite to implement multidimensional QFT.
-
-
-# %%
-@qmc.qkernel
-def qft_for_multidimension(inputs: qmc.Vector[qmc.Float]) -> qmc.Vector[qmc.Bit]:
-    N = Nqx + Nqy
-    q = qmc.qubit_array(N, name="q")
-    q = mottonen_amplitude_encoding(q, inputs)
-    q[0:Nqx] = qmc.qft(q[0:Nqx])
-    q[Nqx:N] = qmc.qft(q[Nqx:N])
-    return qmc.measure(q)
-
+assert record.result.shots == 32
+assert sum(record.result.counts.values()) == 32
+assert all(bits[:2] == (0, 0) for bits in record.result.counts)
+assert observed_y == set(range(side))
+print("reciprocal-grid samples:", record.result.counts)
 
 # %% [markdown]
-# We can now apply QFT.
-
-# %% [markdown]
-# ### Transpiling the circuit
-#
-# Transpile the QFT circuit implemented above for Qiskit.
-# Bind the flattened input amplitudes at compile time through `bindings`.
-
-# %%
-f_flatten = f_padding.flatten()
-transpiler = QiskitTranspiler()
-exe = transpiler.transpile(qft_for_multidimension, bindings={"inputs": f_flatten})
-
+# Every sample has $k_x=0$, as required by the uniform $x$ input. All four
+# $k_y$ values appear because a basis-localized $y$ input has uniform Fourier
+# magnitude. These structural facts expose an axis swap or result-bit reversal
+# without a large statistical comparison.
 
 # %% [markdown]
 # ## Results
 #
-# Run the transpiled program and map the sampled bitstrings to probabilities on the two-dimensional reciprocal-space grid.
-
-
-# %%
-def compute_prob(result: SampleResult) -> np.ndarray:
-    prob = np.zeros(f_padding.shape)
-    total = sum(c for _, c in result.results)
-    for bits, count in result.results:
-        kx = sum(bits[i] << i for i in range(Nqx))
-        ky = sum(bits[Nqx + i] << i for i in range(Nqy))
-        prob[kx, ky] += count / total
-    return prob
-
-
-result1 = exe.sample(transpiler.executor(), shots=sample_shots).result()
-prob = compute_prob(result1)
-
-
-# %% [markdown]
-# ### Comparison with a classical method: Fast Fourier transform (FFT)
+# ### Comparison with a Classical Method: Fast Fourier Transform (FFT)
 #
-# For comparison, compute the result obtained by applying the classical FFT to the same input.
+# We now run the same composition on the padded 6×6 periodic input. The helper
+# below closes one normalized amplitude vector, factors six qubits into two
+# three-qubit axes, and applies the reusable QFT to both. A classical inverse
+# FFT uses the same positive-exponent convention as this QFT; magnitudes are
+# independent of the remaining phase convention.
 
 
 # %%
-def compute_classical_fft(f: np.ndarray) -> np.ndarray:
-    Nx_target, Ny_target = f.shape
-    f_normalized = f / np.linalg.norm(f)
-    fft = np.fft.ifft2(f_normalized) * np.sqrt(Nx_target * Ny_target)
-    prob = np.abs(fft) ** 2
-    return prob
+def make_grid_qft(amplitudes: tuple[float, ...]) -> qm.QKernel:
+    """Build one fixed six-qubit two-axis QFT program."""
+
+    prepare_grid = amplitude_encoding(amplitudes)
+
+    @qm.qkernel
+    def grid_qft() -> qm.Shot[qm.Bits[6]]:
+        state = prepare_grid(qm.qubits(6))
+        x_axis, y_axis = qm.split_at(state, 3)
+        x_axis = qft(x_axis, 3)
+        y_axis = qft(y_axis, 3)
+        return qm.measure(qm.concat(x_axis, y_axis))
+
+    return grid_qft
 
 
-prob_classical = compute_classical_fft(f_padding)
+def classical_probabilities(array: np.ndarray) -> np.ndarray:
+    """Return normalized two-dimensional inverse-FFT probabilities."""
 
-# %% [markdown]
-# Visualize the results.
+    normalized = array / np.linalg.norm(array)
+    transformed = np.fft.ifft2(normalized) * np.sqrt(array.size)
+    return np.abs(transformed) ** 2
 
-# %%
-fig = plt.figure(figsize=(14, 6))
-vmin = min(prob_classical.min(), prob.min())
-vmax = max(prob_classical.max(), prob.max())
-fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-im4 = axes[0].pcolor(prob_classical, vmin=vmin, vmax=vmax, cmap="viridis")
-axes[0].set_title("Classical")
-axes[0].set_xlabel("kx")
-axes[0].set_ylabel("ky")
-im5 = axes[1].pcolor(prob, vmin=vmin, vmax=vmax, cmap="viridis")
-axes[1].set_title("Quantum")
-axes[1].set_xlabel("kx")
-print("Classical peak value: {}".format(prob_classical.max()))
-print("Quantum peak value: {}".format(prob.max()))
-fig.colorbar(im5, ax=axes, fraction=0.046, pad=0.04)
-plt.show()
 
-# %% [markdown]
-# Both the FFT reference and the QFT sampling result show similar sidelobe structure.
+def sampled_grid(array: np.ndarray, seed: int) -> np.ndarray:
+    """Execute the QFT program and return an 8×8 sampled distribution."""
 
-# %% [markdown]
-# ### Applying the window function
-#
-# Repeat the same calculation with the input after applying the window function.
+    kernel = make_grid_qft(tuple(array.reshape(-1)))
+    result = qm.run(
+        qm.specialize(kernel),
+        on=qm.Reference(),
+        shots=512,
+        seed=seed,
+    ).result
+    probabilities = np.zeros((8, 8))
+    for bits, count in result.counts.items():
+        kx = sum(bit << index for index, bit in enumerate(bits[:3]))
+        ky = sum(bit << index for index, bit in enumerate(bits[3:]))
+        probabilities[kx, ky] += count / result.shots
+    return probabilities
 
-# %%
-fw = w2d * f_padding
-fw_flatten = fw.flatten()
-exe = transpiler.transpile(qft_for_multidimension, bindings={"inputs": fw_flatten})
-result2 = exe.sample(transpiler.executor(), shots=sample_shots).result()
-prob2 = compute_prob(result2)
 
-# %% [markdown]
-# For comparison, also apply the classical FFT to the input with the window function applied.
+padded_classical = classical_probabilities(padded_data)
+padded_quantum = sampled_grid(padded_data, seed=5)
+windowed_classical = classical_probabilities(windowed_data)
+windowed_quantum = sampled_grid(windowed_data, seed=7)
 
-# %%
-prob_classical2 = compute_classical_fft(fw)
-
-# %% [markdown]
-# Visualize these two results.
-
-# %%
-fig = plt.figure(figsize=(14, 6))
-vmin = min(prob_classical2.min(), prob2.min())
-vmax = max(prob_classical2.max(), prob2.max())
-fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-im6 = axes[0].pcolor(prob_classical2, vmin=vmin, vmax=vmax, cmap="viridis")
-axes[0].set_title("Classical")
-axes[0].set_xlabel("kx")
-axes[0].set_ylabel("ky")
-im7 = axes[1].pcolor(prob2, vmin=vmin, vmax=vmax, cmap="viridis")
-axes[1].set_title("Quantum")
-axes[1].set_xlabel("kx")
-print("Classical peak value: {}".format(prob_classical2.max()))
-print("Quantum peak value: {}".format(prob2.max()))
-fig.colorbar(im7, ax=axes, fraction=0.046, pad=0.04)
-plt.show()
+padded_distance = np.abs(padded_quantum - padded_classical).sum()
+windowed_distance = np.abs(windowed_quantum - windowed_classical).sum()
+print("distribution distances:", padded_distance, windowed_distance)
+assert padded_distance < 0.5
+assert windowed_distance < 0.5
+print("padded peak:", np.unravel_index(padded_quantum.argmax(), (8, 8)))
+print("windowed peak:", np.unravel_index(windowed_quantum.argmax(), (8, 8)))
 
 # %% [markdown]
-# Although the peak value is lower than before applying the window function, the sidelobes become more localized.
+# The sampled QFT distributions agree with the classical FFT references within
+# finite-shot variation. Applying the window broadens the main lobe but
+# localizes boundary-induced sidelobes, reproducing the preprocessing tradeoff
+# from the nanosheet workflow.
 
 # %% [markdown]
 # ## Summary

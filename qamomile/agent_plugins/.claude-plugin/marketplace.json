@@ -1,0 +1,18 @@
+{
+  "name": "qamomile",
+  "owner": {
+    "name": "Jij Inc."
+  },
+  "metadata": {
+    "description": "Qamomile authoring plugins bundled with the Python package.",
+    "version": "0.2.0"
+  },
+  "plugins": [
+    {
+      "name": "qamomile",
+      "description": "Author, execute, and estimate quantum programs with Qamomile.",
+      "version": "0.2.0",
+      "source": "./plugins/qamomile"
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: py:percent,ipynb
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -32,10 +33,33 @@
 # 3. `QAOAConverter` を使って QAOA 回路とハミルトニアンを構築する。
 # 4. 古典オプティマイザで変分パラメータを最適化する。
 # 5. 最適化された回路をサンプリングし、結果をデコードする。
+#
+
+# %% [markdown]
+# ## インストール
+#
+# ```bash
+# pip install "qamomile[qiskit,visualization]" jijmodeling
+# ```
 
 # %%
-# 最新のQamomileをpipからインストールします！
-# # !pip install "qamomile[qiskit,visualization]"
+# Install the latest Qamomile and JijModeling through pip!
+# # !pip install "qamomile[qiskit,visualization]" jijmodeling
+
+# %%
+import os
+
+import jijmodeling as jm
+import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
+from scipy.optimize import minimize
+
+import qamomile as qm
+from qamomile.optimization import BinaryModel, OMMXProblem, QAOAExperiment, VarType
+from qamomile.qiskit import Qiskit, load_circuit
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 # %% [markdown]
 # ## 問題の定式化
@@ -55,379 +79,331 @@
 # $$
 #
 # ここで $x_u \in \{0, 1\}$ は頂点 $u$ がどちらのグループに属するかを表します。
-
-# %% [markdown]
+#
 # ## JijModeling による問題定義
+#
 
 # %%
-import jijmodeling as jm
-
-problem = jm.Problem("Graph Partitioning")
+formulation = jm.Problem("Graph Partitioning")
 
 
-@problem.update
+@formulation.update
 def _(problem: jm.DecoratedProblem):
-    V = problem.Dim()
-    E = problem.Natural(ndim=2)  # エッジリスト: [[u1,v1], [u2,v2], ...]
-    x = problem.BinaryVar(shape=(V,))
+    vertices = problem.Dim()
+    edges = problem.Natural(ndim=2)
+    x = problem.BinaryVar(shape=(vertices,))
 
-    # 目的関数：分割間のカットエッジ数を最小化
     problem += (
-        E.rows().map(lambda e: x[e[0]] * (1 - x[e[1]]) + x[e[1]] * (1 - x[e[0]])).sum()
+        edges.rows()
+        .map(lambda edge: x[edge[0]] * (1 - x[edge[1]]) + x[edge[1]] * (1 - x[edge[0]]))
+        .sum()
     )
-
-    # 制約条件：均等な分割サイズ
-    problem += problem.Constraint("Equal Partition", x.sum() == V / 2)
+    problem += problem.Constraint("Equal Partition", x.sum() == vertices / 2)
 
 
-problem
+formulation
 
 # %% [markdown]
 # ## グラフインスタンス
 #
 # 再現性を確保するため、8 ノード 16 エッジの固定グラフを使用します。
+#
 
 # %%
-import os
+NUM_NODES = 8
+EDGE_LIST = (
+    (0, 2),
+    (0, 3),
+    (0, 4),
+    (1, 2),
+    (1, 3),
+    (1, 4),
+    (1, 5),
+    (1, 7),
+    (2, 3),
+    (2, 6),
+    (3, 5),
+    (4, 5),
+    (4, 6),
+    (5, 6),
+    (5, 7),
+    (6, 7),
+)
 
-import matplotlib.pyplot as plt
-import networkx as nx
+graph = nx.Graph()
+graph.add_nodes_from(range(NUM_NODES))
+graph.add_edges_from(EDGE_LIST)
+positions = nx.spring_layout(graph, seed=1)
 
-num_nodes = 8
-edge_list = [
-    [0, 2],
-    [0, 3],
-    [0, 4],
-    [1, 2],
-    [1, 3],
-    [1, 4],
-    [1, 5],
-    [1, 7],
-    [2, 3],
-    [2, 6],
-    [3, 5],
-    [4, 5],
-    [4, 6],
-    [5, 6],
-    [5, 7],
-    [6, 7],
-]
+assert graph.number_of_nodes() == NUM_NODES
+assert graph.number_of_edges() == len(EDGE_LIST) == 16
 
-G = nx.Graph()
-G.add_nodes_from(range(num_nodes))
-G.add_edges_from(edge_list)
-assert G.number_of_nodes() == num_nodes
-assert G.number_of_edges() == len(edge_list)
-
-pos = nx.spring_layout(G, seed=1)
+# %%
 plt.figure(figsize=(5, 5))
 nx.draw(
-    G,
-    pos,
+    graph,
+    positions,
     with_labels=True,
     node_color="white",
     node_size=700,
     edgecolors="black",
 )
-plt.title(f"Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+plt.title(f"Graph: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
 plt.show()
 
 # %% [markdown]
-# ## インスタンスの作成
+# ## InstanceとPenalty Modelを作る
 #
-# グラフからエッジリストを取得し、JijModeling の問題を具体的なデータで評価します。
+# `OMMXProblem.from_instance`はcallerのinstanceをcopyし、equal-partition constraintを
+# binary penalty modelへ取り込み、sampling後の評価用に元のbytesを保持します。
+# caller-owned instanceは変更しません。penalty energyは最適化だけに使い、feasibilityと
+# cut数は常に元のOMMX instanceから得ます。
 
 # %%
-instance_data = {"V": num_nodes, "E": edge_list}
-instance = problem.eval(instance_data)
-
-# %% [markdown]
-# ## QAOAConverter のセットアップ
-#
-# `QAOAConverter` は OMMX インスタンスを受け取り、内部で以下を行います：
-# 1. 問題を QUBO（Quadratic Unconstrained Binary Optimization）形式に変換。
-# 2. BINARY 変数から SPIN 変数へ変換。
-# 3. Pauli-Z 演算子の和としてコストハミルトニアンを構築。
-#
-# 元の問題には制約があるため、QUBO 定式化では制約が**ペナルティ項**として目的関数に組み込まれます。そのため、デコードされたサンプルのエネルギー値は元の目的関数（カットエッジ数）とは**異なり**、ペナルティを含んでいます。実行可能性の確認と真の目的関数値の計算を別途行う必要があります。
-
-# %%
-from qamomile.optimization.qaoa import QAOAConverter
-
-converter = QAOAConverter(instance)
-converter.spin_model = converter.spin_model.normalize_by_abs_max()
-hamiltonian = converter.get_cost_hamiltonian()
-print(hamiltonian)
-# この固定インスタンスから導かれるスピン模型の構造的不変量:
-# 頂点 1 個につき量子ビット 1 個、線形 (single-Z) 項は無し、|V|=8, |E|=16 の問題から
-# QUBO 簡約を経た 2 次項の個数も決まる。
-assert converter.spin_model.num_bits == num_nodes
-assert converter.spin_model.linear == {}
-assert len(converter.spin_model.quad) == 12
-assert len(hamiltonian.terms) == 12
-
-# %% [markdown]
-# ## 実行可能な回路へのトランスパイル
-#
-# `converter.transpile()` は `p` 層の QAOA アンザッツ回路を構築し、`ExecutableProgram` にコンパイルします。変分パラメータ `gammas`（コスト層）と `betas`（ミキサー層）はランタイムパラメータとして残ります。
-
-# %%
-from qamomile.qiskit import QiskitTranspiler
-
-transpiler = QiskitTranspiler()
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-p = 1 if docs_test_mode else 5  # QAOA の層数
-executable = converter.transpile(transpiler, p=p)
-
-# %% [markdown]
-# ## QAOA 回路の可視化
-#
-# `QAOAConverter._transpile_quadratic()` は内部で次のサンプリング qkernel を組み立てて transpile します。チュートリアルでは可視化のため、その qkernel を**そのまま**ここに再掲します。`Transpiler.to_block` で IR ブロックに落とし、`Transpiler.inline` でサブ qkernel を展開してから `MatplotlibDrawer.draw` に渡すことで、コンバーターが内部で扱うのと同じ Block 構造を描画できます(レイヤー構造を読みやすくするため `p=2` に縮小)。
-
-# %%
-import qamomile.circuit as qmc
-from qamomile.circuit.algorithm.qaoa import qaoa_state
-from qamomile.circuit.visualization import MatplotlibDrawer
-
-
-@qmc.qkernel
-def qaoa_sampling(
-    p: qmc.UInt,
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    gammas: qmc.Vector[qmc.Float],
-    betas: qmc.Vector[qmc.Float],
-    n: qmc.UInt,
-) -> qmc.Vector[qmc.Bit]:
-    q = qaoa_state(p=p, quad=quad, linear=linear, n=n, gammas=gammas, betas=betas)
-    return qmc.measure(q)
-
-
-block = transpiler.to_block(
-    qaoa_sampling,
-    bindings={
-        "linear": converter.spin_model.linear,
-        "quad": converter.spin_model.quad,
-        "n": converter.spin_model.num_bits,
-        "p": 2,
-    },
-    parameters=["gammas", "betas"],
+instance = formulation.eval(
+    {
+        "vertices": NUM_NODES,
+        "edges": [list(edge) for edge in EDGE_LIST],
+    }
 )
-block = transpiler.inline(block)
-# `fold_loops=False` で全ループ(`for layer`/`for (i,j),Jij in quad`/`for i in range(n)`)を
-# アンロールして、各ゲートを展開した形で描画する。`linear` は空辞書 `{}` のため、
-# `for i, hi in linear` は 0 イテレーションとして消える(ボックスは現れない)。
-# 結果は横長になるが、ドキュメントビルド時にライトボックス用 JS が注入されるので、
-# クリックでモーダル拡大表示できる。
-MatplotlibDrawer(block).draw(fold_loops=False)
+original_payload = instance.to_bytes()
+problem = OMMXProblem.from_instance(instance, uniform_penalty_weight=16.0)
+
+assert instance.to_bytes() == original_payload
+assert problem.model.vartype is VarType.BINARY
+assert problem.model.num_variables == NUM_NODES
+assert problem.model.order == 2
+assert BinaryModel.from_bytes(problem.model.to_bytes()) == problem.model
+
+print(f"Penalty terms: {len(problem.model.coefficients)}")
+print(f"QAOA Hamiltonian terms: {len(problem.model.hamiltonian.terms)}")
 
 # %% [markdown]
-# ### 内部の構成要素を見る
+# ## QAOA Experimentを構築・Compileする
 #
-# `qaoa_sampling` の中では `qaoa_state` を呼んでいますが、`qaoa_state` 自体は次の3つの組み合わせで構成されています:
-#
-# - `superposition_vector(n)` — 全ビットに `H` を作用させて初期状態 $|+\rangle^{\otimes n}$ を準備する。
-# - `ising_cost(quad, linear, q, gamma)` — 二次項 `quad` の各エントリに対して `RZZ`、線形項 `linear` の各エントリに対して `RZ` を作用させるコスト層。今回の問題では線形項がない(`linear={}`)ので `RZZ` だけが現れる。
-# - `x_mixer(q, beta)` — 全ビットに `RX(2\beta)` を作用させるミキサー層。
-#
-# `qaoa_layers(p, ...)` はこの `ising_cost` と `x_mixer` を `p` 回交互に作用させているだけです。各部品を個別に描画して中身を確認します。
+# 通常実行では元と同じ5層のQAOAを使います。documentation testでは1層ですが、
+# compilation、optimizer、sampling、OMMX evaluationの経路は同じです。固定長の
+# `gammas`と`betas`だけがruntime ABIに残り、全optimizer候補が1つのartifactを
+# 再利用します。
 
 # %%
-from qamomile.circuit.algorithm.basic import superposition_vector
-from qamomile.circuit.algorithm.qaoa import ising_cost, x_mixer
+LAYERS = 1 if docs_test_mode else 5
+experiment = QAOAExperiment(problem.model, layers=LAYERS)
+endpoint = qm.Reference()
+compiled = experiment.compile(to=endpoint.target)
 
-superposition_vector.draw(n=converter.spin_model.num_bits, fold_loops=False)
-
-# %%
-ising_cost.draw(
-    q=converter.spin_model.num_bits,
-    quad=converter.spin_model.quad,
-    linear=converter.spin_model.linear,
-    fold_loops=False,
+assert tuple(slot.name for slot in compiled.artifact.parameter_abi.slots) == (
+    "gammas",
+    "betas",
 )
-
-# %%
-x_mixer.draw(q=converter.spin_model.num_bits, fold_loops=False)
+assert compiled.identity == experiment.identity
+assert compiled.identity.problem_digest == problem.model.semantic_digest
+assert "quantum.qaoa" not in experiment.program.inspect()
 
 # %% [markdown]
-# ## QAOA パラメータの最適化
+# ## Circuitを可視化し、Building Blockを確認する
 #
-# `executable.sample()` を使って各イテレーションでコストを評価します。オプティマイザはサンプリングされたビット列の平均エネルギーを最小化する `gammas` と `betas` を探索します。
+# QAOAは通常のcompositionです。各量子ビットへの最初のHadamardに続き、cost evolution
+# とX-mixer rotationを交互に適用します。2層のQiskit projectionにより、mutableな
+# compiler-pass APIを公開せず、繰り返す`rzz`/`rz` cost realizationと`rx` mixerを
+# 確認できます。
 
 # %%
-import numpy as np
-from qiskit_aer import AerSimulator
-from scipy.optimize import minimize
+visualization_experiment = QAOAExperiment(problem.model, layers=2)
+visualization_artifact = qm.compile(visualization_experiment.program, to=Qiskit())
+visualization_circuit = load_circuit(visualization_artifact)
 
-# シミュレータをseedしておくことで、notebookを再実行してもCOBYLAの軌道と
-# 最終的なサンプリング分布が再現される。seedなしの場合、ショットごとに
-# 異なる乱数が引かれるためCOBYLAはノイズのあるコスト面を辿り、
-# 実行のたびに(等価ではあるが)異なる局所最適解に収束する。
-executor = transpiler.executor(
-    backend=AerSimulator(seed_simulator=901, max_parallel_threads=1)
-)
-sample_shots = 1 if docs_test_mode else 2048
-maxiter = 4 if docs_test_mode else 1000
-final_shots = 8 if docs_test_mode else 1000
+print(visualization_circuit.draw(output="text", fold=120))
+print("Circuit operations:", dict(visualization_circuit.count_ops()))
+visualization_circuit.draw(output="mpl", fold=-1)
 
-rng = np.random.default_rng(900)
-initial_params = rng.uniform(0, np.pi, 2 * p)
-assert initial_params.shape == (2 * p,)
+# %% [markdown]
+# resource解析は同じcomposed bodyを参照します。`LAYERS`層なら、problem qubitごとに
+# 1つのHadamard、cost layerごとに1つのabstract Pauli evolution、各qubit・各層に
+# 1つのRX mixer rotationを数えます。
 
+# %%
+study = qm.resources.logical(experiment.program)
+
+assert study.metric(
+    qm.resources.logical_operation_count("quantum.h")
+).numeric_enclosure() == (NUM_NODES, NUM_NODES)
+assert study.metric(
+    qm.resources.logical_operation_count("quantum.rx")
+).numeric_enclosure() == (NUM_NODES * LAYERS, NUM_NODES * LAYERS)
+assert study.metric(
+    qm.resources.logical_operation_count("quantum.pauli_evolution")
+).numeric_enclosure() == (LAYERS, LAYERS)
+
+# %% [markdown]
+# ## QAOA Parameterを最適化する
+#
+# COBYLAはsamplingしたQAOA runが返すoccurrence-weighted penalty energyを最小化します。
+# ここでunpenalizedなcut objectiveを使うと、infeasibleなall-zero/all-one assignmentを
+# 許すため不適切です。通常実行は元と同じ1,000候補のoptimizerを保ち、Reference
+# endpointのlaunch単位のwork guard内に収めるため各launchを256 shotsにします。
+# documentation testでは両方のbudgetを短縮します。
+
+# %%
+SAMPLE_SHOTS = 16 if docs_test_mode else 256
+MAX_ITERATIONS = 6 if docs_test_mode else 1_000
+FINAL_SHOTS = 128 if docs_test_mode else 256
 cost_history = []
 
 
-def cost_fn(params):
-    gammas = list(params[:p])
-    betas = list(params[p:])
-    job = executable.sample(
-        executor,
-        shots=sample_shots,
-        bindings={"gammas": gammas, "betas": betas},
+def cost_function(parameters) -> float:
+    """Sample one QAOA coordinate and return its mean penalty energy."""
+
+    run = compiled.run(
+        on=endpoint,
+        gammas=tuple(float(value) for value in parameters[:LAYERS]),
+        betas=tuple(float(value) for value in parameters[LAYERS:]),
+        shots=SAMPLE_SHOTS,
+        seed=901 + len(cost_history),
     )
-    result = job.result()
-    # decode_to_binary_sampleset は QUBO ドメインの BinarySampleSet を返す。
-    # その `energy` はペナルティを含む目的関数値で、COBYLA が実行不可能解の
-    # コストを認識するために必要。多態的な decode() が返す ommx.v1.SampleSet
-    # の `objective` はペナルティを含まない真の目的関数値であり、
-    # 最適化器を実行不可能な全 0/全 1 ビット列に収束させてしまう。
-    decoded = converter.decode_to_binary_sampleset(result)
-    energy = decoded.energy_mean()
-    cost_history.append(energy)
-    return energy
+    cost_history.append(run.samples.mean_energy)
+    return run.samples.mean_energy
 
 
-res = minimize(
-    cost_fn,
-    initial_params,
+rng = np.random.default_rng(900)
+initial_parameters = rng.uniform(0.0, np.pi, 2 * LAYERS)
+optimization = minimize(
+    cost_function,
+    initial_parameters,
     method="COBYLA",
-    options={"maxiter": maxiter},
+    options={"maxiter": MAX_ITERATIONS, "rhobeg": 0.5},
 )
 
-print(f"Optimized cost: {res.fun:.3f}")
-print(f"Optimal params: {[round(v, 4) for v in res.x]}")
-print(f"Function evaluations: {res.nfev}")
-assert len(cost_history) == res.nfev
-assert len(res.x) == 2 * p
-if docs_test_mode:
-    # docs テストモードでは COBYLA は maxiter の予算で打ち切られる。
-    assert res.nfev == maxiter
+print(f"Optimized penalty cost: {optimization.fun:+.6f}")
+print(f"Function evaluations: {optimization.nfev}")
+assert len(optimization.x) == 2 * LAYERS
+assert len(cost_history) == optimization.nfev
 
 # %%
 plt.figure(figsize=(8, 4))
 plt.plot(cost_history, color="#2696EB")
-plt.xlabel("Iteration")
-plt.ylabel("Cost (mean energy)")
-plt.title("QAOA Optimization Progress")
+plt.xlabel("Energy evaluation")
+plt.ylabel("Penalty mean energy")
+plt.title("QAOA optimization progress")
 plt.show()
 
 # %% [markdown]
-# ## 最適化されたパラメータでサンプリング
+# ## 最適化したParameterでSampleする
 #
-# 最適化されたパラメータを使い、回路をサンプリングしてビット列として候補解を取得します。
+# 最後により大きいrunでcandidate partitionを集めます。decoded distributionは、
+# `problem.evaluate`が変更していない元のOMMX instanceへfeasibility、constraint診断、
+# true objectiveを問い合わせるまで、penalty modelのBINARY domainに留まります。
 
 # %%
-gammas_opt = list(res.x[:p])
-betas_opt = list(res.x[p:])
+optimized_run = compiled.run(
+    on=endpoint,
+    gammas=tuple(float(value) for value in optimization.x[:LAYERS]),
+    betas=tuple(float(value) for value in optimization.x[LAYERS:]),
+    shots=FINAL_SHOTS,
+    seed=1901,
+)
+evaluation = problem.evaluate(optimized_run.samples)
 
-sample_result = executable.sample(
-    executor,
-    shots=final_shots,
-    bindings={"gammas": gammas_opt, "betas": betas_opt},
-).result()
-
-# OMMXベースのコンバーターで`decode()`を呼ぶと、元の(ペナルティを含まない)
-# インスタンスで評価された`ommx.v1.SampleSet`が返る。実行可能性、真の目的関数値、
-# 制約ごとの違反量がOMMXのAPIから直接得られるため、自前の実行可能性判定や
-# 目的関数値計算ヘルパーは不要。
-import ommx.v1
-
-sample_set = converter.decode(sample_result)
-assert isinstance(sample_set, ommx.v1.SampleSet)
-
-# %% [markdown]
-# ## 結果の分析
-#
-# ### 実行可能性のチェック
-#
-# QAOAのサンプルは**候補解**であり、元の制約を満たすとは限りません。制約$\sum x_u = |V|/2$はQUBOのペナルティとして組み込まれているため、制約を満たさないビット列も出力に含まれる可能性があります。
-#
-# `SampleSet.summary`はショットごとに1行を持つDataFrameで、`feasible`列には*元の*制約に対する実行可能性がすでに格納されています。実行可能なショット数はそこから直接取得できます。
-
-# %%
-summary = sample_set.summary
-total_feasible = int(summary["feasible"].sum())
-total_samples = len(summary)
-if docs_test_mode:
-    assert total_feasible > 0
+feasible_shots = sum(
+    evaluation.occurrences[sample_id]
+    for sample_id, feasible in evaluation.feasible.items()
+    if feasible
+)
 
 print(
-    f"Feasible samples: {total_feasible} / {total_samples} "
-    f"({100 * total_feasible / total_samples:.1f}%)"
+    f"Feasible samples: {feasible_shots} / {FINAL_SHOTS} "
+    f"({100.0 * feasible_shots / FINAL_SHOTS:.1f}%)"
 )
-assert total_samples == final_shots
+
+assert optimized_run.execution.artifact is compiled.artifact
+assert optimized_run.samples.total_occurrences == FINAL_SHOTS
+assert evaluation.total_occurrences == FINAL_SHOTS
+assert feasible_shots > 0
 
 # %% [markdown]
-# ### 最良の実行可能解
+# ## 結果を解析する
 #
-# `SampleSet.best_feasible`は、実行可能解のうち目的関数値が最良(ここでは最小)のものを返します。コンバーターをOMMXの`Instance`から構築しているため、報告される目的関数値は*元の*ペナルティを含まないもの、すなわちカットエッジ数そのものです。決定変数の値は`decision_variables_df`に元の変数IDをキーとして格納されています。
+# ### 最良のFeasible Solution
+#
+# `best_feasible`はfeasibleなunique rowのうち、元のcut objectiveが最小のものを返します。
+# decision-variable値は元のIDを使い、equality constraintを直接確認できます。
 
 # %%
-if total_feasible > 0:
-    best = sample_set.best_feasible
-    best_obj = int(round(best.objective))
-    best_sample = {
-        i: int(round(best.decision_variables_df.loc[i, "value"]))
-        for i in range(num_nodes)
-    }
-    print(f"Best feasible solution: {best_sample}")
-    print(f"Cut edges:             {best_obj}")
-    # 実行可能解は等分割制約 sum(x_u) == |V|/2 をきっちり満たしているはず。
-    assert sum(best_sample.values()) == num_nodes // 2
-    assert best_obj >= 0
-else:
-    print("No feasible solution found. Try increasing p or maxiter.")
-    best_sample = None
-    best_obj = None
+best = evaluation.best_feasible
+values = best.decision_variables_df["value"]
+best_assignment = {
+    index: int(round(float(values.loc[index]))) for index in range(NUM_NODES)
+}
+best_objective = int(round(best.objective))
+cut_edges = sum(
+    best_assignment[left] != best_assignment[right] for left, right in EDGE_LIST
+)
+
+print("Best feasible partition:", best_assignment)
+print(f"Cut edges: {best_objective}")
+
+assert sum(best_assignment.values()) == NUM_NODES // 2
+assert best_objective == cut_edges
+assert best_objective >= 0
 
 # %% [markdown]
-# ### 目的関数値の分布
+# ### Objective Valueの分布
 #
-# 実行可能なサンプルのみについて、真の目的関数値(カットエッジ数)の分布を表示します。`summary`にはショットごとに元の目的関数値が格納されているため、実行可能なスライスに対して`value_counts()`を呼ぶだけで分布が得られます。
+# immutable evaluationはunique solutionごとのrowと元のoccurrence countを保持します。
+# feasibleなoccurrenceを元のobjectiveでgroup化し、duplicate rowを展開せずshot-levelの
+# histogramを再現します。
 
 # %%
-if total_feasible > 0:
-    feasible_objectives = (
-        summary.loc[summary["feasible"], "objective"].round().astype(int)
+objective_counts = {}
+for sample_id in evaluation.sample_ids:
+    if not evaluation.feasible[sample_id]:
+        continue
+    objective = int(round(evaluation.objectives[sample_id]))
+    objective_counts[objective] = (
+        objective_counts.get(objective, 0) + evaluation.occurrences[sample_id]
     )
-    obj_counts = feasible_objectives.value_counts().sort_index()
 
-    plt.figure(figsize=(8, 4))
-    plt.bar([str(o) for o in obj_counts.index], obj_counts.values, color="#2696EB")
-    plt.xlabel("Cut edges (objective value)")
-    plt.ylabel("Frequency")
-    plt.title("Distribution of Feasible Solutions")
-    plt.show()
+assert sum(objective_counts.values()) == feasible_shots
+
+plt.figure(figsize=(8, 4))
+plt.bar(
+    [str(value) for value in sorted(objective_counts)],
+    [objective_counts[value] for value in sorted(objective_counts)],
+    color="#2696EB",
+)
+plt.xlabel("Cut edges (objective value)")
+plt.ylabel("Frequency")
+plt.title("Distribution of feasible solutions")
+plt.show()
 
 # %% [markdown]
-# ### 最良の分割の可視化
+# ### 最良Partitionを可視化する
 #
-# QAOA が見つけた最良の実行可能な分割に基づいて、グラフのノードを色分けします。
+# nodeの色で、最良のfeasible QAOA sampleが与える2つの等しいgroupを示します。
 
 # %%
-if best_sample is not None:
-    color_map = [
-        "#FF6B6B" if best_sample.get(i, 0) == 1 else "#4ECDC4" for i in range(num_nodes)
-    ]
+colors = [
+    "#FF6B6B" if best_assignment[index] == 1 else "#4ECDC4"
+    for index in range(NUM_NODES)
+]
+plt.figure(figsize=(5, 5))
+nx.draw(
+    graph,
+    positions,
+    with_labels=True,
+    node_color=colors,
+    node_size=700,
+    edgecolors="black",
+)
+plt.title(f"Best feasible partition (cut edges = {best_objective})")
+plt.show()
 
-    plt.figure(figsize=(5, 5))
-    nx.draw(
-        G,
-        pos,
-        with_labels=True,
-        node_color=color_map,
-        node_size=700,
-        edgecolors="black",
-    )
-    plt.title(f"Best feasible partition (cut edges = {best_obj})")
-    plt.show()
+# %% [markdown]
+# ## まとめ
+#
+# - 元の8-node制約付きJijModeling instanceを保ちます。
+# - 5層QAOA programを一度compileし、penalty-domain mean energyで連続最適化します。
+# - 完全なcircuit可視化とlogical resourceにより、Hadamard、cost、mixerのbuilding
+#   blockを確認します。
+# - 最終samplingではpenalty energyとapplicationの意味を混同せず、元のOMMX
+#   feasibility、best objective、objective分布、graph partitionを得ます。

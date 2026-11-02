@@ -21,7 +21,7 @@ jobs:
   ruff:
     name: ruff-format
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 10
     steps:
       - name: Check out the repository
         # v4.4.0 = https://github.com/actions/checkout/releases/tag/v4.4.0
@@ -41,12 +41,13 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
+          cache-suffix: ${{ github.job }}
 
       - name: Install dependencies
-        run: uv sync --frozen --group dev
+        run: uv sync --frozen --only-group lint
 
       - name: Lint with Ruff
-        run: uv run ruff check qamomile/ tests/
+        run: uv run --no-sync ruff check qamomile/ tests/
 
       - name: Check formatting with Ruff
-        run: uv run ruff format --check qamomile/ tests/
+        run: uv run --no-sync ruff format --check qamomile/ tests/

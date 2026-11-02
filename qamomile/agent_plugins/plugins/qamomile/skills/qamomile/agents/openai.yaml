@@ -1,0 +1,4 @@
+interface:
+  display_name: "Qamomile"
+  short_description: "Author and verify Qamomile quantum programs"
+  default_prompt: "Use $qamomile to implement and verify a quantum program."

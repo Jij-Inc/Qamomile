@@ -28,7 +28,7 @@
 # {cite:p}`10.48550/arXiv.quant-ph/9511026,10.1098/rspa.1998.0164`.
 #
 # This notebook implements the QPE procedure as a Qamomile qkernel and compares
-# it with the built-in `qmc.qpe` function. It then explores the relationship
+# it with the built-in `phase_estimation` function. It then explores the relationship
 # between the number of counting qubits, phase-estimation precision, and gate
 # count.
 
@@ -37,18 +37,21 @@
 # # !pip install "qamomile[qiskit,visualization]"
 
 # %%
-# Import numerical, plotting, simulator, and Qamomile utilities.
+from __future__ import annotations
+
 import math
 import os
 
 import matplotlib.pyplot as plt
 import numpy as np
-from qiskit_aer import AerSimulator
+from IPython.display import HTML, display
 
-import qamomile.circuit as qmc
-from qamomile.qiskit import QiskitTranspiler
+import qamomile as qm
+from qamomile.qiskit import Aer
+from qamomile.stdlib import inverse_qft, phase_estimation
+from qamomile.visualization import draw
 
-transpiler = QiskitTranspiler()
+endpoint = Aer()
 
 # %% [markdown]
 # ## Background: Phase Kickback and Quantum Fourier Transform
@@ -292,10 +295,10 @@ assert 0.0 <= TARGET_PHASE_FRACTION < 1.0
 # First, we define the 4x4 unitary matrix whose phase we want to estimate. The
 # `diagonal_4x4` qkernel implements this matrix directly. The phase gate
 # $P(\theta)$ multiplies the $|1\rangle$ component of a qubit by $e^{i\theta}$;
-# Qamomile expresses this gate as `qmc.p(q, theta)`. Applying
-# `qmc.p(q[0], phi10)` therefore gives every basis
+# Qamomile expresses this gate as `qm.p(q, theta, target=index)`. Applying
+# `qm.p(q, PHI_10, target=0)` therefore gives every basis
 # state whose first target bit is 1 the phase $e^{i\theta_{10}}$, and
-# `qmc.p(q[1], phi01)` gives every basis state whose second target bit is 1
+# `qm.p(q, PHI_01, target=1)` gives every basis state whose second target bit is 1
 # the phase $e^{i\theta_{01}}$. At that point $|11\rangle$ has accumulated
 # $e^{i(\theta_{10}+\theta_{01})}$, so the controlled phase gate adds only the
 # correction
@@ -311,122 +314,94 @@ assert 0.0 <= TARGET_PHASE_FRACTION < 1.0
 
 
 # %%
-# Implement the diagonal 4x4 unitary matrix with phase gates.
-@qmc.qkernel
-def diagonal_4x4(
-    q: qmc.Vector[qmc.Qubit],
-    phi01: qmc.Float,
-    phi10: qmc.Float,
-    phi11: qmc.Float,
-) -> qmc.Vector[qmc.Qubit]:
-    # Add phases controlled by each target bit.
-    q[0] = qmc.p(q[0], phi10)
-    q[1] = qmc.p(q[1], phi01)
-    # Correct the |11> entry so the full diagonal matches the matrix.
-    q[0], q[1] = qmc.cp(q[0], q[1], phi11 - phi10 - phi01)
+@qm.qkernel
+def diagonal_4x4(q: qm.Q[qm.Bits[2]]) -> qm.Q[qm.Bits[2]]:
+    """Apply the diagonal unitary with the phase constants defined above."""
+    q = qm.p(q, PHI_10, target=0)
+    q = qm.p(q, PHI_01, target=1)
+    q = qm.cp(q, PHI_11 - PHI_10 - PHI_01, control=0, target=1)
     return q
 
 
-# Draw the target unitary matrix with the concrete phase parameters.
-diagonal_4x4.draw(
-    q=2,
-    phi01=PHI_01,
-    phi10=PHI_10,
-    phi11=PHI_11,
-    fold_loops=False,
-)
+display(HTML(draw(qm.specialize(diagonal_4x4), loops="expanded").to_html()))
 
 # %% [markdown]
 # We now implement the four QPE steps using Qamomile's basic operations.
-# `qmc.control(diagonal_4x4)` constructs controlled-$U$, and `power=2**k`
-# applies controlled-$U^{2^k}$. After the inverse QFT, the qubits are cast to a
-# `QFixed` with no integer bits. `qmc.measure` measures those qubits and decodes
-# the resulting bit string into a floating-point phase estimate.
+# `qm.control(diagonal_4x4, counting, target, at=k)` applies controlled-$U$
+# using counting qubit $k$. Repeating it `2**k` times applies
+# controlled-$U^{2^k}$. After the inverse QFT, we reverse the little-endian
+# Fourier register into most-significant-first fixed-point digits and use
+# `qm.as_fixed` to view it as `UFixed[0, counting_bits]`, with no integer bits.
+# `qm.measure` measures those qubits and decodes the resulting bit string into
+# a numeric phase estimate. We also measure the retained target register to
+# consume every quantum value; its result is not returned.
 
 
 # %%
-# Implement QPE from basic operations.
-controlled_diagonal_4x4 = qmc.control(diagonal_4x4)
-
-
-@qmc.qkernel
+@qm.qkernel
 def qpe_from_scratch(
-    counting_bits: qmc.UInt,
-    phi01: qmc.Float,
-    phi10: qmc.Float,
-    phi11: qmc.Float,
-) -> qmc.Float:
-    counting = qmc.qubit_array(counting_bits, name="counting")
-    target = qmc.qubit_array(2, name="target")
-    target[1] = qmc.x(target[1])
+    counting_bits: qm.Const[qm.Int],
+) -> qm.Shot[qm.UFixed[0, counting_bits]]:
+    """Read the eigenphase using explicit phase kickback and inverse QFT."""
+    counting = qm.qubits(counting_bits)
+    target = qm.prepare((0, 1))
+    for k in range(counting_bits):
+        counting = qm.h(counting, target=k)
 
-    for k in qmc.range(counting_bits):
-        counting[k] = qmc.h(counting[k])
-    for k in qmc.range(counting_bits):
-        counting[k], target = controlled_diagonal_4x4(
-            counting[k],
-            target,
-            phi01=phi01,
-            phi10=phi10,
-            phi11=phi11,
-            power=2**k,
-        )
+    system = (counting, target)
+    for k in range(counting_bits):
+        for _ in range(2**k):
+            counting, target = system
+            counting, target = qm.control(diagonal_4x4, counting, target, at=k)
+            system = (counting, target)
 
-    counting = qmc.iqft(counting)
-    phase = qmc.cast(counting, qmc.QFixed, int_bits=0)
-    return qmc.measure(phase)
+    counting, target = system
+    counting = inverse_qft(counting, counting_bits)
+    for left in range(counting_bits // 2):
+        counting = qm.swap(counting, left=left, right=counting_bits - left - 1)
+    phase = qm.as_fixed(counting, integer_bits=0)
+    phase_value = qm.measure(phase)
+    _target_value = qm.measure(target)
+    return phase_value
 
 
-# Draw the from-scratch implementation with three counting qubits.
-qpe_from_scratch.draw(
-    counting_bits=3,
-    phi01=PHI_01,
-    phi10=PHI_10,
-    phi11=PHI_11,
-    fold_loops=False,
+display(
+    HTML(
+        draw(
+            qm.specialize(qpe_from_scratch, counting_bits=3), loops="expanded"
+        ).to_html()
+    )
 )
 
 # %% [markdown]
-# ### Built-in Function: `qpe`
+# ### Built-in Function: `phase_estimation`
 #
-# The `qmc.qpe` function combines the Hadamard gates,
-# controlled-$U^{2^k}$ gates, inverse QFT, and cast to `QFixed` used in the
-# from-scratch implementation. Passing the returned `QFixed` to `qmc.measure`
-# measures the qubits and decodes the fixed-point bit string into a
-# floating-point phase estimate.
+# The `phase_estimation` function combines the Hadamard gates,
+# controlled-$U^{2^k}$ gates, inverse QFT, and fixed-point view used in the
+# from-scratch implementation. It returns both the phase and the retained
+# target register. Passing the returned phase to `qm.measure` measures the
+# qubits and decodes the fixed-point bit string into a numeric phase estimate.
 
 
 # %%
-# Implement the same QPE procedure with the built-in qpe function.
-@qmc.qkernel
+@qm.qkernel
 def qpe_with_stdlib(
-    counting_bits: qmc.UInt,
-    phi01: qmc.Float,
-    phi10: qmc.Float,
-    phi11: qmc.Float,
-) -> qmc.Float:
-    counting = qmc.qubit_array(counting_bits, name="counting")
-    target = qmc.qubit_array(2, name="target")
-    target[1] = qmc.x(target[1])
+    counting_bits: qm.Const[qm.Int],
+) -> qm.Shot[qm.UFixed[0, counting_bits]]:
+    """Read the same eigenphase with the standard-library QPE component."""
+    target = qm.prepare((0, 1))
+    phase, target = phase_estimation(diagonal_4x4, target, counting_bits)
+    phase_value = qm.measure(phase)
+    _target_value = qm.measure(target)
+    return phase_value
 
-    phase = qmc.qpe(
-        target,
-        counting,
-        diagonal_4x4,
-        phi01=phi01,
-        phi10=phi10,
-        phi11=phi11,
+
+display(
+    HTML(
+        draw(
+            qm.specialize(qpe_with_stdlib, counting_bits=3), loops="expanded"
+        ).to_html()
     )
-    return qmc.measure(phase)
-
-
-# Draw the built-in implementation with three counting qubits.
-qpe_with_stdlib.draw(
-    counting_bits=3,
-    phi01=PHI_01,
-    phi10=PHI_10,
-    phi11=PHI_11,
-    fold_loops=False,
 )
 
 # %% [markdown]
@@ -435,47 +410,35 @@ qpe_with_stdlib.draw(
 # The target phase $0.6$ cannot be represented exactly with only a few bits, so
 # QPE returns a distribution over nearby $m$-bit approximations. We vary the
 # number of counting qubits from 3 to 9 and compare the estimate produced by the
-# built-in `qpe` function with the exact phase.
+# built-in `phase_estimation` function with the exact phase.
+
 
 # %%
-# Bind the phases of the diagonal unitary matrix at transpile time.
-phase_bindings = {"phi01": PHI_01, "phi10": PHI_10, "phi11": PHI_11}
-
-
-# Compute cyclic distance between two phase fractions.
 def phase_distance(a: float, b: float) -> float:
+    """Compute cyclic distance between two phase fractions."""
     raw_distance = abs(a - b)
     return min(raw_distance, 1.0 - raw_distance)
 
 
-# Transpile and sample a selected QPE qkernel.
 def run_qpe_experiment(qpe_kernel, counting_bits: int) -> float:
-    # Fix the qubit count and phase parameters at transpile time.
-    bindings = {"counting_bits": counting_bits, **phase_bindings}
-    executable = transpiler.transpile(qpe_kernel, bindings=bindings)
-    # Seed the simulator deterministically for reproducible documentation output.
-    executor = transpiler.executor(
-        backend=AerSimulator(
-            seed_simulator=SAMPLER_SEED + counting_bits,
-            max_parallel_threads=1,
-        )
-    )
-    # Sample the measured QFixed phase estimate.
-    sample_result = executable.sample(
-        executor,
+    """Specialize, compile, and sample one QPE register width."""
+    program = qm.specialize(qpe_kernel, counting_bits=counting_bits)
+    artifact = qm.compile(program, to=endpoint.target)
+    sample_result = qm.run(
+        artifact,
+        on=endpoint,
         shots=SHOTS,
-        bindings={},
-    ).result()
-
-    # Keep the most frequent phase, choosing the smaller phase when counts tie.
+        seed=SAMPLER_SEED + counting_bits,
+    ).result
+    assert sample_result.shots == SHOTS
+    assert sum(sample_result.values.values()) == SHOTS
     most_observed_result = max(
-        sample_result.results, key=lambda item: (item[1], -item[0])
+        sample_result.values.items(), key=lambda item: (item[1], -item[0])
     )
     print(most_observed_result)
     qpe_output, most_observed_shots = most_observed_result
-
     assert 0 < most_observed_shots <= SHOTS
-    return qpe_output
+    return float(qpe_output)
 
 
 # Run QPE for all requested counting-qubit counts.
@@ -519,23 +482,33 @@ for counting_bits, phase_error in zip(bits, phase_errors):
 # ## Resource Estimation
 #
 # The previous section showed that more counting qubits improve precision.
-# We can apply `estimate_resources()` directly to the same QPE kernels used by
-# `run_qpe_experiment()` above. This estimate includes the Hadamards, controlled
-# powers from `qmc.qpe`, inverse QFT, and final fixed-point measurement.
-# The plot uses `gates.total`, which counts logical gates under the default
-# `CLEAN_ANCILLA_TOFFOLI` control-decomposition model. Measurement counts are
-# reported separately in `measurements.total`. Engine compilation and
-# optimization can change the emitted gate count. See the
-# [resource-estimation tutorial](../tutorial/05_resource_estimation.ipynb)
-# for details of the counting model.
+# We apply `qm.resources.logical` to the same specialized QPE kernels used by
+# `run_qpe_experiment()` above. This study includes the Hadamards, controlled
+# powers from `phase_estimation`, inverse QFT, and measurements.
+# The plot uses the lower endpoint of `LOGICAL_GATES`. The native study retains
+# an unresolved upper bound for the controlled and adjoint transforms in this
+# program, so this plot shows a guaranteed lower bound rather than an exact
+# gate count. The number of controlled-$U$ calls is exact and checked separately
+# as $2^m-1$. Measurements are reported separately by `LOGICAL_MEASUREMENTS`.
+# Engine compilation and optimization can change the emitted gate count. See the
+# [resource-estimation tutorial](../tutorial/04_resource_estimation.ipynb)
+# for details of resource studies and their bounds.
 
 # %%
-# Substitute concrete counting-qubit counts and collect total gate counts.
 resource_gate_counts: list[int] = []
 for counting_bits in bits:
-    bindings = {"counting_bits": counting_bits, **phase_bindings}
-    concrete_estimate = qpe_with_stdlib.estimate_resources(inputs=bindings).simplify()
-    resource_gate_counts.append(int(concrete_estimate.gates.total))
+    program = qm.specialize(qpe_with_stdlib, counting_bits=counting_bits)
+    logical_study = qm.resources.logical(program)
+    controlled_queries = logical_study.metric(
+        qm.resources.logical_operation_count("qcore.control_call")
+    ).numeric_enclosure()
+    assert controlled_queries == (2**counting_bits - 1, 2**counting_bits - 1)
+    gate_bounds = logical_study.metric(qm.resources.LOGICAL_GATES).numeric_enclosure()
+    assert gate_bounds[0] is not None
+    assert logical_study.metric(
+        qm.resources.LOGICAL_MEASUREMENTS
+    ).numeric_enclosure() == (counting_bits + 2, counting_bits + 2)
+    resource_gate_counts.append(int(gate_bounds[0]))
 
 # Anchor a 2^m reference curve at the first resource-estimate point.
 scaling_reference = [
@@ -549,7 +522,7 @@ ax.plot(
     resource_gate_counts,
     marker="o",
     color="#2696EB",
-    label="QPE logical gate estimate",
+    label="QPE logical gate lower bound",
 )
 ax.plot(
     bits,
@@ -559,7 +532,7 @@ ax.plot(
     label=r"$O(2^m)$",
 )
 ax.set_xlabel(r"counting qubits $m$")
-ax.set_ylabel("logical gates")
+ax.set_ylabel("logical gate lower bound")
 ax.set_yscale("log")
 ax.set_xticks(bits)
 ax.grid(alpha=0.25)
@@ -574,7 +547,7 @@ assert all(
 )
 
 # %% [markdown]
-# The plot compares the number of counting qubits $m$ and the resulting total
+# The plot compares the number of counting qubits $m$ and the resulting lower bound on total
 # gate count with a reference line proportional to $2^m$. If the target
 # additive error is $\epsilon$, the spacing between representable phases should
 # satisfy roughly
@@ -652,8 +625,8 @@ assert all(
 #
 # - QPE uses phase kickback from controlled-$U^{2^k}$ gates and the inverse QFT
 #   to read an eigenphase of a unitary matrix as a binary value.
-# - Qamomile can construct QPE from `qmc.control`, `qmc.iqft`, and `qmc.cast`,
-#   while the built-in `qmc.qpe` expresses the same procedure concisely.
+# - Qamomile can construct QPE from `qm.control`, `inverse_qft`, and `qm.as_fixed`,
+#   while the built-in `phase_estimation` expresses the same procedure concisely.
 # - The phase resolution from $m$ counting qubits is $O(2^{-m})$, while the
 #   required gate count depends on the implementation of controlled-$U^{2^k}$
 #   gates and the initial-state preparation method.

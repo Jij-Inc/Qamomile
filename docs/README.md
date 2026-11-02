@@ -2,6 +2,60 @@
 
 This directory contains the documentation for Qamomile, built with **Jupyter Book 2** and **jupytext**.
 
+## Quick start
+
+Start in the repository root after completing the
+[development prerequisites](../README.md#development). Documentation builds also
+need **Bash** and **Node.js 24**, matching [Read the Docs](../.readthedocs.yaml).
+The Python tools and native compiler are installed from `uv.lock`:
+
+```bash
+node --version
+uv sync --frozen --group docs
+uv run --no-sync python -c "import qamomile, qamomile._qamomile_native, jupytext"
+UV_NO_SYNC=1 ./docs/build.sh build-en
+UV_NO_SYNC=1 ./docs/build.sh serve-en
+```
+
+Open `http://localhost:8000`; stop the server with Ctrl+C. For Japanese, replace
+`build-en` / `serve-en` with `build-ja` / `serve-ja`. Build first: invoking
+`serve-en` or `serve-ja` without existing HTML triggers a full notebook sync
+and execution. The `build-*` commands use committed outputs and do not execute
+notebooks, so they are suitable for an initial preview or prose-only changes.
+The first build needs network access to download the Jupyter Book theme.
+
+`UV_NO_SYNC=1` keeps the prepared docs environment for every `uv run` inside
+the script. A later plain `uv sync` can remove docs-only dependencies; repeat
+`uv sync --frozen --group docs` to restore them. After editing Rust, use
+`uv sync --frozen --group docs --reinstall-package qamomile` before
+running notebook examples.
+
+For one runnable page, edit its Jupytext `.py` source, mirror executable changes
+in the other language, and run:
+
+```bash
+uv run --no-sync pytest tests/docs/test_tutorials.py -m docs --changed-docs --docs-file docs/en/tutorial/01_your_first_quantum_kernel.py
+unset QAMOMILE_DOCS_TEST
+UV_NO_SYNC=1 ./docs/build.sh page-build docs/en/tutorial/01_your_first_quantum_kernel.py
+```
+
+Substitute the page being edited; pass both EN/JA paths to `page-build` when
+both changed. It syncs and executes only those notebooks before rendering the
+language. Pages that call external services also require configured credentials
+and authorization for that execution.
+
+Notebooks select the `python3` kernel. Launch Jupyter from this environment with
+`uv run --no-sync jupyter lab`. If an existing user kernel selects another
+Python installation, register this environment's kernel locally:
+
+```bash
+uv run --no-sync python -m ipykernel install --sys-prefix --name python3 --display-name "Qamomile (.venv)"
+```
+
+Commit the edited `.py` source and its executed `.ipynb` pair. Generated API
+pages, tag pages, injected tag blocks, and `_build_src/` stay out of committed
+source. Authoring policies, templates, and the full command reference follow.
+
 ## Overview
 
 This documentation system uses a modern workflow where:
@@ -24,6 +78,15 @@ This documentation system uses a modern workflow where:
 
 ## Authoring Policy
 
+The published article set includes introductory tutorials, algorithm walkthroughs,
+the BinaryModel usage guide, and integration guides, mirrored in English and
+Japanese. These are the topics retained from `main`;
+their examples use the current Qamomile API. Keep section indexes aligned with
+the actual articles. Compiler boundaries are documented in the
+[Rust crate](../rust/qamomile-compiler/src/lib.rs) and
+[Python package](../qamomile/__init__.py); regression-only programs belong under
+`tests/`.
+
 The docs are reader-first, Qamomile-first, and testable. Each article should
 teach one clear purpose: a Qamomile workflow, an algorithm implemented with
 Qamomile, an integration boundary, or one usage detail. If a page needs two
@@ -37,7 +100,7 @@ independent goals, split it into two pages.
 - **Verified claims only**: avoid unreviewed academic claims. When an algorithm
   page needs theory, keep the statement narrow, cite or link the source, and
   verify the implemented behavior with assertions or reference values.
-- **Qamomile-first examples**: use Qamomile qkernels, observables, converters,
+- **Qamomile-first examples**: use Qamomile functions, observables, optimization helpers,
   drawings, resource estimates, and execution APIs wherever possible.
 - **Use MyST figures**: authored figures and screenshots should use MyST
   `figure` directives so captions, alt text, and layout stay explicit.
@@ -79,7 +142,7 @@ ReadTheDocs builds with `execute.enabled: false`, assuming that executed `.ipynb
 >
 > Several tutorials (e.g. `algorithm/qaoa_graph_partition.py`,
 > `algorithm/qaoa_maxcut.py`, `algorithm/vqe_for_hydrogen.py`,
-> `tutorial/07_classical_flow_patterns.py`) read the
+> `tutorial/06_classical_flow_patterns.py`) read the
 > `QAMOMILE_DOCS_TEST` environment variable and switch to a **reduced
 > workload** (fewer optimizer iterations, fewer shots) when it equals
 > `"1"`. This flag exists only so that
@@ -126,10 +189,11 @@ ReadTheDocs builds with `execute.enabled: false`, assuming that executed `.ipynb
 
 ### Setup
 
-Run this once before editing or building docs:
+Use the prerequisites and preview sequence in [Quick start](#quick-start).
+To restore or update the prepared documentation environment:
 
 ```bash
-uv sync --group docs
+uv sync --frozen --group docs
 ```
 
 The `docs` group includes the regular development tools and the
@@ -160,7 +224,11 @@ setup.
    specified paired `.ipynb` files, then rebuilds the affected language from
    `_build_src/`, where tag-related content is injected and all section
    sources are synced with jupytext. Do not use it for pages that need API
-   keys or other credentials unless those credentials are configured.
+   keys or other credentials unless those credentials are configured and the
+   remote execution is authorized by the task. For translation or source edits
+   without remote execution, sync the paired notebook with
+   `uv run jupytext --to ipynb --update <page.py>` and report that execution
+   remains unverified.
 
 ### Creating a new page
 
@@ -204,7 +272,8 @@ setup.
 
    `page-build` executes the specified pages. For integration pages that
    need API keys or remote side effects, add an explicit docs-test skip and
-   execute the notebook only in an environment with the required credentials.
+   execute the notebook only with the required credentials and authorization
+   for the remote operation.
 
 6. **Preview locally**:
 
@@ -219,7 +288,8 @@ setup.
    browse-by-tag clouds, and per-tag pages are injected — your committed
    source stays clean.
 
-7. **`git add` + commit + push.**
+7. **Review the source and paired notebook diff.** Commit and push when those
+   actions are part of the requested workflow.
 
 ### Adding a new section directory
 
@@ -254,7 +324,9 @@ Update each of the following:
    ```
 3. **Register the section in [docs/scripts/build_doc_tags.py](scripts/build_doc_tags.py)**:
    - Append `"<new>"` to `SECTIONS`.
-   - Add `"<new>"` to `ALLOWED_TAGS` as the section tag.
+   - Add `"<new>"` to `ALLOWED_TAGS` as the section tag only when the user has
+     explicitly requested that taxonomy change. Adding a section does not by
+     itself authorize adding a tag.
    - Add `"<new>": "<English title>"` to `STRINGS["en"]["section_titles"]`
      and `"<new>": "<Japanese title>"` to `STRINGS["ja"]["section_titles"]`
      so the section's name renders correctly on tag pages.
@@ -284,10 +356,10 @@ Update each of the following:
    if the section's notebooks should be exercised by the docs tests:
    ```python
    "docs/en/<new>/**/*.py",
-   "docs/ja/<new>/**/*.py",
    "docs/en/<new>/**/*.ipynb",
-   "docs/ja/<new>/**/*.ipynb",
    ```
+   English pages are the canonical execution checks; mirror executable source
+   changes into Japanese pages rather than adding duplicate CI executions.
    Prefer adding the directory pattern and then skipping only the
    specific credentialed or side-effecting pages via `SKIP_TUTORIALS`.
 8. **Update the `Directory Guide` section of this README** to
@@ -376,7 +448,7 @@ notes (`release_notes/`) are intentionally out of scope and never tagged.
 Ensure documentation dependencies are installed in the active environment:
 
 ```bash
-uv sync --group docs
+uv sync --frozen --group docs
 ```
 
 ### Port 8000 already in use

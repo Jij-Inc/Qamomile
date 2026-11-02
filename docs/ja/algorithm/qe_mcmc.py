@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: py:percent,ipynb
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -23,7 +24,21 @@
 
 # %%
 # 最新のQamomileをpipからインストールします！
-# # !pip install "qamomile[qiskit]"
+# # !pip install qamomile
+
+# %%
+import cmath
+import math
+import os
+import random
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+import qamomile as qm
+from qamomile.stdlib import suzuki_trotter
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 # %% [markdown]
 # ---
@@ -49,50 +64,42 @@
 # まずは、小さなイジング模型について実際にボルツマン分布を可視化してみましょう。ここでは、1次元強磁性イジング鎖（$J_{i,i+1} = 1$、$h_i = 0$）を考え、逆温度$\beta$を変えながら、エネルギー$E(\bm{x})$ごとの確率を集計したヒストグラムをプロットします。
 
 # %%
-import os
-from typing import Any, Callable
-
-import matplotlib.pyplot as plt
-import numpy as np
-
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-
-n_spins = 6
-J = 1.0
+N_SPINS = 6
+ISING_COUPLING = 1.0
 
 
-def ising_energy(state: np.ndarray) -> float:
-    """スピン配置``state``の1次元強磁性イジング鎖のエネルギーを返す（外部磁場なし）。"""
-    return -J * np.sum(state[:-1] * state[1:])
+def spin_chain_energy(state: np.ndarray) -> float:
+    """Return the energy of a 1D ferromagnetic Ising chain."""
+
+    return -ISING_COUPLING * float(np.sum(state[:-1] * state[1:]))
 
 
-# 2^n すべての状態を列挙
-all_states = np.array(
-    [[1 - 2 * ((k >> i) & 1) for i in range(n_spins)] for k in range(2**n_spins)]
+all_spin_states = np.array(
+    [
+        [1 - 2 * ((basis >> index) & 1) for index in range(N_SPINS)]
+        for basis in range(1 << N_SPINS)
+    ]
 )
-energies = np.array([ising_energy(s) for s in all_states])
-# n_spins サイト上の 2^n 通りのスピン配置、エネルギーは強磁性 / 反強磁性の
-# 両極端 +/- (n - 1) * J に挟まれる。
-assert all_states.shape == (2**n_spins, n_spins)
-assert energies.shape == (2**n_spins,)
-assert energies.min() == -(n_spins - 1) * J
-assert energies.max() == (n_spins - 1) * J
+spin_energies = np.array([spin_chain_energy(state) for state in all_spin_states])
+assert all_spin_states.shape == (1 << N_SPINS, N_SPINS)
+assert spin_energies.min() == -(N_SPINS - 1) * ISING_COUPLING
+assert spin_energies.max() == (N_SPINS - 1) * ISING_COUPLING
 
-# エネルギーごとにボルツマン分布を集計してヒストグラムとしてプロット
-unique_energies = np.unique(energies)
+unique_energies = np.unique(spin_energies)
 betas = [0.5, 1.0, 2.0]
-
-fig, axes = plt.subplots(1, len(betas), figsize=(12, 3.5), sharey=True)
-for ax, beta in zip(axes, betas):
-    weights = np.exp(-beta * energies)
-    probs = weights / weights.sum()
-    e_probs = np.array([probs[energies == e].sum() for e in unique_energies])
-    ax.bar(unique_energies, e_probs, width=0.8)
-    ax.set_xlabel(r"Energy $E(\mathbf{x})$")
-    ax.set_title(rf"$\beta = {beta}$")
+figure, axes = plt.subplots(1, len(betas), figsize=(12, 3.5), sharey=True)
+for axis, inverse_temperature in zip(axes, betas, strict=True):
+    boltzmann_weights = np.exp(-inverse_temperature * spin_energies)
+    probabilities = boltzmann_weights / boltzmann_weights.sum()
+    energy_probabilities = np.array(
+        [probabilities[spin_energies == energy].sum() for energy in unique_energies]
+    )
+    axis.bar(unique_energies, energy_probabilities, width=0.8)
+    axis.set_xlabel(r"Energy $E(\mathbf{x})$")
+    axis.set_title(rf"$\beta = {inverse_temperature}$")
 axes[0].set_ylabel(r"Probability $\mu(E)$")
-fig.suptitle(f"Boltzmann distribution of {n_spins}-spin Ising chain")
-plt.tight_layout()
+figure.suptitle(f"Boltzmann distribution of {N_SPINS}-spin Ising chain")
+figure.tight_layout()
 plt.show()
 
 # %% [markdown]
@@ -108,60 +115,14 @@ plt.show()
 #
 # 実際に確認してみましょう。先ほど用意したボルツマン分布をMH法でサンプリングしてみます。提案分布にはさまざまなものが使えますが、ここでは最もシンプルな、ランダムなスピンを1つだけ選んで反転させるものを利用します。
 
-# %%
-rng = np.random.default_rng(seed=0)
-
-
-def local_update(state: np.ndarray) -> np.ndarray:
-    """``state``からランダムに選んだ1スピンを反転させた新しいスピン配置を提案する。"""
-    n = len(state)
-    flip_index = rng.integers(0, n)
-    new_state = state.copy()
-    new_state[flip_index] = int(-1 * state[flip_index])
-    return new_state
-
-
 # %% [markdown]
 # 次に、採択確率に従って、提案された遷移を確率的に処理するステップを実装します。この提案分布は$Q(\bm{x} \mid \bm{y}) = Q(\bm{y} \mid \bm{x})$を満たすため、採択確率において$Q$の比は打ち消されます。したがって、目的分布をボルツマン分布とすると、採択確率は以下の簡潔な形になります:
 # $$
 # A(\bm{y} | \bm{x}) = \min \left(1, \frac{\mu(\bm{y})}{\mu(\bm{x})}\right) = \min \left(1, \exp(-\beta (E(\bm{y}) - E(\bm{x})))\right).
 # $$
 
-
-# %%
-def metropolis_hastings(
-    state: np.ndarray,
-    new_state: np.ndarray,
-    energy_func: Callable[[np.ndarray], float],
-    beta: float,
-) -> np.ndarray:
-    """逆温度``beta``のボルツマン分布に対するMetropolis-Hastingsルールで
-    ``new_state``を``state``に対して採択または棄却する。"""
-
-    delta_energy = energy_func(new_state) - energy_func(state)
-
-    if delta_energy < 0 or rng.random() < np.exp(
-        -beta * delta_energy
-    ):  # delta_energy < 0 のとき、新状態は常により低エネルギーで採択される。
-        return new_state
-    else:
-        return state
-
-
 # %% [markdown]
 # これでMCMCが実装できました。それでは、MCMCを使ってサンプリングしてみましょう。
-
-# %%
-T = 1 if docs_test_mode else 1000  # MCMCのステップ数
-beta = 0.5  # 逆温度
-
-sample = np.zeros((T, n_spins))
-state = np.ones(n_spins)  # 初期状態
-
-for t in range(T):
-    new_state = local_update(state)
-    state = metropolis_hastings(state, new_state, ising_energy, beta)
-    sample[t] = state
 
 # %% [markdown]
 # 得られたサンプル列がボルツマン分布に従っているかを確認しましょう。得られたサンプルを用いて、ボルツマン分布$\mu(\bm{x})$に関する物理量を推定してみます。ここでは、スピンの平均磁化:
@@ -174,30 +135,66 @@ for t in range(T):
 # $$
 # です。平均磁化は磁化のボルツマン分布に関する期待値なので、サンプル数を増やすとともに、得られたサンプル列がボルツマン分布に近いほど推定精度はよくなるはずです。MCMCの$t$番目までのサンプルによる推定量$\bar{m}_t$をプロットしてみましょう。
 
-
 # %%
-def average_magnetization(sample: np.ndarray) -> float:
-    """形状``(T, n_spins)``のMCMCサンプルから平均磁化の推定値を返す。"""
-    magnetization = np.mean(sample, axis=1)
-    return np.mean(magnetization)
+classical_rng = random.Random(0)
 
 
-sample_magnetization = np.array(
-    [average_magnetization(sample[:i]) for i in range(1, T + 1)]
+def local_spin_update(state: np.ndarray) -> np.ndarray:
+    """Propose a spin configuration by flipping one selected spin."""
+
+    proposal = state.copy()
+    index = classical_rng.randrange(len(state))
+    proposal[index] *= -1
+    return proposal
+
+
+def metropolis_hastings_spins(
+    state: np.ndarray,
+    candidate: np.ndarray,
+    beta: float,
+) -> np.ndarray:
+    """Accept or reject a spin proposal under the Boltzmann target."""
+
+    delta_energy = spin_chain_energy(candidate) - spin_chain_energy(state)
+    if delta_energy < 0.0 or classical_rng.random() < math.exp(-beta * delta_energy):
+        return candidate
+    return state
+
+
+CLASSICAL_STEPS = 12 if docs_test_mode else 1_000
+CLASSICAL_BETA = 0.5
+classical_samples = np.zeros((CLASSICAL_STEPS, N_SPINS))
+classical_state = np.ones(N_SPINS)
+for step in range(CLASSICAL_STEPS):
+    classical_candidate = local_spin_update(classical_state)
+    classical_state = metropolis_hastings_spins(
+        classical_state,
+        classical_candidate,
+        CLASSICAL_BETA,
+    )
+    classical_samples[step] = classical_state
+
+
+def average_magnetization(samples: np.ndarray) -> float:
+    """Return the average magnetization of a two-dimensional sample array."""
+
+    return float(np.mean(np.mean(samples, axis=1)))
+
+
+classical_magnetization = np.array(
+    [
+        average_magnetization(classical_samples[:step])
+        for step in range(1, CLASSICAL_STEPS + 1)
+    ]
 )
+boltzmann_weights = np.exp(-CLASSICAL_BETA * spin_energies)
+boltzmann_probabilities = boltzmann_weights / boltzmann_weights.sum()
+theoretical_magnetization = float(
+    np.sum(boltzmann_probabilities * all_spin_states.mean(axis=1))
+)
+assert math.isclose(theoretical_magnetization, 0.0, abs_tol=1e-15)
 
-# 現在の逆温度 beta におけるボルツマン分布から、平均磁化の理論値を計算
-weights = np.exp(-beta * energies)
-probs = weights / weights.sum()
-magnetization_per_state = all_states.mean(axis=1)
-theoretical_magnetization = np.sum(probs * magnetization_per_state)
-# Z2 対称性: 全スピン反転は (h_i = 0 の) エネルギーを変えず磁化だけ反転させるので、
-# ボルツマン重み付き平均はぴったり 0 になる — しかも {+spins, -spins} の対は同じ
-# `probs` を共有するため浮動小数演算上も誤差なくキャンセルする。
-assert theoretical_magnetization == 0.0
-assert np.isclose(probs.sum(), 1.0)
-
-plt.plot(sample_magnetization, label="MCMC estimate")
+plt.plot(classical_magnetization, label="MCMC estimate")
 plt.axhline(
     theoretical_magnetization,
     color="red",
@@ -226,153 +223,231 @@ plt.show()
 # $$
 # ここで、$H_M$はミキサーハミルトニアンと呼ばれ、状態間の量子遷移を生み出します。一方、$H_C$はイジングハミルトニアンです。$\gamma \in [0,1]$は2つの項の重みを制御するパラメータです。$\alpha$は、ミキサーハミルトニアンとコストハミルトニアンの固有値のスケールを揃えるための規格化因子です。$(\gamma, t)$はMCMCの効率を決める調整可能なパラメータです。
 
-# %% [markdown]
-# ---
-# ## アルゴリズムの実装
-
-# %% [markdown]
-# ### 1. ハミルトニアンの準備
-# いよいよ、アルゴリズムを実装していきましょう。まず、サンプリングしたいモデルのイジングハミルトニアン$H_C$と、提案回路$U$のためのミキサーハミルトニアン$H_M$を準備します。
-
 # %%
-from qamomile.observable.hamiltonian import Hamiltonian, X, Z
+GAMMA = 0.45
+EVOLUTION_TIME = 12.0
+BETA = 1.0
+N_SPINS = 6
+TROTTER_STEPS = 1 if docs_test_mode else 15
+INPUT_BITS = (1, 0, 1, 0, 1, 0)
+INPUT_ANGLES = tuple(math.pi * bit for bit in INPUT_BITS)
+HAMILTONIANS = (
+    (1.0 - GAMMA)
+    * sum(
+        (qm.X(index) for index in range(N_SPINS)),
+        qm.Hamiltonian.zero(num_qubits=N_SPINS),
+    ),
+    -GAMMA
+    * sum(
+        (qm.Z(index) * qm.Z(index + 1) for index in range(N_SPINS - 1)),
+        qm.Hamiltonian.zero(num_qubits=N_SPINS),
+    ),
+)
+EVOLUTION = suzuki_trotter(term_count=2, order=2, steps=TROTTER_STEPS)
 
-mixer_hamiltonian = Hamiltonian()
-for i in range(n_spins):
-    mixer_hamiltonian += X(i)
-
-cost_hamiltonian = Hamiltonian()
-for i in range(n_spins - 1):
-    cost_hamiltonian += -J * Z(i) * Z(i + 1)
+assert len(HAMILTONIANS) == 2
+assert TROTTER_STEPS == (1 if docs_test_mode else 15)
 
 # %% [markdown]
-# ### 2. 量子回路の構築
+# ## 1つの型付き提案を書く
 #
-# 次に、量子回路を実装していきましょう。まず、現在の状態$\bm{x}$を入力状態として符号化するため、`computational_basis_state`を用いて量子状態$\ket{\bm{x}}$を準備します。提案遷移にはTrotter分解に基づく時間発展シミュレーションを利用します。先ほど準備したハミルトニアンに対する回路を、`trotterized_time_evolution`を使って構築します。
+# 0または$\pi$の`RX`回転で現在状態の各bitを準備します。固定長Vectorにより、入力と2つのHamiltonian項はどちらも検査済みの関数contractに含まれます。affineな`Q[Bits[6]]`値は共有の積公式を通り、1つの型付きshot resultになります。
+
 
 # %%
-import qamomile.circuit as qmc
-from qamomile.circuit.algorithm import trotterized_time_evolution
-from qamomile.circuit.stdlib import computational_basis_state
+@qm.qkernel
+def qemcmc_samples(
+    input_angles: qm.Param[qm.Vector[qm.Real, 6]],  # type: ignore[valid-type]
+    hamiltonians: qm.Const[qm.Vector[qm.Observable, 2]],  # type: ignore[valid-type]
+    time: qm.Param[qm.Real],
+) -> qm.Shot[qm.Bits[6]]:  # type: ignore[valid-type]
+    """Sample one runtime-rebindable quantum-enhanced MCMC proposal.
+
+    Args:
+        input_angles (qm.Param[qm.Vector[qm.Real, 6]]): Zero-or-pi rotations
+            encoding the current Markov-chain bitstring.
+        hamiltonians (qm.Const[qm.Vector[qm.Observable, 2]]): Mixer and Ising
+            cost Hamiltonian terms.
+        time (qm.Param[qm.Real]): Total proposal evolution time.
+
+    Returns:
+        qm.Shot[qm.Bits[6]]: Proposed six-spin bitstring.
+    """
+
+    state = qm.qubits(6)
+    for index in range(6):
+        state = qm.rx(state, input_angles[index], target=index)
+    state = EVOLUTION(state, hamiltonians, time)
+    return qm.measure(state)
 
 
-@qmc.qkernel
-def qemcmc_circuit(
-    n: qmc.UInt,
-    input_bits: qmc.Vector[qmc.UInt],
-    Hs: qmc.Vector[qmc.Observable],
-    order: qmc.UInt,
-    time: qmc.Float,
-    step: qmc.UInt,
-) -> qmc.Vector[qmc.Bit]:
-    """QeMCMC用の提案回路: ``n``量子ビット上に``|input_bits>``を準備し、
-    指定した``order``の鈴木-Trotter分解で全時間``time``、``step``ステップに
-    わたり``sum_k Hs[k]``の時間発展を作用させ、最後に全量子ビットを測定する。"""
-    q = qmc.qubit_array(n, name="q")
-
-    # step 1: 初期状態を準備
-    q = computational_basis_state(q, input_bits)
-
-    # step 2: ミキサー/コストハミルトニアンによるTrotter化された時間発展を適用
-    q = trotterized_time_evolution(q, Hs, order, time, step)
-
-    return qmc.measure(q)
-
+program = qemcmc_samples.specialize(hamiltonians=HAMILTONIANS)
 
 # %% [markdown]
-# ### 3. トランスパイル
-#
-# カーネルをトランスパイルします。量子回路を実行するには、ハミルトニアンの混合係数$\gamma$とシミュレーション時間$t$を固定する必要があります。 [](https://doi.org/10.1103/PhysRevA.111.042615) に従い、$\gamma=0.45$、$t=12$、$\Delta t = 0.8$と設定します。トランスパイル時に`n`、`order`、`time`、`step`をバインドし、`input_bits`はランタイムパラメータとして残します。
+# 特殊化は、記述したsignatureを消去せずに固定Ising modelを記録します。最終的なartifact ABIには`input_angles`と`time`だけが残ります。inspectからも、QeMCMCは特権的なcompiler operationではなく合成であることが分かります。
+
 # %%
-from qamomile.qiskit import QiskitTranspiler
+assert tuple(parameter.name for parameter in program.entry.parameters) == (
+    "input_angles",
+    "hamiltonians",
+    "time",
+)
+assert tuple(name for name, _ in program.const_bindings) == ("hamiltonians",)
+assert "quantum.qemcmc" not in program.inspect()
+assert program.inspect().count("quantum.pauli_evolution") == 1
 
-gamma = 0.45  # 混合係数
-time = 12.0  # 総発展時間
-delta_t = 0.8  # Trotterステップの時間幅
-step = 1 if docs_test_mode else int(time / delta_t)
-order = 2  # Suzuki-Trotter近似次数
-assert step == (1 if docs_test_mode else 15)
+# %% [markdown]
+# ## 同じbodyのresourceを見積もる
+#
+# 2項の2次公式では、各stepが$H_0/2,H_1,H_0/2$という回文構造のscheduleになります。そのため、logical analysisはTrotter stepごとに3つの抽象Pauli evolutionを厳密に報告します。backend固有のgate synthesisは後段で行われ、このsource-level countを変更できません。
 
-Hs = [
-    (1 - gamma) * mixer_hamiltonian,
-    gamma * cost_hamiltonian,
-]
-assert len(Hs) == 2
+# %%
+study = qm.resources.logical(program)
+pauli_evolutions = qm.resources.logical_operation_count("quantum.pauli_evolution")
 
-transpiler = QiskitTranspiler()
+expected_evolutions = 3 * TROTTER_STEPS
+assert study.metric(pauli_evolutions).numeric_enclosure() == (
+    expected_evolutions,
+    expected_evolutions,
+)
+assert qm.resources.ResourceStudy.from_bytes(study.to_bytes()) == study
 
-executable = transpiler.transpile(
-    qemcmc_circuit,
-    bindings={
-        "n": n_spins,
-        "Hs": Hs,
-        "order": order,
-        "time": time,
-        "step": step,
-    },
-    parameters=["input_bits"],
+# %% [markdown]
+# ## 1回コンパイルして1つの提案をsampleする
+#
+# 実行例は6量子ビットに対して128 shotsのlaunchを1回行います。実際のMarkov chainでは、現在のbitを0または$\pi$のangleに変換し、同じartifactへ繰り返しbindingします。
+
+# %%
+reference = qm.Reference()
+artifact = qm.compile(program, to=reference.target)
+execution = qm.run(
+    artifact,
+    on=reference,
+    parameters={"input_angles": INPUT_ANGLES, "time": EVOLUTION_TIME},
+    shots=128,
+    seed=2,
 )
 
+assert tuple(slot.name for slot in artifact.parameter_abi.slots) == (
+    "input_angles",
+    "time",
+)
+assert execution.artifact is artifact
+assert execution.invocation.values() == {
+    "input_angles": INPUT_ANGLES,
+    "time": EVOLUTION_TIME,
+}
+assert execution.result.shots == 128
+
 # %% [markdown]
-# ### 4. 量子回路をMCMCに組み込む
+# ## hybrid Markov semanticsを厳密に検証する
 #
-# これで量子回路シミュレーションの準備が整いました。最後に、量子計算のブロックをMCMCに組み込みましょう。回路の入力および出力はビット列$\bm{x} \in \{0,1\}^n$であるため、スピン変数$\bm{s} \in \{1, -1\}^n$との変換も準備しておきます。
+# samplingは実行経路を示しますが、可逆性や定常性の証明には適しません。この6-spin例では、64個すべての提案行をhost上で厳密に構成できます。以下のhelperは、記述したprogramと同じSuzuki factorを辿ります。tutorialのassertion用oracleであり、別のcompiler実装ではありません。
 
 
 # %%
-def spin_binary_convert(x: np.ndarray, *, input_kind: str = "auto") -> np.ndarray:
-    """スピン変数 {-1, +1} ↔ バイナリ変数 {0, 1} の相互変換。
+def apply_x_evolution(
+    amplitudes: list[complex],
+    *,
+    target: int,
+    angle: float,
+) -> list[complex]:
+    """Apply exp(-i angle X_target) to a six-qubit host vector."""
 
-    ``input_kind`` で入力の表現を指定します。``"spin"`` は ``x`` を {-1, +1}
-    として扱いバイナリを返し、``"binary"`` は {0, 1} として扱いスピンを返
-    します。デフォルトの ``"auto"`` は値から推論しますが、全要素が 1 で
-    曖昧な場合は ``ValueError`` を投げます。
-    """
-    x = np.asarray(x, dtype=int)
-    values = np.unique(x)
+    cosine = math.cos(angle)
+    sine = -1.0j * math.sin(angle)
+    return [
+        cosine * amplitudes[basis] + sine * amplitudes[basis ^ (1 << target)]
+        for basis in range(1 << N_SPINS)
+    ]
 
-    if input_kind == "spin":
-        if not np.all(np.isin(values, [-1, 1])):
-            raise ValueError(
-                f"input_kind='spin' は {{-1, 1}} の要素を要求します: {values.tolist()}"
+
+def proposal_probabilities(
+    input_bits: tuple[int, ...],
+) -> tuple[float, ...]:
+    """Return exact address-ordered proposal probabilities."""
+
+    basis_index = sum(bit << index for index, bit in enumerate(input_bits))
+    amplitudes = [0.0j] * (1 << N_SPINS)
+    amplitudes[basis_index] = 1.0 + 0.0j
+    step_time = EVOLUTION_TIME / TROTTER_STEPS
+    mixer_angle = (1.0 - GAMMA) * step_time / 2.0
+    for _ in range(TROTTER_STEPS):
+        for target in range(N_SPINS):
+            amplitudes = apply_x_evolution(
+                amplitudes,
+                target=target,
+                angle=mixer_angle,
             )
-        return (1 - x) // 2
-    if input_kind == "binary":
-        if not np.all(np.isin(values, [0, 1])):
-            raise ValueError(
-                f"input_kind='binary' は {{0, 1}} の要素を要求します: {values.tolist()}"
+        for basis in range(1 << N_SPINS):
+            interaction = sum(
+                (-1 if basis & (1 << index) else 1)
+                * (-1 if basis & (1 << (index + 1)) else 1)
+                for index in range(N_SPINS - 1)
             )
-        return 1 - 2 * x
-    if input_kind != "auto":
-        raise ValueError(
-            f"input_kind は 'spin', 'binary', 'auto' のいずれか: {input_kind!r}"
+            amplitudes[basis] *= cmath.exp(1.0j * GAMMA * step_time * interaction)
+        for target in range(N_SPINS):
+            amplitudes = apply_x_evolution(
+                amplitudes,
+                target=target,
+                angle=mixer_angle,
+            )
+    return tuple(abs(amplitude) ** 2 for amplitude in amplitudes)
+
+
+def ising_energy(bits: tuple[int, ...]) -> float:
+    """Return the six-spin ferromagnetic Ising-chain energy."""
+
+    spins = tuple(1 - 2 * bit for bit in bits)
+    return -float(sum(spins[index] * spins[index + 1] for index in range(N_SPINS - 1)))
+
+
+states = tuple(
+    tuple((basis >> index) & 1 for index in range(N_SPINS))
+    for basis in range(1 << N_SPINS)
+)
+proposal = tuple(proposal_probabilities(bits) for bits in states)
+energies = tuple(ising_energy(bits) for bits in states)
+weights = tuple(math.exp(-BETA * energy) for energy in energies)
+partition = sum(weights)
+stationary = tuple(weight / partition for weight in weights)
+state_count = 1 << N_SPINS
+transition: list[list[float]] = [[0.0] * state_count for _ in range(state_count)]
+
+for source in range(state_count):
+    for target in range(state_count):
+        if source == target:
+            continue
+        acceptance = min(
+            1.0,
+            math.exp(-BETA * (energies[target] - energies[source])),
+        )
+        transition[source][target] = proposal[source][target] * acceptance
+    transition[source][source] = 1.0 - sum(transition[source])
+
+for source in range(state_count):
+    assert math.isclose(sum(proposal[source]), 1.0, abs_tol=1e-12)
+    assert math.isclose(sum(transition[source]), 1.0, abs_tol=1e-12)
+    for target in range(state_count):
+        assert math.isclose(
+            proposal[source][target],
+            proposal[target][source],
+            abs_tol=1e-12,
+        )
+        assert math.isclose(
+            stationary[source] * transition[source][target],
+            stationary[target] * transition[target][source],
+            abs_tol=1e-12,
         )
 
-    if np.any(values == -1) and np.all(np.isin(values, [-1, 1])):
-        return (1 - x) // 2
-    if np.any(values == 0) and np.all(np.isin(values, [0, 1])):
-        return 1 - 2 * x
-    if np.array_equal(values, [1]):
-        raise ValueError(
-            "入力が全て 1 のためスピン/バイナリを判別できません。"
-            "input_kind='spin' または input_kind='binary' を明示してください。"
-        )
-    raise ValueError(
-        f"要素は {{-1, 1}} または {{0, 1}} のみ許容されます: {values.tolist()}"
-    )
+input_basis = sum(bit << index for index, bit in enumerate(INPUT_BITS))
+for basis, expected in enumerate(proposal[input_basis]):
+    bits = tuple((basis >> index) & 1 for index in range(N_SPINS))
+    sampling_error = 6.0 * math.sqrt(expected * (1.0 - expected) / 128)
+    assert abs(execution.result.probability(bits) - expected) <= sampling_error + 0.01
 
-
-def quantum_proposal(state: np.ndarray, executable: Any, executor: Any) -> np.ndarray:
-    """現在のスピン状態を入力として量子回路から提案状態を得る。"""
-    binary_state = spin_binary_convert(state, input_kind="spin").tolist()
-    result = executable.sample(
-        executor,
-        shots=1,
-        bindings={"input_bits": binary_state},
-    ).result()
-    ((proposed_bits, _count),) = result.results
-    return spin_binary_convert(np.array(proposed_bits, dtype=int), input_kind="binary")
-
+# %% [markdown]
+# 最初の等式は各提案行と遷移行が正規化されていることを示します。提案の対称性によりMetropolisの式を簡略化でき、最後の等式はBoltzmann分布に対する詳細釣り合いを示します。これにより、乱数、採択、Markov chain policyをQCoreへ移さずに量子・古典部分を合成できます。
 
 # %% [markdown]
 # ---
@@ -382,63 +457,105 @@ def quantum_proposal(state: np.ndarray, executable: Any, executor: Any) -> np.nd
 # 実装したQeMCMCアルゴリズムを実行してみましょう。先ほどよりも低温の $\beta = 1.0$ に設定し、古典MCMCの局所更新では混合が遅くなる条件で量子提案分布の挙動を観察します。公平な比較のため、同じ $\beta = 1.0$ で古典MCMCも併走させます。
 
 # %%
-from qiskit_aer import AerSimulator
+rng = random.Random(7)
+current = (0,) * N_SPINS
+chain = [current]
+accepted = 0
+CHAIN_STEPS = 12 if docs_test_mode else 1_000
 
-beta = 1.0  # 局所更新では混合が遅くなる低温に切り替える
-T_quantum = 1 if docs_test_mode else 1000
+for step in range(CHAIN_STEPS):
+    proposal_result = qm.run(
+        artifact,
+        on=reference,
+        parameters={
+            "input_angles": tuple(math.pi * bit for bit in current),
+            "time": EVOLUTION_TIME,
+        },
+        shots=1,
+        seed=100 + step,
+    ).result
+    candidate = next(iter(proposal_result.counts))
+    acceptance = min(
+        1.0,
+        math.exp(-BETA * (ising_energy(candidate) - ising_energy(current))),
+    )
+    if rng.random() < acceptance:
+        current = candidate
+        accepted += 1
+    chain.append(current)
 
-# beta=1.0 におけるボルツマン分布から平均磁化の理論値を再計算
-weights = np.exp(-beta * energies)
-probs = weights / weights.sum()
-theoretical_magnetization = np.sum(probs * magnetization_per_state)
-# Z2 対称性により依然として 0 — beta は対の重みを変えるだけで {+spins, -spins}
-# の縮退を破らない。
-assert theoretical_magnetization == 0.0
-
-# 比較用に同じ beta、同じステップ数で古典MCMCも実行
-classical_compare_sample = np.zeros((T_quantum, n_spins))
-state = np.ones(n_spins)  # 初期状態
-for t in range(T_quantum):
-    new_state = local_update(state)
-    state = metropolis_hastings(state, new_state, ising_energy, beta)
-    classical_compare_sample[t] = state
-
-# QeMCMC
-executor = transpiler.executor(backend=AerSimulator(seed_simulator=7))
-quantum_sample = np.zeros((T_quantum, n_spins), dtype=int)
-state = np.ones(n_spins, dtype=int)  # 初期状態
-for t in range(T_quantum):
-    proposed_state = quantum_proposal(state, executable, executor)
-    state = metropolis_hastings(state, proposed_state, ising_energy, beta)
-    quantum_sample[t] = state
-# 両 chain とも n_spins サイト・T_quantum サンプル分の +/- 1 スピン列を生成済み。
-assert quantum_sample.shape == (T_quantum, n_spins)
-assert classical_compare_sample.shape == (T_quantum, n_spins)
-assert set(np.unique(quantum_sample).tolist()).issubset({-1, 1})
-
+print("chain endpoints:", chain[:5], "...", chain[-5:])
+print("accepted transitions:", accepted)
+assert len(chain) == CHAIN_STEPS + 1
+assert all(state in states for state in chain)
 
 # %% [markdown]
-# 平均磁化の推定量を計算し、同じ $\beta = 1.0$ で実行した古典MCMCの結果と比較します。
+# ### 古典local-update MCMCとの比較
+#
+# 元のチュートリアルと同じく、同じ逆温度で古典MCMCとQeMCMCのmagnetization収束を比較します。6-spin modelなら上で量子遷移matrix全体を検証しながら、元の比較を保持できます。spin-flip対称性により厳密な平衡magnetizationは0です。
+
 
 # %%
-quantum_sample_magnetization = np.array(
-    [average_magnetization(quantum_sample[:i]) for i in range(1, T_quantum + 1)]
-)
-classical_compare_magnetization = np.array(
-    [average_magnetization(classical_compare_sample[:i]) for i in range(1, T_quantum + 1)]
+def local_update(bits: tuple[int, ...], generator: random.Random) -> tuple[int, ...]:
+    """Return a proposal with one uniformly selected spin flipped."""
+
+    index = generator.randrange(N_SPINS)
+    proposal_bits = list(bits)
+    proposal_bits[index] = 1 - proposal_bits[index]
+    return tuple(proposal_bits)
+
+
+def accept_metropolis(
+    source: tuple[int, ...],
+    candidate: tuple[int, ...],
+    generator: random.Random,
+) -> tuple[int, ...]:
+    """Accept or reject one proposal using the shared Ising objective."""
+
+    probability = min(
+        1.0,
+        math.exp(-BETA * (ising_energy(candidate) - ising_energy(source))),
+    )
+    return candidate if generator.random() < probability else source
+
+
+classical_rng = random.Random(7)
+classical_current = (0,) * N_SPINS
+classical_chain = [classical_current]
+for _ in range(CHAIN_STEPS):
+    classical_candidate = local_update(classical_current, classical_rng)
+    classical_current = accept_metropolis(
+        classical_current,
+        classical_candidate,
+        classical_rng,
+    )
+    classical_chain.append(classical_current)
+
+
+def cumulative_magnetization(samples: list[tuple[int, ...]]) -> np.ndarray:
+    """Return the running mean magnetization of a bitstring chain."""
+
+    per_sample = np.asarray(
+        [sum(1 - 2 * bit for bit in bits) / N_SPINS for bits in samples]
+    )
+    return np.cumsum(per_sample) / np.arange(1, len(per_sample) + 1)
+
+
+quantum_magnetization = cumulative_magnetization(chain)
+classical_magnetization = cumulative_magnetization(classical_chain)
+theoretical_magnetization = sum(
+    probability * sum(1 - 2 * bit for bit in bits) / N_SPINS
+    for probability, bits in zip(stationary, states, strict=True)
 )
 
-plt.plot(classical_compare_magnetization, label="MCMC estimate")
-plt.plot(quantum_sample_magnetization, label="QeMCMC estimate")
-plt.axhline(
-    theoretical_magnetization,
-    color="red",
-    linestyle="--",
-    label=f"Theoretical ({theoretical_magnetization:.3f})",
-)
-plt.xlabel("Step")
-plt.ylabel("Magnetization")
-plt.title("Magnetization vs. Step")
+assert math.isclose(theoretical_magnetization, 0.0, abs_tol=1e-12)
+assert len(classical_chain) == len(chain) == CHAIN_STEPS + 1
+
+plt.plot(classical_magnetization, label="MCMC estimate")
+plt.plot(quantum_magnetization, label="QeMCMC estimate")
+plt.axhline(theoretical_magnetization, linestyle="--", label="Theoretical")
+plt.xlabel("Markov step")
+plt.ylabel("Average magnetization")
 plt.legend()
 plt.show()
 
@@ -446,4 +563,4 @@ plt.show()
 # ---
 # ## まとめ
 #
-# 本チュートリアルでは、古典的なMetropolis-Hastings法によるMCMCの復習からはじめ、量子回路$U(\gamma, t) = \exp(-i t H)$（$H = (1-\gamma) H_M + \gamma H_C$）を提案分布として利用するQuantum-enhanced MCMC (QeMCMC) をQamomile上で実装しました。具体的には、`qamomile.observable`でミキサー/コストハミルトニアンを準備したうえで、`@qkernel`の中で`trotterized_time_evolution`を用いたSuzuki-Trotter時間発展による提案回路を構築しました。最後に、トランスパイルされたexecutorを介して量子提案分布を既存のMHループに組み込み、古典MCMCとQeMCMCを同一のイジング鎖上で走らせて平均磁化の収束を比較することで、一連の量子古典ハイブリッドループが意図どおり動作することを確認しました。
+# 本チュートリアルでは、古典的なMetropolis-Hastings法によるMCMCの復習からはじめ、量子回路$U(\gamma, t) = \exp(-i t H)$（$H = (1-\gamma) H_M + \gamma H_C$）を提案分布として利用するQuantum-enhanced MCMC (QeMCMC) をQamomile上で実装しました。具体的には、Qamomileのobservableでミキサー/コストHamiltonianを準備したうえで、`qkernel`の中で`suzuki_trotter`を用いたSuzuki-Trotter時間発展によるproposal circuitを構築しました。最後に、proposalを`Reference` target向けに1回compileして既存のMH loopに組み込み、古典MCMCとQeMCMCを同一のIsing chain上で走らせて平均磁化の収束を比較することで、一連の量子古典hybrid loopが意図どおり動作することを確認しました。

@@ -1,0 +1,28 @@
+include LICENSE.txt
+include README.md
+
+prune .binder
+prune .claude
+prune .codex
+prune .github
+prune design
+prune docs
+prune tests
+
+exclude .gitattributes
+exclude .gitignore
+exclude .python-version
+exclude .readthedocs.yaml
+exclude AGENTS.md
+exclude CLAUDE.md
+exclude myst.yml
+exclude uv.lock
+
+include Cargo.toml Cargo.lock rust-toolchain.toml setup.cfg
+include rust/qamomile-compiler/Cargo.toml rust/qamomile-python/Cargo.toml
+recursive-include rust/qamomile-compiler/src *.rs
+recursive-include rust/qamomile-python/src *.rs
+prune rust/qamomile-compiler/tests
+prune rust/qamomile-python/tests
+
+global-exclude scm_file_list.json scm_version.json

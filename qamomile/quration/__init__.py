@@ -1,25 +1,24 @@
-"""Quration target integration through its PyQret Python frontend.
+"""Expose Quration emission, local simulation, and FTQC compilation.
 
-Quration is the user-facing FTQC resource-estimation toolchain; PyQret is
-its Python construction API. The public transpiler is therefore named
-``QurationTranspiler`` while the target-native materializer is explicitly
-named ``PyQretMaterializer``.
-
-This engine depends only on ``qamomile.circuit`` and optional ``pyqret``.
-It consumes engine-neutral ``CircuitProgram`` artifacts and never reaches
-back into Qamomile's semantic IR.
+Rust owns QCore semantics, circuit projection, resources and result ABIs.
+This optional adapter emits concrete PyQret IR and executes it; SDK objects
+and machine-specific resource reports never enter persistent Qamomile values.
 """
 
-from qamomile.quration.materializer import PyQretMaterializer
-from qamomile.quration.transpiler import (
-    QurationExecutor,
-    QurationResourceResult,
-    QurationTranspiler,
+from ._integration import (
+    FORMAT as FORMAT,
+    Quration as Quration,
+    QurationLocal as QurationLocal,
+    QurationResourceResult as QurationResourceResult,
+    compile_resources as compile_resources,
+    load_circuit as load_circuit,
 )
 
 __all__ = [
-    "PyQretMaterializer",
-    "QurationExecutor",
+    "FORMAT",
+    "Quration",
+    "QurationLocal",
     "QurationResourceResult",
-    "QurationTranspiler",
+    "compile_resources",
+    "load_circuit",
 ]

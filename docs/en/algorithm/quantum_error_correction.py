@@ -1,11 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: py:percent,ipynb
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -31,16 +32,11 @@
 #
 # **Prerequisites**: `@qkernel`, the CNOT gate, and measurement. If you are new to these, start with [Your First Quantum Kernel](../tutorial/01_your_first_quantum_kernel.ipynb).
 
-# %%
-# Install the latest Qamomile from pip.
-# # !pip install "qamomile[qiskit]"
-# # or
-# # !uv add "qamomile[qiskit]"
-
 # %% [markdown]
 # ## 1. Why Quantum Error Correction Is Hard
 #
 # Before getting into actual quantum error correction, we explain what makes the quantum case harder than the classical one.
+
 
 # %% [markdown]
 # ### 1.1 The Classical Repetition Code
@@ -55,6 +51,7 @@
 #
 # Even if one bit flips along the way (`000 → 010`, say), the majority vote recovers the original value.
 
+
 # %% [markdown]
 # ### 1.2 Encoding Works Fine on Quantum States Too
 #
@@ -67,6 +64,7 @@
 # $$\alpha\lvert000\rangle + \beta\lvert111\rangle$$
 #
 # This is not three copies of the state ($(\alpha\lvert0\rangle+\beta\lvert1\rangle)^{\otimes 3}$); it is an **entanglement** spread across the three qubits. Encoding is built without trouble this way.
+
 
 # %% [markdown]
 # ### 1.3 The Real Obstacle Is Correction
@@ -82,6 +80,7 @@
 # So quantum error correction does not measure the data itself. It measures only **where and what kind of error occurred**. This information about the location and type of the error is called the **syndrome**. "Syndrome" is originally a medical term for a set of symptoms; just as a doctor diagnoses a disease from its symptoms without observing it directly, error correction pins down the error from its "symptoms" alone, without measuring the error itself.
 #
 # The syndrome is extracted through ancilla qubits, so the logical state ($\alpha,\beta$) is left untouched. This operation is **syndrome measurement**.
+
 
 # %% [markdown]
 # ### 1.4 Another Difference: Phase Errors
@@ -102,6 +101,7 @@
 #
 # So the only errors we need to correct are the full $X$, $Y$, $Z$. And since $Y=iXZ$, correcting $X$ and $Z$ automatically covers $Y$.
 
+
 # %% [markdown]
 # ### 1.5 The Quantum Error Correction Flow
 #
@@ -117,70 +117,37 @@
 #
 # From the next section on, we implement this flow with the simplest code — the 3-qubit bit-flip code.
 
+
 # %% [markdown]
 # Before getting into the implementation, we load Qamomile and the Qiskit integration and define two helper functions. `_first_bit_distribution` and `_sample_first_bit` are just utilities that compile and run a kernel and return the 0/1 counts of the first bit. They are not central to QEC, so feel free to skip them.
 
+# %% [markdown]
+# ## Installation
+#
+# ```bash
+# pip install qamomile
+# ```
+
+# %%
+# Install the latest Qamomile through pip!
+# # !pip install qamomile
+
 # %%
 import math
-import os
 
-import qamomile.circuit as qmc
-from qamomile.circuit import SampleResult
-from qamomile.qiskit import QiskitTranspiler
-
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-default_shots = 1 if docs_test_mode else 256
-superposition_shots = 1 if docs_test_mode else 2000
-
-transpiler = QiskitTranspiler()
-
-# Create a seeded backend for reproducible documentation output.
-from qiskit_aer import AerSimulator
-
-_seeded_backend = AerSimulator(seed_simulator=42, max_parallel_threads=1)
-_seeded_executor = transpiler.executor(backend=_seeded_backend)
-
-
-def _first_bit_distribution(result: SampleResult) -> dict[int, int]:
-    """Return the 0/1 counts for the first measured bit."""
-    counts = {0: 0, 1: 0}
-    for outcome, count in result.results:
-        bit = outcome[0] if isinstance(outcome, (list, tuple)) else outcome & 1
-        counts[bit] += count
-    return counts
-
-
-def _sample_first_bit(
-    kernel,
-    *,
-    bindings: dict[str, object] | None = None,
-    parameters: list[str] | None = None,
-    runtime_bindings: dict[str, object] | None = None,
-    shots: int = default_shots,
-) -> dict[int, int]:
-    """Compile and run a kernel, returning the 0/1 counts of the first bit."""
-    executable = transpiler.transpile(
-        kernel,
-        bindings=bindings or {},
-        parameters=parameters or [],
-    )
-    job = executable.sample(
-        _seeded_executor,
-        shots=shots,
-        bindings=runtime_bindings or {},
-    )
-    return _first_bit_distribution(job.result())
-
+import qamomile as qm
 
 # %% [markdown]
 # ## 2. The 3-Qubit Bit-Flip Code
 #
 # The first code we build is the **bit-flip code**. It is the simplest quantum error correction code, correcting just a single bit-flip ($X$) error. We implement the whole flow from 1.5 — encode → error → syndrome measurement → correction — with this code.
 
+
 # %% [markdown]
 # ### 2.1 The Target Error: Bit Flip
 #
 # An $X$ error flips a qubit, $\lvert0\rangle\leftrightarrow\lvert1\rangle$. It is the error corresponding to a classical bit flip. The bit-flip code aims to correct this single $X$ error.
+
 
 # %% [markdown]
 # ### 2.2 The Code Space
@@ -191,24 +158,16 @@ def _sample_first_bit(
 #
 # The logical $\lvert0\rangle$ corresponds to $\lvert000\rangle$ and the logical $\lvert1\rangle$ to $\lvert111\rangle$. The space spanned by these two is called the **code space**, and the only valid codewords are $\lvert000\rangle$ and $\lvert111\rangle$.
 
+
 # %% [markdown]
 # ### 2.3 The Encoding Circuit
 #
 # Encoding is just one CNOT each from the data qubit $q_0$ to $q_1$ and $q_2$.
 
 
-# %%
-@qmc.qkernel
-def encode_3qubit_bitflip(
-    q0: qmc.Qubit, q1: qmc.Qubit, q2: qmc.Qubit
-) -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
-    q0, q1 = qmc.cx(q0, q1)
-    q0, q2 = qmc.cx(q0, q2)
-    return q0, q1, q2
-
-
 # %% [markdown]
 # If $q_0$ is $\lvert1\rangle$, the two CNOTs flip $q_1$ and $q_2$ as well, giving $\lvert111\rangle$. If $q_0$ is $\lvert0\rangle$, nothing happens and it stays $\lvert000\rangle$. If $q_0$ is a superposition $\alpha\lvert0\rangle+\beta\lvert1\rangle$, the result is $\alpha\lvert000\rangle+\beta\lvert111\rangle$.
+
 
 # %% [markdown]
 # ### 2.4 Syndrome Measurement: $Z$ Parity
@@ -247,6 +206,7 @@ def encode_3qubit_bitflip(
 # The key point is that the two terms of the superposition give the **same** ancilla values. Because of this, measuring the ancilla does not destroy the superposition of $a$ and $b$.
 # All the measurement yields is the syndrome $(s_0,s_1)=(1,0)$, which the table identifies as an $X$ error on $q_1$.
 
+
 # %% [markdown]
 # ### 2.5 Correction
 #
@@ -258,50 +218,11 @@ def encode_3qubit_bitflip(
 #
 # restoring the encoded state exactly. The "Correction" column of the table above gives the correction for each syndrome.
 
+
 # %% [markdown]
 # ### 2.6 Implementation and Run: Logical $\lvert1\rangle$
 #
 # We collect everything into a single `@qkernel`. `error_pos` specifies where to inject the error, and the kernel performs encoding, error injection, syndrome measurement, and correction.
-
-
-# %%
-@qmc.qkernel
-def bitflip_syndrome_run(
-    error_pos: qmc.UInt,
-    theta: qmc.Float,
-) -> qmc.Vector[qmc.Bit]:
-    # Allocate 3 data qubits and 2 ancilla qubits for syndrome measurement.
-    data = qmc.qubit_array(3, name="data")
-    anc = qmc.qubit_array(2, name="anc")
-
-    # Prepare the logical state with ry(theta), then encode it into 3 qubits.
-    data[0] = qmc.ry(data[0], theta)
-    data[0], data[1], data[2] = encode_3qubit_bitflip(data[0], data[1], data[2])
-
-    # Inject an X error at error_pos (error_pos=3 means no error).
-    for i in qmc.range(3):
-        if error_pos == i:
-            data[i] = qmc.x(data[i])
-
-    # Syndrome measurement 1: extract the Z0 Z1 parity into anc[0].
-    data[0], anc[0] = qmc.cx(data[0], anc[0])
-    data[1], anc[0] = qmc.cx(data[1], anc[0])
-    s0 = qmc.measure(anc[0])
-
-    # Syndrome measurement 2: extract the Z0 Z2 parity into anc[1].
-    data[0], anc[1] = qmc.cx(data[0], anc[1])
-    data[2], anc[1] = qmc.cx(data[2], anc[1])
-    s1 = qmc.measure(anc[1])
-
-    # Identify the error location from the syndrome (s0, s1) and correct with X.
-    if s0 & s1:  # (1, 1) -> data[0]
-        data[0] = qmc.x(data[0])
-    if s0 & ~s1:  # (1, 0) -> data[1]
-        data[1] = qmc.x(data[1])
-    if ~s0 & s1:  # (0, 1) -> data[2]
-        data[2] = qmc.x(data[2])
-
-    return qmc.measure(data)
 
 
 # %% [markdown]
@@ -309,76 +230,161 @@ def bitflip_syndrome_run(
 #
 # First we prepare the logical $\lvert1\rangle$ (an `ry` gate with `theta` $=\pi$). If correction works, `data[0]` should always be 1.
 
-# %%
-bitflip_cases = [
-    ("no error", 3),
-    ("X on data[0]", 0),
-    ("X on data[1]", 1),
-    ("X on data[2]", 2),
-]
-if docs_test_mode:
-    bitflip_cases = [
-        ("no error", 3),
-        ("X on data[1]", 1),
-    ]
 
-print("3-qubit bit-flip code: logical |1>")
-for label, error_pos in bitflip_cases:
-    counts = _sample_first_bit(
-        bitflip_syndrome_run,
-        bindings={"error_pos": error_pos},
-        parameters=["theta"],
-        runtime_bindings={"theta": math.pi},
-    )
-    print(f"  {label:14s}: data[0]=0 -> {counts[0]:3d}, data[0]=1 -> {counts[1]:3d}")
-    # Perfect single-X correction on a pure-|1> input is fully deterministic:
-    # every shot reads data[0] = 1.
-    assert counts[0] == 0
-    assert counts[1] == counts[0] + counts[1]
+# %%
+@qm.qkernel
+def bit_flip_code_state(
+    state: qm.Q[qm.Bits[5]],  # type: ignore[valid-type]
+    theta: qm.Real,
+    error_position: qm.Const[qm.Int],
+) -> qm.Q[qm.Bits[5]]:  # type: ignore[valid-type]
+    """Encode, diagnose, and coherently correct one bit-flip error.
+
+    Args:
+        state (qm.Q[qm.Bits[5]]): Three data and two clean syndrome qubits.
+        theta (qm.Real): Logical-state Y rotation angle in radians.
+        error_position (qm.Const[qm.Int]): Erroneous data-qubit index.
+
+    Returns:
+        qm.Q[qm.Bits[5]]: Decoded logical qubit, clean data, and syndrome bits.
+    """
+
+    state = qm.ry(state, theta, target=0)
+    state = qm.cx(state, control=0, target=1)
+    state = qm.cx(state, control=0, target=2)
+    state = qm.x(state, target=error_position)
+
+    state = qm.cx(state, control=0, target=3)
+    state = qm.cx(state, control=1, target=3)
+    state = qm.cx(state, control=0, target=4)
+    state = qm.cx(state, control=2, target=4)
+
+    state = qm.ccx(state, control1=3, control2=4, target=0)
+    state = qm.x(state, target=4)
+    state = qm.ccx(state, control1=3, control2=4, target=1)
+    state = qm.x(state, target=4)
+    state = qm.x(state, target=3)
+    state = qm.ccx(state, control1=3, control2=4, target=2)
+    state = qm.x(state, target=3)
+
+    state = qm.cx(state, control=0, target=2)
+    return qm.cx(state, control=0, target=1)
+
+
+@qm.qkernel
+def bit_flip_code_samples(
+    theta: qm.Param[qm.Real],
+    error_position: qm.Const[qm.Int],
+) -> qm.Shot[qm.Bits[5]]:  # type: ignore[valid-type]
+    """Sample the runtime-parametric three-qubit repetition code.
+
+    Args:
+        theta (qm.Param[qm.Real]): Runtime logical-state angle in radians.
+        error_position (qm.Const[qm.Int]): Erroneous data-qubit index.
+
+    Returns:
+        qm.Shot[qm.Bits[5]]: Logical, clean-data, and syndrome bits.
+    """
+
+    return qm.measure(bit_flip_code_state(qm.qubits(5), theta, error_position))
+
+
+# %% [markdown]
+# `error_position` is `Const` because it changes circuit topology. `theta` is a
+# `Param`, so one compiled artifact can accept different logical amplitudes. The
+# two names cannot accidentally overlap as compile-time and launch-time values.
+
+# %% [markdown]
+# ## Inspect and estimate the corrected body
+#
+# We specialize one representative error on data qubit one. No QEC-specific
+# operation is introduced: Rust follows the ordinary call and derives the exact
+# gate families and five-qubit peak width from its body.
+
+# %%
+ERROR_POSITION = 1
+program = bit_flip_code_samples.specialize(
+    error_position=ERROR_POSITION,
+)
+inspection = program.inspect()
+study = qm.resources.logical(program)
+
+assert "qcore.call" in inspection
+assert "quantum.error_correction" not in inspection
+assert study.metric(qm.resources.LOGICAL_PEAK_QUBITS).numeric_enclosure() == (5, 5)
+assert study.metric(qm.resources.LOGICAL_GATES).numeric_enclosure() == (17, 17)
+assert study.metric(
+    qm.resources.logical_operation_count("quantum.cx")
+).numeric_enclosure() == (8, 8)
+assert study.metric(
+    qm.resources.logical_operation_count("quantum.ccx")
+).numeric_enclosure() == (3, 3)
+assert study.metric(qm.resources.LOGICAL_ROTATION_GATES).numeric_enclosure() == (1, 1)
+assert qm.resources.ResourceStudy.from_bytes(study.to_bytes()) == study
+
+# %% [markdown]
+# ## Compile once and verify amplitude preservation
+#
+# For $\theta=\pi/3$, the original logical state has
+# $P(1)=\sin^2(\theta/2)=1/4$. A 64-shot sample is sufficient for a bounded
+# six-standard-error witness. The two clean data bits must always be zero after
+# decoding, and the retained syndrome must always identify data qubit one.
+
+# %%
+THETA = math.pi / 3.0
+SHOTS = 64
+EXPECTED_SYNDROME = (1, 0)
+
+endpoint = qm.Reference()
+artifact = qm.compile(program, to=endpoint.target)
+record = qm.run(
+    artifact,
+    on=endpoint,
+    parameters={"theta": THETA},
+    shots=SHOTS,
+    seed=2,
+)
+result = record.result
+expected_one_probability = math.sin(THETA / 2.0) ** 2
+observed_one_probability = (
+    sum(count for bits, count in result.counts.items() if bits[0] == 1) / result.shots
+)
+sampling_error = 6.0 * math.sqrt(
+    expected_one_probability * (1.0 - expected_one_probability) / SHOTS
+)
+
+print("corrected counts:", result.counts)
+print("P(logical=1):", observed_one_probability)
+
+assert tuple(slot.name for slot in artifact.parameter_abi.slots) == ("theta",)
+assert record.artifact is artifact
+assert all(bits[1:3] == (0, 0) for bits in result.counts)
+assert all(bits[3:5] == EXPECTED_SYNDROME for bits in result.counts)
+assert abs(observed_one_probability - expected_one_probability) <= sampling_error
 
 # %% [markdown]
 # ### 2.7 Superposition Input
 #
-# The code also preserves amplitudes. The state prepared with `theta` $=\pi/3$ has probability
+# The measured probability confirms that correction preserves the amplitudes of
+# $\cos(\theta/2)|0\rangle+\sin(\theta/2)|1\rangle$, not just the classical
+# values zero and one.
 #
-# $$P(\text{data}[0]=1)=\sin^2(\pi/6)=0.25.$$
-#
-# This probability should be preserved regardless of the injected error.
-
-# %%
-print("3-qubit bit-flip code: superposition input")
-for label, error_pos in bitflip_cases:
-    counts = _sample_first_bit(
-        bitflip_syndrome_run,
-        bindings={"error_pos": error_pos},
-        parameters=["theta"],
-        runtime_bindings={"theta": math.pi / 3},
-        shots=superposition_shots,
-    )
-    total = counts[0] + counts[1]
-    print(f"  {label:14s}: P(data[0]=1) = {counts[1] / total:.3f}")
-    if not docs_test_mode:
-        assert abs(counts[1] / total - 0.25) < 0.05
-    assert total == superposition_shots
-
-# %% [markdown]
 # ### 2.8 Limitation: Powerless Against Phase Errors
 #
-# The bit-flip code can correct only $X$ errors. It is powerless against the phase error $Z$.
-#
-# The reason lies in how the $Z$ parity is measured. A $Z$ error only changes the sign of $\lvert000\rangle$ or $\lvert111\rangle$; it does not change the bit values. The $Z_iZ_j$ parity only looks at whether bits are equal, so even when a $Z$ error occurs the syndrome stays $(0,0)$ — the error cannot be detected.
-#
-# Correcting $Z$ errors requires a different code. In the next section we build the **phase-flip code**, which uses Hadamard gates to move the bit-flip code into "the world of phases".
+# The $Z_0Z_1$ and $Z_0Z_2$ parities cannot see a sign change. To correct $Z$,
+# move the same repetition code into the $X$ basis.
 
 # %% [markdown]
 # ## 3. The 3-Qubit Phase-Flip Code
 #
 # The bit-flip code could correct only $X$ errors. Next we build a code that corrects the phase error $Z$. Rather than designing one from scratch, we reuse the bit-flip code "in a different basis".
 
+
 # %% [markdown]
 # ### 3.1 The Target Error: Phase Flip
 #
 # A $Z$ error flips only the sign of $\lvert1\rangle$ ($\lvert0\rangle\to\lvert0\rangle$, $\lvert1\rangle\to-\lvert1\rangle$). As seen in 1.4, it is an error invisible when measured in the computational basis. The phase-flip code aims to correct this single $Z$ error.
+
 
 # %% [markdown]
 # ### 3.2 The Key Identity: $H$ Swaps $X$ and $Z$
@@ -388,6 +394,7 @@ for label, error_pos in bitflip_cases:
 # $$HZH = X, \qquad HXH = Z$$
 #
 # That is, conjugating by $H$ swaps $X$ errors and $Z$ errors. The bit-flip code could correct $X$ errors. If we change the basis of each qubit with $H$, that code becomes a code that corrects $Z$ errors. This is the phase-flip code.
+
 
 # %% [markdown]
 # ### 3.3 The Code Space
@@ -399,23 +406,11 @@ for label, error_pos in bitflip_cases:
 #
 # Just as an $X$ error swaps $\lvert0\rangle\leftrightarrow\lvert1\rangle$ in the bit-flip code, a $Z$ error swaps $\lvert+\rangle\leftrightarrow\lvert-\rangle$ in the phase-flip code ($Z\lvert+\rangle=\lvert-\rangle$).
 
+
 # %% [markdown]
 # ### 3.4 The Encoding Circuit
 #
 # Encoding is just the bit-flip encoding followed by an $H$ on all three qubits.
-
-
-# %%
-@qmc.qkernel
-def encode_3qubit_phaseflip(
-    q0: qmc.Qubit, q1: qmc.Qubit, q2: qmc.Qubit
-) -> tuple[qmc.Qubit, qmc.Qubit, qmc.Qubit]:
-    # After bit-flip encoding, move all 3 qubits to the X basis with H.
-    q0, q1, q2 = encode_3qubit_bitflip(q0, q1, q2)
-    q0 = qmc.h(q0)
-    q1 = qmc.h(q1)
-    q2 = qmc.h(q2)
-    return q0, q1, q2
 
 
 # %% [markdown]
@@ -432,81 +427,16 @@ def encode_3qubit_phaseflip(
 # | $Z_1$ | $(1, 0)$ | $Z_1$ |
 # | $Z_2$ | $(0, 1)$ | $Z_2$ |
 
+
 # %% [markdown]
 # ### 3.6 Implementation and Run
 #
 # We collect everything into a single `@qkernel`. This time we prepare the logical $\lvert0_L\rangle=\lvert+++\rangle$.
 
 
-# %%
-@qmc.qkernel
-def phaseflip_syndrome_run(error_pos: qmc.UInt) -> qmc.Vector[qmc.Bit]:
-    # Allocate 3 data qubits and 2 ancilla qubits for syndrome measurement.
-    data = qmc.qubit_array(3, name="data")
-    anc = qmc.qubit_array(2, name="anc")
-
-    # Encode into the logical |0_L> = |+++>.
-    data[0], data[1], data[2] = encode_3qubit_phaseflip(data[0], data[1], data[2])
-
-    # Inject a Z error at error_pos (error_pos=3 means no error).
-    for i in qmc.range(3):
-        if error_pos == i:
-            data[i] = qmc.z(data[i])
-
-    # Syndrome measurement 1: extract the X0 X1 parity into anc[0] (H gives the X basis).
-    anc[0] = qmc.h(anc[0])
-    anc[0], data[0] = qmc.cx(anc[0], data[0])
-    anc[0], data[1] = qmc.cx(anc[0], data[1])
-    anc[0] = qmc.h(anc[0])
-    s0 = qmc.measure(anc[0])
-
-    # Syndrome measurement 2: extract the X0 X2 parity into anc[1].
-    anc[1] = qmc.h(anc[1])
-    anc[1], data[0] = qmc.cx(anc[1], data[0])
-    anc[1], data[2] = qmc.cx(anc[1], data[2])
-    anc[1] = qmc.h(anc[1])
-    s1 = qmc.measure(anc[1])
-
-    # Identify the error location from the syndrome (s0, s1) and correct with Z.
-    if s0 & s1:  # (1, 1) -> data[0]
-        data[0] = qmc.z(data[0])
-    if s0 & ~s1:  # (1, 0) -> data[1]
-        data[1] = qmc.z(data[1])
-    if ~s0 & s1:  # (0, 1) -> data[2]
-        data[2] = qmc.z(data[2])
-
-    # data[0] is back in |+>, so apply H to turn it into |0> before measuring.
-    data[0] = qmc.h(data[0])
-    return qmc.measure(data)
-
-
 # %% [markdown]
 # After correction, `data[0]` is back in $\lvert+\rangle$. Since $\lvert+\rangle$ measured directly gives 0 and 1 half the time, we apply one final $H$ to `data[0]` to turn it into $\lvert0\rangle$ before measuring. If correction works, `data[0]` should always be 0.
 
-# %%
-phaseflip_cases = [
-    ("no error", 3),
-    ("Z on data[0]", 0),
-    ("Z on data[1]", 1),
-    ("Z on data[2]", 2),
-]
-if docs_test_mode:
-    phaseflip_cases = [
-        ("no error", 3),
-        ("Z on data[1]", 1),
-    ]
-
-print("3-qubit phase-flip code: logical |0_L> = |+++>")
-for label, error_pos in phaseflip_cases:
-    counts = _sample_first_bit(
-        phaseflip_syndrome_run,
-        bindings={"error_pos": error_pos},
-    )
-    print(f"  {label:14s}: data[0]=0 -> {counts[0]:3d}, data[0]=1 -> {counts[1]:3d}")
-    # After perfect single-Z correction the final H sends data[0] back to
-    # |0>, so every shot reads 0.
-    assert counts[1] == 0
-    assert counts[0] == counts[0] + counts[1]
 
 # %% [markdown]
 # ### 3.7 Limitation: Only One Error Type
@@ -515,10 +445,88 @@ for label, error_pos in phaseflip_cases:
 #
 # The bit-flip code handles only $X$, the phase-flip code only $Z$ — each corrects just one error type. But real noise causes both $X$ and $Z$, and also $Y$, where both occur at once. In the next section we combine the two codes into **Shor's 9-qubit code**, which corrects any single-qubit error.
 
+
+# %%
+@qm.qkernel
+def phase_flip_code_state(
+    state: qm.Q[qm.Bits[5]],  # type: ignore[valid-type]
+    theta: qm.Real,
+    error_position: qm.Const[qm.Int],
+) -> qm.Q[qm.Bits[5]]:  # type: ignore[valid-type]
+    """Encode, diagnose, and coherently correct one phase-flip error.
+
+    Args:
+        state (qm.Q[qm.Bits[5]]): Three data and two clean syndrome qubits.
+        theta (qm.Real): Logical-state Y rotation angle in radians.
+        error_position (qm.Const[qm.Int]): Erroneous data-qubit index.
+
+    Returns:
+        qm.Q[qm.Bits[5]]: Decoded logical qubit, clean data, and syndrome bits.
+    """
+
+    state = qm.ry(state, theta, target=0)
+    state = qm.cx(state, control=0, target=1)
+    state = qm.cx(state, control=0, target=2)
+    for index in range(3):
+        state = qm.h(state, target=index)
+    state = qm.z(state, target=error_position)
+    for index in range(3):
+        state = qm.h(state, target=index)
+
+    state = qm.cx(state, control=0, target=3)
+    state = qm.cx(state, control=1, target=3)
+    state = qm.cx(state, control=0, target=4)
+    state = qm.cx(state, control=2, target=4)
+    state = qm.ccx(state, control1=3, control2=4, target=0)
+    state = qm.x(state, target=4)
+    state = qm.ccx(state, control1=3, control2=4, target=1)
+    state = qm.x(state, target=4)
+    state = qm.x(state, target=3)
+    state = qm.ccx(state, control1=3, control2=4, target=2)
+    state = qm.x(state, target=3)
+    state = qm.cx(state, control=0, target=2)
+    return qm.cx(state, control=0, target=1)
+
+
+@qm.qkernel
+def phase_flip_code_samples(
+    theta: qm.Param[qm.Real],
+    error_position: qm.Const[qm.Int],
+) -> qm.Shot[qm.Bits[5]]:  # type: ignore[valid-type]
+    """Sample the runtime-parametric phase-flip repetition code.
+
+    Args:
+        theta (qm.Param[qm.Real]): Runtime logical-state angle in radians.
+        error_position (qm.Const[qm.Int]): Erroneous data-qubit index.
+
+    Returns:
+        qm.Shot[qm.Bits[5]]: Logical, clean-data, and syndrome bits.
+    """
+
+    return qm.measure(phase_flip_code_state(qm.qubits(5), theta, error_position))
+
+
+phase_result = qm.run(
+    phase_flip_code_samples,
+    on=endpoint,
+    error_position=1,
+    parameters={"theta": THETA},
+    shots=SHOTS,
+    seed=3,
+).result
+phase_one_probability = (
+    sum(count for bits, count in phase_result.counts.items() if bits[0] == 1)
+    / phase_result.shots
+)
+assert all(bits[1:3] == (0, 0) for bits in phase_result.counts)
+assert all(bits[3:5] == EXPECTED_SYNDROME for bits in phase_result.counts)
+assert abs(phase_one_probability - expected_one_probability) <= sampling_error
+
 # %% [markdown]
 # ## 4. Shor's 9-Qubit Code
 #
 # Combining the bit-flip code and the phase-flip code should let us correct both $X$ and $Z$. **Shor's 9-qubit code** is what realizes this.
+
 
 # %% [markdown]
 # ### 4.1 The Idea: Nest Two Codes
@@ -529,6 +537,7 @@ for label, error_pos in phaseflip_cases:
 # 2. Encode each of those three qubits into three more with the bit-flip code.
 #
 # This spreads 1 → 3 → 9 qubits. This construction of "putting one more code inside a code" is called a **concatenated code**. The outer phase-flip layer handles $Z$ errors, and the inner bit-flip layer handles $X$ errors.
+
 
 # %% [markdown]
 # ### 4.2 Viewing 9 Qubits as 3 Blocks
@@ -541,23 +550,11 @@ for label, error_pos in phaseflip_cases:
 #
 # Each block is the inner bit-flip code. The representatives of the three blocks, $q_0, q_3, q_6$, form the outer phase-flip code.
 
+
 # %% [markdown]
 # ### 4.3 The Encoding Circuit
 #
 # Encoding is just applying the outer phase-flip encoding to $q_0, q_3, q_6$, then bit-flip encoding each block.
-
-
-# %%
-@qmc.qkernel
-def encode_shor(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-    # Outer layer: encode q[0], q[3], q[6] with the phase-flip code.
-    q[0], q[3], q[6] = encode_3qubit_phaseflip(q[0], q[3], q[6])
-
-    # Inner layer: encode each of the 3 blocks with the bit-flip code.
-    q[0], q[1], q[2] = encode_3qubit_bitflip(q[0], q[1], q[2])
-    q[3], q[4], q[5] = encode_3qubit_bitflip(q[3], q[4], q[5])
-    q[6], q[7], q[8] = encode_3qubit_bitflip(q[6], q[7], q[8])
-    return q
 
 
 # %% [markdown]
@@ -567,6 +564,7 @@ def encode_shor(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
 #
 # - **Intra-block $Z$ parities** (`anc[0]`–`anc[5]`, two per block): these are exactly the bit-flip code's syndrome measurement, locating an $X$ error within each block.
 # - **Inter-block $X$ parities** (`anc[6]`, `anc[7]`): the two parities $X_0X_1X_2X_3X_4X_5$ and $X_3X_4X_5X_6X_7X_8$. These correspond to the phase-flip code's syndrome measurement, identifying the block containing a $Z$ error.
+
 
 # %% [markdown]
 # ### 4.5 Why $Y$ Errors Are Corrected
@@ -578,120 +576,160 @@ def encode_shor(q: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
 # %% [markdown]
 # ### 4.6 Implementation and Run
 #
-# We collect everything into a single `@qkernel`. `error_type` is `1=X`, `2=Y`, `3=Z`, and `error_pos` is the index of the qubit to inject the error into.
-#
-# Even after correction, the logical state is still encoded across nine qubits. For this demonstration we apply the inverse encoding circuit at the end so that the logical bit can be read directly from `q[0]`. This inverse encoding is a step for checking the result; the correction itself is already complete with syndrome measurement and feedback.
+# `error_type` uses `1=X`, `2=Y`, and `3=Z`. Both the error type and location
+# are `Const` values because they select circuit structure in this bounded
+# witness. `theta` remains a runtime parameter, exactly as in the smaller codes.
 
 
 # %%
-@qmc.qkernel
-def shor_syndrome_run(
-    error_type: qmc.UInt,
-    error_pos: qmc.UInt,
-    theta: qmc.Float,
-) -> qmc.Vector[qmc.Bit]:
-    # Allocate 9 data qubits and 8 ancilla qubits for syndrome measurement.
-    q = qmc.qubit_array(9, name="q")
-    anc = qmc.qubit_array(8, name="anc")
+@qm.qkernel
+def flip_shor_data(state: qm.Q[qm.Bits[9]], position: qm.Int) -> qm.Q[qm.Bits[9]]:
+    """Flip one component of a Shor data block.
 
-    # Prepare the logical state with ry(theta), then encode it into 9 qubits.
-    q[0] = qmc.ry(q[0], theta)
-    q = encode_shor(q)
+    Args:
+        state (qm.Q[qm.Bits[9]]): Nine encoded data qubits.
+        position (qm.Int): Component to flip.
 
-    # Inject the X / Y / Z error specified by error_type / error_pos.
-    for i in qmc.range(9):
-        if (error_type == 1) & (error_pos == i):  # 1: X error
-            q[i] = qmc.x(q[i])
-        if (error_type == 2) & (error_pos == i):  # 2: Y error
-            q[i] = qmc.y(q[i])
-        if (error_type == 3) & (error_pos == i):  # 3: Z error
-            q[i] = qmc.z(q[i])
+    Returns:
+        qm.Q[qm.Bits[9]]: Updated data block.
+    """
 
-    # Intra-block Z parity: for block b, anc[2b]=Z(3b,3b+1), anc[2b+1]=Z(3b,3b+2).
-    for b in qmc.range(3):
-        q[3 * b], anc[2 * b] = qmc.cx(q[3 * b], anc[2 * b])
-        q[3 * b + 1], anc[2 * b] = qmc.cx(q[3 * b + 1], anc[2 * b])
-        q[3 * b], anc[2 * b + 1] = qmc.cx(q[3 * b], anc[2 * b + 1])
-        q[3 * b + 2], anc[2 * b + 1] = qmc.cx(q[3 * b + 2], anc[2 * b + 1])
-
-    # Inter-block X parity: anc[6] spans q[0..5], anc[7] spans q[3..8].
-    for p in qmc.range(2):
-        anc[6 + p] = qmc.h(anc[6 + p])
-        for i in qmc.range(6):
-            anc[6 + p], q[3 * p + i] = qmc.cx(anc[6 + p], q[3 * p + i])
-        anc[6 + p] = qmc.h(anc[6 + p])
-
-    # X-component correction: per block, measure the syndrome, locate the X error, and correct.
-    for b in qmc.range(3):
-        s0 = qmc.measure(anc[2 * b])
-        s1 = qmc.measure(anc[2 * b + 1])
-        if s0 & s1:  # (1, 1) -> qubit 0 of the block
-            q[3 * b] = qmc.x(q[3 * b])
-        if s0 & ~s1:  # (1, 0) -> qubit 1 of the block
-            q[3 * b + 1] = qmc.x(q[3 * b + 1])
-        if ~s0 & s1:  # (0, 1) -> qubit 2 of the block
-            q[3 * b + 2] = qmc.x(q[3 * b + 2])
-
-    # Z-component correction: find the block holding the Z error, apply Z to its representative.
-    phase_s0 = qmc.measure(anc[6])
-    phase_s1 = qmc.measure(anc[7])
-    if phase_s0 & ~phase_s1:
-        q[0] = qmc.z(q[0])
-    if phase_s0 & phase_s1:
-        q[3] = qmc.z(q[3])
-    if ~phase_s0 & phase_s1:
-        q[6] = qmc.z(q[6])
-
-    # Verification: apply the inverse encoder to collect the logical bit into q[0].
-    for b in qmc.range(3):
-        q[3 * b], q[3 * b + 1] = qmc.cx(q[3 * b], q[3 * b + 1])
-        q[3 * b], q[3 * b + 2] = qmc.cx(q[3 * b], q[3 * b + 2])
-        q[3 * b] = qmc.h(q[3 * b])
-    q[0], q[3] = qmc.cx(q[0], q[3])
-    q[0], q[6] = qmc.cx(q[0], q[6])
-
-    return qmc.measure(q)
+    return qm.x(state, target=position)
 
 
-# %% [markdown]
-# We try one representative error per block ($X$ on block 0, $Y$ on block 1, $Z$ on block 2). If the logical $\lvert1\rangle$ is preserved, `q[0]` should always be 1.
+@qm.qkernel
+def phase_shor_data(state: qm.Q[qm.Bits[9]], position: qm.Int) -> qm.Q[qm.Bits[9]]:
+    """Apply one phase correction to a Shor data block.
+
+    Args:
+        state (qm.Q[qm.Bits[9]]): Nine encoded data qubits.
+        position (qm.Int): Component receiving the phase correction.
+
+    Returns:
+        qm.Q[qm.Bits[9]]: Updated data block.
+    """
+
+    return qm.z(state, target=position)
+
+
+@qm.qkernel
+def shor_code_samples(
+    theta: qm.Param[qm.Real],
+    error_type: qm.Const[qm.Int],
+    error_position: qm.Const[qm.Int],
+) -> qm.Shot[qm.Bits[17]]:  # type: ignore[valid-type]
+    """Encode, correct, decode, and sample one Shor-code experiment.
+
+    Args:
+        theta (qm.Param[qm.Real]): Runtime logical-state angle in radians.
+        error_type (qm.Const[qm.Int]): Pauli error selector: 1, 2, or 3.
+        error_position (qm.Const[qm.Int]): Erroneous data-qubit index.
+
+    Returns:
+        qm.Shot[qm.Bits[17]]: Decoded data followed by measured syndromes.
+    """
+
+    state = qm.qubits(17)
+    state = qm.ry(state, theta, target=0)
+
+    # Outer phase-flip encoding on representatives 0, 3, and 6.
+    state = qm.cx(state, control=0, target=3)
+    state = qm.cx(state, control=0, target=6)
+    for target in range(0, 9, 3):
+        state = qm.h(state, target=target)
+
+    # Inner bit-flip encoding in each three-qubit block.
+    for block in range(3):
+        representative = 3 * block
+        state = qm.cx(state, control=representative, target=representative + 1)
+        state = qm.cx(state, control=representative, target=representative + 2)
+
+    if error_type == 1:
+        state = qm.x(state, target=error_position)
+    elif error_type == 2:
+        state = qm.y(state, target=error_position)
+    elif error_type == 3:
+        state = qm.z(state, target=error_position)
+
+    # Six intra-block Z-parity syndromes occupy components 9 through 14.
+    for block in range(3):
+        representative = 3 * block
+        first_syndrome = 9 + 2 * block
+        second_syndrome = first_syndrome + 1
+        state = qm.cx(state, control=representative, target=first_syndrome)
+        state = qm.cx(state, control=representative + 1, target=first_syndrome)
+        state = qm.cx(state, control=representative, target=second_syndrome)
+        state = qm.cx(state, control=representative + 2, target=second_syndrome)
+
+    # Inter-block X parities occupy components 15 and 16.
+    for parity in range(2):
+        syndrome = 15 + parity
+        state = qm.h(state, target=syndrome)
+        for target in range(3 * parity, 3 * parity + 6):
+            state = qm.cx(state, control=syndrome, target=target)
+        state = qm.h(state, target=syndrome)
+
+    # Keep syndrome extraction coherent and realize each lookup table with a
+    # two-control call. Control component zero is the least-significant bit.
+    data, syndromes = qm.split_at(state, 9)
+    x0, syndromes = qm.split_at(syndromes, 2)
+    x1, syndromes = qm.split_at(syndromes, 2)
+    x2, phase = qm.split_at(syndromes, 2)
+
+    x0, data = qm.control(flip_shor_data, x0, data, 0, control_state=3)
+    x0, data = qm.control(flip_shor_data, x0, data, 1, control_state=1)
+    x0, data = qm.control(flip_shor_data, x0, data, 2, control_state=2)
+    x1, data = qm.control(flip_shor_data, x1, data, 3, control_state=3)
+    x1, data = qm.control(flip_shor_data, x1, data, 4, control_state=1)
+    x1, data = qm.control(flip_shor_data, x1, data, 5, control_state=2)
+    x2, data = qm.control(flip_shor_data, x2, data, 6, control_state=3)
+    x2, data = qm.control(flip_shor_data, x2, data, 7, control_state=1)
+    x2, data = qm.control(flip_shor_data, x2, data, 8, control_state=2)
+
+    phase, data = qm.control(phase_shor_data, phase, data, 0, control_state=1)
+    phase, data = qm.control(phase_shor_data, phase, data, 3, control_state=3)
+    phase, data = qm.control(phase_shor_data, phase, data, 6, control_state=2)
+
+    # Invert the inner and outer encoders to expose the logical qubit at q0.
+    for block in range(3):
+        representative = 3 * block
+        data = qm.cx(data, control=representative, target=representative + 2)
+        data = qm.cx(data, control=representative, target=representative + 1)
+        data = qm.h(data, target=representative)
+    data = qm.cx(data, control=0, target=6)
+    data = qm.cx(data, control=0, target=3)
+    syndromes = qm.concat(x0, x1, x2, phase)
+    return qm.measure(qm.concat(data, syndromes))
+
 
 # %%
-shor_cases = [
-    ("X", 1, 0),
-    ("Y", 2, 4),
-    ("Z", 3, 8),
-]
-if docs_test_mode:
-    shor_cases = [
-        ("Y", 2, 4),
-    ]
+shor_cases = (("X", 1, 0), ("Y", 2, 4), ("Z", 3, 8))
+shor_results = tuple(
+    qm.run(
+        shor_code_samples,
+        on=endpoint,
+        error_type=error_type,
+        error_position=error_position,
+        parameters={"theta": math.pi},
+        shots=1,
+        seed=10 + error_position,
+    ).result
+    for _, error_type, error_position in shor_cases
+)
 
-print("Shor 9-qubit code: logical |1>")
-print(f"  {'error':6s} | {'pos':5s} | P(q[0]=1)")
-print(f"  {'-' * 6}-+-{'-' * 5}-+-{'-' * 9}")
-for name, error_type, error_pos in shor_cases:
-    counts = _sample_first_bit(
-        shor_syndrome_run,
-        bindings={"error_type": error_type, "error_pos": error_pos},
-        parameters=["theta"],
-        runtime_bindings={"theta": math.pi},
-    )
-    total = counts[0] + counts[1]
-    print(f"  {name:6s} | q[{error_pos}]  | {counts[1] / total:.3f}")
-    # The pure-|1> input survives any single Pauli error perfectly under
-    # Shor's code, so q[0] reads 1 on every shot.
-    assert counts[0] == 0
-    assert counts[1] == total
-
-# %% [markdown]
-# ### 4.7 Why It Corrects "Any Single Error"
+for (name, _, position), shor_result in zip(
+    shor_cases,
+    shor_results,
+    strict=True,
+):
+    print(f"Shor code: {name} error on q[{position}] -> {shor_result.counts}")
+    assert all(bits[0] == 1 for bits in shor_result.counts)
 #
-# Shor's code corrects all three of $X$, $Y$, $Z$. This directly means it "corrects any single-qubit error".
+# ### 4.7 Why It Corrects “Any Single Error”
 #
-# As seen in 1.4, any error can be written, as a matrix, as a linear combination of $I, X, Y, Z$, and syndrome measurement collapses that superposition into a single discrete Pauli error. What remains after the collapse is just one of $X$, $Y$, $Z$ (or no error), all of which Shor's code can correct. This is why it handles any single-qubit error, including continuous ones.
-#
-# The formal treatment is organized in the second part, [Stabilizer Formalism and the Steane Code](steane_code.ipynb).
+# Syndrome extraction projects an arbitrary one-qubit error onto one of the
+# Pauli components $I,X,Y,Z$. Shor's code corrects each component, so by
+# linearity it corrects any single-qubit error.
 
 # %% [markdown]
 # ## 5. The Common Pattern
@@ -705,6 +743,7 @@ for name, error_type, error_pos in shor_cases:
 #
 # This skeleton does not change as the code changes. What differs is only "which parity to measure".
 
+
 # %% [markdown]
 # ### 5.1 Naming the Parity Operators: Stabilizers
 #
@@ -713,6 +752,7 @@ for name, error_type, error_pos in shor_cases:
 # A stabilizer is a Pauli operator that leaves every state of the code space unchanged. Applied to a valid codeword, the state is unchanged (eigenvalue $+1$). When an error occurs, the measured value of a stabilizer that anticommutes with that error flips to $-1$, and that becomes a bit of the syndrome.
 #
 # The $Z_0Z_1$ of the bit-flip code, the $X_0X_1$ of the phase-flip code, and the eight parities of Shor's code are all stabilizers. The three codes were different manifestations of one idea: "measure stabilizers to obtain a syndrome." This view is called the **stabilizer formalism**, and the second part treats it in earnest.
+
 
 # %% [markdown]
 # ### 5.2 Summary of the Three Codes
@@ -735,6 +775,7 @@ for name, error_type, error_pos in shor_cases:
 # - **Change the error location**: set `error_pos` of each `*_syndrome_run` to various values and confirm that correction works.
 # - **Make it fail on purpose**: below, we experience the limitation of the bit-flip code.
 
+
 # %% [markdown]
 # ### Make It Fail on Purpose
 #
@@ -742,55 +783,23 @@ for name, error_type, error_pos in shor_cases:
 #
 # The following kernel injects $X$ errors at two locations, `data[0]` and `data[1]`, into the logical $\lvert1\rangle$ ($\lvert111\rangle$), and performs syndrome measurement and correction as usual.
 
-# %%
-@qmc.qkernel
-def bitflip_two_errors(theta: qmc.Float) -> qmc.Vector[qmc.Bit]:
-    data = qmc.qubit_array(3, name="data")
-    anc = qmc.qubit_array(2, name="anc")
-
-    data[0] = qmc.ry(data[0], theta)
-    data[0], data[1], data[2] = encode_3qubit_bitflip(data[0], data[1], data[2])
-
-    # Inject X errors at two locations (beyond the single-error correction capability).
-    data[0] = qmc.x(data[0])
-    data[1] = qmc.x(data[1])
-
-    # Syndrome measurement and correction are the same as in bitflip_syndrome_run.
-    data[0], anc[0] = qmc.cx(data[0], anc[0])
-    data[1], anc[0] = qmc.cx(data[1], anc[0])
-    s0 = qmc.measure(anc[0])
-    data[0], anc[1] = qmc.cx(data[0], anc[1])
-    data[2], anc[1] = qmc.cx(data[2], anc[1])
-    s1 = qmc.measure(anc[1])
-
-    if s0 & s1:
-        data[0] = qmc.x(data[0])
-    if s0 & ~s1:
-        data[1] = qmc.x(data[1])
-    if ~s0 & s1:
-        data[2] = qmc.x(data[2])
-
-    return qmc.measure(data)
-
-
-# %%
-print("bit-flip code with TWO X errors (logical |1>)")
-counts = _sample_first_bit(
-    bitflip_two_errors,
-    parameters=["theta"],
-    runtime_bindings={"theta": math.pi},
-)
-print(f"  data[0]=0 -> {counts[0]:3d}, data[0]=1 -> {counts[1]:3d}")
-# Failure mode: with two X errors the syndrome misidentifies a single-X
-# error and the "correction" turns logical |1> into logical |0>, so every
-# shot deterministically reads data[0] = 0 — that is what d=1 means.
-assert counts[1] == 0
-assert counts[0] == counts[0] + counts[1]
 
 # %% [markdown]
 # `data[0]` becomes 0, not 1. Far from fixing the state, the correction turned the logical $\lvert1\rangle$ into the logical $\lvert0\rangle$.
 #
 # With $X$ at two locations, $\lvert001\rangle$ looks "different in only one place" from $\lvert111\rangle$, so the correction applies an $X$ to the remaining location as well, ending at $\lvert000\rangle$. This is the limitation "up to a single error" — the actual meaning of the bit-flip code having $d=1$ in the table of 5.2.
+
+# %% [markdown]
+# ## From bit flips to general Pauli errors
+#
+# A three-qubit phase-flip code is the same repetition construction conjugated
+# by Hadamards: $HZH=X$ turns one $Z$ error into the bit-flip problem above.
+# Correcting an arbitrary single-qubit error requires independent bit and phase
+# syndromes because $Y=iXZ$. The next article,
+# [Stabilizer Formalism and the Steane Code](steane_code.ipynb), implements that
+# complete composition with one bounded ten-qubit Qamomile program. Keeping
+# its execution witness there avoids repeating another deep statevector test in
+# this introductory page.
 
 # %% [markdown]
 # ## 7. Summary

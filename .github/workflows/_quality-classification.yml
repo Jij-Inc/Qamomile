@@ -25,7 +25,7 @@ jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
-      # If steps.changes.outputs.classification_complete is not true, meaning including 
+      # If steps.changes.outputs.classification_complete is not true, meaning including
       # Null or "unknown" or anything, we conservatively require the full quality check,
       # and also regard documentations are changed.
       full_ci_required: ${{ steps.changes.outputs.classification_complete != 'true' || steps.changes.outputs.full_ci_required != 'false' }}

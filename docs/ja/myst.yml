@@ -3,7 +3,7 @@ version: 1
 project:
   id: qamomile-docs-ja
   title: Qamomile ドキュメント
-  description: 量子最適化アルゴリズムのための強力なSDK
+  description: Pythonに組み込まれたsource-compiledでtype-safeな関数型量子プログラミング言語
   keywords:
     - 量子コンピューティング
     - 最適化
@@ -40,6 +40,7 @@ project:
     - title: リリースノート
       file: release_notes/index.md
       children:
+        - file: release_notes/v0_16_0_rc1.md
         - file: release_notes/v0_15_2.md
         - file: release_notes/v0_15_1.md
         - file: release_notes/v0_15_0.md
@@ -61,75 +62,66 @@ project:
     - title: API Reference
       file: api/index
       children:
-        - file: api/braket/index
-          children:
-            - file: api/braket/execution
-            - file: api/braket/materializer
-            - file: api/braket/observable
-            - file: api/braket/transpiler
-        - file: api/circuit/index
-          children:
-            - file: api/circuit/algorithm
-            - file: api/circuit/estimator
-            - file: api/circuit/frontend
-            - file: api/circuit/ir
-            - file: api/circuit/multi_controlled_x
-            - file: api/circuit/qft
-            - file: api/circuit/qpe
-            - file: api/circuit/qsvt
-            - file: api/circuit/serialization
-            - file: api/circuit/stdlib
-            - file: api/circuit/transpiler
-            - file: api/circuit/visualization
-        - file: api/cudaq/index
-          children:
-            - file: api/cudaq/emitter
-            - file: api/cudaq/materializer
-            - file: api/cudaq/observable
-            - file: api/cudaq/transpiler
-        - file: api/hugr/index
-          children:
-            - file: api/hugr/executable
-            - file: api/hugr/execution
-            - file: api/hugr/lowerer
-            - file: api/hugr/transpiler
-        - file: api/linalg/index
-          children:
-            - file: api/linalg/hermitian
-            - file: api/linalg/mottonen
-            - file: api/linalg/pauli_lcu
-            - file: api/linalg/periodic_shift_lcu
-            - file: api/linalg/subspace
-        - file: api/observable
+        - file: api/braket
+        - file: api/cirq
+        - file: api/cudaq
+        - file: api/hugr
+        - file: api/lowering
+        - file: api/measurement
         - file: api/optimization/index
           children:
-            - file: api/optimization/binary_model
-            - file: api/optimization/converter
             - file: api/optimization/fqaoa
             - file: api/optimization/gas
+            - file: api/optimization/local_search
+            - file: api/optimization/model
+            - file: api/optimization/ommx
             - file: api/optimization/pce
-            - file: api/optimization/post_process
             - file: api/optimization/qaoa
-            - file: api/optimization/qrao
+            - file: api/optimization/qrac
             - file: api/optimization/qsvt_eigenstate_filter
         - file: api/qbraid
-        - file: api/qiskit/index
-          children:
-            - file: api/qiskit/emitter
-            - file: api/qiskit/execution
-            - file: api/qiskit/materializer
-            - file: api/qiskit/observable
-            - file: api/qiskit/runtime
-            - file: api/qiskit/runtime_execution
-            - file: api/qiskit/transpiler
+        - file: api/qir
+        - file: api/qiskit
         - file: api/quration
-        - file: api/quri_parts/index
+        - file: api/quri_parts
+        - file: api/resources/index
           children:
-            - file: api/quri_parts/emitter
-            - file: api/quri_parts/exceptions
-            - file: api/quri_parts/materializer
-            - file: api/quri_parts/observable
-            - file: api/quri_parts/transpiler
+            - file: api/resources/analysis
+            - file: api/resources/bundle
+            - file: api/resources/control
+            - file: api/resources/expr
+            - file: api/resources/metrics
+            - file: api/resources/physical
+            - file: api/resources/projection
+            - file: api/resources/report
+            - file: api/resources/research
+            - file: api/resources/rules
+            - file: api/resources/values
+        - file: api/statistics
+        - file: api/stdlib/index
+          children:
+            - file: api/stdlib/arithmetic
+            - file: api/stdlib/block_encoding
+            - file: api/stdlib/boolean
+            - file: api/stdlib/fourier
+            - file: api/stdlib/grover
+            - file: api/stdlib/lcu
+            - file: api/stdlib/lookup
+            - file: api/stdlib/pauli
+            - file: api/stdlib/periodic_shift
+            - file: api/stdlib/phase_estimation
+            - file: api/stdlib/product_formula
+            - file: api/stdlib/qsvt
+            - file: api/stdlib/qsvt_eigenstate_filter
+            - file: api/stdlib/qubits
+            - file: api/stdlib/shor
+            - file: api/stdlib/signals
+            - file: api/stdlib/sparse_access_block_encoding
+            - file: api/stdlib/state_preparation
+            - file: api/stdlib/state_preparation_block_encoding
+            - file: api/stdlib/uniformly_controlled
+            - file: api/stdlib/variational
+        - file: api/visualization
 # --- End API Reference ---
 
 site:

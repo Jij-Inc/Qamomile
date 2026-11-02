@@ -1,28 +1,37 @@
-"""Qiskit engine for Qamomile.
+"""Expose Qiskit compilation and execution support for Qamomile.
 
-Design intent: this package concretizes circuit's abstract IR for Qiskit
-through ``QiskitMaterializer``. ``QiskitTranspiler`` plugs the materializer
-into the shared compiler pipeline, while ``observable.py`` converts
-Hamiltonians to ``SparsePauliOp``.
-
-``QiskitExecutor`` uses a local simulator by default and adapts IBM Runtime
-V2 primitives for named or preconfigured IBM backends, including account
-access checks, ISA compilation, and remote job lifecycles.
-
-Constraints: depend only on ``qamomile.circuit`` public APIs plus the
-``qiskit`` SDK — never on ``qamomile.optimization`` or other engines.
-Engine-specific lowering (decompositions, runtime control flow) belongs
-here at emit time, not in the IR; reuse circuit's shared decomposition
-recipes as the fallback for gates without a native Qiskit equivalent.
+QCore and the Rust compiler remain the semantic authorities. This namespace
+emits and retains Qiskit circuits and exposes execution endpoints. `to_circuit`
+inspects quantum components without creating an executable artifact. QPY is used
+only for explicit portable artifact export; SDK handles never enter QCore.
+`profile_from_backend` derives an immutable, Rust-validated ``TargetProfile``
+(coupling map, native operations, calibration rows) from a live backend target;
+its digest enters the target fingerprint and extension passes read it as
+``context.profile``.
 """
 
-from qamomile.qiskit.execution import QiskitExecutionOptions
-from qamomile.qiskit.observable import hamiltonian_to_sparse_pauli_op
-from qamomile.qiskit.transpiler import QiskitExecutor, QiskitTranspiler
+from ._integration import (
+    FORMAT as FORMAT,
+    Aer as Aer,
+    IBMRuntime as IBMRuntime,
+    Qiskit as Qiskit,
+    QiskitBackend as QiskitBackend,
+    bind_circuit as bind_circuit,
+    decode_counts as decode_counts,
+    load_circuit as load_circuit,
+    profile_from_backend as profile_from_backend,
+    to_circuit as to_circuit,
+)
 
 __all__ = [
-    "QiskitTranspiler",
-    "QiskitExecutor",
-    "QiskitExecutionOptions",
-    "hamiltonian_to_sparse_pauli_op",
+    "Aer",
+    "FORMAT",
+    "IBMRuntime",
+    "Qiskit",
+    "QiskitBackend",
+    "bind_circuit",
+    "decode_counts",
+    "load_circuit",
+    "profile_from_backend",
+    "to_circuit",
 ]

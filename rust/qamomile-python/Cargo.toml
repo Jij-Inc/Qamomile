@@ -1,0 +1,32 @@
+[package]
+name = "qamomile-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+name = "_qamomile_native"
+
+[dependencies]
+num-bigint.workspace = true
+num-complex.workspace = true
+pyo3.workspace = true
+qamomile-compiler.workspace = true
+pyo3-stub-gen = { version = "0.23.0", default-features = false, optional = true }
+pyo3-stub-gen-derive = "0.23.0"
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+stub-gen = ["dep:pyo3-stub-gen"]
+
+[[bin]]
+name = "stub_gen"
+path = "src/bin/stub_gen.rs"
+required-features = ["stub-gen"]
+
+[lints]
+workspace = true

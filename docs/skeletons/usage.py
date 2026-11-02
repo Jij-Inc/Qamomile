@@ -28,7 +28,7 @@
 
 # %%
 # Put every import used by the notebook here.
-# import qamomile.circuit as qmc
+# import qamomile as qm
 
 # %% [markdown]
 # ## Feature or Workflow

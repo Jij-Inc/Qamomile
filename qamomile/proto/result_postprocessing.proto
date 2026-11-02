@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package qamomile.proto;
+
+import "qcore.proto";
+
+message CircuitResultPathProto {
+  oneof component {
+    uint64 index = 1;
+    string field = 2;
+  }
+}
+
+enum CircuitResultScalarTypeProto {
+  CIRCUIT_RESULT_SCALAR_TYPE_UNSPECIFIED = 0;
+  CIRCUIT_RESULT_BOOL = 1;
+  CIRCUIT_RESULT_INT = 2;
+  CIRCUIT_RESULT_REAL = 3;
+}
+
+message CircuitResultParameterProto {
+  string name = 1;
+  repeated CircuitResultPathProto path = 2;
+  CircuitResultScalarTypeProto type = 3;
+}
+
+message CircuitResultApplyProto {
+  string opcode = 1;
+  CircuitResultScalarTypeProto type = 2;
+  repeated AttributeProto attributes = 3;
+  repeated uint32 operands = 4;
+}
+
+message CircuitResultScalarProto {
+  oneof node {
+    bool bool_value = 1;
+    sint64 int_value = 2;
+    fixed64 real_bits = 3;
+    uint64 measurement = 4;
+    CircuitResultParameterProto parameter = 5;
+    CircuitResultApplyProto apply = 6;
+  }
+}
+
+message CircuitResultSequenceProto {
+  repeated CircuitResultValueProto values = 1;
+}
+
+message CircuitResultFieldProto {
+  string name = 1;
+  CircuitResultValueProto value = 2;
+}
+
+message CircuitResultRecordProto {
+  repeated CircuitResultFieldProto fields = 1;
+}
+
+message CircuitResultValueProto {
+  oneof value {
+    bool unit = 1;
+    LiteralProto literal = 2;
+    uint32 scalar = 3;
+    CircuitResultSequenceProto aggregate = 4;
+    CircuitResultRecordProto record = 5;
+  }
+}
+
+message CircuitResultPostprocessingProto {
+  uint32 schema_major = 1;
+  uint32 schema_minor = 2;
+  uint64 measurement_count = 3;
+  repeated CircuitResultScalarProto scalars = 4;
+  CircuitResultValueProto result = 5;
+}

@@ -1,36 +1,61 @@
 [build-system]
-requires = ["setuptools>=77.0", "setuptools-scm>=8"]
+requires = ["setuptools>=77.0", "setuptools-scm>=8", "setuptools-rust>=1.13,<2"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "qamomile"
 dynamic = ["version"]
-description = ""
+description = "A source-compiled, type-safe functional quantum programming language"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE.txt"]
-requires-python = ">=3.11"
+requires-python = ">=3.11, <4"
 dependencies = [
-    "jijmodeling>=2.1.0",
     "ommx>=2.3.3",
-    "protobuf>=5.29,<7",
+    "protobuf>=5.29,<6",
     "pyqsp>=0.2.0",
-    "sympy>=1.14.0",
 ]
 
+[project.scripts]
+qamomile = "qamomile._cli:main"
+
 [tool.setuptools.packages.find]
-include = ["qamomile*"]
+include = ["qamomile", "qamomile.*"]
+exclude = ["qamomile.agent_plugins", "qamomile.agent_plugins.*"]
 
 [tool.setuptools.package-data]
-"qamomile" = ["py.typed"]
-"qamomile.circuit.serialization.proto" = ["*.proto", "*.pyi"]
+"qamomile" = [
+    "py.typed",
+    "_qamomile_native.pyi",
+    "agent_plugins/.agents/plugins/marketplace.json",
+    "agent_plugins/.claude-plugin/marketplace.json",
+    "agent_plugins/plugins/qamomile/plugin.json",
+    "agent_plugins/plugins/qamomile/.claude-plugin/plugin.json",
+    "agent_plugins/plugins/qamomile/skills/qamomile/SKILL.md",
+    "agent_plugins/plugins/qamomile/skills/qamomile/references/*.md",
+    "agent_plugins/plugins/qamomile/skills/qamomile/references/quantum/*.md",
+    "agent_plugins/plugins/qamomile/skills/qamomile/agents/*.yaml",
+]
+"qamomile.proto" = ["*.proto", "*.pyi"]
 
 [[tool.mypy.overrides]]
-module = "qamomile.circuit.serialization.proto.qamomile_ir_pb2"
+module = "qamomile.proto.qcore_pb2"
+disable_error_code = ["metaclass"]
+
+[[tool.mypy.overrides]]
+module = "qamomile.proto.resource_analysis_pb2"
+disable_error_code = ["metaclass"]
+
+[[tool.mypy.overrides]]
+module = "qamomile.proto.execution_snapshot_pb2"
+disable_error_code = ["metaclass"]
+
+[[tool.mypy.overrides]]
+module = "qamomile.proto.target_profile_pb2"
 disable_error_code = ["metaclass"]
 
 [tool.ruff]
-extend-exclude = ["*_pb2.py", "*_pb2.pyi"]
+extend-exclude = ["*_pb2.py", "*_pb2.pyi", "_qamomile_native.pyi"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
@@ -40,13 +65,22 @@ ignore = ["E501"]  # To ignore errors for documentations
 combine-as-imports = true
 
 [project.optional-dependencies]
+qir = [
+    "pyqir>=0.11.1,<0.12",
+]
+visualization = [
+    "cairosvg>=2.8,<3",
+]
+quration = [
+    "pyqret>=1.1,<1.2",
+]
+sparse = [
+    "scipy>=1.15",
+]
 qiskit = [
     "qiskit>=2.3.0,<3",
     "qiskit-aer>=0.17.2",
     "qiskit-ibm-runtime>=0.40,<1",
-]
-visualization = [
-    "matplotlib>=3.10.8",
 ]
 cudaq-cu12 = [
     "cuda-quantum-cu12>=0.14,<0.15; sys_platform == 'linux'",
@@ -62,41 +96,86 @@ quri_parts = [
     "quri-parts-circuit>=0.21.1",
     "quri-parts-qulacs>=0.21.1",
 ]
-qbraid = [
-    "qbraid[qiskit]>=0.11.0",
-]
 hugr = [
     "hugr>=0.16,<0.17",
-    "selene-sim>=0.2,<0.3",
+    "qnexus>=0.49,<0.50",
+    "selene-hugr-qis-compiler>=0.3.2,<0.4",
+    "selene-sim>=0.3.2,<0.4",
     "tket-exts>=0.12,<0.13",
-    "qnexus>=0.51.1,<0.52",
-    "pytket>=2.18.5,<3",
-    "hugr-qir>=0.1.2,<0.2; python_version < '3.13'",
+]
+guppy = [
+    "guppylang>=0.21.16,<0.22",
 ]
 braket = [
     "amazon-braket-sdk>=1.125,<2",
 ]
+qbraid = [
+    "qbraid[qiskit]>=0.12,<0.13",
+]
+cirq = [
+    "cirq-core>=1.6,<1.7",
+    "cirq-google>=1.6,<1.7",
+]
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "setup.cfg" },
+    { file = "MANIFEST.in" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "rust-toolchain.toml" },
+    { file = "rust/*/Cargo.toml" },
+    { file = "rust/*/src/**/*.rs" },
+    { file = "qamomile/proto/*.proto" },
+    { file = "qamomile/_qamomile_native.pyi" },
+    { git = { commit = true, tags = true } },
+]
+conflicts = [
+    [
+        { extra = "hugr" },
+        { extra = "guppy" },
+    ],
+]
 
 [dependency-groups]
-dev = [
-    "matplotlib>=3.10.8",
-    "networkx>=3.0",
+# CI selects a focused group with --no-default-groups; dev remains the full
+# local environment, including the executable documentation dependencies.
+test = [
     "pytest>=9.0.2",
-    "qiskit>=2.3.0,<3",
-    "qiskit-aer>=0.17.2",
-    "qiskit-ibm-runtime>=0.40,<1",
-    "pytest-mpl>=0.17.0",
-    "pytest-mock>=3.14.0",
-    "ruff>=0.14.11",
-    "zuban>=0.4.1",
-    "grpcio-tools>=1.71,<2",
+    "pyyaml>=6.0.2",
 ]
-docs = [
-    { include-group = "dev" },
+test-core = [
+    { include-group = "test" },
+    { include-group = "typecheck" },
+    "cairosvg>=2.8,<3",
+    "sympy>=1.14.0",
+]
+lint = [
+    "ruff>=0.14.11",
+]
+typecheck = [
+    "zuban>=0.4.1",
+]
+qir-test = [
+    "qirrunner>=0.9.7,<0.10",
+]
+dev = [
+    { include-group = "test-core" },
+    { include-group = "lint" },
+    "jijmodeling>=2.1.0",
     "jupyter>=1.1.1",
     "jupyter-book>=2.1.0",
     "jupytext>=1.18.1",
+    "matplotlib>=3.10.8",
+    "networkx>=3.0",
     "pylatexenc>=2.10",
+    "qiskit>=2.3.0,<3",
+    "qiskit-aer>=0.17.2",
+    "cirq-core>=1.6,<1.7",
+    "cirq-google>=1.6,<1.7",
+    "pytest-mpl>=0.17.0",
+    "pytest-mock>=3.14.0",
     "torch>=2.13.0",
     "torchvision>=0.15.0",
     "griffe>=1.0.0",
@@ -106,6 +185,10 @@ docs = [
     "openfermionpyscf>=0.5",
     "pyscf>=2.5.0",
     "ommx-quantum-benchmarks>=0.0.2",
+    "grpcio-tools>=1.71,<2",
+]
+docs = [
+    { include-group = "dev" },
     # Keep engine constraints aligned with project.optional-dependencies.
     "quri-parts-core>=0.21.1",
     "quri-parts-circuit>=0.21.1",
@@ -117,7 +200,7 @@ docs = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not docs and not quri_parts and not cudaq and not braket and not quration and not hugr'"
+addopts = "-m 'not docs and not quri_parts and not cudaq and not braket and not cirq and not hugr and not quration and not qir and not backend_slow and not resource_slow'"
 # Qiskit's PauliEvolutionGate.to_matrix() triggers these harmless conversions
 # inside scipy.sparse.linalg.expm. Keep other SparseEfficiencyWarnings visible.
 filterwarnings = [
@@ -125,13 +208,27 @@ filterwarnings = [
     "ignore:spsolve is more efficient when sparse b is in the CSC matrix format:scipy.sparse.SparseEfficiencyWarning",
 ]
 markers = [
-    "ci_smoke: marks the minimal end-to-end transpiler checks run in GitHub CI",
+    "qir: marks tests that require PyQIR or QIR Runner",
+    "quration: marks tests that require the PyQret SDK",
+    "ci_smoke: marks the minimal end-to-end compiler checks run in GitHub CI",
     "docs: marks tests that run documentation examples",
     "quri_parts: marks tests that require quri-parts dependencies",
     "cudaq: marks tests that require CUDA-Q dependencies",
     "braket: marks tests that require Amazon Braket dependencies",
-    "quration: marks tests that require Quration/PyQret dependencies",
+    "cirq: marks tests that require Cirq dependencies",
     "hugr: marks tests that require HUGR and TKET extension dependencies",
+    "hugr_slow: marks exhaustive HUGR/Selene acceptance tests excluded from the fast loop",
+    "backend_slow: marks exhaustive SDK-backend acceptance tests excluded from the fast loop",
+    "resource_slow: marks large symbolic resource-analysis acceptance tests excluded from the fast loop",
+    "guppy: marks tests that require the Guppy-compatible HUGR toolchain",
 ]
 
 [tool.setuptools_scm]
+
+[[tool.setuptools-rust.ext-modules]]
+target = "qamomile._qamomile_native"
+path = "rust/qamomile-python/Cargo.toml"
+binding = "PyO3"
+debug = false
+features = ["extension-module"]
+cargo-manifest-args = ["--locked"]

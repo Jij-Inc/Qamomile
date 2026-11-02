@@ -1,11 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -19,28 +20,34 @@
 #
 # # CUDA-Q Support
 #
-# This page shows how to use Qamomile's [CUDA-Q](https://nvidia.github.io/cuda-quantum/latest/) quantum SDK integration through a concrete optimization problem.
-# In this tutorial, we use QAOA optimization for a small MaxCut instance as an example. We transpile a Qamomile qkernel to CUDA-Q, then run sampling and expectation-value evaluation.
-# Later, we run the same QAOA circuit on CPU and GPU simulators and compare the sampled results and execution time.
-# Along the way, we inspect the generated CUDA-Q source and compare Qamomile's `STATIC` and `RUNNABLE` CUDA-Q execution modes.
-
-# %%
-# Install Qamomile with the CUDA-Q extras through pip.
-# Choose the optional dependency group that matches your CUDA-Q environment.
-# # !pip install "qamomile[cudaq-cu12,visualization]"  # CUDA 12.x, Linux
-# # !pip install "qamomile[cudaq-cu13,visualization]"  # CUDA 13.x, Linux or macOS ARM64
+# This page shows how to use Qamomile's CUDA-Q integration through a concrete
+# optimization problem. We use QAOA for the same small MaxCut instance as the
+# algorithm tutorial, compile one typed program to serialized CUDA-Q kernel
+# data, and run sampling and expectation-value evaluation on CUDA-Q targets.
+# We also compare CPU and optional NVIDIA targets and examine kernels with
+# classical control flow.
+#
+# Qamomile keeps CUDA-Q at the realization boundary. QCore remains the only
+# persistent program semantics; a CUDA-Q kernel is a temporary SDK object
+# used for inspection or execution, never a second source representation.
 
 # %% [markdown]
-# :::{warning}
-# On macOS ARM64, do not run CUDA-Q kernels and Qiskit Aer in the same Python process.
-# Their native dependencies can load incompatible OpenMP runtimes, which may terminate the process instead of raising a Python exception.
-# Use separate notebook kernels or separate Python processes when comparing the two simulators.
-# :::
+# ## Installation
+#
+# Choose the optional dependency group matching the installed CUDA toolkit:
+#
+# ```bash
+# pip install "qamomile[cudaq-cu12]"  # CUDA 12.x on Linux
+# pip install "qamomile[cudaq-cu13]"  # CUDA 13.x on Linux or macOS ARM64
+# ```
 
 # %%
+# Install the latest Qamomile and its CUDA-Q integration through pip!
+# # !pip install "qamomile[cudaq-cu13]"
+
+# %%
+import math
 import os
-import platform
-import subprocess
 import time
 from collections import Counter
 
@@ -50,493 +57,381 @@ import networkx as nx
 import numpy as np
 from scipy.optimize import minimize
 
-import qamomile.circuit as qmc
-import qamomile.observable as qm_o
-from qamomile.cudaq import CudaqExecutor, CudaqTranspiler, ExecutionMode
-from qamomile.optimization.binary_model import BinaryModel
+import qamomile as qm
+
+from qamomile.persistence import deserialize, export_payload, serialize
+from qamomile.cudaq import Cudaq, CudaqLocal, load_kernel
+from qamomile.optimization import BinaryModel, QAOAExperiment
+from qamomile.stdlib import qaoa_state
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+
+# %% [markdown]
+# ## Author one runtime-parametric quantum state
+#
+# `parameterized_state` is the sole state-preparation definition. Its two basis
+# endpoints are deliberately asymmetric: `theta = 0` produces `01`, while
+# `theta = pi` produces `10`. That makes a reversed native bit order visible.
+
+
+# %%
+@qm.qkernel
+def parameterized_state(
+    theta: qm.Param[qm.Real],
+) -> qm.Q[qm.Bits[2]]:  # type: ignore[valid-type]
+    """Prepare one runtime-parametric asymmetric two-qubit state.
+
+    Args:
+        theta (qm.Param[qm.Real]): First-qubit Y-rotation angle in radians.
+
+    Returns:
+        qm.Q[qm.Bits[2]]: Affine two-qubit state in Qamomile source order.
+    """
+
+    state = qm.qubits(2)
+    state = qm.ry(state, theta, target=0)
+    state = qm.x(state, target=1)
+    return qm.cx(state, control=0, target=1)
+
+
+@qm.qkernel
+def entangled_sample(
+    theta: qm.Param[qm.Real],
+) -> qm.Shot[qm.Bits[2]]:  # type: ignore[valid-type]
+    """Measure the shared parameterized state.
+
+    Args:
+        theta (qm.Param[qm.Real]): First-qubit Y-rotation angle in radians.
+
+    Returns:
+        qm.Shot[qm.Bits[2]]: Bits in Qamomile source order.
+    """
+
+    return qm.measure(parameterized_state(theta))
+
+
+sample_program = entangled_sample.specialize()
+study = qm.resources.logical(sample_program)
+
+assert study.metric(qm.resources.LOGICAL_GATES).numeric_enclosure() == (3, 3)
+assert study.metric(qm.resources.LOGICAL_PEAK_QUBITS).numeric_enclosure() == (2, 2)
+
+# %% [markdown]
+# ## Compile once and retain the executable
+#
+# `qm.compile` returns a process-local `CompiledProgram` containing the CUDA-Q kernel,
+# its SDK lifetime owners, and compiler-derived ABI and resource facts. Ordinary
+# execution does not export or restore it. The optional `serialize`/`deserialize`
+# calls below demonstrate saving through `qamomile.persistence`; loading creates
+# a new executable owner. Compare compilation identities, not Python objects.
+
+# %%
+target = Cudaq()
+artifact = qm.compile(sample_program, to=target)
+restored = deserialize(serialize(artifact))
+
+assert artifact.format == "cudaq.python-source.v1"
+assert restored.execution_identity == artifact.execution_identity
+assert artifact.execution_identity == qm.compile(sample_program, to=target).execution_identity
+assert tuple(slot.name for slot in artifact.parameter_abi.slots) == ("theta",)
+assert artifact.result_abi.width == 2
+
+# %% [markdown]
+# Generated Python source is available through explicit export. `load_kernel`
+# accesses the retained kernel for inspection. Repeated launches reuse the kernel
+# and helper owners for the selected CUDA-Q target.
+
+# %%
+generated_source = export_payload(restored).decode("utf-8")
+kernel = load_kernel(restored)
+
+print(generated_source)
+print("CUDA-Q kernel type:", type(kernel).__name__)
+
+assert isinstance(generated_source, str)
+assert "@cudaq.kernel" in generated_source
+assert "q = cudaq.qvector(2)" in generated_source
+assert "ry(p0, q[0])" in generated_source
+assert "x(q[1])" in generated_source
+assert "x.ctrl(q[0], q[1])" in generated_source
+
+# %% [markdown]
+# ## Run the artifact on the CPU simulator
+#
+# Passing an artifact to `qm.run` does not invoke the compiler again. The
+# endpoint validates the invocation and executes in the calling process. It
+# restores the kernel, selects CUDA-Q's `qpp-cpu` target, binds `theta`, and
+# normalizes native bit order once. Qamomile serializes its CUDA-Q launches and
+# restores the previous SDK target afterward. One deterministic asymmetric
+# launch proves both the runtime parameter path and source-order result contract.
+
+# %%
+endpoint = CudaqLocal(runtime_target="qpp-cpu")
+record = qm.run(
+    restored,
+    on=endpoint,
+    parameters={"theta": math.pi},
+    shots=8,
+    seed=7,
+)
+
+print(record.result.counts)
+assert record.artifact is restored
+assert record.result.backend == "cudaq.qpp-cpu"
+assert record.result.counts == {(1, 0): 8}
+assert record.result.values == {(1, 0): 8}
 
 # %% [markdown]
 # ## The MaxCut problem
 #
-# We use the same small 5-node graph from the [QAOA for MaxCut tutorial](../algorithm/qaoa_maxcut.ipynb) so the focus stays on the CUDA-Q integration.
-# Maximizing $\sum_{(i,j) \in E}(1 - s_i s_j)/2$ is equivalent, up to a constant, to *minimizing* the antiferromagnetic Ising Hamiltonian $H_C = \sum_{(i,j) \in E} s_i s_j$.
-# For unweighted MaxCut, every $J_{ij} = 1$ and every $h_i = 0$, so we pass these coefficients directly to `BinaryModel.from_ising`.
-# We use the model object for the `quad` / `linear` dictionaries passed to the QAOA qkernel and for decoding measurements back into spin values $(+1 / -1)$.
+# We use the same small five-node, six-edge graph from the
+# [QAOA for MaxCut tutorial](../algorithm/qaoa_maxcut.ipynb). Maximizing
+# $\sum_{(i,j)\in E}(1-s_i s_j)/2$ is equivalent, up to a constant, to
+# minimizing $H_C=\sum_{(i,j)\in E}s_i s_j$. The graph therefore maps directly
+# to an immutable Ising `BinaryModel`.
+#
+# ## Building the QAOA ansatz
+#
+# The ansatz prepares a uniform superposition, alternates cost and mixer layers
+# three times, and measures in the computational basis. `QAOAExperiment`
+# supplies that same composition while leaving `gammas` and `betas` as runtime
+# parameters. Normal execution uses 2,000 shots per proposal and a 100-proposal
+# COBYLA loop; documentation tests reduce only those budgets.
 
 # %%
-G = nx.Graph()
-G.add_edges_from([(0, 1), (0, 2), (1, 2), (1, 3), (2, 3), (3, 4)])
-num_nodes = G.number_of_nodes()
+MAXCUT_EDGES = ((0, 1), (0, 2), (1, 2), (1, 3), (2, 3), (3, 4))
+graph = nx.Graph(MAXCUT_EDGES)
+positions = nx.spring_layout(graph, seed=42)
 
-ising_quad: dict[tuple[int, int], float] = {
-    tuple(sorted((i, j))): 1.0 for i, j in G.edges()
-}
-ising_linear: dict[int, float] = {}
-spin_model = BinaryModel.from_ising(linear=ising_linear, quad=ising_quad)
-# The problem structure is fully determined by the graph: one quad term per edge
-# and no linear terms for unweighted MaxCut. Assert so a regression in
-# `BinaryModel.from_ising` is caught when this notebook runs in CI.
-assert len(spin_model.quad) == G.number_of_edges()
-assert len(spin_model.linear) == 0
+maxcut_model = BinaryModel.from_ising(
+    {edge: 0.5 for edge in MAXCUT_EDGES},
+    constant=-len(MAXCUT_EDGES) / 2.0,
+    variables=range(5),
+)
+LAYERS = 1 if docs_test_mode else 3
+qaoa_experiment = QAOAExperiment(maxcut_model, layers=LAYERS)
+compiled_qaoa = qaoa_experiment.compile(to=endpoint.target)
 
-pos = nx.spring_layout(G, seed=42)
 plt.figure(figsize=(5, 4))
 nx.draw(
-    G,
-    pos,
+    graph,
+    positions,
     with_labels=True,
     node_color="white",
     node_size=700,
     edgecolors="black",
 )
-plt.title(f"MaxCut graph: {num_nodes} nodes, {G.number_of_edges()} edges")
+plt.title(
+    f"MaxCut graph: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges"
+)
 plt.show()
 
 # %% [markdown]
-# ## Building the QAOA ansatz with `@qkernel`
-#
-# We write the sampling QAOA ansatz as reusable qkernels.
-# The recipe is the same as in the [QAOA for MaxCut tutorial](../algorithm/qaoa_maxcut.ipynb). After preparing a uniform superposition in the computational basis, we alternately apply cost and mixer layers $p$ times, then measure in the computational basis.
-#
-# :::{tip}
-# Qamomile's rotation gates follow the $e^{-i\theta/2}$ convention.
-# Because of that, the $1/2$ factor is handled slightly differently in the cost and mixer layers.
-# In the mixer layer, we pass $2\beta$ to `rx`, so the $1/2$ cancels and we get the textbook $e^{-i\beta X}$.
-# In the cost layer, we pass $J_{ij} \cdot \gamma$ to `rzz`, so the $1/2$ remains.
-# We absorb this coefficient difference into the variational parameter $\gamma$: the $\gamma$ used here is twice the textbook QAOA $\gamma$.
-# :::
-
+# The serialized CUDA-Q artifact retains only two runtime vectors. Generated
+# source exposes the layered Hadamard, Pauli-evolution realization, mixer, and
+# final measurements while QCore remains the persistent semantics.
 
 # %%
-@qmc.qkernel
-def superposition(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
-    q = qmc.qubit_array(n, name="q")
-    for i in qmc.range(n):
-        q[i] = qmc.h(q[i])
-    return q
+qaoa_source = export_payload(compiled_qaoa.artifact).decode("utf-8")
+print(qaoa_source)
 
-
-@qmc.qkernel
-def cost_layer(
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    q: qmc.Vector[qmc.Qubit],
-    gamma: qmc.Float,
-) -> qmc.Vector[qmc.Qubit]:
-    for (i, j), Jij in quad.items():
-        q[i], q[j] = qmc.rzz(q[i], q[j], angle=Jij * gamma)
-    for i, hi in linear.items():
-        q[i] = qmc.rz(q[i], angle=hi * gamma)
-    return q
-
-
-@qmc.qkernel
-def mixer_layer(
-    q: qmc.Vector[qmc.Qubit],
-    beta: qmc.Float,
-) -> qmc.Vector[qmc.Qubit]:
-    n = q.shape[0]
-    for i in qmc.range(n):
-        q[i] = qmc.rx(q[i], angle=2.0 * beta)
-    return q
-
-
-@qmc.qkernel
-def qaoa_ansatz(
-    p: qmc.UInt,
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    n: qmc.UInt,
-    gammas: qmc.Vector[qmc.Float],
-    betas: qmc.Vector[qmc.Float],
-) -> qmc.Vector[qmc.Bit]:
-    q = superposition(n)
-    for layer in qmc.range(p):
-        q = cost_layer(quad, linear, q, gammas[layer])
-        q = mixer_layer(q, betas[layer])
-    return qmc.measure(q)
-
-
-# %% [markdown]
-# `qaoa_ansatz.draw(...)` renders the Qamomile circuit diagram.
-# We pass concrete values for the arguments that determine the problem structure (`p`, `quad`, `linear`, `n`) so the layered shape is visible.
-# Meanwhile, `gammas` / `betas` are left as parameters whose values are supplied later.
-
-# %%
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-p = 1 if docs_test_mode else 3  # number of QAOA layers
-qaoa_ansatz.draw(
-    p=p,
-    quad=spin_model.quad,
-    linear=spin_model.linear,
-    n=num_nodes,
+assert compiled_qaoa.artifact.format == "cudaq.python-source.v1"
+assert tuple(slot.name for slot in compiled_qaoa.artifact.parameter_abi.slots) == (
+    "gammas",
+    "betas",
 )
+assert isinstance(qaoa_source, str) and "@cudaq.kernel" in qaoa_source
 
 # %% [markdown]
-# ## Transpile to CUDA-Q
+# ## Sampling and continuous optimization
 #
-# `CudaqTranspiler` is used with `transpile()` the same way as any other quantum SDK.
-# We bind the arguments that determine the problem structure and keep `gammas` / `betas` as runtime parameters.
+# Each objective call reuses the one compiled artifact, samples one coordinate
+# on `qpp-cpu`, and minimizes the decoded mean Ising energy. Qamomile keeps the
+# aggregate vector ABI and source-order bit normalization independent of the
+# selected CUDA-Q runtime target.
 
 # %%
-transpiler = CudaqTranspiler()
-executor = CudaqExecutor()
+SAMPLE_SHOTS = 8 if docs_test_mode else 2_000
+MAX_ITERATIONS = 4 if docs_test_mode else 100
+cost_history = []
 
-executable = transpiler.transpile(
-    qaoa_ansatz,
-    bindings={
-        "p": p,
-        "quad": spin_model.quad,
-        "linear": spin_model.linear,
-        "n": num_nodes,
-    },
-    parameters=["gammas", "betas"],
-)
 
-# %% [markdown]
-# `executable.get_first_circuit()` returns Qamomile's generated CUDA-Q artifact, `CudaqKernelArtifact`.
-# This is a Qamomile-side wrapper for the generated `@cudaq.kernel` function, not a type from the upstream `cudaq` Python package.
-# The artifact keeps an inspectable Python source string for the generated CUDA-Q kernel. The $2p$ QAOA angles (`gammas[0..p-1]`, `betas[0..p-1]`) remain available as named runtime parameters.
-# We can confirm that with `type(...)`, the qubit count, and the parameter count, then inspect the generated source.
-# This source string is useful when you want to see exactly what Qamomile handed to CUDA-Q, including gate decompositions such as the `rzz` layer below.
+def cost_function(parameters) -> float:
+    """Sample one QAOA coordinate and return its mean Ising energy."""
 
-# %%
-cudaq_artifact = executable.get_first_circuit()
-assert cudaq_artifact is not None  # transpile() always emits one quantum segment here
-# `num_qubits` and `param_count` are fully determined by the problem setting:
-# one qubit per graph node, and one runtime parameter per (gamma | beta) per layer.
-assert cudaq_artifact.num_qubits == num_nodes
-assert cudaq_artifact.param_count == 2 * p
-assert cudaq_artifact.execution_mode == ExecutionMode.STATIC
-assert len(executable.parameter_names) == 2 * p
-print(type(cudaq_artifact).__name__)
-print("execution_mode :", cudaq_artifact.execution_mode.value)
-print("num_qubits     :", cudaq_artifact.num_qubits)
-print("param_count    :", cudaq_artifact.param_count)
-print("parameter_names:", executable.parameter_names)
+    run = compiled_qaoa.run(
+        on=endpoint,
+        gammas=tuple(float(value) for value in parameters[:LAYERS]),
+        betas=tuple(float(value) for value in parameters[LAYERS:]),
+        shots=SAMPLE_SHOTS,
+        seed=20 + len(cost_history),
+    )
+    cost_history.append(run.samples.mean_energy)
+    return run.samples.mean_energy
 
-assert "@cudaq.kernel" in cudaq_artifact.source
-assert "x.ctrl" in cudaq_artifact.source
-assert "rz(" in cudaq_artifact.source
-print(cudaq_artifact.source)
 
-# %% [markdown]
-# Each runtime parameter remains unbound until execution time.
-# That means binding `gammas` / `betas` is treated as a parameter-value update on the CUDA-Q side rather than a circuit rebuild.
-# The problem structure, such as the Ising coefficients, qubit count, and number of layers, is fixed when the circuit is transpiled, leaving only the variational angles as runtime inputs.
-
-# %% [markdown]
-# ## Sampling QAOA with `CudaqExecutor`
-#
-# `executable.sample(executor, bindings=..., shots=...)` returns a `SampleJob`.
-# Calling `.result()` gives a `SampleResult`, which `BinaryModel.decode_from_sampleresult` decodes into a `BinarySampleSet` of spin variables $(+1 / -1)$.
-# This lets us count cut edges without any additional conversion.
-
-# %%
 rng = np.random.default_rng(42)
-init_params = rng.uniform(-np.pi / 2, np.pi / 2, 2 * p)
-init_gammas = list(init_params[:p])
-init_betas = list(init_params[p:])
-sample_shots = 1 if docs_test_mode else 2000
-maxiter = 4 if docs_test_mode else 100
+initial_parameters = rng.uniform(-np.pi / 2.0, np.pi / 2.0, 2 * LAYERS)
+optimization = minimize(
+    cost_function,
+    initial_parameters,
+    method="COBYLA",
+    options={"maxiter": MAX_ITERATIONS, "rhobeg": 0.5},
+)
 
-# Sample the parameterized executable and decode bitstrings to Ising energies.
-sample_result = executable.sample(
-    executor,
-    bindings={"gammas": init_gammas, "betas": init_betas},
-    shots=sample_shots,
-).result()
+optimized_gammas = tuple(float(value) for value in optimization.x[:LAYERS])
+optimized_betas = tuple(float(value) for value in optimization.x[LAYERS:])
 
-decoded = spin_model.decode_from_sampleresult(sample_result)
-print(f"Mean energy at random init: {decoded.energy_mean():+.4f}")
+print(f"Optimized mean energy: {optimization.fun:+.4f}")
+print(f"Optimal gammas: {optimized_gammas}")
+print(f"Optimal betas: {optimized_betas}")
 
-# %% [markdown]
-# ## Optimizing the QAOA parameters
-#
-# A QAOA optimization loop reuses the same `executable` across many `(gammas, betas)` vectors.
-# Call `transpiler.transpile()` once, then call `executable.sample()` many times.
-# In this example, we define the sampling and decoding work as `cost_fn()` and optimize it with SciPy's `minimize` function.
-# The classical optimizer updates `(gammas, betas)` while lowering the mean sampled Ising energy.
-# Each iteration reuses the same `executable` and `CudaqExecutor`.
+assert len(optimization.x) == 2 * LAYERS
+assert len(cost_history) == optimization.nfev
 
 # %%
-# Reuse one executable inside the classical objective function.
-cost_history: list[float] = []
-
-
-def cost_fn(params: np.ndarray) -> float:
-    result = executable.sample(
-        executor,
-        bindings={"gammas": list(params[:p]), "betas": list(params[p:])},
-        shots=sample_shots,
-    ).result()
-    energy = spin_model.decode_from_sampleresult(result).energy_mean()
-    cost_history.append(energy)
-    return energy
-
-
-# Optimize the sampled mean energy with COBYLA.
-res = minimize(cost_fn, init_params, method="COBYLA", options={"maxiter": maxiter})
-
-opt_gammas = list(res.x[:p])
-opt_betas = list(res.x[p:])
-print(f"Optimized mean energy: {res.fun:+.4f}")
-print(f"Optimal gammas       : {[round(float(v), 4) for v in opt_gammas]}")
-print(f"Optimal betas        : {[round(float(v), 4) for v in opt_betas]}")
-
-# %%
-# Plot the objective values collected during optimization.
 plt.figure(figsize=(8, 4))
 plt.plot(cost_history, color="#2696EB")
-plt.xlabel("Iteration")
+plt.xlabel("Energy evaluation")
 plt.ylabel("Cost (mean Ising energy)")
-plt.title("QAOA optimization on CUDA-Q via `CudaqExecutor`")
+plt.title("QAOA optimization on CUDA-Q")
 plt.tight_layout()
 plt.show()
 
 # %% [markdown]
-# Sampling is probabilistic, and different CUDA-Q targets can use different simulator implementations.
-# Because of that, the optimization trajectory and final sampled energy may vary slightly across runs.
-# The optimizer should still converge close to the ground-state energy of $H_C$ on this 5-node graph.
-# The optimized parameters from this run (`opt_gammas`, `opt_betas`) are reused throughout the rest of this page.
-
-# %% [markdown]
-# ## Expectation values
+# ## Final distribution and best cut
 #
-# In Qamomile, you write expectation values in a qkernel with `qmc.expval(...)`.
-# When this is transpiled to CUDA-Q, it becomes an executable object that can be called with `ExecutableProgram.run(executor, bindings=...)`.
-# For CUDA-Q, `run()` uses Qamomile's recorded parameter information to bind runtime parameters before calling CUDA-Q's `observe` API.
-#
-# We first use Qamomile's `run()` path, then open the lower-level path that passes the generated CUDA-Q artifact directly to `executor.estimate(...)`.
-
-# %% [markdown]
-# ### `run()`
-#
-# First build a Qamomile `Hamiltonian` for $H_C = \sum_{(i,j) \in E} Z_i Z_j$.
-# Then transpile the expectation-value qkernel and evaluate it at the optimized QAOA parameters.
+# The optimized artifact is sampled again with a larger budget. The decoded
+# distribution retains exact occurrence counts and spin energies, so the
+# lowest row maps directly to the best observed graph cut.
 
 # %%
-cost_hamiltonian = qm_o.Hamiltonian()
-for (i, j), Jij in spin_model.quad.items():
-    cost_hamiltonian.add_term(
-        (qm_o.PauliOperator(qm_o.Pauli.Z, i), qm_o.PauliOperator(qm_o.Pauli.Z, j)),
-        Jij,
-    )
-for i, hi in spin_model.linear.items():
-    cost_hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
-
-# Define the expectation-value qkernel.
-@qmc.qkernel
-def qaoa_expval(
-    p: qmc.UInt,
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    n: qmc.UInt,
-    gammas: qmc.Vector[qmc.Float],
-    betas: qmc.Vector[qmc.Float],
-    obs: qmc.Observable,
-) -> qmc.Float:
-    q = superposition(n)
-    for layer in qmc.range(p):
-        q = cost_layer(quad, linear, q, gammas[layer])
-        q = mixer_layer(q, betas[layer])
-    return qmc.expval(q, obs)
-
-
-# Transpile the expectation-value qkernel and evaluate it with `run()`.
-expval_executable = transpiler.transpile(
-    qaoa_expval,
-    bindings={
-        "p": p,
-        "quad": spin_model.quad,
-        "linear": spin_model.linear,
-        "n": num_nodes,
-        "obs": cost_hamiltonian,
-    },
-    parameters=["gammas", "betas"],
+FINAL_SHOTS = 64 if docs_test_mode else 2_000
+final_run = compiled_qaoa.run(
+    on=endpoint,
+    gammas=optimized_gammas,
+    betas=optimized_betas,
+    shots=FINAL_SHOTS,
+    seed=113,
 )
-energy_from_run = expval_executable.run(
-    executor,
-    bindings={"gammas": opt_gammas, "betas": opt_betas},
-).result()
+best_qaoa_sample = final_run.samples.lowest
+best_spins = best_qaoa_sample.values
+best_cut = sum(best_spins[left] != best_spins[right] for left, right in MAXCUT_EDGES)
 
-print(f"ExecutableProgram.run: {energy_from_run:+.10f}")
-assert np.isfinite(energy_from_run)
+energy_counts = Counter()
+for sample in final_run.samples.samples:
+    energy_counts[sample.energy] += sample.occurrences
 
-# %% [markdown]
-# `ExecutableProgram.run(...)` is the recommended route when you work through the Qamomile API.
-# The observable and named runtime parameter bindings are managed by Qamomile's `ExecutableProgram`.
-#
-# The next section opens the lower-level path and passes the CUDA-Q artifact emitted by `transpile()` directly to `executor.estimate(...)`.
+print("best observed MaxCut sample:", best_qaoa_sample)
+print(f"best observed cut: {best_cut}")
 
-# %% [markdown]
-# ### `cudaq.observe`
-#
-# For `STATIC` CUDA-Q artifacts, `CudaqExecutor.estimate(circuit, hamiltonian, params=...)` calls `cudaq.observe()` under the hood.
-# The measured QAOA ansatz above is still usable as a state-preparation circuit because Qamomile does not write terminal measurements into the generated CUDA-Q kernel for `STATIC` artifacts.
-# Sampling handles the final measurement separately, so the same emitted artifact can also be used by `cudaq.observe()`.
-# In a QAOA optimizer, you can keep the same circuit and replace `ExecutableProgram.sample()` plus decoding with `executor.estimate(circuit, hamiltonian, params=...)`.
-#
-# When calling `executor.estimate(...)` directly, you provide the flat parameter order expected by the CUDA-Q artifact yourself.
+assert final_run.samples.total_occurrences == FINAL_SHOTS
+assert best_qaoa_sample.energy == -float(best_cut)
 
 # %%
-unbound_circuit = executable.get_first_circuit()
-assert unbound_circuit is not None
-assert unbound_circuit.execution_mode == ExecutionMode.STATIC
-print(f"artifact type       : {type(unbound_circuit).__name__}")
-print(f"artifact param_count: {unbound_circuit.param_count}")
+energies = sorted(energy_counts)
+plt.figure(figsize=(8, 4))
+plt.bar(energies, [energy_counts[energy] for energy in energies], width=0.6)
+plt.xlabel("Ising energy")
+plt.ylabel("Frequency")
+plt.title("Optimized CUDA-Q QAOA distribution")
+plt.show()
 
-# CUDA-Q requires the runtime parameters as a flat list in the order
-# they were registered on the artifact, which is the first-use order during
-# circuit emission. For QAOA that means gammas[0], betas[0], gammas[1], betas[1],
-# ..., interleaved per layer, NOT all gammas followed by all betas.
-# Read the order from the `ExecutableProgram` and build the flat list by lookup so
-# we never have to guess the convention.
-named_values = {f"gammas[{i}]": opt_gammas[i] for i in range(p)}
-named_values.update({f"betas[{i}]": opt_betas[i] for i in range(p)})
-flat_params = [named_values[name] for name in executable.parameter_names]
-# The runtime parameter set is the 2p QAOA angles.
-assert len(executable.parameter_names) == 2 * p
-assert len(flat_params) == 2 * p
-print(f"artifact parameter order: {executable.parameter_names}")
-
-energy_via_estimate = executor.estimate(
-    unbound_circuit, cost_hamiltonian, params=flat_params
+node_colors = [
+    "#2696EB" if best_spins[node] == 1 else "#EA9B26" for node in graph.nodes()
+]
+edge_colors = [
+    "r" if best_spins[left] != best_spins[right] else "b"
+    for left, right in MAXCUT_EDGES
+]
+plt.figure(figsize=(5, 4))
+nx.draw(
+    graph,
+    positions,
+    with_labels=True,
+    node_color=node_colors,
+    edge_color=edge_colors,
+    node_size=700,
+    edgecolors="black",
 )
-print(f"executor.estimate: {energy_via_estimate:+.10f}")
-assert np.isclose(energy_from_run, energy_via_estimate, atol=1e-10)
+plt.title(f"Best QAOA partition (cut = {best_cut})")
+plt.show()
 
 # %% [markdown]
-# The `run()` and `executor.estimate(...)` paths agree to numerical precision.
-# They evaluate the same QAOA state against the same Ising cost Hamiltonian.
-# The resulting noise-free expectation value at the optimized parameters should also match the sample-mean energy printed earlier within shot noise.
-
-# %% [markdown]
-# ## Choosing CUDA-Q targets: Using the GPU target
+# ## Expectation value
 #
-# A `CUDA-Q target` is the execution target CUDA-Q uses for kernel calls, such as the `qpp-cpu` CPU simulator, the `nvidia` GPU simulator, or a configured QPU target.
-# `CudaqExecutor()` uses the currently selected CUDA-Q target. If you do not choose a target explicitly, CUDA-Q uses its default target, so the examples above run in a local CPU-only environment without extra configuration.
-# `CudaqExecutor(target=...)` or `CudaqTranspiler.executor(target=...)` selects a target explicitly.
-# The custom executor can be used anywhere `executor` appeared above.
-# Changing the CUDA-Q target does not require re-transpiling the kernel.
-# The `ExecutableProgram` carries the emitted CUDA-Q artifact, while the executor chooses the target used at execution time.
-# The list of simulator targets you can select is maintained in CUDA-Q's [Circuit Simulation](https://nvidia.github.io/cuda-quantum/latest/using/simulators.html) documentation, and CUDA-Q's [Running on a GPU](https://nvidia.github.io/cuda-quantum/latest/using/basics/run_kernel.html#running-on-a-gpu) section shows the same `qpp-cpu` / `nvidia` target pattern directly.
-#
-# :::{note}
-# This tutorial also works well in Google Colab.
-# To try the GPU target there, choose a GPU runtime before running the notebook, install the CUDA-Q extras that match the runtime, and then run the cells below.
-# CUDA-Q uses `qpp-cpu` as the CPU simulator target and `nvidia` as the local NVIDIA GPU simulator target.
-# :::
-#
-# As a concrete example, we sample the same optimized QAOA `ExecutableProgram` on the CPU and GPU targets.
-# Both runs below are noise-free: we do not install a CUDA-Q noise model, and each target uses the same QAOA circuit and the same parameter vector.
-# We also set the same CUDA-Q random seed before each sampling call.
-# The finite-shot samples are still produced by each target's simulator, so we compare the sampled mean energies with a tolerance and plot the energy histograms rather than relying on identical raw shot ordering.
-# We also time the sampling call on each target.
+# `qm.expectation` builds the required Pauli measurement programs from the same
+# state-returning standard-library QAOA composition. The result is the sampled
+# expectation and its statistical uncertainty through the same CUDA-Q endpoint.
 
 # %%
-benchmark_shots = 1 if docs_test_mode else 100_000
-benchmark_seed = 13
+expectation = qm.expectation(
+    qaoa_state,
+    maxcut_model.hamiltonian,
+    on=endpoint,
+    parameters={"gammas": optimized_gammas, "betas": optimized_betas},
+    shots=16 if docs_test_mode else 4_096,
+    seed=211,
+    grouping="qwc",
+    width=maxcut_model.num_variables,
+    layers=LAYERS,
+    hamiltonian=maxcut_model.hamiltonian,
+)
+
+print(
+    f"CUDA-Q expectation: {expectation.value:+.6f} ± {expectation.standard_error:.6f}"
+)
+assert expectation.backend == endpoint.name
+assert abs(expectation.value - final_run.samples.mean_energy) <= (
+    6 * expectation.standard_error + 0.5
+)
+
+# %% [markdown]
+# ## Compare CUDA-Q runtime targets
+#
+# Runtime selection belongs to the endpoint, not the source or artifact. We
+# time 100,000 shots on `qpp-cpu`; when an NVIDIA target is available, the same
+# artifact and parameters are also run there and the finite-shot means are
+# compared.
+
+# %%
+BENCHMARK_SHOTS = 1 if docs_test_mode else 100_000
 
 
-def cpu_backend_info() -> str:
-    processor = platform.processor() or platform.machine() or "unknown processor"
-    if os.path.exists("/proc/cpuinfo"):
-        with open("/proc/cpuinfo", encoding="utf-8") as cpuinfo:
-            for line in cpuinfo:
-                if line.startswith("model name"):
-                    processor = line.split(":", maxsplit=1)[1].strip()
-                    break
-    return f"{processor}; logical CPUs: {os.cpu_count()}"
+def timed_target_run(runtime_target: str):
+    """Run the optimized artifact on one CUDA-Q runtime target and time it."""
 
-
-def gpu_backend_info() -> str:
-    try:
-        completed = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (
-        FileNotFoundError,
-        subprocess.CalledProcessError,
-        subprocess.TimeoutExpired,
-    ):
-        return f"{cudaq.num_available_gpus()} CUDA-Q GPU(s) available"
-
-    names = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
-    return ", ".join(names) if names else "NVIDIA GPU detected"
-
-
-def timed_qaoa_sample(target_name: str):
-    cudaq.set_target(target_name)
-    cudaq.set_random_seed(benchmark_seed)
+    runtime_endpoint = CudaqLocal(runtime_target=runtime_target)
     start = time.perf_counter()
-    result = executable.sample(
-        CudaqExecutor(),
-        bindings={"gammas": opt_gammas, "betas": opt_betas},
-        shots=benchmark_shots,
-    ).result()
-    return result, time.perf_counter() - start
-
-
-# %%
-# CPU target (qpp-cpu)
-target_runs = []
-cpu_result, cpu_seconds = timed_qaoa_sample("qpp-cpu")
-cpu_decoded = spin_model.decode_from_sampleresult(cpu_result)
-cpu_energy = cpu_decoded.energy_mean()
-target_runs.append(("qpp-cpu", cpu_decoded, cpu_energy, cpu_seconds, "#2696EB"))
-print("CPU backend target  : qpp-cpu")
-print(f"CPU hardware        : {cpu_backend_info()}")
-print(f"CPU qpp-cpu mean energy: {cpu_energy:+.4f}")
-print(f"CPU qpp-cpu sample time: {cpu_seconds:.4f} s")
-
-# %%
-# GPU target (nvidia)
-if cudaq.num_available_gpus() > 0 and cudaq.has_target("nvidia"):
-    gpu_result, gpu_seconds = timed_qaoa_sample("nvidia")
-    gpu_decoded = spin_model.decode_from_sampleresult(gpu_result)
-    gpu_energy = gpu_decoded.energy_mean()
-    target_runs.append(("nvidia GPU", gpu_decoded, gpu_energy, gpu_seconds, "#FF8A3D"))
-    print("GPU backend target  : nvidia")
-    print(f"GPU hardware        : {gpu_backend_info()}")
-    print(f"GPU nvidia mean energy: {gpu_energy:+.4f}")
-    print(f"GPU nvidia sample time: {gpu_seconds:.4f} s")
-    print(f"CPU/GPU time ratio    : {cpu_seconds / gpu_seconds:.2f}x")
-else:
-    gpu_decoded = None
-    print(
-        "No NVIDIA GPU was detected. Run this notebook in a Google Colab GPU "
-        "runtime to execute the `nvidia` target."
+    run = compiled_qaoa.run(
+        on=runtime_endpoint,
+        gammas=optimized_gammas,
+        betas=optimized_betas,
+        shots=BENCHMARK_SHOTS,
+        seed=13,
     )
+    return run, time.perf_counter() - start
 
-cudaq.reset_target()
 
-# %% [markdown]
-# When a GPU is available, the CPU and GPU samples should describe the same QAOA output distribution.
-# The helper below visualizes the sampled energy histograms and checks that the mean energies remain close.
-# The tolerances are deliberately finite-shot tolerances, not exact-equality checks; the common seed makes the comparison reproducible for each target implementation.
+cpu_run, cpu_seconds = timed_target_run("qpp-cpu")
+print(f"qpp-cpu mean energy: {cpu_run.samples.mean_energy:+.4f}")
+print(f"qpp-cpu sample time: {cpu_seconds:.4f} s")
+
+target_runs = [("qpp-cpu", cpu_run.samples, cpu_seconds, "#2696EB")]
+if cudaq.num_available_gpus() > 0 and cudaq.has_target("nvidia"):
+    gpu_run, gpu_seconds = timed_target_run("nvidia")
+    target_runs.append(("nvidia", gpu_run.samples, gpu_seconds, "#FF8A3D"))
+    difference = abs(cpu_run.samples.mean_energy - gpu_run.samples.mean_energy)
+    print(f"nvidia mean energy: {gpu_run.samples.mean_energy:+.4f}")
+    print(f"nvidia sample time: {gpu_seconds:.4f} s")
+    print(f"mean-energy difference: {difference:.4f}")
+    if not docs_test_mode:
+        assert difference < 0.15
+else:
+    print("No NVIDIA GPU detected; skipping the nvidia target run.")
 
 # %%
-def energy_distribution(decoded_samples):
-    counts: Counter[float] = Counter()
-    for energy, occ in zip(decoded_samples.energy, decoded_samples.num_occurrences):
-        counts[energy] += occ
-    energies = sorted(counts.keys())
-    return energies, [counts[energy] for energy in energies]
-
-
-if gpu_decoded is not None:
-    energy_delta = abs(cpu_energy - gpu_energy)
-    print(f"mean-energy difference: {energy_delta:.4f}")
-    assert np.isfinite(cpu_energy) and np.isfinite(gpu_energy)
-    if not docs_test_mode:
-        assert energy_delta < 0.15
-
-fig, axes = plt.subplots(
+figure, axes = plt.subplots(
     1,
     len(target_runs),
     figsize=(5.5 * len(target_runs), 4),
@@ -544,97 +439,79 @@ fig, axes = plt.subplots(
 )
 if len(target_runs) == 1:
     axes = [axes]
-for ax, (target_name, decoded_samples, mean_energy, elapsed, color) in zip(
-    axes, target_runs
+for axis, (target_name, samples, elapsed, color) in zip(
+    axes,
+    target_runs,
+    strict=True,
 ):
-    energies, counts = energy_distribution(decoded_samples)
-    ax.bar(energies, counts, width=0.6, color=color)
-    ax.axvline(
-        mean_energy,
+    counts = Counter()
+    for sample in samples.samples:
+        counts[sample.energy] += sample.occurrences
+    values = sorted(counts)
+    axis.bar(values, [counts[value] for value in values], width=0.6, color=color)
+    axis.axvline(
+        samples.mean_energy,
         color="#2B2B2B",
         linestyle="--",
-        linewidth=1.5,
-        label=f"mean = {mean_energy:+.3f}",
+        label=f"mean = {samples.mean_energy:+.3f}",
     )
-    ax.set_xticks(energies)
-    ax.set_title(f"{target_name} ({elapsed:.3f} s)")
-    ax.set_xlabel("Ising energy")
-    ax.legend()
-
+    axis.set_title(f"{target_name} ({elapsed:.3f} s)")
+    axis.set_xlabel("Ising energy")
+    axis.legend()
 axes[0].set_ylabel("Frequency")
-fig.suptitle(f"QAOA samples by CUDA-Q target ({benchmark_shots} shots)")
-fig.tight_layout()
+figure.suptitle(f"QAOA samples by CUDA-Q target ({BENCHMARK_SHOTS} shots)")
+figure.tight_layout()
 plt.show()
 
 # %% [markdown]
-# ## When Kernels Include Classical Control Flow: `STATIC` and `RUNNABLE` artifacts
+# ## Kernels with classical control flow
 #
-# Most variational circuits, including the QAOA ansatz above, transpile to `ExecutionMode.STATIC`.
-# `STATIC` artifacts have no explicit terminal measurement in the generated CUDA-Q source, so they are compatible with CUDA-Q's `sample` and `observe` APIs.
-#
-# Qamomile quantum kernels are designed with hardware-level execution in mind and can express classical control flow based on mid-circuit measurement results (see [Classical Flow Patterns](../tutorial/07_classical_flow_patterns.ipynb) for details).
-# For this reason, if a quantum kernel contains control flow that depends on runtime measurements, such as `if` branches or `while` loops, the CUDA-Q integration emits an `ExecutionMode.RUNNABLE` artifact instead.
-# `RUNNABLE` artifacts use explicit `mz(...)` measurements in the generated source and execute through `cudaq.run()`.
-# The following tiny feed-forward circuit demonstrates that path.
+# QCore effects state that this program needs mid-circuit measurement and a
+# dynamic branch. Capability planning checks that requirement and CUDA-Q
+# emission generates the matching runtime `if`.
 
 
 # %%
-@qmc.qkernel
-def measurement_feed_forward() -> qmc.Bit:
-    q0 = qmc.qubit("q0")
-    q1 = qmc.qubit("q1")
-    q0 = qmc.x(q0)
-    bit = qmc.measure(q0)
-    if bit:
-        q1 = qmc.x(q1)
-    return qmc.measure(q1)
+@qm.qkernel
+def feedback_sample() -> qm.Shot[qm.Bits[2]]:  # type: ignore[valid-type]
+    """Correlate two output bits through measurement feedback.
+
+    Returns:
+        qm.Shot[qm.Bits[2]]: Two equal source-ordered bits.
+    """
+
+    state = qm.h(qm.qubits(2), target=0)
+    flag, state = qm.measure_z(state, 0)
+    if flag:
+        state = qm.x(state, target=1)
+    else:
+        state = qm.z(state, target=1)
+    return qm.measure(state)
 
 
-runnable_executable = transpiler.transpile(measurement_feed_forward)
-runnable_circuit = runnable_executable.get_first_circuit()
-assert runnable_circuit is not None
-assert runnable_circuit.execution_mode == ExecutionMode.RUNNABLE
-assert "mz(" in runnable_circuit.source
-assert "if " in runnable_circuit.source
+feedback_artifact = qm.compile(feedback_sample, to=target)
+feedback_source = export_payload(feedback_artifact).decode("utf-8")
+feedback_result = qm.run(feedback_artifact, on=endpoint, shots=32, seed=3).result
 
-print("execution_mode:", runnable_circuit.execution_mode.value)
-print(runnable_circuit.source)
+print(feedback_source)
+assert isinstance(feedback_source, str) and "if m0:" in feedback_source
+assert set(feedback_result.counts) == {(0, 0), (1, 1)}
 
 # %% [markdown]
-# `ExecutableProgram.sample(...)` still works for `RUNNABLE` artifacts, but the executor calls `cudaq.run()` rather than `cudaq.sample()`.
-# The example above is deterministic: the first measurement is always `1`, so the branch flips `q1` and the returned bit is always `1`.
-
-# %%
-runnable_shots = 1 if docs_test_mode else 128
-runnable_sample = runnable_executable.sample(executor, shots=runnable_shots).result()
-print(runnable_sample.results)
-assert sum(count for _, count in runnable_sample.results) == runnable_shots
-assert all(value == 1 for value, _ in runnable_sample.results)
-
-# %% [markdown]
-# The trade-off is that `RUNNABLE` artifacts are not compatible with CUDA-Q's `observe` API.
-# Qamomile surfaces that distinction as a `TypeError` when `estimate()` is called on a `RUNNABLE` artifact.
-
-# %%
-try:
-    executor.estimate(runnable_circuit, qm_o.Z(0))
-except TypeError as exc:
-    print(type(exc).__name__, exc)
-else:
-    raise AssertionError("RUNNABLE CUDA-Q circuits must reject observe()")
+# A target that lacks the required effects fails capability negotiation before
+# launch; a capable target receives the verified artifact without an additional
+# user-selected execution mode.
 
 # %% [markdown]
 # ## Summary
 #
-# In this tutorial, we transpiled a MaxCut QAOA quantum kernel to CUDA-Q, then exercised sampling, expectation-value estimation, CPU/GPU target selection, and execution of a circuit with classical control flow.
-#
-# - The CUDA-Q artifact emitted by `CudaqTranspiler` keeps inspectable Python source and can be reused with runtime parameters.
-# - The same `ExecutableProgram` can run on the `qpp-cpu` target or the `nvidia` GPU target, with target selection handled by the executor.
-# - `CudaqExecutor` supports both QAOA-style sampling and noise-free expectation values through CUDA-Q's `observe` API.
-# - Quantum kernels with classical control flow that depends on runtime measurements are emitted as `ExecutionMode.RUNNABLE` artifacts and execute through `cudaq.run()`.
-
-# %% [markdown]
-# ### See also
-#
-# - [QURI Parts Support](quri_parts_support.ipynb) covers the same MaxCut QAOA workflow with QURI Parts.
-# - [Qiskit Support](qiskit_support.ipynb) covers the same workflow on Qiskit, including Aer simulators, Qiskit primitives, and native Qiskit circuit features.
+# - QCore is the sole persistent meaning of the typed source program.
+# - `Cudaq` changes only realization by emitting serialized CUDA-Q kernel data.
+# - One compiled artifact binds a runtime parameter on the in-process
+#   `qpp-cpu` endpoint and returns Qamomile source-order bits.
+# - The original five-node, three-layer MaxCut workflow includes continuous
+#   optimization, expectation estimation, final sampling, and visualization.
+# - The same artifact is benchmarked for 100,000 shots on CPU and, when
+#   available, NVIDIA GPU; target selection changes only the endpoint.
+# - Dynamic classical control executes through the same verified artifact
+#   contract after capability negotiation.

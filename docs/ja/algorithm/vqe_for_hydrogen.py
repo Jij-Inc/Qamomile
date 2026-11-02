@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: py:percent,ipynb
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -17,6 +18,10 @@
 # tags: [algorithm, chemistry, variational]
 # ---
 #
+# ---
+# tags: [algorithm, chemistry, variational]
+# ---
+#
 # # 水素分子のための変分量子固有値ソルバー（VQE）
 #
 # このチュートリアルでは、水素分子（H₂）の基底状態エネルギーを求めるための変分量子固有値ソルバー（VQE）アルゴリズムの実装について解説します。分子ハミルトニアンの生成には [OpenFermion](https://quantumai.google/openfermion) を使用します。
@@ -29,53 +34,68 @@
 #
 # 量子コンピューティングを用いた量子化学問題の解法を紹介し、特にH₂分子の最小エネルギー構造の探索に焦点を当てます。
 
+# %% [markdown]
+# ## インストール
+#
+# ```bash
+# pip install "qamomile[qiskit,visualization]" openfermion pyscf openfermionpyscf
+# ```
+
 # %%
-# 必要なパッケージは以下のコマンドでインストールできます
+# Install the latest Qamomile and chemistry extras through pip!
 # # !pip install "qamomile[qiskit,visualization]" openfermion pyscf openfermionpyscf
 
 # %%
+import itertools
 import os
-import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
 import openfermion.chem as of_chem
 import openfermion.transforms as of_trans
 import openfermionpyscf as of_pyscf
-from qiskit_aer.primitives import EstimatorV2
 from scipy.optimize import minimize
 
-import qamomile.circuit as qmc
-import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.basic import cx_entangling_layer, ry_layer, rz_layer
-from qamomile.qiskit import QiskitTranspiler
-from qamomile.qiskit.transpiler import QiskitExecutor
+import qamomile as qm
+from qamomile.measurement import Estimator
+from qamomile.qiskit import Aer
 
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 # %% [markdown]
-# ## 水素分子のハミルトニアンの作成
+# ## 水素分子のHamiltonianを作る
+#
+# 最小基底STO-3GのH₂には2つの空間軌道があり、Jordan–Wigner符号化後は4つの
+# spin orbital、すなわち4量子ビットになります。PySCFから分子積分に加えて、
+# 変分結果の検証に用いるfull-configuration-interaction（FCI）energyを得ます。
+
 
 # %%
-basis = "sto-3g"
-multiplicity = 1
-charge = 0
-distance = 0.977
-geometry = [["H", [0, 0, 0]], ["H", [0, 0, distance]]]
-description = "tmp"
-molecule = of_chem.MolecularData(geometry, basis, multiplicity, charge, description)
-molecule = of_pyscf.run_pyscf(molecule, run_scf=True, run_fci=True)
-n_qubit = molecule.n_qubits
-n_electron = molecule.n_electrons
-# H2 を STO-3G 基底で扱うと、空間軌道 2 個 -> スピン軌道 4 個 -> 4 量子ビット、
-# 電子数は 2。
-assert n_qubit == 4
-assert n_electron == 2
-fermionic_hamiltonian = of_trans.get_fermion_operator(
-    molecule.get_molecular_hamiltonian()
-)
-jw_hamiltonian = of_trans.jordan_wigner(fermionic_hamiltonian)
+def make_hydrogen_molecule(bond_length: float):
+    """Generate one STO-3G hydrogen molecule and its qubit Hamiltonian.
 
+    Args:
+        bond_length: Distance between the hydrogen atoms in angstroms.
+
+    Returns:
+        A pair containing the Jordan–Wigner operator and molecular data.
+    """
+
+    geometry = [["H", [0, 0, 0]], ["H", [0, 0, bond_length]]]
+    molecule = of_chem.MolecularData(geometry, "sto-3g", 1, 0)
+    molecule = of_pyscf.run_pyscf(molecule, run_scf=True, run_fci=True)
+    fermionic = of_trans.get_fermion_operator(molecule.get_molecular_hamiltonian())
+    return of_trans.jordan_wigner(fermionic), molecule
+
+
+jordan_wigner_hamiltonian, molecule = make_hydrogen_molecule(0.977)
+N_QUBITS = molecule.n_qubits
+N_ELECTRONS = molecule.n_electrons
+
+assert N_QUBITS == 4
+assert N_ELECTRONS == 2
+assert molecule.fci_energy is not None
+print(f"FCI reference energy: {molecule.fci_energy:+.12f}")
 
 # %% [markdown]
 # ## Qamomile ハミルトニアンへの変換
@@ -84,186 +104,243 @@ jw_hamiltonian = of_trans.jordan_wigner(fermionic_hamiltonian)
 
 
 # %%
-def operator_to_qamomile(operators: tuple[tuple[int, str], ...]) -> qm_o.Hamiltonian:
-    pauli = {"X": qm_o.X, "Y": qm_o.Y, "Z": qm_o.Z}
-    H = qm_o.Hamiltonian()
-    H.constant = 1.0
-    for ope in operators:
-        H *= pauli[ope[1]](ope[0])
-    return H
+def openfermion_to_qamomile(operator, num_qubits: int) -> qm.Hamiltonian:
+    """Convert an OpenFermion QubitOperator into a Qamomile Hamiltonian.
+
+    Args:
+        operator: Jordan–Wigner-transformed OpenFermion operator.
+        num_qubits: Width retained even when the highest mode is identity.
+
+    Returns:
+        The equivalent immutable Qamomile Hamiltonian.
+    """
+
+    paulis = {"X": qm.X, "Y": qm.Y, "Z": qm.Z}
+    result = qm.Hamiltonian.zero(num_qubits=num_qubits)
+    for factors, coefficient in operator.terms.items():
+        assert abs(coefficient.imag) < 1e-12
+        if not factors:
+            result = result + coefficient.real
+            continue
+        word = qm.Hamiltonian.identity(num_qubits=num_qubits)
+        for index, label in factors:
+            word = word * paulis[label](index)
+        result = result + coefficient.real * word
+    return result
 
 
-def openfermion_to_qamomile(of_h) -> qm_o.Hamiltonian:
-    H = qm_o.Hamiltonian()
-    for k, v in of_h.terms.items():
-        if len(k) == 0:
-            H.constant += v
-        else:
-            H += operator_to_qamomile(k) * v
-    return H
-
-
-hamiltonian = openfermion_to_qamomile(jw_hamiltonian)
-assert hamiltonian.num_qubits == n_qubit
-
-
-# %% [markdown]
-# ## VQE アンザッツの作成
-#
-# このセクションでは、VQEアルゴリズムのための Hardware Efficient SU(2) アンザッツを `@qkernel` デコレータを用いて作成します。アンザッツとは、試行波動関数を準備するパラメータ付き量子回路です。`ry_layer`、`rz_layer` および線形 CX エンタングル層を組み合わせて構築し、最後に `expval` でハミルトニアンの期待値を計算します。
-
-
-# %%
-@qmc.qkernel
-def vqe_ansatz(
-    n: qmc.UInt,
-    reps: qmc.UInt,
-    thetas: qmc.Vector[qmc.Float],
-    H: qmc.Observable,
-) -> qmc.Float:
-    q = qmc.qubit_array(n, name="q")
-    for r in qmc.range(reps):
-        base = r * 2 * n
-        q = ry_layer(q, thetas, base)
-        q = rz_layer(q, thetas, base + n)
-        q = cx_entangling_layer(q)
-    # Final rotation layer
-    final_base = reps * 2 * n
-    q = ry_layer(q, thetas, final_base)
-    q = rz_layer(q, thetas, final_base + n)
-    return qmc.expval(q, H)
-
-
-# %% [markdown]
-# ## Qiskitを用いたVQEの実行
-#
-# このセクションでは、`QiskitTranspiler` を使って VQE カーネルを実行可能オブジェクトにトランスパイルします。デフォルトの executor がこのオブジェクトを実行し、qkernel で定義した `expval` による期待値を返します。そのため、ユーザーは最適化ループのみ実装すれば問題ありません。
-
-# %%
-transpiler = QiskitTranspiler()
-reps = 4
-
-executable = transpiler.transpile(
-    vqe_ansatz,
-    bindings={"n": n_qubit, "reps": reps, "H": hamiltonian},
-    parameters=["thetas"],
+hamiltonian = openfermion_to_qamomile(
+    jordan_wigner_hamiltonian,
+    N_QUBITS,
 )
 
-# Transpiled quantum circuit
-executable.quantum_circuit.draw("mpl")
+assert hamiltonian.num_qubits == N_QUBITS
+assert hamiltonian.is_hermitian
+assert qm.Hamiltonian.from_portable(hamiltonian.to_portable()) == hamiltonian
+print(f"Hamiltonian terms: {len(hamiltonian.terms)}")
+
+# %% [markdown]
+# ## VQE ansatzを作る
+#
+# hardware-efficient SU(2) ansatzは従来のチュートリアルと同じです。RY layer、
+# RZ layer、線形CX chainを4回繰り返し、最後にRY/RZの組を追加します。
+# 4量子ビットでは$(4 + 1)\times 2\times 4=40$個のruntime parameterになります。
+# この状態準備を、測定基底を明示するプログラムから呼び出します。
+# 各基底で新しい状態を準備して測定し、その結果からエネルギーを推定します。
+
+# %%
+REPETITIONS = 4
+NUM_PARAMETERS = (REPETITIONS + 1) * 2 * N_QUBITS
+
+
+@qm.qkernel
+def hydrogen_vqe_state(
+    thetas: qm.Param[qm.Vector[qm.Real, 40]],  # type: ignore[valid-type]
+) -> qm.Q[qm.Bits[4]]:  # type: ignore[valid-type]
+    """Prepare the four-qubit hardware-efficient hydrogen trial state.
+
+    Args:
+        thetas (qm.Param[qm.Vector[qm.Real, 40]]): Runtime SU(2) angles.
+
+    Returns:
+        qm.Q[qm.Bits[4]]: Prepared variational state.
+    """
+
+    state = qm.qubits(4)
+    for repetition in range(4):
+        base = repetition * 8
+        for target in range(4):
+            state = qm.ry(state, thetas[base + target], target=target)
+        for target in range(4):
+            state = qm.rz(state, thetas[base + 4 + target], target=target)
+        for control in range(3):
+            state = qm.cx(state, control=control, target=control + 1)
+    for target in range(4):
+        state = qm.ry(state, thetas[32 + target], target=target)
+    for target in range(4):
+        state = qm.rz(state, thetas[36 + target], target=target)
+    return state
+
+
+# %% [markdown]
+# ## エネルギー推定器の準備
+#
+# `Estimator`は状態準備の定義とHamiltonianを受け取り、コンストラクタで検証します。
+# `estimate`は実行先を確認し、契約を満たすバックエンドの推定機能か、測定回路を生成する共通経路を選びます。
+# QWCの項は測定基底を共有します。返された量子ビットの位置がHamiltonianの添字に対応します。
+# 生成する実行入口は古典の測定結果を返し、量子状態が実行の外へ出ることはありません。
+# 共通経路では、実行時の角度を変えてもコンパイル済みの回路を再利用します。
+#
+# %%
+endpoint = Aer()
+estimator = Estimator(hydrogen_vqe_state, hamiltonian, grouping="qwc")
+assert NUM_PARAMETERS == 40
+
+
+# %% [markdown]
+# ## 有限ショットによるエネルギー推定
+#
+# `estimate`が測定をスケジュールし、統計量を集計します。`shots`は**総予算**で、測定グループへ均等に配分されます。同じグループ内の共分散を保持し、異なるグループには別々の実行と乱数系列を使います。恒等項にはデバイスのショットを使いません。
+#
+# 標準誤差は独立同分布のショットを仮定したサンプリングの不確かさを表し、ハードウェアの偏りや最適化誤差を含みません。1ショットでは標本分散を求められず、標準誤差は`None`になります。
+
+# %%
+SHOTS = 640 if docs_test_mode else 5120
+FINAL_SHOTS = 2560 if docs_test_mode else 40960
+measurement_seeds = itertools.count(42)
+
+
+def estimate_energy(values, estimator, *, shots=SHOTS):
+    """Evaluate the prepared estimator with fresh random streams."""
+    estimate = estimator.estimate(
+        on=endpoint,
+        parameters={"thetas": tuple(float(value) for value in values)},
+        shots=shots,
+        seed=next(measurement_seeds),
+    )
+    assert estimate.shots == shots
+    assert np.isfinite(estimate.value)
+    assert estimate.standard_error is not None
+    assert np.isfinite(estimate.standard_error)
+    return estimate
+
+
+# %% [markdown]
+# ## 最適化後のパラメータを改めて測定する
+#
+# COBYLAにはサンプリングで推定したエネルギーを渡すため、有限差分の勾配は不要です。目的関数にはショットノイズが含まれます。最終結果には最適化中の最小の推定値を流用せず、より多いショット数で新たに測定した値を使います。
+#
+# 読者向けの評価予算は結合距離ごとに目的関数200回分です。テスト用の予算は実行経路の確認のみを目的にしています。誤差棒は選ばれたパラメータでのサンプリングの不確かさを示し、最適化の未収束やansatzの表現力による誤差は含みません。そのため、FCIの値を含むとは限りません。
+#
+# 変分状態の真の期待値は基底状態エネルギー以上ですが、有限ショットの推定値は基準値を下回る場合があります。そのため、各標本平均に厳密な変分上界を要求せず、推定した標準誤差を表示します。誤差棒は標準誤差1個分であり、保証された信頼区間ではありません。
 
 # %%
 cost_history = []
-executor = QiskitExecutor(estimator=EstimatorV2())
 
 
-def cost_fn(param_values):
-    job = executable.run(executor, bindings={"thetas": list(param_values)})
-    return job.result()
+def cost_function(values) -> float:
+    """Record the sampled energy used by the classical optimizer."""
+    estimate = estimate_energy(values, estimator)
+    cost_history.append(estimate.value)
+    return estimate.value
 
 
-def cost_callback(param_values):
-    cost_history.append(cost_fn(param_values))
-
-
-num_params = len(executable.parameter_names)
 rng = np.random.default_rng(42)
-initial_params = rng.uniform(0, np.pi, num_params)
-# 各 rep は RY 層 (n パラメータ) と RZ 層 (n パラメータ) を、最後の追加層も
-# RY + RZ ペアをもう 1 つ出すので、パラメータ数は (reps + 1) * 2 * n_qubit。
-assert num_params == (reps + 1) * 2 * n_qubit
-assert initial_params.shape == (num_params,)
-
-# VQE 最適化を実行します
-maxiter = 1 if docs_test_mode else 50
-warnings.filterwarnings("ignore", message="Maximum number of iterations")
-result = minimize(
-    cost_fn,
-    initial_params,
-    method="BFGS",
-    options={"disp": True, "maxiter": maxiter, "gtol": 1e-6},
-    callback=cost_callback,
+initial_parameters = rng.uniform(0.0, np.pi, NUM_PARAMETERS)
+max_iterations = 42 if docs_test_mode else 200
+optimization = minimize(
+    cost_function,
+    initial_parameters,
+    method="COBYLA",
+    options={"maxiter": max_iterations, "rhobeg": 0.5},
 )
-print(result)
-# 変分原理: BFGS の予算が短くても、試行エネルギーは FCI 基底エネルギーの上界。
-# 上で ``run_fci=True`` を渡しているので ``molecule.fci_energy`` は埋まっている。
-# openfermion の stub は ``run_fci=False`` のケースも考慮して ``float | None``
-# と宣言しているので、ここで narrow する。
-fci_ref = molecule.fci_energy
-assert fci_ref is not None
-assert result.fun >= fci_ref - 1e-9
-assert len(result.x) == num_params
+final_estimate = estimate_energy(optimization.x, estimator, shots=FINAL_SHOTS)
+fci_reference = float(molecule.fci_energy)
+print(
+    f"VQE energy: {final_estimate.value:+.6f} +/- {final_estimate.standard_error:.6f} (SE)"
+)
+print(f"FCI energy: {fci_reference:+.6f}")
+print(f"Final measurement shots: {final_estimate.shots}")
+assert len(optimization.x) == NUM_PARAMETERS
+assert len(cost_history) == optimization.nfev
 
 # %%
-plt.plot(cost_history)
-plt.plot(
-    range(len(cost_history)),
-    [fci_ref] * len(cost_history),
-    linestyle="dashed",
-    color="black",
-    label="Exact Solution",
+plt.plot(cost_history, label="Sampled VQE objective")
+plt.errorbar(
+    [len(cost_history) - 1],
+    [final_estimate.value],
+    yerr=[final_estimate.standard_error],
+    fmt="o",
+    capsize=4,
+    label="Fresh final estimate (1 SE)",
 )
+plt.axhline(fci_reference, linestyle="dashed", color="black", label="FCI reference")
+plt.xlabel("Energy evaluation")
+plt.ylabel("Energy (Hartree)")
 plt.legend()
 plt.show()
 
-
 # %% [markdown]
-# ## 原子同士の距離を変更する
-
+# ## 原子間距離を変える
+#
+# 各結合長でハミルトニアンを再計算し、推定器を作成します。各推定器は最適化を通じてコンパイル済み測定プログラムを再利用します。最適化した各点は、新しいショットで再評価します。ドキュメントテストでは1点、読者向けのノートブックでは15点の結合長を使います。
 
 # %%
-def hydrogen_molecule(bond_length):
-    basis = "sto-3g"
-    multiplicity = 1
-    charge = 0
-    geometry = [["H", [0, 0, 0]], ["H", [0, 0, bond_length]]]
-    description = "tmp"
-    molecule = of_chem.MolecularData(geometry, basis, multiplicity, charge, description)
-    molecule = of_pyscf.run_pyscf(molecule, run_scf=True, run_fci=True)
-    fermionic_hamiltonian = of_trans.get_fermion_operator(
-        molecule.get_molecular_hamiltonian()
-    )
-    jw_hamiltonian = of_trans.jordan_wigner(fermionic_hamiltonian)
-    return openfermion_to_qamomile(jw_hamiltonian), molecule.fci_energy
-
-
 n_points = 1 if docs_test_mode else 15
 bond_lengths = np.linspace(0.2, 1.5, n_points)
-assert bond_lengths.shape == (n_points,)
-energies = []
+vqe_energies = []
+vqe_errors = []
+fci_energies = []
+starting_parameters = optimization.x
+
 for bond_length in bond_lengths:
-    hamiltonian, fci_energy = hydrogen_molecule(bond_length)
-    # 結合長を変えても H2 は 4 量子ビット問題のまま。
-    assert hamiltonian.num_qubits == 4
-
-    executable = transpiler.transpile(
-        vqe_ansatz,
-        bindings={"n": hamiltonian.num_qubits, "reps": reps, "H": hamiltonian},
-        parameters=["thetas"],
+    transformed, bond_molecule = make_hydrogen_molecule(float(bond_length))
+    bond_hamiltonian = openfermion_to_qamomile(transformed, bond_molecule.n_qubits)
+    bond_estimator = Estimator(hydrogen_vqe_state, bond_hamiltonian)
+    bond_fci = bond_molecule.fci_energy
+    assert bond_fci is not None
+    bond_result = minimize(
+        lambda values: estimate_energy(values, bond_estimator).value,
+        starting_parameters,
+        method="COBYLA",
+        options={"maxiter": max_iterations, "rhobeg": 0.5},
+    )
+    starting_parameters = bond_result.x
+    measured = estimate_energy(
+        starting_parameters,
+        bond_estimator,
+        shots=FINAL_SHOTS,
+    )
+    vqe_energies.append(measured.value)
+    vqe_errors.append(measured.standard_error)
+    fci_energies.append(float(bond_fci))
+    print(
+        f"distance={bond_length:.3f}, VQE={measured.value:+.6f} "
+        f"+/- {measured.standard_error:.6f} (SE), FCI={bond_fci:+.6f}"
     )
 
-    num_params = len(executable.parameter_names)
-    initial_params = rng.uniform(0, np.pi, num_params)
-    result = minimize(
-        cost_fn,
-        initial_params,
-        method="BFGS",
-        options={"maxiter": maxiter, "gtol": 1e-6},
-    )
-
-    energies.append(result.fun)
-    # ``run_fci=True`` を渡しているので ``fci_energy`` は populate されている。
-    # openfermion stub の ``float | None`` をここで narrow。
-    assert fci_energy is not None
-    # 変分原理はどの結合長でも成り立つ。
-    assert result.fun >= fci_energy - 1e-9
-
-    print("distance: ", bond_length, "energy: ", result.fun, "fci_energy: ", fci_energy)
-
-assert len(energies) == n_points
+assert len(vqe_energies) == len(vqe_errors) == len(fci_energies) == n_points
 
 # %%
-plt.plot(bond_lengths, energies, "-o")
-plt.xlabel("Distance")
-plt.ylabel("Energy")
+plt.errorbar(
+    bond_lengths,
+    vqe_energies,
+    yerr=vqe_errors,
+    fmt="-o",
+    capsize=3,
+    label="Sampled VQE (1 SE)",
+)
+plt.plot(bond_lengths, fci_energies, "--", label="FCI reference")
+plt.xlabel("H–H distance (Å)")
+plt.ylabel("Energy (Hartree)")
+plt.legend()
 plt.show()
+
+# %% [markdown]
+# ## まとめ
+#
+# - OpenFermion/PySCFで4量子ビットのHamiltonianとFCI基準値を得ます。
+# - 状態準備qkernelに、`Estimator`が測定回路を組み合わせます。
+# - パラメータ更新には通常のコンパイル済みサンプリングプログラムを再利用します。
+# - 古典的なパリティの集計、グループ内の共分散、独立グループ間の誤差の合成は`qamomile.statistics`が担当します。
+# - 最終結果は新たな測定によるエネルギー推定値と誤差棒で示します。ショットをまたぐ集計はqkernelの外で行います。

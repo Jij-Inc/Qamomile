@@ -1,176 +1,343 @@
-import qamomile.circuit as qmc
-import qamomile.observable as qm_o
-from qamomile._utils import is_close_zero
-from qamomile.circuit.algorithm.qaoa import (
-    hubo_qaoa_state,
-    qaoa_state,
+# ruff: noqa: F821 -- dimensions are Qamomile dependent shape binders.
+
+"""Backend-neutral QAOA experiment composition."""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import Generic, TypeVar
+
+import qamomile as qm
+from qamomile.compilation import (
+    CompilationTarget,
+    CompiledProgram,
+    ExecutionEndpoint,
+    Invocation,
+    RunRecord,
+    SampleResult,
+    compile as compile_program,
+    run as run_program,
 )
-from qamomile.circuit.transpiler.executable import ExecutableProgram
-from qamomile.circuit.transpiler.transpiler import Transpiler
+from qamomile.ir import Program
+from qamomile.stdlib.variational import qaoa_state, uniform_superposition
 
-from .converter import MathematicalProblemConverter
+from .model import BinaryModel, DecodedSamples, VarType
+
+_Domain = TypeVar("_Domain", bound=VarType)
 
 
-class QAOAConverter(MathematicalProblemConverter):
-    """Converter for Quantum Approximate Optimization Algorithm (QAOA).
+@qm.qkernel
+def _qaoa_initial_sample(
+    width: qm.Const[qm.Int],  # type: ignore[valid-type]
+) -> qm.Shot[qm.Bits[width]]:  # type: ignore[valid-type]
+    """Sample the uniform initial state without variational coordinates.
 
-    Supports both standard quadratic (QUBO/Ising) models and higher-order
-    binary optimization (HUBO) models. When higher-order terms are present,
-    automatically uses phase-gadget decomposition for k-body Z-rotations.
+    Args:
+        width (qm.Const[qm.Int]): Positive number of problem variables.
 
-    Example:
-        >>> model = BinaryModel.from_hubo({(0, 1, 2): 1.0, (0,): -2.0})
-        >>> converter = QAOAConverter(model)
-        >>> executable = converter.transpile(QiskitTranspiler(), p=2)
+    Returns:
+        qm.Shot[qm.Bits[width]]: One sampled source-ordered bit string.
     """
 
-    def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
-        """Construct the Ising cost Hamiltonian from the spin model.
+    return qm.measure(uniform_superposition(qm.qubits(width), width))
 
-        Builds a Pauli-Z Hamiltonian from the spin model's linear, quadratic,
-        and higher-order terms.
 
-        Returns:
-            qm_o.Hamiltonian: The cost Hamiltonian.
-        """
-        hamiltonian = qm_o.Hamiltonian()
+@qm.qkernel
+def _qaoa_sample(
+    width: qm.Const[qm.Int],  # type: ignore[valid-type]
+    layers: qm.Const[qm.Int],  # type: ignore[valid-type]
+    hamiltonian: qm.Const[qm.Observable],  # type: ignore[valid-type]
+    gammas: qm.Param[qm.Vector[qm.Real, layers]],  # type: ignore[valid-type]
+    betas: qm.Param[qm.Vector[qm.Real, layers]],  # type: ignore[valid-type]
+) -> qm.Shot[qm.Bits[width]]:  # type: ignore[valid-type]
+    """Measure one QAOA state through a reusable dependent declaration.
 
-        for i, hi in self.spin_model.linear.items():
-            if not is_close_zero(hi):
-                hamiltonian.add_term((qm_o.PauliOperator(qm_o.Pauli.Z, i),), hi)
+    Args:
+        width (qm.Const[qm.Int]): Positive number of problem variables.
+        layers (qm.Const[qm.Int]): Positive number of QAOA layers.
+        hamiltonian (qm.Const[qm.Observable]): Closed Ising cost operator.
+        gammas (qm.Param[qm.Vector[qm.Real, layers]]): Runtime cost angles.
+        betas (qm.Param[qm.Vector[qm.Real, layers]]): Runtime mixer angles.
 
-        for (i, j), Jij in self.spin_model.quad.items():
-            if not is_close_zero(Jij):
-                hamiltonian.add_term(
-                    (
-                        qm_o.PauliOperator(qm_o.Pauli.Z, i),
-                        qm_o.PauliOperator(qm_o.Pauli.Z, j),
-                    ),
-                    Jij,
+    Returns:
+        qm.Shot[qm.Bits[width]]: One sampled source-ordered bit string.
+
+    Raises:
+        ValueError: If a dependent width is not positive at specialization.
+    """
+
+    return qm.measure(qaoa_state(width, layers, hamiltonian, gammas, betas))
+
+
+@dataclass(frozen=True, slots=True)
+class OptimizationExperimentIdentity:
+    """Exact typed identity of an optimization problem and executable plan."""
+
+    kind: str
+    problem_digest: str
+    program_digest: str
+
+    def __post_init__(self) -> None:
+        """Reject empty kinds and malformed Rust-owned component identities."""
+
+        if not isinstance(self.kind, str) or not self.kind:
+            raise ValueError("Q7670: optimization experiment kind must be non-empty")
+        for name, value in (
+            ("problem", self.problem_digest),
+            ("program", self.program_digest),
+        ):
+            if (
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise ValueError(
+                    f"Q7670: optimization experiment {name} identity must be a "
+                    "SHA-256 digest"
                 )
 
-        for indices, coeff in self.spin_model.higher.items():
-            if not is_close_zero(coeff):
-                pauli_ops = tuple(
-                    qm_o.PauliOperator(qm_o.Pauli.Z, idx) for idx in indices
-                )
-                hamiltonian.add_term(pauli_ops, coeff)
 
-        hamiltonian.constant = self.spin_model.constant
-        return hamiltonian
+@dataclass(frozen=True, slots=True)
+class OptimizationRun(Generic[_Domain]):
+    """One identified execution paired with its typed decoded distribution."""
 
-    def transpile(self, transpiler: Transpiler, *, p: int) -> ExecutableProgram:
-        """Transpile the model into an executable QAOA circuit.
+    identity: OptimizationExperimentIdentity
+    execution: RunRecord
+    samples: DecodedSamples[_Domain]
 
-        Dispatches to the quadratic-only fast path when no higher-order terms
-        are present, otherwise uses the HUBO path with phase-gadget
-        decomposition.
+    def __post_init__(self) -> None:
+        """Reject execution records for a different experiment program."""
 
-        Args:
-            transpiler (Transpiler): Engine transpiler to use.
-            p (int): Number of QAOA layers.
-
-        Returns:
-            ExecutableProgram: The compiled circuit program.
-        """
-        if not self.spin_model.higher:
-            return self._transpile_quadratic(transpiler, p=p)
-        return self._transpile_hubo(transpiler, p=p)
-
-    def _transpile_quadratic(
-        self,
-        transpiler: Transpiler,
-        *,
-        p: int,
-    ) -> ExecutableProgram:
-        """Transpile a quadratic-only model using the standard QAOA circuit.
-
-        Args:
-            transpiler (Transpiler): Engine transpiler to use.
-            p (int): Number of QAOA layers.
-
-        Returns:
-            ExecutableProgram: The compiled circuit program.
-        """
-
-        # NOTE: @qkernel is defined inline (not at module level) because
-        # transpile() binds instance-specific data at call time.
-        @qmc.qkernel
-        def qaoa_sampling(
-            p: qmc.UInt,
-            quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-            linear: qmc.Dict[qmc.UInt, qmc.Float],
-            gammas: qmc.Vector[qmc.Float],
-            betas: qmc.Vector[qmc.Float],
-            n: qmc.UInt,
-        ) -> qmc.Vector[qmc.Bit]:
-            q = qaoa_state(
-                p=p, quad=quad, linear=linear, n=n, gammas=gammas, betas=betas
+        if not isinstance(self.identity, OptimizationExperimentIdentity):
+            raise TypeError("optimization run identity is invalid")
+        if not isinstance(self.execution, RunRecord):
+            raise TypeError("optimization run execution must be a RunRecord")
+        if not isinstance(self.samples, DecodedSamples):
+            raise TypeError("optimization run samples must be DecodedSamples")
+        if self.execution.artifact.source_digest.hex() != self.identity.program_digest:
+            raise ValueError(
+                "Q7671: optimization run artifact does not match its experiment "
+                "identity"
             )
-            return qmc.measure(q)
 
-        return transpiler.transpile(
-            qaoa_sampling,
-            bindings={
-                "linear": self.spin_model.linear,
-                "quad": self.spin_model.quad,
-                "n": self.spin_model.num_bits,
-                "p": p,
-            },
-            parameters=["gammas", "betas"],
+    @property
+    def invocation(self) -> Invocation:
+        """Return the exact normalized coordinates and execution policy."""
+
+        return self.execution.invocation
+
+
+@dataclass(frozen=True, slots=True)
+class QAOAExperiment(Generic[_Domain]):
+    """A fixed problem and layer topology ready for repeated QAOA launches.
+
+    The immutable experiment closes only compile-time problem structure. The
+    variational coordinates remain the aggregate runtime parameter ABI, so a
+    caller may reuse :attr:`program` across optimization iterations and target
+    it at any compatible execution endpoint.
+
+    Args:
+        model (BinaryModel[_Domain]): Nonempty optimization problem.
+        layers (int): Nonnegative number of QAOA layers. Zero samples the
+            uniform initial state and requires empty gamma and beta sequences.
+
+    Raises:
+        TypeError: If the model or layer count has an invalid type.
+        ValueError: If layers is negative or the model has no variables.
+    """
+
+    model: BinaryModel[_Domain]
+    layers: int = 1
+    program: Program = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Validate topology and build the initial-state or layered Program.
+
+        Raises:
+            TypeError: If model is not a BinaryModel or layers is not an integer.
+            ValueError: If layers is negative or the model has no variables.
+        """
+
+        if not isinstance(self.model, BinaryModel):
+            raise TypeError("model must be a qamomile.optimization.BinaryModel")
+        if type(self.layers) is not int:
+            raise TypeError("layers must be an integer")
+        if self.layers < 0:
+            raise ValueError("layers must be nonnegative")
+        if self.model.num_variables <= 0:
+            raise ValueError("QAOA requires at least one model variable")
+        program = (
+            _qaoa_initial_sample.specialize(width=self.model.num_variables)
+            if self.layers == 0
+            else _qaoa_sample.specialize(
+                **{
+                    "width": self.model.num_variables,
+                    "layers": self.layers,
+                    "hamiltonian": self.model.hamiltonian,
+                }
+            )
+        )
+        object.__setattr__(self, "program", program)
+
+    @property
+    def identity(self) -> OptimizationExperimentIdentity:
+        """Return the exact problem/program pair defining this experiment."""
+
+        return OptimizationExperimentIdentity(
+            "qamomile.qaoa.v1",
+            self.model.semantic_digest,
+            self.program.semantic_digest,
         )
 
-    def _transpile_hubo(
-        self,
-        transpiler: Transpiler,
-        *,
-        p: int,
-    ) -> ExecutableProgram:
-        """Transpile a model with higher-order terms using phase-gadget decomposition.
+    def compile(self, *, to: CompilationTarget) -> CompiledQAOAExperiment[_Domain]:
+        """Compile this fixed experiment once for repeated target launches."""
 
-        Decomposes k-body Z-rotation terms into CX ladder + RZ primitives
-        via ``phase_gadget``, while reusing the standard
-        ``ising_cost`` for quadratic and linear terms.
+        return CompiledQAOAExperiment(self, compile_program(self.program, to=to))
+
+    def run(
+        self,
+        *,
+        on: ExecutionEndpoint,
+        gammas: Sequence[float],
+        betas: Sequence[float],
+        shots: int,
+        seed: int = 0,
+    ) -> OptimizationRun[_Domain]:
+        """Compile, execute, and decode one variational coordinate.
 
         Args:
-            transpiler (Transpiler): Engine transpiler to use.
-            p (int): Number of QAOA layers.
+            on: Backend-neutral execution endpoint.
+            gammas: One cost angle per static layer.
+            betas: One mixer angle per static layer.
+            shots: Number of observations requested from the endpoint.
+            seed: Optional endpoint seed.
 
         Returns:
-            ExecutableProgram: The compiled circuit program.
+            The complete compilation record and model-domain sample set.
+
+        Raises:
+            TypeError: If an angle vector is not a real numeric sequence.
+            ValueError: If an angle vector has the wrong length or is non-finite.
         """
 
-        # NOTE: @qkernel is defined inline (not at module level) because
-        # transpile() binds instance-specific data at call time.
-        @qmc.qkernel
-        def qaoa_sampling_hubo(
-            p_val: qmc.UInt,
-            quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-            linear: qmc.Dict[qmc.UInt, qmc.Float],
-            higher: qmc.Dict[qmc.Vector[qmc.UInt], qmc.Float],
-            gammas: qmc.Vector[qmc.Float],
-            betas: qmc.Vector[qmc.Float],
-            n: qmc.UInt,
-        ) -> qmc.Vector[qmc.Bit]:
-            q = hubo_qaoa_state(
-                p_val=p_val,
-                quad=quad,
-                linear=linear,
-                higher=higher,
-                n=n,
-                gammas=gammas,
-                betas=betas,
-            )
-            return qmc.measure(q)
-
-        return transpiler.transpile(
-            qaoa_sampling_hubo,
-            bindings={
-                "linear": self.spin_model.linear,
-                "quad": self.spin_model.quad,
-                "higher": self.spin_model.higher,
-                "n": self.spin_model.num_bits,
-                "p_val": p,
-            },
-            parameters=["gammas", "betas"],
+        gamma_values = _angles("gammas", gammas, self.layers)
+        beta_values = _angles("betas", betas, self.layers)
+        return self.compile(to=on.target)._run_normalized(
+            on=on,
+            gammas=gamma_values,
+            betas=beta_values,
+            shots=shots,
+            seed=seed,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledQAOAExperiment(Generic[_Domain]):
+    """One immutable QAOA plan compiled for a concrete artifact target."""
+
+    experiment: QAOAExperiment[_Domain]
+    artifact: CompiledProgram
+    identity: OptimizationExperimentIdentity = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Verify that the target artifact belongs to the retained experiment."""
+
+        if not isinstance(self.experiment, QAOAExperiment):
+            raise TypeError("compiled QAOA experiment requires a QAOAExperiment")
+        if not isinstance(self.artifact, CompiledProgram):
+            raise TypeError("compiled QAOA experiment requires an CompiledProgram")
+        identity = self.experiment.identity
+        if self.artifact.source_digest.hex() != identity.program_digest:
+            raise ValueError("Q7670: compiled artifact does not match QAOA experiment")
+        object.__setattr__(self, "identity", identity)
+
+    def run(
+        self,
+        *,
+        on: ExecutionEndpoint,
+        gammas: Sequence[float],
+        betas: Sequence[float],
+        shots: int,
+        seed: int = 0,
+    ) -> OptimizationRun[_Domain]:
+        """Execute one coordinate without recompiling the experiment."""
+
+        return self._run_normalized(
+            on=on,
+            gammas=_angles("gammas", gammas, self.experiment.layers),
+            betas=_angles("betas", betas, self.experiment.layers),
+            shots=shots,
+            seed=seed,
+        )
+
+    def _run_normalized(
+        self,
+        *,
+        on: ExecutionEndpoint,
+        gammas: tuple[float, ...],
+        betas: tuple[float, ...],
+        shots: int,
+        seed: int,
+    ) -> OptimizationRun[_Domain]:
+        """Execute coordinates through the compiled program's parameter ABI.
+
+        Args:
+            on (ExecutionEndpoint): Local or authorized remote endpoint.
+            gammas (tuple[float, ...]): One validated cost angle per layer.
+            betas (tuple[float, ...]): One validated mixer angle per layer.
+            shots (int): Number of observations.
+            seed (int): Endpoint random seed.
+
+        Returns:
+            OptimizationRun[_Domain]: Identified execution and decoded samples.
+
+        Raises:
+            TypeError: If the program returns a non-sampling result.
+        """
+
+        coordinates = {"gammas": gammas, "betas": betas}
+        execution = run_program(
+            self.artifact,
+            on=on,
+            parameters={
+                slot.name: coordinates[slot.name]
+                for slot in self.artifact.parameter_abi.slots
+            },
+            shots=shots,
+            seed=seed,
+        )
+        if not isinstance(execution.result, SampleResult):
+            raise TypeError("QAOA sample program returned a non-sampling result")
+        return OptimizationRun(
+            identity=self.identity,
+            execution=execution,
+            samples=self.experiment.model.decode(execution.result),
+        )
+
+
+def _angles(name: str, values: object, layers: int) -> tuple[float, ...]:
+    """Validate one fixed-shape finite variational coordinate."""
+
+    if isinstance(values, (str, bytes, bytearray)) or not isinstance(values, Sequence):
+        raise TypeError(f"{name} must be a real numeric sequence")
+    if len(values) != layers:
+        raise ValueError(f"{name} must contain exactly {layers} values")
+    normalized: list[float] = []
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"{name} must contain only real numbers")
+        coordinate = float(value)
+        if not math.isfinite(coordinate):
+            raise ValueError(f"{name} must contain only finite values")
+        normalized.append(coordinate)
+    return tuple(normalized)
+
+
+__all__ = [
+    "CompiledQAOAExperiment",
+    "OptimizationExperimentIdentity",
+    "OptimizationRun",
+    "QAOAExperiment",
+]

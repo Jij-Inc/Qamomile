@@ -1,35 +1,24 @@
-"""QURI Parts engine for Qamomile.
+"""Expose QURI Parts compilation and execution support for Qamomile.
 
-Design intent: this package concretizes circuit's abstract IR for QURI
-Parts through ``QuriPartsMaterializer``. ``QuriPartsTranspiler`` plugs the
-materializer into the shared compiler pipeline, while ``observable.py``
-converts Hamiltonians to QURI Parts ``Operator``s.
-
-Engine-specific quirks stay confined here: parametric circuits use
-``LinearMappedUnboundParametricQuantumCircuit``, so symbolic angles are
-normalized to linear-combination form (``{param: coeff, CONST: offset}``)
-at emit time, and controlled gates without a native equivalent fall back
-to circuit's shared decomposition recipes. Failures surface as
-``QamomileQuriPartsTranspileError`` (``exceptions.py``) rather than raw
-SDK errors.
-
-Constraints: depend only on ``qamomile.circuit`` public APIs plus the
-``quri-parts`` SDK — never on ``qamomile.optimization`` or other
-engines. Lowering decisions belong at emit time, not in the IR.
+QCore and the Rust compiler remain the semantic authorities. This namespace
+only exposes logical-circuit emission and QURI Parts execution endpoints; SDK
+objects stay out of persistent Qamomile artifacts.
 """
 
-from .emitter import QuriPartsGateEmitter
-from .exceptions import QamomileQuriPartsTranspileError
-from .observable import hamiltonian_to_quri_operator, to_quri_operator
-from .transpiler import QuriPartsExecutor, QuriPartsTranspiler
+from ._integration import (
+    FORMAT as FORMAT,
+    Qulacs as Qulacs,
+    QuriParts as QuriParts,
+    QuriPartsSampler as QuriPartsSampler,
+    load_circuit as load_circuit,
+    load_logical_circuit as load_logical_circuit,
+)
 
 __all__ = [
-    "QuriPartsTranspiler",
-    "QuriPartsExecutor",
-    "QuriPartsGateEmitter",
-    # Observable support
-    "hamiltonian_to_quri_operator",
-    "to_quri_operator",
-    # Exceptions
-    "QamomileQuriPartsTranspileError",
+    "FORMAT",
+    "Qulacs",
+    "QuriParts",
+    "QuriPartsSampler",
+    "load_circuit",
+    "load_logical_circuit",
 ]

@@ -1,41 +1,9 @@
-"""HUGR program-graph target for Qamomile.
+"""Expose HUGR compilation and local or Helios execution."""
 
-The engine lowers prepared hierarchical Qamomile semantics directly to a
-HUGR package. It deliberately bypasses circuit segmentation and CircuitProgram
-so function boundaries, typed dataflow, and hybrid control can be preserved.
-Generated quantum operations use the same ``tket.*`` extensions as Guppy,
-making the result interoperable with the Guppy/HUGR ecosystem.
+from ._execution import load_package as load_package
+from ._nexus import Helios as Helios, HeliosOptions as HeliosOptions
+from ._profile import FORMAT as FORMAT
+from ._selene import Selene as Selene
+from ._target import Hugr as Hugr
 
-Destructive measurements consume qubits with ``MeasureFree``. Projections
-retain their measured state with ``Measure``. Direct measurement/reset pairs
-use ``MeasureReset`` when their quantum wire and ordering permit fusion.
-Opaque measurement bits are converted to the existing native Boolean carrier.
-
-``HugrExecutable.qir`` and ``qir_info`` expose the latest complete H2 payloads
-and detached restoration metadata from ordinary ``sample`` and ``run`` calls.
-These records are ready before authentication or upload and survive a lost
-submission response. Compatible consecutive H2 calls reuse the exact bytes.
-Existing typed jobs, snapshots, and restoration keep their usual contracts.
-"""
-
-from qamomile.hugr._nexus import NexusExecutionOptions, NexusRegion
-from qamomile.hugr.executable import HugrExecutable
-from qamomile.hugr.execution import (
-    HugrExecutionTarget,
-    HugrExecutor,
-    SeleneExecutionOptions,
-)
-from qamomile.hugr.lowerer import HugrCompilationPlan, HugrTarget
-from qamomile.hugr.transpiler import HugrTranspiler
-
-__all__ = [
-    "HugrCompilationPlan",
-    "HugrTarget",
-    "HugrTranspiler",
-    "HugrExecutable",
-    "HugrExecutor",
-    "HugrExecutionTarget",
-    "SeleneExecutionOptions",
-    "NexusExecutionOptions",
-    "NexusRegion",
-]
+__all__ = ["FORMAT", "Helios", "HeliosOptions", "Hugr", "Selene", "load_package"]

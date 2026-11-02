@@ -28,7 +28,7 @@
 
 # %%
 # Put every import used by the notebook here.
-# import qamomile.circuit as qmc
+# import qamomile as qm
 
 # %% [markdown]
 # ## Background
@@ -54,7 +54,7 @@
 # %% [markdown]
 # ## Implementation
 #
-# Implement the algorithm with Qamomile. Prefer Qamomile-native qkernels,
+# Implement the algorithm with Qamomile. Prefer ordinary Qamomile functions,
 # observables, drawing, and assertions.
 
 # %%
@@ -75,7 +75,7 @@
 # ## Qamomile Built-ins
 #
 # Optional. If this page implemented the algorithm from scratch and Qamomile
-# provides a built-in qkernel, converter, or helper, show the built-in version
+# provides a built-in function, experiment, or helper, show the built-in version
 # here.
 
 # %%

@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: py:percent,ipynb
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -20,23 +21,31 @@
 # # Pauli Correlation Encoding
 #
 # In this tutorial we solve the MaxCut problem with Pauli Correlation
-# Encoding (PCE) using Qamomile's `PCEConverter`. PCE maps $N$ spin
+# Encoding (PCE) using Qamomile's `PauliCorrelationEncoding`. PCE maps $N$ spin
 # variables to expectation values of $k$-body Pauli correlators on a
 # register of $n = \mathcal{O}(N^{1/k})$ qubits. This reduces the qubit
 # count compared with a one-qubit-per-variable QAOA formulation.
 #
 # We solve a 20-vertex MaxCut instance on **3 qubits** with $k = 2$.
-# The workflow builds the encoding with `PCEConverter`, estimates each
+# The workflow builds the encoding with `PauliCorrelationEncoding`, estimates each
 # correlator expectation value with a hardware-efficient `@qkernel`
 # ansatz, optimizes the ansatz with `scipy.optimize.minimize`, decodes
-# the final expectations with `converter.decode`, and compares the
+# the final expectations with `encoding.decode`, and compares the
 # result with a brute-force baseline.
+
+# %% [markdown]
+# ## Installation
+#
+# ```bash
+# pip install "qamomile[qiskit,visualization]"
+# ```
 
 # %%
 # Install the latest Qamomile through pip!
 # # !pip install "qamomile[qiskit,visualization]"
 
 # %%
+import itertools
 import os
 
 import matplotlib.pyplot as plt
@@ -44,19 +53,17 @@ import networkx as nx
 import numpy as np
 from scipy.optimize import minimize
 
-import qamomile.circuit as qmc
-from qamomile.circuit.algorithm.basic import (
-    cx_entangling_layer,
-    ry_layer,
-    rz_layer,
-)
-from qamomile.optimization.binary_model import BinaryModel, BinarySampleSet
-from qamomile.optimization.pce import PCEConverter
-from qamomile.qiskit import QiskitTranspiler
+import qamomile as qm
+from qamomile.measurement import Estimator
+from qamomile.optimization import BinaryModel, PauliCorrelationEncoding
+from qamomile.qiskit import Aer, to_circuit
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 # %% [markdown]
 # (problem-settings)=
 # ## Problem Settings: MaxCut
+
 
 # %% [markdown]
 # ### Problem Definition
@@ -88,6 +95,7 @@ from qamomile.qiskit import QiskitTranspiler
 # this spin form, so we do not need an extra conversion from binary
 # variables $x \in \{0, 1\}$.
 
+
 # %% [markdown]
 # ### Create the Graph
 #
@@ -105,26 +113,31 @@ from qamomile.qiskit import QiskitTranspiler
 # %%
 seed = 42
 while True:
-    G = nx.random_regular_graph(3, 20, seed=seed)
-    if nx.is_connected(G):
+    graph = nx.random_regular_graph(3, 20, seed=seed)
+    if nx.is_connected(graph):
         break
     seed += 1
-print(f"Using seed = {seed} (smallest seed >= 42 producing a connected graph)")
 
-num_nodes = G.number_of_nodes()
-num_edges = G.number_of_edges()
+NUM_NODES = graph.number_of_nodes()
+NUM_EDGES = graph.number_of_edges()
+EDGES = tuple(sorted(tuple(sorted(edge)) for edge in graph.edges()))
+positions = nx.spring_layout(graph, seed=42)
 
-pos = nx.spring_layout(G, seed=42)
+print(f"Using graph seed {seed}: {NUM_NODES} nodes, {NUM_EDGES} edges")
+assert NUM_NODES == 20
+assert NUM_EDGES == 30
+
+# %%
 plt.figure(figsize=(6, 5))
 nx.draw(
-    G,
-    pos,
+    graph,
+    positions,
     with_labels=True,
     node_color="white",
     node_size=500,
     edgecolors="black",
 )
-plt.title(f"Graph: {num_nodes} nodes, {num_edges} edges")
+plt.title(f"Graph: {NUM_NODES} nodes, {NUM_EDGES} edges")
 plt.show()
 
 # %% [markdown]
@@ -136,6 +149,7 @@ plt.show()
 # under tight qubit budgets. Standard QAOA uses one qubit
 # per variable. PCE uses $n = \mathcal{O}(N^{1/k})$ qubits for an
 # $N$-variable problem.
+
 
 # %% [markdown]
 # ### PCE Encoding
@@ -158,6 +172,31 @@ plt.show()
 # correlators is deterministic: pick any fixed enumeration of $k$-body
 # Pauli strings on $n$ qubits and assign the first $N$ of them to
 # variables $0, \dots, N-1$.
+
+# %%
+model = BinaryModel.from_ising(
+    {edge: 0.5 for edge in EDGES},
+    constant=-NUM_EDGES / 2.0,
+    variables=range(NUM_NODES),
+)
+encoding = PauliCorrelationEncoding(model, correlator_order=2)
+
+assert model.num_variables == NUM_NODES
+assert encoding.num_qubits == 3
+assert len(encoding.observables) == NUM_NODES
+assert tuple(encoding.correlations) == model.variables
+assert all(
+    len(observable.terms) == 1
+    and len(observable.terms[0][0].factors) == 2
+    and observable.terms[0][1] == 1.0
+    for observable in encoding.observables
+)
+
+print(f"Classical variables: {model.num_variables}")
+print(f"PCE qubits: {encoding.num_qubits}")
+print(f"Compression ratio: {model.num_variables / encoding.num_qubits:.1f}x")
+for variable, observable in encoding.correlations.items():
+    print(f"P_{variable:2d}: {observable}")
 
 # %% [markdown]
 # ### Cost Function
@@ -201,6 +240,7 @@ plt.show()
 # $J_{ij} = +\tfrac{1}{2}$ on every edge, so the data term is minimized
 # precisely when adjacent $\sigma_i, \sigma_j$ disagree in sign.
 
+
 # %% [markdown]
 # ### Decoding
 #
@@ -217,257 +257,158 @@ plt.show()
 # $x_i = (1 - s_i) / 2$.
 
 # %% [markdown]
-# ## Implementation
-
-# %% [markdown]
-# ### Build the `BinaryModel` and `PCEConverter`
-#
-# We build the Ising form derived in [](#problem-settings) with
-# `BinaryModel.from_ising`: $h_i = 0$, $J_{ij} = 1/2$ on every edge, and
-# constant $-|E|/2$. Passing that spin model and correlator order
-# $k = 2$ to `PCEConverter` lets the converter choose the required
-# qubit count. With this scaling, the spin-model energy equals minus
-# the cut value. A higher cut has a lower energy.
-
-# %%
-quad = {(i, j): 0.5 for i, j in G.edges()}
-ising_model = BinaryModel.from_ising(
-    linear={},
-    quad=quad,
-    constant=-num_edges / 2,
-)
-converter = PCEConverter(ising_model, correlator_order=2)
-
-spin_model = converter.spin_model
-print(f"Number of variables  : {spin_model.num_bits}")
-print(f"PCE qubit count      : {converter.num_qubits}")
-print(f"Correlator order (k) : {converter.correlator_order}")
-print(f"Compression ratio    : {spin_model.num_bits / converter.num_qubits:.1f}x")
-
-assert spin_model.num_bits == 20
-assert converter.num_qubits == 3
-assert converter.correlator_order == 2
-
-# %% [markdown]
-# ### Inspect the Per-Variable Pauli Observables
-#
-# `get_encoded_pauli_list()` returns one Hamiltonian per variable, each
-# containing exactly one $k$-body Pauli string with coefficient $1$.
-# These are the $P_i$ observables from [](#pce-algorithm). The optimizer
-# will estimate their expectation values with `qmc.expval` inside the
-# ansatz kernel.
-
-# %%
-observables = converter.get_encoded_pauli_list()
-
-print(f"Total observables : {len(observables)}")
-for i, P_i in enumerate(observables):
-    print(f"  P_{i:2d}: {P_i}")
-
-assert len(observables) == spin_model.num_bits
-# Each observable is a single k-body Pauli string with coefficient 1.
-for P_i in observables:
-    coeffs = list(P_i.terms.values())
-    assert len(coeffs) == 1 and abs(coeffs[0] - 1.0) < 1e-12
-
-# %% [markdown]
 # ### Define the Ansatz
 #
-# PCE leaves the circuit choice open. The original paper uses a
-# **hardware-efficient ansatz**: alternating layers of
-# single-qubit rotations and two-qubit entangling gates. We use the
-# pre-built `ry_layer`, `rz_layer`, and `cx_entangling_layer` from
-# `qamomile.circuit.algorithm.basic` and stack them `depth` times,
-# giving $2 \cdot n \cdot \text{depth}$ variational angles in total.
-# The kernel returns $\langle P \rangle$, where `P` is the observable
-# fixed by transpile-time bindings, so we transpile the same kernel once
-# per $P_i$.
+# We use a hardware-efficient state preparation: H on each bit, then three layers of RY, RZ, and nearest-neighbor CX gates. The 3-bit, depth-3 example has 18 runtime angles. The qkernel returns the prepared quantum variable to a composing caller; it does not calculate an expectation or return a live state to host Python.
 #
-# :::{note}
-# Qamomile's rotation gates carry the standard
-# $1/2$ factor: $\text{RY}(\theta) = e^{-i \theta Y / 2}$ and
-# $\text{RZ}(\theta) = e^{-i \theta Z / 2}$. Every entry of the `thetas`
-# vector is a variational parameter. The optimizer can scale it, so the
-# constant factor is absorbed into the optimal `thetas` values. We pass
-# `thetas[i]` directly without inserting an explicit factor of $2$.
-# :::
-
-
-# %%
-@qmc.qkernel
-def pce_ansatz(
-    n: qmc.UInt,
-    depth: qmc.UInt,
-    thetas: qmc.Vector[qmc.Float],
-    P: qmc.Observable,
-) -> qmc.Float:
-    q = qmc.qubit_array(n, name="q")
-    for i in qmc.range(n):
-        q[i] = qmc.h(q[i])
-    for d in qmc.range(depth):
-        offset = d * 2 * n
-        q = ry_layer(q, thetas, offset)  # type: ignore[arg-type]
-        q = rz_layer(q, thetas, offset + n)  # type: ignore[arg-type,operator]
-        q = cx_entangling_layer(q)
-    return qmc.expval(q, P)
-
+# `Estimator` later combines this definition with each correlator. The diagram shows the full three-layer state-preparation component, before measurement. Qamomile uses the standard RY/RZ half-angle convention, so each entry of `thetas` is passed directly to its rotation.
 
 # %% [markdown]
-# To make the structure concrete, here is the circuit diagram at
-# $n = 3$ qubits and `depth = 1` (one layer), with `P` bound
-# to the first encoded observable. The `thetas` entries remain runtime
-# parameters.
+# The state-preparation definition can be inspected and analyzed before choosing a measurement or an execution endpoint.
 
 # %%
-pce_ansatz.draw(n=3, depth=1, P=observables[0], fold_loops=False)
+DEPTH = 3
+NUM_PARAMETERS = 2 * 3 * DEPTH
 
-# %% [markdown]
-# ### Transpile One `ExecutableProgram` per Observable
-#
-# Each $P_i$ must be fixed at transpile time, so we transpile the kernel
-# once per observable and cache the resulting executables. Each
-# `transpiler.transpile(...)` returns an `ExecutableProgram` containing
-# the transpiled engine circuit and the metadata needed to rebind
-# runtime parameters. The transpile-time `bindings` fix the structural
-# inputs (`n`, `depth`, `P`);
-# `parameters=["thetas"]` leaves the variational angles as runtime
-# parameters that the optimizer can change on every call.
 
-# %%
-transpiler = QiskitTranspiler()
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+@qm.qkernel
+def pce_state(
+    thetas: qm.Param[qm.Vector[qm.Real, 18]],  # type: ignore[valid-type]
+) -> qm.Q[qm.Bits[3]]:  # type: ignore[valid-type]
+    """Prepare the three-qubit hardware-efficient PCE trial state.
 
-n = converter.num_qubits
-depth = 1 if docs_test_mode else 3
-num_thetas = 2 * n * depth
+    Args:
+        thetas (qm.Param[qm.Vector[qm.Real, 18]]): Runtime rotation angles.
 
-executables = [
-    transpiler.transpile(
-        pce_ansatz,
-        bindings={"n": n, "depth": depth, "P": P_i},
-        parameters=["thetas"],
-    )
-    for P_i in observables
-]
+    Returns:
+        qm.Q[qm.Bits[3]]: Prepared PCE state.
+    """
 
-print(f"Executables cached : {len(executables)}")
-print(f"Variational params : {num_thetas} (= 2 * n * depth)")
+    state = qm.qubits(3)
+    for target in range(3):
+        state = qm.h(state, target=target)
+    for depth in range(3):
+        base = depth * 6
+        for target in range(3):
+            state = qm.ry(state, thetas[base + target], target=target)
+        for target in range(3):
+            state = qm.rz(state, thetas[base + 3 + target], target=target)
+        for control in range(2):
+            state = qm.cx(state, control=control, target=control + 1)
+    return state
 
-assert len(executables) == len(observables)
-assert num_thetas == 2 * n * depth
+
+program = pce_state.specialize()
+study = qm.resources.logical(program)
+
+assert NUM_PARAMETERS == 18
+assert study.metric(qm.resources.LOGICAL_GATES).numeric_enclosure() == (27, 27)
+assert study.metric(qm.resources.LOGICAL_PEAK_QUBITS).numeric_enclosure() == (3, 3)
 
 # %% [markdown]
 # (pce-optimize-variational-parameters)=
-# ### Optimize the Variational Parameters
+# ## Prepare Estimators and Optimize the Parameters
 #
-# The classical loop estimates $\langle P_i \rangle$ for every
-# observable at the current `thetas`, plugs those values into the
-# tanh-relaxed loss from [](#pce-algorithm) (data term + regularizer), and
-# asks `scipy.optimize.minimize` to update the angles.
+# Create one reusable Qamomile `Estimator` per encoded correlator. The estimator chooses a compatible backend path or generates measured programs; the tutorial does not strip measurements from an executable or translate observable and parameter ordering by hand.
 #
-# We configure the three loss hyperparameters following the original
-# paper:
-#
-# - $\alpha$ (tanh sharpness): set to $\alpha = N^{k/2}$, where $N$
-#   is the number of graph nodes and $k$ is the correlator order. For
-#   our 20-node, $k = 2$ run, $\alpha = 20$.
-# - $\beta$ (regularizer strength): a fixed value of $1/2$ that the
-#   paper has already tuned.
-# - $\nu$ (overall scale): the Edwards–Erdős MaxCut bound,
-#   $\nu = |E|/2 + (N - 1)/4$.
+# Each call receives a finite shot budget for one correlator. With 20 correlators, a loss evaluation consumes `20 * SHOTS_PER_OBSERVABLE` shots. Distinct nonzero seeds give each call a fresh random stream. The nonlinear loss is a plug-in estimate: applying tanh to noisy means can introduce bias. A fresh, larger final budget reports per-correlator uncertainty before sign rounding. A correlator close to zero can change sign under repeated sampling.
 
 # %%
-executor = transpiler.executor()
-maxiter = 1 if docs_test_mode else 100
+state_circuit = to_circuit(program)
+assert state_circuit.num_qubits == encoding.num_qubits
+assert state_circuit.num_parameters == NUM_PARAMETERS
+print(state_circuit.draw(output="text", fold=100))
 
-# Hyperparameters from https://doi.org/10.48550/arXiv.2401.09421:
-#   alpha = N^(k/2) (N = number of nodes, k = PCE correlator order)
-#   beta  = 1/2 (regularizer strength)
-#   nu    = |E| / 2 + (N - 1) / 4 (Edwards-Erdős MaxCut bound)
-N = spin_model.num_bits
-k = converter.correlator_order
-alpha = float(N ** (k / 2))
-beta = 0.5
-nu = num_edges / 2 + (N - 1) / 4
-print(f"alpha = {alpha}, beta = {beta}, nu = {nu}")
-
-cost_history: list[float] = []
+endpoint = Aer()
+estimators = tuple(
+    Estimator(program, observable) for observable in encoding.observables
+)
+SHOTS_PER_OBSERVABLE = 32 if docs_test_mode else 512
+FINAL_SHOTS_PER_OBSERVABLE = 128 if docs_test_mode else 2_048
+measurement_seeds = itertools.count(100)
 
 
-def measure_expectations(thetas: list[float]) -> list[float]:
-    return [
-        exe.run(executor, bindings={"thetas": thetas}).result() for exe in executables
-    ]
+def measure_expectations(values, *, shots=SHOTS_PER_OBSERVABLE):
+    """Estimate correlators with fresh finite-shot measurements."""
+    parameters = {"thetas": tuple(float(value) for value in values)}
+    return tuple(
+        estimator.estimate(
+            on=endpoint,
+            parameters=parameters,
+            shots=shots,
+            seed=next(measurement_seeds),
+        )
+        for estimator in estimators
+    )
 
 
-def loss(params: np.ndarray) -> float:
-    thetas = list(params)
-    expvals = measure_expectations(thetas)
-    relaxed = [np.tanh(alpha * e) for e in expvals]
-
-    # Data term: smooth surrogate of the spin objective.
-    L_data = 0.0
-    for (i, j), J_ij in spin_model.quad.items():
-        L_data += J_ij * relaxed[i] * relaxed[j]
-    for i, h_i in spin_model.linear.items():
-        L_data += h_i * relaxed[i]
-
-    # Regularizer: beta * nu * [(1/N) sum tanh^2(alpha <P_i>)]^2.
-    mean_sq = sum(r**2 for r in relaxed) / N
-    L_reg = beta * nu * mean_sq**2
-
-    L_total = L_data + L_reg
-    cost_history.append(L_total)
-    return L_total
+ALPHA = float(NUM_NODES ** (2 / 2))
+BETA = 0.5
+NU = NUM_EDGES / 2.0 + (NUM_NODES - 1) / 4.0
+cost_history = []
 
 
+def loss(values) -> float:
+    """Return the tanh-relaxed PCE loss including quartic regularization."""
+
+    estimates = measure_expectations(values)
+    expectations = np.array([estimate.value for estimate in estimates])
+    relaxed = tuple(float(value) for value in np.tanh(ALPHA * expectations))
+    data_term = encoding.relaxed_cost(relaxed) - model.constant
+    mean_square = sum(value**2 for value in relaxed) / NUM_NODES
+    total = data_term + BETA * NU * mean_square**2
+    cost_history.append(total)
+    return total
+
+
+print(f"alpha={ALPHA}, beta={BETA}, nu={NU}")
 rng = np.random.default_rng(42)
-initial_params = rng.uniform(-np.pi, np.pi, num_thetas)
+initial_parameters = rng.uniform(-np.pi, np.pi, NUM_PARAMETERS)
+max_iterations = 20 if docs_test_mode else 100
+optimization = minimize(
+    loss,
+    initial_parameters,
+    method="COBYLA",
+    options={"maxiter": max_iterations, "rhobeg": 0.5},
+)
 
-res = minimize(loss, initial_params, method="BFGS", options={"maxiter": maxiter})
-
-print(f"Final loss: {res.fun:+.4f}")
+print(f"Final loss: {optimization.fun:+.6f}")
+assert len(optimization.x) == NUM_PARAMETERS
+assert len(cost_history) == optimization.nfev
 
 # %%
 plt.figure(figsize=(8, 4))
 plt.plot(cost_history, color="#2696EB")
-plt.xlabel("Iteration")
+plt.xlabel("Energy evaluation")
 plt.ylabel("Loss")
-plt.title("PCE Optimization Progress")
+plt.title("PCE optimization progress")
 plt.show()
 
 # %% [markdown]
-# (pce-decode-optimized-expectations)=
-# ### Decode the Optimized Expectations
+# ## Decode the Optimized Expectations
 #
-# `PCEConverter.decode(expectations)` takes the per-variable expectation
-# values, sign-rounds each one to a spin, and returns a single-sample
-# `BinarySampleSet` in the same vartype as the input model. Here the
-# vartype is SPIN because `ising_model` was built with
-# `BinaryModel.from_ising`. The reported energy follows the convention
-# from [](#problem-settings): energy = $-\,\text{cut}$. The decoded energy is
-# the negative of the cut value.
+# The final expectations are sign-rounded in their original variable order.
+# `DecodedSamples` reports both the immutable assignment and its exact Ising
+# energy, which equals minus the cut value for this model.
 
 # %%
-final_expectations = measure_expectations(list(res.x))
-sampleset = converter.decode(final_expectations)
-# ``PCEConverter`` was built from a ``BinaryModel`` (the ``ising_model``
-# above), so ``decode`` returns a ``BinarySampleSet``. The static return
-# type is the union ``BinarySampleSet | SampleSet`` because the converter
-# class also accepts an OMMX ``Instance``; narrow here so the
-# ``.vartype`` / ``.energy`` / ``.samples`` accesses below type-check.
-assert isinstance(sampleset, BinarySampleSet)
+final_estimates = measure_expectations(optimization.x, shots=FINAL_SHOTS_PER_OBSERVABLE)
+final_expectations = tuple(estimate.value for estimate in final_estimates)
+assert all(estimate.shots == FINAL_SHOTS_PER_OBSERVABLE for estimate in final_estimates)
+decoded = encoding.decode(final_expectations)
+solution = decoded.lowest
+spins = solution.values
+pce_cut = sum(spins[left] != spins[right] for left, right in EDGES)
 
 print("Final per-variable expectations:")
-for i, e in enumerate(final_expectations):
-    print(f"  <P_{i:2d}> = {e:+.4f}")
-print()
-print(f"Decoded vartype : {sampleset.vartype}")
-print(f"Decoded energy  : {sampleset.energy[0]:+.4f}")
+for index, estimate in enumerate(final_estimates):
+    print(f"  <P_{index:2d}> = {estimate.value:+.4f} ± {estimate.standard_error:.4f}")
+print("Decoded spins:", dict(spins))
+print(f"Decoded energy: {solution.energy:+.1f}")
+print(f"PCE cut: {pce_cut}")
 
-# %% [markdown]
-# (pce-result)=
-# ## Result
+assert model.energy(spins) == solution.energy
+assert np.isclose(pce_cut, -solution.energy, rtol=0.0, atol=1e-12)
 
 # %% [markdown]
 # (pce-classical-baseline)=
@@ -483,43 +424,23 @@ print(f"Decoded energy  : {sampleset.energy[0]:+.4f}")
 # the PCE result against in the next subsection.
 
 # %%
-assignments = np.arange(2**num_nodes, dtype=np.int64)
-cuts = np.zeros(2**num_nodes, dtype=np.int32)
-for i, j in G.edges():
-    s_i = 1 - 2 * ((assignments >> i) & 1)  # bit 0 → +1, bit 1 → -1
-    s_j = 1 - 2 * ((assignments >> j) & 1)
-    cuts += (s_i != s_j).astype(np.int32)
+assignments = np.arange(2**NUM_NODES, dtype=np.int64)
+cuts = np.zeros(2**NUM_NODES, dtype=np.int32)
+for left, right in EDGES:
+    left_spins = 1 - 2 * ((assignments >> left) & 1)
+    right_spins = 1 - 2 * ((assignments >> right) & 1)
+    cuts += (left_spins != right_spins).astype(np.int32)
 
 best_cut = int(cuts.max())
-optimal_assignment_ints = np.flatnonzero(cuts == best_cut)
-print(f"Optimal MaxCut value         : {best_cut}")
-print(f"Number of optimal partitions : {len(optimal_assignment_ints)}")
+optimal_assignments = np.flatnonzero(cuts == best_cut)
+approximation_ratio = pce_cut / best_cut
 
-# The graph seed is fixed, so the brute-force optimum is deterministic.
+print(f"Brute-force optimum: {best_cut}")
+print(f"Number of optimal partitions: {len(optimal_assignments)}")
+print(f"PCE approximation ratio: {approximation_ratio:.3f}")
+
 assert best_cut == 26
-
-# %% [markdown]
-# ### Decode and Analyze Results
-
-# %% [markdown]
-# #### Best Cut
-#
-# Convert the decoded spin assignment into a graph partition and compare
-# its cut value with the brute-force optimum from
-# [](#pce-classical-baseline). As a consistency check, the cut
-# value should equal $-1$ times the spin energy reported in
-# [](#pce-decode-optimized-expectations).
-
-# %%
-sample = sampleset.samples[0]
-spins = [sample[i] for i in range(num_nodes)]
-pce_cut = sum(1 for i, j in G.edges() if spins[i] != spins[j])
-
-print(f"PCE spin assignment : {spins}")
-print(f"PCE cut value       : {pce_cut}")
-print(f"Brute-force optimum : {best_cut}")
-print(f"Approximation ratio : {pce_cut / best_cut:.3f}")
-assert np.isclose(pce_cut, -sampleset.energy[0], rtol=0.0, atol=1e-12)
+assert 0.0 <= approximation_ratio <= 1.0
 
 # %% [markdown]
 # #### Visualize the Best Solution
@@ -528,13 +449,13 @@ assert np.isclose(pce_cut, -sampleset.energy[0], rtol=0.0, atol=1e-12)
 # colors sit on opposite sides of the cut.
 
 # %%
-color_map = ["#FF6B6B" if spins[i] == 1 else "#4ECDC4" for i in range(num_nodes)]
+colors = ["#FF6B6B" if spins[index] == 1 else "#4ECDC4" for index in graph]
 plt.figure(figsize=(6, 5))
 nx.draw(
-    G,
-    pos,
+    graph,
+    positions,
     with_labels=True,
-    node_color=color_map,
+    node_color=colors,
     node_size=500,
     edgecolors="black",
 )
@@ -554,16 +475,17 @@ plt.show()
 #   over the one-qubit-per-variable QAOA encoding.
 # - **Surrogate-loss training:** the variational loop minimized the
 #   tanh-relaxed surrogate rather than an energy directly, and the
-#   decoded assignment matched the brute-force optimum.
-# - **End-to-end Qamomile path:** `PCEConverter` encoded the given
+#   decoded assignment is compared with the brute-force optimum; finite-shot
+#   training does not guarantee an optimal partition.
+# - **End-to-end Qamomile path:** `PauliCorrelationEncoding` encoded the given
 #   classical variables and exposed the corresponding observables through
-#   `get_encoded_pauli_list`; a hardware-efficient `@qkernel` ansatz and
-#   `qmc.expval` estimated each correlator; `QiskitTranspiler` produced
-#   the `ExecutableProgram` objects, the optimizer tuned the parameters,
-#   and `converter.decode` sign-rounded the expectations obtained with
+#   `encoding.observables`; a hardware-efficient `@qkernel` ansatz and
+#   Qamomile estimators measured each correlator with an explicit shot budget,
+#   the optimizer tuned the parameters, and `encoding.decode` sign-rounded
+#   the expectations obtained with
 #   those tuned parameters back into the corresponding classical variables.
 #
-# This `PCEConverter` workflow applies to any QUBO / Ising
+# This `PauliCorrelationEncoding` workflow applies to any QUBO / Ising
 # combinatorial problem where qubit count is the bottleneck: swap in your
-# own `BinaryModel` and reuse the encode, transpile, and decode steps
+# own `BinaryModel` and reuse the encode, estimate, and decode steps
 # shown above.

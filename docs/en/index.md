@@ -9,7 +9,7 @@ If you find a bug, we'd really appreciate it if you could let us know via [GitHu
 
 ## What is Qamomile?
 
-Qamomile is a quantum programming language embedded in Python, an embedded domain-specific language (eDSL). The same source supports resource estimation and execution across supported quantum SDKs.
+Qamomile is a source-compiled, type-safe functional quantum programming language embedded in Python, an embedded domain-specific language (eDSL). The same source supports resource estimation and execution across supported quantum SDKs.
 
 ## Motivations
 
@@ -43,7 +43,7 @@ Higher-level language constructs and reusable algorithms help you express quantu
 :::{card}
 :header: Type safety
 
-Qamomile's affine type system allows each quantum value to be consumed at most once. It catches invalid reuse before execution.
+Qamomile's linear type system requires each quantum state value to be consumed exactly once. It catches invalid reuse and unconsumed states before execution.
 :::
 
 :::{card}
@@ -61,7 +61,7 @@ Estimate qubits and gates symbolically to assess implementations and identify bo
 :::{card}
 :header: Portable quantum programs
 
-Transpilers convert your programs to supported targets such as Qiskit, CUDA-Q, and HUGR. The corresponding executors run the converted programs through Qamomile.
+`qm.compile` converts your programs to supported targets such as Qiskit, CUDA-Q, and HUGR. Use `qm.run` to execute the source or compiled program on a compatible execution endpoint.
 :::
 
 :::{card}
@@ -82,46 +82,31 @@ Run quantum optimization algorithms with OMMX, a solver-independent data format 
 
 ## Quick start
 
-Qamomile can be installed from pip.
+Install Qamomile from pip. The distribution is named `qamomile`; the new language module is `qamomile`.
 
 ```bash
-pip install "qamomile[qiskit,visualization]"
+pip install qamomile
 ```
 
-The following example runs a quantum algorithm with Qamomile. For details, see [Your First Quantum Kernel](tutorial/01_your_first_quantum_kernel.ipynb).
+The following example estimates and runs the same Bell program. For details, see [Your First Qamomile Function](tutorial/01_your_first_quantum_kernel.ipynb).
 
 ```python
-import math
-
-import qamomile.circuit as qmc
-from qamomile.qiskit import QiskitTranspiler
+import qamomile as qm
 
 
-@qmc.qkernel
-def biased_coin(theta: qmc.Float) -> qmc.Bit:
-    q = qmc.qubit(name="q")
-    q = qmc.ry(q, theta)
-    return qmc.measure(q)
+@qm.qkernel
+def bell() -> qm.Bits[2]:
+    state = qm.qubits(2)
+    state = qm.h(state, target=0)
+    state = qm.cx(state, control=0, target=1)
+    return qm.measure(state)
 
 
-# Visualize the kernel and estimate resources before execution
-biased_coin.draw(theta=0.6)
-est = biased_coin.estimate_resources()
-print("qubits:", est.qubits)
-print("total gates:", est.gates.total)
+study = qm.resources.logical(bell)
+print(study.metric(qm.resources.LOGICAL_GATES))
 
-# Transpile while keeping theta available as a runtime parameter
-transpiler = QiskitTranspiler()
-exe = transpiler.transpile(biased_coin, parameters=["theta"])
-
-# Execute with a concrete value for theta
-result = exe.sample(
-    transpiler.executor(),
-    shots=256,
-    bindings={"theta": math.pi / 4},
-).result()
-
-print(result.results)
+record = qm.run(bell, on=qm.Reference(), shots=16, seed=7)
+print(record.result.counts)
 ```
 
 ---
@@ -133,13 +118,13 @@ print(result.results)
 :::{card}
 :header: **Installation**
 :link: installation_guide.md
-Install Qamomile itself, then add quantum SDK integrations such as CUDA-Q, QURI Parts, and qBraid as needed.
+Install Qamomile and add Qiskit, Cirq, QURI Parts, CUDA-Q, Braket, or HUGR only when needed.
 :::
 
 :::{card}
 :header: **Tutorials**
 :link: tutorial/index.md
-Learn the basics of Qamomile step by step, including kernels, parameters, execution, and transpilation.
+Learn typed functions, functional quantum values, parameters, resources, execution, and target compilation.
 :::
 
 ::::
@@ -165,7 +150,7 @@ Task-focused guides for individual Qamomile modules, such as `BinaryModel`.
 :::{card}
 :header: **Integration**
 :link: integration/index.md
-Guides for using Qamomile with quantum platforms and external libraries, such as qBraid.
+Target-specific guides for Qiskit, Cirq, QURI Parts, CUDA-Q, Amazon Braket, and HUGR use the same Qamomile lifecycle.
 :::
 
 ::::
@@ -185,7 +170,7 @@ Per-version changelog with feature highlights and breaking changes.
 :::{card}
 :header: **API Reference**
 :link: api/index.md
-How to use the APIs provided by Qamomile, including their arguments and return values.
+Reference for the public `qamomile` package.
 :::
 
 ::::

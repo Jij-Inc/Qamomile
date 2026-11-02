@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package qamomile.proto;
+
+import "result_postprocessing.proto";
+
+message CircuitFamilyDispatchParameterProto {
+  uint64 parameter_index = 1;
+  string name = 2;
+  uint64 uint_width = 3;
+}
+
+message CircuitFamilyPredicateProto {
+  repeated CircuitResultScalarProto scalars = 1;
+  uint32 root = 2;
+}
+
+message CircuitFamilyDecisionProto {
+  uint32 predicate_index = 1;
+  bool value = 2;
+}
+
+message CircuitFamilyVariantProto {
+  repeated CircuitFamilyDecisionProto decisions = 1;
+}
+
+message CircuitFamilySelectionProto {
+  uint32 schema_major = 1;
+  uint32 schema_minor = 2;
+  repeated CircuitFamilyDispatchParameterProto dispatch_parameters = 3;
+  repeated CircuitFamilyPredicateProto predicates = 4;
+  repeated CircuitFamilyVariantProto variants = 5;
+}

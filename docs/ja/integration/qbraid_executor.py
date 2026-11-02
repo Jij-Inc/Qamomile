@@ -1,11 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -17,317 +18,247 @@
 # tags: [integration, optimization, variational]
 # ---
 #
-# # qBraidサポート - QBraidExecutor
+# # qBraidサポート
 #
-# このページでは、Qamomileの[qBraid](https://www.qbraid.com/)サポートを紹介し、`QBraidExecutor`を使ってQamomileのワークフローを実行する方法を説明します。現状のQamomileはQiskit経由でqBraidと連携するため、基本的な流れは `qkernel` -> `QiskitTranspiler` -> `QBraidExecutor` です。
-
-# %%
-# 最新のQamomileをpipからインストールします！
-# # !pip install "qamomile[qbraid]"
-
-# %% [markdown]
+# このpageではQamomileのqBraid supportを紹介し、`QBraidDevice`を使って
+# Qamomile workflowを実行する方法を説明します。QamomileはQiskit artifact形式を
+# 介してqBraidと連携するため、基本的な流れは
+# `qkernel` → `Qiskit` target → `QBraidDevice`です。
+#
 # ## このノートで扱う内容
-# このノートは、MaxCutを題材にした `QBraidExecutor`のチュートリアルです。主な目的は、`QBraidExecutor`を設定し、`QiskitTranspiler`で`qkernel`をトランスパイルし、同じexecutorを最適化ループ全体で再利用しながら、最後にqBraidから返るサンプルを確認する流れを示すことです。
+#
+# このnotebookは、元のMaxCut workflowを題材にしたqBraid tutorialです。
+# 主な目的はqBraid deviceを設定し、qkernelを1つのQPY artifactへcompileし、
+# 同じartifactをoptimization loop全体で再利用しながら、最後にqBraidから返る
+# sampleを確認する流れを示すことです。
+#
+# documentationではuser credentialなしにremote jobをsubmitできません。
+# そこで、コンパイルしたQPY artifactをQiskit Aerで実行し、
+# 元の8-node、5-layer workflow全体を確認してから、credential-dependentな
+# device置換を示します。graph構築、continuous parameter optimization、
+# 最終energy distribution、partition visualization、SCIP比較も維持します。
 
 # %% [markdown]
 # ## インストール
 #
-# qBraid連携を使うには、オプションの`qbraid`依存グループを含めてインストールします。
-#
 # ```bash
-# pip install "qamomile[qbraid]"
+# pip install "qamomile[qbraid]" jijmodeling ommx-pyscipopt-adapter
 # ```
-#
-# これにより、Qamomile本体に加えてqBraidパッケージと、そのQiskit連携に必要な依存関係がインストールされます。
 
 # %%
-import warnings
+# Install the latest Qamomile and its qBraid integration through pip!
+# # !pip install "qamomile[qbraid]" jijmodeling ommx-pyscipopt-adapter
+
+# %%
+import os
 from collections import defaultdict
 
+import jijmodeling as jm
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
+from ommx_pyscipopt_adapter import OMMXPySCIPOptAdapter
 from scipy.optimize import minimize
 
-import qamomile.circuit as qmc
-from qamomile.circuit.algorithm.qaoa import qaoa_state
-from qamomile.optimization.binary_model.expr import VarType
-from qamomile.optimization.binary_model.model import BinaryModel
-from qamomile.qbraid import QBraidExecutor
-from qamomile.qiskit import QiskitTranspiler
+from qamomile.optimization import BinaryModel, QAOAExperiment
+from qamomile.persistence import deserialize, serialize
+from qamomile.qiskit import Aer, load_circuit
 
-seed = 901
-rng = np.random.default_rng(seed)
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+SEED = 901
+rng = np.random.default_rng(SEED)
 
 # %% [markdown]
-# ## qBraidのセットアップ
-# qBraidは、対応するシミュレータや量子ハードウェアを統一的なインターフェースで扱える実行基盤です。Qamomileでは、`QBraidExecutor`がQiskit回路をqBraidのデバイスへ送信し、リモートジョブの完了を待ち、他のQamomile executorと同じ形式で結果を返します。
+# ## MaxCut問題を構築する
 #
-# このノートでは、最初にexecutorを作成し、それをパラメータ最適化と最後の評価の両方で使い回します。下のwarning filterはこのセットアップ用セルだけに作用するため、既知の`pyqir` runtime warningのみを抑制し、それ以外のwarningには影響しません。
+# 元のチュートリアルと同じ再現可能な8-node 3-regular graphを使います。
+# spin $s_i\in\{-1,+1\}$について
 #
-# **注意:** 下のセルの `"YOUR_API_KEY"` をご自身のqBraid APIキーに置き換えてください。APIキーは [qBraidアカウントページ](https://account.qbraid.com/) から取得できます。
+# $$
+# E(\mathbf{s})=\frac12\sum_{(i,j)\in E}s_i s_j-\frac{|E|}{2}
+# $$
+#
+# を最小化することはcut edge数の最大化と等価で、$E=-\mathrm{cut}$です。
 
 # %%
-device_id = "qbraid:qbraid:sim:qir-sv"
-api_key = "YOUR_API_KEY"
+graph = nx.random_regular_graph(d=3, n=8, seed=SEED)
+positions = nx.spring_layout(graph, seed=SEED)
+EDGES = tuple(sorted(tuple(sorted(edge)) for edge in graph.edges()))
 
-if api_key == "YOUR_API_KEY":
-    raise ValueError("Replace 'YOUR_API_KEY' with your actual qBraid API key")
+assert graph.number_of_nodes() == 8
+assert graph.number_of_edges() == 12
 
-with warnings.catch_warnings():
-    warnings.filterwarnings(
-        "ignore",
-        message=r"The default runtime configuration for device 'qbraid:qbraid:sim:qir-sv' includes transpilation to program type 'pyqir', which is not registered\.",
-        category=RuntimeWarning,
-        module=r"qbraid\.runtime\.native\.provider",
-    )
-    qbraid_executor = QBraidExecutor(
-        device_id=device_id,
-        api_key=api_key,
-    )
-
-# %% [markdown]
-# ## MaxCut例
-# qBraid executorの準備ができたので、次にMaxCut用のパラメータ付きQAOAプログラムを1つ用意し、最適化の中でqBraidから繰り返しサンプリングします。全体の流れは、グラフ生成 -> Ising モデル化 -> パラメータ付きQAOA qkernel -> Qiskitへのトランスパイル -> qBraidでのサンプリング -> 解の解析、という順番です。
-
-# %% [markdown]
-# ### 問題の構築
-# `networkx.random_regular_graph` を使って、8ノードの小さな3-正則ランダムグラフをMaxCutのインスタンスとして生成します。このグラフが、後でQAOA回路にエンコードされてqBraid上でサンプリングされる古典入力データになります。図は問題構造を可視化しているだけで、最適化で実際に使うのは`graph`に入っているデータです。
 # %%
-# networkxでランダムグラフを生成
-graph = nx.random_regular_graph(d=3, n=8, seed=seed)
-
-# 生成したグラフを可視化
-fig, ax = plt.subplots(figsize=(6, 5))
-ax.set_title("グラフ")
-pos = nx.spring_layout(graph, seed=seed)
-nx.draw_networkx(graph, pos, ax=ax, node_size=500, width=2, with_labels=True)
+figure, axis = plt.subplots(figsize=(6, 5))
+axis.set_title("Graph")
+nx.draw_networkx(
+    graph,
+    positions,
+    ax=axis,
+    node_size=500,
+    width=2,
+    with_labels=True,
+)
 plt.tight_layout()
 plt.show()
 
 # %% [markdown]
-# ### Isingハミルトニアンの構築
-# MaxCutは、両端点が異なるスピン状態にあるときに辺が寄与するIsing最適化問題として書けます。この構成では、各辺が二次の相互作用項を追加し、定数項は「Isingエネルギーを最小化すること」が「cut値を最大化すること」に対応するように目的関数をずらしています。さらに、`normalize_by_rms()`で係数のスケールを揃えておきます。この前処理はQAOA回路でパラメータ最適化を行うための前処理としてしばしば上手く機能します。
+# ## 5層QAOAを構築・Compileする
+#
+# `QAOAExperiment`はspin Hamiltonianと5層topologyを1つのtyped programへ閉じます。
+# `gammas`と`betas`だけがruntime ABIに残ります。Qiskit targetはdeterministicなQPY
+# bytesをemitし、local AerとqBraidのどちらもproblemやansatzの意味を変えません。
+# SDK回路の準備は各エンドポイントが担当します。実行先のtargetに対してコンパイルします。
 
 # %%
-quad = {}
-linear = {node: 0.0 for node in graph.nodes()}
-constant = 0.0
+model = BinaryModel.from_ising(
+    {edge: 0.5 for edge in EDGES},
+    constant=-len(EDGES) / 2.0,
+    variables=range(graph.number_of_nodes()),
+)
+LAYERS = 5
+experiment = QAOAExperiment(model, layers=LAYERS)
+endpoint = Aer()
+compiled = experiment.compile(to=endpoint.target)
+restored_artifact = deserialize(serialize(compiled.artifact))
+circuit = load_circuit(restored_artifact)
 
-for u, v, data in graph.edges(data=True):
-    key = (u, v) if u <= v else (v, u)
-    quad[key] = quad.get(key, 0.0) + 1 / 2
-    constant -= 1 / 2
-
-spin_model = BinaryModel.from_ising(linear=linear, quad=quad, constant=constant)
-spin_model_normalized = spin_model.normalize_by_rms()
-spin_model_normalized._expr
-
-
-# %% [markdown]
-# ### QAOA回路の構築
-# `qaoa_state(...)`はIsingモデルに対するQAOA ansatzを構築し、`qmc.measure(q)`はその状態準備回路を測定ビットを返すsampling qkernelに変換します。その後、量子回路の構造に影響するパラメータだけを先に束縛し、`gammas`と`betas`は変分パラメータとして残したまま`QiskitTranspiler`でトランスパイルします。
-
-
-# %%
-@qmc.qkernel
-def qaoa_circuit(
-    p: qmc.UInt,
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    n: qmc.UInt,
-    gammas: qmc.Vector[qmc.Float],
-    betas: qmc.Vector[qmc.Float],
-) -> qmc.Vector[qmc.Bit]:
-    q = qaoa_state(p=p, quad=quad, linear=linear, n=n, gammas=gammas, betas=betas)
-    return qmc.measure(q)
-
-
-# %%
-transpiler = QiskitTranspiler()
-p = 5  # QAOAの層数
-
-executable = transpiler.transpile(
-    qaoa_circuit,
-    bindings={
-        "p": p,
-        "quad": spin_model_normalized.quad,
-        "linear": spin_model_normalized.linear,
-        "n": len(graph.nodes()),
-    },
-    parameters=["gammas", "betas"],
+assert restored_artifact.execution_identity == compiled.artifact.execution_identity
+assert circuit.num_qubits == graph.number_of_nodes()
+assert circuit.num_parameters == 2 * LAYERS
+assert tuple(slot.name for slot in compiled.artifact.parameter_abi.slots) == (
+    "gammas",
+    "betas",
 )
 
+print(circuit.draw(output="text", fold=120))
+
 # %% [markdown]
-# ### 最適化
-# 目的関数は、一度に1つの候補パラメータベクトルを評価します。各試行では、`gammas`と`betas`を束縛した実行可能プログラムを`QBraidExecutor`経由でqBraidに送り、得られたビット列サンプルを二値エネルギーに変換して平均を取り、その値を目的関数として使います。外側の古典最適化は`scipy.optimize.minimize(...)`が担当し、各更新を支える測定データはqBraidのサンプリングから得られます。同じexecutorを全反復で使い回します。
+# ## QAOAパラメータの最適化
+#
+# 目的関数はコンパイル済みプログラムに`gammas`と`betas`を名前で渡し、Aerエンドポイントでサンプリングします。SDK回路の準備とビット順の正規化はアダプターが担当し、Rustが管理するモデルでスピンのエネルギーを復号・平均します。リモートの例では、同じexperimentをqBraidのtargetに対してコンパイルします。
 
 # %%
-# 最適化の履歴を保存するリスト
+OPTIMIZATION_SHOTS = 16 if docs_test_mode else 2_000
+MAX_ITERATIONS = 12 if docs_test_mode else 100
 energy_history = []
-# サンプルされたビット列のエネルギーを評価できるように、
-# スピンモデルを対応する二値モデルへ変換
-binary_model = spin_model.change_vartype(VarType.BINARY)
 
 
-# 最適化で使う目的関数
-def objective_function(params, executable, executor, shots=2000):
-    """
-    QAOAのパラメータ最適化に用いる目的関数。
+def sample_coordinate(parameters, *, shots: int, seed: int):
+    """Sample one aggregate QAOA coordinate and decode its spin energies."""
 
-    引数:
-        params: [gammas, betas] を連結したパラメータ
-        executable: コンパイル済みのQAOA回路
-        executor: 回路サンプリングに使うexecutor
-        shots: 測定ショット数
-
-    戻り値:
-        推定平均エネルギー
-    """
-    p = len(params) // 2
-    gammas = params[:p]
-    betas = params[p:]
-
-    # 現在のパラメータで回路をサンプリング
-    job = executable.sample(
-        executor,
-        bindings={
-            "gammas": gammas,
-            "betas": betas,
-        },
+    record = compiled.run(
+        on=endpoint,
+        gammas=tuple(float(value) for value in parameters[:LAYERS]),
+        betas=tuple(float(value) for value in parameters[LAYERS:]),
         shots=shots,
+        seed=seed,
     )
-    result = job.result()
-
-    # サンプルされたビット列から平均エネルギーを計算
-    energies = []
-    for bit_list, counts in result.results:
-        energy = binary_model.calc_energy(bit_list)
-        for _ in range(counts):
-            energies.append(energy)
-    energy_avg = np.average(energies)
-    energy_history.append(energy_avg)
-
-    return energy_avg
+    return record.samples
 
 
-# %%
-init_params = rng.uniform(low=-np.pi / 4, high=np.pi / 4, size=2 * p)
+def objective_function(parameters) -> float:
+    """Return and record the sampled mean MaxCut energy."""
 
-# 履歴を初期化
-energy_history = []
+    decoded = sample_coordinate(
+        parameters,
+        shots=OPTIMIZATION_SHOTS,
+        seed=SEED + len(energy_history),
+    )
+    energy_history.append(decoded.mean_energy)
+    return decoded.mean_energy
 
-print(f"p={p} 層でQAOAの最適化を開始します...")
-print(f"初期パラメータ: gammas={init_params[:p]}, betas={init_params[p:]}")
 
-# COBYLAで最適化
-result_opt = minimize(
+initial_parameters = rng.uniform(-np.pi / 4.0, np.pi / 4.0, 2 * LAYERS)
+optimization = minimize(
     objective_function,
-    init_params,
-    # 目的関数内のサンプリングにQBraidExecutorを使う
-    args=(executable, qbraid_executor),
+    initial_parameters,
     method="COBYLA",
-    options={"disp": True},
+    options={"maxiter": MAX_ITERATIONS, "rhobeg": 0.5},
 )
 
-print("\n最適化後のパラメータ:")
-print(f"  gammas: {result_opt.x[:p]}")
-print(f"  betas: {result_opt.x[p:]}")
-print(f"最終エネルギー: {result_opt.fun:.4f}")
+print(f"Optimized gammas: {optimization.x[:LAYERS]}")
+print(f"Optimized betas: {optimization.x[LAYERS:]}")
+print(f"Final mean energy: {optimization.fun:+.4f}")
+
+assert len(optimization.x) == 2 * LAYERS
+assert len(energy_history) == optimization.nfev
 
 # %%
 plt.figure(figsize=(10, 5))
 plt.plot(energy_history, marker="o", markersize=3)
-plt.xlabel("反復回数")
-plt.ylabel("エネルギー")
-plt.title("QAOA最適化の収束")
+plt.xlabel("Energy evaluation")
+plt.ylabel("Mean energy")
+plt.title("QAOA optimization convergence")
 plt.grid(True)
 plt.tight_layout()
 plt.show()
 
 # %% [markdown]
-# ### 評価
-# 最適化が終わったら、最適化済みパラメータでもう一度qBraidを呼び出し、より多くの測定結果を集めます。これにより、最終的なエネルギー分布を確認し、サンプルの中で最も低いエネルギーを与えたビット列を見つけて、それを元のグラフに対するMaxCut解として解釈できます。
+# ## 最適化したDistributionを評価する
+#
+# 最後の2,000-shot runでenergy分布全体を得て、観測された最低energyのpartitionを
+# 選びます。
 
 # %%
-# 最適化後のパラメータでサンプリング
-optimal_gammas = result_opt.x[:p]
-optimal_betas = result_opt.x[p:]
-
-job_final = executable.sample(
-    # 最適化で使ったものと同じQBraidExecutorで最終分布をサンプリング
-    qbraid_executor,
-    bindings={
-        "gammas": optimal_gammas,
-        "betas": optimal_betas,
-    },
-    shots=2000,
+FINAL_SHOTS = 128 if docs_test_mode else 2_000
+final_samples = sample_coordinate(
+    optimization.x,
+    shots=FINAL_SHOTS,
+    seed=2 * SEED,
 )
-result_final = job_final.result()
+energy_counts = defaultdict(int)
+for sample in final_samples.samples:
+    energy_counts[sample.energy] += sample.occurrences
+
+best_sample = final_samples.lowest
+best_spins = dict(best_sample.assignment)
+best_cut = sum(best_spins[left] != best_spins[right] for left, right in EDGES)
+
+print(f"Best QAOA energy: {best_sample.energy:+.1f}")
+print(f"Best QAOA cut: {best_cut}")
+print(f"Best QAOA spins: {best_spins}")
+
+assert final_samples.total_occurrences == FINAL_SHOTS
+assert best_sample.energy == -float(best_cut)
 
 # %%
-# サンプルされたビット列全体の頻度分布を作成
-energy_vs_counts = defaultdict(int)
-lowest_energy = float("inf")
-best_solution = None
-for bit_list, counts in result_final.results:
-    energy = binary_model.calc_energy(bit_list)
-    energy_vs_counts[energy] += counts
-    if energy < lowest_energy:
-        lowest_energy = energy
-        best_solution = bit_list
-
-# 描画用にエネルギーと頻度を取り出す
-energies = list(energy_vs_counts.keys())
-counts = list(energy_vs_counts.values())
-# 見やすいようにエネルギー順に並べ替え
-sorted_indices = np.argsort(energies)[::-1]
-counts = np.array(counts)[sorted_indices]
-energies = np.array(energies)[sorted_indices]
-
-# 頻度分布を描画
-fig, ax = plt.subplots(figsize=(12, 5))
-x_pos = np.arange(len(energy_vs_counts))
-bars = ax.bar(x_pos, counts)
-
-ax.set_xticks(x_pos)
-ax.set_xticklabels(energies, rotation=90)
-ax.set_xlabel("エネルギー")
-ax.set_ylabel("出現回数")
-ax.set_title("QAOA測定結果の頻度分布")
+energies = sorted(energy_counts, reverse=True)
+plt.figure(figsize=(12, 5))
+plt.bar(
+    np.arange(len(energies)),
+    [energy_counts[energy] for energy in energies],
+)
+plt.xticks(np.arange(len(energies)), energies, rotation=90)
+plt.xlabel("Energy")
+plt.ylabel("Counts")
+plt.title("QAOA measurement frequency distribution")
 plt.tight_layout()
 plt.show()
 
+# %% [markdown]
+# ## 最良解を可視化する
+
 
 # %%
-# グラフ上で解を可視化する関数
-def get_edge_colors(
-    graph, solution: list[int], in_cut_color: str = "r", not_in_cut_color: str = "b"
-) -> tuple[list[str], list[str]]:
-    cut_set_1 = [node for node, value in enumerate(solution) if value == 1.0]
-    cut_set_2 = [node for node in graph.nodes() if node not in cut_set_1]
+def show_solution(assignment, title: str) -> None:
+    """Draw one binary or spin assignment on the MaxCut graph."""
 
-    edge_colors = []
-    for u, v, _ in graph.edges(data=True):
-        if (u in cut_set_1 and v in cut_set_2) or (u in cut_set_2 and v in cut_set_1):
-            edge_colors.append(in_cut_color)
-        else:
-            edge_colors.append(not_in_cut_color)
-    node_colors = [
-        "#2696EB" if node in cut_set_1 else "#EA9b26" for node in graph.nodes()
+    first_group = {node for node, value in assignment.items() if value in {1, 1.0}}
+    edge_colors = [
+        "r" if (left in first_group) != (right in first_group) else "b"
+        for left, right in EDGES
     ]
-    return edge_colors, node_colors
-
-
-def show_solution(graph, solution, title):
-    edge_colors, node_colors = get_edge_colors(graph, solution)
-    cut_edges = sum(1 for c in edge_colors if c == "r")
-    _, ax = plt.subplots(figsize=(6, 5))
-    ax.set_title(f"{title}（カット辺数: {cut_edges}）")
+    node_colors = [
+        "#2696EB" if node in first_group else "#EA9B26" for node in graph.nodes()
+    ]
+    cut_edges = sum(color == "r" for color in edge_colors)
+    _, axis = plt.subplots(figsize=(6, 5))
+    axis.set_title(f"{title} (cut edges: {cut_edges})")
     nx.draw_networkx(
         graph,
-        pos,
-        ax=ax,
+        positions,
+        ax=axis,
         node_size=500,
         width=3,
         with_labels=True,
@@ -338,57 +269,88 @@ def show_solution(graph, solution, title):
     plt.show()
 
 
-# %%
-# QAOAで得られた最良の解を可視化
-show_solution(graph, best_solution, "QAOA")
+show_solution(best_spins, "QAOA")
 
 # %% [markdown]
-# ## 任意: 古典最適化との比較
-# メインのqBraidワークフローはここまでです。最後の節では、[JijModeling](https://jij-inc-jijmodeling-tutorials-ja.readthedocs-hosted.com/ja/latest/introduction.html) と `OMMXPySCIPOptAdapter` を使った古典最適化と比較します。これにより、同じMaxCutインスタンスに対して得られたQAOAの結果がどの程度良いかを判断しやすくなります。
+# ## 同じExperimentをqBraidで実行する
+#
+# remote submissionにはqBraid accountが必要でexternal workを作るため、documentation
+# buildでは実行しません。実行先を`QBraidDevice`へ替え、そのtargetに対してコンパイルします。最適化済みpointを次のように
+# 1回送信できます。
+#
+# ```python
+# from qbraid import QbraidProvider
+# from qamomile.qbraid import QBraidDevice
+#
+# provider = QbraidProvider()
+# endpoint = QBraidDevice(
+#     provider.get_device("qbraid:qbraid:sim:qir-sv"),
+#     wait_timeout_seconds=120.0,
+# )
+# remote_compiled = experiment.compile(to=endpoint.target)
+# remote_run = remote_compiled.run(
+#     on=endpoint,
+#     gammas=tuple(float(value) for value in optimization.x[:LAYERS]),
+#     betas=tuple(float(value) for value in optimization.x[LAYERS:]),
+#     shots=2_000,
+#     seed=0,
+# )
+# print(remote_run.samples.lowest)
+# ```
+#
+# `seed=0`はportable seedを要求しないことを意味します。qBraid deviceごとにseed controlが
+# 異なるため、endpointは偽の再現性を約束せずnonzero seedを拒否します。
+
+# %% [markdown]
+# ## 古典SCIP比較
+#
+# JijModelingで同じgraphをMAXIMIZE問題として表します。SCIPのexact partitionをQAOAと
+# 並べて表示します。
 
 # %%
-import jijmodeling as jm
-from ommx_pyscipopt_adapter import OMMXPySCIPOptAdapter
-
-# %%
-# JijModelingでMaxCut問題を定義
-problem = jm.Problem("Maxcut", sense=jm.ProblemSense.MAXIMIZE)
+classical_problem = jm.Problem("Maxcut", sense=jm.ProblemSense.MAXIMIZE)
 
 
-@problem.update
+@classical_problem.update
 def _(problem: jm.DecoratedProblem):
-    V = problem.Dim()
-    E = problem.Graph()
-    x = problem.BinaryVar(shape=(V,))
-
-    obj = (
-        E.rows()
-        .map(lambda e: 1 / 2 * (1 - (2 * x[e[0]] - 1) * (2 * x[e[1]] - 1)))
+    vertices = problem.Dim()
+    edges = problem.Graph()
+    x = problem.BinaryVar(shape=(vertices,))
+    problem += (
+        edges.rows()
+        .map(lambda edge: 0.5 * (1 - (2 * x[edge[0]] - 1) * (2 * x[edge[1]] - 1)))
         .sum()
     )
-    problem += obj
 
 
-problem
+classical_instance = classical_problem.eval(
+    {
+        "vertices": graph.number_of_nodes(),
+        "edges": graph.edges(),
+    }
+)
+scip_solution = OMMXPySCIPOptAdapter.solve(classical_instance)
+scip_values = scip_solution.decision_variables_df["value"]
+scip_assignment = {
+    index: int(round(float(scip_values.loc[index])))
+    for index in range(graph.number_of_nodes())
+}
+scip_cut = int(round(scip_solution.objective))
+
+print(f"SCIP cut: {scip_cut}")
+print(f"QAOA cut: {best_cut}")
+
+assert scip_solution.feasible
+assert scip_cut >= best_cut
 
 # %%
-# グラフデータからOMMXインスタンスを作成
-V = graph.number_of_nodes()
-E = graph.edges()
-data = {"V": V, "E": E}
-print(data)
-instance = problem.eval(data)
+show_solution(scip_assignment, "SCIP")
+show_solution(best_spins, "QAOA")
 
-# %%
-# OMMXPySCIPOptAdapterで問題を解く
-scip_solution = OMMXPySCIPOptAdapter.solve(instance)
-scip_solution_entries = [bit for bit in scip_solution.state.entries.values()]
-print(f"SCIPの解: {scip_solution_entries}")
-
-# %%
-# SCIPで得られた解を可視化
-show_solution(graph, scip_solution_entries, "SCIP")
-
-# %%
-# 比較のためにQAOAの最良解をもう一度可視化
-show_solution(graph, best_solution, "QAOA")
+# %% [markdown]
+# ## まとめ
+#
+# - 元の8-node graphと5-layer QAOAを実行できます。
+# - 1つのdeterministic QPY artifactを連続COBYLA最適化と最終2,000-shot評価で再bindします。
+# - energy分布、best partition、graph可視化、SCIP比較まで元の解析を再現します。
+# - 同じexperimentを`QBraidDevice`のtargetに対してコンパイルして実行できます。認証とリモート送信は明示的に行います。

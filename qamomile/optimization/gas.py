@@ -1,1050 +1,825 @@
-"""This module implements the Grover Adaptive Search (GAS) algorithm for Combinatorial Polynomial Binary Optimization (CPBO).
+# ruff: noqa: F821 -- widths are closed into concrete Qamomile shapes.
 
-The quantum optimization algorithm iteratively applies Grover's search to find the minimum of the function.
-The GAS algorithm is designed to efficiently find the optimal solution by adaptively adjusting the search
-space based on previous iterations' results.
-"""
+"""Grover Adaptive Search composed from ordinary Qamomile qkernels."""
+
+from __future__ import annotations
 
 import math
 import warnings
-from collections.abc import Sequence
+from dataclasses import dataclass, field
 from decimal import Decimal
+from typing import cast
 
-import numpy as np
-
-import qamomile.circuit as qmc
-import qamomile.observable as qm_o
-from qamomile.circuit.algorithm.gas import (
-    diffusion_op,
-    grover_algorithm,
-    qft_encoding,
-    zero_degree_qft_encoding,
+import qamomile as qm
+from qamomile._native import compiler as native
+from qamomile.compilation import (
+    CompilationTarget,
+    CompiledProgram,
+    ExecutionEndpoint,
+    SampleResult,
+    compile as compile_program,
+    run as run_program,
 )
-from qamomile.circuit.transpiler.executable import ExecutableProgram
-from qamomile.circuit.transpiler.transpiler import Transpiler
+from qamomile.ir import Program
+from qamomile.stdlib._primitives import flip
+from qamomile.stdlib._structure import (
+    adjoint_unary,
+    compose_unary,
+    lift_indices,
+    lift_slice,
+)
+from qamomile.stdlib.arithmetic import add_constant
 
-from .binary_model.model import BinaryModel
-from .converter import MathematicalProblemConverter
+from .model import BinaryDomain, BinaryModel, VarType
+from .qaoa import OptimizationExperimentIdentity, OptimizationRun
+
+_MAX_EXACT_FLOAT_INTEGER_BITS = 54
 
 
-def _scatter_controls_back(
-    q_input: qmc.Vector[qmc.Qubit],
-    ctrl_indices: list[int],
-    result: Sequence[qmc.Qubit],
-) -> None:
-    """Return borrowed control qubits to their slots in the input register.
-
-    Deliberately a plain Python function rather than inline kernel-body code:
-    the DSL transformer rewrites ``for`` statements it finds inside a qkernel
-    body into ``for_loop()`` context managers, which turns the loop variable
-    into a symbolic ``UInt`` and makes the Python-sequence indexing below raise
-    ``TypeError`` from ``UInt.__index__()``. The transformer never descends into
-    a called helper, so here ``k`` stays a concrete ``int``.
+def _decision_superposition(*, total_width: int, decision_width: int) -> qm.QKernel:
+    """Construct Hadamards over the decision prefix of a joint register.
 
     Args:
-        q_input (qmc.Vector[qmc.Qubit]): Register that lent out the controls.
-        ctrl_indices (list[int]): Slot index in ``q_input`` for each control,
-            in the order they were passed to the controlled kernel.
-        result (Sequence[qmc.Qubit]): Values returned by the controlled kernel;
-            the first ``len(ctrl_indices)`` entries are the controls.
+        total_width (int): Width of the decision and output registers together.
+        decision_width (int): Positive decision-register prefix width.
 
     Returns:
-        None: ``q_input`` is updated in place.
+        qm.QKernel: Unary joint-register transform.
 
-    """
-    for k, idx in enumerate(ctrl_indices):
-        q_input[idx] = result[k]
-
-
-class GASConverter(MathematicalProblemConverter):
-    """Converter for Grover Adaptive Search (GAS).
-
-    Encodes the BINARY-domain model normalized by the base converter, so that
-    the Grover QFT-arithmetic circuit receives the correct QUBO coefficients
-    (binary variables take values in {0, 1}, not ±1).
-
-    Attributes:
-        binary_model (BinaryModel): Precision-aligned BINARY-domain model in
-            the caller's original coefficient scale.
-        effective_model (BinaryModel): Model actually encoded into the circuit.
-            Equals ``binary_model`` until ``transpile()`` decides to quantize
-            real-valued coefficients, after which it holds the integer model.
-        quantization_scale (float): Factor relating ``effective_model`` back to
-            ``binary_model`` — every effective coefficient approximates
-            ``quantization_scale ×`` its original counterpart. ``1.0`` whenever
-            no quantization was applied. Thresholds expressed in the original
-            objective scale must be multiplied by this before being compared
-            against the circuit's arithmetic register.
+    Raises:
+        ValueError: If the widths do not describe a nonempty proper prefix.
     """
 
-    _MAX_EXACT_INT_IN_FLOAT_BITS = 54
+    if decision_width <= 0 or decision_width >= total_width:
+        raise ValueError("GAS decision width must be a nonempty register prefix")
+
+    @qm.qkernel
+    def prepare(
+        state: qm.Q[qm.Bits[total_width]],  # type: ignore[valid-type]
+    ) -> qm.Q[qm.Bits[total_width]]:  # type: ignore[valid-type]
+        """Prepare a uniform decision-register superposition.
+
+        Args:
+            state (qm.Q[qm.Bits[total_width]]): Owned joint register.
+
+        Returns:
+            qm.Q[qm.Bits[total_width]]: Joint register with Hadamards applied to
+            the decision prefix.
+        """
+
+        for index in range(decision_width):
+            state = qm.h(state, target=index)
+        return state
+
+    return prepare
+
+
+def _controlled_term_encoding(
+    *,
+    decision_width: int,
+    output_width: int,
+    controls: tuple[int, ...],
+    coefficient: float,
+) -> qm.QKernel:
+    """Lift one monomial-controlled modular addition onto a joint register.
+
+    Args:
+        decision_width (int): Number of decision bits in the joint prefix.
+        output_width (int): Number of objective bits in the joint suffix.
+        controls (tuple[int, ...]): Dense decision-bit positions in the
+            monomial.
+        coefficient (float): Integer-valued coefficient added when every control is
+            one.
+
+    Returns:
+        qm.QKernel: Unary transform over decision and output registers.
+
+    Raises:
+        ValueError: If the control row is empty, repeated, or out of range.
+    """
+
+    if not controls:
+        raise ValueError("a controlled GAS term must have at least one variable")
+    if len(set(controls)) != len(controls) or any(
+        index < 0 or index >= decision_width for index in controls
+    ):
+        raise ValueError("GAS term controls must be unique decision positions")
+    if not float(coefficient).is_integer():
+        raise ValueError("GAS arithmetic requires integer-valued coefficients")
+    addition = add_constant(width=output_width, value=int(coefficient))
+    selected_width = len(controls) + output_width
+    degree = len(controls)
+
+    @qm.qkernel
+    def controlled(
+        state: qm.Q[qm.Bits[selected_width]],  # type: ignore[valid-type]
+    ) -> qm.Q[qm.Bits[selected_width]]:  # type: ignore[valid-type]
+        """Add one objective term under every monomial control.
+
+        Args:
+            state (qm.Q[qm.Bits[selected_width]]): Selected controls followed by
+                the objective register.
+
+        Returns:
+            qm.Q[qm.Bits[selected_width]]: Updated controls and objective register.
+        """
+
+        control_state, output = qm.split_at(state, degree)
+        control_state, output = qm.control(addition, control_state, output)
+        return qm.concat(control_state, output)
+
+    total_width = decision_width + output_width
+    output_indices = tuple(range(decision_width, total_width))
+    return lift_indices(
+        total_width=total_width,
+        indices=(*controls, *output_indices),
+        transform=controlled,
+    )
+
+
+def _zero_reflection(*, width: int) -> qm.QKernel:
+    """Construct the reflection about the all-zero decision state.
+
+    Args:
+        width (int): Positive decision-register width.
+
+    Returns:
+        qm.QKernel: Unary zero-state reflection.
+
+    Raises:
+        ValueError: If ``width`` is not positive.
+    """
+
+    if width <= 0:
+        raise ValueError("GAS decision width must be positive")
+    if width == 1:
+
+        @qm.qkernel
+        def single(
+            state: qm.Q[qm.Bits[1]],  # type: ignore[valid-type]
+        ) -> qm.Q[qm.Bits[1]]:  # type: ignore[valid-type]
+            """Reflect one decision qubit about zero up to global phase.
+
+            Args:
+                state (qm.Q[qm.Bits[1]]): Owned decision qubit.
+
+            Returns:
+                qm.Q[qm.Bits[1]]: Reflected decision qubit.
+            """
+
+            return qm.z(state)
+
+        return single
+
+    control_width = width - 1
+
+    @qm.qkernel
+    def reflect(
+        state: qm.Q[qm.Bits[width]],  # type: ignore[valid-type]
+    ) -> qm.Q[qm.Bits[width]]:  # type: ignore[valid-type]
+        """Reflect a multi-bit decision register about the zero state.
+
+        Args:
+            state (qm.Q[qm.Bits[width]]): Owned decision register.
+
+        Returns:
+            qm.Q[qm.Bits[width]]: Reflected decision register.
+        """
+
+        for index in range(width):
+            state = qm.x(state, target=index)
+        controls, target = qm.split_at(state, control_width)
+        target = qm.h(target)
+        controls, target = qm.control(flip, controls, target)
+        target = qm.h(target)
+        state = qm.concat(controls, target)
+        for index in range(width):
+            state = qm.x(state, target=index)
+        return state
+
+    return reflect
+
+
+def _gas_preparation(
+    *,
+    model: BinaryModel[BinaryDomain],
+    threshold: float,
+    output_width: int,
+) -> qm.QKernel:
+    """Construct the reversible quantum dictionary for one fixed model.
+
+    Args:
+        model (BinaryModel[BinaryDomain]): Effective integer or real binary
+            polynomial encoded by the circuit.
+        threshold (float): Threshold in the effective model's scale.
+        output_width (int): Two's-complement objective-register width.
+
+    Returns:
+        qm.QKernel: Unary preparation over decision and objective registers.
+
+    Raises:
+        ValueError: If a model term refers to an unknown variable.
+    """
+
+    decision_width = model.num_variables
+    total_width = decision_width + output_width
+    output_indices = tuple(range(decision_width, total_width))
+    position = {variable: index for index, variable in enumerate(model.variables)}
+    steps: list[qm.QKernel] = [
+        _decision_superposition(
+            total_width=total_width,
+            decision_width=decision_width,
+        ),
+    ]
+    constant = model.constant - threshold
+    if constant != 0.0:
+        if not float(constant).is_integer():
+            raise ValueError("GAS threshold must map to exact integer arithmetic")
+        steps.append(
+            lift_indices(
+                total_width=total_width,
+                indices=output_indices,
+                transform=add_constant(width=output_width, value=int(constant)),
+            )
+        )
+    for variables, coefficient in model.coefficients.items():
+        try:
+            controls = tuple(position[variable] for variable in variables)
+        except KeyError as error:
+            raise ValueError("GAS term refers to an unknown model variable") from error
+        steps.append(
+            _controlled_term_encoding(
+                decision_width=decision_width,
+                output_width=output_width,
+                controls=controls,
+                coefficient=coefficient,
+            )
+        )
+    return compose_unary(width=total_width, steps=steps)
+
+
+@qm.qkernel
+def _gas_transform(
+    preparation: qm.QKernel[qm.Q[qm.Bits[n]], qm.Q[qm.Bits[n]]],  # type: ignore[valid-type]
+    inverse_preparation: qm.QKernel[qm.Q[qm.Bits[n]], qm.Q[qm.Bits[n]]],  # type: ignore[valid-type]
+    reflection: qm.QKernel[qm.Q[qm.Bits[n]], qm.Q[qm.Bits[n]]],  # type: ignore[valid-type]
+    state: qm.Q[qm.Bits[n]],  # type: ignore[valid-type]
+    sign_index: qm.Const[qm.Int],  # type: ignore[valid-type]
+    iterations: qm.Const[qm.Int],  # type: ignore[valid-type]
+) -> qm.Q[qm.Bits[n]]:  # type: ignore[valid-type]
+    """Apply one fixed-threshold Grover Adaptive Search transform.
+
+    Args:
+        preparation (qm.QKernel[qm.Q[qm.Bits[n]], qm.Q[qm.Bits[n]]]): Closed reversible
+            objective preparation over the joint register.
+        inverse_preparation (qm.QKernel[qm.Q[qm.Bits[n]], qm.Q[qm.Bits[n]]]): Exact
+            inverse of ``preparation``.
+        reflection (qm.QKernel[qm.Q[qm.Bits[n]], qm.Q[qm.Bits[n]]]): Closed lifted
+            zero-state reflection over the same register.
+        state (qm.Q[qm.Bits[n]]): Fresh owned joint register.
+        sign_index (qm.Const[qm.Int]): Objective sign-bit position.
+        iterations (qm.Const[qm.Int]): Nonnegative Grover-operator count.
+
+    Returns:
+        qm.Q[qm.Bits[n]]: Joint decision and objective state after amplification.
+
+    Raises:
+        ValueError: If a width or iteration count is invalid at specialization.
+    """
+
+    state = preparation(state)
+    for _ in range(iterations):
+        state = qm.z(state, target=sign_index)
+        state = inverse_preparation(state)
+        state = reflection(state)
+        state = preparation(state)
+    return state
+
+
+def _gas_sample_program(
+    *,
+    model: BinaryModel[BinaryDomain],
+    threshold: float,
+    iterations: int,
+    output_width: int,
+) -> Program:
+    """Build one closed GAS sampling program.
+
+    Args:
+        model (BinaryModel[BinaryDomain]): Effective model encoded by the
+            quantum dictionary.
+        threshold (float): Threshold in the effective model's scale.
+        iterations (int): Nonnegative Grover-operator count.
+        output_width (int): Objective-register width.
+
+    Returns:
+        Program: Specialized backend-neutral GAS sampling program.
+
+    Raises:
+        ValueError: If model or register widths are invalid.
+    """
+
+    decision_width = model.num_variables
+    if decision_width <= 0:
+        raise ValueError("GAS requires at least one model variable")
+    total_width = decision_width + output_width
+    preparation = _gas_preparation(
+        model=model,
+        threshold=threshold,
+        output_width=output_width,
+    )
+    reflection = lift_slice(
+        total_width=total_width,
+        start=0,
+        width=decision_width,
+        transform=_zero_reflection(width=decision_width),
+    )
+    inverse_preparation = adjoint_unary(
+        width=total_width,
+        transform=preparation,
+    )
+
+    @qm.qkernel
+    def entry() -> qm.Shot[qm.Bits[decision_width]]:  # type: ignore[valid-type]
+        """Close the planned transforms at one compiler-visible call site.
+
+        Returns:
+            qm.Shot[qm.Bits[decision_width]]: Source-ordered decision bits.
+        """
+
+        state = _gas_transform(
+            preparation,
+            inverse_preparation,
+            reflection,
+            qm.qubits(total_width),
+            total_width - 1,
+            iterations,
+        )
+        decision, objective = qm.split_at(state, decision_width)
+        result = qm.measure(decision)
+        _ignored_objective = qm.measure(objective)
+        return result
+
+    return entry.specialize()
+
+
+@dataclass(frozen=True, slots=True)
+class GASExperiment:
+    """Fix one binary objective, threshold, and Grover search topology.
+
+    Args:
+        model (BinaryModel[BinaryDomain]): Binary polynomial to minimize.
+        threshold (float): Mark assignments whose objective is strictly below
+            this value.
+        iterations (int): Nonnegative number of Grover iterations.
+        output_bits (int | None): Optional objective-register width. ``None``
+            derives the smallest safe two's-complement width.
+        approximate_real_coefficients (bool): Whether to quantize noninteger
+            coefficients before building the arithmetic circuit. ``False``
+            preserves the original binary64 coefficients exactly through a
+            power-of-two scale and rejects widths above 54 objective bits.
+        quantization_parameter (int | None): Optional positive quantization
+            precision. ``None`` derives and bounds it automatically.
+
+    Raises:
+        TypeError: If an argument has the wrong host type.
+        ValueError: If a value is non-finite, a count is invalid, or the
+            requested output register is too narrow.
+    """
+
+    model: BinaryModel[BinaryDomain]
+    threshold: float
+    iterations: int = 1
+    output_bits: int | None = None
+    approximate_real_coefficients: bool = True
+    quantization_parameter: int | None = None
+    effective_model: BinaryModel[BinaryDomain] = field(init=False)
+    quantization_scale: float = field(init=False)
+    resolved_output_bits: int = field(init=False)
+    program: Program = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        """Precision-align the inherited BINARY model and set the encoding state.
+        """Validate configuration and build one immutable closed program.
 
-        Uses the BINARY model the base converter already normalized rather than
-        converting ``spin_model`` back: a degree-``d`` BINARY monomial expands
-        into ``2**d`` SPIN terms, so a round trip would pay that cost twice and
-        add the float noise ``_align_precision`` then has to remove.
-        """
-        coeffs = [self.binary_model.constant] + list(
-            self.binary_model.coefficients.values()
-        )
-        coeffs = GASConverter._align_precision(coeffs)
-        precision_aligned_constant = coeffs[0]
-        precision_aligned_coefficients = {
-            k: v for k, v in zip(self.binary_model.coefficients.keys(), coeffs[1:])
-        }
-        self.binary_model = BinaryModel.from_hubo(
-            hubo=precision_aligned_coefficients,
-            constant=precision_aligned_constant,
-        )
-        # Establish the encoding state up front so the HUBO kernel factories,
-        # which read `effective_model`, work on a freshly built converter
-        # instead of only after `transpile()` has run.
-        self.effective_model = self.binary_model
-        self.quantization_scale = 1.0
-
-    @staticmethod
-    def _align_precision(values: list[float]) -> list[float]:
-        """Round noisy non-integer coefficients to a common user-intended precision.
-
-        Floating-point computation can leave a coefficient that the user meant
-        as an exact decimal (e.g. ``1.0``) fakely precise (e.g.
-        ``0.9999999999999999`` or ``1.0000000000000002``). Left as-is, such a
-        value would make ``_detect_eps`` report a spuriously fine epsilon driven
-        by rounding noise rather than by the precision the user actually wrote.
-
-        By default, this infers the *finest meaningful* decimal precision across
-        non-integer values while ignoring binary floating-point tails.
-        Concretely, for each value it finds the smallest number of decimal
-        digits that reproduces the value within ``atol=1e-12``; then all
-        non-integer values are rounded to the maximum of those per-value
-        precisions. Integer-valued coefficients (within ``atol=1e-12``) are
-        considered exact.
-
-        Every comparison here is absolute-only (``rtol=0.0``). The default
-        relative tolerance of ``np.isclose`` scales with the magnitude of the
-        compared value, which would make a large but genuinely fractional
-        coefficient such as ``100000.4`` compare equal to ``100000`` and be
-        silently snapped to an integer before quantization ever runs.
-
-        Args:
-            values (list[float]): Coefficient values to align, typically the
-                model's constant followed by its interaction coefficients.
-
-        Returns:
-            list[float]: ``values`` with every non-integer entry rounded to the
-                finest meaningful decimal precision inferred from non-integer
-                entries. Returned unchanged (aside from float coercion) when
-                every value is integer-valued.
-
-        """
-        non_integer_values = []
-        for v in values:
-            fv = float(v)
-            if not np.isclose(fv, round(fv), atol=1e-12, rtol=0.0):
-                non_integer_values.append(fv)
-
-        if not non_integer_values:
-            return [
-                float(round(float(v)))
-                if np.isclose(float(v), round(float(v)), atol=1e-12, rtol=0.0)
-                else float(v)
-                for v in values
-            ]
-
-        max_scan_decimals = 12
-        inferred_digits = []
-        for fv in non_integer_values:
-            inferred = None
-            for d in range(max_scan_decimals + 1):
-                if np.isclose(fv, round(fv, d), atol=1e-12, rtol=0.0):
-                    inferred = d
-                    break
-
-            if inferred is None:
-                exp = Decimal(str(fv)).as_tuple().exponent
-                inferred = -exp if exp < 0 else 0  # type: ignore[operator]
-
-            inferred_digits.append(inferred)
-
-        round_digits = max(inferred_digits)
-
-        aligned = []
-        for v in values:
-            fv = float(v)
-            if np.isclose(fv, round(fv), atol=1e-12, rtol=0.0):
-                # Snap integer-like float artifacts (e.g. 4.000000000000005)
-                # to exact integers so downstream precision detection does not
-                # keep meaningless binary tails.
-                aligned.append(float(round(fv)))
-            else:
-                aligned.append(round(fv, round_digits))
-        return aligned
-
-    @staticmethod
-    def _detect_eps(values: list[float]) -> float:
-        """Auto-detect the input precision epsilon from a list of floats.
-
-        Uses Python's shortest-decimal guarantee: ``str(float(v))`` always
-        produces the shortest decimal string that round-trips back to the same
-        float.  The exponent of that decimal representation gives the precision
-        of the value as the user wrote it (e.g. ``0.3`` → exponent ``-1`` →
-        eps ``0.1``; ``1/3 = 0.3333...`` → exponent ``-16`` → eps ``1e-16``).
-        The overall epsilon is the minimum across all values.
-
-        Args:
-            values (list[float]): Coefficient values to inspect.
-
-        Returns:
-            float: The finest common step size that represents all values.
-
-        """
-        eps = 1.0
-        for v in values:
-            exp = Decimal(str(float(v))).as_tuple().exponent
-            if exp < 0:  # type: ignore[operator]
-                eps = min(eps, 10.0**exp)  # type: ignore[operator]
-        return eps
-
-    @staticmethod
-    def _greedy_quantization_parameter(
-        binary_model: BinaryModel,
-    ) -> int:
-        """Compute the quantization precision for approximating a real-valued model.
-
-        Args:
-            binary_model (BinaryModel): The binary model whose coefficients are
-                quantized. Both ``constant`` and all interaction coefficients are
-                considered.
-
-        Returns:
-            int: Quantization parameter ``m_q``. Each coefficient ``a`` is
-                approximated as ``k = round(a / max_coeff * 2**(m_q - 1))``.
-        """
-        safety = 2  # Extra safety bits (default 2, the minimum for correctness).
-        coeffs = [binary_model.constant] + list(binary_model.coefficients.values())
-
-        max_coeff = float(np.max(np.abs(coeffs)))
-        N_terms = len(coeffs)
-
-        epsilon = GASConverter._detect_eps(coeffs)
-
-        p = math.ceil(math.log2(max_coeff / epsilon))
-        log_N = math.ceil(math.log2(N_terms)) if N_terms > 1 else 0
-
-        return p + log_N + safety
-
-    @staticmethod
-    def approximate_real_valued_model(
-        binary_model: BinaryModel, quantization_parameter: int | None = None
-    ) -> tuple[BinaryModel, float]:
-        """Rescale and round all model coefficients to integers for QFT arithmetic.
-
-        Divides every coefficient (including the constant) by the maximum absolute
-        value to map them into [-1, 1], then multiplies by ``2^(quantization_parameter - 1)``
-        and rounds to the nearest integer. The resulting model has integer coefficients
-        that the Grover QFT circuit can encode exactly.
-
-        The scale relating the two models is returned alongside the model rather
-        than discarded: the quantized objective is ``scale × f(x)``, so any
-        threshold expressed in the original scale is only comparable against it
-        after being multiplied by ``scale``.
-
-        Args:
-            binary_model (BinaryModel): The original binary model with real-valued
-                coefficients.
-            quantization_parameter (int | None): Number of bits used for the fixed-point
-                representation. ``2^(quantization_parameter - 1)`` is the scale factor
-                applied after normalisation. When ``None``, the value is chosen
-                automatically by ``_greedy_quantization_parameter``.
-
-        Returns:
-            tuple[BinaryModel, float]: A new binary model whose coefficients are
-                integers approximating the original up to the chosen precision,
-                and the scale factor ``s`` such that each returned coefficient
-                approximates ``s ×`` its original counterpart. ``s`` is ``1.0``
-                when the model is returned unchanged.
+        Raises:
+            TypeError: If model, flags, or integer controls are ill-typed.
+            ValueError: If the model domain, threshold, counts, or width are
+                invalid.
         """
 
-        #### Rescaling
-        coef_list = [binary_model.constant] + list(binary_model.coefficients.values())
-        coef_array = np.asarray(coef_list, dtype=float)
-        max_val = np.max(np.abs(coef_array))
-        if np.isclose(max_val, 0.0, atol=1e-12, rtol=0.0):
-            return binary_model, 1.0
-        rescaled_coef_list = coef_array / max_val
+        if not isinstance(self.model, BinaryModel):
+            raise TypeError("model must be a qamomile.optimization.BinaryModel")
+        if self.model.vartype is not VarType.BINARY:
+            raise ValueError("GAS requires a BINARY-domain model")
+        if self.model.num_variables <= 0:
+            raise ValueError("GAS requires at least one model variable")
+        if isinstance(self.threshold, bool) or not isinstance(
+            self.threshold, (int, float)
+        ):
+            raise TypeError("threshold must be a real number")
+        threshold = float(self.threshold)
+        if not math.isfinite(threshold):
+            raise ValueError("threshold must be finite")
+        if type(self.iterations) is not int:
+            raise TypeError("iterations must be an integer")
+        if self.iterations < 0:
+            raise ValueError("iterations must be nonnegative")
+        if not isinstance(self.approximate_real_coefficients, bool):
+            raise TypeError("approximate_real_coefficients must be a Boolean")
+        if self.quantization_parameter is not None and (
+            type(self.quantization_parameter) is not int
+            or self.quantization_parameter <= 0
+        ):
+            raise ValueError("quantization_parameter must be a positive integer")
+        if self.output_bits is not None and type(self.output_bits) is not int:
+            raise TypeError("output_bits must be an integer or None")
 
-        #### Approximation
-
-        if quantization_parameter is None:
-            quantization_parameter = GASConverter._greedy_quantization_parameter(
-                binary_model
-            )
-            if quantization_parameter > GASConverter._MAX_EXACT_INT_IN_FLOAT_BITS:
+        if self.approximate_real_coefficients:
+            aligned = _aligned_model(self.model)
+            effective = aligned
+            scale = 1.0
+            if _has_noninteger_coefficients(aligned):
+                effective, scale = _quantize_model(
+                    aligned,
+                    quantization_parameter=self.quantization_parameter,
+                )
                 warnings.warn(
-                    "Auto-selected quantization_parameter is too large for exact integer "
-                    "representation in float-backed binary models. Clamping it to 54 bits "
-                    "to preserve integer-valued coefficients.",
+                    "GAS quantized noninteger coefficients for exact QFT arithmetic; "
+                    "inspect effective_model and quantization_scale for the circuit "
+                    "values.",
                     UserWarning,
+                    stacklevel=2,
                 )
-                quantization_parameter = GASConverter._MAX_EXACT_INT_IN_FLOAT_BITS
-
-        scale = 2 ** (quantization_parameter - 1)
-        # Kept as float: BinaryModel stores float coefficients, and rounding
-        # already guarantees these are integer-valued.
-        frac_list = [float(round(float(a) * scale)) for a in rescaled_coef_list]
-        new_constant = frac_list[0]
-        new_coef = {
-            i: j for i, j in zip(binary_model.coefficients.keys(), frac_list[1:])
-        }
-
-        ### Build new model with the rational coefficients
-        return (
-            BinaryModel.from_hubo(
-                hubo=new_coef,
-                constant=new_constant,
-            ),
-            float(scale / max_val),
-        )
-
-    @staticmethod
-    def _objective_bounds(binary_model: BinaryModel) -> tuple[float, float]:
-        """Return the extreme values the objective can take over all bitstrings.
-
-        Every monomial is a product of binary variables, so each coefficient
-        contributes either its full value or nothing. The bounds are therefore
-        the constant plus the sum of the positive and negative coefficients
-        respectively. They are attainable only when no two terms conflict, which
-        makes them a safe (never too narrow) envelope for register sizing.
-
-        Args:
-            binary_model (BinaryModel): Binary model (QUBO or HUBO) whose
-                coefficients define the objective range.
-
-        Returns:
-            tuple[float, float]: ``(f_min, f_max)``.
-
-        """
-        all_coeffs = (
-            list(binary_model.linear.values())
-            + list(binary_model.quad.values())
-            + list(binary_model.higher.values())
-        )
-        f_max = binary_model.constant + sum(c for c in all_coeffs if c > 0)
-        f_min = binary_model.constant + sum(c for c in all_coeffs if c < 0)
-        return f_min, f_max
-
-    @staticmethod
-    def _required_output_bits(binary_model: BinaryModel, y_scaled: float = 0.0) -> int:
-        """Compute the minimum output-register size for the Grover QFT circuit.
-
-        The register holds ``f(x) − y`` in two's complement, so it must fit
-        every value in ``[f_min − y, f_max − y]``. Sizing for the *span*
-        ``f_max − f_min`` alone is not enough: a threshold outside the objective
-        range, or an objective that never comes near zero, pushes the encoded
-        quantity beyond the representable interval, wrapping it around and
-        flipping the sign bit the oracle tests. ``m`` is therefore the smallest
-        width with ``2^(m−1) > max(|f_min − y|, |f_max − y|)``.
-
-        Args:
-            binary_model (BinaryModel): Binary model (QUBO or HUBO) whose
-                coefficients define the objective range. Pass the *effective*
-                (quantized) model when one is in use.
-            y_scaled (float): Oracle threshold expressed in the same scale as
-                ``binary_model`` — that is, the caller's ``y`` already
-                multiplied by ``quantization_scale``. Defaults to ``0.0``.
-
-        Returns:
-            int: Minimum number of output qubits ``m``.
-
-        """
-        f_min, f_max = GASConverter._objective_bounds(binary_model)
-        bound = max(abs(f_min - y_scaled), abs(f_max - y_scaled))
-        if bound <= 0:
-            return 2
-        return max(2, int(math.floor(math.log2(bound))) + 2)
-
-    def required_output_bits(self, y: float = 0.0) -> int:
-        """Return the output-register width ``transpile()`` would pick for ``y``.
-
-        Exposes the automatic sizing so callers can reserve the register
-        themselves — for drawing the circuit, estimating resources, or checking
-        a width before passing it as ``output_bits``.
-
-        Reports the width for the *current* ``effective_model``. On a freshly
-        built converter that is the un-quantized model, so for a model with
-        real-valued coefficients the answer grows once ``transpile()`` has
-        quantized them: call this again afterwards, or pass
-        ``approximate_real_coefficients=False``.
-
-        Args:
-            y (float): Oracle threshold in the model's original (un-quantized)
-                scale, exactly as it would be passed to ``transpile()``.
-                Defaults to ``0.0``.
-
-        Returns:
-            int: Minimum number of output qubits for the current
-                ``effective_model`` and ``quantization_scale``.
-
-        """
-        return self._required_output_bits(
-            self.effective_model, y * self.quantization_scale
-        )
-
-    def get_cost_hamiltonian(self) -> qm_o.Hamiltonian:
-        """Raise NotImplementedError because GAS is oracle-based and has no cost Hamiltonian.
-
-        GAS marks states via an oracle reflection rather than minimizing the
-        expectation value of a cost Hamiltonian. This method always raises so
-        that incorrect usage fails immediately rather than propagating a silent
-        ``None`` that would cause a confusing error later.
-
-        Returns:
-            qm_o.Hamiltonian: Never returns; declared for base-class
-            compatibility only.
-
-        Raises:
-            NotImplementedError: Always. GAS exposes no cost Hamiltonian.
-
-        """
-        raise NotImplementedError(
-            "GASConverter does not expose a cost Hamiltonian. "
-            "GAS is oracle-based and does not use Hamiltonian expectation values."
-        )
-
-    def transpile(
-        self,
-        transpiler: Transpiler,
-        *,
-        output_bits: int | None = None,
-        y: float,
-        num_iterations: int,
-        approximate_real_coefficients: bool = True,
-        quantization_parameter: int | None = None,
-    ) -> ExecutableProgram:
-        """Transpile the model into an executable Grover circuit.
-
-        Dispatches to the quadratic-only path, with build-in function, when no
-        higher-order terms are present. Otherwise uses the HUBO path with the
-        qkernel factory.
-
-        Args:
-            transpiler (Transpiler): Backend transpiler to use.
-            output_bits (int | None): Number of qubits in the arithmetic
-                register holding ``f(x) - y``. When ``None`` (default), the
-                minimum sufficient size is computed automatically from the
-                effective model *and* the threshold via
-                ``required_output_bits``. A manual value is rejected when it
-                cannot represent the whole range of ``f(x) - y``.
-            y (float): Current best known objective value.  The oracle marks
-                all states ``x`` where ``f(x) < y``.  Pass the QUBO objective
-                directly, in the model's original scale — the sign convention
-                and any quantization rescaling are handled internally.
-            num_iterations (int): Number of Grover operator applications.
-            approximate_real_coefficients (bool): When ``True`` (default) and the
-                model has non-integer coefficients, quantize them to integers so
-                the QFT arithmetic can encode them exactly. When ``False`` the
-                real coefficients are encoded as-is.
-            quantization_parameter (int | None): Bit width forwarded to
-                ``approximate_real_valued_model`` when quantizing. ``None``
-                selects it automatically. Ignored unless quantization applies.
-
-        Returns:
-            ExecutableProgram: The compiled circuit program.
-
-        Raises:
-            ValueError: If ``output_bits`` is too small to represent
-                ``f(x) - y`` over the whole search space.
-
-        """
-
-        # If the model contains real values
-        all_values = [self.binary_model.constant] + list(
-            self.binary_model.coefficients.values()
-        )
-        has_non_integer = any(
-            not np.isclose(v, round(v), atol=1e-12, rtol=0.0) for v in all_values
-        )
-        if has_non_integer and approximate_real_coefficients:
-            (
-                self.effective_model,
-                self.quantization_scale,
-            ) = self.approximate_real_valued_model(
-                self.binary_model, quantization_parameter=quantization_parameter
-            )
-            warnings.warn(
-                "The binary model contains non-integer coefficients. "
-                "They have been rescaled and approximated to the nearest integer. "
-                "This may affect the accuracy of the results. "
-                "Use approximate_real_coefficients=False to disable this approximation "
-                "and use the original real coefficients."
-            )
+            effective_threshold = math.ceil(threshold * scale)
+            required = _required_output_bits(effective, effective_threshold)
         else:
-            self.effective_model = self.binary_model
-            self.quantization_scale = 1.0
-
-        y_scaled = y * self.quantization_scale
-        required_bits = self._required_output_bits(self.effective_model, y_scaled)
-        if output_bits is None:
-            output_bits = required_bits
-        elif output_bits < required_bits:
-            f_min, f_max = self._objective_bounds(self.effective_model)
+            effective, scale, effective_threshold, required = _exact_integer_model(
+                self.model, threshold
+            )
+        resolved = required if self.output_bits is None else self.output_bits
+        if (
+            not self.approximate_real_coefficients
+            and resolved > native.MAX_EXACT_GAS_BITS
+        ):
+            raise ValueError("exact GAS output_bits exceeds the 54-bit budget")
+        if resolved < required:
+            minimum, maximum = _objective_bounds(effective)
             raise ValueError(
-                f"output_bits={output_bits} is too small to hold f(x) - y for "
-                f"every x: the encoded value ranges over "
-                f"[{f_min - y_scaled}, {f_max - y_scaled}], which needs at "
-                f"least {required_bits} qubits. A narrower register wraps "
-                "around in two's complement and inverts the sign bit the "
-                "oracle tests, so the wrong states get marked."
+                f"output_bits={resolved} is too small for f(x) - threshold in "
+                f"[{minimum - effective_threshold}, "
+                f"{maximum - effective_threshold}]; at least {required} bits "
+                "are required"
             )
-        # Otherwise the caller's width already fits; use it as given.
-
-        if not self.effective_model.higher:
-            return self._transpile_quadratic(
-                transpiler, output_bits=output_bits, y=y, num_iterations=num_iterations
-            )
-        return self._transpile_hubo(
-            transpiler, output_bits=output_bits, y=y, num_iterations=num_iterations
+        program = _gas_sample_program(
+            model=effective,
+            threshold=effective_threshold,
+            iterations=self.iterations,
+            output_width=resolved,
         )
+        object.__setattr__(self, "threshold", threshold)
+        object.__setattr__(self, "effective_model", effective)
+        object.__setattr__(self, "quantization_scale", scale)
+        object.__setattr__(self, "resolved_output_bits", resolved)
+        object.__setattr__(self, "program", program)
 
-    def _transpile_quadratic(
-        self,
-        transpiler: Transpiler,
-        *,
-        output_bits: int,
-        y: float,
-        num_iterations: int,
-    ) -> ExecutableProgram:
-        """Transpile a QUBO model into an executable Grover circuit.
-
-        Uses the BINARY-domain coefficients so that the QFT phase-encoding
-        computes the correct objective value ``f(x) = constant + Σ linear[i]·xᵢ
-        + Σ quad[i,j]·xᵢxⱼ`` for binary inputs xᵢ ∈ {0, 1}.
-
-        The circuit encodes ``f(x) − y`` in the output register and the oracle
-        marks states where that quantity is negative (two's-complement MSB = 1),
-        i.e. states where ``f(x) < y``.
-
-        Args:
-            transpiler (Transpiler): Backend transpiler to use.
-            output_bits (int): Number of output qubits for the QFT arithmetic
-                register.
-            y (float): Current best known objective value, in the model's
-                original (un-quantized) scale.
-            num_iterations (int): Number of Grover operator applications.
+    @property
+    def identity(self) -> OptimizationExperimentIdentity:
+        """Return the exact original-problem and closed-program identity.
 
         Returns:
-            ExecutableProgram: The compiled circuit program.
-
+            OptimizationExperimentIdentity: Stable problem/program digest pair.
         """
 
-        @qmc.qkernel
-        def measure_grover_algorithm(
-            n: qmc.UInt,
-            m: qmc.UInt,
-            y: qmc.Float,
-            linear: qmc.Dict[qmc.UInt, qmc.Float],
-            quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-            iters: qmc.UInt = 1,  # type: ignore[assignment]
-        ) -> qmc.Vector[qmc.Bit]:
-            """Measure the input register after running the QUBO Grover algorithm.
-
-            Args:
-                n (qmc.UInt): Number of input (decision-variable) qubits.
-                m (qmc.UInt): Number of output (objective-value) qubits.
-                y (qmc.Float): Internal circuit threshold, already carrying the
-                    quantization scale (see ``_transpile_quadratic``).
-                linear (qmc.Dict[qmc.UInt, qmc.Float]): Linear coefficients.
-                quad (qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float]):
-                    Quadratic coefficients indexed by variable pairs.
-                iters (qmc.UInt): Number of Grover iterations. Defaults to 1.
-
-            Returns:
-                qmc.Vector[qmc.Bit]: Measurement outcomes of the input register.
-
-            """
-            q_output, q_input = grover_algorithm(
-                n=n,
-                m=m,
-                y=y,
-                linear=linear,
-                quad=quad,
-                iters=iters,
-            )
-            return qmc.measure(q_input)
-
-        # The QFT register encodes  y_circuit + Σ linear[i]·xᵢ + Σ quad[i,j]·xᵢxⱼ
-        # = (constant − s·y) + (f_eff(x) − constant)  =  s·(f(x) − y), where s is
-        # `quantization_scale`. The oracle fires when this is negative (MSB = 1);
-        # since s > 0 that is exactly f(x) < y. Scaling y is what keeps the
-        # comparison meaningful once the coefficients have been quantized.
-        y_circuit = self.effective_model.constant - y * self.quantization_scale
-
-        return transpiler.transpile(
-            measure_grover_algorithm,
-            bindings={
-                "n": self.effective_model.num_bits,
-                "m": output_bits,
-                "y": y_circuit,
-                "linear": self.effective_model.linear,
-                "quad": self.effective_model.quad,
-                "iters": num_iterations,
-            },
+        return OptimizationExperimentIdentity(
+            "qamomile.gas.v1",
+            self.model.semantic_digest,
+            self.program.semantic_digest,
         )
 
-    ######################################################################################
-    #                   HUBO PATH (degree ≥ 3) using qkernel factory                     #
-    ######################################################################################
-
-    def _make_term_encoding(self, ctrl_indices: list[int]) -> qmc.QKernel:
-        """Factory to create kernel that encodes one polynomial term via qft_encoding.
+    def compile(self, *, to: CompilationTarget) -> CompiledGASExperiment:
+        """Compile this fixed experiment for one target.
 
         Args:
-            ctrl_indices (list[int]): Input-qubit indices used as controls.
+            to (CompilationTarget): Target-format compiler configuration.
 
         Returns:
-            qmc.QKernel: A qkernel with signature ``(q_output, q_input, coef)``.
-
-        """
-        degree = len(ctrl_indices)
-
-        if degree == 0:
-            return zero_degree_qft_encoding
-
-        @qmc.qkernel
-        def term_encoding(
-            q_output: qmc.Vector[qmc.Qubit],
-            q_input: qmc.Vector[qmc.Qubit],
-            coef: qmc.Float,
-        ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-            """Encode one polynomial term controlled on ``degree`` input qubits.
-
-            Args:
-                q_output (qmc.Vector[qmc.Qubit]): Output register in the Fourier basis.
-                q_input (qmc.Vector[qmc.Qubit]): Input register holding the controls.
-                coef (qmc.Float): Coefficient to encode when all controls are active.
-
-            Returns:
-                tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Updated
-                    output and input registers.
-
-            """
-            # num_controls baked in at factory time via closure over `degree`.
-            ctrl_qft = qmc.control(qft_encoding, num_controls=degree)
-            controls = [q_input[ci] for ci in ctrl_indices]
-            result = ctrl_qft(*controls, q_output, coef)
-            # result = (ctrl_0, ..., ctrl_{degree-1}, q_output)
-            _scatter_controls_back(q_input, ctrl_indices, result)
-            q_output = result[degree]  # type: ignore[index]
-            return q_output, q_input
-
-        return term_encoding
-
-    def _compose_encoders_baked(
-        self,
-        encoders: list[qmc.QKernel],
-        coef_values: list[float],
-    ) -> qmc.QKernel:
-        """Factory that composes term encoders with baked-in coefficients into a single kernel.
-
-        Builds the chain iteratively at factory time — no Python recursion — so
-        models with many terms do not hit the interpreter's recursion limit. Each
-        ``(encoder, coef)`` pair is wrapped in its own helper to ensure correct
-        closure capture before being prepended to the growing chain.
-
-        Args:
-            encoders (list[qmc.QKernel]): Encoder kernels to apply in sequence.
-            coef_values (list[float]): Per-encoder raw coefficients, one per encoder.
-
-        Returns:
-            qmc.QKernel: A qkernel with signature ``(q_output, q_input)``.
+            CompiledGASExperiment: Reusable compiled GAS experiment.
 
         Raises:
-            ValueError: If ``encoders`` and ``coef_values`` differ in length,
-                which would leave an encoder without its coefficient.
-
+            TypeError: If ``to`` is not an artifact target.
         """
-        if len(encoders) != len(coef_values):
-            raise ValueError(
-                "encoders and coef_values must have the same length "
-                f"(got {len(encoders)} and {len(coef_values)})."
-            )
 
-        steps = list(zip(encoders, coef_values))
+        return CompiledGASExperiment(self, compile_program(self.program, to=to))
 
-        if not steps:
-
-            @qmc.qkernel
-            def identity(
-                q_output: qmc.Vector[qmc.Qubit],
-                q_input: qmc.Vector[qmc.Qubit],
-            ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-                """Pass both registers through unchanged (empty term list).
-
-                Args:
-                    q_output (qmc.Vector[qmc.Qubit]): Output register.
-                    q_input (qmc.Vector[qmc.Qubit]): Input register.
-
-                Returns:
-                    tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: The
-                        registers, untouched.
-
-                """
-                return q_output, q_input
-
-            return identity
-
-        def _make_leaf(enc: qmc.QKernel, th: float) -> qmc.QKernel:
-            """Wrap the final encoder of the chain with its coefficient baked in.
-
-            Args:
-                enc (qmc.QKernel): Encoder kernel to apply.
-                th (float): Coefficient passed to ``enc``.
-
-            Returns:
-                qmc.QKernel: A qkernel with signature ``(q_output, q_input)``.
-
-            """
-
-            @qmc.qkernel
-            def leaf(
-                q_output: qmc.Vector[qmc.Qubit],
-                q_input: qmc.Vector[qmc.Qubit],
-            ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-                """Apply the baked-in encoder once.
-
-                Args:
-                    q_output (qmc.Vector[qmc.Qubit]): Output register.
-                    q_input (qmc.Vector[qmc.Qubit]): Input register.
-
-                Returns:
-                    tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Updated
-                        output and input registers.
-
-                """
-                q_output, q_input = enc(q_output, q_input, th)
-                return q_output, q_input
-
-            return leaf
-
-        def _make_step(enc: qmc.QKernel, th: float, rest: qmc.QKernel) -> qmc.QKernel:
-            """Prepend one baked-in encoder to an already-composed chain.
-
-            Args:
-                enc (qmc.QKernel): Encoder kernel to apply first.
-                th (float): Coefficient passed to ``enc``.
-                rest (qmc.QKernel): Chain kernel applied after ``enc``.
-
-            Returns:
-                qmc.QKernel: A qkernel with signature ``(q_output, q_input)``.
-
-            """
-
-            @qmc.qkernel
-            def step(
-                q_output: qmc.Vector[qmc.Qubit],
-                q_input: qmc.Vector[qmc.Qubit],
-            ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-                """Apply this encoder, then the rest of the chain.
-
-                Args:
-                    q_output (qmc.Vector[qmc.Qubit]): Output register.
-                    q_input (qmc.Vector[qmc.Qubit]): Input register.
-
-                Returns:
-                    tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Updated
-                        output and input registers.
-
-                """
-                q_output, q_input = enc(q_output, q_input, th)
-                q_output, q_input = rest(q_output, q_input)
-                return q_output, q_input
-
-            return step
-
-        chain = _make_leaf(*steps[-1])
-        for enc, th in reversed(steps[:-1]):
-            chain = _make_step(enc, th, chain)
-        return chain
-
-    def _make_apply_function_preparation_hubo(
+    def run(
         self,
-        output_bits: int,
-    ) -> qmc.QKernel:
-        """Factory to create the HUBO state-preparation kernel.
-
-        Args:
-            output_bits (int): Number of qubits in the QFT output register.
-
-        Returns:
-            qmc.QKernel: A qkernel with signature ``(q_output, q_input, y)``.
-
-        """
-        # Gather all terms — linear, quadratic, and higher-order — into a
-        # single encoder list. The function doesn't need to distinguish them.
-        terms_indices = []
-        coefficients = []
-
-        for idx, coef in self.effective_model.linear.items():
-            terms_indices.append([idx])
-            coefficients.append(float(coef))
-
-        for idxs, coef in self.effective_model.quad.items():
-            terms_indices.append(list(idxs))
-            coefficients.append(float(coef))
-
-        for idxs, coef in self.effective_model.higher.items():
-            terms_indices.append(list(idxs))
-            coefficients.append(float(coef))
-
-        encoders = [self._make_term_encoding(idxs) for idxs in terms_indices]
-        all_phases = self._compose_encoders_baked(encoders, coefficients)
-
-        @qmc.qkernel
-        def apply_hubo_preparation(
-            q_output: qmc.Vector[qmc.Qubit],
-            q_input: qmc.Vector[qmc.Qubit],
-            y: qmc.Float,
-        ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-            """Prepare Σ|x, f(x) − y> for a HUBO objective of any degree.
-
-            Args:
-                q_output (qmc.Vector[qmc.Qubit]): Output register for arithmetic encoding.
-                q_input (qmc.Vector[qmc.Qubit]): Input register for decision variables.
-                y (qmc.Float): Objective threshold offset encoded as a constant term.
-
-            Returns:
-                tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Updated
-                    output and input registers.
-
-            """
-            for i in qmc.range(output_bits):
-                q_output[i] = qmc.h(q_output[i])
-            for i in qmc.range(self.effective_model.num_bits):
-                q_input[i] = qmc.h(q_input[i])
-
-            q_output, q_input = zero_degree_qft_encoding(q_output, q_input, y)
-            q_output, q_input = all_phases(q_output, q_input)
-            q_output = qmc.iqft(q_output)
-            return q_output, q_input
-
-        return apply_hubo_preparation
-
-    def _make_apply_function_preparation_hubo_dagger(
-        self,
-        output_bits: int,
-    ) -> qmc.QKernel:
-        """Factory: returns the Hermitian conjugate of the qkernel from _make_apply_function_preparation_hubo.
-
-        Applies all phase encodings in reverse order with negated angles, replaces the
-        final IQFT with a QFT, negates the y offset, and undoes the initial Hadamards.
-
-        Args:
-            output_bits (int): Number of output qubits for the QFT register.
-                Must match the value used for the forward preparation kernel.
-
-        Returns:
-            qmc.QKernel: A qkernel with signature
-                ``(q_output: Vector[Qubit], q_input: Vector[Qubit], y: Float)
-                -> tuple[Vector[Qubit], Vector[Qubit]]``.
-
-        """
-        terms_indices = []
-        coefficients = []
-
-        for idx, coef in self.effective_model.linear.items():
-            terms_indices.append([idx])
-            coefficients.append(float(coef))
-
-        for idxs, coef in self.effective_model.quad.items():
-            terms_indices.append(list(idxs))
-            coefficients.append(float(coef))
-
-        for idxs, coef in self.effective_model.higher.items():
-            terms_indices.append(list(idxs))
-            coefficients.append(float(coef))
-
-        # Negate all coefficients for the dagger, then reverse order of application.
-        encoders = [self._make_term_encoding(idxs) for idxs in terms_indices]
-        encoders_rev = list(reversed(encoders))
-        coefs_neg_rev = list(reversed([-c for c in coefficients]))
-
-        all_phases_dagger = self._compose_encoders_baked(encoders_rev, coefs_neg_rev)
-
-        @qmc.qkernel
-        def apply_hubo_preparation_dagger(
-            q_output: qmc.Vector[qmc.Qubit],
-            q_input: qmc.Vector[qmc.Qubit],
-            y: qmc.Float,
-        ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-            """Apply the Hermitian conjugate of the HUBO state preparation.
-
-            Args:
-                q_output (qmc.Vector[qmc.Qubit]): Output register for arithmetic encoding.
-                q_input (qmc.Vector[qmc.Qubit]): Input register for decision variables.
-                y (qmc.Float): Objective threshold offset encoded as a constant term.
-                    Must match the value given to the forward kernel.
-
-            Returns:
-                tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Updated
-                    output and input registers.
-
-            """
-            # Reverse of the final iqft
-            q_output = qmc.qft(q_output)
-            # Reverse all phase encodings with negated angles
-            q_output, q_input = all_phases_dagger(q_output, q_input)
-            # Reverse the zero-degree phase with negated y
-            q_output, q_input = zero_degree_qft_encoding(q_output, q_input, (-1.0) * y)
-            # Reverse the initial Hadamards (H is self-adjoint)
-            for i in qmc.range(self.effective_model.num_bits):
-                q_input[i] = qmc.h(q_input[i])
-            for i in qmc.range(output_bits):
-                q_output[i] = qmc.h(q_output[i])
-            return q_output, q_input
-
-        return apply_hubo_preparation_dagger
-
-    def _transpile_hubo(
-        self,
-        transpiler: Transpiler,
         *,
-        output_bits: int,
-        y: float,
-        num_iterations: int,
-    ) -> ExecutableProgram:
-        """Transpile a HUBO model into an executable Grover circuit using the factory methods.
+        on: ExecutionEndpoint,
+        shots: int,
+        seed: int = 0,
+    ) -> OptimizationRun[BinaryDomain]:
+        """Compile, execute, and decode this fixed search experiment.
 
         Args:
-            transpiler (Transpiler): Backend transpiler to use.
-            output_bits (int): Number of output qubits.
-            y (float): Current best known objective value, in the model's
-                original (un-quantized) scale.
-            num_iterations (int): Number of Grover operator applications.
+            on (ExecutionEndpoint): Backend-neutral execution endpoint.
+            shots (int): Positive number of observations.
+            seed (int): Optional deterministic local-endpoint seed.
 
         Returns:
-            ExecutableProgram: The compiled circuit program.
+            OptimizationRun[BinaryDomain]: Execution and decoded distribution.
 
+        Raises:
+            TypeError: If the endpoint or launch values are invalid.
+            ValueError: If the endpoint cannot run the compiled program.
         """
-        apply_function_preparation_hubo = self._make_apply_function_preparation_hubo(
-            output_bits=output_bits
+
+        return self.compile(to=on.target).run(on=on, shots=shots, seed=seed)
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledGASExperiment:
+    """Pair one immutable GAS experiment with its compiled artifact.
+
+    Args:
+        experiment (GASExperiment): Source experiment owning the model.
+        artifact (CompiledProgram): Compiled target artifact.
+
+    Raises:
+        TypeError: If either value has the wrong public type.
+        ValueError: If the artifact belongs to a different program.
+    """
+
+    experiment: GASExperiment
+    artifact: CompiledProgram
+    identity: OptimizationExperimentIdentity = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Verify the retained artifact belongs to the experiment.
+
+        Raises:
+            TypeError: If experiment or artifact has the wrong type.
+            ValueError: If the artifact source digest does not match.
+        """
+
+        if not isinstance(self.experiment, GASExperiment):
+            raise TypeError("compiled GAS experiment requires a GASExperiment")
+        if not isinstance(self.artifact, CompiledProgram):
+            raise TypeError("compiled GAS experiment requires an CompiledProgram")
+        identity = self.experiment.identity
+        if self.artifact.source_digest.hex() != identity.program_digest:
+            raise ValueError("compiled artifact does not match GAS experiment")
+        object.__setattr__(self, "identity", identity)
+
+    def run(
+        self,
+        *,
+        on: ExecutionEndpoint,
+        shots: int,
+        seed: int = 0,
+    ) -> OptimizationRun[BinaryDomain]:
+        """Execute and decode the compiled search program.
+
+        Args:
+            on (ExecutionEndpoint): Endpoint compatible with the artifact.
+            shots (int): Positive number of observations.
+            seed (int): Optional deterministic local-endpoint seed.
+
+        Returns:
+            OptimizationRun[BinaryDomain]: Execution and original-model
+            decoded samples.
+
+        Raises:
+            TypeError: If the target result is not a sample distribution.
+            ValueError: If endpoint capabilities or launch values are invalid.
+        """
+
+        execution = run_program(
+            self.artifact,
+            on=on,
+            shots=shots,
+            seed=seed,
         )
-        apply_function_preparation_hubo_dagger = (
-            self._make_apply_function_preparation_hubo_dagger(output_bits=output_bits)
+        if not isinstance(execution.result, SampleResult):
+            raise TypeError("GAS sample program returned a non-sampling result")
+        return OptimizationRun(
+            identity=self.identity,
+            execution=execution,
+            samples=self.experiment.model.decode(execution.result),
         )
 
-        @qmc.qkernel
-        def hubo_grover_operator(
-            q_output: qmc.Vector[qmc.Qubit],
-            q_input: qmc.Vector[qmc.Qubit],
-            y: qmc.Float,
-        ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-            """Apply one Grover iteration for the HUBO GAS oracle.
 
-            Args:
-                q_output (qmc.Vector[qmc.Qubit]): Output register for arithmetic encoding.
-                q_input (qmc.Vector[qmc.Qubit]): Input register for decision variables.
-                y (qmc.Float): Objective threshold offset encoded as a constant term.
+def _exact_integer_model(
+    model: BinaryModel[BinaryDomain], threshold: float
+) -> tuple[BinaryModel[BinaryDomain], float, int, int]:
+    """Project the checked native exact objective encoding for GAS composition.
 
-            Returns:
-                tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Updated output and input registers.
+    Args:
+        model (BinaryModel[BinaryDomain]): Original, unrounded model.
+        threshold (float): Finite strict bound on the original objective.
 
-            """
-            m = q_output.shape[0]
+    Returns:
+        tuple[BinaryModel[BinaryDomain], float, int, int]: Integer model, exact
+        scale, integer threshold, and minimal safe register width.
 
-            # Oracle
-            q = q_output[m - 1]
-            q = qmc.z(q)
-            q_output[m - 1] = q
+    Raises:
+        TypeError: If native support is unavailable or the projection is malformed.
+        ValueError: If exact encoding exceeds scaling or register-width budgets.
+    """
+    derive = getattr(model._native_model, "exact_integer_encoding", None)
+    if not callable(derive):
+        raise TypeError("Q7560: native exact integer encoding is unavailable")
+    projection = derive(threshold)
+    if (
+        not isinstance(projection, tuple)
+        or len(projection) != 4
+        or type(projection[1]) is not float
+        or not math.isfinite(projection[1])
+        or projection[1] <= 0
+        or not isinstance(projection[2], str)
+        or type(projection[3]) is not int
+        or not 2 <= projection[3] <= native.MAX_EXACT_GAS_BITS
+    ):
+        raise TypeError("Q7560: malformed exact integer encoding")
+    encoded, scale, bound, width = projection
+    effective = cast(
+        BinaryModel[BinaryDomain], BinaryModel._from_native(VarType.BINARY, encoded)
+    )
+    return effective, scale, int(bound), width
 
-            # A_y^dagger
-            q_output, q_input = apply_function_preparation_hubo_dagger(
-                q_output, q_input, y
+
+def _aligned_model(model: BinaryModel[BinaryDomain]) -> BinaryModel[BinaryDomain]:
+    """Remove insignificant binary64 tails before optional quantization.
+
+    Args:
+        model (BinaryModel[BinaryDomain]): Original immutable binary model.
+
+    Returns:
+        BinaryModel[BinaryDomain]: Precision-aligned model with the same
+        variable universe.
+    """
+
+    values = [model.constant, *model.coefficients.values()]
+    noninteger = [
+        value
+        for value in values
+        if not math.isclose(value, round(value), abs_tol=1e-12, rel_tol=0.0)
+    ]
+    digits = 0
+    for value in noninteger:
+        inferred = 12
+        for candidate in range(13):
+            if math.isclose(
+                value,
+                round(value, candidate),
+                abs_tol=1e-12,
+                rel_tol=0.0,
+            ):
+                inferred = candidate
+                break
+        digits = max(digits, inferred)
+
+    def align(value: float) -> float:
+        """Align one finite coefficient to the inferred decimal precision.
+
+        Args:
+            value (float): Finite input coefficient.
+
+        Returns:
+            float: Integer-snapped or decimal-aligned coefficient.
+        """
+
+        if math.isclose(value, round(value), abs_tol=1e-12, rel_tol=0.0):
+            return float(round(value))
+        return round(value, digits)
+
+    coefficients = {
+        variables: align(coefficient)
+        for variables, coefficient in model.coefficients.items()
+    }
+    return BinaryModel.from_hubo(
+        coefficients,
+        align(model.constant),
+        variables=model.variables,
+    )
+
+
+def _has_noninteger_coefficients(model: BinaryModel[BinaryDomain]) -> bool:
+    """Return whether any model coefficient is genuinely noninteger.
+
+    Args:
+        model (BinaryModel[BinaryDomain]): Precision-aligned binary model.
+
+    Returns:
+        bool: ``True`` when quantization can change a coefficient.
+    """
+
+    return any(
+        not math.isclose(value, round(value), abs_tol=1e-12, rel_tol=0.0)
+        for value in (model.constant, *model.coefficients.values())
+    )
+
+
+def _quantize_model(
+    model: BinaryModel[BinaryDomain],
+    *,
+    quantization_parameter: int | None,
+) -> tuple[BinaryModel[BinaryDomain], float]:
+    """Scale one real model into exactly representable integer coefficients.
+
+    Args:
+        model (BinaryModel[BinaryDomain]): Precision-aligned binary model.
+        quantization_parameter (int | None): Positive precision or ``None`` for
+            bounded automatic selection.
+
+    Returns:
+        tuple[BinaryModel[BinaryDomain], float]: Integer model and positive
+        scale relating it to the original coefficients.
+
+    Raises:
+        ValueError: If an explicit precision is not positive.
+    """
+
+    values = [model.constant, *model.coefficients.values()]
+    maximum = max(abs(value) for value in values)
+    if math.isclose(maximum, 0.0, abs_tol=1e-12, rel_tol=0.0):
+        return model, 1.0
+    if quantization_parameter is None:
+        decimal_exponents = (
+            Decimal(str(float(value))).as_tuple().exponent for value in values
+        )
+        negative_exponents = (
+            exponent
+            for exponent in decimal_exponents
+            if isinstance(exponent, int) and exponent < 0
+        )
+        epsilon = min(
+            (10.0**exponent for exponent in negative_exponents),
+            default=1.0,
+        )
+        precision = math.ceil(math.log2(maximum / epsilon))
+        term_bits = math.ceil(math.log2(len(values))) if len(values) > 1 else 0
+        quantization_parameter = precision + term_bits + 2
+        if quantization_parameter > _MAX_EXACT_FLOAT_INTEGER_BITS:
+            warnings.warn(
+                "GAS automatic quantization was clamped to 54 bits so its "
+                "integer coefficients remain exactly representable.",
+                UserWarning,
+                stacklevel=3,
             )
+            quantization_parameter = _MAX_EXACT_FLOAT_INTEGER_BITS
+    elif quantization_parameter <= 0:
+        raise ValueError("quantization_parameter must be positive")
+    integer_scale = 2 ** (quantization_parameter - 1)
+    scale = float(integer_scale / maximum)
+    coefficients = {
+        variables: float(round(coefficient * scale))
+        for variables, coefficient in model.coefficients.items()
+    }
+    return (
+        BinaryModel.from_hubo(
+            coefficients,
+            float(round(model.constant * scale)),
+            variables=model.variables,
+        ),
+        scale,
+    )
 
-            # Diffusion. The shared kernel already writes the slice back
-            # after the controlled-Z, so the borrow is released before the next
-            # prep call (which indexes q_input with concrete indices and would
-            # otherwise collide with a live borrow).
-            q_input = diffusion_op(q_input)
 
-            # A_y
-            q_output, q_input = apply_function_preparation_hubo(q_output, q_input, y)
+def _objective_bounds(model: BinaryModel[BinaryDomain]) -> tuple[float, float]:
+    """Return a safe coefficient-wise envelope of the binary objective.
 
-            return q_output, q_input
+    Args:
+        model (BinaryModel[BinaryDomain]): Binary model to bound.
 
-        @qmc.qkernel
-        def hubo_grover_algorithm(
-            n: qmc.UInt,
-            m: qmc.UInt,
-            y: qmc.Float,
-            iters: qmc.UInt = 1,  # type: ignore[assignment]
-        ) -> tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]:
-            """Run repeated Grover iterations for the HUBO GAS circuit.
+    Returns:
+        tuple[float, float]: Inclusive lower and upper objective bounds.
+    """
 
-            Args:
-                n (qmc.UInt): Number of input qubits.
-                m (qmc.UInt): Number of output qubits.
-                y (qmc.Float): Objective threshold offset encoded as a constant term.
-                iters (qmc.UInt): Number of Grover iterations.
+    coefficients = tuple(model.coefficients.values())
+    minimum = model.constant + sum(value for value in coefficients if value < 0)
+    maximum = model.constant + sum(value for value in coefficients if value > 0)
+    return minimum, maximum
 
-            Returns:
-                tuple[qmc.Vector[qmc.Qubit], qmc.Vector[qmc.Qubit]]: Output and input qubit registers after all iterations.
 
-            """
-            q_output = qmc.qubit_array(m, name="q_output")
-            q_input = qmc.qubit_array(n, name="q_input")
-            q_output, q_input = apply_function_preparation_hubo(q_output, q_input, y)
+def _required_output_bits(
+    model: BinaryModel[BinaryDomain],
+    threshold: float,
+) -> int:
+    """Return the smallest safe two's-complement objective width.
 
-            for _ in qmc.range(iters):
-                q_output, q_input = hubo_grover_operator(
-                    q_output,
-                    q_input,
-                    y=y,
-                )
+    Args:
+        model (BinaryModel[BinaryDomain]): Effective binary model.
+        threshold (float): Threshold in the effective model's scale.
 
-            return q_output, q_input
+    Returns:
+        int: Width whose sign bit cannot wrap over the objective envelope.
+    """
 
-        @qmc.qkernel
-        def measure_hubo_grover_algorithm(
-            n: qmc.UInt,
-            m: qmc.UInt,
-            y: qmc.Float,
-            iters: qmc.UInt = 1,  # type: ignore[assignment]
-        ) -> qmc.Vector[qmc.Bit]:
-            """Measure the input register after applying the Grover algorithm.
+    minimum, maximum = _objective_bounds(model)
+    bound = max(abs(minimum - threshold), abs(maximum - threshold))
+    if bound <= 0:
+        return 2
+    return max(2, math.floor(math.log2(bound)) + 2)
 
-            Args:
-                n (qmc.UInt): Number of input (decision-variable) qubits.
-                m (qmc.UInt): Number of output (objective-value) qubits.
-                y (qmc.Float): Internal circuit threshold: ``effective_model.constant − best_y``.
-                    Encodes the shift so the oracle fires on ``f(x) < best_y``.
-                iters (qmc.UInt): Number of Grover iterations. Defaults to 1.
 
-            Returns:
-                qmc.Vector[qmc.Bit]: Measurement outcomes of the input register.
-
-            """
-            q_output, q_input = hubo_grover_algorithm(
-                n=n,
-                m=m,
-                y=y,
-                iters=iters,
-            )
-            return qmc.measure(q_input)
-
-        # See _transpile_quadratic for why the threshold carries the
-        # quantization scale.
-        y_circuit = self.effective_model.constant - y * self.quantization_scale
-
-        return transpiler.transpile(
-            measure_hubo_grover_algorithm,
-            bindings={
-                "n": self.effective_model.num_bits,
-                "m": output_bits,
-                "y": y_circuit,
-                "iters": num_iterations,
-            },
-        )
+__all__ = ["CompiledGASExperiment", "GASExperiment"]

@@ -1,0 +1,91 @@
+syntax = "proto3";
+
+package qamomile.proto;
+
+// Immutable device facts a compilation target can supply to extension passes.
+//
+// Rust owns validation, canonical order, and the digest. Python retains the
+// canonical bytes behind a frozen facade; adapters derive profiles from SDK
+// objects but never define what a profile means. Missing facets are unknown,
+// not empty: a profile without calibration makes no claim about errors.
+message TargetProfileProto {
+  // Profile schema version; this revision is 1.
+  uint32 schema_version = 1;
+  // Target format the profile describes, for example "qiskit.qpy.v1".
+  string format = 2;
+  // Required structural facet.
+  TopologyProto topology = 3;
+  // Optional measured facet.
+  CalibrationProto calibration = 4;
+  // Optional fault-tolerant cost facet.
+  LogicalProto logical = 5;
+  // Optional backend identity as named by the operator or SDK.
+  string backend_name = 6;
+  // Optional operator-supplied calibration timestamp, kept opaque.
+  string calibration_time = 7;
+  // Optional free-form statement of where the facts came from.
+  string provenance = 8;
+}
+
+// One directed coupling edge; `symmetric` records that the reverse direction
+// is native too, so the reverse pair never appears as its own row.
+message CouplingEdgeProto {
+  uint32 control = 1;
+  uint32 target = 2;
+  bool symmetric = 3;
+}
+
+// Qubit count, native coupling graph, and native operation names.
+message TopologyProto {
+  uint32 num_qubits = 1;
+  // Sorted by (control, target); symmetric rows satisfy control < target.
+  repeated CouplingEdgeProto edges = 2;
+  // Sorted unique names of native single-qubit operations.
+  repeated string one_qubit_operations = 3;
+  // Sorted unique names of native two-qubit operations.
+  repeated string two_qubit_operations = 4;
+}
+
+// One measured per-qubit quantity such as "t1" in "s".
+message QubitPropertyProto {
+  uint32 qubit = 1;
+  string name = 2;
+  double value = 3;
+  string unit = 4;
+}
+
+// One measured per-edge quantity such as "cx.error" in "probability".
+message EdgePropertyProto {
+  uint32 control = 1;
+  uint32 target = 2;
+  string name = 3;
+  double value = 4;
+  string unit = 5;
+}
+
+// Measured facts; rows reference topology qubits and edges and are sorted by
+// (qubit, name) and (control, target, name).
+message CalibrationProto {
+  repeated QubitPropertyProto qubit_properties = 1;
+  repeated EdgePropertyProto edge_properties = 2;
+  string provenance = 3;
+}
+
+// One named finite constant of a rotation-synthesis model.
+message NamedConstantProto {
+  string name = 1;
+  double value = 2;
+}
+
+// Fault-tolerant cost facet consumed by magic-state and cycle accounting.
+message LogicalProto {
+  string code_family = 1;
+  uint32 code_distance = 2;
+  double cycle_time = 3;
+  string cycle_time_unit = 4;
+  double magic_state_cost = 5;
+  string magic_state_cost_unit = 6;
+  string rotation_synthesis_model = 7;
+  // Sorted by name, unique.
+  repeated NamedConstantProto rotation_synthesis_constants = 8;
+}

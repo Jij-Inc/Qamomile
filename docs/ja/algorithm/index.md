@@ -4,110 +4,116 @@ slug: algorithm
 
 # アルゴリズム
 
-Qamomileで実装した具体的な量子アルゴリズム例です。
+Qamomileで実装し、結果を確認する量子アルゴリズムの例です。
 
 ::::{grid} 1 1 1 1
 
 :::{card}
-:header: **組合せ多項式二値最適化のためのGrover Adaptive Search**
+:header: **Grover適応探索**
 :link: grover_adaptive_search
-`GASConverter`でポートフォリオ選択問題を解く例です。古典的な外側ループからGroverの閾値を更新し、結果を全探索と比較して検証します。
+`BinaryModel`とGroverオラクルを使い、古典側でしきい値を更新しながらポートフォリオの二値目的関数を最小化します。
 :::
 
 :::{card}
-:header: **Suzuki–Trotter分解によるハミルトニアンシミュレーション (Rabi振動)**
+:header: **ハミルトニアンシミュレーション**
 :link: hamiltonian_simulation
-RabiモデルでのTrotter–Suzuki積公式と収束次数の実験です。
+Suzuki積公式でRabi振動をシミュレーションし、解析解と比較します。
 :::
 
 :::{card}
-:header: **ハイブリッド量子ニューラルネットワーク (HQNN)**
+:header: **ハイブリッド量子ニューラルネットワーク**
 :link: hybrid_qnn
-CNN＋量子変分回路をFashion-MNISTでend-to-end学習し、パラメータシフトルールで勾配を計算します。
+量子回路をPyTorchと組み合わせ、パラメータシフト法で求めた勾配を使って学習します。
 :::
 
 :::{card}
 :header: **Möttönen振幅エンコーディング**
-:link: mottonen_amplitude_encoding.ipynb
-任意の量子状態を準備するMöttönenの振幅エンコーディングをQamomileで使う方法です。`amplitude_encoding`および`mottonen_amplitude_encoding`に基づく状態準備の方法を紹介します。
+:link: mottonen_amplitude_encoding
+古典的な振幅データから量子状態を準備し、測定確率を確認します。
 :::
 
 :::{card}
-:header: **量子振幅推定を用いたオプションプライシング**
+:header: **量子振幅推定によるオプション価格計算**
 :link: option_pricing
-量子振幅推定(QAE)によるオプションプライシングをQamomileで実装する例です。株価データの振幅への埋め込みと、Grover演算子による振幅推定を実装し、オプションの数値シミュレーションを実行します。
+資産価格の分布とペイオフを量子状態に符号化し、期待ペイオフを推定して割引後のオプション価格を求めます。
 :::
 
 :::{card}
-:header: **多次元量子フーリエ変換によるナノシート物質特性推定**
+:header: **多次元量子フーリエ変換**
 :link: multidimensional_qft
-多次元量子フーリエ変換をQamomileで実装する例です。ナノシート材料の特性評価について、データの前処理を行った多次元QFTを利用してナノシートに関するシミュレーションを実行します。
+量子レジスタを論理的な軸に分け、各軸に同じQFT関数を適用します。
 :::
 
 :::{card}
-:header: **Pauli Correlation Encoding**
+:header: **Pauli相関エンコーディング**
 :link: pce_maxcut
-Pauli Correlation Encoding (PCE)をQamomileで使用する例です。20ノードのグラフに対するMaxCutを3量子ビットのPCEで解き、厳密解と比較します。
+4変数のMaxCut問題を2量子ビットに符号化し、推定したPauli相関から分割を復元します。
 :::
 
 :::{card}
-:header: **QAOA によるグラフ分割**
+:header: **QAOAによる制約付きグラフ分割**
 :link: qaoa_graph_partition
-OMMX・JijModeling・`QAOAConverter`を使ったend-to-endの最適化例です。
+JijModelingとOMMXで制約付き問題を定式化し、QAOAの結果から制約の充足と目的関数値を確認します。
 :::
 
 :::{card}
-:header: **QAOAでMaxCutを解く: 回路をゼロから構築する**
+:header: **QAOAによるMaxCut**
 :link: qaoa_maxcut
-QAOA回路をゼロから構築してMaxCutを解き、組み込みの`qaoa_state`と比較します。
+再利用可能な関数からQAOAを構成し、4頂点の閉路グラフの分割を求めます。
 :::
 
 :::{card}
-:header: **Quantum-enhanced Markov chain Monte Carlo**
+:header: **QSVT固有状態フィルタリングによるグラフ分割**
+:link: qsvt_eigenstate_filter_graph_partitioning
+実数多項式による固有状態フィルタを構成し、成功確率を推定して、頂点数の等しいグラフ分割を求めます。
+:::
+
+:::{card}
+:header: **量子回路を用いたMarkov連鎖Monte Carlo法**
 :link: qe_mcmc
-トロッター分解による時間発展を利用して、Quantum-enhanced MCMCを実装します。
+量子時間発展回路で古典側の候補を生成し、詳細釣り合いを確認します。
 :::
 
 :::{card}
-:header: **Quantum Selected Configuration Interaction (QSCI)**
+:header: **量子選択配置間相互作用（QSCI）**
 :link: qsci
-量子状態からビット列をサンプリングして有効ハミルトニアンを構築し、変分原理の保証付きで古典的に対角化します。
+試行状態をサンプリングし、得られた部分空間のハミルトニアンから変分エネルギーを求めます。
+:::
+
+:::{card}
+:header: **量子特異値変換（QSVT）**
+:link: qsvt
+非エルミート行列をブロックエンコーディングし、2次の特異値多項式を適用して、射影後の行列と論理リソースを検証します。
 :::
 
 :::{card}
 :header: **量子誤り訂正入門**
 :link: quantum_error_correction
-3量子ビットbit-flip/phase-flip符号からShor 9量子ビット符号、スタビライザー形式までを扱います。
+論理状態を符号化し、単一のビット反転を検出して、論理振幅を保ちながら訂正します。
 :::
 
 :::{card}
 :header: **量子位相推定（QPE）**
 :link: qpe
-量子位相推定をQamomileで実装する例です。4x4ユニタリ行列に対して、スクラッチ実装と組み込みの`qpe`ヘルパーを使う2種類の方法を紹介します。さらに、カウント用量子ビット数を大きくしたときの精度や必要なゲート数を比較します。
+個々の操作と`qamomile.stdlib`の`phase_estimation`の両方で量子位相推定を実装し、推定精度と論理ゲート数を比較します。
 :::
 
 :::{card}
 :header: **量子カーネル分類**
 :link: quantum_kernel_classification
-量子特徴マップとカーネル法を使ってmake_circlesデータセットの分類を行います。
+量子状態の重なりからカーネル行列を推定し、サポートベクトル分類器に使います。
 :::
 
 :::{card}
-:header: **QSVT Filteringによるグラフ分割問題の求解**
-:link: qsvt_eigenstate_filter_graph_partitioning
-コストハミルトニアンをブロックエンコーディングしてsign関数のQSVT近似でフィルタし、post-selectionの割合を使ったLin & Tongの二分探索で基底エネルギーを求めます。
-:::
-
-:::{card}
-:header: **スタビライザ形式論と Steane 符号**
+:header: **スタビライザとSteane符号**
 :link: steane_code
-Hamming [7,4,3]符号からのCSS構成、6スタビライザー、横断的Hadamardを扱います。
+Steane符号を構成し、シンドロームからPauli誤りを訂正します。
 :::
 
 :::{card}
-:header: **水素分子のための変分量子固有値ソルバー（VQE）**
+:header: **水素分子のVQE**
 :link: vqe_for_hydrogen
-OpenFermionで分子ハミルトニアンを構築し、VQEで基底状態エネルギーを求めます。
+分子ハミルトニアンを構成し、2量子ビットの試行状態を最適化して基底状態エネルギーを推定します。
 :::
 
 ::::

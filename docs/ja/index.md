@@ -9,7 +9,7 @@ Qamomileは現在も活発に開発中であり、リリース間で破壊的変
 
 ## Qamomileとは？
 
-Qamomileは、Pythonで書ける量子プログラミング言語です。Pythonに埋め込まれたドメイン固有言語（embedded domain-specific language、eDSL）として、同じソースコードでリソース推定と、対応する量子SDKでの実行を扱えます。
+Qamomileは、Pythonのソースコードからコンパイルする、型安全な関数型量子プログラミング言語です。Pythonに埋め込まれたドメイン固有言語（embedded domain-specific language、eDSL）として、同じソースコードでリソース推定と、対応する量子SDKでの実行を扱えます。
 
 ## 開発の動機
 
@@ -43,7 +43,7 @@ Qamomileは、Pythonで書ける量子プログラミング言語です。Python
 :::{card}
 :header: 型による安全性
 
-affine type system（アフィン型システム）により、各量子リソースを表す値の使用を高々1回に制限します。同じ値の不正な再利用を実行前に検出します。
+線形型システム（各量子状態の値をちょうど1回使う規則）により、同じ値の不正な再利用や未使用の量子状態を実行前に検出します。
 :::
 
 :::{card}
@@ -61,7 +61,7 @@ affine type system（アフィン型システム）により、各量子リソ�
 :::{card}
 :header: 量子プログラムの移植性
 
-トランスパイラ（プログラムの変換器）がQiskit、CUDA-Q、HUGRなどの対応形式に変換します。変換したプログラムは、対応するエグゼキュータ（実行を担う仕組み）を通じてQamomileから実行できます。
+`qm.compile`がQiskit、CUDA-Q、HUGRなどの対応形式に変換します。`qm.run`を使うと、元のプログラムや変換済みプログラムを、対応する実行先で実行できます。
 :::
 
 :::{card}
@@ -82,46 +82,31 @@ affine type system（アフィン型システム）により、各量子リソ�
 
 ## クイックスタート
 
-Qamomileはpipからインストールすることができます。
+Qamomileはpipからインストールできます。ディストリビューション名は`qamomile`で、新しい言語モジュールは`qamomile`です。
 
 ```bash
-pip install "qamomile[qiskit,visualization]"
+pip install qamomile
 ```
 
-以下は、Qamomileによる量子アルゴリズムの実行例です。詳細は、[はじめての量子カーネル](tutorial/01_your_first_quantum_kernel.ipynb)を参照してください。
+以下では、同じBellプログラムをEstimateして実行します。詳細は[はじめてのQamomile関数](tutorial/01_your_first_quantum_kernel.ipynb)を参照してください。
 
 ```python
-import math
-
-import qamomile.circuit as qmc
-from qamomile.qiskit import QiskitTranspiler
+import qamomile as qm
 
 
-@qmc.qkernel
-def biased_coin(theta: qmc.Float) -> qmc.Bit:
-    q = qmc.qubit(name="q")
-    q = qmc.ry(q, theta)
-    return qmc.measure(q)
+@qm.qkernel
+def bell() -> qm.Bits[2]:
+    state = qm.qubits(2)
+    state = qm.h(state, target=0)
+    state = qm.cx(state, control=0, target=1)
+    return qm.measure(state)
 
 
-# 実行前に量子カーネルを可視化し、リソースを見積もる
-biased_coin.draw(theta=0.6)
-est = biased_coin.estimate_resources()
-print("qubits:", est.qubits)
-print("total gates:", est.gates.total)
+study = qm.resources.logical(bell)
+print(study.metric(qm.resources.LOGICAL_GATES))
 
-# thetaを実行時に指定できるパラメータとして残してトランスパイル
-transpiler = QiskitTranspiler()
-exe = transpiler.transpile(biased_coin, parameters=["theta"])
-
-# thetaの値を指定して実行
-result = exe.sample(
-    transpiler.executor(),
-    shots=256,
-    bindings={"theta": math.pi / 4},
-).result()
-
-print(result.results)
+record = qm.run(bell, on=qm.Reference(), shots=16, seed=7)
+print(record.result.counts)
 ```
 
 ---
@@ -133,13 +118,13 @@ print(result.results)
 :::{card}
 :header: **インストール**
 :link: installation_guide.md
-Qamomile本体に加えて、CUDA-Q、QURI Parts、qBraidなどの量子SDK連携を必要に応じてインストールします。
+Qamomileをインストールし、Qiskit、Cirq、QURI Parts、CUDA-Q、Braket、HUGRは必要な場合だけ追加します。
 :::
 
 :::{card}
 :header: **チュートリアル**
 :link: tutorial/index.md
-量子カーネル、パラメータ、実行、トランスパイルなど、Qamomileの基本的な使い方を順に学べます。
+型付き関数、関数型の量子値、パラメータ、リソース、実行、target向けトランスパイルを順に学べます。
 :::
 
 ::::
@@ -165,7 +150,7 @@ QAOAやVQEなどの量子アルゴリズムを、Qamomileで実装して実行�
 :::{card}
 :header: **インテグレーション**
 :link: integration/index.md
-qBraidなどの量子プラットフォームや外部ライブラリと、Qamomileを組み合わせて使う方法を紹介します。
+Qiskit、Cirq、QURI Parts、CUDA-Q、Amazon Braket、HUGR向けのガイドは同じQamomileライフサイクルを利用します。
 :::
 
 ::::
@@ -185,7 +170,7 @@ qBraidなどの量子プラットフォームや外部ライブラリと、Qamom
 :::{card}
 :header: **APIリファレンス**
 :link: api/index.md
-Qamomileが提供するAPIの使い方、引数、戻り値を確認できます。
+公開`qamomile`パッケージのAPIリファレンスです。
 :::
 
 ::::

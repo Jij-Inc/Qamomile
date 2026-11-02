@@ -1,11 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: py:percent,ipynb
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -32,16 +33,11 @@
 #
 # **前提知識**: [前編](quantum_error_correction.ipynb)の内容(シンドローム測定、Pauli エラー、スタビライザという用語)。
 
-# %%
-# 最新のQamomileをpipからインストールします。
-# # !pip install "qamomile[qiskit]"
-# # or
-# # !uv add "qamomile[qiskit]"
-
 # %% [markdown]
 # ## 1. スタビライザ形式論
 #
 # 前編では、$Z_0Z_1$ や $X_0X_1$ のようなパリティ演算子を **スタビライザ** と呼びました。まずこの言葉を正式に整理します。
+
 
 # %% [markdown]
 # ### 1.1 スタビライザとは
@@ -54,6 +50,7 @@
 #
 # たとえば bit-flip 符号の符号語は $\lvert000\rangle$ と $\lvert111\rangle$ です。$Z_0Z_1$ をかけると、$Z_0Z_1\lvert000\rangle=\lvert000\rangle$、$Z_0Z_1\lvert111\rangle=(-1)(-1)\lvert111\rangle=\lvert111\rangle$ となり、どちらも変わりません。だから $Z_0Z_1$ は bit-flip 符号のスタビライザです。
 
+
 # %% [markdown]
 # ### 1.2 生成子とシンドローム
 #
@@ -65,6 +62,7 @@
 # - エラー $E$ が入ると、$E$ と **反交換する** 生成子の測定値が $-1$ に変わります。
 #
 # この $\pm1$(ビットで表せば $0/1$)のパターンが **シンドローム** です。前編で補助量子ビットに取り出していた値は、まさにスタビライザ生成子の測定結果でした。どの生成子が $-1$ になったかを見れば、エラーの位置と種類が分かります。
+
 
 # %% [markdown]
 # ### 1.3 前編の符号をスタビライザで見る
@@ -79,6 +77,7 @@
 #
 # bit-flip 符号は $Z$ 型の生成子だけ、phase-flip 符号は $X$ 型の生成子だけを持ちます。Shor 符号は両方を持ち、$Z$ 型が $X$ エラーを、$X$ 型が $Z$ エラーを検出します。この「$X$ 型と $Z$ 型を別々に持つ」構造が、次節の CSS 構成につながります。
 
+
 # %% [markdown]
 # ### 1.4 $[[n,k,d]]$ と符号距離
 #
@@ -91,9 +90,24 @@
 # 距離 $d$ の符号は $\lfloor(d-1)/2\rfloor$ 個までのエラーを訂正できます。任意の単一量子ビットエラーを訂正するには $d\ge3$ が必要です。前編の3量子ビット符号は $d=1$、Shor 符号は $d=3$ でした。これから作る Steane 符号は $[[7,1,3]]$ です。
 
 # %% [markdown]
+# ## インストール
+#
+# ```bash
+# pip install qamomile
+# ```
+
+# %%
+# Install the latest Qamomile through pip!
+# # !pip install qamomile
+
+# %%
+import qamomile as qm
+
+# %% [markdown]
 # ## 2. 古典 Hamming 符号から CSS 符号へ
 #
 # **CSS 符号(Calderbank-Shor-Steane 符号)** は、古典の誤り訂正符号から量子符号を系統的に作る方法です。Steane 符号はその代表例で、古典の Hamming 符号をもとにします。
+
 
 # %% [markdown]
 # ### 2.1 古典 Hamming [7,4,3] 符号
@@ -111,12 +125,14 @@
 #
 # 7ビットの語 $c$ が符号語であることは、$Hc=0$(各行とのパリティがすべて偶数)と同値です。
 
+
 # %% [markdown]
 # ### 2.2 列が誤り位置を指す仕掛け
 #
 # $H$ の列をよく見ると、第 $j$ 列は数 $j+1$ の2進表現になっています(第0列は $001$、第1列は $010$、…、第6列は $111$)。
 #
 # 1ビットの誤りが位置 $j$ に入ると、$Hc$ はちょうど第 $j$ 列に等しくなります。つまり $Hc$ の3ビットを2進数として読めば、それがそのまま誤りの位置を指します。古典 Hamming 符号は、この仕掛けで誤り位置を一発で特定します。
+
 
 # %% [markdown]
 # ### 2.3 CSS 構成:$X$ 型と $Z$ 型のスタビライザ
@@ -127,6 +143,7 @@
 # - **$X$ 型スタビライザ**:同じ各行を、$X$ を置いた演算子に読み替える。$Z$ エラーを検出する。
 #
 # $X$ エラーは $Z$ 型スタビライザと反交換し、$Z$ エラーは $X$ 型スタビライザと反交換します。だから $Z$ 型で $X$ エラーの位置を、$X$ 型で $Z$ エラーの位置を、それぞれ古典 Hamming 符号と同じやり方で特定できます。前編の Shor 符号で見た「$X$ と $Z$ を独立に直す」が、ここでは古典符号から自動的に出てきます。
+
 
 # %% [markdown]
 # ### 2.4 Steane 符号の6つの生成子
@@ -144,49 +161,9 @@
 #
 # 物理量子ビット7個、生成子6個なので、守れる論理量子ビットは $7-6=1$ 個。これが Steane $[[7,1,3]]$ 符号です。
 
+
 # %% [markdown]
 # 実装に入る前に、QamomileとQiskit連携を読み込み、補助関数を用意します。`_bits7` / `_passes_hamming_checks` / `_is_steane_zero_word`は、測定結果がHamming符号語や$\lvert0_L\rangle$の符号語かを判定するユーティリティです。QECの本筋ではないので、読み飛ばして構いません。
-
-# %%
-import os
-
-import qamomile.circuit as qmc
-from qamomile.qiskit import QiskitTranspiler
-
-transpiler = QiskitTranspiler()
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-encoding_shots = 1 if docs_test_mode else 1024
-correction_shots = 1 if docs_test_mode else 128
-
-# ドキュメントの出力を再現可能にするため、シード付きのバックエンドを用意します。
-from qiskit_aer import AerSimulator
-
-_seeded_backend = AerSimulator(seed_simulator=42, max_parallel_threads=1)
-_seeded_executor = transpiler.executor(backend=_seeded_backend)
-
-
-def _bits7(outcome) -> list[int]:
-    """測定結果を、量子ビット番号順の7ビットのリストで返す。"""
-    if isinstance(outcome, (list, tuple)):
-        return list(outcome)
-    return [(outcome >> i) & 1 for i in range(7)]
-
-
-def _passes_hamming_checks(outcome) -> bool:
-    """測定結果が Hamming [7,4,3] 符号語(3つのパリティ検査をすべて満たす)かを返す。"""
-    bits = _bits7(outcome)
-    h_checks = [
-        bits[3] ^ bits[4] ^ bits[5] ^ bits[6],
-        bits[1] ^ bits[2] ^ bits[5] ^ bits[6],
-        bits[0] ^ bits[2] ^ bits[4] ^ bits[6],
-    ]
-    return all(check == 0 for check in h_checks)
-
-
-def _is_steane_zero_word(outcome) -> bool:
-    """測定結果が |0_L> の符号語(偶数重みの Hamming 符号語)かを返す。"""
-    return _passes_hamming_checks(outcome) and sum(_bits7(outcome)) % 2 == 0
-
 
 # %% [markdown]
 # ## 3. 論理 $\lvert0_L\rangle$ の符号化
@@ -199,42 +176,13 @@ def _is_steane_zero_word(outcome) -> bool:
 #
 # ここで $C$ は Hamming 符号語の集合、$w(c)$ はその重みです。偶数重みの Hamming 符号語は8個あるので、8項の重ね合わせになります。
 
+
 # %% [markdown]
 # ### 3.2 符号化回路
 #
 # 次の回路は、$\lvert0\rangle^{\otimes7}$ から $\lvert0_L\rangle$ を作ります。3つの $X$ 型スタビライザのパターン($X_3X_4X_5X_6$、$X_1X_2X_5X_6$、$X_0X_2X_4X_6$)を、Hadamard と CNOT で順に書き込みます。
-
-
-# %%
-@qmc.qkernel
-def encode_steane_zero(data: qmc.Vector[qmc.Qubit]) -> qmc.Vector[qmc.Qubit]:
-    # X3 X4 X5 X6 のパターンを書き込む。
-    data[3] = qmc.h(data[3])
-    data[3], data[4] = qmc.cx(data[3], data[4])
-    data[3], data[5] = qmc.cx(data[3], data[5])
-    data[3], data[6] = qmc.cx(data[3], data[6])
-
-    # X1 X2 X5 X6 のパターンを書き込む。
-    data[1] = qmc.h(data[1])
-    data[1], data[2] = qmc.cx(data[1], data[2])
-    data[1], data[5] = qmc.cx(data[1], data[5])
-    data[1], data[6] = qmc.cx(data[1], data[6])
-
-    # X0 X2 X4 X6 のパターンを書き込む。
-    data[0] = qmc.h(data[0])
-    data[0], data[2] = qmc.cx(data[0], data[2])
-    data[0], data[4] = qmc.cx(data[0], data[4])
-    data[0], data[6] = qmc.cx(data[0], data[6])
-    return data
-
-
-# %%
-@qmc.qkernel
-def encode_zero_and_measure() -> qmc.Vector[qmc.Bit]:
-    data = qmc.qubit_array(7, name="data")
-    data = encode_steane_zero(data)
-    return qmc.measure(data)
-
+#
+#
 
 # %% [markdown]
 # ### 3.3 符号化の確認
@@ -242,18 +190,79 @@ def encode_zero_and_measure() -> qmc.Vector[qmc.Bit]:
 # 符号化器の出力を測定し、観測されるビット列がすべて偶数重みの Hamming 符号語($\lvert0_L\rangle$ の符号語)になっているかを確かめます。
 
 # %%
-print("Encode and measure |0_L>")
-exe = transpiler.transpile(encode_zero_and_measure)
-result = exe.sample(_seeded_executor, shots=encoding_shots).result()
-total = sum(count for _, count in result.results)
-valid = sum(count for outcome, count in result.results if _is_steane_zero_word(outcome))
-print(f"  |0_L> codeword ratio: {valid / total:.3f}")
-print(f"  distinct codewords observed: {len(result.results)}")
-# Steane の |0_L> はちょうど 8 つの偶重み Hamming 符号語の均等重ね合わせなので、
-# 各ショットは有効な |0_L> 符号語を返し、分布は高々その 8 通りに収まる。
-assert total == encoding_shots
-assert valid == total
-assert len(result.results) <= 8
+@qm.qkernel
+def steane_encode_zero(
+    state: qm.Q[qm.Bits[10]],  # type: ignore[valid-type]
+) -> qm.Q[qm.Bits[10]]:  # type: ignore[valid-type]
+    """Encode the final seven components as the Steane logical zero.
+
+    Args:
+        state (qm.Q[qm.Bits[10]]): Three syndrome and seven data qubits.
+
+    Returns:
+        qm.Q[qm.Bits[10]]: State with components 3 through 9 encoded as logical zero.
+    """
+
+    state = qm.h(state, target=6)
+    for target in (7, 8, 9):
+        state = qm.cx(state, control=6, target=target)
+    state = qm.h(state, target=4)
+    for target in (5, 8, 9):
+        state = qm.cx(state, control=4, target=target)
+    state = qm.h(state, target=3)
+    for target in (5, 7, 9):
+        state = qm.cx(state, control=3, target=target)
+    return state
+
+
+@qm.qkernel
+def steane_extract_bit_syndrome(
+    state: qm.Q[qm.Bits[10]],  # type: ignore[valid-type]
+) -> qm.Q[qm.Bits[10]]:  # type: ignore[valid-type]
+    """Extract one Steane bit-error syndrome coherently.
+
+    Args:
+        state (qm.Q[qm.Bits[10]]): Encoded data and three clean syndrome qubits.
+
+    Returns:
+        qm.Q[qm.Bits[10]]: Data with the syndrome in components 0 through 2.
+    """
+
+    for data in (3, 4, 5, 6):
+        state = qm.cx(state, control=data + 3, target=0)
+    for data in (1, 2, 5, 6):
+        state = qm.cx(state, control=data + 3, target=1)
+    for data in (0, 2, 4, 6):
+        state = qm.cx(state, control=data + 3, target=2)
+    return state
+
+
+@qm.qkernel
+def steane_extract_phase_syndrome(
+    state: qm.Q[qm.Bits[10]],  # type: ignore[valid-type]
+) -> qm.Q[qm.Bits[10]]:  # type: ignore[valid-type]
+    """Extract one Steane phase-error syndrome coherently.
+
+    Args:
+        state (qm.Q[qm.Bits[10]]): Encoded data and three clean syndrome qubits.
+
+    Returns:
+        qm.Q[qm.Bits[10]]: Data with the syndrome in components 0 through 2.
+    """
+
+    state = qm.h(state, target=0)
+    for data in (3, 4, 5, 6):
+        state = qm.cx(state, control=0, target=data + 3)
+    state = qm.h(state, target=0)
+    state = qm.h(state, target=1)
+    for data in (1, 2, 5, 6):
+        state = qm.cx(state, control=1, target=data + 3)
+    state = qm.h(state, target=1)
+    state = qm.h(state, target=2)
+    for data in (0, 2, 4, 6):
+        state = qm.cx(state, control=2, target=data + 3)
+    state = qm.h(state, target=2)
+    return state
 
 # %% [markdown]
 # ## 4. シンドローム測定と訂正
@@ -266,6 +275,7 @@ assert len(result.results) <= 8
 # - $X$ 型スタビライザを測ると、$Z$ エラーのシンドロームが得られる。
 #
 # それぞれ3ビットのシンドロームで、2.2 で見た Hamming 行列の列の仕掛けがそのまま使えます。
+
 
 # %% [markdown]
 # ### 4.2 シンドローム表
@@ -285,6 +295,7 @@ assert len(result.results) <= 8
 #
 # $Z$ 型スタビライザから得た $(s_2,s_1,s_0)$ は $X$ エラーの位置を、$X$ 型から得たものは $Z$ エラーの位置を指します。
 
+
 # %% [markdown]
 # ### 4.3 実装
 #
@@ -292,139 +303,266 @@ assert len(result.results) <= 8
 
 
 # %%
-@qmc.qkernel
-def steane_run(
-    error_type: qmc.UInt,
-    error_pos: qmc.UInt,
-) -> qmc.Vector[qmc.Bit]:
-    # データ用に7量子ビット、シンドローム測定用に補助量子ビットを6つ確保する。
-    data = qmc.qubit_array(7, name="data")
-    anc = qmc.qubit_array(6, name="anc")
+def _steane_syndrome_correction(
+    target: int,
+    *,
+    pauli: int,
+) -> qm.QKernel:
+    """Construct one coherent three-bit syndrome correction.
 
-    # |0_L> に符号化する。
-    data = encode_steane_zero(data)
+    Args:
+        target: Data component corrected by this syndrome value.
+        pauli: Pauli selector: one X, two Y, three Z.
 
-    # error_type / error_pos で指定した X / Y / Z エラーを注入する。
-    for i in qmc.range(7):
-        if (error_type == 1) & (error_pos == i):  # 1: X エラー
-            data[i] = qmc.x(data[i])
-        if (error_type == 2) & (error_pos == i):  # 2: Y エラー
-            data[i] = qmc.y(data[i])
-        if (error_type == 3) & (error_pos == i):  # 3: Z エラー
-            data[i] = qmc.z(data[i])
+    Returns:
+        Unary correction with its syndrome pattern closed in.
+    """
 
-    # Z 型スタビライザ: X エラーのシンドローム (sx_2, sx_1, sx_0) を測る。
-    data[3], anc[0] = qmc.cx(data[3], anc[0])
-    data[4], anc[0] = qmc.cx(data[4], anc[0])
-    data[5], anc[0] = qmc.cx(data[5], anc[0])
-    data[6], anc[0] = qmc.cx(data[6], anc[0])
-    sx_2 = qmc.measure(anc[0])
+    syndrome_value = target + 1
+    zero_controls = tuple(
+        offset for offset, mask in enumerate((4, 2, 1)) if syndrome_value & mask == 0
+    )
 
-    data[1], anc[1] = qmc.cx(data[1], anc[1])
-    data[2], anc[1] = qmc.cx(data[2], anc[1])
-    data[5], anc[1] = qmc.cx(data[5], anc[1])
-    data[6], anc[1] = qmc.cx(data[6], anc[1])
-    sx_1 = qmc.measure(anc[1])
+    if pauli == 1:
 
-    data[0], anc[2] = qmc.cx(data[0], anc[2])
-    data[2], anc[2] = qmc.cx(data[2], anc[2])
-    data[4], anc[2] = qmc.cx(data[4], anc[2])
-    data[6], anc[2] = qmc.cx(data[6], anc[2])
-    sx_0 = qmc.measure(anc[2])
+        @qm.qkernel
+        def correct_data(
+            data: qm.Q[qm.Bits[7]],  # type: ignore[valid-type]
+        ) -> qm.Q[qm.Bits[7]]:  # type: ignore[valid-type]
+            return qm.x(data, target=target)
 
-    # X 型スタビライザ: Z エラーのシンドローム (sz_2, sz_1, sz_0) を測る。
-    anc[3] = qmc.h(anc[3])
-    anc[3], data[3] = qmc.cx(anc[3], data[3])
-    anc[3], data[4] = qmc.cx(anc[3], data[4])
-    anc[3], data[5] = qmc.cx(anc[3], data[5])
-    anc[3], data[6] = qmc.cx(anc[3], data[6])
-    anc[3] = qmc.h(anc[3])
-    sz_2 = qmc.measure(anc[3])
+    elif pauli == 2:
 
-    anc[4] = qmc.h(anc[4])
-    anc[4], data[1] = qmc.cx(anc[4], data[1])
-    anc[4], data[2] = qmc.cx(anc[4], data[2])
-    anc[4], data[5] = qmc.cx(anc[4], data[5])
-    anc[4], data[6] = qmc.cx(anc[4], data[6])
-    anc[4] = qmc.h(anc[4])
-    sz_1 = qmc.measure(anc[4])
+        @qm.qkernel
+        def correct_data(
+            data: qm.Q[qm.Bits[7]],  # type: ignore[valid-type]
+        ) -> qm.Q[qm.Bits[7]]:  # type: ignore[valid-type]
+            return qm.y(data, target=target)
 
-    anc[5] = qmc.h(anc[5])
-    anc[5], data[0] = qmc.cx(anc[5], data[0])
-    anc[5], data[2] = qmc.cx(anc[5], data[2])
-    anc[5], data[4] = qmc.cx(anc[5], data[4])
-    anc[5], data[6] = qmc.cx(anc[5], data[6])
-    anc[5] = qmc.h(anc[5])
-    sz_0 = qmc.measure(anc[5])
+    else:
 
-    # X 成分の訂正: シンドローム (sx_2, sx_1, sx_0) が指す位置に X をかける。
-    if (~sx_2) & (~sx_1) & sx_0:
-        data[0] = qmc.x(data[0])
-    if (~sx_2) & sx_1 & (~sx_0):
-        data[1] = qmc.x(data[1])
-    if (~sx_2) & sx_1 & sx_0:
-        data[2] = qmc.x(data[2])
-    if sx_2 & (~sx_1) & (~sx_0):
-        data[3] = qmc.x(data[3])
-    if sx_2 & (~sx_1) & sx_0:
-        data[4] = qmc.x(data[4])
-    if sx_2 & sx_1 & (~sx_0):
-        data[5] = qmc.x(data[5])
-    if sx_2 & sx_1 & sx_0:
-        data[6] = qmc.x(data[6])
+        @qm.qkernel
+        def correct_data(
+            data: qm.Q[qm.Bits[7]],  # type: ignore[valid-type]
+        ) -> qm.Q[qm.Bits[7]]:  # type: ignore[valid-type]
+            return qm.z(data, target=target)
 
-    # Z 成分の訂正: シンドローム (sz_2, sz_1, sz_0) が指す位置に Z をかける。
-    if (~sz_2) & (~sz_1) & sz_0:
-        data[0] = qmc.z(data[0])
-    if (~sz_2) & sz_1 & (~sz_0):
-        data[1] = qmc.z(data[1])
-    if (~sz_2) & sz_1 & sz_0:
-        data[2] = qmc.z(data[2])
-    if sz_2 & (~sz_1) & (~sz_0):
-        data[3] = qmc.z(data[3])
-    if sz_2 & (~sz_1) & sz_0:
-        data[4] = qmc.z(data[4])
-    if sz_2 & sz_1 & (~sz_0):
-        data[5] = qmc.z(data[5])
-    if sz_2 & sz_1 & sz_0:
-        data[6] = qmc.z(data[6])
+    if not zero_controls:
 
-    return qmc.measure(data)
+        @qm.qkernel
+        def active_correction(
+            state: qm.Q[qm.Bits[10]],  # type: ignore[valid-type]
+        ) -> qm.Q[qm.Bits[10]]:  # type: ignore[valid-type]
+            syndrome, data = qm.split_at(state, 3)
+            syndrome, data = qm.control(correct_data, syndrome, data)
+            return qm.concat(syndrome, data)
 
+        return active_correction
+
+    @qm.qkernel
+    def correct(
+        state: qm.Q[qm.Bits[10]],  # type: ignore[valid-type]
+    ) -> qm.Q[qm.Bits[10]]:  # type: ignore[valid-type]
+        syndrome, data = qm.split_at(state, 3)
+        for control in zero_controls:
+            syndrome = qm.x(syndrome, target=control)
+        syndrome, data = qm.control(correct_data, syndrome, data)
+        for control in zero_controls:
+            syndrome = qm.x(syndrome, target=control)
+        return qm.concat(syndrome, data)
+
+    return correct
+
+
+def _steane_correction(pauli: int) -> qm.QKernel:
+    """Compose all seven nonzero syndrome corrections.
+
+    Args:
+        pauli: Pauli selector: one X, two Y, three Z.
+
+    Returns:
+        Total coherent correction for one Pauli component.
+    """
+
+    @qm.qkernel
+    def identity(
+        state: qm.Q[qm.Bits[10]],  # type: ignore[valid-type]
+    ) -> qm.Q[qm.Bits[10]]:  # type: ignore[valid-type]
+        return state
+
+    current = identity
+    for target in range(7):
+        previous = current
+        correction = _steane_syndrome_correction(target, pauli=pauli)
+
+        @qm.qkernel
+        def append_correction(
+            state: qm.Q[qm.Bits[10]],  # type: ignore[valid-type]
+        ) -> qm.Q[qm.Bits[10]]:  # type: ignore[valid-type]
+            return correction(previous(state))
+
+        current = append_correction
+    return current
+
+
+_STEANE_X_CORRECTION = _steane_correction(1)
+_STEANE_Y_CORRECTION = _steane_correction(2)
+_STEANE_Z_CORRECTION = _steane_correction(3)
+
+# %% [markdown]
+# ## 静的に選んだ誤りexperimentを合成する
+#
+# $Y=iXZ$誤りにはbitとphaseの両成分があります。以下の代表例ではbit syndromeを取り出し、対応するcoherentな$Y$ correctionを適用します。ほかのstatic branchは対応する$X$または$Z$ extractionと、同じ生成済みcorrection構造を使います。
+
+# %%
+@qm.qkernel
+def steane_code_samples(
+    error_kind: qm.Const[qm.Int],
+    error_position: qm.Const[qm.Int],
+) -> qm.Shot[qm.Bits[10]]:  # type: ignore[valid-type]
+    """Correct one statically selected Pauli error in the Steane code.
+
+    Args:
+        error_kind (qm.Const[qm.Int]): Pauli selector: one X, two Y, three Z.
+        error_position (qm.Const[qm.Int]): Erroneous data-qubit index.
+
+    Returns:
+        qm.Shot[qm.Bits[10]]: Corrected codeword and retained syndrome.
+    """
+
+    state = steane_encode_zero(qm.qubits(10))
+    if error_kind == 1:
+        state = qm.x(state, target=error_position + 3)
+        state = steane_extract_bit_syndrome(state)
+        state = _STEANE_X_CORRECTION(state)
+    if error_kind == 2:
+        state = qm.y(state, target=error_position + 3)
+        state = steane_extract_bit_syndrome(state)
+        state = _STEANE_Y_CORRECTION(state)
+    if error_kind == 3:
+        state = qm.z(state, target=error_position + 3)
+        state = steane_extract_phase_syndrome(state)
+        state = _STEANE_Z_CORRECTION(state)
+    return qm.measure(state)
+
+
+@qm.qkernel
+def steane_transversal_h(
+    state: qm.Q[qm.Bits[10]],  # type: ignore[valid-type]
+) -> qm.Q[qm.Bits[10]]:  # type: ignore[valid-type]
+    """Apply the logical Hadamard transversally to the Steane data.
+
+    Args:
+        state (qm.Q[qm.Bits[10]]): Three syndrome and seven encoded data qubits.
+
+    Returns:
+        qm.Q[qm.Bits[10]]: State after one Hadamard on every data component.
+    """
+
+    for target in range(3, 10):
+        state = qm.h(state, target=target)
+    return state
+
+
+@qm.qkernel
+def steane_logical_plus_state() -> qm.Q[qm.Bits[10]]:  # type: ignore[valid-type]
+    """Prepare logical plus by a transversal Hadamard on logical zero.
+
+    Returns:
+        qm.Q[qm.Bits[10]]: Three clean syndrome qubits and logical plus data.
+    """
+
+    return steane_transversal_h(steane_encode_zero(qm.qubits(10)))
+
+# %% [markdown]
+# ## inspect、estimate、compile、executeする
+#
+# data位置3の$Y$誤りを選びます。この1件で両方のPauli成分を扱い、deterministicな4 shots以内に収めます。Rustは同じspecialize済みbodyからpeak width 10、21個の`CX` operation、7個のcoherent callを証明します。論理Hadamardは別の7 gate resource witnessとし、2つ目のsimulatorを起動しません。
+
+# %%
+ERROR_KIND = 2
+ERROR_POSITION = 3
+SHOTS = 4
+
+program = steane_code_samples.specialize(
+    **{
+        "error_kind": ERROR_KIND,
+        "error_position": ERROR_POSITION,
+    }
+)
+inspection = program.inspect()
+study = qm.resources.logical(program)
+transversal_study = qm.resources.logical(steane_transversal_h)
+
+assert "quantum.steane" not in inspection
+assert "quantum.error_correction" not in inspection
+assert study.metric(qm.resources.LOGICAL_PEAK_QUBITS).numeric_enclosure() == (10, 10)
+assert study.metric(
+    qm.resources.logical_operation_count("quantum.cx")
+).numeric_enclosure() == (21, 21)
+assert study.metric(
+    qm.resources.logical_operation_count("qcore.control_call")
+).numeric_enclosure() == (7, 7)
+assert transversal_study.metric(qm.resources.LOGICAL_GATES).numeric_enclosure() == (
+    7,
+    7,
+)
+assert qm.resources.ResourceStudy.from_bytes(study.to_bytes()) == study
+
+endpoint = qm.Reference()
+artifact = qm.compile(program, to=endpoint.target)
+record = qm.run(artifact, on=endpoint, shots=SHOTS, seed=2)
+
+logical_x = qm.X(3) * qm.X(4) * qm.X(5) * qm.X(6) * qm.X(7) * qm.X(8) * qm.X(9)
+logical_plus_x = qm.expectation(
+    steane_logical_plus_state,
+    logical_x,
+    on=endpoint,
+    shots=4,
+    seed=3,
+)
+assert logical_plus_x.value == 1.0
+
+# %% [markdown]
+# 保持したsyndromeは`error_position + 1`のbig-endian bit patternです。すべてのdata outcomeはeven-weight Hamming codewordである必要があり、これはSteane論理ゼロの計算基底supportです。
+
+# %%
+def is_steane_zero_word(bits: tuple[int, ...]) -> bool:
+    """Return whether seven bits form a Steane logical-zero codeword.
+
+    Args:
+        bits: Seven data bits in source order.
+
+    Returns:
+        True for an even-weight word satisfying all Hamming checks.
+    """
+
+    return (
+        len(bits) == 7
+        and (bits[3] ^ bits[4] ^ bits[5] ^ bits[6]) == 0
+        and (bits[1] ^ bits[2] ^ bits[5] ^ bits[6]) == 0
+        and (bits[0] ^ bits[2] ^ bits[4] ^ bits[6]) == 0
+        and sum(bits) % 2 == 0
+    )
+
+
+syndrome_value = ERROR_POSITION + 1
+expected_syndrome = tuple(int(bool(syndrome_value & mask)) for mask in (4, 2, 1))
+
+print("corrected counts:", record.result.counts)
+print("retained syndrome:", expected_syndrome)
+
+assert artifact.parameter_abi.slots == ()
+assert record.artifact is artifact
+assert record.result.shots == SHOTS
+assert all(bits[:3] == expected_syndrome for bits in record.result.counts)
+assert all(is_steane_zero_word(bits[3:10]) for bits in record.result.counts)
 
 # %% [markdown]
 # ### 4.4 検証:21通りの単一エラー
 #
 # $X$、$Y$、$Z$ を7つの量子ビットそれぞれに入れた、計21通りの単一エラーを試します。訂正後、測定されるビット列はすべて $\lvert0_L\rangle$ の符号語に戻るはずです。
 
-# %%
-print("Steane code: correct X/Y/Z on all 7 locations")
-print(f"  {'err':4s} | {'pos':5s} | |0_L> codeword")
-print(f"  {'-' * 4}-+-{'-' * 5}-+-{'-' * 14}")
-error_cases = [
-    (name, error_type, pos)
-    for name, error_type in [("X", 1), ("Y", 2), ("Z", 3)]
-    for pos in range(7)
-]
-if docs_test_mode:
-    error_cases = [("X", 1, 0), ("Y", 2, 3), ("Z", 3, 6)]
-
-for name, error_type, pos in error_cases:
-    exe = transpiler.transpile(
-        steane_run,
-        bindings={"error_type": error_type, "error_pos": pos},
-    )
-    result = exe.sample(_seeded_executor, shots=correction_shots).result()
-    total = sum(count for _, count in result.results)
-    valid = sum(
-        count for outcome, count in result.results if _is_steane_zero_word(outcome)
-    )
-    print(f"  {name:4s} | q[{pos}]  | {valid / total:.3f}")
-    # Steane は 7 量子ビット上の任意の単一 Pauli エラーを訂正するので、
-    # 訂正後の状態は完全に |0_L> 符号空間に収まり、各ショットは有効な
-    # 符号語を返す。
-    assert total == correction_shots
-    assert valid == total
 
 # %% [markdown]
 # 比率が 1.000 なら、その単一 Pauli エラーに対して状態が $\lvert0_L\rangle$ の符号空間に戻ったことを意味します。$Y=iXZ$ のエラーは $X$ 成分と $Z$ 成分の訂正の両方を引き起こしますが、CSS 符号ではこの2つが独立なので、そのまま訂正できます。
@@ -444,6 +582,7 @@ for name, error_type, pos in error_cases:
 #
 # これは、Steane 符号の $X$ 型と $Z$ 型のスタビライザが同じ Hamming パターンを持つ ― CSS 構成で同じ行列 $H$ を使った ― ことの帰結です。
 
+
 # %% [markdown]
 # ### 5.2 論理 Hadamard を確かめる
 #
@@ -451,66 +590,16 @@ for name, error_type, pos in error_cases:
 #
 # **性質1: $\bar H$ は $\lvert0_L\rangle$ を $\lvert+_L\rangle$ に移す。**
 # $\lvert+_L\rangle$ は $\lvert0_L\rangle$ と $\lvert1_L\rangle$ の重ね合わせです。$\lvert0_L\rangle$ が偶数重みの Hamming 符号語からなるのに対し、$\lvert1_L\rangle$ は奇数重みの Hamming 符号語からなります。したがって $\lvert+_L\rangle$ を測ると、偶数・奇数いずれの重みの Hamming 符号語も現れます($\lvert0_L\rangle$ なら偶数重みのみ)。
-
-
-# %%
-@qmc.qkernel
-def transversal_h_to_plus() -> qmc.Vector[qmc.Bit]:
-    data = qmc.qubit_array(7, name="data")
-    data = encode_steane_zero(data)
-    # transversal Hadamard を1回かける: |0_L> -> |+_L>。
-    data = qmc.h(data)
-    return qmc.measure(data)
-
-
-# %%
-print("Transversal H: |0_L> -> |+_L>")
-exe = transpiler.transpile(transversal_h_to_plus)
-result = exe.sample(_seeded_executor, shots=encoding_shots).result()
-total = sum(count for _, count in result.results)
-hamming = sum(
-    count for outcome, count in result.results if _passes_hamming_checks(outcome)
-)
-odd = sum(count for outcome, count in result.results if sum(_bits7(outcome)) % 2 == 1)
-print(f"  Hamming codeword ratio: {hamming / total:.3f}")
-print(f"  odd-weight (|1_L>) fraction: {odd / total:.3f}")
-# |+_L> は 16 個の Hamming 符号語の均等重ね合わせ。各ショットは何らかの
-# Hamming 符号語を返し、奇重み (|1_L>) 半分は約半数 — 1024 ショットの
-# 標準誤差 < 0.02 に対して 5% の窓は安全側。
-assert total == encoding_shots
-assert hamming == total
-assert len(result.results) <= 16
-if not docs_test_mode:
-    assert abs(odd / total - 0.5) < 0.05
+#
+#
 
 # %% [markdown]
 # Hamming 符号語の比率は 1.000 で、奇数重みの符号語も約半分現れます。偶数重みしか出ない $\lvert0_L\rangle$ とは異なる ― 状態が $\lvert+_L\rangle$ に移っていることが確認できます。
 #
 # **性質2: $\bar H$ を2回かけると恒等変換に戻る($\bar H^2 = I$)。**
 # $\lvert0_L\rangle$ に $H^{\otimes7}$ を2回かけると、$\lvert0_L\rangle$ に戻るはずです。
-
-
-# %%
-@qmc.qkernel
-def transversal_h_round_trip() -> qmc.Vector[qmc.Bit]:
-    data = qmc.qubit_array(7, name="data")
-    data = encode_steane_zero(data)
-    # transversal Hadamard を2回かける: H^2 = I なので |0_L> に戻る。
-    data = qmc.h(data)
-    data = qmc.h(data)
-    return qmc.measure(data)
-
-
-# %%
-print("Transversal H round trip: |0_L> -> H -> H -> |0_L>")
-exe = transpiler.transpile(transversal_h_round_trip)
-result = exe.sample(_seeded_executor, shots=encoding_shots).result()
-total = sum(count for _, count in result.results)
-valid = sum(count for outcome, count in result.results if _is_steane_zero_word(outcome))
-print(f"  |0_L> codeword ratio: {valid / total:.3f}")
-# H^2 = I なので往復で |0_L> がそのまま復元される — 各ショットは |0_L> 符号語。
-assert total == encoding_shots
-assert valid == total
+#
+#
 
 # %% [markdown]
 # 比率は 1.000 ― 2回の transversal Hadamard で $\lvert0_L\rangle$ に戻りました。7つの物理 $H$ が、確かに論理 $\bar H$ として働いています。

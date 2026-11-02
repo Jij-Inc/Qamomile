@@ -19,314 +19,399 @@
 #
 # # はじめての量子カーネル
 #
-# 本チュートリアルでは、Qamomileを初めて使用するユーザーが量子カーネルを定義し、実行するまでの基本的なワークフローを紹介します。一方で、本チュートリアルでは量子計算の基礎や量子アルゴリズムの詳細には踏み込まないことに注意してください。
+# この章では、Qamomileを初めて使う方に向けて、量子カーネルを定義し、実行するまでの基本的なワークフローを紹介します。量子計算の基礎や量子アルゴリズムの詳細には踏み込みません。
 #
 # ## Qamomileとは？
 #
-# Qamomileは量子プログラミングSDKです。Pythonで量子プログラムを記述し、記述したプログラムはサポートされている量子SDK（Qiskit、QuriParts、その他今後対応予定）で実行できます。**型アノテーション付きのシンボリック**なアプローチを採用しており、`@qkernel`デコレータを付けたPython関数を書くと、Qamomileがそれをトレースし、分析・可視化・量子SDKへの変換可能な中間表現が作成できます。
+# Qamomileは、Pythonに埋め込まれた、ソースコンパイル型の関数型量子プログラミング言語です。
 #
-# 基本的なワークフローは以下のパイプラインです：
+# Python関数に`@qm.qkernel`デコレータを付けて、量子カーネルを定義します。量子カーネルの引数と戻り値には、型アノテーションが必要です。Qamomileは、その型情報に基づいて実行前に型の整合性を検査します。
 #
-# ```
-# @qkernel 定義  →  draw() / estimate_resources()  →  transpile()  →  sample() / run()  →  .result()
-# ```
+# Qamomileはカーネルのソースコードを読み取り、検証して中間表現に変換します。この中間表現は解析や保存ができ、Qiskit、QURI Parts、CUDA-Qなどの対応する量子SDK向けにコンパイルできます。
 #
-# - **定義**：型アノテーション付きの量子カーネル関数を記述
-# - **検査**：`draw()`で回路図を可視化、`estimate_resources()`で量子ビット数やゲート数を推定
-# - **トランスパイル**：量子カーネルをユーザーが指定した量子SDKで実行可能形式にトランスパイル
-# - **実行**：`sample()`（測定ビットの取得）または`run()`（期待値の計算）で実行
-# - **結果の読み取り**：`.result()`で出力を取得
+# また、Qamomileは、値がまだ確定していないパラメータを含む式をシンボリックに扱えます。
 #
-# 毎回すべてのステップが必要なわけではありません — タスクに応じて使い分けてください。
-
-# %%
-# 最新のQamomileをpipからインストールします！
-# # !pip install "qamomile[qiskit,visualization]"
+# この章では、量子カーネルを定義し、実行して結果を取り出すために必要なワークフローを紹介します。
+#
+# - **定義**：型アノテーションと`@qm.qkernel`デコレータを付けたPython関数を書きます。
+# - **実行**：`record = qm.run(...)`で量子カーネルを実行し、実行結果を含む`RunRecord`を受け取ります。
+# - **結果の読み取り**：`record.result`から実行結果を取得します。
+#
+# Qamomileでは、同じ量子カーネルを使って、計算の実行だけでなく、必要な量子ビット数や論理ゲート数などを実行前に見積もることもできます。コンパイルを個別に行う機能や、コンパイル前にプログラムの内容を確認する機能もあります。まず基本のワークフローを試してから、これらの機能を紹介します。
 
 # %% [markdown]
 # ## インストール
 #
-# 通常の使用：
+# このチュートリアルでは、Qiskit Aerを使って量子計算をシミュレーションします。量子コンピューターの実機は必要ありません。
 #
-# ```bash
-# pip install "qamomile[qiskit,visualization]"
-# ```
-#
-# このチュートリアルでは、具体的な量子SDKとしてQiskitを使用します。QuriPartsもサポートされており、トランスパイル可能な量子SDKは今後も増えていく予定です。
+# 次の行の先頭の`#`を外して実行すると、Qamomile、Qiskit、Aerをまとめてインストールできます。
+
+# %%
+# # !pip install "qamomile[qiskit]"
 
 # %%
 import math
 import os
 
-import qamomile.circuit as qmc
-from qamomile.qiskit import QiskitTranspiler
+import qamomile as qm
+from qamomile.qiskit import Aer, load_circuit
 
-transpiler = QiskitTranspiler()
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 sample_shots = 1 if docs_test_mode else 256
 
 # %% [markdown]
-# ## 最初の量子カーネル：偏りのあるコイン
+# ## 基本のワークフロー
 #
-# **量子カーネル**とは、`@qmc.qkernel`デコレータを付けたPython関数です。型付きハンドルとゲート操作を使って量子回路を記述します。
-# > ハンドルとは、あるリソースやオブジェクトを間接的に参照するための「識別子」や「トークン」のことです。
+# ### 最初の量子カーネル：偏りのあるコイン
 #
-# 最もシンプルな例を作りましょう：1つの量子ビットを角度`theta`で回転させ、測定します。`theta`の値に応じて、量子ビットは`0`または`1`に偏ります。偏りのあるコイントスのようなイメージです。
+# Qamomileでは、Python関数に`@qm.qkernel`デコレータを付けて**量子カーネル**（QKernel）を定義します。量子カーネルでは、型付きの値とゲート操作を使って量子計算を記述します。
+#
+# まずは、1つの量子ビットを角度`theta`で回転させて測定する、簡単な例から始めましょう。`theta`を変えると、測定で`0`や`1`が得られる確率を変えられます。コイントスで表と裏の出やすさを調整するようなイメージです。
 
 
 # %%
-@qmc.qkernel
-def biased_coin(theta: qmc.Float) -> qmc.Bit:
-    # "q" という名前の量子ビットハンドルを作成
-    q = qmc.qubit(name="q")
+@qm.qkernel
+def biased_coin(
+    theta: qm.Param[qm.Real],
+) -> qm.Shot[qm.Bits[1]]:  # type: ignore[valid-type]
+    # 1つの量子ビットからなる状態を作成します。
+    state = qm.qubits(1)
 
-    # RY 回転を適用 — 量子ビットにバイアスをかける
-    q = qmc.ry(q, theta)
+    # RY回転を適用して、測定結果に偏りを持たせます。
+    state = qm.ry(state, theta)
 
-    # 測定し、結果を古典ビットとして返す
-    return qmc.measure(q)
+    # 測定し、1つの古典ビットを返します。
+    return qm.measure(state)
 
-
-# %% [markdown]
-# ポイント：
-#
-# - 型アノテーションは必須です。`theta: qmc.Float`はthetaが浮動小数点パラメータであることを、戻り値の`qmc.Bit`はこの量子カーネルが1つの古典ビットを出力することを示します。
-# - `qmc.qubit(name="q")`は量子ビットハンドルを作成します。`name`は回路図に表示されます。
-# - `q = qmc.ry(q, theta)`はRYゲートを適用し、`q`を再代入します。この再代入が重要です — 理由は後述します。
-# - `qmc.measure(q)`は量子ビットの状態を測定し、`Bit`を返します。
 
 # %% [markdown]
-# ## 実行前の検査
+# :::{note}
+# Pythonの型チェッカーによっては、`qm.Shot[qm.Bits[1]]`が有効な型アノテーションとして認識されないことがあります。`# type: ignore[valid-type]`は、この行に対する指摘を抑制するためのコメントです。カーネルの動作を変えたり、Qamomile自身の型チェックを無効にしたりするものではありません。
+# :::
 #
-# 実行前に量子カーネルの確認ができます。`draw()`で回路図を確認しましょう：
+# **ここでのポイント：**
 #
-# > **注意**：`draw()`はQamomileのIRレベルで回路を可視化します。対象の量子SDKへのトランスパイル時にゲートが分解・最適化されることがあるため、実際に実行される回路は`draw()`の表示と異なる場合があります。対象量子SDK固有の回路を確認するには`transpiler.to_circuit()`を使ってください。
+# - **型アノテーションは必須です**。 `theta: qm.Param[qm.Real]`では、`qm.Real`が値の型（浮動小数点数）を、`qm.Param[...]`がその値を実行時に指定することを表します。この例では、実行ごとに回転角`theta`を指定できます。戻り値の型`qm.Shot[qm.Bits[1]]`は、このカーネルが1回の実行（ショット）で1ビットの値を返すことを表します。この例では、`qm.measure(state)`で得た測定結果を返します。
+# - `qm.qubits(1)`は、1つの量子ビットからなる状態を作成します。
+# - `state = qm.ry(state, theta)`は、RY回転を適用し、返された更新後の状態を同じ変数名`state`で受け取ります。以降の操作では、この更新後の値を使います。ゲートに渡した古い値を再び使うことはできません。
+# - `qm.measure(state)`は、量子ビットを測定し、古典ビットを返します。
+
+# %% [markdown]
+# ### 量子カーネルを実行する
+#
+# この例では、`parameters`で回転角`theta`の値を、`shots`で繰り返し実行する回数を指定します。
+#
+# `biased_coin`を`qm.run(...)`に直接渡して実行できます。必要な検証とコンパイルは内部で行われます。
+#
+# ここでは、`Aer()`でQiskit Aerシミュレーターの実行先（エンドポイント）を作成します。エンドポイントは、計算をどこで実行するかを指定するものです。
+
+# %% [markdown]
+# :::{note}
+# `qm.run(...)`に渡す量子カーネルは、入れ子になった値も含め、入力も出力も古典データである必要があります。呼び出し元が受け取る計算結果は、測定結果などの古典データに限られます。カーネル内で別の量子カーネルを呼び出す場合は、量子状態を引数や戻り値として受け渡せます。
+#
+# 1回の実行（ショット）の中で行う古典計算や、測定結果に応じた条件分岐は、量子カーネルに記述できます。複数のショットで得られた結果の集計は、量子カーネルの外で行います。[チュートリアル05](05_execution_models.ipynb)では、`statistics`と`Estimator`を使った統計処理と、観測量の期待値の推定を紹介します。
+# :::
 
 # %%
-biased_coin.draw(theta=0.6)
+# 実行先を選びます。
+endpoint = Aer()
 
-# %% [markdown]
-# コストも事前に確認できます。`estimate_resources()`で量子ビット数やゲート数を推定します：
-
-# %%
-est = biased_coin.estimate_resources()
-print("qubits:", est.qubits)
-assert est.qubits == 1
-print("total gates:", est.gates.total)
-assert est.gates.total == 1
-
-# %% [markdown]
-# この量子カーネルでは具体的な数値が返りますが、パラメータ付き量子カーネルではSymPyを用いた代数的なリソース推定も可能です —[チュートリアル02](02_parameterized_kernels.ipynb)で詳しく扱います。
-
-# %% [markdown]
-# ## 実行パイプライン
-#
-# 実際に量子カーネルを実行してみましょう。3ステップです：
-#
-# 1. **トランスパイル**：量子カーネルをユーザーが指定した量子SDKで実行可能形式にトランスパイル
-# 2. **実行**：`sample()`で具体的なパラメータ値を与えて実行
-# 3. **結果の読み取り**：Jobの`.result()`で出力を取得
-#
-# 各パートを順に見ていきます：
-
-# %%
-# ステップ1:トランスパイル
-# parameters=["theta"]はトランスパイラに「thetaは後で指定するので、
-# トランスパイル済み回路では調整可能なパラメータとして保持せよ」と伝えます。
-exe = transpiler.transpile(biased_coin, parameters=["theta"])
-
-# ステップ2:実行
-# bindings={"theta": ...}はthetaの具体的な値を指定します。
-# shots=256は回路を256回実行することを意味します。
-# デフォルトのexecutor（transpiler.executor()）はローカルシミュレータを使用しますが、
-# 独自のカスタムexecutor（例:実機やクラウドサービス）を接続することもできます。
-job = exe.sample(
-    transpiler.executor(),
+# 回路をsample_shots回実行します。
+record = qm.run(
+    biased_coin,
+    on=endpoint,
+    parameters={"theta": math.pi / 4},
     shots=sample_shots,
-    bindings={"theta": math.pi / 4},
+    seed=7,
 )
 
-# ステップ3:結果の読み取り
-# .result()はジョブが完了するまで待ち、SampleResultを返します。
-result = job.result()
+# 測定結果を保持するSampleResultを取得します。
+result = record.result
 
-print("sample results:", result.results)
+print("sample counts:", result.counts)
 assert result.shots == sample_shots
-assert sum(count for _, count in result.results) == sample_shots
+assert sum(result.counts.values()) == sample_shots
 
 # %% [markdown]
-# 3つの概念を押さえておきましょう：
+# 各部分の役割を確認しましょう。
 #
-# - `parameters=["theta"]`（トランスパイル時）— 量子カーネル入力のうち、トランスパイル後もスイープ可能なパラメータとして残すものを宣言します。ここに列挙されていない入力は、実行時に`bindings`で値を与える必要があります（チュートリアル02で詳しく扱います）。
+# - **`parameters={"theta": math.pi / 4}`** は、今回の実行で使う回転角をπ/4ラジアンに指定します。
 #
-# - `bindings={"theta": math.pi / 4}`（実行時）— パラメータに具体的な値を設定します。デフォルトのexecutorはローカルシミュレータですが、カスタムexecutor（実機やクラウドサービス）を使うこともできます。
+# - **`shots=sample_shots`** は、計算を繰り返す回数を指定します。`sample_shots`が256の場合、この例では1ビットの測定結果が256回分得られます。
 #
-# - `.result()` — `sample()`は結果を直接返すのではなくJobを返します。`.result()`でジョブの完了を待ち、`SampleResult`を取得します。
+# - **`seed=7`** は、シミュレーターの乱数シードを設定します。同じ設定で繰り返し実行したときに、結果を再現できるようにします。
+#
+# - **`record.result`** から実行結果を取得できます。`qm.run(...)`は実行の完了を待ってから`RunRecord`を返します。この例では、その`result`に、測定結果をQamomileのデータ形式で保持する`SampleResult`が入っています。
+#
+# この例では、実行ごとに`theta`の値を指定できます。パラメータの種類と値を指定するタイミングについては、[チュートリアル02](02_parameterized_kernels.ipynb)で詳しく説明します。
 
 # %% [markdown]
-# ## `SampleResult`
+# ### `SampleResult`から結果を読み取る
 #
-# `result.results`は`list[tuple[T, int]]`で、以下の構造です：
+# 前の節では、`record.result`を変数`result`に代入しました。この例の`result`は`SampleResult`のインスタンスで、測定結果をQamomileのデータ形式で保持しています。そのプロパティやメソッドを使って、各結果の出現回数や総ショット数を確認したり、測定結果の確率を推定したりできます。
 #
-# - `T`は測定出力の型（ここでは`int` — `Bit`の場合`0`または`1`）
-# - `int`はカウント：その結果が何回出現したか
+# まず、`result.counts`を見てみましょう。これは、測定結果と出現回数を対応付けた読み取り専用のマッピングです。
 #
-# 例えば、`[(0, 150), (1, 106)]`は、256ショットのうち結果`0`が150回、結果`1`が106回出現したことを意味します。
+# - **キー**は、ビットのタプルで表した測定結果です。この例では、1ビットの結果を`(0,)`または`(1,)`で表します。
+# - **値**は、その測定結果が得られたショット数です。
+#
+# 例えば、`{(0,): 214, (1,): 42}`は、256ショットのうち`0`が214回、`1`が42回得られたことを意味します。
 
 # %%
-for value, count in result.results:
+for value, count in result.counts.items():
     print(f"  outcome={value}, count={count}")
 
 # %% [markdown]
-# `SampleResult`には便利なメソッドも用意されています：
+# 次のプロパティやメソッドも使えます。
+#
+# - **`result.most_likely`** は、最も多く得られた測定結果を返します。
+# - **`result.probability((1,))`** は、`1`の出現回数を総ショット数で割り、測定で`1`が得られる確率を推定します。
+# - **`result.values`** は、カーネルで宣言した戻り値の型に従って復元した測定結果と、その出現回数を対応付けた読み取り専用のマッピングを返します。このカーネルでは、`result.counts`と同じ内容になります。
 
 # %%
-# 最も多い結果
-print("most common:", result.most_common(1))
+# 最も多く得られた結果。同数の場合も一定の規則で選びます。
+print("most likely:", result.most_likely)
 
-# 確率分布
-print("probabilities:", result.probabilities())
+# 測定で1が得られる確率の推定値。
+print("P(1):", result.probability((1,)))
+
+# カーネルの戻り値の型に従って復元した測定結果と出現回数。
+print("typed values:", result.values)
 
 # %% [markdown]
-# ## トランスパイル後の回路の確認
+# ## 追加機能を使う
 #
-# `to_circuit()`はすべてのパラメータをバインドした状態でトランスパイルし、量子SDK固有の回路（例: Qiskitの`QuantumCircuit`）を返します。量子SDKの形式で回路を確認できるので、デバッグに便利です。
+# ここまでで、定義から実行、結果の読み取りまでを試せました。ここからは、同じカーネルを使って、コンパイルを個別に行う方法、コンパイル前の確認、生成された回路の確認を紹介します。
+#
+# ### コンパイルを個別に行う
+#
+# `qm.compile(...)`は、量子カーネルを受け取り、繰り返し実行できるコンパイル結果を返します。以下の例では、`biased_coin`を渡し、返された`CompiledProgram`のインスタンスを`artifact`として受け取ります。この`artifact`は、`qm.run(...)`に渡して実行できます。
+#
+# `endpoint.target`は、その実行先に必要な形式と設定を表します。ここでは、Qiskit Aerで実行するためのコンパイルに使用します。
 
 # %%
-qiskit_circuit = transpiler.to_circuit(
-    biased_coin,
-    bindings={"theta": math.pi / 4},
+artifact = qm.compile(biased_coin, to=endpoint.target)
+compiled_record = qm.run(
+    artifact,
+    on=endpoint,
+    parameters={"theta": math.pi / 4},
+    shots=sample_shots,
+    seed=7,
 )
+assert compiled_record.result.counts == result.counts
+
+# %% [markdown]
+# コンパイル結果`artifact`には、`theta`がパラメータとして残ります。`qm.run(...)`の`parameters`で回転角を変えながら、同じ`artifact`を再利用できます。
+#
+# 別のエンドポイントで必要な形式やコンパイル設定が異なる場合は、その設定でカーネルをコンパイルしてから実行します。
+
+# %% [markdown]
+# ### コンパイル前の確認
+#
+# 量子カーネルをコンパイルする前に、カーネルの検証、プログラムの内容の確認、必要なリソースの見積もりを行えます。バックエンドを選んだり、量子計算を実行したりする必要はありません。
+#
+# #### 量子カーネルを検証する
+#
+# `qm.specialize(...)`は、指定された`Const`入力の値をカーネルに反映し、検証済みの`Program`を作成します。このとき、型や量子状態の使い方を検査します。コンパイル前にその内容を確認したい場合などに利用できます。
+
+# %%
+program = qm.specialize(biased_coin)
+
+# %% [markdown]
+# `biased_coin`には`Const`入力がないため、ここでは値を追加で指定する必要はありません。量子カーネルを`qm.compile(...)`に直接渡す場合は、特殊化と検証が内部で行われるため、`qm.specialize(...)`を別途呼ぶ必要はありません。先に作成した`Program`をコンパイルする場合は、`qm.compile(program, to=endpoint.target)`と書けます。
+#
+# #### プログラムの内容を確認する
+#
+# `program.inspect()`では、プログラムに含まれる演算や型をテキストで確認できます。`qm.resources.logical(program)`では、必要な量子ビット数や論理ゲート数などを見積もれます。以下の例では、リソース推定に注目します。
+
+# %% [markdown]
+# #### 必要なリソースを見積もる
+#
+# `qm.resources.logical(program)`で、先ほど検証した`biased_coin`の論理リソースを推定します。ここでは、同時に使用する量子ビット数の最大値と、論理ゲート数を確認します。
+
+# %%
+study = qm.resources.logical(program)
+peak_qubits = study.metric(qm.resources.LOGICAL_PEAK_QUBITS)
+logical_gates = study.metric(qm.resources.LOGICAL_GATES)
+
+print("peak logical qubits:", peak_qubits)
+assert peak_qubits.numeric_enclosure() == (1, 1)
+print("logical gates:", logical_gates)
+assert logical_gates.numeric_enclosure() == (1, 1)
+
+# %% [markdown]
+# このカーネルは、1つの量子ビットと1つの論理ゲート（RY回転）を使用しています。ここで見積もっているのはカーネルの論理リソースであり、特定の量子コンピューターで実行するための物理リソースは含みません。詳しくは[リソース推定](04_resource_estimation.ipynb)の章で扱います。
+
+# %% [markdown]
+# ### コンパイル済みの回路を確認する
+#
+# コンパイルで生成された回路も確認できます。冒頭で`qamomile.qiskit`からインポートした`load_circuit(artifact)`は、コンパイル結果`artifact`に保持されているQiskit回路のコピーを返します。
+#
+# 以下の`qiskit_circuit`は、Qiskitの`QuantumCircuit`のインスタンスです。`print(...)`でゲートや測定を含む回路図を表示できるため、回路の構成の確認やデバッグに役立ちます。
+
+# %%
+qiskit_circuit = load_circuit(artifact)
 print(qiskit_circuit)
 assert qiskit_circuit.num_qubits == 1
 assert qiskit_circuit.num_clbits == 1
 
 # %% [markdown]
-# ## 複数量子ビットの例
+# 表示された回路の`p0`は、カーネルのパラメータ`theta`に対応します。先ほどの実行ではπ/4を指定しましたが、`artifact`内の回路には、実行後も具体的な値に置き換えられていないパラメータが残っています。`qm.run(...)`は、実行のたびに指定された値を使います。
+
+# %% [markdown]
+# ### 複数量子ビットの例
 #
-# 量子ビットを複数使ってみましょう。ここでは2つの新しい要素が登場します：
+# 次は、2つの量子ビットを使ってみましょう。1つ目の量子ビットにアダマール（Hadamard）ゲートを適用し、続いてCNOTゲートを適用してから、両方の量子ビットを測定します。
+
+
+# %%
+@qm.qkernel
+def two_qubit_demo() -> qm.Shot[qm.Bits[2]]:  # type: ignore[valid-type]
+    state = qm.qubits(2)
+    state = qm.h(state, target=0)
+    state = qm.cx(state, control=0, target=1)
+    return qm.measure(state)
+
+
+# %% [markdown]
+# `qm.qubits(2)`は、2つの量子ビットからなる状態を作成します。量子ビットのインデックスは0から始まります。
 #
-# - `qubit_array(n)` — 複数の量子ビットをまとめて確保
-# - `cx()`（CNOTゲート）— 2量子ビットゲートで、両方のハンドルを返す
-
-
-# %%
-@qmc.qkernel
-def two_qubit_demo() -> qmc.Vector[qmc.Bit]:
-    q = qmc.qubit_array(2, name="q")
-
-    q[0] = qmc.h(q[0])  # q[0] に H ゲートを適用
-    q[0], q[1] = qmc.cx(q[0], q[1])  # q[0], q[1] に CNOT を適用
-
-    return qmc.measure(q)
-
+# - `target=0`は、アダマールゲートの対象として1つ目の量子ビットを指定します。
+# - `control=0, target=1`は、CNOTゲートの制御量子ビットとして1つ目を、標的量子ビットとして2つ目を指定します。
+#
+# `qm.measure(state)`は、両方の量子ビットを測定します。戻り値の型`qm.Shot[qm.Bits[2]]`は、各ショットで2つの古典ビットを返すことを示しています。
+#
+# このカーネルでは、`two_qubit_demo`を`qm.run(...)`に直接渡せます。先ほどと同じAerのエンドポイントを使い、検証・コンパイル・実行をまとめて行います。
 
 # %%
-two_qubit_demo.draw()
-
-# %%
-demo_result = (
-    transpiler.transpile(two_qubit_demo)
-    .sample(
-        transpiler.executor(),
-        shots=sample_shots,
-    )
-    .result()
+demo_record = qm.run(
+    two_qubit_demo,
+    on=endpoint,
+    shots=sample_shots,
+    seed=11,
 )
+demo_result = demo_record.result
 
-for outcome, count in demo_result.results:
+for outcome, count in demo_result.counts.items():
     print(f"  outcome={outcome}, count={count}")
 assert demo_result.shots == sample_shots
-assert sum(count for _, count in demo_result.results) == sample_shots
-# Bell 状態 |Phi+>: (0,0) と (1,1) のみが出現する。
-assert all(outcome in {(0, 0), (1, 1)} for outcome, _ in demo_result.results)
+assert sum(demo_result.counts.values()) == sample_shots
+# ベル状態|Phi+>では、(0, 0)と(1, 1)だけが得られます。
+assert set(demo_result.counts) <= {(0, 0), (1, 1)}
 
 # %% [markdown]
-# 2つのパターンに注目してください：
+# この回路で作られるベル状態を測定すると、理想的には`(0, 0)`または`(1, 1)`だけが得られ、それぞれの確率は1/2です。ここで使うノイズのないシミュレーターは、この確率分布に従って測定結果を生成します。
 #
-# - `qubit_array(2)`で複数の量子ビットをまとめて作成し、`q[0]`、`q[1]`のようにインデックスでアクセスします。チュートリアル02では`qubit_array(n)`でサイズをシンボリックにする方法を扱います。
-# - 2量子ビットゲートは両方のハンドルを返す：`q[0], q[1] = qmc.cx(q[0], q[1])`。両辺を再代入する必要があります。
+# 実行回数が有限なので、両者の出現回数がちょうど同じになるとは限りません。
 #
-# これは次に説明する重要なルールにつながります。
+# この例では、量子ビット数を2に固定しています。チュートリアル02では、`Const[Int]`の入力で量子ビット数を指定する方法を扱います。
+#
+# アダマールゲートもCNOTゲートも更新後の状態を返し、それを同じ変数名`state`で受け取っている点に注目してください。次の節では、以降の操作で更新後の状態を使う必要がある理由を説明します。
 
 # %% [markdown]
-# ## アフィン型システム
+# ### 線形型システム
 #
-# Qamomileの量子ハンドルは**アフィン型**です。ゲートがハンドルを消費したら、以降は返された新しいハンドルを**必ず**使う必要があります。
+# Qamomileは、**線形型システム**（linear type system）を使って量子状態を管理します。ゲートは、受け取った状態を表す値を消費し、更新後の状態を表す値を返します。一度消費された古い値は、再び使うことができません。
 #
-# - 1量子ビットゲート：`q = qmc.h(q)` — 同じ変数に再代入する。
-# - 2量子ビットゲート：`q0, q1 = qmc.cx(q0, q1)` — 両方の変数に再代入する。
+# これまでの例では、更新後の状態を同じ変数名で受け取っています。
 #
-# ### なぜ線型ではなくアフィンなのか？
+# - 1量子ビットゲート：`state = qm.h(state)`
+# - 2量子ビットゲート：`state = qm.cx(state, control=0, target=1)`
 #
-# 量子コンピューティングでは、一時的な量子ビットをシステムともつれたまま放置すると、他の量子ビットに予期しない影響を与える可能性があります。厳密には**線型型**（すべてのハンドルをちょうど1回使う）が最も安全ですが、Pythonで線型型を強制すると書きづらくなるため、Qamomileでは**アフィン型**を採用しています：ハンドルは**最大1回**使用でき、ドロップ（使わずに捨てること）も許可されます。
+# 返された状態を別の変数名で受け取ることもできます。重要なのは、以降の操作で更新後の値を使うことです。
 #
-# > **トレードオフ**：一時的な量子ビットを他の量子ビットともつれさせた後、そのまま放置するとその一時的な量子ビットが結果に影響を与えることがあります。コンパイラはこれを検出できないので、**一時的な量子ビットをもつれさせたら使い終わる前にアンコンピュートしてください。**
+# #### なぜ線形なのか？
 #
-# 再代入を忘れるとエラーになります。以下はその例です：
+# Qamomileの線形型システムは、量子状態を表す値の受け渡しを追跡し、消費済みの値の再利用を実行前に検出します。これにより、更新前と更新後の状態を別々に使えるかのような記述を防ぎます。また、使われなくなった量子状態が適切に処理されることも確認します。これまでの例では、最後に`qm.measure(state)`が量子状態を消費し、古典データを返しています。
+#
+# 一時的に使う量子ビットには注意が必要です。他の量子ビットともつれたままになり、干渉や最終的な測定結果の確率に影響することがあります。**アンコンピュート**（uncomputation）は、一時的な計算を逆向きに実行して、不要なもつれを解消する操作です。`qm.adjoint(...)`を使うと、ユニタリ演算を行うヘルパーカーネルの逆演算を明示的に適用できます。
+#
+# Qamomileは、**自動アンコンピュート**にも対応しています。変数に代入された状態が以降で使われない場合、コンパイラは、その状態をアンコンピュートして解放する処理の生成を試みます。必要なアンコンピュートと解放を検証できない場合は、エラーになります。
+#
+# 意図的に状態を破棄する場合は、`qm.discard(state)`を使います。これは、アンコンピュートを行わずに状態を明示的に消費します。量子ビットを破棄しても、他の量子ビットともつれさせた操作が取り消されるわけではありません。
+#
+# 例えば、次のカーネルでは、アダマールゲートが返した状態を無視しています。
+
+
+# %%
+@qm.qkernel
+def bad_rebind() -> qm.Shot[qm.Bits[1]]:  # type: ignore[valid-type]
+    state = qm.qubits(1)
+    qm.h(state)  # 誤り：返された状態を使っていません。
+    state = qm.x(state)  # ここでは、まだ古い状態を参照しています。
+    return qm.measure(state)
+
+
+# %% [markdown]
+# このカーネルは、実行せずに`qm.specialize(...)`で検証できます。
 
 # %%
 try:
-
-    @qmc.qkernel
-    def bad_rebind() -> qmc.Bit:
-        q = qmc.qubit(name="q")
-        qmc.h(q)  # 間違い：q を消費したのに結果をキャプチャしていない
-        q = qmc.x(q)  # 古い（既に消費された）ハンドルを使っている
-        return qmc.measure(q)
-
-    bad_rebind.draw()
-except Exception as e:
-    print(f"Error type: {type(e).__name__}")
-    print(f"Error message: {e}")
-    assert type(e).__name__ == "QubitConsumedError"
+    qm.specialize(bad_rebind)
+except qm.FrontendError as error:
+    print(f"Error type: {type(error).__name__}")
+    print(f"Error message: {error}")
+    assert "unused expression has non-Unit type" in str(error)
 
 # %% [markdown]
-# 修正は簡単です：`qmc.h(q)`ではなく、常に`q = qmc.h(q)`と書いてください。
+# `unused expression`というエラーは、`qm.h(state)`の戻り値が無視されていることを指しています。この行を`state = qm.h(state)`に変えると、次の`qm.x(state)`で更新後の状態を使えます。
 
 # %% [markdown]
-# ## まとめ
-#
-# ここまでで以下ができるようになりました：
-#
-# - `@qmc.qkernel`で量子カーネルを定義
-# - 量子ビットの作成、ゲートの適用、測定
-# - `draw()`で可視化、`estimate_resources()`でコスト見積もり
-# - `transpile()` → `sample()` → `.result()`で実行
-# - `SampleResult`から結果を読み取る
-# - `to_circuit()`でトランスパイル後の回路を確認
-# - アフィン型（`q = qmc.gate(q)`）に従う
-#
 # ## サポートされている量子SDK
 #
-# Qamomileは同じ`@qkernel`を異なる量子SDKにトランスパイルします。現在のサポート状況：
+# Qamomileは、次の量子SDKや中間表現に対応しています。
 #
-# | 量子SDK | ステータス | 備考 |
-# |---------|--------|-------|
-# | **Qiskit** | サポート済み | 全ゲートセット、制御フロー、オブザーバブル |
-# | **QuriParts** | サポート済み | 全ゲートセット、オブザーバブル |
-# | **CUDA-Q** | サポート済み | GPUアクセラレーテッドシミュレーション。対応: forループ（展開）、ランタイム`if`/`if-else`/`while`（`cudaq.run()`経由） |
+# | SDK・中間表現 | 対応状況 | 備考 |
+# |---|---|---|
+# | **Qiskit** | 対応 | Qiskit回路の生成、Aerによるシミュレーション、対応するQiskitバックエンドでの実行 |
+# | **QURI Parts** | 対応 | QURI Parts回路の生成、Qulacsによるシミュレーション、QURI Partsのサンプラーを使った実行 |
+# | **CUDA-Q** | 対応 | CUDA-Qカーネルの生成と、利用可能なCUDA-Qシミュレーターでの実行 |
+# | **Cirq** | 対応 | Cirq回路の生成、ローカルシミュレーション、対応するサンプラーやGoogle Quantum Engineを使った実行 |
+# | **Amazon Braket** | 対応 | ローカルシミュレーションと、対応するAmazon Braketデバイスでの実行 |
+# | **Quration（PyQret）** | 対応 | ローカルシミュレーションと、誤り耐性量子計算（FTQC）のリソース推定 |
+# | **HUGR** | 対応 | HUGR形式へのコンパイル、Seleneによるローカルシミュレーション、Quantinuum Nexus経由のHeliosでの実行 |
+# | **qBraid** | Qiskit経由で対応 | コンパイル済みのQiskit回路を、対応するqBraidデバイスで実行 |
+# | **QIR** | 出力のみ | QIR 1.0 Base Profile形式で出力。実行には外部のQIR対応システムを使用 |
 #
-# > **注意**：ランタイム測定依存の制御フロー（`if bit:`、`if/else`、`while bit:`）はQiskitとCUDA-Qの両方でサポートされています。`while`ループの条件は**必ず**測定結果（`qmc.measure()`から得られる`Bit`）でなければなりません。古典変数、定数、比較演算はwhile条件としてサポートされていません。CUDA-Qでは、すべての回路が`@cudaq.kernel`デコレータ関数としてコンパイルされます。ランタイム制御フローを含まない静的回路は`cudaq.sample()` / `cudaq.observe()`経由で実行され、ランタイム測定依存の分岐を含む回路は`cudaq.run()`経由で実行されます。`if`文のコンパイル時定数の条件はすべてのエンジンで静的に解決されます。
+# :::{note}
+# 利用できる機能は、選択したバックエンドによって異なります。例えば、測定結果に応じて次に適用するゲートを変える処理には、測定結果に基づく制御フローへの対応が必要です。`Const`入力で決まる条件は、コンパイル時に解決されます。
+# :::
 #
-# ### CUDA-Q プラットフォームサポート
+# ### CUDA-Qの対応環境
 #
-# CUDA-Qは以下の環境でサポートされています：
+# CUDA-Qは、次の環境に対応しています。
 #
-# | 環境 | ステータス | 備考 |
-# |---------|--------|-------|
-# | Linux | サポート済み | ネイティブ対応 |
-# | macOS ARM64 (Apple silicon) | サポート済み | CPUシミュレーションのみ; Intel macOSは非対応 |
-# | Windows (WSL2経由) | サポート済み | WSL2 Linux環境内でインストール・実行 |
-# | ネイティブWindows | 非対応 | WSL2を使用してください |
-# | macOS x86_64 (Intel) | 非対応 | Apple siliconのみ対応 |
+# | 環境 | 対応状況 | 備考 |
+# |---|---|---|
+# | **Linux** | 対応 | CPUによるシミュレーション。GPUによる高速化には、対応するNVIDIA GPUと互換性のあるCUDA環境が必要 |
+# | **macOS ARM64（Apple silicon）** | 対応 | ローカルシミュレーションはCPUのみ |
+# | **Windows（WSL2経由）** | 対応 | WSL2のLinux環境内でインストール・実行 |
+# | **ネイティブWindows** | 非対応 | WSL2を使用 |
+# | **macOS x86_64（Intel）** | 非対応 | macOSではApple siliconが必要 |
+#
+# 対応環境と要件は、[CUDA-Qのインストールドキュメント](https://nvidia.github.io/cuda-quantum/0.14.0/using/install/local_installation.html)に基づいています。
+#
+# ## まとめ
+#
+# 基本のワークフローは、`@qm.qkernel`と型アノテーションで量子カーネルを定義し、`qm.run(...)`で実行して、`record.result`から結果を取り出すことです。この章のサンプリングの例では、`SampleResult`から出現回数や確率の推定値を確認できます。
+#
+# さらに、次の機能や考え方を紹介しました。
+#
+# - カーネルを個別にコンパイルし、パラメータの値を変えながら再利用する。
+# - 必要に応じて、コンパイル前に特殊化、内容の確認、論理リソースの推定を行う。
+# - `load_circuit(...)`で、コンパイル済みのQiskit回路を確認する。
+# - 複数の量子ビットを扱い、更新後の量子状態を正しく使う。
+# - アンコンピュートと明示的な破棄の違いを理解する。
 #
 # ## 次の章
 #
-# 1. [パラメータ付き量子カーネル](02_parameterized_kernels.ipynb) — 構造パラメータとランタイムパラメータ、バインド/スイープパターン
-# 2. [Vectorのスライシング](03_vector_slicing.ipynb) — `VectorView`、スライス代入、ネストしたスライス、ヘルパーカーネルへの引き渡し
-# 3. [制御ゲート](04_controlled_gates.ipynb) — `qmc.control`によるビルトインゲートやサブカーネルの制御、concrete/symbolicの制御数指定
-# 4. [リソース推定](05_resource_estimation.ipynb) — シンボリックなコスト分析、ゲート内訳、スケーリング分析
-# 5. [実行モデル](06_execution_models.ipynb) — `sample()`と`run()`、オブザーバブル、ビット順序
-# 6. [古典フローパターン](07_classical_flow_patterns.ipynb) — ループ、スパースデータ、条件分岐
-# 7. [再利用パターン](08_reuse_patterns.ipynb) — ヘルパー量子カーネル、コンポジットゲート、スタブ
+# 以降の章では、この章で紹介したワークフローをもとに、次の内容を学びます。
+#
+# 2. [パラメータ付き量子カーネル](02_parameterized_kernels.ipynb) — 回路の構造を決めるパラメータと実行時パラメータを区別し、実行時の値を変えながらコンパイル済みのプログラムを再利用します。
+# 3. [qm.controlによるコヒーレント制御](03_controlled_gates.ipynb) — 1つ以上の制御量子ビットを使って、ユニタリな量子カーネルを制御付きで適用する方法を学びます。
+# 4. [リソース推定](04_resource_estimation.ipynb) — 量子ビット数、ゲート数、回路の深さなどの論理リソースを見積もり、シンボリックな推定結果の読み方と、その限界を学びます。
+# 5. [実行・統計・オブザーバブルの推定](05_execution_models.ipynb) — 単一ショットの実行と繰り返しサンプリング、測定結果の集計、観測量の期待値の推定を学びます。
+# 6. [古典制御フローのパターン](06_classical_flow_patterns.ipynb) — ループや条件分岐、特定の量子ビット対の相互作用を表すデータを扱います。測定結果に応じて処理を分岐する方法も紹介します。
+# 7. [再利用パターン：量子カーネルの合成と複合ゲート](07_reuse_patterns.ipynb) — ヘルパーカーネルや複合ゲートを組み合わせる方法、カーネルを引数として渡す方法、実装本体のない関数を宣言してリソースを見積もる方法を学びます。
+#
+# 量子ビット列の一部を操作する方法は、使い方ガイドの[量子ビット列の操作](../usage/qubit_arrays.ipynb)を参照してください。

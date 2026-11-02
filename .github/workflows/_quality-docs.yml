@@ -42,6 +42,7 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
+          cache-suffix: ${{ github.job }}
 
       - name: Install dependencies
         run: uv sync --frozen --no-default-groups --group docs

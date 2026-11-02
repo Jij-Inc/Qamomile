@@ -14,7 +14,7 @@ from .annotations import (
 from .config import ApiGenConfig
 from .crossref import CrossRefRegistry
 from .discovery import get_public_non_module_members, is_public, resolve_member
-from .docstrings import get_first_line, write_docstring, _escape_table_cell
+from .docstrings import _escape_table_cell, get_first_line, write_docstring
 
 
 def _source_link(obj: griffe.Object, config: ApiGenConfig) -> str:

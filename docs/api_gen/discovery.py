@@ -14,9 +14,12 @@ def discover_subpackages(config: ApiGenConfig) -> list[str]:
     subpackages = []
     for entry in sorted(config.package_dir.iterdir()):
         if entry.is_dir() and (entry / "__init__.py").exists():
-            if not entry.name.startswith("_"):
+            if (
+                not entry.name.startswith("_")
+                and entry.name not in config.excluded_subpackages
+            ):
                 subpackages.append(entry.name)
-    return subpackages
+    return sorted(set(subpackages).union(config.included_modules))
 
 
 def resolve_member(member: griffe.Alias | griffe.Object) -> griffe.Object | None:

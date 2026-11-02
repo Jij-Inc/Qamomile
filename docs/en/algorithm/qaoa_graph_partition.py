@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: py:percent,ipynb
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -33,10 +34,33 @@
 # 3. Use `QAOAConverter` to build the QAOA circuit and Hamiltonian.
 # 4. Optimize the variational parameters with a classical optimizer.
 # 5. Sample the optimized circuit and decode the results.
+#
+
+# %% [markdown]
+# ## Installation
+#
+# ```bash
+# pip install "qamomile[qiskit,visualization]" jijmodeling
+# ```
 
 # %%
-# Install the latest Qamomile through pip!
-# # !pip install "qamomile[qiskit,visualization]"
+# Install the latest Qamomile and JijModeling through pip!
+# # !pip install "qamomile[qiskit,visualization]" jijmodeling
+
+# %%
+import os
+
+import jijmodeling as jm
+import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
+from scipy.optimize import minimize
+
+import qamomile as qm
+from qamomile.optimization import BinaryModel, OMMXProblem, QAOAExperiment, VarType
+from qamomile.qiskit import Qiskit, load_circuit
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 # %% [markdown]
 # ## Problem Formulation
@@ -58,424 +82,337 @@
 # $$
 #
 # where $x_u \in \{0, 1\}$ indicates which partition vertex $u$ belongs to.
-
-# %% [markdown]
+#
 # ## Define the Problem with JijModeling
+#
 
 # %%
-import jijmodeling as jm
-
-problem = jm.Problem("Graph Partitioning")
+formulation = jm.Problem("Graph Partitioning")
 
 
-@problem.update
+@formulation.update
 def _(problem: jm.DecoratedProblem):
-    V = problem.Dim()
-    E = problem.Natural(ndim=2)  # edge list: [[u1,v1], [u2,v2], ...]
-    x = problem.BinaryVar(shape=(V,))
+    vertices = problem.Dim()
+    edges = problem.Natural(ndim=2)
+    x = problem.BinaryVar(shape=(vertices,))
 
-    # Objective: minimize edges cut between partitions
     problem += (
-        E.rows().map(lambda e: x[e[0]] * (1 - x[e[1]]) + x[e[1]] * (1 - x[e[0]])).sum()
+        edges.rows()
+        .map(lambda edge: x[edge[0]] * (1 - x[edge[1]]) + x[edge[1]] * (1 - x[edge[0]]))
+        .sum()
     )
-
-    # Constraint: equal partition sizes
-    problem += problem.Constraint("Equal Partition", x.sum() == V / 2)
+    problem += problem.Constraint("Equal Partition", x.sum() == vertices / 2)
 
 
-problem
+formulation
 
 # %% [markdown]
 # ## Graph Instance
 #
 # We use a fixed 8-node graph with 16 edges for reproducibility.
+#
 
 # %%
-import os
+NUM_NODES = 8
+EDGE_LIST = (
+    (0, 2),
+    (0, 3),
+    (0, 4),
+    (1, 2),
+    (1, 3),
+    (1, 4),
+    (1, 5),
+    (1, 7),
+    (2, 3),
+    (2, 6),
+    (3, 5),
+    (4, 5),
+    (4, 6),
+    (5, 6),
+    (5, 7),
+    (6, 7),
+)
 
-import matplotlib.pyplot as plt
-import networkx as nx
+graph = nx.Graph()
+graph.add_nodes_from(range(NUM_NODES))
+graph.add_edges_from(EDGE_LIST)
+positions = nx.spring_layout(graph, seed=1)
 
-num_nodes = 8
-edge_list = [
-    [0, 2],
-    [0, 3],
-    [0, 4],
-    [1, 2],
-    [1, 3],
-    [1, 4],
-    [1, 5],
-    [1, 7],
-    [2, 3],
-    [2, 6],
-    [3, 5],
-    [4, 5],
-    [4, 6],
-    [5, 6],
-    [5, 7],
-    [6, 7],
-]
+assert graph.number_of_nodes() == NUM_NODES
+assert graph.number_of_edges() == len(EDGE_LIST) == 16
 
-G = nx.Graph()
-G.add_nodes_from(range(num_nodes))
-G.add_edges_from(edge_list)
-assert G.number_of_nodes() == num_nodes
-assert G.number_of_edges() == len(edge_list)
-
-pos = nx.spring_layout(G, seed=1)
+# %%
 plt.figure(figsize=(5, 5))
 nx.draw(
-    G,
-    pos,
+    graph,
+    positions,
     with_labels=True,
     node_color="white",
     node_size=700,
     edgecolors="black",
 )
-plt.title(f"Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+plt.title(f"Graph: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
 plt.show()
 
 # %% [markdown]
-# ## Create the Instance
+# ## Create the Instance and Penalty Model
 #
-# We extract the edge list from the graph and evaluate the JijModeling
-# problem with the concrete data.
+# `OMMXProblem.from_instance` copies the caller's instance, absorbs the equal
+# partition constraint into a binary penalty model, and retains the original
+# bytes for evaluation after sampling. The caller-owned instance is never
+# mutated. Penalty energy is used only for optimization; feasibility and the
+# reported cut count always come from the original OMMX instance.
 
 # %%
-instance_data = {"V": num_nodes, "E": edge_list}
-instance = problem.eval(instance_data)
-
-# %% [markdown]
-# ## Set Up the QAOAConverter
-#
-# `QAOAConverter` takes an OMMX instance and internally:
-# 1. Converts the problem to a QUBO (Quadratic Unconstrained Binary Optimization) form.
-# 2. Transforms from BINARY variables to SPIN variables.
-# 3. Builds the cost Hamiltonian as a sum of Pauli-Z operators.
-#
-# Because the original problem has a constraint, the QUBO formulation folds it
-# into the objective as a **penalty term**. This means the energy values from
-# the decoded samples are **not** the original objective (number of cut edges)
-# — they include the penalty. We will need to check feasibility and compute
-# the true objective separately.
-
-# %%
-from qamomile.optimization.qaoa import QAOAConverter
-
-converter = QAOAConverter(instance)
-converter.spin_model = converter.spin_model.normalize_by_abs_max()
-hamiltonian = converter.get_cost_hamiltonian()
-print(hamiltonian)
-# Structural invariants of the spin model derived from this fixed instance:
-# one qubit per vertex, no linear (single-Z) terms, and a fixed quadratic-term
-# count once the QUBO simplifies the |V|=8, |E|=16 problem.
-assert converter.spin_model.num_bits == num_nodes
-assert converter.spin_model.linear == {}
-assert len(converter.spin_model.quad) == 12
-assert len(hamiltonian.terms) == 12
-
-# %% [markdown]
-# ## Transpile to an Executable Circuit
-#
-# `converter.transpile()` builds a QAOA ansatz circuit with `p` layers and
-# compiles it into an `ExecutableProgram`. The variational parameters
-# `gammas` (cost layer) and `betas` (mixer layer) remain as runtime parameters.
-
-# %%
-from qamomile.qiskit import QiskitTranspiler
-
-transpiler = QiskitTranspiler()
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-p = 1 if docs_test_mode else 5  # number of QAOA layers
-executable = converter.transpile(transpiler, p=p)
-
-# %% [markdown]
-# ## Visualize the QAOA Circuit
-#
-# `QAOAConverter._transpile_quadratic()` internally builds the sampling
-# qkernel below and feeds it to the transpiler. For visualization we
-# restate that qkernel *verbatim*, then trace it through the early
-# pipeline (`Transpiler.to_block` to lower it into an IR Block,
-# `Transpiler.inline` to expand the sub-qkernel calls) before handing
-# the resulting Block to `MatplotlibDrawer.draw`. This renders exactly
-# the Block structure the converter works with internally, with `p=2`
-# for readability.
-
-# %%
-import qamomile.circuit as qmc
-from qamomile.circuit.algorithm.qaoa import qaoa_state
-from qamomile.circuit.visualization import MatplotlibDrawer
-
-
-@qmc.qkernel
-def qaoa_sampling(
-    p: qmc.UInt,
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    gammas: qmc.Vector[qmc.Float],
-    betas: qmc.Vector[qmc.Float],
-    n: qmc.UInt,
-) -> qmc.Vector[qmc.Bit]:
-    q = qaoa_state(p=p, quad=quad, linear=linear, n=n, gammas=gammas, betas=betas)
-    return qmc.measure(q)
-
-
-block = transpiler.to_block(
-    qaoa_sampling,
-    bindings={
-        "linear": converter.spin_model.linear,
-        "quad": converter.spin_model.quad,
-        "n": converter.spin_model.num_bits,
-        "p": 2,
-    },
-    parameters=["gammas", "betas"],
+instance = formulation.eval(
+    {
+        "vertices": NUM_NODES,
+        "edges": [list(edge) for edge in EDGE_LIST],
+    }
 )
-block = transpiler.inline(block)
-# `fold_loops=False` unrolls every loop (`for layer`,
-# `for (i,j),Jij in quad`, and the per-qubit range loops) so each gate
-# is rendered explicitly. `linear` is the empty dict `{}` for graph
-# partition (no linear Ising terms), so its ForItems loop has zero
-# iterations and is rendered as nothing rather than as a folded box.
-# The result is wide; the docs build injects a lightbox script that
-# turns each cell-output image into a click-to-zoom modal so the wide
-# rendering stays inspectable on ReadTheDocs.
-MatplotlibDrawer(block).draw(fold_loops=False)
+original_payload = instance.to_bytes()
+problem = OMMXProblem.from_instance(instance, uniform_penalty_weight=16.0)
+
+assert instance.to_bytes() == original_payload
+assert problem.model.vartype is VarType.BINARY
+assert problem.model.num_variables == NUM_NODES
+assert problem.model.order == 2
+assert BinaryModel.from_bytes(problem.model.to_bytes()) == problem.model
+
+print(f"Penalty terms: {len(problem.model.coefficients)}")
+print(f"QAOA Hamiltonian terms: {len(problem.model.hamiltonian.terms)}")
 
 # %% [markdown]
-# ### Inspecting the Building Blocks
+# ## Build and Compile the QAOA Experiment
 #
-# Inside `qaoa_sampling` we call `qaoa_state`, and `qaoa_state` itself
-# is the composition of three smaller qkernels:
-#
-# - `superposition_vector(n)` — applies `H` to every qubit, preparing
-#   the initial state $|+\rangle^{\otimes n}$.
-# - `ising_cost(quad, linear, q, gamma)` — the cost layer: one `RZZ`
-#   per quadratic entry in `quad` and one `RZ` per linear entry in
-#   `linear`. The graph-partition spin model has no linear terms
-#   (`linear={}`), so only `RZZ` gates appear.
-# - `x_mixer(q, beta)` — the mixer layer: applies `RX(2\beta)` to every
-#   qubit.
-#
-# `qaoa_layers(p, ...)` is just the alternation of `ising_cost` and
-# `x_mixer`, repeated `p` times. Below we render each piece on its own.
+# Normal execution uses the original five QAOA layers. Documentation tests use
+# one layer but follow the same compilation, optimizer, sampling, and OMMX
+# evaluation path. Only fixed-length `gammas` and `betas` remain in the runtime
+# ABI, so every optimizer proposal reuses one artifact.
 
 # %%
-from qamomile.circuit.algorithm.basic import superposition_vector
-from qamomile.circuit.algorithm.qaoa import ising_cost, x_mixer
+LAYERS = 1 if docs_test_mode else 5
+experiment = QAOAExperiment(problem.model, layers=LAYERS)
+endpoint = qm.Reference()
+compiled = experiment.compile(to=endpoint.target)
 
-superposition_vector.draw(n=converter.spin_model.num_bits, fold_loops=False)
-
-# %%
-ising_cost.draw(
-    q=converter.spin_model.num_bits,
-    quad=converter.spin_model.quad,
-    linear=converter.spin_model.linear,
-    fold_loops=False,
+assert tuple(slot.name for slot in compiled.artifact.parameter_abi.slots) == (
+    "gammas",
+    "betas",
 )
+assert compiled.identity == experiment.identity
+assert compiled.identity.problem_digest == problem.model.semantic_digest
+assert "quantum.qaoa" not in experiment.program.inspect()
+
+# %% [markdown]
+# ## Visualize the Circuit and Inspect Its Building Blocks
+#
+# QAOA is ordinary composition: an initial Hadamard on every qubit, followed by
+# alternating cost evolution and X-mixer rotations. For two layers, the Qiskit
+# projection makes the repeated `rzz`/`rz` cost realization and `rx` mixers
+# visible without exposing a mutable compiler-pass API.
 
 # %%
-x_mixer.draw(q=converter.spin_model.num_bits, fold_loops=False)
+visualization_experiment = QAOAExperiment(problem.model, layers=2)
+visualization_artifact = qm.compile(visualization_experiment.program, to=Qiskit())
+visualization_circuit = load_circuit(visualization_artifact)
+
+print(visualization_circuit.draw(output="text", fold=120))
+print("Circuit operations:", dict(visualization_circuit.count_ops()))
+visualization_circuit.draw(output="mpl", fold=-1)
+
+# %% [markdown]
+# Resource analysis sees the same composed body. With `LAYERS` layers it reports
+# one Hadamard per problem qubit, one abstract Pauli evolution per cost layer,
+# and one RX mixer rotation per qubit and layer.
+
+# %%
+study = qm.resources.logical(experiment.program)
+
+assert study.metric(
+    qm.resources.logical_operation_count("quantum.h")
+).numeric_enclosure() == (NUM_NODES, NUM_NODES)
+assert study.metric(
+    qm.resources.logical_operation_count("quantum.rx")
+).numeric_enclosure() == (NUM_NODES * LAYERS, NUM_NODES * LAYERS)
+assert study.metric(
+    qm.resources.logical_operation_count("quantum.pauli_evolution")
+).numeric_enclosure() == (LAYERS, LAYERS)
 
 # %% [markdown]
 # ## Optimize the QAOA Parameters
 #
-# We use `executable.sample()` to evaluate the cost at each iteration of the
-# classical optimizer. The optimizer explores different `gammas` and `betas`
-# to minimize the mean energy of the sampled bitstrings.
+# COBYLA minimizes the occurrence-weighted penalty energy returned by each
+# sampled QAOA run. This is the correct optimizer coordinate: using the
+# unpenalized original cut objective here would allow infeasible all-zero or
+# all-one assignments. Normal execution retains the original 1,000-proposal
+# optimizer and uses 256 shots per launch, which stays inside the Reference
+# endpoint's per-launch work guard. Documentation tests reduce both budgets.
 
 # %%
-import numpy as np
-from qiskit_aer import AerSimulator
-from scipy.optimize import minimize
-
-# Seed the simulator so re-executing the notebook reproduces the same
-# COBYLA trajectory and final sampling distribution. Without a seed,
-# every shot draws fresh randomness, COBYLA sees a noisy cost surface,
-# and each notebook run converges to a different (but equivalent) local
-# optimum.
-executor = transpiler.executor(
-    backend=AerSimulator(seed_simulator=901, max_parallel_threads=1)
-)
-sample_shots = 1 if docs_test_mode else 2048
-maxiter = 4 if docs_test_mode else 1000
-final_shots = 8 if docs_test_mode else 1000
-
-rng = np.random.default_rng(900)
-initial_params = rng.uniform(0, np.pi, 2 * p)
-assert initial_params.shape == (2 * p,)
-
+SAMPLE_SHOTS = 16 if docs_test_mode else 256
+MAX_ITERATIONS = 6 if docs_test_mode else 1_000
+FINAL_SHOTS = 128 if docs_test_mode else 256
 cost_history = []
 
 
-def cost_fn(params):
-    gammas = list(params[:p])
-    betas = list(params[p:])
-    job = executable.sample(
-        executor,
-        shots=sample_shots,
-        bindings={"gammas": gammas, "betas": betas},
+def cost_function(parameters) -> float:
+    """Sample one QAOA coordinate and return its mean penalty energy."""
+
+    run = compiled.run(
+        on=endpoint,
+        gammas=tuple(float(value) for value in parameters[:LAYERS]),
+        betas=tuple(float(value) for value in parameters[LAYERS:]),
+        shots=SAMPLE_SHOTS,
+        seed=901 + len(cost_history),
     )
-    result = job.result()
-    # decode_to_binary_sampleset returns the QUBO-domain BinarySampleSet
-    # whose `energy` is the penalized objective — what COBYLA needs to
-    # see infeasibility costs. The polymorphic decode() returns an
-    # ommx.v1.SampleSet whose `objective` is the un-penalized true
-    # objective; using it here would let the optimizer settle on
-    # infeasible all-zero / all-one bitstrings.
-    decoded = converter.decode_to_binary_sampleset(result)
-    energy = decoded.energy_mean()
-    cost_history.append(energy)
-    return energy
+    cost_history.append(run.samples.mean_energy)
+    return run.samples.mean_energy
 
 
-res = minimize(
-    cost_fn,
-    initial_params,
+rng = np.random.default_rng(900)
+initial_parameters = rng.uniform(0.0, np.pi, 2 * LAYERS)
+optimization = minimize(
+    cost_function,
+    initial_parameters,
     method="COBYLA",
-    options={"maxiter": maxiter},
+    options={"maxiter": MAX_ITERATIONS, "rhobeg": 0.5},
 )
 
-print(f"Optimized cost: {res.fun:.3f}")
-print(f"Optimal params: {[round(v, 4) for v in res.x]}")
-print(f"Function evaluations: {res.nfev}")
-assert len(cost_history) == res.nfev
-assert len(res.x) == 2 * p
-if docs_test_mode:
-    # In docs test mode COBYLA is truncated at the maxiter budget.
-    assert res.nfev == maxiter
+print(f"Optimized penalty cost: {optimization.fun:+.6f}")
+print(f"Function evaluations: {optimization.nfev}")
+assert len(optimization.x) == 2 * LAYERS
+assert len(cost_history) == optimization.nfev
 
 # %%
 plt.figure(figsize=(8, 4))
 plt.plot(cost_history, color="#2696EB")
-plt.xlabel("Iteration")
-plt.ylabel("Cost (mean energy)")
-plt.title("QAOA Optimization Progress")
+plt.xlabel("Energy evaluation")
+plt.ylabel("Penalty mean energy")
+plt.title("QAOA optimization progress")
 plt.show()
 
 # %% [markdown]
 # ## Sample with Optimized Parameters
 #
-# With the optimized parameters, we sample the circuit to collect
-# candidate solutions as bitstrings.
+# A final, larger run collects candidate partitions. The decoded distribution
+# remains in the penalty model's BINARY domain until `problem.evaluate` asks the
+# untouched original OMMX instance for feasibility, constraint diagnostics,
+# and the true objective.
 
 # %%
-gammas_opt = list(res.x[:p])
-betas_opt = list(res.x[p:])
+optimized_run = compiled.run(
+    on=endpoint,
+    gammas=tuple(float(value) for value in optimization.x[:LAYERS]),
+    betas=tuple(float(value) for value in optimization.x[LAYERS:]),
+    shots=FINAL_SHOTS,
+    seed=1901,
+)
+evaluation = problem.evaluate(optimized_run.samples)
 
-sample_result = executable.sample(
-    executor,
-    shots=final_shots,
-    bindings={"gammas": gammas_opt, "betas": betas_opt},
-).result()
+feasible_shots = sum(
+    evaluation.occurrences[sample_id]
+    for sample_id, feasible in evaluation.feasible.items()
+    if feasible
+)
 
-# `decode()` on an OMMX-backed converter returns an `ommx.v1.SampleSet`
-# evaluated against the *original* (un-penalized) instance, so
-# feasibility, the true objective, and per-constraint diagnostics are
-# available through OMMX's own API — no hand-rolled feasibility or
-# objective helper is needed.
-import ommx.v1
+print(
+    f"Feasible samples: {feasible_shots} / {FINAL_SHOTS} "
+    f"({100.0 * feasible_shots / FINAL_SHOTS:.1f}%)"
+)
 
-sample_set = converter.decode(sample_result)
-assert isinstance(sample_set, ommx.v1.SampleSet)
+assert optimized_run.execution.artifact is compiled.artifact
+assert optimized_run.samples.total_occurrences == FINAL_SHOTS
+assert evaluation.total_occurrences == FINAL_SHOTS
+assert feasible_shots > 0
 
 # %% [markdown]
 # ## Analyze the Results
 #
-# ### Feasibility Check
-#
-# QAOA samples are **candidate solutions** — they are not guaranteed to
-# satisfy the original constraints. The constraint $\sum x_u = |V|/2$ was
-# folded into the QUBO as a penalty, so infeasible bitstrings can still
-# appear in the output.
-#
-# `SampleSet.summary` is a DataFrame with one row per shot whose
-# `feasible` column already encodes feasibility against the *original*
-# constraints, so we can read the feasible-shot count straight off it.
-
-# %%
-summary = sample_set.summary
-total_feasible = int(summary["feasible"].sum())
-total_samples = len(summary)
-if docs_test_mode:
-    assert total_feasible > 0
-
-print(
-    f"Feasible samples: {total_feasible} / {total_samples} "
-    f"({100 * total_feasible / total_samples:.1f}%)"
-)
-assert total_samples == final_shots
-
-# %% [markdown]
 # ### Best Feasible Solution
 #
-# `SampleSet.best_feasible` returns the feasible sample with the
-# best (here: smallest) objective. Because the converter was built from
-# an OMMX `Instance`, the reported objective is the *original*
-# un-penalized one — i.e. the number of cut edges itself — and the
-# decision-variable values come back keyed by the original variable
-# IDs in `decision_variables_df`.
+# `best_feasible` returns the smallest original cut objective among feasible
+# unique rows. Decision-variable values use the original IDs, and the equality
+# constraint can be checked directly.
 
 # %%
-if total_feasible > 0:
-    best = sample_set.best_feasible
-    best_obj = int(round(best.objective))
-    best_sample = {
-        i: int(round(best.decision_variables_df.loc[i, "value"]))
-        for i in range(num_nodes)
-    }
-    print(f"Best feasible solution: {best_sample}")
-    print(f"Cut edges:             {best_obj}")
-    # Any feasible solution must satisfy the equal-partition constraint
-    # sum(x_u) == |V|/2 exactly.
-    assert sum(best_sample.values()) == num_nodes // 2
-    assert best_obj >= 0
-else:
-    print("No feasible solution found. Try increasing p or maxiter.")
-    best_sample = None
-    best_obj = None
+best = evaluation.best_feasible
+values = best.decision_variables_df["value"]
+best_assignment = {
+    index: int(round(float(values.loc[index]))) for index in range(NUM_NODES)
+}
+best_objective = int(round(best.objective))
+cut_edges = sum(
+    best_assignment[left] != best_assignment[right] for left, right in EDGE_LIST
+)
+
+print("Best feasible partition:", best_assignment)
+print(f"Cut edges: {best_objective}")
+
+assert sum(best_assignment.values()) == NUM_NODES // 2
+assert best_objective == cut_edges
+assert best_objective >= 0
 
 # %% [markdown]
 # ### Objective Value Distribution
 #
-# We plot the distribution of the true objective value (cut edges)
-# for feasible samples only. `summary` already has the original
-# objective per shot, so a `value_counts()` on the feasible slice
-# gives the histogram directly.
+# The immutable evaluation stores one row per unique solution plus its original
+# occurrence count. Grouping feasible occurrences by the original objective
+# reproduces the shot-level histogram without expanding duplicate rows.
 
 # %%
-if total_feasible > 0:
-    feasible_objectives = (
-        summary.loc[summary["feasible"], "objective"].round().astype(int)
+objective_counts = {}
+for sample_id in evaluation.sample_ids:
+    if not evaluation.feasible[sample_id]:
+        continue
+    objective = int(round(evaluation.objectives[sample_id]))
+    objective_counts[objective] = (
+        objective_counts.get(objective, 0) + evaluation.occurrences[sample_id]
     )
-    obj_counts = feasible_objectives.value_counts().sort_index()
 
-    plt.figure(figsize=(8, 4))
-    plt.bar([str(o) for o in obj_counts.index], obj_counts.values, color="#2696EB")
-    plt.xlabel("Cut edges (objective value)")
-    plt.ylabel("Frequency")
-    plt.title("Distribution of Feasible Solutions")
-    plt.show()
+assert sum(objective_counts.values()) == feasible_shots
+
+plt.figure(figsize=(8, 4))
+plt.bar(
+    [str(value) for value in sorted(objective_counts)],
+    [objective_counts[value] for value in sorted(objective_counts)],
+    color="#2696EB",
+)
+plt.xlabel("Cut edges (objective value)")
+plt.ylabel("Frequency")
+plt.title("Distribution of feasible solutions")
+plt.show()
 
 # %% [markdown]
 # ### Visualize the Best Partition
 #
-# We color the graph nodes according to the best feasible partition
-# found by QAOA.
+# Node colors show the two equal groups of the best feasible QAOA sample.
 
 # %%
-if best_sample is not None:
-    color_map = [
-        "#FF6B6B" if best_sample.get(i, 0) == 1 else "#4ECDC4" for i in range(num_nodes)
-    ]
+colors = [
+    "#FF6B6B" if best_assignment[index] == 1 else "#4ECDC4"
+    for index in range(NUM_NODES)
+]
+plt.figure(figsize=(5, 5))
+nx.draw(
+    graph,
+    positions,
+    with_labels=True,
+    node_color=colors,
+    node_size=700,
+    edgecolors="black",
+)
+plt.title(f"Best feasible partition (cut edges = {best_objective})")
+plt.show()
 
-    plt.figure(figsize=(5, 5))
-    nx.draw(
-        G,
-        pos,
-        with_labels=True,
-        node_color=color_map,
-        node_size=700,
-        edgecolors="black",
-    )
-    plt.title(f"Best feasible partition (cut edges = {best_obj})")
-    plt.show()
+# %% [markdown]
+# ## Summary
+#
+# - The original eight-node constrained JijModeling instance is preserved.
+# - A five-layer QAOA program is compiled once and continuously optimized with
+#   the penalty-domain mean energy.
+# - Full-circuit visualization and logical resources expose the Hadamard, cost,
+#   and mixer building blocks.
+# - Final sampling reports original OMMX feasibility, best objective,
+#   objective-value distribution, and the graph partition without conflating
+#   penalty energy with application meaning.

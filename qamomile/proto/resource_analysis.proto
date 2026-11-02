@@ -1,0 +1,210 @@
+syntax = "proto3";
+
+package qamomile.proto;
+
+enum ResourceDomainProto {
+  RESOURCE_DOMAIN_UNSPECIFIED = 0;
+  RESOURCE_NATURAL = 1;
+  RESOURCE_INTEGER = 2;
+  RESOURCE_RATIONAL = 3;
+  RESOURCE_REAL = 4;
+  RESOURCE_PROBABILITY = 5;
+  RESOURCE_BOOLEAN = 6;
+}
+
+enum ResourceCoordinateProto {
+  RESOURCE_COORDINATE_UNSPECIFIED = 0;
+  RESOURCE_ALGORITHMIC = 1;
+  RESOURCE_LOGICAL = 2;
+  RESOURCE_CIRCUIT = 3;
+  RESOURCE_FAULT_TOLERANT = 4;
+  RESOURCE_PHYSICAL = 5;
+  RESOURCE_EMITTED = 6;
+  RESOURCE_OBSERVED_EXECUTION = 7;
+}
+
+enum ResourceCompositionProto {
+  RESOURCE_COMPOSITION_UNSPECIFIED = 0;
+  RESOURCE_ADDITIVE_WORK = 1;
+  RESOURCE_DEPENDENCY_SPAN = 2;
+  RESOURCE_PEAK_LIVENESS = 3;
+  RESOURCE_REPLACEMENT = 4;
+  RESOURCE_ERROR_BOUND = 5;
+}
+
+enum ResourceRelationProto {
+  RESOURCE_RELATION_UNSPECIFIED = 0;
+  RESOURCE_EQUALITY = 1;
+  RESOURCE_LOWER_BOUND = 2;
+  RESOURCE_UPPER_BOUND = 3;
+  RESOURCE_ENCLOSURE = 4;
+  RESOURCE_PARTIAL_ENCLOSURE = 5;
+  RESOURCE_UNKNOWN = 6;
+}
+
+enum ResourceTransformModeProto {
+  RESOURCE_TRANSFORM_MODE_UNSPECIFIED = 0;
+  RESOURCE_DIRECT = 1;
+  RESOURCE_CONTROLLED = 2;
+  RESOURCE_ADJOINT = 3;
+  RESOURCE_CONTROLLED_ADJOINT = 4;
+}
+
+enum ResourceEvidenceAuthorityProto {
+  RESOURCE_EVIDENCE_AUTHORITY_UNSPECIFIED = 0;
+  RESOURCE_STRUCTURALLY_DERIVED = 1;
+  RESOURCE_TRUSTED_AXIOM = 2;
+  RESOURCE_HEURISTIC_MODEL = 3;
+}
+
+message ResourceRationalProto {
+  string numerator = 1;
+  string denominator = 2;
+}
+
+message ResourceNumberProto {
+  oneof value {
+    string integer = 1;
+    ResourceRationalProto rational = 2;
+    fixed64 real_bits = 3;
+  }
+}
+
+message ResourceSymbolProto {
+  string scope = 1;
+  string name = 2;
+  ResourceDomainProto domain = 3;
+  string unit = 4;
+  string origin = 5;
+  repeated string constraints = 6;
+}
+
+message ResourceAttributeProto {
+  string name = 1;
+  string value = 2;
+}
+
+message ResourceExpressionNodeProto {
+  string kind = 1;
+  ResourceDomainProto domain = 2;
+  string unit = 3;
+  repeated uint32 arguments = 4;
+  ResourceNumberProto literal = 5;
+  ResourceSymbolProto symbol = 6;
+  repeated ResourceAttributeProto attributes = 7;
+  repeated uint32 predicates = 8;
+}
+
+message ResourcePredicateNodeProto {
+  string kind = 1;
+  repeated uint32 arguments = 2;
+  repeated uint32 predicates = 3;
+}
+
+message ResourceNodeProto {
+  oneof node {
+    ResourceExpressionNodeProto expression = 1;
+    ResourcePredicateNodeProto predicate = 2;
+  }
+}
+
+message ResourceExpressionGraphProto {
+  repeated ResourceNodeProto nodes = 1;
+  uint32 root = 2;
+}
+
+message ResourceMetricProto {
+  string identifier = 1;
+  ResourceCoordinateProto coordinate = 2;
+  ResourceDomainProto domain = 3;
+  string unit = 4;
+  ResourceCompositionProto composition = 5;
+  string version = 6;
+}
+
+message ResourceRuleProto {
+  string identity = 1;
+  string callable = 2;
+  ResourceMetricProto metric = 3;
+  ResourceRelationProto relation = 4;
+  ResourceExpressionGraphProto expression = 5;
+  repeated ResourceTransformModeProto modes = 6;
+  repeated string assumptions = 7;
+  repeated string validity_domain = 8;
+  ResourceEvidenceAuthorityProto authority = 9;
+  string provenance = 10;
+  ResourceSchedulingFootprintProto scheduling_footprint = 11;
+}
+
+message ResourceSchedulingFootprintProto {
+  repeated string parameters = 1;
+}
+
+message ResourceAnalysisRequestProto {
+  uint32 schema_major = 1;
+  uint32 schema_minor = 2;
+  bytes program_family = 3;
+  repeated ResourceRuleProto rules = 4;
+  bytes request_digest = 5;
+}
+
+message ResourceEvidenceProto {
+  ResourceEvidenceAuthorityProto authority = 1;
+  string reference = 2;
+  repeated ResourceAttributeProto details = 3;
+}
+
+message ResourceValueProto {
+  ResourceMetricProto metric = 1;
+  ResourceRelationProto relation = 2;
+  ResourceExpressionGraphProto expression = 3;
+  ResourceExpressionGraphProto lower = 4;
+  ResourceExpressionGraphProto upper = 5;
+  repeated string unknown_contributors = 6;
+  repeated ResourceEvidenceProto evidence = 7;
+  repeated string assumptions = 8;
+}
+
+message ResourceMetricValueProto {
+  string identifier = 1;
+  ResourceValueProto value = 2;
+}
+
+message ResourceContributionProto {
+  string identifier = 1;
+  ResourceRelationProto relation = 2;
+  ResourceExpressionGraphProto expression = 3;
+  ResourceExpressionGraphProto lower = 4;
+  ResourceExpressionGraphProto upper = 5;
+  repeated string unknown_contributors = 6;
+}
+
+message ResourceOperationFactProto {
+  string opcode = 1;
+  repeated ResourceContributionProto contributions = 2;
+}
+
+message ResourceAnalysisFactProto {
+  string kind = 1;
+  string owner = 2;
+  string source = 3;
+  oneof value {
+    ResourceOperationFactProto operation = 4;
+  }
+}
+
+message ResourceAnalysisBundleProto {
+  string entrypoint = 1;
+  string analysis_version = 2;
+  bytes qcore_payload = 3;
+  repeated ResourceAnalysisFactProto facts = 4;
+}
+
+message ResourceStudyProto {
+  uint32 schema_major = 1;
+  uint32 schema_minor = 2;
+  ResourceAnalysisBundleProto bundle = 3;
+  repeated ResourceMetricValueProto metrics = 4;
+  repeated string derivations = 5;
+  bytes study_digest = 6;
+}

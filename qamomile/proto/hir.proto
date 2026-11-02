@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package qamomile.proto;
+
+import "qcore.proto";
+
+message HIRExpressionProto {
+  string opcode = 1;
+  TypeProto type = 2;
+  repeated HIRExpressionProto operands = 3;
+  repeated AttributeProto attributes = 4;
+  SourceSpanProto span = 5;
+  repeated HIRExpressionProto regions = 6;
+}
+
+message HIRStatementProto {
+  string opcode = 1;
+  HIRExpressionProto expression = 2;
+  repeated string targets = 3;
+  repeated AttributeProto attributes = 4;
+  repeated HIRBlockProto regions = 5;
+  SourceSpanProto span = 6;
+  repeated TypeProto result_types = 7;
+}
+
+message HIRBlockProto {
+  repeated HIRStatementProto statements = 1;
+}
+
+message HIRParameterProto {
+  string name = 1;
+  TypeProto type = 2;
+  LiteralProto default_value = 3;
+  bool has_default = 4;
+}
+
+message HIRFunctionProto {
+  string symbol = 1;
+  repeated HIRParameterProto parameters = 2;
+  TypeProto result_type = 3;
+  HIRBlockProto body = 4;
+  string declared_kind = 5;
+  SourceSpanProto span = 6;
+  bool external = 7;
+  // Untrusted provenance rows carried verbatim onto the lowered QCore function.
+  repeated AttributeProto intent = 8;
+}
+
+message HIRConstantProto {
+  string name = 1;
+  TypeProto type = 2;
+  LiteralProto value = 3;
+}
+
+message HIRPackageProto {
+  uint32 schema_major = 1;
+  uint32 schema_minor = 2;
+  string artifact_kind = 3;
+  string module_name = 4;
+  repeated HIRFunctionProto functions = 5;
+  repeated HIRConstantProto constants = 6;
+  bytes package_digest = 7;
+}

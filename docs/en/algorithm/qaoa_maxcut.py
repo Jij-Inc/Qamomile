@@ -18,6 +18,10 @@
 # tags: [algorithm, optimization, variational]
 # ---
 #
+# ---
+# tags: [algorithm, optimization, variational]
+# ---
+#
 # # QAOA for MaxCut: Building the Circuit from Scratch
 #
 # This tutorial walks through the Quantum Approximate Optimization Algorithm
@@ -30,12 +34,35 @@
 # 4. Optimize variational parameters with a classical optimizer.
 # 5. Decode and visualize the results.
 #
-# At the end, we show that `qamomile.circuit.algorithm.qaoa_state` provides
+# At the end, we show that `qamomile.stdlib.qaoa_state` provides
 # the same circuit in a single function call.
+
+# %% [markdown]
+# ## Installation
+#
+# ```bash
+# pip install qamomile
+# ```
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install "qamomile[qiskit,visualization]"
+# # !pip install qamomile
+
+# %%
+from __future__ import annotations
+
+import itertools
+import math
+import os
+
+import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
+from scipy.optimize import minimize
+
+import qamomile as qm
+from qamomile.optimization import BinaryModel, VarType
+from qamomile.stdlib import ising_cost, qaoa_state, uniform_superposition, x_mixer
 
 # %% [markdown]
 # ## What is MaxCut?
@@ -66,79 +93,57 @@
 # non-trivial, yet small enough to brute-force for comparison.
 
 # %%
-import os
+EDGES = ((0, 1), (0, 2), (1, 2), (1, 3), (2, 3), (3, 4))
+graph = nx.Graph()
+graph.add_edges_from(EDGES)
+num_nodes = graph.number_of_nodes()
 
-import matplotlib.pyplot as plt
-import networkx as nx
-
-G = nx.Graph()
-G.add_edges_from([(0, 1), (0, 2), (1, 2), (1, 3), (2, 3), (3, 4)])
-num_nodes = G.number_of_nodes()
 assert num_nodes == 5
-assert G.number_of_edges() == 6
+assert graph.number_of_edges() == 6
 
-pos = nx.spring_layout(G, seed=42)
+positions = nx.spring_layout(graph, seed=42)
 plt.figure(figsize=(5, 4))
 nx.draw(
-    G,
-    pos,
+    graph,
+    positions,
     with_labels=True,
     node_color="white",
     node_size=700,
     edgecolors="black",
 )
-plt.title(f"Graph: {num_nodes} nodes, {G.number_of_edges()} edges")
+plt.title(f"Graph: {num_nodes} nodes, {graph.number_of_edges()} edges")
 plt.show()
 
 # %% [markdown]
 # ## Ising Formulation
 #
-# Maximizing $\sum_{(i,j) \in E} (1 - s_i s_j) / 2$ is equivalent (up to a
-# constant) to *minimizing* the **antiferromagnetic Ising Hamiltonian**
+# Maximizing the cut count is equivalent, up to a constant, to minimizing the
+# antiferromagnetic Ising Hamiltonian
 #
 # $$
-# H_C(\boldsymbol{s}) = \sum_{(i,j) \in E} s_i s_j.
+# H_C(\mathbf{s})=\sum_{(i,j)\in E}s_i s_j.
 # $$
 #
-# Compared to the general Ising form
-# $H = \sum_i h_i s_i + \sum_{i < j} J_{ij} s_i s_j$, unweighted MaxCut has:
-#
-# - **no linear terms**: $h_i = 0$ for every vertex, and
-# - **uniform couplings**: $J_{ij} = 1$ for every edge $(i, j) \in E$.
-#
-# `BinaryModel.from_ising` takes the Ising coefficients directly — there is
-# no need to go through a QUBO and convert variable types.
+# Compared with the general Ising form
+# $H=\sum_i h_i s_i+\sum_{i<j}J_{ij}s_i s_j$, unweighted MaxCut has no linear
+# terms and one uniform coupling for every edge. `BinaryModel.from_ising`
+# accepts those coefficients directly; there is no need to go through QUBO.
 
 # %%
-from qamomile.optimization.binary_model import BinaryModel
+model = BinaryModel.from_ising(
+    {edge: 1.0 for edge in EDGES},
+    variables=range(num_nodes),
+)
 
-ising_quad: dict[tuple[int, int], float] = {
-    tuple(sorted((i, j))): 1.0 for i, j in G.edges()
-}
-ising_linear: dict[int, float] = {}
-
-# For weighted MaxCut or spin-glass instances where the J_{ij} are not all
-# of the same magnitude, append `.normalize_by_abs_max()` here to keep the
-# cost-landscape scale comparable across runs (helps gradient-free
-# optimizers such as COBYLA converge consistently).
-spin_model = BinaryModel.from_ising(linear=ising_linear, quad=ising_quad)
-
-print(f"Variable type:          {spin_model.vartype}")
-print(f"Linear terms (h_i):     {spin_model.linear}")
-print(f"Quadratic terms (J_ij): {spin_model.quad}")
-print(f"Constant:               {spin_model.constant}")
-# Spin-domain model with no linear field, one J_ij per graph edge, no offset.
-assert spin_model.vartype.name == "SPIN"
-assert spin_model.linear == {}
-assert len(spin_model.quad) == G.number_of_edges()
-assert spin_model.constant == 0.0
+assert model.vartype is VarType.SPIN
+assert model.num_variables == 5
+assert model.order == 2
+assert BinaryModel.from_bytes(model.to_bytes()) == model
 
 # %% [markdown]
-# > **Note:** `BinaryModel` also provides `from_qubo()` and `from_hubo()` for
-# > problems that are naturally expressed in the binary domain (e.g.,
-# > assignment problems, constrained problems with penalty terms). See
-# > [QAOA for Graph Partitioning](qaoa_graph_partition) for a
-# > QUBO / JijModeling-based workflow.
+# `BinaryModel` also provides `from_qubo()` and `from_hubo()` for problems that
+# are naturally expressed in the binary domain, such as assignment problems
+# and constrained problems with penalty terms.
 
 # %% [markdown]
 # ## Exact Solution (Brute Force)
@@ -148,13 +153,10 @@ assert spin_model.constant == 0.0
 # against.
 
 # %%
-import itertools
-
 best_cut = 0
-optimal_partitions: list[tuple[int, ...]] = []
-
-for spins in itertools.product([+1, -1], repeat=num_nodes):
-    cut = sum(1 for i, j in G.edges() if spins[i] != spins[j])
+optimal_partitions = []
+for spins in itertools.product((1, -1), repeat=num_nodes):
+    cut = sum(spins[left] != spins[right] for left, right in EDGES)
     if cut > best_cut:
         best_cut = cut
         optimal_partitions = [spins]
@@ -163,14 +165,25 @@ for spins in itertools.product([+1, -1], repeat=num_nodes):
 
 print(f"Optimal MaxCut value: {best_cut}")
 print(f"Number of optimal partitions: {len(optimal_partitions)}")
-for part in optimal_partitions:
-    print(f"  {part}")
-# The MaxCut of this fixed 5-node, 6-edge graph is 5; it is achieved by
-# exactly two spin configurations related by the global flip s -> -s.
+
 assert best_cut == 5
 assert len(optimal_partitions) == 2
-for part in optimal_partitions:
-    assert tuple(-s for s in part) in optimal_partitions
+assert all(
+    tuple(-spin for spin in item) in optimal_partitions for item in optimal_partitions
+)
+
+# %% [markdown]
+# `model.hamiltonian` is the same objective represented as an immutable,
+# backend-neutral sum of commuting Pauli-Z words. Rust derives it from the
+# canonical polynomial, so the source page does not need a second coefficient
+# conversion.
+
+# %%
+cost_hamiltonian = model.hamiltonian
+
+assert cost_hamiltonian.num_qubits == 5
+assert cost_hamiltonian.is_pairwise_commuting
+assert min(model.energy(item) for item in optimal_partitions) == -4.0
 
 # %% [markdown]
 # ## QAOA Circuit: The Idea
@@ -199,26 +212,12 @@ for part in optimal_partitions:
 # and outcome $1$ maps to spin $-1$.
 #
 # We will now build each component as a `@qkernel`.
-
-# %% [markdown]
+#
 # ### Step 1: Uniform Superposition
 #
 # Apply a Hadamard gate to every qubit to start from the equal
 # superposition state $|{+}\rangle^{\otimes n}$.
-
-# %%
-import qamomile.circuit as qmc
-
-
-@qmc.qkernel
-def superposition(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
-    q = qmc.qubit_array(n, name="q")
-    for i in qmc.range(n):
-        q[i] = qmc.h(q[i])
-    return q
-
-
-# %% [markdown]
+#
 # ### Step 2: Cost Layer
 #
 # Apply the cost unitary $e^{-i \gamma H_C}$.
@@ -232,152 +231,193 @@ def superposition(n: qmc.UInt) -> qmc.Vector[qmc.Qubit]:
 # We keep the `linear` argument even though it is empty for unweighted
 # MaxCut — this makes the kernel immediately reusable for weighted MaxCut
 # and generic spin-glass Hamiltonians, which do include linear $h_i$ terms.
-
-
-# %%
-@qmc.qkernel
-def cost_layer(
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    q: qmc.Vector[qmc.Qubit],
-    gamma: qmc.Float,
-) -> qmc.Vector[qmc.Qubit]:
-    for (i, j), Jij in quad.items():
-        q[i], q[j] = qmc.rzz(q[i], q[j], angle=2.0 * Jij * gamma)
-    for i, hi in linear.items():
-        q[i] = qmc.rz(q[i], angle=2.0 * hi * gamma)
-    return q
-
-
-# %% [markdown]
+#
 # ### Step 3: Mixer Layer
 #
 # Apply the mixer unitary $e^{-i \beta H_M}$ where $H_M = \sum_i X_i$.
 # Since $\text{RX}(\theta) = e^{-i \theta X / 2}$, we need $\theta = 2\beta$
 # to implement $e^{-i \beta X_i}$ on each qubit.
-
-
-# %%
-@qmc.qkernel
-def mixer_layer(
-    q: qmc.Vector[qmc.Qubit],
-    beta: qmc.Float,
-) -> qmc.Vector[qmc.Qubit]:
-    n = q.shape[0]
-    for i in qmc.range(n):
-        q[i] = qmc.rx(q[i], angle=2.0 * beta)
-    return q
-
-
-# %% [markdown]
+#
 # ### Step 4: Full QAOA Ansatz
 #
 # Compose the three pieces: superposition, then $p$ rounds of
 # cost + mixer, and finally measurement.
+#
 
 
 # %%
-@qmc.qkernel
-def qaoa_ansatz(
-    p: qmc.UInt,
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    n: qmc.UInt,
-    gammas: qmc.Vector[qmc.Float],
-    betas: qmc.Vector[qmc.Float],
-) -> qmc.Vector[qmc.Bit]:
-    q = superposition(n)
-    for layer in qmc.range(p):
-        q = cost_layer(quad, linear, q, gammas[layer])
-        q = mixer_layer(q, betas[layer])
-    return qmc.measure(q)
+@qm.qkernel
+def maxcut_qaoa(
+    hamiltonian: qm.Const[qm.Observable],  # type: ignore[valid-type]
+    layers: qm.Const[qm.Int],
+    gammas: qm.Param[qm.Vector[qm.Real, layers]],  # type: ignore[valid-type]  # noqa: F821
+    betas: qm.Param[qm.Vector[qm.Real, layers]],  # type: ignore[valid-type]  # noqa: F821
+) -> qm.Shot[qm.Bits[5]]:  # type: ignore[valid-type]
+    """Sample a typed QAOA state for the five-node MaxCut graph.
 
+    Args:
+        hamiltonian (qm.Const[qm.Observable]): Compile-time MaxCut cost.
+        layers (qm.Const[qm.Int]): Compile-time number of QAOA layers.
+        gammas (qm.Param[qm.Vector[qm.Real, layers]]): Runtime cost angles.
+        betas (qm.Param[qm.Vector[qm.Real, layers]]): Runtime mixer angles.
+
+    Returns:
+        qm.Shot[qm.Bits[5]]: One logical five-bit observation per shot.
+    """
+
+    state = uniform_superposition(qm.qubits(5), 5)
+    for layer in range(layers):
+        state = ising_cost(state, hamiltonian, gammas[layer])
+        state = x_mixer(state, 5, betas[layer])
+    return qm.measure(state)
+
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+layers = 1 if docs_test_mode else 3
+program = maxcut_qaoa.specialize(hamiltonian=cost_hamiltonian, layers=layers)
+
+# %% [markdown]
+# The program retains its source signature and records the Hamiltonian as a
+# `Const` binding. Compilation later derives an artifact ABI containing only
+# the two runtime coordinates, without erasing source identity.
+
+# %%
+assert tuple(parameter.name for parameter in program.entry.parameters) == (
+    "hamiltonian",
+    "layers",
+    "gammas",
+    "betas",
+)
+assert tuple(name for name, _ in program.const_bindings) == (
+    "hamiltonian",
+    "layers",
+)
+assert "quantum.qaoa" not in program.inspect()
+
+# %% [markdown]
+# ## Using the Built-in `qaoa_state`
+#
+# The explicit construction above makes every QAOA step visible. The standard
+# library also provides the same composition for applications that only need
+# to supply a width, layer count, cost Hamiltonian, and runtime angles.
+
+
+# %%
+@qm.qkernel
+def maxcut_qaoa_builtin(
+    hamiltonian: qm.Const[qm.Observable],  # type: ignore[valid-type]
+    layers: qm.Const[qm.Int],
+    gammas: qm.Param[qm.Vector[qm.Real, layers]],  # type: ignore[valid-type]  # noqa: F821
+    betas: qm.Param[qm.Vector[qm.Real, layers]],  # type: ignore[valid-type]  # noqa: F821
+) -> qm.Shot[qm.Bits[5]]:  # type: ignore[valid-type]
+    """Sample the standard-library form of the same MaxCut QAOA state.
+
+    Args:
+        hamiltonian (qm.Const[qm.Observable]): Compile-time MaxCut cost.
+        layers (qm.Const[qm.Int]): Compile-time number of QAOA layers.
+        gammas (qm.Param[qm.Vector[qm.Real, layers]]): Runtime cost angles.
+        betas (qm.Param[qm.Vector[qm.Real, layers]]): Runtime mixer angles.
+
+    Returns:
+        qm.Shot[qm.Bits[5]]: One logical five-bit observation per shot.
+    """
+
+    return qm.measure(qaoa_state(5, layers, hamiltonian, gammas, betas))
+
+
+builtin_program = maxcut_qaoa_builtin.specialize(
+    hamiltonian=cost_hamiltonian,
+    layers=layers,
+)
+assert (
+    qm.resources.logical(builtin_program)
+    .metric(qm.resources.LOGICAL_GATES)
+    .numeric_enclosure()
+    == qm.resources.logical(program)
+    .metric(qm.resources.LOGICAL_GATES)
+    .numeric_enclosure()
+)
+
+# %% [markdown]
+# ## Estimate the authored program
+#
+# Logical resource analysis follows this same body. It sees five Hadamards,
+# five mixer rotations and one abstract commuting-Pauli evolution per layer.
+# Target lowering may realize that evolution differently, but cannot change
+# its source meaning.
+
+# %%
+study = qm.resources.logical(program)
+
+assert study.metric(
+    qm.resources.logical_operation_count("quantum.h")
+).numeric_enclosure() == (5, 5)
+assert study.metric(
+    qm.resources.logical_operation_count("quantum.rx")
+).numeric_enclosure() == (5 * layers, 5 * layers)
+assert study.metric(
+    qm.resources.logical_operation_count("quantum.pauli_evolution")
+).numeric_enclosure() == (layers, layers)
+assert qm.resources.ResourceStudy.from_bytes(study.to_bytes()) == study
 
 # %% [markdown]
 # ## Transpile and Optimize
 #
-# We transpile the kernel, binding the problem structure (Ising coefficients,
-# number of qubits, number of layers) while keeping `gammas` and `betas`
-# as runtime parameters that the optimizer will tune.
+# Compile the program once while keeping `gammas` and `betas` as runtime
+# parameters that the optimizer will tune. At each iteration, the classical
+# optimizer samples that same artifact and minimizes its mean Ising energy.
+#
+# The simulator seed and NumPy generator make the run reproducible. Normal
+# notebook execution uses three QAOA layers, 256 shots per objective call, and
+# a useful optimization budget. Documentation tests retain the complete
+# optimizer loop but reduce those three values so every page remains quick.
 
 # %%
-from qamomile.qiskit import QiskitTranspiler
+endpoint = qm.Reference()
+artifact = qm.compile(program, to=endpoint.target)
+assert tuple(slot.name for slot in artifact.parameter_abi.slots) == (
+    "gammas",
+    "betas",
+)
+objective_shots = 8 if docs_test_mode else 256
+max_iterations = 4 if docs_test_mode else 80
+cost_history = []
+evaluation_counter = [0]
 
-transpiler = QiskitTranspiler()
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-p = 1 if docs_test_mode else 3  # number of QAOA layers
 
-executable = transpiler.transpile(
-    qaoa_ansatz,
-    bindings={
-        "p": p,
-        "quad": spin_model.quad,
-        "linear": spin_model.linear,
-        "n": num_nodes,
-    },
-    parameters=["gammas", "betas"],
+def cost_function(parameters):
+    """Return sampled mean Ising energy for one variational point."""
+
+    gammas = tuple(float(value) for value in parameters[:layers])
+    betas = tuple(float(value) for value in parameters[layers:])
+    record = qm.run(
+        artifact,
+        on=endpoint,
+        parameters={"gammas": gammas, "betas": betas},
+        shots=objective_shots,
+        seed=42 + evaluation_counter[0],
+    )
+    decoded = model.decode(record.result)
+    evaluation_counter[0] += 1
+    cost_history.append(decoded.mean_energy)
+    return decoded.mean_energy
+
+
+rng = np.random.default_rng(42)
+initial_parameters = rng.uniform(-math.pi / 2.0, math.pi / 2.0, 2 * layers)
+optimization = minimize(
+    cost_function,
+    initial_parameters,
+    method="COBYLA",
+    options={"maxiter": max_iterations},
 )
 
-# %% [markdown]
-# We use `scipy.optimize.minimize` with the COBYLA method. At each
-# iteration, the optimizer samples the circuit and evaluates the mean
-# energy.
-#
-# To make the tutorial reproducible we (i) pass `seed_simulator=SEED` to
-# `AerSimulator` so the per-shot pseudo-random sampling is deterministic,
-# (ii) seed the NumPy generator with the same value so initial
-# variational parameters are stable, and (iii) set
-# `max_parallel_threads=1` so the simulator does not interleave random
-# draws across threads. The single-thread setting trades a little
-# performance for fully reproducible runs; in production code you can
-# drop it (or only enable it in tests / docs builds).
+print(f"Optimized cost: {optimization.fun:+.4f}")
+print(f"Optimal parameters: {[round(value, 4) for value in optimization.x]}")
 
-# %%
-import numpy as np
-from qiskit_aer import AerSimulator
-from scipy.optimize import minimize
-
-SEED = 42
-
-
-def make_seeded_backend() -> AerSimulator:
-    """Fresh AerSimulator with deterministic sampling for this tutorial."""
-    return AerSimulator(seed_simulator=SEED, max_parallel_threads=1)
-
-
-executor = transpiler.executor(backend=make_seeded_backend())
-sample_shots = 1 if docs_test_mode else 2048
-maxiter = 4 if docs_test_mode else 500
-cost_history: list[float] = []
-
-
-def cost_fn(params):
-    gammas = list(params[:p])
-    betas = list(params[p:])
-    result = executable.sample(
-        executor,
-        shots=sample_shots,
-        bindings={"gammas": gammas, "betas": betas},
-    ).result()
-    decoded = spin_model.decode_from_sampleresult(result)
-    energy = decoded.energy_mean()
-    cost_history.append(energy)
-    return energy
-
-
-rng = np.random.default_rng(SEED)
-initial_params = rng.uniform(-np.pi / 2, np.pi / 2, 2 * p)
-assert initial_params.shape == (2 * p,)
-
-res = minimize(cost_fn, initial_params, method="COBYLA", options={"maxiter": maxiter})
-
-print(f"Optimized cost: {res.fun:.4f}")
-print(f"Optimal params: {[round(v, 4) for v in res.x]}")
-assert len(cost_history) == res.nfev
-assert len(res.x) == 2 * p
-if docs_test_mode:
-    # In docs test mode COBYLA is truncated at the maxiter budget.
-    assert res.nfev == maxiter
+assert len(initial_parameters) == 2 * layers
+assert len(optimization.x) == 2 * layers
+assert len(cost_history) == optimization.nfev
 
 # %%
 plt.figure(figsize=(8, 4))
@@ -390,174 +430,92 @@ plt.show()
 # %% [markdown]
 # ## Decode and Analyze Results
 #
-# We sample the circuit with the optimized parameters and interpret the
-# measurement outcomes. `decode_from_sampleresult` returns samples already
-# in the spin domain (+1 / -1), so we can count cut edges directly —
-# no binary conversion needed.
+# Sample with the optimized parameters and interpret the outcomes.
+# `BinaryModel.decode` maps logical measurement order back to the original
+# variable IDs and evaluates every unique assignment in the spin domain, so no
+# binary conversion is needed.
 
 # %%
-gammas_opt = list(res.x[:p])
-betas_opt = list(res.x[p:])
+optimized_gammas = tuple(float(value) for value in optimization.x[:layers])
+optimized_betas = tuple(float(value) for value in optimization.x[layers:])
+final_shots = 128 if docs_test_mode else 2048
+final_record = qm.run(
+    artifact,
+    on=endpoint,
+    parameters={"gammas": optimized_gammas, "betas": optimized_betas},
+    shots=final_shots,
+    seed=42,
+)
+decoded = model.decode(final_record.result)
 
-final_result = executable.sample(
-    executor,
-    shots=sample_shots,
-    bindings={"gammas": gammas_opt, "betas": betas_opt},
-).result()
-
-decoded = spin_model.decode_from_sampleresult(final_result)
-
-# %%
-from collections import Counter
-
-cut_distribution: Counter[int] = Counter()
+cut_distribution = {}
 best_qaoa_cut = 0
-best_qaoa_sample = None
-
-for sample, _energy, occ in zip(
-    decoded.samples, decoded.energy, decoded.num_occurrences
-):
-    # sample is a dict {vertex_index: spin_value (+1 or -1)}
-    spins = [sample[i] for i in range(num_nodes)]
-    cut = sum(1 for i, j in G.edges() if spins[i] != spins[j])
-    cut_distribution[cut] += occ
+best_qaoa_assignment = None
+for sample in decoded.samples:
+    spins = dict(sample.assignment)
+    cut = sum(spins[left] != spins[right] for left, right in EDGES)
+    cut_distribution[cut] = cut_distribution.get(cut, 0) + sample.occurrences
     if cut > best_qaoa_cut:
         best_qaoa_cut = cut
-        best_qaoa_sample = spins
+        best_qaoa_assignment = spins
 
-print(f"Best QAOA cut: {best_qaoa_cut}  (optimal: {best_cut})")
-print(f"Best partition (spins): {best_qaoa_sample}")
-# QAOA cannot exceed the brute-force optimum, and the distribution must
-# account for every shot of the final sample.
+print(f"Best QAOA cut: {best_qaoa_cut} (optimal: {best_cut})")
+print(f"Best partition: {best_qaoa_assignment}")
+
+assert best_qaoa_assignment is not None
 assert best_qaoa_cut <= best_cut
-assert sum(cut_distribution.values()) == sample_shots
+assert sum(cut_distribution.values()) == final_shots
+
+# %% [markdown]
+# Plot the distribution of observed cut values and the best partition found.
 
 # %%
-cuts = sorted(cut_distribution.keys())
-counts = [cut_distribution[c] for c in cuts]
+cuts = sorted(cut_distribution)
+counts = [cut_distribution[cut] for cut in cuts]
 
 plt.figure(figsize=(8, 4))
-plt.bar([str(c) for c in cuts], counts, color="#2696EB")
+plt.bar([str(cut) for cut in cuts], counts, color="#2696EB")
 plt.xlabel("Cut size")
 plt.ylabel("Frequency")
 plt.title("Distribution of MaxCut Values from QAOA")
 plt.show()
 
 # %%
-if best_qaoa_sample is not None:
-    color_map = [
-        "#FF6B6B" if best_qaoa_sample[i] == +1 else "#4ECDC4" for i in range(num_nodes)
-    ]
-    plt.figure(figsize=(5, 4))
-    nx.draw(
-        G,
-        pos,
-        with_labels=True,
-        node_color=color_map,
-        node_size=700,
-        edgecolors="black",
-    )
-    plt.title(f"QAOA partition (cut = {best_qaoa_cut})")
-    plt.show()
-
-# %% [markdown]
-# ## Using the Built-in `qaoa_state`
-#
-# Everything we implemented above — superposition, cost layer, mixer layer,
-# and the layered loop — is already provided by
-# `qamomile.circuit.algorithm.qaoa_state`. It accepts exactly the same
-# Ising coefficients (`quad`, `linear`) and variational parameters
-# (`gammas`, `betas`).
-#
-# Let's build the same circuit using the built-in function to confirm
-# that it implements the same structure. Each executor below is
-# instantiated with the same `seed_simulator=SEED`. Under a fixed seed,
-# **identical circuits yield identical samples and therefore identical
-# mean energies**. With finite shots the per-circuit estimate still
-# carries shot-noise — that does not vanish under seeding — so if the
-# two printed mean energies *do* differ, it indicates that the manual
-# and built-in routes did not emit bit-identical circuits (e.g., a gate
-# ordering or compilation difference), not residual sampling noise.
-
-# %%
-from qamomile.circuit.algorithm import qaoa_state
-
-
-@qmc.qkernel
-def qaoa_builtin(
-    p: qmc.UInt,
-    quad: qmc.Dict[qmc.Tuple[qmc.UInt, qmc.UInt], qmc.Float],
-    linear: qmc.Dict[qmc.UInt, qmc.Float],
-    n: qmc.UInt,
-    gammas: qmc.Vector[qmc.Float],
-    betas: qmc.Vector[qmc.Float],
-) -> qmc.Vector[qmc.Bit]:
-    q = qaoa_state(p=p, quad=quad, linear=linear, n=n, gammas=gammas, betas=betas)
-    return qmc.measure(q)
-
-
-# %% [markdown]
-# We transpile and sample with the same optimized parameters.
-
-# %%
-exe_builtin = transpiler.transpile(
-    qaoa_builtin,
-    bindings={
-        "p": p,
-        "quad": spin_model.quad,
-        "linear": spin_model.linear,
-        "n": num_nodes,
-    },
-    parameters=["gammas", "betas"],
+node_colors = [
+    "#FF6B6B" if best_qaoa_assignment[node] == 1 else "#4ECDC4"
+    for node in range(num_nodes)
+]
+plt.figure(figsize=(5, 4))
+nx.draw(
+    graph,
+    positions,
+    with_labels=True,
+    node_color=node_colors,
+    node_size=700,
+    edgecolors="black",
 )
+plt.title(f"QAOA partition (cut = {best_qaoa_cut})")
+plt.show()
 
-executor_manual = transpiler.executor(backend=make_seeded_backend())
-executor_builtin = transpiler.executor(backend=make_seeded_backend())
-
-result_manual = executable.sample(
-    executor_manual,
-    shots=sample_shots,
-    bindings={"gammas": gammas_opt, "betas": betas_opt},
-).result()
-
-result_builtin = exe_builtin.sample(
-    executor_builtin,
-    shots=sample_shots,
-    bindings={"gammas": gammas_opt, "betas": betas_opt},
-).result()
-
-decoded_manual = spin_model.decode_from_sampleresult(result_manual)
-decoded_builtin = spin_model.decode_from_sampleresult(result_builtin)
-print(f"Manual   mean energy: {decoded_manual.energy_mean():.4f}")
-print(f"Built-in mean energy: {decoded_builtin.energy_mean():.4f}")
-# Same seed + bit-identical circuit ⇒ identical samples ⇒ identical mean.
-# Any divergence here means the manual and built-in paths emitted different
-# circuits (gate ordering, compilation difference) — not shot noise.
-assert decoded_manual.energy_mean() == decoded_builtin.energy_mean()
+# %% [markdown]
+# The source function did not change between inspection, resource estimation,
+# compilation, repeated simulation, and decoding. Replacing `Reference` with a
+# supported SDK or hardware endpoint changes target realization and transport,
+# not the typed QAOA program or the meaning of its result.
 
 # %% [markdown]
 # ## Summary
 #
 # In this tutorial we:
 #
-# 1. Defined a MaxCut problem and wrote it *directly* as an Ising
-#    Hamiltonian on spin variables — no QUBO / binary-variable detour.
+# 1. Defined a MaxCut problem and wrote it directly as an Ising Hamiltonian on
+#    spin variables—without a QUBO detour.
 # 2. Built the spin-domain `BinaryModel` with `BinaryModel.from_ising`.
-# 3. Built every component of the QAOA circuit as a `@qkernel` —
-#    superposition, cost layer, mixer layer, and the full ansatz.
-# 4. Ran a classical optimization loop and decoded the spin-domain
-#    results.
-# 5. Verified that `qamomile.circuit.algorithm.qaoa_state` provides the
-#    same circuit with a single function call.
+# 3. Built every component of the QAOA program—superposition, cost layer,
+#    mixer layer, and the full layered ansatz.
+# 4. Ran a classical optimization loop and decoded and visualized the results.
+# 5. Verified that `qamomile.stdlib.qaoa_state` provides the same composition.
 #
-# The same spin-first recipe applies to any Ising-like problem —
-# spin-glass ground-state search, weighted MaxCut, Sherrington–Kirkpatrick
-# model, and so on: plug the $h_i$ and $J_{ij}$ coefficients into
-# `BinaryModel.from_ising` and reuse the circuit components above.
-#
-# **Next steps:**
-#
-# - For problems that are naturally expressed with **binary variables** or
-#   that require **constraints** (penalty terms), see
-#   [QAOA for Graph Partitioning](qaoa_graph_partition),
-#   which uses the higher-level `QAOAConverter` together with JijModeling.
+# The same spin-first recipe applies to weighted MaxCut and spin-glass problems:
+# provide the $h_i$ and $J_{ij}$ coefficients to `BinaryModel.from_ising` and
+# reuse the program above.

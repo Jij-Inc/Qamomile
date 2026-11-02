@@ -29,7 +29,7 @@
 
 # %%
 # Put every import used by the notebook here.
-# import qamomile.circuit as qmc
+# import qamomile as qm
 
 # %% [markdown]
 # ## Goal
@@ -40,11 +40,11 @@
 # %% [markdown]
 # ## Build with Qamomile
 #
-# Introduce the qkernel or Qamomile object the reader needs. Prefer the smallest
+# Introduce the Qamomile function or public object the reader needs. Prefer the smallest
 # complete example that demonstrates the workflow.
 
 # %%
-# Define the qkernel or object here.
+# Define the Qamomile function or object here.
 # Add assertions that check the important invariants.
 
 # %% [markdown]

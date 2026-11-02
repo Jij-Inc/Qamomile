@@ -1,24 +1,10 @@
-"""qBraid execution integration for Qamomile (executor-only, no transpiler).
+"""Expose qBraid execution support for Qamomile.
 
-Design intent: unlike the other engine packages, qBraid provides no
-emit pass or ``GateEmitter`` of its own. ``QBraidExecutor``
-(``executor.py``) implements circuit's ``QuantumExecutor[QuantumCircuit]``
-protocol over circuits *already emitted by the Qiskit engine*, routing
-them to qBraid-accessible devices through the qBraid runtime. Compile
-with ``QiskitTranspiler``, execute with ``QBraidExecutor``.
-
-Constraints:
-- Depends only on ``qamomile.circuit`` (plus the optional ``qbraid`` and
-  ``qiskit`` SDKs); never imported by circuit or other engines.
-- Execution requires qBraid credentials (API key / ``QbraidProvider``),
-  so this integration is out of scope for the mandatory cross-engine test
-  matrix; tests must gate on credentials and skip otherwise.
-- ``estimate()`` is counts-based and rejects circuits with pre-existing
-  classical bits rather than risk silently wrong results.
+The Qiskit adapter remains the artifact authority. This namespace only exposes
+the live qBraid provider endpoint, and credentials or SDK objects never enter
+persistent Qamomile artifacts.
 """
 
-from qamomile.qbraid.executor import QBraidExecutor
+from ._integration import QBraidDevice as QBraidDevice
 
-__all__ = [
-    "QBraidExecutor",
-]
+__all__ = ["QBraidDevice"]
