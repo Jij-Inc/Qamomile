@@ -16,8 +16,8 @@
 #   EVENT_SHA:
 #     Required commit SHA from the release event.
 #   RELEASE_TAG:
-#     Required release tag in vX.Y.Z form with an optional alpha, beta, or rc
-#     suffix and number.
+#     Required release tag in vX.Y.Z, vX.Y.Z-alpha.N, vX.Y.Z-beta.N, or
+#     vX.Y.Z-rc.N form. Numeric components must not have leading zeros.
 #   GITHUB_ENV:
 #     Required path to the GitHub Actions environment file.
 #   RUNNER_TEMP:
@@ -44,17 +44,17 @@ set -euo pipefail
 : "${RUNNER_TEMP:?RUNNER_TEMP is required.}"
 
 # Check if the release tag matches the expected format and extract version components.
-if [[ ! "${RELEASE_TAG}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)(-(alpha|beta|rc)([.-]?[0-9]+)?)?$ ]]; then
-  echo "Release tags must have the form vX.Y.Z with an optional alpha, beta, or rc suffix." >&2
+version_number='(0|[1-9][0-9]*)'
+release_tag_pattern="^v${version_number}\.${version_number}\.${version_number}(-(alpha|beta|rc)\.${version_number})?$"
+if [[ ! "${RELEASE_TAG}" =~ ${release_tag_pattern} ]]; then
+  echo "Release tags must have the form vX.Y.Z, vX.Y.Z-alpha.N, vX.Y.Z-beta.N, or vX.Y.Z-rc.N; numeric components must not have leading zeros." >&2
   exit 1
 fi
 # Construct the expected version string from the release tag components.
 expected_version="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"  # X.Y.Z
-# Add the prerelease suffix without hyphen if present.
+# Normalize the dotted prerelease suffix to the Python package version.
 if [[ -n "${BASH_REMATCH[4]}" ]]; then
-  prerelease_number="${BASH_REMATCH[6]#\.}"
-  prerelease_number="${prerelease_number#-}"
-  prerelease_number="${prerelease_number:-0}"
+  prerelease_number="${BASH_REMATCH[6]}"
   case "${BASH_REMATCH[5]}" in
     alpha)
       expected_version+="a${prerelease_number}"
