@@ -256,7 +256,7 @@ jobs:
       - name: Export locked documentation dependencies
         shell: bash
         run: >-
-          uv export --frozen --no-default-groups --group docs
+          uv export --frozen --no-default-groups --group docs --extra hugr
           --no-emit-workspace --no-hashes --no-annotate
           --no-header --output-file "${RUNNER_TEMP}/docs-requirements.txt"
 
