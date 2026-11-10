@@ -3,7 +3,7 @@
 This script is the source of truth for tag-based discovery UX across the
 documentation. It scans every tagged article under
 
-    docs/<lang>/{tutorial,algorithm,usage,integration}/*.py
+    docs/<lang>/<section>/*.py
 
 (reading the MyST ``title`` / ``tags`` frontmatter inside the first
 ``# %% [markdown]`` cell), and writes:
@@ -58,14 +58,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 # run the script ad hoc against a working tree.
 DOCS_ROOT = Path(os.environ.get("DOCS_ROOT_OVERRIDE", REPO_ROOT / "docs")).resolve()
 
-# Sections whose .py files participate in tagging. Adding a new section
-# is a matter of appending its directory name here.
-SECTIONS: tuple[str, ...] = (
-    "tutorial",
-    "algorithm",
-    "usage",
-    "integration",
-)
+# Article directories and the required tag under which readers can find them.
+SECTIONS: dict[str, str] = {
+    "tutorial": "tutorial",
+    "hands-on": "tutorial",
+    "algorithm": "algorithm",
+    "usage": "usage",
+    "integration": "integration",
+}
 
 # Whitelist of tags every article is allowed to carry. The taxonomy is
 # deliberately small and contributor-controlled; expanding it is a
@@ -75,8 +75,7 @@ SECTIONS: tuple[str, ...] = (
 # the build, only the test fails on the PR.
 ALLOWED_TAGS: frozenset[str] = frozenset(
     {
-        # Section (1:1 with directory layout — every article carries the
-        # tag that matches its containing section)
+        # Section tags
         "tutorial",
         "algorithm",
         "usage",
@@ -122,6 +121,7 @@ STRINGS: dict[str, dict[str, object]] = {
         "tag_page_heading_fmt": "`{tag}`",
         "section_titles": {
             "tutorial": "Tutorials",
+            "hands-on": "Hands-on",
             "algorithm": "Algorithms",
             "usage": "Usage",
             "integration": "Integration",
@@ -146,6 +146,7 @@ STRINGS: dict[str, dict[str, object]] = {
         "tag_page_heading_fmt": "`{tag}`",
         "section_titles": {
             "tutorial": "チュートリアル",
+            "hands-on": "ハンズオン",
             "algorithm": "アルゴリズム",
             "usage": "使い方",
             "integration": "インテグレーション",

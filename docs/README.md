@@ -13,7 +13,7 @@ This documentation system uses a modern workflow where:
   [docs/generate_api.py](generate_api.py). The generated Markdown is written
   to gitignored `docs/api/`, copied into `docs/{en,ja}/api/` during builds,
   and the API TOC region in each language's `myst.yml` is refreshed.
-- **Bilingual**: English (`en/`) and Japanese (`ja/`) documentation with identical structure
+- **Languages**: English (`en/`) and Japanese (`ja/`) share the same layout for translated pages. Hands-on exercises are currently available in English.
 
 ### Why This Approach?
 
@@ -111,6 +111,7 @@ ReadTheDocs builds with `execute.enabled: false`, assuming that executed `.ipynb
 | [docs/en/](en/) | English documentation source. |
 | [docs/ja/](ja/) | Japanese documentation source mirroring `docs/en/`. |
 | [docs/en/tutorial/](en/tutorial/) / [docs/ja/tutorial/](ja/tutorial/) | New-user tutorials for learning Qamomile workflows. |
+| [docs/en/hands-on/](en/hands-on/) | Guided, runnable exercises in English. |
 | [docs/en/algorithm/](en/algorithm/) / [docs/ja/algorithm/](ja/algorithm/) | Algorithm walkthroughs implemented with Qamomile. |
 | [docs/en/usage/](en/usage/) / [docs/ja/usage/](ja/usage/) | Focused usage notes for Qamomile features and API patterns. |
 | [docs/en/integration/](en/integration/) / [docs/ja/integration/](ja/integration/) | Integration guides for external SDKs, services, or packages. |
@@ -187,7 +188,7 @@ setup.
    listing are similarly discovered via `pattern: tags/*.md`.)
 
 4. **Check docs-test coverage.** Pages under
-   `tutorial/`, `algorithm/`, `usage/`, and `integration/` are already
+   `tutorial/`, `hands-on/`, `algorithm/`, `usage/`, and `integration/` are already
    discovered by [tests/docs/test_tutorials.py](../tests/docs/test_tutorials.py)'s
    `TUTORIAL_PATTERNS`.
    If a page cannot run in CI because it needs credentials or remote
@@ -223,7 +224,7 @@ setup.
 
 ### Adding a new section directory
 
-The four sections currently registered (`tutorial/`, `algorithm/`,
+The registered notebook sections (`tutorial/`, `hands-on/`, `algorithm/`,
 `usage/`, `integration/`) live at the top level under
 `docs/<lang>/`. Adding a new one — at the same level — is supported
 and only needs config changes.
@@ -253,8 +254,7 @@ Update each of the following:
    - [First Article Title](first_article) — short description
    ```
 3. **Register the section in [docs/scripts/build_doc_tags.py](scripts/build_doc_tags.py)**:
-   - Append `"<new>"` to `SECTIONS`.
-   - Add `"<new>"` to `ALLOWED_TAGS` as the section tag.
+   - Map the directory name to its required tag in `SECTIONS`. For example, `hands-on` uses the existing `tutorial` tag.
    - Add `"<new>": "<English title>"` to `STRINGS["en"]["section_titles"]`
      and `"<new>": "<Japanese title>"` to `STRINGS["ja"]["section_titles"]`
      so the section's name renders correctly on tag pages.
@@ -303,8 +303,8 @@ does not need touching.
 
 ### Tags
 
-Articles under `{tutorial,algorithm,usage,integration}/` (in both
-`en/` and `ja/`) are tag-filterable. Tags are declared in each article's
+Articles in all registered notebook sections are tag-filterable.
+Tags are declared in each article's
 jupytext frontmatter as shown in the skeletons.
 
 Tags are language-agnostic (same string for `en` and `ja`). The build
