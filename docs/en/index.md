@@ -145,7 +145,7 @@ Learn the basics of Qamomile step by step, including kernels, parameters, execut
 :::{card}
 :header: **Hands-on**
 :link: hands-on/index.md
-Work through five QCE 2026 notebooks on quantum circuits, resource estimation, and optimization.
+Build and run quantum circuits, estimate their resource requirements, and solve a graph coloring problem in five notebooks.
 :::
 
 ::::

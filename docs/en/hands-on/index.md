@@ -1,6 +1,6 @@
 # Hands-on
 
-These five notebooks follow the Qamomile tutorial at IEEE Quantum Week 2026. Start with quantum teleportation, then work through resource estimation, circuit execution, phase estimation, and graph coloring. Each notebook can also be run on its own.
+Start with quantum teleportation, then work through resource estimation, circuit execution, phase estimation, and graph coloring. You can run each notebook on its own.
 
 ::::{grid} 1 1 1 1
 
