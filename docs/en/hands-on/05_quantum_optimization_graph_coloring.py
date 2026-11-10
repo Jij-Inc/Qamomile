@@ -493,7 +493,13 @@ plt.show()
 # For sizes where all methods reach the optimum, the lines on the left overlap at zero.
 #
 # :::{note}
-# Each timing covers one graph and one run at the given size. We optimize the QAOA angles ($\gamma,\beta$) and keep the layer count, evaluation budget, and SA settings fixed. Comparing solver performance more broadly would require multiple graphs, random seeds, and settings. The QAOA timings here measure classical simulation.
+# **About this benchmark**
+#
+# This is a small example for learning the workflow. We optimize the QAOA circuit parameters ($\gamma,\beta$), but have not thoroughly tuned the layer count, evaluation budget, or SA settings for a performance comparison.
+#
+# With one graph and one run per size, these results cannot establish which method performs better in general. A detailed comparison requires multiple graphs and random seeds.
+#
+# QAOA runs on a classical simulator, so these timings do not represent execution times on quantum hardware.
 # :::
 
 # %% [markdown]
