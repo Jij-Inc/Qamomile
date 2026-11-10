@@ -24,6 +24,8 @@ SKIP_TUTORIALS: dict[str, str] = {
 TUTORIAL_PATTERNS = [
     "docs/en/tutorial/**/*.py",
     "docs/en/tutorial/**/*.ipynb",
+    "docs/en/hands-on/**/*.py",
+    "docs/en/hands-on/**/*.ipynb",
     "docs/en/algorithm/**/*.py",
     "docs/en/algorithm/**/*.ipynb",
     "docs/en/usage/**/*.py",
@@ -37,6 +39,10 @@ TUTORIAL_PATTERNS = [
 # Tutorials that require optional dependency groups (e.g. chemistry)
 # and should be skipped when those dependencies are not installed.
 OPTIONAL_SKIP_MODULES: dict[str, tuple[str, ...]] = {
+    "05_quantum_optimization_graph_coloring": (
+        "ommx_openjij_adapter",
+        "ommx_pyscipopt_adapter",
+    ),
     "vqe_for_hydrogen": ("openfermion",),
     "braket_support": ("braket",),
     "hugr_support": ("hugr", "tket_exts", "selene_sim"),

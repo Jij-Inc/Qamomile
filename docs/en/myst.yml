@@ -23,6 +23,10 @@ project:
       file: tutorial/index.md
       children:
         - pattern: tutorial/*.ipynb
+    - title: Hands-on
+      file: hands-on/index.md
+      children:
+        - pattern: hands-on/*.ipynb
     - title: Algorithms
       file: algorithm/index.md
       children:

@@ -142,6 +142,12 @@ Install Qamomile itself, then add quantum SDK integrations such as CUDA-Q, QURI 
 Learn the basics of Qamomile step by step, including kernels, parameters, execution, and transpilation.
 :::
 
+:::{card}
+:header: **Hands-on**
+:link: hands-on/index.md
+Build and run quantum circuits, estimate their resource requirements, and solve a graph coloring problem in five notebooks.
+:::
+
 ::::
 
 ---
