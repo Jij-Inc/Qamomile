@@ -4099,6 +4099,16 @@ fn evaluate_contracted(
             }
             Ok(Some(Numeric::integer(floor_ratio(left, right))))
         }
+        Some("qamomile.positive_dimension") => {
+            let [value] = integer_arguments(arguments)?;
+            if value.is_positive() {
+                Ok(Some(Numeric::integer(value.clone())))
+            } else {
+                Err(ResourceExpressionEvaluationError::Domain(
+                    "a shape dimension must be positive".to_owned(),
+                ))
+            }
+        }
         Some("qamomile.modulo") => {
             let [left, right] = integer_arguments(arguments)?;
             if right.is_zero() {

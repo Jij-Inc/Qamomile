@@ -1109,46 +1109,27 @@ impl SymbolicAnalyzer<'_> {
                 }
             }
             Dimension::Symbol { scope, name } => {
-                if let Ok(polynomial) = PolynomialDimension::parse(name)
-                    && polynomial.constant >= 0
-                    && polynomial
-                        .terms
-                        .values()
-                        .all(|coefficient| *coefficient > 0)
-                {
-                    let mut terms = Vec::with_capacity(polynomial.terms.len() + 1);
-                    if polynomial.constant > 0 {
-                        terms.push(
-                            arena.literal_u128(u128::from(polynomial.constant.unsigned_abs()))?,
-                        );
+                if let Ok(polynomial) = PolynomialDimension::parse(name) {
+                    let natural = polynomial.constant >= 0
+                        && polynomial
+                            .terms
+                            .values()
+                            .all(|coefficient| *coefficient > 0);
+                    let terms = polynomial_width_terms(arena, scope, &polynomial, bindings)?;
+                    let sum = arena.add(terms)?;
+                    if natural {
+                        return Ok(sum);
                     }
-                    for (monomial, coefficient) in polynomial.terms {
-                        let mut factors = Vec::with_capacity(monomial.len() + 1);
-                        if coefficient != 1 {
-                            factors
-                                .push(arena.literal_u128(u128::from(coefficient.unsigned_abs()))?);
-                        }
-                        for symbol_name in monomial {
-                            let symbol = Dimension::Symbol {
-                                scope: Arc::clone(scope),
-                                name: Arc::from(symbol_name.as_str()),
-                            };
-                            if let Some(bound) = bindings.values.get(&symbol).copied() {
-                                factors.push(bound);
-                            } else {
-                                let constraint = format!("{symbol_name} >= 1");
-                                factors.push(arena.symbol(
-                                    scope,
-                                    &symbol_name,
-                                    ResourceDomain::Natural,
-                                    "type_dimension",
-                                    &[constraint.as_str()],
-                                )?);
-                            }
-                        }
-                        terms.push(arena.multiply(factors)?);
-                    }
-                    return arena.add(terms);
+                    // Signed polynomials such as `n-k` (the suffix of a symbolic
+                    // split) are positive for every admitted binding because
+                    // specialization rejects nonpositive widths. The contracted
+                    // positive-dimension node states that fact and evaluates to
+                    // the polynomial itself.
+                    return arena.contracted(
+                        "qamomile.positive_dimension",
+                        ResourceDomain::Natural,
+                        [sum],
+                    );
                 }
                 let constraint = format!("{name} >= 1");
                 arena.symbol(
@@ -1256,4 +1237,50 @@ impl SymbolicAnalyzer<'_> {
             _ => Ok(None),
         }
     }
+}
+
+/// Build one resource term per polynomial monomial, binding known symbols.
+fn polynomial_width_terms(
+    arena: &mut ExpressionArena,
+    scope: &Arc<str>,
+    polynomial: &PolynomialDimension,
+    bindings: &SymbolicDimensionBindings,
+) -> Result<Vec<ExprId>, SymbolicResourceError> {
+    let mut terms = Vec::with_capacity(polynomial.terms.len() + 1);
+    if polynomial.constant != 0 {
+        terms.push(
+            arena.literal_bigint(
+                &num_bigint::BigInt::from(polynomial.constant).to_signed_bytes_be(),
+            )?,
+        );
+    }
+    for (monomial, coefficient) in &polynomial.terms {
+        let mut factors = Vec::with_capacity(monomial.len() + 1);
+        if *coefficient != 1 {
+            factors
+                .push(arena.literal_bigint(
+                    &num_bigint::BigInt::from(*coefficient).to_signed_bytes_be(),
+                )?);
+        }
+        for symbol_name in monomial {
+            let symbol = Dimension::Symbol {
+                scope: Arc::clone(scope),
+                name: Arc::from(symbol_name.as_str()),
+            };
+            if let Some(bound) = bindings.values.get(&symbol).copied() {
+                factors.push(bound);
+            } else {
+                let constraint = format!("{symbol_name} >= 1");
+                factors.push(arena.symbol(
+                    scope,
+                    symbol_name,
+                    ResourceDomain::Natural,
+                    "type_dimension",
+                    &[constraint.as_str()],
+                )?);
+            }
+        }
+        terms.push(arena.multiply(factors)?);
+    }
+    Ok(terms)
 }

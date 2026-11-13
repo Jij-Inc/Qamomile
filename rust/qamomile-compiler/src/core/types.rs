@@ -279,6 +279,36 @@ impl PolynomialDimension {
         result
     }
 
+    /// Read a fixed or canonical symbolic dimension as a polynomial.
+    ///
+    /// Slice shapes and noncanonical spellings have no polynomial reading.
+    pub(crate) fn of_dimension(dimension: &Dimension) -> Option<Self> {
+        match dimension {
+            Dimension::Fixed(value) => Some(Self {
+                constant: i64::try_from(*value).ok()?,
+                terms: BTreeMap::new(),
+            }),
+            Dimension::Symbol { name, .. } if name.starts_with("slice(") => None,
+            Dimension::Symbol { name, .. } => Self::parse(name).ok(),
+        }
+    }
+
+    /// Return `self + scale * other` with checked coefficients.
+    pub(crate) fn add_scaled(&self, other: &Self, scale: i64) -> Option<Self> {
+        let mut result = self.clone();
+        result.constant = result
+            .constant
+            .checked_add(other.constant.checked_mul(scale)?)?;
+        for (monomial, coefficient) in &other.terms {
+            let entry = result.terms.entry(monomial.clone()).or_default();
+            *entry = entry.checked_add(coefficient.checked_mul(scale)?)?;
+            if *entry == 0 {
+                result.terms.remove(monomial);
+            }
+        }
+        Some(result)
+    }
+
     pub(crate) fn symbols(&self) -> impl Iterator<Item = &str> {
         self.terms
             .keys()

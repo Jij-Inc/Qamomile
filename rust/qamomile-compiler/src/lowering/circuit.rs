@@ -48,7 +48,7 @@ use crate::static_values::{
     self, StaticScalar, StaticValue, normalize_aggregate_index, range_len as static_range_len,
     truth as static_truth,
 };
-use crate::types::{SemanticType, TypeArena, TypeId};
+use crate::types::{Dimension, PolynomialDimension, SemanticType, TypeArena, TypeId};
 use crate::wire;
 
 const MAX_STATIC_CIRCUIT_INSTRUCTIONS: usize = 1_000_000;
@@ -1023,6 +1023,8 @@ struct StaticLowerer<'a> {
     known_scalars: HashMap<CircuitScalarId, StaticValue>,
     result_types: Vec<wire::TypeProto>,
     expanded_loops: Vec<ExpandedLoop>,
+    /// Concrete values of each active call frame's dimension binders.
+    dimension_frames: Vec<HashMap<String, u64>>,
     operation_visits: u128,
     aggregate_projection_work: usize,
     call_cache: HashMap<CallCacheKey, CallCacheEntry>,
@@ -1689,6 +1691,7 @@ fn project_with_host_decisions(
         known_scalars: HashMap::new(),
         result_types: Vec::new(),
         expanded_loops: Vec::new(),
+        dimension_frames: Vec::new(),
         operation_visits: 0,
         aggregate_projection_work: 0,
     };
@@ -2129,11 +2132,108 @@ impl StaticLowerer<'_> {
             StaticCircuitError::Missing(format!("result type for {:?}", function.symbol))
         })?;
         self.result_types.push(result_type);
+        let frame = self.dimension_frame(function, arguments);
+        self.dimension_frames.push(frame);
         let outer_loops = std::mem::take(&mut self.expanded_loops);
         let result = self.emit_block(body, &environment, &[]);
         self.expanded_loops = outer_loops;
+        self.dimension_frames.pop();
         self.result_types.pop();
         result
+    }
+
+    /// Bind a callee's dimension binders from its concrete arguments.
+    ///
+    /// Const Int parameters bind to their static values and a single-word
+    /// quantum parameter `Q[Bits[n]]` or `Q[UInt[n]]` binds `n` to the number
+    /// of argument wires. Other shapes leave their binders unresolved.
+    fn dimension_frame(
+        &self,
+        function: &wire::FunctionProto,
+        arguments: &[CircuitValue],
+    ) -> HashMap<String, u64> {
+        let mut frame = HashMap::new();
+        let mut types = TypeArena::default();
+        let scope = types.intern_scope("static-circuit-frame");
+        for (parameter, argument) in function.parameters.iter().zip(arguments) {
+            let Some(type_id) = parameter
+                .value
+                .as_ref()
+                .and_then(|value| value.r#type.as_ref())
+                .and_then(|r#type| types.resolve_wire_type(r#type, &scope).ok())
+            else {
+                continue;
+            };
+            let stripped = types.strip_stage(type_id);
+            match types.get(stripped) {
+                Some(SemanticType::Scalar(crate::types::ScalarType::Int)) => {
+                    if let Some(value) = self
+                        .static_int(argument)
+                        .and_then(|value| u64::try_from(value).ok())
+                    {
+                        frame.insert(parameter.name.clone(), value);
+                    }
+                }
+                Some(SemanticType::Quantum(payload)) => {
+                    if let Some(SemanticType::Word {
+                        width: Dimension::Symbol { name, .. },
+                        ..
+                    }) = types.get(*payload)
+                    {
+                        let mut wires = Vec::new();
+                        if flatten_coherent_wires(argument, &mut wires).is_ok()
+                            && !name.contains(['+', '-', '*'])
+                        {
+                            frame.insert(name.to_string(), wires.len() as u64);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        frame
+    }
+
+    /// Replace polynomial widths bound by the current call frame with values.
+    fn resolve_frame_dimensions(
+        &self,
+        source: &wire::TypeProto,
+    ) -> Result<wire::TypeProto, StaticCircuitError> {
+        let Some(frame) = self
+            .dimension_frames
+            .last()
+            .filter(|frame| !frame.is_empty())
+        else {
+            return Ok(source.clone());
+        };
+        let mut types = TypeArena::default();
+        let scope = types.intern_scope("static-circuit-frame");
+        let root = types.resolve_wire_type(source, &scope).map_err(|error| {
+            StaticCircuitError::Unsupported(format!("coherent circuit type: {error}"))
+        })?;
+        let mut substitutions = HashMap::new();
+        for dimension in types.dimensions_in([root]) {
+            let Dimension::Symbol { name, .. } = &dimension else {
+                continue;
+            };
+            if let Some(value) = PolynomialDimension::parse(name)
+                .ok()
+                .and_then(|polynomial| polynomial.evaluate(|symbol| frame.get(symbol).copied()))
+            {
+                substitutions.insert(dimension, Dimension::Fixed(value));
+            }
+        }
+        if substitutions.is_empty() {
+            return Ok(source.clone());
+        }
+        let substituted = types
+            .substitute_dimensions(root, &substitutions)
+            .map_err(|error| {
+                StaticCircuitError::Unsupported(format!("coherent circuit type: {error}"))
+            })?;
+        types.encode_wire_type(substituted).map_err(|error| {
+            StaticCircuitError::Unsupported(format!("coherent circuit type: {error}"))
+        })
     }
 
     fn emit_block(
@@ -2595,7 +2695,8 @@ impl StaticLowerer<'_> {
             }
         }
         let mut position = 0_usize;
-        let reshaped = pack_coherent_wires(target_type, &wires, &mut position)?;
+        let target_type = self.resolve_frame_dimensions(target_type)?;
+        let reshaped = pack_coherent_wires(&target_type, &wires, &mut position)?;
         if position != wires.len() {
             return Err(StaticCircuitError::Missing(
                 "qcore.reshape width equation".to_owned(),

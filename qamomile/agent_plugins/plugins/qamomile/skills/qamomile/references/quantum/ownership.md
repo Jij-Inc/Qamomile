@@ -33,3 +33,22 @@ def link(state: qm.Q[qm.Bits[n]], control: qm.Int, target: qm.Int) -> qm.Q[qm.Bi
 Here `n` is a dependent dimension bound by the input shape. Allocation widths
 and structural shapes need compile-time information. Keep quantum states
 inside kernel composition; executable host entries return classical data.
+
+Widths may be polynomials over `Const[Int]` parameters. A `split_at` boundary
+can be a literal or an integer expression over Const Int parameters that the
+kernel never rebinds, and `concat` adds the widths of its owners:
+
+```python
+@qm.qkernel
+def suffix_flip(n: qm.Const[qm.Int], k: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[n + 1]]:
+    prefix, rest = qm.split_at(qm.qubits(n), k)
+    rest = qm.x(rest)
+    return qm.measure(qm.concat(prefix, rest, qm.qubits(1)))
+```
+
+`prefix` is `Bits[k]` and `rest` is `Bits[n-k]`; `qm.qubits(2 * n + 1)` is
+likewise `Bits[2*n+1]`. Widths compare as polynomials, so concatenating the two
+parts restores `Bits[n]` and the result can be a loop carry. Specialization
+rejects bindings that make any width nonpositive (`Q3007`). A loop index is not
+a dimension binder: select a lane with a gate selector or `qm.control(..., at=i)`.
+

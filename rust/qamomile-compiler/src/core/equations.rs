@@ -17,7 +17,8 @@ use crate::control_state::ControlState;
 use crate::core::slice_shape::{SliceBound, operation_bounds};
 use crate::operations::{LocallyCheckedOperations, PrimitiveGateSpec, primitive_gate_spec};
 use crate::types::{
-    CoherentLeafWidth, Dimension, ScalarType, SemanticType, Stage, TypeArena, TypeId, WordKind,
+    CoherentLeafWidth, Dimension, PolynomialDimension, ScalarType, SemanticType, Stage, TypeArena,
+    TypeId, WordKind,
 };
 use crate::verification::QCoreVerificationWork;
 use crate::wire;
@@ -1584,26 +1585,36 @@ fn unpack_owners_are_valid(
     true
 }
 
-fn coherent_width_expression(
-    arena: &TypeArena,
-    type_id: TypeId,
-) -> Option<(u64, HashMap<Dimension, u64>)> {
-    let mut fixed = 0_u64;
-    let mut symbolic = HashMap::<Dimension, u64>::new();
+/// Sum the widths of every coherent leaf as one canonical polynomial.
+///
+/// Symbolic widths are read through their canonical polynomial spelling, so
+/// `(Bits[k], Bits[n-k])` and `Bits[n]` denote the same width. Leaves from
+/// different dimension scopes, slice shapes, and arithmetic overflow have no
+/// width expression.
+fn coherent_width_expression(arena: &TypeArena, type_id: TypeId) -> Option<PolynomialDimension> {
+    let mut total = PolynomialDimension {
+        constant: 0,
+        terms: std::collections::BTreeMap::new(),
+    };
+    let mut scope: Option<Arc<str>> = None;
     let complete = arena
         .visit_coherent_value_leaves(type_id, &mut |leaf| {
             let mut add = |dimension: &Dimension| -> Option<()> {
-                match dimension {
-                    Dimension::Fixed(width) => fixed = fixed.checked_add(*width)?,
-                    Dimension::Symbol { .. } => {
-                        let count = symbolic.entry(dimension.clone()).or_default();
-                        *count = count.checked_add(1)?;
+                if let Dimension::Symbol {
+                    scope: leaf_scope, ..
+                } = dimension
+                {
+                    match &scope {
+                        Some(existing) if existing != leaf_scope => return None,
+                        Some(_) => {}
+                        None => scope = Some(Arc::clone(leaf_scope)),
                     }
                 }
+                total = total.add_scaled(&PolynomialDimension::of_dimension(dimension)?, 1)?;
                 Some(())
             };
             match leaf {
-                CoherentLeafWidth::Bit => fixed = fixed.checked_add(1).ok_or(())?,
+                CoherentLeafWidth::Bit => add(&Dimension::Fixed(1)).ok_or(())?,
                 CoherentLeafWidth::Word(width) => add(width).ok_or(())?,
                 CoherentLeafWidth::Fixed {
                     integer_bits,
@@ -1616,7 +1627,7 @@ fn coherent_width_expression(
             Ok::<_, ()>(true)
         })
         .ok()?;
-    complete.then_some((fixed, symbolic))
+    complete.then_some(total)
 }
 
 fn coherent_payload_width(arena: &TypeArena, type_id: TypeId) -> Option<u64> {

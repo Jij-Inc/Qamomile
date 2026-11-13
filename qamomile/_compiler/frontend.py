@@ -242,6 +242,7 @@ class _Frontend:
         self.signatures: dict[str, _Signature] = {}
         self._loop_depth = 0
         self._slice_parameters: set[str] = set()
+        self._dimension_parameters: set[str] = set()
 
     def compile(self) -> HIRModule:
         """Collect all signatures, then capture every declared body.
@@ -609,6 +610,12 @@ class _Frontend:
             parameter.name: parameter.type for parameter in signature.parameters
         }
         self._slice_parameters = set(environment)
+        rebound = _assigned_names(_function_body(signature.node))
+        self._dimension_parameters = {
+            parameter.name
+            for parameter in signature.parameters
+            if parameter.type == Const[Int] and parameter.name not in rebound
+        }
         body, _, terminated = self._compile_block(
             _function_body(signature.node),
             environment,
@@ -3192,7 +3199,13 @@ class _Frontend:
                     self._error(node, "Q5034", "qubit count constant must be positive")
                 size = raw_size
             else:
-                size = "dynamic"
+                polynomial = self._dimension_polynomial(positional[0])
+                symbolic = (
+                    None if polynomial is None else _polynomial_dimension(*polynomial)
+                )
+                if polynomial is not None and not polynomial[1] and symbolic is None:
+                    self._error(node, "Q5033", "qubit count must be positive")
+                size = "dynamic" if symbolic is None else symbolic
             return HIRExpression(
                 "quantum.alloc",
                 Q[Bits[size]],
@@ -3335,31 +3348,34 @@ class _Frontend:
                     "Q5095",
                     "qm.split_at expects a state and boundary",
                 )
-            widths = coherent_leaf_widths(positional[0].type)
+            widths = _coherent_leaf_dimensions(positional[0].type)
             if widths is None or len(widths) != 1:
                 self._type_error(node, "qm.split_at expects Q[Bits[N]]")
-            boundary = _static_integer_value(positional[1])
-            if boundary is None:
+            width = widths[0]
+            boundary_polynomial = self._dimension_polynomial(positional[1])
+            if boundary_polynomial is None:
                 self._error(
                     node,
                     "Q5096",
-                    "qm.split_at boundary must be a compile-time integer",
+                    "qm.split_at boundary must be a compile-time integer or an "
+                    "integer expression over Const Int parameters",
                 )
-            width = widths[0]
-            if (
-                isinstance(boundary, bool)
-                or not isinstance(boundary, int)
-                or boundary <= 0
-                or boundary >= width
-            ):
+            prefix = _polynomial_dimension(*boundary_polynomial)
+            suffix = _polynomial_dimension(
+                *_subtract_polynomials(
+                    _dimension_to_polynomial(width), boundary_polynomial
+                )
+            )
+            if prefix is None or suffix is None:
+                bound = width if isinstance(width, int) else f"the width {width}"
                 self._error(
                     node,
                     "Q5097",
-                    f"qm.split_at boundary must satisfy 0 < boundary < {width}",
+                    f"qm.split_at boundary must satisfy 0 < boundary < {bound}",
                 )
             return HIRExpression(
                 "qcore.reshape",
-                ProductType((Q[Bits[boundary]], Q[Bits[width - boundary]])),
+                ProductType((Q[Bits[prefix]], Q[Bits[suffix]])),
                 (positional[0],),
                 span=self._span(node),
             )
@@ -3371,9 +3387,17 @@ class _Frontend:
                     "qm.concat expects at least two coherent values",
                 )
             product = ProductType(tuple(value.type for value in positional))
-            widths = coherent_leaf_widths(product)
-            if widths is None or len(widths) != len(product.elements):
+            leaves = [_coherent_leaf_dimensions(value.type) for value in positional]
+            if any(leaf is None for leaf in leaves):
                 self._type_error(node, "qm.concat expects coherent values")
+            total: tuple[int, dict[tuple[str, ...], int]] = (0, {})
+            for leaf in leaves:
+                assert leaf is not None
+                for dimension in leaf:
+                    total = _add_polynomials(total, _dimension_to_polynomial(dimension))
+            combined = _polynomial_dimension(*total)
+            if combined is None:
+                self._type_error(node, "qm.concat width exceeds the dimension budget")
             packed = HIRExpression(
                 "tuple",
                 product,
@@ -3382,7 +3406,7 @@ class _Frontend:
             )
             return HIRExpression(
                 "qcore.reshape",
-                Q[Bits[sum(widths)]],
+                Q[Bits[combined]],
                 (packed,),
                 span=self._span(node),
             )
@@ -4143,6 +4167,57 @@ class _Frontend:
         self._error(annotation, "Q5063", "type annotation is not statically resolvable")
         raise AssertionError
 
+    def _dimension_polynomial(
+        self, expression: HIRExpression
+    ) -> tuple[int, dict[tuple[str, ...], int]] | None:
+        """Read a typed integer expression as a dimension polynomial.
+
+        Only literals, module constants, and Const Int parameters that the
+        function never rebinds can appear, combined with ``+``, ``-``, unary
+        signs, and ``*``. Such parameters are the dependent dimension binders
+        that specialization substitutes, so the resulting shape stays exact
+        for every admitted binding.
+
+        Args:
+            expression (HIRExpression): Typed boundary or size expression.
+
+        Returns:
+            tuple[int, dict[tuple[str, ...], int]] | None: Constant and
+                monomial coefficients, or ``None`` outside that fragment.
+        """
+
+        value = _static_integer_value(expression)
+        if value is not None:
+            return value, {}
+        opcode = expression.opcode
+        if opcode == "name":
+            name = expression.attribute("name")
+            if (
+                isinstance(name, str)
+                and name in self._dimension_parameters
+                and expression.type == Const[Int]
+            ):
+                return 0, {(name,): 1}
+            return None
+        if opcode == "classical.pos" and len(expression.operands) == 1:
+            return self._dimension_polynomial(expression.operands[0])
+        if opcode == "classical.neg" and len(expression.operands) == 1:
+            operand = self._dimension_polynomial(expression.operands[0])
+            return None if operand is None else _subtract_polynomials((0, {}), operand)
+        if opcode in {"classical.add", "classical.sub", "classical.mul"} and (
+            len(expression.operands) == 2
+        ):
+            left = self._dimension_polynomial(expression.operands[0])
+            right = self._dimension_polynomial(expression.operands[1])
+            if left is None or right is None:
+                return None
+            if opcode == "classical.add":
+                return _add_polynomials(left, right)
+            if opcode == "classical.sub":
+                return _subtract_polynomials(left, right)
+            return _multiply_polynomials(left, right)
+        return None
+
     def _parse_dimension(self, expression: ast.expr) -> int | str:
         """Parse and canonicalize one positive polynomial logical dimension.
 
@@ -4617,6 +4692,162 @@ def _quantum_uint_width(type_spec: TypeSpec) -> Dimension | None:
     ):
         return base.inner.width
     return None
+
+
+_Polynomial: TypeAlias = tuple[int, dict[tuple[str, ...], int]]
+_MAX_DIMENSION_TERMS = 64
+_MAX_DIMENSION_MAGNITUDE = 2**31
+
+
+def _add_polynomials(
+    left: _Polynomial, right: _Polynomial, scale: int = 1
+) -> _Polynomial:
+    """Return ``left + scale * right`` without zero coefficients."""
+
+    terms = dict(left[1])
+    for monomial, coefficient in right[1].items():
+        terms[monomial] = terms.get(monomial, 0) + scale * coefficient
+        if terms[monomial] == 0:
+            del terms[monomial]
+    return left[0] + scale * right[0], terms
+
+
+def _subtract_polynomials(left: _Polynomial, right: _Polynomial) -> _Polynomial:
+    """Return ``left - right``."""
+
+    return _add_polynomials(left, right, -1)
+
+
+def _multiply_polynomials(left: _Polynomial, right: _Polynomial) -> _Polynomial:
+    """Return the product of two dimension polynomials."""
+
+    left_terms = {(): left[0], **left[1]}
+    right_terms = {(): right[0], **right[1]}
+    product: dict[tuple[str, ...], int] = {}
+    for left_monomial, left_coefficient in left_terms.items():
+        for right_monomial, right_coefficient in right_terms.items():
+            monomial = tuple(sorted((*left_monomial, *right_monomial)))
+            product[monomial] = product.get(monomial, 0) + (
+                left_coefficient * right_coefficient
+            )
+    constant = product.pop((), 0)
+    return constant, {
+        monomial: coefficient
+        for monomial, coefficient in product.items()
+        if coefficient
+    }
+
+
+def _dimension_to_polynomial(dimension: Dimension) -> _Polynomial:
+    """Read a fixed width or canonical symbolic spelling as a polynomial.
+
+    Args:
+        dimension (Dimension): Positive width or canonical polynomial text.
+
+    Returns:
+        _Polynomial: Constant and monomial coefficients.
+
+    Raises:
+        TypeCheckError: If the spelling is outside the dimension language.
+    """
+
+    if isinstance(dimension, int):
+        return dimension, {}
+    try:
+        tree = ast.parse(dimension, mode="eval").body
+    except SyntaxError as error:
+        raise TypeCheckError(f"invalid dimension spelling {dimension!r}") from error
+
+    def read(node: ast.expr) -> _Polynomial:
+        if isinstance(node, ast.Constant) and type(node.value) is int:
+            return node.value, {}
+        if isinstance(node, ast.Name):
+            return 0, {(node.id,): 1}
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            return _subtract_polynomials((0, {}), read(node.operand))
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            return _add_polynomials(read(node.left), read(node.right))
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Sub):
+            return _subtract_polynomials(read(node.left), read(node.right))
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+            return _multiply_polynomials(read(node.left), read(node.right))
+        raise TypeCheckError(f"invalid dimension spelling {dimension!r}")
+
+    return read(tree)
+
+
+def _polynomial_dimension(
+    constant: int, terms: dict[tuple[str, ...], int]
+) -> Dimension | None:
+    """Return the canonical dimension of a polynomial, or ``None`` if invalid.
+
+    A constant polynomial must be positive. A symbolic polynomial keeps its
+    canonical spelling; specialization rejects bindings that make it
+    nonpositive. Polynomials over the shared complexity budget are invalid.
+    """
+
+    if not terms:
+        return constant if constant > 0 else None
+    if (
+        len(terms) > _MAX_DIMENSION_TERMS
+        or sum(len(monomial) for monomial in terms) > _MAX_DIMENSION_TERMS
+        or any(
+            abs(value) > _MAX_DIMENSION_MAGNITUDE
+            for value in (constant, *terms.values())
+        )
+    ):
+        return None
+    if all(coefficient < 0 for coefficient in terms.values()) and constant <= 0:
+        return None
+    return _format_polynomial_dimension(constant, terms)
+
+
+def _coherent_leaf_dimensions(type_spec: TypeSpec) -> list[Dimension] | None:
+    """Return the ordered fixed or symbolic widths of coherent leaves.
+
+    Args:
+        type_spec (TypeSpec): A quantum value or product of quantum values.
+
+    Returns:
+        list[Dimension] | None: Leaf widths, or ``None`` for other types.
+    """
+
+    base = strip_stage(type_spec)
+
+    def payload(inner: TypeSpec) -> list[Dimension] | None:
+        if isinstance(inner, WordType):
+            return [inner.width]
+        if inner in (Bit, Bool):
+            return [1]
+        if isinstance(inner, FixedType):
+            total = _add_polynomials(
+                _dimension_to_polynomial(inner.integer_bits),
+                _dimension_to_polynomial(inner.fractional_bits),
+            )
+            width = _polynomial_dimension(*total)
+            return None if width is None else [width]
+        if isinstance(inner, ProductType):
+            leaves: list[Dimension] = []
+            for element in inner.elements:
+                nested = payload(element)
+                if nested is None:
+                    return None
+                leaves.extend(nested)
+            return leaves
+        return None
+
+    if isinstance(base, QuantumType):
+        return payload(base.inner)
+    if isinstance(base, ProductType):
+        leaves: list[Dimension] = []
+        for element in base.elements:
+            nested = _coherent_leaf_dimensions(element)
+            if nested is None:
+                return None
+            leaves.extend(nested)
+        return leaves
+    widths = coherent_leaf_widths(type_spec)
+    return None if widths is None else list(widths)
 
 
 def _format_affine_dimension(constant: int, terms: dict[str, int]) -> str:
