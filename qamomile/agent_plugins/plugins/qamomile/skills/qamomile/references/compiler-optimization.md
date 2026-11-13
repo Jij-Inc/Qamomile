@@ -97,9 +97,10 @@ compiled artifact passed to `run` cannot select another optimizer.
 ## Optimize before and after specialization
 
 The multi-level factory composes symbolic common-expression elimination (F),
-common-expression elimination plus standard QCore simplification (H), bounded
-addition realization selection (R), and phase-exact local circuit simplification
-(C). The target owns device synthesis/routing (T); Qiskit optimization level 3
+common-expression elimination plus standard QCore simplification (H), and
+phase-exact local circuit simplification (C). Bounded selector-count addition
+selection (R) is opt-in with `multilevel(realization=RealizationSelection())`.
+The target owns device synthesis/routing (T); Qiskit optimization level 3
 is an ordinary OSS target option. Keep these levels distinct from Const/Param/Shot.
 
 ```python
@@ -148,13 +149,31 @@ late circuit policies on that adapter fails before any pass runs. Circuit target
 Reference, and QIR consume the portable late policies. QIR does not thereby gain
 finite-family or shot-execution support.
 
-`RealizationSelection` compares existing addition schedules by exact generated
-selector count, with step count as a tie-breaker. This is a compiler/emitter work
-metric, not a fidelity/latency prediction. Target-native choices and explicit
-`RealizationOptions` take precedence. `CircuitSimplification` preserves global
-phase, controls, measurements, numeric-check positions, and segment boundaries.
-It optimizes each shared retained body once and keeps arithmetic recipes lazy.
+Without a policy or explicit choice, portable `add_into` picks the candidate
+with the fewest estimated CNOTs for its width and surrounding coherent controls:
+`add.ripple` (ancilla-free ripple carry, 16n-13 CNOTs; only its 2n-1 target
+CNOTs inherit controls), `add.qft` for three or four bits, and `add.increments`
+for at most two. A coherently controlled `add_into` also replaces a default
+native choice with this portable choice; explicit `add.native` is kept.
+`RealizationSelection` instead compares schedules by exact generated selector
+count, with step count as a tie-breaker. This is a compiler/emitter work metric,
+not a fidelity/latency prediction, and it can select a much larger circuit
+(selectors count a multi-controlled X linearly). Target-native choices and
+explicit `RealizationOptions` take precedence.
+
+`CircuitSimplification` (version 2) moves each gate back past earlier gates
+that provably commute with it: on every shared wire both act diagonally
+(phases, controls) or both lie in the Pauli-X algebra (X, RX, CX/CCX targets).
+It then cancels inverse pairs, fuses exact phase gates (T T = S, Z S = Sdg),
+merges same-axis rotation angles (folding literal sums and building symbolic
+sums), and removes zero rotations. Top-level uncontrolled SWAPs become wire
+relabeling of later gates and measurements; the net permutation is restored
+with SWAPs before regions, cuts, numeric checks, and live result wires. It
+preserves global phase, controls, measurements, classically conditioned gates,
+structured regions, numeric-check positions, and segment boundaries. It
+optimizes each shared retained body once and keeps arithmetic recipes lazy.
 Its work bound includes shared retained bodies, counted once per projection.
+Artifacts recorded with version 1 keep its adjacent-instruction rules.
 
 R/C currently use versioned native strategies rather than arbitrary Python late
 callbacks. Include or omit them with pipeline constructor arguments; extending

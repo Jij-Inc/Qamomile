@@ -670,7 +670,7 @@ def test_cirq_google_engine_keeps_configuration_at_endpoint_boundary(
         )
 
 
-@pytest.mark.parametrize("choice", ["add.increments", "add.qft"])
+@pytest.mark.parametrize("choice", ["add.increments", "add.qft", "add.ripple"])
 def test_cirq_executes_late_realizations(choice: str) -> None:
     """One shared arithmetic source survives exact alternative realizations."""
     pytest.importorskip("cirq")

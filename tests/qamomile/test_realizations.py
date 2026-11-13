@@ -37,7 +37,7 @@ def test_discovery_matches_validation_and_is_immutable() -> None:
     from dataclasses import FrozenInstanceError
 
     choices = list_realizations()
-    assert len(choices) == 15
+    assert len(choices) == 16
     assert len({choice.name for choice in choices}) == len(choices)
     for choice in choices:
         assert not choice.name.endswith(".v1")
@@ -160,7 +160,9 @@ def exercise_realization_backend(
     )
 
 
-@pytest.mark.parametrize("choice", ["add.increments", "add.qft", "add.native"])
+@pytest.mark.parametrize(
+    "choice", ["add.increments", "add.qft", "add.ripple", "add.native"]
+)
 @pytest.mark.parametrize("width", [1, 2, 3])
 def test_addition_matrix_matches_full_complex_unitary(choice: str, width: int) -> None:
     """All basis amplitudes and phases agree with an independent permutation."""

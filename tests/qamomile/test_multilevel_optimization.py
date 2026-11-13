@@ -8,6 +8,7 @@ from qamomile.compilation import (
     OptimizationContext,
     OptimizationPipeline,
     OptimizationProgram,
+    RealizationSelection,
 )
 from qamomile.persistence import deserialize, serialize
 from qamomile.source import ProgramFamily
@@ -75,7 +76,7 @@ def test_complete_flow_preserves_source_and_restores_without_callbacks():
     from qamomile.qiskit import QiskitBackend
 
     source = family()
-    pipeline = OptimizationPipeline.multilevel()
+    pipeline = OptimizationPipeline.multilevel(realization=RealizationSelection())
     endpoint = QiskitBackend(AerSimulator(), optimization_level=3, seed_transpiler=7)
     target = endpoint.target
     artifact = qm.compile(source, n=1, to=target, optimizer=pipeline)
@@ -83,7 +84,7 @@ def test_complete_flow_preserves_source_and_restores_without_callbacks():
     assert "optimization:family.common-expressions@1" in stages
     assert "optimization:qcore.common-expressions@1" in stages
     assert "optimization:realization.minimum-selectors@1" in stages
-    assert "optimization:circuit.exact-local@1" in stages
+    assert "optimization:circuit.exact-local@2" in stages
     assert "qiskit-routing" in stages
     assert artifact.source_digest.hex() == source.specialize(n=1).semantic_digest
     for candidate in (artifact, deserialize(serialize(artifact))):
@@ -268,7 +269,7 @@ def test_late_circuit_optimization_reaches_qir():
     artifact = qm.compile(
         _program(), to=QIR(), optimizer=OptimizationPipeline.multilevel(family=False)
     )
-    assert "optimization:circuit.exact-local@1" in artifact.report.stages
+    assert "optimization:circuit.exact-local@2" in artifact.report.stages
     assert _counts(deserialize(serialize(artifact)), shots=4) == {(1,): 4}
 
 
@@ -356,16 +357,19 @@ def test_late_realization_policy_survives_native_preparation_and_overrides():
 def sample() -> qm.Shot[qm.Bits[32]]:
     return qm.measure(qm.add_into(qm.qubits(32)))
 """).specialize("sample")
-    pipeline = OptimizationPipeline.multilevel(family=False)
+    pipeline = OptimizationPipeline.multilevel(
+        family=False, realization=RealizationSelection()
+    )
     prepared = pipeline._prepare(source, OptimizationContext("", frozenset()))
     circuit = lower_to_circuit(prepared)
-    assert "add.qft" in circuit.realizations
+    # Sixteen-bit ripple carry has fewer selectors (666) than Fourier addition.
+    assert "add.ripple" in circuit.realizations
     explicit = lower_to_circuit(
         prepared, realizations=RealizationOptions({qm.add_into: "add.increments"})
     )
     assert "add.increments" in explicit.realizations
     assert "optimization:realization.minimum-selectors@1" in circuit.realization_stages
-    assert "optimization:circuit.exact-local@1" in explicit.realization_stages
+    assert "optimization:circuit.exact-local@2" in explicit.realization_stages
 
 
 @pytest.mark.parametrize("middle, expected", [("x", 2.0), ("z", 0.5)])
@@ -401,3 +405,94 @@ def test_late_rewrite_preserves_lazy_measured_error_checks(middle, expected):
     else:
         with pytest.raises(qm.QamomileError):
             qm.execute(artifact, on=endpoint, parameters={"value": 0.0}, shots=4)
+
+
+COMMUTING_RULES_SOURCE = """import qamomile as qm
+@qm.qkernel
+def state(theta: qm.Param[qm.Real]) -> qm.Q[qm.Bits[4]]:
+    s = qm.qubits(4)
+    for i in range(4):
+        s = qm.h(s, target=i)
+    s = qm.swap(s, left=0, right=3)
+    s = qm.cx(s, control=0, target=1)
+    s = qm.rz(s, theta, target=0)
+    s = qm.t(s, target=2)
+    s = qm.cx(s, control=0, target=1)
+    s = qm.cp(s, 0.25, control=1, target=2)
+    s = qm.rz(s, theta, target=0)
+    s = qm.cp(s, -0.25, control=2, target=1)
+    s = qm.swap(s, left=1, right=2)
+    s = qm.t(s, target=1)
+    return s
+"""
+
+
+@pytest.mark.parametrize("theta", [0.0, 0.7])
+def test_commuting_circuit_rules_preserve_full_operator_with_relabeled_swaps(theta):
+    """Lookback cancellation, angle merging and swap relabeling are phase exact."""
+    import numpy as np
+    from qiskit.quantum_info import Operator
+
+    from qamomile.compilation import CircuitSimplification
+    from qamomile.qiskit import Qiskit, to_circuit
+
+    program = qm.build_source(COMMUTING_RULES_SOURCE).specialize("state")
+    target = Qiskit(use_native_pauli_evolution=False)
+    context = OptimizationContext("", frozenset())
+    baseline = to_circuit(
+        OptimizationPipeline()._prepare(program, context),
+        target=target,
+        parameters={"theta": theta},
+    )
+    assert baseline.count_ops()["cx"] == 2
+    optimized_program = OptimizationPipeline(circuit=CircuitSimplification())._prepare(
+        program, context
+    )
+    optimized = to_circuit(
+        optimized_program, target=target, parameters={"theta": theta}
+    )
+    np.testing.assert_allclose(
+        Operator(optimized).data, Operator(baseline).data, rtol=0, atol=1e-12
+    )
+    ops = optimized.count_ops()
+    # Both CX cancel across the commuting RZ; the two RZ merge; the CP pair
+    # cancels; live result wires restore the net permutation with swaps only.
+    assert "cx" not in ops
+    assert ops.get("rz", 0) == 1
+    assert "cp" not in ops
+
+
+def test_circuit_rules_accept_checks_recorded_inside_retained_loops():
+    """Numeric checks emitted inside a nested loop body do not break remapping."""
+    import numpy as np
+    from qiskit.quantum_info import Operator
+    from qiskit.transpiler.passes import UnrollForLoops
+
+    from qamomile.compilation import CircuitSimplification
+    from qamomile.qiskit import to_circuit
+
+    program = qm.build_source("""import qamomile as qm
+@qm.qkernel
+def repeated(state: qm.Q[qm.Bits[1]]) -> qm.Q[qm.Bits[1]]:
+    for index in range(1, 6, 2):
+        state = qm.rx(state, 0.13 * index)
+        state = qm.rz(state, 0.21 * index)
+        state = qm.global_phase(state, 0.07 * index)
+    return state
+
+@qm.qkernel
+def state() -> qm.Q[qm.Bits[2]]:
+    control, target = qm.split_at(qm.qubits(2), 1)
+    control, target = qm.control(repeated, control, target)
+    return qm.concat(control, target)
+""").specialize("state")
+    context = OptimizationContext("", frozenset())
+    circuits = [
+        to_circuit(pipeline._prepare(program, context))
+        for pipeline in (
+            OptimizationPipeline(),
+            OptimizationPipeline(circuit=CircuitSimplification()),
+        )
+    ]
+    baseline, optimized = (Operator(UnrollForLoops()(item)).data for item in circuits)
+    np.testing.assert_allclose(optimized, baseline, rtol=0, atol=1e-12)

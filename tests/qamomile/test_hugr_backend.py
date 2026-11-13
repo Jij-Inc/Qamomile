@@ -2846,7 +2846,7 @@ def test_hugr_executes_typed_product_result() -> None:
     assert result.values == {((1,), (0, 1)): 3}
 
 
-@pytest.mark.parametrize("choice", ["add.increments", "add.qft"])
+@pytest.mark.parametrize("choice", ["add.increments", "add.qft", "add.ripple"])
 def test_hugr_executes_late_realizations(choice: str) -> None:
     """One shared arithmetic source survives exact alternative realizations."""
     pytest.importorskip("selene_sim")

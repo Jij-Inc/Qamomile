@@ -177,14 +177,14 @@ pub struct OptimizationPolicy {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LateOptimization {
     minimum_selectors: bool,
-    exact_circuit: bool,
+    exact_circuit: Option<crate::lowering::circuit::ExactCircuitRules>,
     max_work: u64,
 }
 
 impl LateOptimization {
     pub(crate) const NONE: Self = Self {
         minimum_selectors: false,
-        exact_circuit: false,
+        exact_circuit: None,
         max_work: MAX_REWRITE_WORK,
     };
 
@@ -197,17 +197,32 @@ impl LateOptimization {
             ..Self::NONE
         };
         for pass in passes {
-            let slot = match pass.name.as_str() {
-                REALIZATION_SELECTION_PASS => &mut result.minimum_selectors,
-                CIRCUIT_SIMPLIFICATION_PASS => &mut result.exact_circuit,
-                _ => continue,
+            let unsupported = || {
+                OptimizationError::invalid("unsupported late optimization version or configuration")
             };
-            if pass.version != "1" || !pass.configuration.is_empty() {
-                return Err(OptimizationError::invalid(
-                    "unsupported late optimization version or configuration",
-                ));
+            if !matches!(
+                pass.name.as_str(),
+                REALIZATION_SELECTION_PASS | CIRCUIT_SIMPLIFICATION_PASS
+            ) {
+                continue;
             }
-            *slot = true;
+            if !pass.configuration.is_empty() {
+                return Err(unsupported());
+            }
+            match (pass.name.as_str(), pass.version.as_str()) {
+                (REALIZATION_SELECTION_PASS, "1") => result.minimum_selectors = true,
+                // Version 1 is retained so restored artifacts reproduce their
+                // recorded projection; version 2 adds commutation lookback.
+                (CIRCUIT_SIMPLIFICATION_PASS, "1") => {
+                    result.exact_circuit =
+                        Some(crate::lowering::circuit::ExactCircuitRules::Adjacent);
+                }
+                (CIRCUIT_SIMPLIFICATION_PASS, "2") => {
+                    result.exact_circuit =
+                        Some(crate::lowering::circuit::ExactCircuitRules::Commuting);
+                }
+                _ => return Err(unsupported()),
+            }
         }
         Ok(result)
     }
@@ -227,8 +242,8 @@ impl LateOptimization {
         if self.minimum_selectors {
             circuit.record_realization_selection();
         }
-        if self.exact_circuit {
-            circuit = circuit.simplify_exact(self.max_work)?;
+        if let Some(rules) = self.exact_circuit {
+            circuit = circuit.simplify_exact_with(self.max_work, rules)?;
         }
         Ok(circuit)
     }

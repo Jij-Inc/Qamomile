@@ -918,7 +918,7 @@ def test_braket_device_submits_portable_openqasm_through_common_job() -> None:
     assert record.artifact.target_fingerprint == endpoint.target.fingerprint
 
 
-@pytest.mark.parametrize("choice", ["add.increments", "add.qft"])
+@pytest.mark.parametrize("choice", ["add.increments", "add.qft", "add.ripple"])
 def test_braket_executes_late_realizations(choice: str) -> None:
     """One shared arithmetic source survives exact alternative realizations."""
     pytest.importorskip("braket")

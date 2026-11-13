@@ -19,6 +19,7 @@ mod deferred;
 mod optimization;
 pub use deferred::CircuitDefinition;
 use deferred::{CallCacheEntry, CallCacheKey};
+pub(crate) use optimization::ExactCircuitRules;
 
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
@@ -27,7 +28,7 @@ use thiserror::Error;
 
 use crate::contracts::requires_launch_scalar_evaluation;
 use crate::control_state::ControlState;
-use crate::lowering::arithmetic::plan_addition;
+use crate::lowering::arithmetic::plan_controlled_addition;
 use crate::lowering::arithmetic_permutation::{ArithmeticOperation, plan_arithmetic_permutation};
 use crate::lowering::modular_realization::{
     ModularGatePlan, ModularRealizationPlan, ModularRequest, plan_mod_multi_pow, plan_mod_pow,
@@ -5073,7 +5074,11 @@ impl StaticLowerer<'_> {
         inverse: bool,
     ) -> Result<Vec<CircuitValue>, StaticCircuitError> {
         let state = require_wires(operands.first(), "quantum.add_into")?;
-        let plan = plan_addition(state.len() as u64, self.lowering)?;
+        let plan = plan_controlled_addition(
+            state.len() as u64,
+            self.lowering,
+            self.controls.len() as u64,
+        )?;
         self.realizations
             .insert(ConfiguredRealization::exact(plan.realization()));
         let plan = if inverse { plan.into_adjoint() } else { plan };

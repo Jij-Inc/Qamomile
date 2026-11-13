@@ -197,6 +197,8 @@ pub enum Realization {
     AddIncrements,
     /// Exact Fourier addition without truncating any controlled rotation.
     AddQft,
+    /// Ancilla-free linear ripple-carry addition with relative-phase Toffolis.
+    AddRipple,
     /// Schoolbook accumulation with clean ripple-carry arithmetic.
     ModMulSchoolbookRipple,
     /// Schoolbook retained-register product and modular accumulation.
@@ -219,13 +221,14 @@ pub enum Realization {
 
 impl Realization {
     /// Closed list used by option validation and user-facing discovery.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::PauliNative,
         Self::PauliRzz,
         Self::PauliParity,
         Self::AddNative,
         Self::AddIncrements,
         Self::AddQft,
+        Self::AddRipple,
         Self::ModMulSchoolbookRipple,
         Self::ModMulAddSchoolbookRipple,
         Self::ModPowNative,
@@ -283,6 +286,12 @@ impl Realization {
                 "add.qft",
                 AddInto,
                 "Use ancilla-free exact Fourier addition: O(n^2) steps, with no rotation truncation.",
+                Caps::EMPTY,
+            ),
+            Self::AddRipple => (
+                "add.ripple",
+                AddInto,
+                "Use ancilla-free ripple-carry addition with relative-phase Toffolis: O(n) steps and 16n-13 CNOTs.",
                 Caps::EMPTY,
             ),
             Self::ModMulSchoolbookRipple => (
@@ -544,6 +553,19 @@ impl LoweringConfig {
         self.minimum_addition_selectors && self.addition.is_none()
     }
 
+    /// Whether no explicit addition realization was requested.
+    pub(crate) const fn addition_is_default(self) -> bool {
+        self.addition.is_none()
+    }
+
+    /// Whether addition uses the width-dependent portable default.
+    pub(crate) const fn addition_is_automatic(self) -> bool {
+        self.addition.is_none()
+            && !self
+                .capabilities
+                .contains(RealizationCapabilities::ADD_INTO)
+    }
+
     /// Decode at most one override per semantic family.
     ///
     /// # Errors
@@ -641,7 +663,8 @@ impl LoweringConfig {
                 {
                     ConfiguredRealization::exact(Realization::AddNative)
                 }
-                None => ConfiguredRealization::exact(Realization::AddIncrements),
+                // Width-dependent automatic choice; see `plan_addition`.
+                None => ConfiguredRealization::exact(Realization::AddRipple),
             },
             RealizationFamily::ModMul => match self.mod_mul {
                 Some(choice) => choice,
@@ -717,7 +740,7 @@ mod tests {
             LoweringConfig::EMPTY
                 .select(RealizationFamily::AddInto)
                 .kind(),
-            Realization::AddIncrements
+            Realization::AddRipple
         );
         assert_eq!(
             LoweringConfig::EMPTY

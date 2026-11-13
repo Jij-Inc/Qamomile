@@ -22,6 +22,10 @@ pub enum ArithmeticGate {
     PauliX,
     /// Apply one controlled phase rotation.
     ControlledPhase,
+    /// Apply one T phase gate.
+    T,
+    /// Apply one adjoint T phase gate.
+    Tdg,
 }
 
 impl ArithmeticGate {
@@ -34,6 +38,8 @@ impl ArithmeticGate {
             Self::Hadamard => "h",
             Self::PauliX => "x",
             Self::ControlledPhase => "cp",
+            Self::T => "t",
+            Self::Tdg => "tdg",
         }
     }
 
@@ -41,6 +47,8 @@ impl ArithmeticGate {
         match self {
             Self::AddInto => Self::SubtractInto,
             Self::SubtractInto => Self::AddInto,
+            Self::T => Self::Tdg,
+            Self::Tdg => Self::T,
             Self::Hadamard | Self::PauliX | Self::ControlledPhase => self,
         }
     }
@@ -158,7 +166,12 @@ impl ArithmeticPlan {
 /// Realize `|a>|b> -> |a>|a+b mod 2^n>` with equal little-endian halves.
 ///
 /// The increment construction uses O(n²) steps and O(n³) selectors; Fourier
-/// addition uses O(n²) steps/selectors. Checked preflight precedes allocation.
+/// addition uses O(n²) steps/selectors; ripple-carry addition uses O(n) steps
+/// and selectors. Checked preflight precedes allocation.
+///
+/// Without an explicit choice, a native target capability, or the
+/// minimum-selector policy, the portable default minimizes the estimated
+/// CNOT count of the standard decomposition of each candidate.
 ///
 /// # Errors
 /// Rejects zero/odd widths and schedules exceeding either output budget.
@@ -166,19 +179,61 @@ pub fn plan_addition(
     state_width: u64,
     config: LoweringConfig,
 ) -> Result<ArithmeticPlan, RealizationError> {
+    plan_controlled_addition(state_width, config, 0)
+}
+
+/// Plan addition whose control-inheriting steps receive `outer_controls`.
+///
+/// Surrounding controls change the automatic portable choice and replace a
+/// default native choice; explicit and minimum-selector selections are kept.
+///
+/// # Errors
+/// Rejects zero/odd widths and schedules exceeding either output budget.
+pub(crate) fn plan_controlled_addition(
+    state_width: u64,
+    config: LoweringConfig,
+    outer_controls: u64,
+) -> Result<ArithmeticPlan, RealizationError> {
     if state_width == 0 || !state_width.is_multiple_of(2) {
         return Err(RealizationError::AdditionWidth);
     }
     let n = state_width / 2;
     let mut realization = config.select(RealizationFamily::AddInto);
     if config.selects_addition() && realization.kind() != Realization::AddNative {
-        let choices = [Realization::AddIncrements, Realization::AddQft];
+        let choices = [
+            Realization::AddIncrements,
+            Realization::AddQft,
+            Realization::AddRipple,
+        ];
         if let Some(choice) = choices
             .into_iter()
             .filter_map(|choice| addition_cost(n, state_width, choice))
             .min_by_key(|cost| (cost.selectors, cost.steps))
         {
             realization = crate::ConfiguredRealization::exact(choice.realization);
+        }
+    } else if config.addition_is_automatic()
+        || (outer_controls > 0
+            && config.addition_is_default()
+            && realization.kind() == Realization::AddNative)
+    {
+        // A coherently controlled native adder is synthesized by generic SDK
+        // control of every gate; the portable ripple adder controls only the
+        // 2n-1 CNOTs between its self-inverse conjugations.
+        let choices = [
+            Realization::AddRipple,
+            Realization::AddQft,
+            Realization::AddIncrements,
+        ];
+        if let Some(choice) = choices
+            .into_iter()
+            .filter_map(|choice| {
+                let cnots = estimated_cnots(n, choice, outer_controls)?;
+                addition_cost(n, state_width, choice).map(|cost| (cnots, cost))
+            })
+            .min_by_key(|(cnots, cost)| (*cnots, cost.steps))
+        {
+            realization = crate::ConfiguredRealization::exact(choice.1.realization);
         }
     }
     let cost = addition_cost(n, state_width, realization.kind())
@@ -218,10 +273,64 @@ fn addition_cost(n: u64, state_width: u64, realization: Realization) -> Option<A
                 / 2,
             selectors: n.checked_mul(n)?.checked_mul(3)?.checked_add(n)?,
         },
+        Realization::AddRipple if n == 1 => AdditionCost {
+            realization,
+            steps: 1,
+            selectors: 2,
+        },
+        Realization::AddRipple => AdditionCost {
+            realization,
+            steps: n.checked_mul(28)?.checked_sub(25)?,
+            selectors: n.checked_mul(44)?.checked_sub(38)?,
+        },
         _ => unreachable!("family selection returns an addition realization"),
     };
     (cost.steps <= MAX_ARITHMETIC_STEPS && cost.selectors <= MAX_ARITHMETIC_SELECTORS)
         .then_some(cost)
+}
+
+/// Estimate CNOTs of a standard decomposition under `outer` extra controls.
+///
+/// Multi-controlled X uses the ancilla-free costs 0, 1, 6, 14, 36 and 84 for up
+/// to five controls, then grows linearly; a controlled phase with extra
+/// controls costs one multi-controlled X plus two CNOTs. Increments are only
+/// estimated for one or two bits, where they need at most two internal controls.
+fn estimated_cnots(n: u64, realization: Realization, outer: u64) -> Option<u64> {
+    let x = |controls: u64| -> Option<u64> {
+        match controls {
+            0 => Some(0),
+            1 => Some(1),
+            2 => Some(6),
+            3 => Some(14),
+            4 => Some(36),
+            _ => controls.checked_sub(5)?.checked_mul(56)?.checked_add(84),
+        }
+    };
+    let phase = if outer == 0 {
+        2
+    } else {
+        x(outer.checked_add(1)?)?.checked_add(2)?
+    };
+    match realization {
+        Realization::AddIncrements => match n {
+            1 => x(outer.checked_add(1)?),
+            2 => x(outer.checked_add(2)?)?.checked_add(x(outer.checked_add(1)?)?.checked_mul(2)?),
+            _ => None,
+        },
+        Realization::AddQft => {
+            let basis = n.checked_mul(n.checked_sub(1)?)?.checked_mul(2)?;
+            let rotations = n.checked_mul(n.checked_add(1)?)? / 2;
+            basis.checked_add(rotations.checked_mul(phase)?)
+        }
+        Realization::AddRipple if n == 1 => x(outer.checked_add(1)?),
+        Realization::AddRipple => {
+            let inherited = n.checked_mul(2)?.checked_sub(1)?;
+            n.checked_mul(14)?
+                .checked_sub(12)?
+                .checked_add(inherited.checked_mul(x(outer.checked_add(1)?)?)?)
+        }
+        _ => None,
+    }
 }
 
 fn build_addition(
@@ -283,10 +392,65 @@ fn build_addition(
                 steps.push(single(ArithmeticGate::Hadamard, n + target));
             }
         }
+        Realization::AddRipple => ripple_addition(n, &mut steps),
         _ => unreachable!("family selection returns an addition realization"),
     }
     debug_assert_eq!(steps.len() as u64, count);
     Ok(ArithmeticPlan::new(realization, steps))
+}
+
+/// Gidney's ancilla-free modular adder (arXiv:1706.07884, Fig. 15).
+///
+/// The top addend bit carries the ripple. Fan-out layers and the controlled
+/// swap blocks `S_i` are self-inverse conjugations around the CNOTs that write
+/// the target, so only those `2n - 1` CNOTs inherit surrounding controls:
+/// `C(W M W) = W C(M) W` and `C(X S M' S Y) = C(X) S C(M') S C(Y)`. Each `S_i`
+/// uses a relative-phase Toffoli whose phase cancels against its mirror image.
+fn ripple_addition(n: u64, steps: &mut Vec<ArithmeticStep>) {
+    let addend = |bit: u64| bit;
+    let target = |bit: u64| n + bit;
+    if n == 1 {
+        steps.push(ArithmeticStep::pauli_x(target(0), vec![addend(0)]));
+        return;
+    }
+    let carry = addend(n - 1);
+    let fan_out = |steps: &mut Vec<ArithmeticStep>| {
+        for wire in (0..n - 1).map(addend).chain((0..n).map(target)) {
+            steps.push(local_x(wire, vec![carry]));
+        }
+    };
+    let swap_block = |steps: &mut Vec<ArithmeticStep>, bit: u64| {
+        let (first, second, wire) = (target(bit), carry, addend(bit));
+        steps.push(local_x(carry, vec![wire]));
+        steps.push(single(ArithmeticGate::Hadamard, wire));
+        steps.push(single(ArithmeticGate::T, wire));
+        steps.push(local_x(wire, vec![second]));
+        steps.push(single(ArithmeticGate::Tdg, wire));
+        steps.push(local_x(wire, vec![first]));
+        steps.push(single(ArithmeticGate::T, wire));
+        steps.push(local_x(wire, vec![second]));
+        steps.push(single(ArithmeticGate::Tdg, wire));
+        steps.push(single(ArithmeticGate::Hadamard, wire));
+        steps.push(local_x(carry, vec![wire]));
+    };
+    fan_out(steps);
+    for bit in 0..n - 1 {
+        steps.push(ArithmeticStep::pauli_x(target(bit), vec![carry]));
+        swap_block(steps, bit);
+    }
+    steps.push(ArithmeticStep::pauli_x(target(n - 1), vec![carry]));
+    for bit in (0..n - 1).rev() {
+        swap_block(steps, bit);
+        steps.push(ArithmeticStep::pauli_x(target(bit), vec![addend(bit)]));
+    }
+    fan_out(steps);
+}
+
+fn local_x(target: u64, controls: Vec<u64>) -> ArithmeticStep {
+    ArithmeticStep {
+        inherit_controls: false,
+        ..ArithmeticStep::pauli_x(target, controls)
+    }
 }
 
 fn single(gate: ArithmeticGate, target: u64) -> ArithmeticStep {
@@ -323,7 +487,7 @@ mod tests {
         let automatic = LoweringConfig::EMPTY.minimizing_addition_selectors();
         for n in [1, 4, 8, 16, 32] {
             let selected = plan_addition(2 * n, automatic).unwrap();
-            let candidates = ["add.increments", "add.qft"].map(|label| {
+            let candidates = ["add.increments", "add.qft", "add.ripple"].map(|label| {
                 plan_addition(
                     2 * n,
                     LoweringConfig::from_labels(&[], &[label.into()]).unwrap(),
@@ -374,7 +538,7 @@ mod tests {
     #[test]
     fn schedules_match_preflight_and_restore_fourier_basis() {
         for n in 1..8 {
-            for choice in ["add.increments", "add.qft"] {
+            for choice in ["add.increments", "add.qft", "add.ripple"] {
                 let config = LoweringConfig::from_labels(&[], &[choice.into()]).unwrap();
                 let plan = plan_addition(2 * n, config).unwrap();
                 assert!(plan.steps().iter().all(|step| {
@@ -394,6 +558,125 @@ mod tests {
                     assert_eq!(plan.steps().len() as u64, 3 * n * (n + 1) / 2);
                 }
             }
+        }
+    }
+
+    /// Simulate a schedule on basis states, with optional outer controls.
+    fn simulate(plan: &ArithmeticPlan, input: u64, outer: bool) -> u64 {
+        let mut state = input;
+        for step in plan.steps() {
+            let bit = |wire: u64| state >> wire & 1 == 1;
+            let active = (!step.inherits_controls() || outer)
+                && step.controls().iter().all(|wire| bit(*wire));
+            match step.gate() {
+                ArithmeticGate::PauliX if active => state ^= 1 << step.indices()[0],
+                ArithmeticGate::PauliX => {}
+                _ => panic!("basis simulation needs X-only blocks"),
+            }
+        }
+        state
+    }
+
+    #[test]
+    fn ripple_matches_increments_on_classical_inputs_without_phase_blocks() {
+        // Replace every relative-phase Toffoli block by an exact CCX so the
+        // schedule can be checked as a classical permutation.
+        for n in 1..6_u64 {
+            let config = LoweringConfig::from_labels(&[], &["add.ripple".into()]).unwrap();
+            let plan = plan_addition(2 * n, config).unwrap();
+            assert_eq!(plan.realization(), Realization::AddRipple);
+            let mut classical = Vec::new();
+            let mut iter = plan.steps().iter().peekable();
+            while let Some(step) = iter.next() {
+                if step.gate() == ArithmeticGate::Hadamard {
+                    let wire = step.indices()[0];
+                    let block = (0..8).map(|_| iter.next().unwrap()).collect::<Vec<_>>();
+                    assert_eq!(block[7].gate(), ArithmeticGate::Hadamard);
+                    let mut controls = vec![block[1].controls()[0], block[3].controls()[0]];
+                    controls.sort_unstable();
+                    classical.push(local_x(wire, controls));
+                } else {
+                    classical.push(step.clone());
+                }
+            }
+            let classical = ArithmeticPlan::new(Realization::AddRipple, classical);
+            let mask = (1 << n) - 1;
+            for input in 0..1_u64 << (2 * n) {
+                let (a, b) = (input & mask, input >> n);
+                let sum = a | ((a + b) & mask) << n;
+                assert_eq!(simulate(&classical, input, true), sum);
+                assert_eq!(simulate(&classical, input, false), input);
+                let inverse = classical.clone().into_adjoint();
+                assert_eq!(simulate(&inverse, sum, true), input);
+            }
+        }
+    }
+
+    #[test]
+    fn automatic_addition_minimizes_estimated_cnots() {
+        let kinds = (1..=8)
+            .map(|n| {
+                plan_addition(2 * n, LoweringConfig::EMPTY)
+                    .unwrap()
+                    .realization()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            [
+                Realization::AddRipple,
+                Realization::AddIncrements,
+                Realization::AddQft,
+                Realization::AddQft,
+                Realization::AddRipple,
+                Realization::AddRipple,
+                Realization::AddRipple,
+                Realization::AddRipple,
+            ]
+        );
+        let explicit = LoweringConfig::from_labels(&[], &["add.increments".into()]).unwrap();
+        assert_eq!(
+            plan_addition(16, explicit).unwrap().realization(),
+            Realization::AddIncrements
+        );
+        // Doubly controlled Fourier rotations are more expensive than the
+        // 2n-1 control-inheriting CNOTs of the ripple adder.
+        assert_eq!(
+            plan_controlled_addition(6, LoweringConfig::EMPTY, 2)
+                .unwrap()
+                .realization(),
+            Realization::AddRipple
+        );
+        let native = LoweringConfig::from_labels(&["add_into".into()], &[]).unwrap();
+        assert_eq!(
+            plan_controlled_addition(16, native, 0)
+                .unwrap()
+                .realization(),
+            Realization::AddNative
+        );
+        assert_eq!(
+            plan_controlled_addition(16, native, 1)
+                .unwrap()
+                .realization(),
+            Realization::AddRipple
+        );
+        let pinned =
+            LoweringConfig::from_labels(&["add_into".into()], &["add.native".into()]).unwrap();
+        assert_eq!(
+            plan_controlled_addition(16, pinned, 1)
+                .unwrap()
+                .realization(),
+            Realization::AddNative
+        );
+        for n in 1..=16 {
+            assert_eq!(
+                estimated_cnots(n, Realization::AddRipple, 0),
+                Some(if n == 1 { 1 } else { 16 * n - 13 })
+            );
+            assert_eq!(
+                estimated_cnots(n, Realization::AddQft, 0),
+                Some(3 * n * n - n)
+            );
         }
     }
 

@@ -531,12 +531,18 @@ class RealizationSelection:
 class CircuitSimplification:
     """Apply phase-exact local gate rules after checked circuit projection.
 
-    Rules retain measurements, ordered numeric checks, coherent controls, and
-    segment boundaries. The configuration is portable to deferred execution.
+    Version 2 moves each gate back past earlier gates that provably commute
+    with it (diagonal or X-algebra action on every shared wire; controls are
+    diagonal), then cancels inverse pairs, fuses exact phase gates, merges
+    rotation angles, and removes zero rotations. Rules retain measurements,
+    classically conditioned gates, structured regions, ordered numeric checks,
+    coherent controls, and segment boundaries. The configuration is portable
+    to deferred execution; artifacts recorded with version 1 keep its
+    adjacent-only rules.
     """
 
     name: str = field(default="circuit.exact-local", init=False)
-    version: str = field(default="1", init=False)
+    version: str = field(default="2", init=False)
     configuration: bytes = field(default=b"", init=False)
 
 
@@ -704,7 +710,7 @@ class OptimizationPipeline:
         cls,
         *,
         family: bool = True,
-        realization: RealizationSelection | None = RealizationSelection(),
+        realization: RealizationSelection | None = None,
         circuit: CircuitSimplification | None = CircuitSimplification(),
         seed: int = 0,
         max_work: int = 1_000_000,
@@ -715,6 +721,10 @@ class OptimizationPipeline:
             family (bool): Run symbolic CSE; requires source or a ProgramFamily.
                 Set False when compiling an already specialized Program.
             realization (RealizationSelection | None): Late selection policy.
+                Defaults to None, which keeps the width- and control-aware
+                portable defaults that minimize estimated CNOTs; selector
+                count is a compiler-work metric and can choose much larger
+                circuits.
             circuit (CircuitSimplification | None): Late exact circuit rules.
                 Both late policies require a circuit target or Reference.
             seed (int): Deterministic unsigned optimization seed.
