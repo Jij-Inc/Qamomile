@@ -1,3 +1,4 @@
+use super::timing::schedule_symbolic_depths;
 use super::*;
 use crate::resource_rules::RuleRelation;
 
@@ -670,17 +671,17 @@ fn schedules_one_dynamic_selector_per_independent_owner() {
     .expect("repeated dynamic selector");
     assert_eq!(evaluate(serial["gates"].lower, &arena), 2);
 
+    // Two symbolic selectors on one owner may alias, so no exact schedule
+    // exists; the bound scheduler occupies the whole owner instead.
+    let aliased = [step(0, selector, first), step(0, other_selector, second)];
     assert!(matches!(
-        schedule_symbolic_depths(
-            &[
-                step(0, selector, first),
-                step(0, other_selector, second),
-            ],
-            &mut arena,
-        ),
-        Err(SymbolicResourceError::Unsupported(reason))
-            if reason == "dynamic timing selector may alias another lane"
+        schedule_symbolic_depths(&aliased, &mut arena),
+        Err(SymbolicResourceError::Unsupported(_))
     ));
+    let (bounds, exact) =
+        super::timing::schedule_symbolic_depth_bounds(&aliased, &mut arena).expect("bounds");
+    assert!(!exact);
+    assert_eq!(evaluate(bounds["gates"], &arena), 2);
 }
 
 fn evaluate(expression: ExprId, arena: &ExpressionArena) -> u128 {

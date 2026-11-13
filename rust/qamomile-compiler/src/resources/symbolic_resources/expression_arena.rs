@@ -521,8 +521,13 @@ impl ExpressionArena {
                 Some(result)
             }
             ResourceExpressionNode::Power { arguments, .. } => {
-                let exponent = self.integer_value(arguments[1])?;
-                let exponent = u32::try_from(exponent).ok()?;
+                // A symbolic exponent such as `2**level` is an opaque atom.
+                let Some(exponent) = self
+                    .integer_value(arguments[1])
+                    .and_then(|exponent| u32::try_from(exponent).ok())
+                else {
+                    return Some(SymbolicPolynomial::atom(root));
+                };
                 if usize::try_from(exponent).ok()? > MAX_SYMBOLIC_POLYNOMIAL_FACTORS {
                     return None;
                 }

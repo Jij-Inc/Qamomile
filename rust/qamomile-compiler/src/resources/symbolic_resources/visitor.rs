@@ -9,6 +9,7 @@ use crate::types::{Dimension, compare_dimensions};
 use crate::wire;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use super::timing::{collect_timing_roots, schedule_symbolic_depth_bounds};
 use super::{
     BlockExit, BlockSummary, Counts, ExprId, MAX_SYMBOLIC_LOOP_INTERPRETATIONS, ScalarFact,
     SymbolicAnalysisFact, SymbolicAnalysisKey, SymbolicAnalyzer, SymbolicCount,
@@ -826,15 +827,51 @@ impl SymbolicAnalyzer<'_> {
             )?;
         }
         let values = join_values(branches.iter().map(|branch| branch.values.as_slice()))?;
-        let timing = (branches[0].timing == branches[1].timing)
-            .then(|| branches[0].timing.clone())
-            .flatten();
+        let timing = if branches[0].timing == branches[1].timing {
+            branches[0].timing.clone()
+        } else {
+            self.branch_barrier(&branches)
+        };
         Ok(BlockSummary {
             counts,
             exit: BlockExit::YIELD,
             values,
             timing,
         })
+    }
+
+    /// Summarize branches with different schedules as one occupying region.
+    ///
+    /// Either arm may run, so the region lasts the longer arm's makespan per
+    /// depth family and occupies every owner either arm touches.
+    fn branch_barrier(&mut self, branches: &[BlockSummary]) -> Option<Vec<SymbolicTimingNode>> {
+        let mut roots = Vec::new();
+        let mut durations: Option<BTreeMap<String, ExprId>> = None;
+        for branch in branches {
+            let nodes = branch.timing.as_deref()?;
+            for root in collect_timing_roots(nodes) {
+                if !roots.contains(&root) {
+                    roots.push(root);
+                }
+            }
+            let (maxima, _) = schedule_symbolic_depth_bounds(nodes, &mut self.arena).ok()?;
+            durations = Some(match durations {
+                None => maxima,
+                Some(previous) => {
+                    let mut joined = BTreeMap::new();
+                    for (family, left) in previous {
+                        if let Some(right) = maxima.get(&family) {
+                            joined.insert(family, self.arena.extremum(true, [left, *right]).ok()?);
+                        }
+                    }
+                    joined
+                }
+            });
+        }
+        Some(vec![SymbolicTimingNode::Barrier {
+            roots: roots.into_boxed_slice(),
+            durations: durations?,
+        }])
     }
 
     pub(super) fn analyze_non_yielding_if(
@@ -895,10 +932,21 @@ impl SymbolicAnalyzer<'_> {
         body: &wire::BlockProto,
         context: SymbolicFunctionContext<'_>,
     ) -> Result<BlockSummary, SymbolicResourceError> {
-        let count = SymbolicCount::unresolved(
-            "while body cost depends on changing loop carries".to_owned(),
-            &mut self.arena,
-        )?;
+        self.unresolved_region(
+            body,
+            "while body cost depends on changing loop carries",
+            context,
+        )
+    }
+
+    /// Summarize a region whose cost cannot be derived as named unknowns.
+    fn unresolved_region(
+        &mut self,
+        body: &wire::BlockProto,
+        reason: &str,
+        context: SymbolicFunctionContext<'_>,
+    ) -> Result<BlockSummary, SymbolicResourceError> {
+        let count = SymbolicCount::unresolved(reason.to_owned(), &mut self.arena)?;
         let function = self
             .functions
             .get(context.owner)
@@ -930,7 +978,12 @@ impl SymbolicAnalyzer<'_> {
                 work: count.clone(),
                 span: count.clone(),
                 cleanup_work: count.clone(),
-                depths: None,
+                depths: Some(
+                    super::external_depth_metrics()
+                        .iter()
+                        .map(|(family, _)| ((*family).to_owned(), count.clone()))
+                        .collect(),
+                ),
                 opcodes,
                 extra_metrics,
                 families: Some(
@@ -1073,11 +1126,28 @@ impl SymbolicAnalyzer<'_> {
                 "qcore.for bounds".to_owned(),
             ));
         };
-        let bounds = [*lower_id, *upper_id, *stride_id]
+        let Some(bounds) = [*lower_id, *upper_id, *stride_id]
             .map(|operand| int_fact(environment.get(&operand).and_then(Option::as_ref)))
             .into_iter()
             .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| SymbolicResourceError::Missing("qcore.for bounds".to_owned()))?;
+        else {
+            // A bound computed by an unanalyzed carry (for example a Const
+            // `while`) leaves this loop's cost unknown without hiding the
+            // costs of the rest of the program.
+            let body = operation
+                .regions
+                .first()
+                .and_then(|region| region.blocks.first())
+                .ok_or_else(|| SymbolicResourceError::Missing("qcore.for body".to_owned()))?;
+            let mut summary = self.unresolved_region(
+                body,
+                "qcore.for trip count depends on a value the analyzer could not derive",
+                context,
+            )?;
+            summary.exit = BlockExit::YIELD;
+            summary.values = vec![None; operation.results.len()];
+            return Ok(summary);
+        };
         let [lower, upper, stride] = bounds.as_slice() else {
             return Err(SymbolicResourceError::Missing(
                 "qcore.for bounds".to_owned(),

@@ -40,6 +40,22 @@ finished head lane can overlap the remaining chain. Other selected prefixes,
 partial/nonadjacent chains, nested repeats, and path-dependent exits may retain
 conservative enclosures. Always inspect the reported relation and evidence.
 
+Where no exact rule applies, depth is still scheduled rather than replaced by
+the gate count, and the result is reported as an upper bound:
+
+- A loop whose lanes are `i + c` with offsets that differ by at least the trip
+  count (for example `cx(control=i, target=i + n)` for `i in range(n)`, or a
+  doubling tree with `target=i + 2 ** level` for `i in range(2 ** level)`) has
+  independent iterations and costs one body.
+- Any other loop costs the sum of its locally scheduled body over the
+  iterations, so parallel inner loops keep their parallelism.
+- A lane that cannot be proved distinct occupies its whole register, and
+  branches with different schedules last as long as the longer branch.
+
+The reported upper bound is never larger than the gate-count bound. A loop
+bound that the analyzer cannot derive (for example one computed by a Const
+`while`) becomes a named unknown instead of an analysis error.
+
 Natural additive costs of supported Const integer recursion are retained as scoped,
 simultaneous equations, including base-case conditions. Concrete inputs evaluate
 with bounded memoization in Rust, rather than expanding a circuit or invoking

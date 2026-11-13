@@ -28,7 +28,7 @@ use count_algebra::{
 };
 use timing::{
     add_symbolic_timing_footprints, append_symbolic_timing, instantiate_symbolic_timing,
-    natural_literal, reverse_symbolic_timing, schedule_symbolic_depths,
+    natural_literal, reverse_symbolic_timing, schedule_symbolic_depth_bounds,
     small_permutation_step_bound, symbolic_adjoint_roots, symbolic_call_roots,
     symbolic_coherent_roots, symbolic_depth_families, symbolic_quantum_multiplicity,
     symbolic_timing_root, symbolic_timing_selectors, symbolic_unit_durations,
@@ -1731,6 +1731,15 @@ enum SymbolicTimingNode {
         binder: ExprId,
         trip_count: ExprId,
     },
+    /// A region whose internal schedule is summarized by an upper bound.
+    ///
+    /// It occupies every lane of each listed root for at most `durations`
+    /// steps per depth family, which keeps one unresolved region from
+    /// discarding the schedule of the whole program.
+    Barrier {
+        roots: Box<[SymbolicTimingRoot]>,
+        durations: BTreeMap<String, ExprId>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2032,7 +2041,50 @@ fn final_symbolic_depths(
     let scheduled = summary
         .timing
         .as_deref()
-        .and_then(|timing| schedule_symbolic_depths(timing, arena).ok());
+        .and_then(|timing| schedule_symbolic_depth_bounds(timing, arena).ok())
+        .and_then(|(maxima, exact)| {
+            if exact {
+                return Some(
+                    maxima
+                        .into_iter()
+                        .map(|(family, value)| (family, SymbolicCount::exact_value(value)))
+                        .collect::<BTreeMap<_, _>>(),
+                );
+            }
+            // A conservative schedule only tightens the algebraic upper bound:
+            // keep the algebraic lower bound and report the smaller upper bound.
+            let mut tightened = BTreeMap::new();
+            for (family, value) in maxima {
+                let algebraic = if family == "span" {
+                    Some(&summary.counts.span)
+                } else {
+                    summary
+                        .counts
+                        .depths
+                        .as_ref()
+                        .and_then(|depths| depths.get(&family))
+                };
+                let Some(algebraic) = algebraic.filter(|count| count.unknown.is_empty()) else {
+                    continue;
+                };
+                let upper = match algebraic.upper {
+                    Some(upper) if upper == value => value,
+                    Some(upper) => arena.extremum(false, [upper, value]).ok()?,
+                    None => value,
+                };
+                tightened.insert(
+                    family,
+                    SymbolicCount {
+                        lower: algebraic.lower,
+                        upper: Some(upper),
+                        exact: algebraic.exact && algebraic.upper == Some(upper),
+                        unknown: algebraic.unknown.clone(),
+                        rule_identities: algebraic.rule_identities.clone(),
+                    },
+                );
+            }
+            Some(tightened)
+        });
     let span = scheduled
         .as_ref()
         .and_then(|depths| depths.get("span"))

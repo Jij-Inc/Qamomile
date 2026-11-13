@@ -7,10 +7,10 @@ use crate::wire;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::{
-    ExprId, ExpressionArena, ResourceExpressionNode, SymbolicCount, SymbolicLaneTimeline,
-    SymbolicResourceError, SymbolicTimingFootprint, SymbolicTimingNode, SymbolicTimingRoot,
-    SymbolicTimingSelectors, SymbolicTimingStep, ValueFact, int_fact,
-    mapping_string_tuple_attribute, string_tuple_attribute,
+    ExprId, ExpressionArena, ResourceExpressionNode, SymbolicLaneTimeline, SymbolicResourceError,
+    SymbolicTimingFootprint, SymbolicTimingNode, SymbolicTimingRoot, SymbolicTimingSelectors,
+    SymbolicTimingStep, ValueFact, int_fact, mapping_string_tuple_attribute,
+    string_tuple_attribute,
 };
 
 pub(super) fn append_symbolic_timing(
@@ -36,6 +36,15 @@ pub(super) fn add_symbolic_timing_footprints(
             }
             SymbolicTimingNode::Repeat { body, .. } => {
                 add_symbolic_timing_footprints(body, added);
+            }
+            SymbolicTimingNode::Barrier { roots, .. } => {
+                let mut extended = roots.to_vec();
+                for footprint in added {
+                    if !extended.contains(&footprint.root) {
+                        extended.push(footprint.root.clone());
+                    }
+                }
+                *roots = extended.into_boxed_slice();
             }
         }
     }
@@ -208,6 +217,7 @@ pub(super) fn reverse_symbolic_timing(nodes: Vec<SymbolicTimingNode>) -> Vec<Sym
                 binder,
                 trip_count,
             },
+            barrier @ SymbolicTimingNode::Barrier { .. } => barrier,
         })
         .collect()
 }
@@ -261,6 +271,17 @@ pub(super) fn instantiate_symbolic_timing(
                     .into_boxed_slice(),
                 binder,
                 trip_count,
+            },
+            SymbolicTimingNode::Barrier {
+                roots: barrier_roots,
+                durations,
+            } => SymbolicTimingNode::Barrier {
+                roots: barrier_roots
+                    .iter()
+                    .map(|root| map_root(root, callee_scope, roots, instance))
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                durations,
             },
         })
         .collect()
@@ -441,10 +462,39 @@ pub(super) const SYMBOLIC_DEPTH_FAMILIES: &[&str] = &[
     "resets",
 ];
 
+/// Schedule the exact dependency depths of one timing graph.
+///
+/// Fails when any part of the graph needed a conservative rule; callers that
+/// accept upper bounds use [`schedule_symbolic_depth_bounds`].
+#[cfg(test)]
 pub(super) fn schedule_symbolic_depths(
     nodes: &[SymbolicTimingNode],
     arena: &mut ExpressionArena,
-) -> Result<BTreeMap<String, SymbolicCount>, SymbolicResourceError> {
+) -> Result<BTreeMap<String, super::SymbolicCount>, SymbolicResourceError> {
+    let (maxima, exact) = schedule_symbolic_depth_bounds(nodes, arena)?;
+    if !exact {
+        return Err(SymbolicResourceError::Unsupported(
+            "symbolic schedule needs a conservative rule".to_owned(),
+        ));
+    }
+    Ok(maxima
+        .into_iter()
+        .map(|(family, value)| (family, super::SymbolicCount::exact_value(value)))
+        .collect())
+}
+
+/// Schedule dependency depths, returning per-family makespans and exactness.
+///
+/// Exact rules (independent lanes, loop-index lanes, adjacent chains) keep the
+/// result exact. Where they do not apply the scheduler stays sound instead of
+/// failing: an unprovable lane selection occupies its whole owner, a loop whose
+/// iterations are proved disjoint runs in parallel, and any other loop is the
+/// sequential composition of its locally scheduled body. Each such step makes
+/// the result an upper bound.
+pub(super) fn schedule_symbolic_depth_bounds(
+    nodes: &[SymbolicTimingNode],
+    arena: &mut ExpressionArena,
+) -> Result<(BTreeMap<String, ExprId>, bool), SymbolicResourceError> {
     let zero = arena.literal_u128(0)?;
     let mut timelines = SYMBOLIC_DEPTH_FAMILIES
         .iter()
@@ -454,41 +504,100 @@ pub(super) fn schedule_symbolic_depths(
         .iter()
         .map(|family| ((*family).to_owned(), zero))
         .collect::<BTreeMap<_, _>>();
-    schedule_symbolic_nodes(nodes, &mut timelines, &mut maxima, arena)?;
-    Ok(maxima
-        .into_iter()
-        .map(|(family, value)| (family, SymbolicCount::exact_value(value)))
-        .collect())
+    let mut exact = true;
+    schedule_symbolic_nodes(nodes, &mut timelines, &mut maxima, &mut exact, arena)?;
+    Ok((maxima, exact))
 }
 
 pub(super) fn schedule_symbolic_nodes(
     nodes: &[SymbolicTimingNode],
     timelines: &mut HashMap<&str, HashMap<SymbolicTimingRoot, SymbolicLaneTimeline>>,
     maxima: &mut BTreeMap<String, ExprId>,
+    exact: &mut bool,
     arena: &mut ExpressionArena,
 ) -> Result<(), SymbolicResourceError> {
     for node in nodes {
         match node {
             SymbolicTimingNode::Step(step) => {
-                schedule_symbolic_step(step, timelines, maxima, arena)?;
+                schedule_symbolic_step(step, timelines, maxima, exact, arena)?;
             }
             SymbolicTimingNode::Repeat {
                 body,
                 binder,
                 trip_count,
-            } => schedule_symbolic_repeat(body, *binder, *trip_count, timelines, maxima, arena)?,
+            } => schedule_symbolic_repeat(
+                body,
+                *binder,
+                *trip_count,
+                timelines,
+                maxima,
+                exact,
+                arena,
+            )?,
+            SymbolicTimingNode::Barrier { roots, durations } => {
+                *exact = false;
+                let step = SymbolicTimingStep {
+                    footprints: roots
+                        .iter()
+                        .map(|root| SymbolicTimingFootprint {
+                            root: root.clone(),
+                            selectors: None,
+                            width: None,
+                        })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                    durations: durations.clone(),
+                };
+                schedule_symbolic_step(&step, timelines, maxima, exact, arena)?;
+            }
         }
     }
     Ok(())
 }
 
+/// Return each footprint's lane selection, or `None` when it must occupy the
+/// whole owner because its selectors cannot be proved distinct and in range.
+fn tolerant_timing_selections(
+    footprints: &[SymbolicTimingFootprint],
+    arena: &ExpressionArena,
+    exact: &mut bool,
+) -> Vec<Option<Vec<ExprId>>> {
+    footprints
+        .iter()
+        .map(|footprint| {
+            let selected = footprint.selectors.as_deref()?.to_vec();
+            let duplicate = selected.iter().collect::<HashSet<_>>().len() != selected.len();
+            let out_of_range = footprint
+                .width
+                .and_then(|width| natural_literal(arena, width))
+                .is_some_and(|width| {
+                    selected.iter().any(|selector| {
+                        natural_literal(arena, *selector).is_some_and(|selector| selector >= width)
+                    })
+                });
+            let dynamic_multi_lane = selected.len() > 1
+                && selected
+                    .iter()
+                    .any(|selector| natural_literal(arena, *selector).is_none());
+            if duplicate || out_of_range || dynamic_multi_lane {
+                *exact = false;
+                None
+            } else {
+                Some(selected)
+            }
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_lines)]
 pub(super) fn schedule_symbolic_step(
     step: &SymbolicTimingStep,
     timelines: &mut HashMap<&str, HashMap<SymbolicTimingRoot, SymbolicLaneTimeline>>,
     maxima: &mut BTreeMap<String, ExprId>,
+    exact: &mut bool,
     arena: &mut ExpressionArena,
 ) -> Result<(), SymbolicResourceError> {
-    let selections = validate_symbolic_timing_selections(&step.footprints, arena)?;
+    let selections = tolerant_timing_selections(&step.footprints, arena, exact);
     let zero = arena.literal_u128(0)?;
     for family in SYMBOLIC_DEPTH_FAMILIES {
         if !timelines.contains_key(family) {
@@ -502,26 +611,38 @@ pub(super) fn schedule_symbolic_step(
         let roots = timelines
             .get_mut(family)
             .ok_or_else(|| SymbolicResourceError::Missing("depth family".to_owned()))?;
-        let mut dependencies = Vec::new();
-        for (footprint, selected) in step.footprints.iter().zip(&selections) {
+        // Demote selections that could alias a lane already in flight.
+        let mut effective = selections.clone();
+        for (footprint, selected) in step.footprints.iter().zip(effective.iter_mut()) {
             for (root, frontier) in roots.iter() {
                 if !symbolic_timing_roots_overlap(root, &footprint.root) {
                     continue;
                 }
-                if symbolic_timing_projection_is_ambiguous(root, footprint, frontier) {
-                    return Err(SymbolicResourceError::Unsupported(
-                        "projected timing selector alias".to_owned(),
-                    ));
+                let ambiguous = symbolic_timing_projection_is_ambiguous(root, footprint, frontier);
+                let aliases = root == &footprint.root
+                    && selected.as_deref().is_some_and(|selected| {
+                        symbolic_timing_selector_aliases(selected, &frontier.lanes, arena)
+                            || (frontier.chain.is_some()
+                                && selected
+                                    .iter()
+                                    .any(|selector| natural_literal(arena, *selector).is_none()))
+                    });
+                if selected.is_some() && (ambiguous || aliases) {
+                    *selected = None;
+                    *exact = false;
+                }
+            }
+        }
+        let mut dependencies = Vec::new();
+        for (footprint, selected) in step.footprints.iter().zip(&effective) {
+            for (root, frontier) in roots.iter() {
+                if !symbolic_timing_roots_overlap(root, &footprint.root) {
+                    continue;
                 }
                 dependencies.push(frontier.barrier);
                 if root == &footprint.root
                     && let Some(selected) = selected
                 {
-                    if symbolic_timing_selector_aliases(selected, &frontier.lanes, arena) {
-                        return Err(SymbolicResourceError::Unsupported(
-                            "dynamic timing selector may alias another lane".to_owned(),
-                        ));
-                    }
                     for selector in selected {
                         let completion = if let Some(value) = frontier.lanes.get(selector) {
                             *value
@@ -532,8 +653,7 @@ pub(super) fn schedule_symbolic_step(
                         };
                         dependencies.push(completion);
                     }
-                }
-                if selected.is_none() {
+                } else if selected.is_none() || root != &footprint.root {
                     dependencies.extend(frontier.lanes.values().copied());
                     if let Some(chain) = &frontier.chain {
                         dependencies.push(chain.finish(arena)?);
@@ -550,7 +670,7 @@ pub(super) fn schedule_symbolic_step(
         }
         let start = arena.extremum(true, dependencies)?;
         let finish = arena.add([start, duration])?;
-        for (footprint, selected) in step.footprints.iter().zip(&selections) {
+        for (footprint, selected) in step.footprints.iter().zip(&effective) {
             let frontier = roots
                 .get_mut(&footprint.root)
                 .ok_or_else(|| SymbolicResourceError::Missing("timing frontier".to_owned()))?;
@@ -576,52 +696,13 @@ pub(super) fn schedule_symbolic_step(
     Ok(())
 }
 
-pub(super) fn validate_symbolic_timing_selections(
-    footprints: &[SymbolicTimingFootprint],
-    arena: &ExpressionArena,
-) -> Result<Vec<Option<Vec<ExprId>>>, SymbolicResourceError> {
-    let selections = footprints
-        .iter()
-        .map(|footprint| footprint.selectors.as_deref().map(<[ExprId]>::to_vec))
-        .collect::<Vec<_>>();
-    for (footprint, selected) in footprints.iter().zip(&selections) {
-        if let Some(selected) = selected
-            && (selected.iter().collect::<HashSet<_>>().len() != selected.len()
-                || footprint
-                    .width
-                    .and_then(|width| natural_literal(arena, width))
-                    .is_some_and(|width| {
-                        selected.iter().any(|selector| {
-                            natural_literal(arena, *selector)
-                                .is_some_and(|selector| selector >= width)
-                        })
-                    }))
-        {
-            return Err(SymbolicResourceError::Unsupported(
-                "invalid timing selector".to_owned(),
-            ));
-        }
-        if selected.as_ref().is_some_and(|selected| {
-            selected.len() > 1
-                && selected
-                    .iter()
-                    .any(|selector| natural_literal(arena, *selector).is_none())
-        }) {
-            return Err(SymbolicResourceError::Unsupported(
-                "dynamic multi-lane timing selector".to_owned(),
-            ));
-        }
-    }
-    Ok(selections)
-}
-
-#[allow(clippy::too_many_lines)]
 pub(super) fn schedule_symbolic_repeat(
     body: &[SymbolicTimingNode],
     binder: ExprId,
     trip_count: ExprId,
     timelines: &mut HashMap<&str, HashMap<SymbolicTimingRoot, SymbolicLaneTimeline>>,
     maxima: &mut BTreeMap<String, ExprId>,
+    exact: &mut bool,
     arena: &mut ExpressionArena,
 ) -> Result<(), SymbolicResourceError> {
     if super::timing_chain::try_schedule_adjacent_chain(
@@ -629,37 +710,51 @@ pub(super) fn schedule_symbolic_repeat(
     )? {
         return Ok(());
     }
+    if try_schedule_lane_repeat(body, binder, trip_count, timelines, maxima, exact, arena)? {
+        return Ok(());
+    }
+    if try_schedule_disjoint_repeat(body, binder, trip_count, timelines, maxima, exact, arena)? {
+        return Ok(());
+    }
+    schedule_sequential_repeat(body, binder, trip_count, timelines, maxima, exact, arena)
+}
+
+/// Exact rule: every step occupies only lane `binder` of owners whose width
+/// the trip count covers, so iterations are independent and the repeat
+/// costs one body.
+#[allow(clippy::too_many_lines)]
+fn try_schedule_lane_repeat(
+    body: &[SymbolicTimingNode],
+    binder: ExprId,
+    trip_count: ExprId,
+    timelines: &mut HashMap<&str, HashMap<SymbolicTimingRoot, SymbolicLaneTimeline>>,
+    maxima: &mut BTreeMap<String, ExprId>,
+    exact: &mut bool,
+    arena: &mut ExpressionArena,
+) -> Result<bool, SymbolicResourceError> {
     let mut touched = HashMap::<SymbolicTimingRoot, ExprId>::new();
     let mut local_steps = Vec::new();
     let zero = arena.literal_u128(0)?;
     for node in body {
         let SymbolicTimingNode::Step(step) = node else {
-            return Err(SymbolicResourceError::Unsupported(
-                "nested symbolic timing repeat".to_owned(),
-            ));
+            return Ok(false);
         };
         let mut footprints = Vec::new();
         for footprint in &step.footprints {
             if footprint.selectors.as_deref() != Some(&[binder]) {
-                return Err(SymbolicResourceError::Unsupported(
-                    "non-disjoint symbolic timing repeat".to_owned(),
-                ));
+                return Ok(false);
             }
-            let width = footprint.width.ok_or_else(|| {
-                SymbolicResourceError::Unsupported("unknown timing width".to_owned())
-            })?;
+            let Some(width) = footprint.width else {
+                return Ok(false);
+            };
             if !symbolic_trip_covers_width(arena, trip_count, width) {
-                return Err(SymbolicResourceError::Unsupported(
-                    "partial symbolic timing coverage".to_owned(),
-                ));
+                return Ok(false);
             }
             if touched
                 .insert(footprint.root.clone(), width)
                 .is_some_and(|old| old != width)
             {
-                return Err(SymbolicResourceError::Unsupported(
-                    "inconsistent symbolic timing width".to_owned(),
-                ));
+                return Ok(false);
             }
             footprints.push(SymbolicTimingFootprint {
                 root: footprint.root.clone(),
@@ -673,39 +768,59 @@ pub(super) fn schedule_symbolic_repeat(
         }));
     }
     if touched.is_empty() {
-        return Ok(());
+        return Ok(true);
     }
-    let mut local_timelines = SYMBOLIC_DEPTH_FAMILIES
-        .iter()
-        .map(|family| (*family, HashMap::new()))
-        .collect::<HashMap<&str, HashMap<SymbolicTimingRoot, SymbolicLaneTimeline>>>();
-    let mut local_maxima = SYMBOLIC_DEPTH_FAMILIES
-        .iter()
-        .map(|family| ((*family).to_owned(), zero))
-        .collect::<BTreeMap<_, _>>();
-    schedule_symbolic_nodes(&local_steps, &mut local_timelines, &mut local_maxima, arena)?;
+    let (local_maxima, local_exact) = schedule_symbolic_depth_bounds(&local_steps, arena)?;
+    *exact &= local_exact;
     let one = arena.literal_u128(1)?;
     let active_iterations = arena.extremum(false, [one, trip_count])?;
+    let mut durations = BTreeMap::new();
+    for (family, local) in local_maxima {
+        durations.insert(family, arena.multiply([active_iterations, local])?);
+    }
+    install_parallel_region(
+        &touched.keys().cloned().collect::<Vec<_>>(),
+        &durations,
+        timelines,
+        maxima,
+        exact,
+        arena,
+    )?;
+    Ok(true)
+}
+
+/// Occupy `roots` for `durations` after everything they already wait for.
+///
+/// Prior per-lane completions are joined into the start time; that is exact
+/// when the roots carry no lane detail and conservative otherwise.
+fn install_parallel_region(
+    roots_touched: &[SymbolicTimingRoot],
+    durations: &BTreeMap<String, ExprId>,
+    timelines: &mut HashMap<&str, HashMap<SymbolicTimingRoot, SymbolicLaneTimeline>>,
+    maxima: &mut BTreeMap<String, ExprId>,
+    exact: &mut bool,
+    arena: &mut ExpressionArena,
+) -> Result<(), SymbolicResourceError> {
+    let zero = arena.literal_u128(0)?;
     for family in SYMBOLIC_DEPTH_FAMILIES {
-        let Some(local) = local_maxima.get(*family).copied() else {
+        let Some(duration) = durations.get(*family).copied() else {
             timelines.remove(family);
             maxima.remove(*family);
             continue;
         };
-        if !timelines.contains_key(family) {
+        let Some(roots) = timelines.get_mut(family) else {
             continue;
-        }
-        let roots = timelines
-            .get_mut(family)
-            .ok_or_else(|| SymbolicResourceError::Missing("depth family".to_owned()))?;
+        };
         let mut dependencies = Vec::new();
-        for touched_root in touched.keys() {
+        for touched_root in roots_touched {
             for (root, frontier) in roots.iter() {
                 if symbolic_timing_roots_overlap(root, touched_root) {
                     if !frontier.lanes.is_empty() || frontier.chain.is_some() {
-                        return Err(SymbolicResourceError::Unsupported(
-                            "symbolic repeat follows selected lanes".to_owned(),
-                        ));
+                        *exact = false;
+                        dependencies.extend(frontier.lanes.values().copied());
+                        if let Some(chain) = &frontier.chain {
+                            dependencies.push(chain.finish(arena)?);
+                        }
                     }
                     dependencies.push(frontier.barrier);
                 }
@@ -719,9 +834,8 @@ pub(super) fn schedule_symbolic_repeat(
                 });
         }
         let start = arena.extremum(true, dependencies)?;
-        let contribution = arena.multiply([active_iterations, local])?;
-        let finish = arena.add([start, contribution])?;
-        for root in touched.keys() {
+        let finish = arena.add([start, duration])?;
+        for root in roots_touched {
             let frontier = roots
                 .get_mut(root)
                 .ok_or_else(|| SymbolicResourceError::Missing("repeat frontier".to_owned()))?;
@@ -738,6 +852,226 @@ pub(super) fn schedule_symbolic_repeat(
         );
     }
     Ok(())
+}
+
+/// Upper-bound rule: iterations whose lanes are pairwise disjoint run in
+/// parallel.
+///
+/// Every selector must be `binder + c` with `c` independent of the binder.
+/// Two lanes `i + c_a` and `j + c_b` of distinct iterations `i != j` can only
+/// coincide when `|c_a - c_b| = |i - j| < trip_count`, so offsets on one owner
+/// that differ by at least the trip count prove the iterations disjoint (a
+/// shared offset is the same lane only within one iteration). The repeat then
+/// costs one locally scheduled body. Owners it does not fully cover are
+/// treated as busy for that whole time, so the result is an upper bound.
+#[allow(clippy::too_many_lines)]
+fn try_schedule_disjoint_repeat(
+    body: &[SymbolicTimingNode],
+    binder: ExprId,
+    trip_count: ExprId,
+    timelines: &mut HashMap<&str, HashMap<SymbolicTimingRoot, SymbolicLaneTimeline>>,
+    maxima: &mut BTreeMap<String, ExprId>,
+    exact: &mut bool,
+    arena: &mut ExpressionArena,
+) -> Result<bool, SymbolicResourceError> {
+    let extent = trip_extent(arena, trip_count);
+    let Some(extent) = arena.polynomial(extent) else {
+        return Ok(false);
+    };
+    let mut offsets: HashMap<SymbolicTimingRoot, Vec<super::SymbolicPolynomial>> = HashMap::new();
+    let mut lane_steps = Vec::new();
+    for node in body {
+        let SymbolicTimingNode::Step(step) = node else {
+            return Ok(false);
+        };
+        let mut footprints = Vec::new();
+        for footprint in &step.footprints {
+            let Some(selectors) = footprint.selectors.as_deref() else {
+                return Ok(false);
+            };
+            let known = offsets.entry(footprint.root.clone()).or_default();
+            let mut lanes = Vec::new();
+            for selector in selectors {
+                let Some(offset) = selector_offset(arena, *selector, binder) else {
+                    return Ok(false);
+                };
+                let index = if let Some(index) = known.iter().position(|item| item == &offset) {
+                    index
+                } else {
+                    known.push(offset);
+                    known.len() - 1
+                };
+                lanes.push(arena.literal_u128(index as u128)?);
+            }
+            footprints.push(SymbolicTimingFootprint {
+                root: footprint.root.clone(),
+                selectors: Some(lanes.into_boxed_slice()),
+                width: None,
+            });
+        }
+        lane_steps.push(SymbolicTimingNode::Step(SymbolicTimingStep {
+            footprints: footprints.into_boxed_slice(),
+            durations: step.durations.clone(),
+        }));
+    }
+    if offsets.is_empty() {
+        return Ok(false);
+    }
+    let roots_touched = offsets.keys().cloned().collect::<Vec<_>>();
+    for (index, left) in roots_touched.iter().enumerate() {
+        if roots_touched[index + 1..]
+            .iter()
+            .any(|right| symbolic_timing_roots_overlap(left, right))
+        {
+            return Ok(false);
+        }
+    }
+    for owner_offsets in offsets.values() {
+        for (index, left) in owner_offsets.iter().enumerate() {
+            for right in &owner_offsets[index + 1..] {
+                if !offsets_separated(left, right, &extent) {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    let (local_maxima, _) = schedule_symbolic_depth_bounds(&lane_steps, arena)?;
+    *exact = false;
+    let one = arena.literal_u128(1)?;
+    let active_iterations = arena.extremum(false, [one, trip_count])?;
+    let mut durations = BTreeMap::new();
+    for (family, local) in local_maxima {
+        durations.insert(family, arena.multiply([active_iterations, local])?);
+    }
+    install_parallel_region(&roots_touched, &durations, timelines, maxima, exact, arena)?;
+    Ok(true)
+}
+
+/// Upper-bound rule: run the iterations one after another.
+///
+/// The body is scheduled on its own (keeping its internal parallelism), and
+/// the repeat occupies every owner the body touches for the sum of the body
+/// makespans over all iterations.
+fn schedule_sequential_repeat(
+    body: &[SymbolicTimingNode],
+    binder: ExprId,
+    trip_count: ExprId,
+    timelines: &mut HashMap<&str, HashMap<SymbolicTimingRoot, SymbolicLaneTimeline>>,
+    maxima: &mut BTreeMap<String, ExprId>,
+    exact: &mut bool,
+    arena: &mut ExpressionArena,
+) -> Result<(), SymbolicResourceError> {
+    let roots_touched = collect_timing_roots(body);
+    if roots_touched.is_empty() {
+        return Ok(());
+    }
+    let (local_maxima, _) = schedule_symbolic_depth_bounds(body, arena)?;
+    *exact = false;
+    let zero = arena.literal_u128(0)?;
+    let negative_one = arena.literal_i64(-1)?;
+    let last = arena.add([trip_count, negative_one])?;
+    let mut durations = BTreeMap::new();
+    for (family, local) in local_maxima {
+        let total = if arena.depends_on(local, binder) {
+            arena.bounded_sum(binder, zero, last, local)?
+        } else {
+            arena.multiply([trip_count, local])?
+        };
+        durations.insert(family, total);
+    }
+    install_parallel_region(&roots_touched, &durations, timelines, maxima, exact, arena)
+}
+
+/// Every owner touched anywhere in a timing graph, in first-touch order.
+pub(super) fn collect_timing_roots(nodes: &[SymbolicTimingNode]) -> Vec<SymbolicTimingRoot> {
+    fn visit(nodes: &[SymbolicTimingNode], output: &mut Vec<SymbolicTimingRoot>) {
+        for node in nodes {
+            match node {
+                SymbolicTimingNode::Step(step) => {
+                    for footprint in &step.footprints {
+                        if !output.contains(&footprint.root) {
+                            output.push(footprint.root.clone());
+                        }
+                    }
+                }
+                SymbolicTimingNode::Repeat { body, .. } => visit(body, output),
+                SymbolicTimingNode::Barrier { roots, .. } => {
+                    for root in roots {
+                        if !output.contains(root) {
+                            output.push(root.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut output = Vec::new();
+    visit(nodes, &mut output);
+    output
+}
+
+/// The number of values a repeat binder takes, as a plain expression.
+fn trip_extent(arena: &ExpressionArena, trip_count: ExprId) -> ExprId {
+    match arena.node(trip_count) {
+        Some(ResourceExpressionNode::Contracted {
+            name, arguments, ..
+        }) if name == "qamomile.range_trip_count"
+            && arguments.len() == 3
+            && arena.is_literal(arguments[0], "0")
+            && arena.is_literal(arguments[2], "1") =>
+        {
+            arguments[1]
+        }
+        _ => trip_count,
+    }
+}
+
+/// Write a lane selector as `binder + offset`, returning the offset.
+fn selector_offset(
+    arena: &ExpressionArena,
+    selector: ExprId,
+    binder: ExprId,
+) -> Option<super::SymbolicPolynomial> {
+    let mut polynomial = arena.polynomial(selector)?;
+    let mut powers = BTreeMap::new();
+    powers.insert(binder, 1);
+    let linear = super::SymbolicMonomial(powers);
+    if polynomial.terms.remove(&linear)? != num_bigint::BigInt::from(1) {
+        return None;
+    }
+    let independent = polynomial.terms.keys().all(|monomial| {
+        monomial
+            .0
+            .keys()
+            .all(|atom| *atom != binder && !arena.depends_on(*atom, binder))
+    });
+    independent.then_some(polynomial)
+}
+
+/// Prove `|left - right| >= extent` for symbolic polynomial offsets.
+fn offsets_separated(
+    left: &super::SymbolicPolynomial,
+    right: &super::SymbolicPolynomial,
+    extent: &super::SymbolicPolynomial,
+) -> bool {
+    let negate = |value: &super::SymbolicPolynomial| {
+        value.multiplied(&super::SymbolicPolynomial::constant(
+            num_bigint::BigInt::from(-1),
+        ))
+    };
+    let nonnegative_constant = |value: &super::SymbolicPolynomial| {
+        value.terms.iter().all(|(monomial, coefficient)| {
+            monomial.0.is_empty() && coefficient >= &num_bigint::BigInt::from(0)
+        })
+    };
+    let difference = |a: &super::SymbolicPolynomial, b: &super::SymbolicPolynomial| {
+        let mut result = a.clone();
+        result.add_assign(negate(b)?)?;
+        result.add_assign(negate(extent)?)?;
+        Some(result)
+    };
+    difference(left, right).is_some_and(|value| nonnegative_constant(&value))
+        || difference(right, left).is_some_and(|value| nonnegative_constant(&value))
 }
 
 pub(super) fn symbolic_trip_covers_width(
