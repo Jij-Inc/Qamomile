@@ -252,3 +252,54 @@ def test_depth_bounds_enclose_the_emitted_circuit_depth(seed: int) -> None:
             actual = _circuit_depth(_unoptimized_circuit(module, n))
             assert high is None or actual <= high
             assert low is None or low <= actual
+
+
+def test_expanded_nonnegative_polynomials_stay_symbolic_under_substitution() -> None:
+    """A natural sum may hold negative constant terms after expansion.
+
+    ``(p - 2) * 50`` is expanded to ``-100 + 50 * p``; substituting nothing must
+    keep the negative constant in an integer literal instead of failing the
+    sum's natural domain.
+    """
+
+    from qamomile.resources.expr import Expr
+
+    p = {
+        "kind": "symbol",
+        "domain": "natural",
+        "unit": "1",
+        "symbol": {
+            "scope": "t",
+            "name": "p",
+            "domain": "natural",
+            "unit": "1",
+            "origin": "const",
+            "constraints": ["p >= 2"],
+        },
+    }
+    expanded = Expr.from_data(
+        {
+            "kind": "add",
+            "domain": "natural",
+            "unit": "1",
+            "arguments": [
+                {"kind": "literal", "domain": "integer", "unit": "1", "value": -100},
+                {
+                    "kind": "multiply",
+                    "domain": "natural",
+                    "unit": "1",
+                    "arguments": [
+                        p,
+                        {
+                            "kind": "literal",
+                            "domain": "natural",
+                            "unit": "1",
+                            "value": 50,
+                        },
+                    ],
+                },
+            ],
+        }
+    )
+    assert str(expanded.evaluate({})) == "p * 50 + -100"
+    assert expanded.evaluate({"p": 3}).value == 50

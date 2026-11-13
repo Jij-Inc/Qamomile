@@ -2635,7 +2635,11 @@ impl SubstitutionBuilder {
         }
         if (kind == "add" && !folded.is_zero()) || (kind == "multiply" && !folded.is_one()) {
             let literal_unit = if kind == "add" { &node.unit } else { "1" };
-            symbolic.push(self.intern(numeric_wire_node(folded, node.domain, literal_unit))?);
+            // The folded constant is one operand of a nonnegative whole (for
+            // example ``-100`` in ``(p - 2) * (50 + ...)`` expanded), so it takes
+            // its own domain when the parent's domain cannot hold it.
+            let domain = operand_literal_domain(&folded, node.domain);
+            symbolic.push(self.intern(numeric_wire_node(folded, domain, literal_unit))?);
         }
         self.sort_identifiers(&mut symbolic)?;
         if symbolic.len() == 1
@@ -3239,6 +3243,36 @@ fn numeric_wire_literal(
         None => return invalid_value("literal has no numeric payload"),
     };
     result.checked()
+}
+
+/// Keep ``domain`` for a literal operand when it holds ``value``; otherwise use
+/// the narrowest numeric domain that does.
+fn operand_literal_domain(value: &Numeric, domain: i32) -> i32 {
+    use wire::ResourceDomainProto as D;
+    let (integer, negative, within_unit) = match value {
+        Numeric::Rational(numerator, denominator) => (
+            denominator.is_one(),
+            numerator.is_negative(),
+            !numerator.is_negative() && numerator <= denominator,
+        ),
+        Numeric::Real(real) => (false, *real < 0.0, (0.0..=1.0).contains(real)),
+    };
+    let holds = match D::try_from(domain) {
+        Ok(D::ResourceNatural) => integer && !negative,
+        Ok(D::ResourceInteger) => integer,
+        Ok(D::ResourceRational) => !matches!(value, Numeric::Real(_)),
+        Ok(D::ResourceProbability) => within_unit,
+        _ => true,
+    };
+    if holds {
+        return domain;
+    }
+    match value {
+        Numeric::Real(_) => D::ResourceReal.into(),
+        Numeric::Rational(_, _) if integer && !negative => D::ResourceNatural.into(),
+        Numeric::Rational(_, _) if integer => D::ResourceInteger.into(),
+        Numeric::Rational(_, _) => D::ResourceRational.into(),
+    }
 }
 
 fn numeric_wire_node(value: Numeric, domain: i32, unit: &str) -> wire::ResourceNodeProto {
