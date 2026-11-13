@@ -514,35 +514,20 @@ class FamilyCommonExpressions:
 
 
 @dataclass(frozen=True, slots=True)
-class RealizationSelection:
-    """Select addition implementations by exact generated selector count.
-
-    Native instructions and explicit target overrides take precedence. Selection
-    compares existing bounded schedules without materializing both candidates.
-    Selector count measures compiler/emitter work, not physical device latency.
-    """
-
-    name: str = field(default="realization.minimum-selectors", init=False)
-    version: str = field(default="1", init=False)
-    configuration: bytes = field(default=b"", init=False)
-
-
-@dataclass(frozen=True, slots=True)
 class CircuitSimplification:
     """Apply phase-exact local gate rules after checked circuit projection.
 
-    Version 2 moves each gate back past earlier gates that provably commute
-    with it (diagonal or X-algebra action on every shared wire; controls are
-    diagonal), then cancels inverse pairs, fuses exact phase gates, merges
-    rotation angles, and removes zero rotations. Rules retain measurements,
-    classically conditioned gates, structured regions, ordered numeric checks,
-    coherent controls, and segment boundaries. The configuration is portable
-    to deferred execution; artifacts recorded with version 1 keep its
-    adjacent-only rules.
+    Each gate moves back past earlier gates that provably commute with it
+    (diagonal or X-algebra action on every shared wire; controls are diagonal),
+    then inverse pairs cancel, exact phase gates fuse, rotation angles merge,
+    and zero rotations vanish. Top-level SWAPs become wire relabeling. Rules
+    retain measurements, classically conditioned gates, structured regions,
+    ordered numeric checks, coherent controls, and segment boundaries. The
+    configuration is portable to deferred execution.
     """
 
     name: str = field(default="circuit.exact-local", init=False)
-    version: str = field(default="2", init=False)
+    version: str = field(default="1", init=False)
     configuration: bytes = field(default=b"", init=False)
 
 
@@ -556,7 +541,6 @@ class OptimizationPipeline:
         max_work (int): Native rewrite visits per call, from one to one million.
         family_passes (Sequence[FamilyOptimizationPass]): Symbolic passes before
             Const binding; requires a QKernel or ProgramFamily input.
-        realization (RealizationSelection | None): Portable late selection policy.
         circuit (CircuitSimplification | None): Portable late circuit policy.
 
     Raises:
@@ -569,7 +553,6 @@ class OptimizationPipeline:
     max_work: int
     _identities: tuple[tuple[str, str, bytes], ...] = field(repr=False)
     family_passes: tuple[FamilyOptimizationPass, ...]
-    realization: RealizationSelection | None
     circuit: CircuitSimplification | None
     _family_identities: tuple[tuple[str, str, bytes], ...] = field(repr=False)
 
@@ -580,7 +563,6 @@ class OptimizationPipeline:
         seed: int = 0,
         max_work: int = 1_000_000,
         family_passes: Sequence[FamilyOptimizationPass] = (),
-        realization: RealizationSelection | None = None,
         circuit: CircuitSimplification | None = None,
     ) -> None:
         """Snapshot bounded pass configuration before any extension invocation.
@@ -590,7 +572,6 @@ class OptimizationPipeline:
             seed (int): Deterministic unsigned 64-bit optimization seed.
             max_work (int): Maximum visits per native rewrite invocation.
             family_passes (Sequence[FamilyOptimizationPass]): Symbolic stage passes.
-            realization (RealizationSelection | None): Deferred selection policy.
             circuit (CircuitSimplification | None): Deferred circuit policy.
 
         Raises:
@@ -602,16 +583,8 @@ class OptimizationPipeline:
             raise ValueError("optimization seed must be an unsigned 64-bit integer")
         if type(max_work) is not int or not 1 <= max_work <= 1_000_000:
             raise ValueError("max_work must be between one and one million")
-        if (
-            len(passes)
-            + len(family_passes)
-            + int(realization is not None)
-            + int(circuit is not None)
-            > 64
-        ):
+        if len(passes) + len(family_passes) + int(circuit is not None) > 64:
             raise ValueError("pipeline exceeds 64 passes")
-        if realization is not None and type(realization) is not RealizationSelection:
-            raise TypeError("realization must be RealizationSelection or None")
         if circuit is not None and type(circuit) is not CircuitSimplification:
             raise TypeError("circuit must be CircuitSimplification or None")
         frozen = tuple(passes)
@@ -624,31 +597,23 @@ class OptimizationPipeline:
         object.__setattr__(self, "_identities", identities)
         object.__setattr__(self, "family_passes", families)
         object.__setattr__(self, "_family_identities", family_identities)
-        object.__setattr__(self, "realization", realization)
         object.__setattr__(self, "circuit", circuit)
         constructor.validate_pipeline(list(self._all_identities))
-
-    @property
-    def _late_identities(self) -> tuple[tuple[str, str, bytes], ...]:
-        """Project the portable late policies in their fixed driver order.
-
-        Returns:
-            tuple[tuple[str, str, bytes], ...]: Realization then circuit identities.
-        """
-        return tuple(
-            (policy.name, policy.version, policy.configuration)
-            for policy in (self.realization, self.circuit)
-            if policy is not None
-        )
 
     @property
     def _all_identities(self) -> tuple[tuple[str, str, bytes], ...]:
         """Return every pass identity in driver order for native validation.
 
         Returns:
-            tuple[tuple[str, str, bytes], ...]: Family, specialized, then late identities.
+            tuple[tuple[str, str, bytes], ...]: Family, specialized, then circuit identities.
         """
-        return (*self._family_identities, *self._identities, *self._late_identities)
+        circuit = self.circuit
+        late = (
+            ()
+            if circuit is None
+            else ((circuit.name, circuit.version, circuit.configuration),)
+        )
+        return (*self._family_identities, *self._identities, *late)
 
     def _with(
         self,
@@ -674,7 +639,6 @@ class OptimizationPipeline:
             family_passes=(
                 self.family_passes if family_passes is None else family_passes
             ),
-            realization=self.realization,
             circuit=self.circuit,
         )
 
@@ -710,23 +674,17 @@ class OptimizationPipeline:
         cls,
         *,
         family: bool = True,
-        realization: RealizationSelection | None = None,
         circuit: CircuitSimplification | None = CircuitSimplification(),
         seed: int = 0,
         max_work: int = 1_000_000,
     ) -> OptimizationPipeline:
-        """Compose working symbolic, hybrid, realization, and circuit stages.
+        """Compose working symbolic, hybrid, and circuit stages.
 
         Args:
             family (bool): Run symbolic CSE; requires source or a ProgramFamily.
                 Set False when compiling an already specialized Program.
-            realization (RealizationSelection | None): Late selection policy.
-                Defaults to None, which keeps the width- and control-aware
-                portable defaults that minimize estimated CNOTs; selector
-                count is a compiler-work metric and can choose much larger
-                circuits.
-            circuit (CircuitSimplification | None): Late exact circuit rules.
-                Both late policies require a circuit target or Reference.
+            circuit (CircuitSimplification | None): Late exact circuit rules;
+                requires a circuit target or Reference.
             seed (int): Deterministic unsigned optimization seed.
             max_work (int): Native traversal bound per invocation.
 
@@ -741,7 +699,6 @@ class OptimizationPipeline:
                 StandardSimplification(),
             ),
             family_passes=(FamilyCommonExpressions(),) if family else (),
-            realization=realization,
             circuit=circuit,
             seed=seed,
             max_work=max_work,

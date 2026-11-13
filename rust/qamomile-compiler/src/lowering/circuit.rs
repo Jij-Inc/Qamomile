@@ -19,7 +19,6 @@ mod deferred;
 mod optimization;
 pub use deferred::CircuitDefinition;
 use deferred::{CallCacheEntry, CallCacheKey};
-pub(crate) use optimization::ExactCircuitRules;
 
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;

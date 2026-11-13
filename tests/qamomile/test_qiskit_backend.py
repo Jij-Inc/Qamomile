@@ -1413,9 +1413,7 @@ def test_qiskit_executes_typed_product_result() -> None:
     assert record.result.values == {((1,), (0, 1)): 4}
 
 
-@pytest.mark.parametrize(
-    "choice", ["add.increments", "add.qft", "add.ripple", "add.native"]
-)
+@pytest.mark.parametrize("choice", ["add.qft", "add.ripple", "add.native"])
 def test_qiskit_executes_late_realizations(choice: str) -> None:
     """One shared arithmetic source survives exact alternative realizations."""
     pytest.importorskip("qiskit_aer")

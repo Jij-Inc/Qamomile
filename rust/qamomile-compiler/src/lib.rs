@@ -1338,7 +1338,7 @@ impl TargetPreparedProgram {
         circuit::project_with_lowering(
             &self.verified.local.checked.package,
             &self.verified.local.checked.boolean_plans,
-            self.late.lowering(capabilities),
+            capabilities,
         )
         .and_then(|circuit| self.late.finish(circuit))
     }
@@ -1355,7 +1355,7 @@ impl TargetPreparedProgram {
         circuit::project_with_work(
             &self.verified.local.checked.package,
             &self.verified.local.checked.boolean_plans,
-            self.late.lowering(LoweringConfig::EMPTY),
+            LoweringConfig::EMPTY,
         )
         .and_then(|(circuit, work)| self.late.finish(circuit).map(|circuit| (circuit, work)))
     }
@@ -1388,7 +1388,7 @@ impl TargetPreparedProgram {
             &self.verified.local.checked.package,
             &self.verified.local.checked.boolean_plans,
             indices,
-            self.late.lowering(capabilities),
+            capabilities,
         )
         .and_then(|family| family.map_circuits(|circuit| self.late.finish(circuit)))
     }
@@ -1426,7 +1426,7 @@ impl TargetPreparedProgram {
             &self.verified.local.checked.boolean_plans,
             indices,
             bindings,
-            self.late.lowering(capabilities),
+            capabilities,
         )
         .and_then(|circuit| self.late.finish(circuit))
     }
@@ -1450,7 +1450,7 @@ impl TargetPreparedProgram {
             &self.verified.local.checked.boolean_plans,
             indices,
             bindings,
-            self.late.lowering(LoweringConfig::EMPTY),
+            LoweringConfig::EMPTY,
         )
         .and_then(|circuit| self.late.finish(circuit))
     }

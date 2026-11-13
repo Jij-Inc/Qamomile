@@ -193,8 +193,6 @@ pub enum Realization {
     PauliParity,
     /// Preserve wrapping register addition at the next boundary.
     AddNative,
-    /// Compose controlled increments without ancillary qubits.
-    AddIncrements,
     /// Exact Fourier addition without truncating any controlled rotation.
     AddQft,
     /// Ancilla-free linear ripple-carry addition with relative-phase Toffolis.
@@ -221,12 +219,11 @@ pub enum Realization {
 
 impl Realization {
     /// Closed list used by option validation and user-facing discovery.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 15] = [
         Self::PauliNative,
         Self::PauliRzz,
         Self::PauliParity,
         Self::AddNative,
-        Self::AddIncrements,
         Self::AddQft,
         Self::AddRipple,
         Self::ModMulSchoolbookRipple,
@@ -275,12 +272,6 @@ impl Realization {
                 AddInto,
                 "Delegate exact wrapping register addition to the target; synthesis depends on the target SDK.",
                 Caps::ADD_INTO,
-            ),
-            Self::AddIncrements => (
-                "add.increments",
-                AddInto,
-                "Use ancilla-free controlled increments: O(n^2) steps and O(n^3) control selectors.",
-                Caps::EMPTY,
             ),
             Self::AddQft => (
                 "add.qft",
@@ -516,7 +507,6 @@ impl ConfiguredRealization {
 /// Immutable target input; not a persistent semantic plan or registry.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct LoweringConfig {
-    minimum_addition_selectors: bool,
     /// Instructions accepted at this emission boundary.
     pub capabilities: RealizationCapabilities,
     pauli: Option<ConfiguredRealization>,
@@ -531,7 +521,6 @@ pub struct LoweringConfig {
 impl LoweringConfig {
     /// Portable, deterministic defaults with no optional target instructions.
     pub const EMPTY: Self = Self {
-        minimum_addition_selectors: false,
         capabilities: RealizationCapabilities::EMPTY,
         pauli: None,
         addition: None,
@@ -542,28 +531,9 @@ impl LoweringConfig {
         mod_multi_pow: None,
     };
 
-    /// Enable bounded addition selection while preserving explicit overrides.
-    #[must_use]
-    pub const fn minimizing_addition_selectors(mut self) -> Self {
-        self.minimum_addition_selectors = true;
-        self
-    }
-
-    pub(crate) const fn selects_addition(self) -> bool {
-        self.minimum_addition_selectors && self.addition.is_none()
-    }
-
     /// Whether no explicit addition realization was requested.
     pub(crate) const fn addition_is_default(self) -> bool {
         self.addition.is_none()
-    }
-
-    /// Whether addition uses the width-dependent portable default.
-    pub(crate) const fn addition_is_automatic(self) -> bool {
-        self.addition.is_none()
-            && !self
-                .capabilities
-                .contains(RealizationCapabilities::ADD_INTO)
     }
 
     /// Decode at most one override per semantic family.
@@ -773,7 +743,7 @@ mod tests {
             Err(RealizationError::Unavailable(_))
         ));
         assert!(matches!(
-            LoweringConfig::from_labels(&[], &["add.qft".into(), "add.increments".into()]),
+            LoweringConfig::from_labels(&[], &["add.qft".into(), "add.ripple".into()]),
             Err(RealizationError::ConflictingOverride(_))
         ));
     }

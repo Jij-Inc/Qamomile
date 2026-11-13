@@ -165,13 +165,10 @@ impl ArithmeticPlan {
 
 /// Realize `|a>|b> -> |a>|a+b mod 2^n>` with equal little-endian halves.
 ///
-/// The increment construction uses O(n²) steps and O(n³) selectors; Fourier
-/// addition uses O(n²) steps/selectors; ripple-carry addition uses O(n) steps
-/// and selectors. Checked preflight precedes allocation.
-///
-/// Without an explicit choice, a native target capability, or the
-/// minimum-selector policy, the portable default minimizes the estimated
-/// CNOT count of the standard decomposition of each candidate.
+/// Fourier addition uses O(n²) steps; ripple-carry addition uses O(n) steps.
+/// Without an explicit choice or a native target capability, the cheaper of
+/// the two by estimated CNOT count is used. Checked preflight precedes
+/// allocation.
 ///
 /// # Errors
 /// Rejects zero/odd widths and schedules exceeding either output budget.
@@ -184,11 +181,9 @@ pub fn plan_addition(
 
 /// Plan addition whose control-inheriting steps receive `outer_controls`.
 ///
-/// Surrounding controls change the automatic portable choice and replace a
-/// default native choice; explicit and minimum-selector selections are kept.
-///
-/// # Errors
-/// Rejects zero/odd widths and schedules exceeding either output budget.
+/// A default native choice is replaced under coherent control: generic SDK
+/// control of a native adder controls every gate, while the ripple adder only
+/// controls the 2n-1 CNOTs between its self-inverse conjugations.
 pub(crate) fn plan_controlled_addition(
     state_width: u64,
     config: LoweringConfig,
@@ -198,136 +193,69 @@ pub(crate) fn plan_controlled_addition(
         return Err(RealizationError::AdditionWidth);
     }
     let n = state_width / 2;
-    let mut realization = config.select(RealizationFamily::AddInto);
-    if config.selects_addition() && realization.kind() != Realization::AddNative {
-        let choices = [
-            Realization::AddIncrements,
-            Realization::AddQft,
-            Realization::AddRipple,
-        ];
-        if let Some(choice) = choices
-            .into_iter()
-            .filter_map(|choice| addition_cost(n, state_width, choice))
-            .min_by_key(|cost| (cost.selectors, cost.steps))
-        {
-            realization = crate::ConfiguredRealization::exact(choice.realization);
-        }
-    } else if config.addition_is_automatic()
-        || (outer_controls > 0
-            && config.addition_is_default()
-            && realization.kind() == Realization::AddNative)
+    let selected = config.select(RealizationFamily::AddInto).kind();
+    let realization = if config.addition_is_default()
+        && (selected != Realization::AddNative || outer_controls > 0)
     {
-        // A coherently controlled native adder is synthesized by generic SDK
-        // control of every gate; the portable ripple adder controls only the
-        // 2n-1 CNOTs between its self-inverse conjugations.
-        let choices = [
-            Realization::AddRipple,
-            Realization::AddQft,
-            Realization::AddIncrements,
-        ];
-        if let Some(choice) = choices
+        [Realization::AddRipple, Realization::AddQft]
             .into_iter()
-            .filter_map(|choice| {
-                let cnots = estimated_cnots(n, choice, outer_controls)?;
-                addition_cost(n, state_width, choice).map(|cost| (cnots, cost))
-            })
-            .min_by_key(|(cnots, cost)| (*cnots, cost.steps))
-        {
-            realization = crate::ConfiguredRealization::exact(choice.1.realization);
-        }
-    }
-    let cost = addition_cost(n, state_width, realization.kind())
-        .ok_or(RealizationError::ScheduleBudget)?;
-    build_addition(n, state_width, cost.realization, cost.steps)
+            .filter(|choice| addition_steps(n, state_width, *choice).is_some())
+            .min_by_key(|choice| estimated_cnots(n, *choice, outer_controls).unwrap_or(u64::MAX))
+            .ok_or(RealizationError::ScheduleBudget)?
+    } else {
+        selected
+    };
+    let steps =
+        addition_steps(n, state_width, realization).ok_or(RealizationError::ScheduleBudget)?;
+    build_addition(n, state_width, realization, steps)
 }
 
-/// A complete candidate whose work and allocation costs fit both native bounds.
-struct AdditionCost {
-    realization: Realization,
-    steps: u64,
-    selectors: u64,
-}
-
-fn addition_cost(n: u64, state_width: u64, realization: Realization) -> Option<AdditionCost> {
-    let cost = match realization {
-        Realization::AddNative => AdditionCost {
-            realization,
-            steps: 1,
-            selectors: state_width,
-        },
-        Realization::AddIncrements => AdditionCost {
-            realization,
-            steps: n.checked_add(1)?.checked_mul(n)? / 2,
-            selectors: n
-                .checked_add(1)?
-                .checked_mul(n)?
-                .checked_mul(n.checked_add(5)?)?
-                / 6,
-        },
-        Realization::AddQft => AdditionCost {
-            realization,
-            steps: n
-                .checked_mul(n)?
-                .checked_mul(3)?
-                .checked_add(n.checked_mul(3)?)?
-                / 2,
-            selectors: n.checked_mul(n)?.checked_mul(3)?.checked_add(n)?,
-        },
-        Realization::AddRipple if n == 1 => AdditionCost {
-            realization,
-            steps: 1,
-            selectors: 2,
-        },
-        Realization::AddRipple => AdditionCost {
-            realization,
-            steps: n.checked_mul(28)?.checked_sub(25)?,
-            selectors: n.checked_mul(44)?.checked_sub(38)?,
-        },
+/// Return the step count of a schedule whose work fits both native bounds.
+fn addition_steps(n: u64, state_width: u64, realization: Realization) -> Option<u64> {
+    let (steps, selectors) = match realization {
+        Realization::AddNative => (1, state_width),
+        Realization::AddQft => (
+            n.checked_mul(n.checked_add(1)?)?.checked_mul(3)? / 2,
+            n.checked_mul(n)?.checked_mul(3)?.checked_add(n)?,
+        ),
+        Realization::AddRipple if n == 1 => (1, 2),
+        Realization::AddRipple => (
+            n.checked_mul(28)?.checked_sub(25)?,
+            n.checked_mul(44)?.checked_sub(38)?,
+        ),
         _ => unreachable!("family selection returns an addition realization"),
     };
-    (cost.steps <= MAX_ARITHMETIC_STEPS && cost.selectors <= MAX_ARITHMETIC_SELECTORS)
-        .then_some(cost)
+    (steps <= MAX_ARITHMETIC_STEPS && selectors <= MAX_ARITHMETIC_SELECTORS).then_some(steps)
 }
 
 /// Estimate CNOTs of a standard decomposition under `outer` extra controls.
 ///
 /// Multi-controlled X uses the ancilla-free costs 0, 1, 6, 14, 36 and 84 for up
 /// to five controls, then grows linearly; a controlled phase with extra
-/// controls costs one multi-controlled X plus two CNOTs. Increments are only
-/// estimated for one or two bits, where they need at most two internal controls.
+/// controls costs one multi-controlled X plus two CNOTs.
 fn estimated_cnots(n: u64, realization: Realization, outer: u64) -> Option<u64> {
-    let x = |controls: u64| -> Option<u64> {
-        match controls {
-            0 => Some(0),
-            1 => Some(1),
-            2 => Some(6),
-            3 => Some(14),
-            4 => Some(36),
-            _ => controls.checked_sub(5)?.checked_mul(56)?.checked_add(84),
-        }
+    let x = |controls: u64| match controls {
+        0..=4 => Some([0, 1, 6, 14, 36][usize::try_from(controls).ok()?]),
+        _ => controls.checked_sub(5)?.checked_mul(56)?.checked_add(84),
     };
-    let phase = if outer == 0 {
-        2
-    } else {
-        x(outer.checked_add(1)?)?.checked_add(2)?
-    };
+    let controlled = x(outer.checked_add(1)?)?;
     match realization {
-        Realization::AddIncrements => match n {
-            1 => x(outer.checked_add(1)?),
-            2 => x(outer.checked_add(2)?)?.checked_add(x(outer.checked_add(1)?)?.checked_mul(2)?),
-            _ => None,
-        },
         Realization::AddQft => {
+            let phase = if outer == 0 {
+                2
+            } else {
+                controlled.checked_add(2)?
+            };
             let basis = n.checked_mul(n.checked_sub(1)?)?.checked_mul(2)?;
             let rotations = n.checked_mul(n.checked_add(1)?)? / 2;
             basis.checked_add(rotations.checked_mul(phase)?)
         }
-        Realization::AddRipple if n == 1 => x(outer.checked_add(1)?),
+        Realization::AddRipple if n == 1 => Some(controlled),
         Realization::AddRipple => {
             let inherited = n.checked_mul(2)?.checked_sub(1)?;
             n.checked_mul(14)?
                 .checked_sub(12)?
-                .checked_add(inherited.checked_mul(x(outer.checked_add(1)?)?)?)
+                .checked_add(inherited.checked_mul(controlled)?)
         }
         _ => None,
     }
@@ -349,25 +277,6 @@ fn build_addition(
             controls: Vec::new(),
             angle: None,
         }),
-        Realization::AddIncrements => {
-            for addend in 0..n {
-                for target in (addend..n).rev() {
-                    let mut controls = Vec::with_capacity(
-                        usize::try_from(target - addend + 1)
-                            .map_err(|_| RealizationError::ScheduleBudget)?,
-                    );
-                    controls.push(addend);
-                    controls.extend((addend..target).map(|bit| n + bit));
-                    steps.push(ArithmeticStep {
-                        inherit_controls: true,
-                        gate: ArithmeticGate::PauliX,
-                        indices: vec![n + target],
-                        controls,
-                        angle: None,
-                    });
-                }
-            }
-        }
         Realization::AddQft => {
             // QFT without swaps; Fourier output order is accounted for below.
             for target in (0..n).rev() {
@@ -483,46 +392,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bounded_cost_selection_respects_explicit_and_native_choices() {
-        let automatic = LoweringConfig::EMPTY.minimizing_addition_selectors();
-        for n in [1, 4, 8, 16, 32] {
-            let selected = plan_addition(2 * n, automatic).unwrap();
-            let candidates = ["add.increments", "add.qft", "add.ripple"].map(|label| {
-                plan_addition(
-                    2 * n,
-                    LoweringConfig::from_labels(&[], &[label.into()]).unwrap(),
-                )
-                .unwrap()
-            });
-            let cost = |plan: &ArithmeticPlan| {
-                plan.steps()
-                    .iter()
-                    .map(|s| s.indices().len() + s.controls().len())
-                    .sum::<usize>()
-            };
-            assert_eq!(cost(&selected), candidates.iter().map(cost).min().unwrap());
-        }
-        let explicit = LoweringConfig::from_labels(&[], &["add.qft".into()]).unwrap();
-        assert_eq!(
-            plan_addition(4, explicit).unwrap(),
-            plan_addition(4, explicit.minimizing_addition_selectors()).unwrap()
-        );
-        let native =
-            LoweringConfig::from_labels(&["add_into".into()], &["add.native".into()]).unwrap();
-        assert_eq!(
-            plan_addition(32, native.minimizing_addition_selectors())
-                .unwrap()
-                .steps()[0]
-                .gate(),
-            ArithmeticGate::AddInto
-        );
-        assert_eq!(
-            plan_addition(u64::MAX - 1, automatic),
-            Err(RealizationError::ScheduleBudget)
-        );
-    }
-
-    #[test]
     fn checked_plan_owns_exact_adjoint_construction() {
         let config =
             LoweringConfig::from_labels(&["add_into".to_owned()], &["add.native".to_owned()])
@@ -538,7 +407,7 @@ mod tests {
     #[test]
     fn schedules_match_preflight_and_restore_fourier_basis() {
         for n in 1..8 {
-            for choice in ["add.increments", "add.qft", "add.ripple"] {
+            for choice in ["add.qft", "add.ripple"] {
                 let config = LoweringConfig::from_labels(&[], &[choice.into()]).unwrap();
                 let plan = plan_addition(2 * n, config).unwrap();
                 assert!(plan.steps().iter().all(|step| {
@@ -578,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn ripple_matches_increments_on_classical_inputs_without_phase_blocks() {
+    fn ripple_adds_on_classical_inputs_and_inherits_controls_only_where_needed() {
         // Replace every relative-phase Toffoli block by an exact CCX so the
         // schedule can be checked as a classical permutation.
         for n in 1..6_u64 {
@@ -614,69 +483,31 @@ mod tests {
 
     #[test]
     fn automatic_addition_minimizes_estimated_cnots() {
-        let kinds = (1..=8)
-            .map(|n| {
-                plan_addition(2 * n, LoweringConfig::EMPTY)
-                    .unwrap()
-                    .realization()
-            })
+        use Realization::{AddNative, AddQft, AddRipple};
+        let choose = |n: u64, config: LoweringConfig, controls: u64| {
+            plan_controlled_addition(2 * n, config, controls)
+                .unwrap()
+                .realization()
+        };
+        let kinds = (1..=6)
+            .map(|n| choose(n, LoweringConfig::EMPTY, 0))
             .collect::<Vec<_>>();
         assert_eq!(
             kinds,
-            [
-                Realization::AddRipple,
-                Realization::AddIncrements,
-                Realization::AddQft,
-                Realization::AddQft,
-                Realization::AddRipple,
-                Realization::AddRipple,
-                Realization::AddRipple,
-                Realization::AddRipple,
-            ]
+            [AddRipple, AddQft, AddQft, AddQft, AddRipple, AddRipple]
         );
-        let explicit = LoweringConfig::from_labels(&[], &["add.increments".into()]).unwrap();
-        assert_eq!(
-            plan_addition(16, explicit).unwrap().realization(),
-            Realization::AddIncrements
-        );
-        // Doubly controlled Fourier rotations are more expensive than the
-        // 2n-1 control-inheriting CNOTs of the ripple adder.
-        assert_eq!(
-            plan_controlled_addition(6, LoweringConfig::EMPTY, 2)
-                .unwrap()
-                .realization(),
-            Realization::AddRipple
-        );
+        // Doubly controlled Fourier rotations cost more than the ripple
+        // adder's 2n-1 control-inheriting CNOTs.
+        assert_eq!(choose(3, LoweringConfig::EMPTY, 2), AddRipple);
         let native = LoweringConfig::from_labels(&["add_into".into()], &[]).unwrap();
-        assert_eq!(
-            plan_controlled_addition(16, native, 0)
-                .unwrap()
-                .realization(),
-            Realization::AddNative
-        );
-        assert_eq!(
-            plan_controlled_addition(16, native, 1)
-                .unwrap()
-                .realization(),
-            Realization::AddRipple
-        );
+        assert_eq!(choose(8, native, 0), AddNative);
+        assert_eq!(choose(8, native, 1), AddRipple);
         let pinned =
             LoweringConfig::from_labels(&["add_into".into()], &["add.native".into()]).unwrap();
-        assert_eq!(
-            plan_controlled_addition(16, pinned, 1)
-                .unwrap()
-                .realization(),
-            Realization::AddNative
-        );
-        for n in 1..=16 {
-            assert_eq!(
-                estimated_cnots(n, Realization::AddRipple, 0),
-                Some(if n == 1 { 1 } else { 16 * n - 13 })
-            );
-            assert_eq!(
-                estimated_cnots(n, Realization::AddQft, 0),
-                Some(3 * n * n - n)
-            );
+        assert_eq!(choose(8, pinned, 1), AddNative);
+        for n in 2..=16 {
+            assert_eq!(estimated_cnots(n, AddRipple, 0), Some(16 * n - 13));
+            assert_eq!(estimated_cnots(n, AddQft, 0), Some(3 * n * n - n));
         }
     }
 

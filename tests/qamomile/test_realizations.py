@@ -37,7 +37,7 @@ def test_discovery_matches_validation_and_is_immutable() -> None:
     from dataclasses import FrozenInstanceError
 
     choices = list_realizations()
-    assert len(choices) == 16
+    assert len(choices) == 15
     assert len({choice.name for choice in choices}) == len(choices)
     for choice in choices:
         assert not choice.name.endswith(".v1")
@@ -160,31 +160,45 @@ def exercise_realization_backend(
     )
 
 
-@pytest.mark.parametrize(
-    "choice", ["add.increments", "add.qft", "add.ripple", "add.native"]
-)
-@pytest.mark.parametrize("width", [1, 2, 3])
-def test_addition_matrix_matches_full_complex_unitary(choice: str, width: int) -> None:
-    """All basis amplitudes and phases agree with an independent permutation."""
+@pytest.mark.parametrize("choice", ["add.qft", "add.ripple", "add.native"])
+@pytest.mark.parametrize("width", [1, 3])
+@pytest.mark.parametrize("controlled", [False, True])
+def test_addition_matrix_matches_full_complex_unitary(
+    choice: str, width: int, controlled: bool
+) -> None:
+    """All amplitudes and phases agree with an independent permutation."""
     pytest.importorskip("qiskit")
     from qiskit.quantum_info import Operator
 
     from qamomile.qiskit import Qiskit, to_circuit
 
+    size, offset = 2 * width, int(controlled)
+    entry = (
+        f"""    control, target = qm.split_at(qm.qubits({size + 1}), 1)
+    control, target = qm.control(adder, control, target)
+    return qm.concat(control, target)"""
+        if controlled
+        else f"    return adder(qm.qubits({size}))"
+    )
     program = qm.build_source(f"""
 import qamomile as qm
 @qm.qkernel
-def example() -> qm.Q[qm.Bits[{2 * width}]]:
-    return qm.add_into(qm.qubits({2 * width}))
+def adder(state: qm.Q[qm.Bits[{size}]]) -> qm.Q[qm.Bits[{size}]]:
+    return qm.add_into(state)
+@qm.qkernel
+def example() -> qm.Q[qm.Bits[{size + offset}]]:
+{entry}
 """).specialize("example")
     target = Qiskit(realizations=RealizationOptions({qm.add_into: choice}))
-    circuit = to_circuit(program, target=target)
-    actual = Operator(circuit).data
+    actual = Operator(to_circuit(program, target=target)).data
     expected = np.zeros_like(actual)
     mask = (1 << width) - 1
-    for index in range(1 << (2 * width)):
-        a, b = index & mask, index >> width
-        expected[a | (((a + b) & mask) << width), index] = 1
+    for index in range(1 << (size + offset)):
+        control, state = index & offset, index >> offset
+        a, b = state & mask, state >> width
+        if control == offset:
+            b = (a + b) & mask
+        expected[control | ((a | (b << width)) << offset), index] = 1
     np.testing.assert_allclose(actual, expected, atol=2e-12, rtol=0)
 
 
@@ -196,7 +210,7 @@ def test_realization_does_not_change_semantic_identity_or_logical_count() -> Non
     assert restored.to_bytes() == payload
     assert restored.inspect().count("quantum.add_into") == 1
     counts = []
-    for choice in ("add.increments", "add.qft"):
+    for choice in ("add.qft", "add.ripple"):
         circuit = lower_to_circuit(
             restored, realizations=RealizationOptions({qm.add_into: choice})
         )
@@ -244,7 +258,7 @@ def test_arithmetic_preflights_width_work_and_native_bypass() -> None:
     for width in (0, 1, 3):
         with pytest.raises(ValueError, match="Q8047"):
             native.plan_addition(width)
-    for choice in ("add.increments", "add.qft"):
+    for choice in ("add.qft", "add.ripple"):
         with pytest.raises(ValueError, match="Q8048"):
             native.plan_addition(1 << 40, [], [choice])
     identity, steps = native.plan_addition(1000, ["add_into"])

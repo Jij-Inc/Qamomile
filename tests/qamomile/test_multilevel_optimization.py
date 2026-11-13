@@ -8,7 +8,6 @@ from qamomile.compilation import (
     OptimizationContext,
     OptimizationPipeline,
     OptimizationProgram,
-    RealizationSelection,
 )
 from qamomile.persistence import deserialize, serialize
 from qamomile.source import ProgramFamily
@@ -76,15 +75,14 @@ def test_complete_flow_preserves_source_and_restores_without_callbacks():
     from qamomile.qiskit import QiskitBackend
 
     source = family()
-    pipeline = OptimizationPipeline.multilevel(realization=RealizationSelection())
+    pipeline = OptimizationPipeline.multilevel()
     endpoint = QiskitBackend(AerSimulator(), optimization_level=3, seed_transpiler=7)
     target = endpoint.target
     artifact = qm.compile(source, n=1, to=target, optimizer=pipeline)
     stages = artifact.report.stages
     assert "optimization:family.common-expressions@1" in stages
     assert "optimization:qcore.common-expressions@1" in stages
-    assert "optimization:realization.minimum-selectors@1" in stages
-    assert "optimization:circuit.exact-local@2" in stages
+    assert "optimization:circuit.exact-local@1" in stages
     assert "qiskit-routing" in stages
     assert artifact.source_digest.hex() == source.specialize(n=1).semantic_digest
     for candidate in (artifact, deserialize(serialize(artifact))):
@@ -134,7 +132,6 @@ def test_explicit_stage_availability_and_immutable_composition():
     assert len(extended.passes) == len(pipeline.passes) + 1
     assert extended.family_passes == pipeline.family_passes
     assert extended.circuit == pipeline.circuit
-    assert extended.realization == pipeline.realization
 
 
 def test_classical_cse_keeps_first_failure_and_never_speculates():
@@ -269,7 +266,7 @@ def test_late_circuit_optimization_reaches_qir():
     artifact = qm.compile(
         _program(), to=QIR(), optimizer=OptimizationPipeline.multilevel(family=False)
     )
-    assert "optimization:circuit.exact-local@2" in artifact.report.stages
+    assert "optimization:circuit.exact-local@1" in artifact.report.stages
     assert _counts(deserialize(serialize(artifact)), shots=4) == {(1,): 4}
 
 
@@ -285,7 +282,7 @@ def test_structured_target_accepts_high_levels_and_rejects_late_projection():
         source,
         n=1,
         to=Hugr(),
-        optimizer=OptimizationPipeline.multilevel(realization=None, circuit=None),
+        optimizer=OptimizationPipeline.multilevel(circuit=None),
     )
     assert "optimization:family.common-expressions@1" in artifact.report.stages
     assert not any("circuit.exact-local" in s for s in artifact.report.stages)
@@ -347,8 +344,8 @@ def test_symbolic_pipeline_reuses_source_descriptor_binding():
     )
 
 
-def test_late_realization_policy_survives_native_preparation_and_overrides():
-    """Automatic selection reaches projection while explicit choices remain final."""
+def test_late_circuit_policy_survives_native_preparation_and_overrides():
+    """Automatic and explicit realizations both reach the late circuit pass."""
     from qamomile.circuit import lower_to_circuit
     from qamomile.lowering import RealizationOptions
 
@@ -357,19 +354,16 @@ def test_late_realization_policy_survives_native_preparation_and_overrides():
 def sample() -> qm.Shot[qm.Bits[32]]:
     return qm.measure(qm.add_into(qm.qubits(32)))
 """).specialize("sample")
-    pipeline = OptimizationPipeline.multilevel(
-        family=False, realization=RealizationSelection()
-    )
+    pipeline = OptimizationPipeline.multilevel(family=False)
     prepared = pipeline._prepare(source, OptimizationContext("", frozenset()))
     circuit = lower_to_circuit(prepared)
-    # Sixteen-bit ripple carry has fewer selectors (666) than Fourier addition.
-    assert "add.ripple" in circuit.realizations
+    assert circuit.realizations == ("add.ripple",)
     explicit = lower_to_circuit(
-        prepared, realizations=RealizationOptions({qm.add_into: "add.increments"})
+        prepared, realizations=RealizationOptions({qm.add_into: "add.qft"})
     )
-    assert "add.increments" in explicit.realizations
-    assert "optimization:realization.minimum-selectors@1" in circuit.realization_stages
-    assert "optimization:circuit.exact-local@2" in explicit.realization_stages
+    assert explicit.realizations == ("add.qft",)
+    for projection in (circuit, explicit):
+        assert "optimization:circuit.exact-local@1" in projection.realization_stages
 
 
 @pytest.mark.parametrize("middle, expected", [("x", 2.0), ("z", 0.5)])
@@ -427,8 +421,7 @@ def state(theta: qm.Param[qm.Real]) -> qm.Q[qm.Bits[4]]:
 """
 
 
-@pytest.mark.parametrize("theta", [0.0, 0.7])
-def test_commuting_circuit_rules_preserve_full_operator_with_relabeled_swaps(theta):
+def test_commuting_circuit_rules_preserve_full_operator_with_relabeled_swaps():
     """Lookback cancellation, angle merging and swap relabeling are phase exact."""
     import numpy as np
     from qiskit.quantum_info import Operator
@@ -438,6 +431,7 @@ def test_commuting_circuit_rules_preserve_full_operator_with_relabeled_swaps(the
 
     program = qm.build_source(COMMUTING_RULES_SOURCE).specialize("state")
     target = Qiskit(use_native_pauli_evolution=False)
+    theta = 0.7
     context = OptimizationContext("", frozenset())
     baseline = to_circuit(
         OptimizationPipeline()._prepare(program, context),

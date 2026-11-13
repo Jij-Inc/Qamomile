@@ -901,7 +901,7 @@ def feedback() -> qm.Shot[qm.Bits[1]]:
         qm.compile(program, to=QuriParts())
 
 
-@pytest.mark.parametrize("choice", ["add.increments", "add.qft", "add.ripple"])
+@pytest.mark.parametrize("choice", ["add.qft", "add.ripple"])
 def test_quri_parts_executes_late_realizations(choice: str) -> None:
     """One shared arithmetic source survives exact alternative realizations."""
     pytest.importorskip("quri_parts.qulacs")

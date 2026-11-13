@@ -154,7 +154,7 @@ def sample() -> qm.Shot[qm.Bits[1]]:
     [
         None,
         OptimizationPipeline(),
-        OptimizationPipeline.multilevel(family=False, realization=None, circuit=None),
+        OptimizationPipeline.multilevel(family=False, circuit=None),
     ],
     ids=["default", "empty", "multilevel"],
 )

@@ -1,11 +1,9 @@
 //! Exact local circuit rewriting with source-check and segment boundaries.
 //!
-//! Version 2 looks back along each wire instead of only at the previous
-//! instruction. It moves a gate past earlier gates that provably commute with
-//! it (both diagonal, or both in the `{I, X}` algebra, on every shared wire;
-//! controls are diagonal), then cancels inverse pairs, fuses exact phase gates,
-//! and merges rotation angles. Version 1 keeps the original adjacent-only rules
-//! so restored artifacts reproduce their recorded projection.
+//! Each gate looks back along its wires past earlier gates that provably
+//! commute with it (both diagonal, or both in the `{I, X}` algebra, on every
+//! shared wire; controls are diagonal), then cancels inverse pairs, fuses exact
+//! phase gates, and merges rotation angles. Top-level SWAPs become relabeling.
 
 use std::collections::{HashMap, HashSet};
 
@@ -19,38 +17,12 @@ const LOOKBACK_WINDOW: usize = 128;
 /// Maximum scalar DAG depth folded while proving literal angles.
 const MAX_FOLD_DEPTH: usize = 32;
 
-/// Rule set of the exact local circuit pass.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ExactCircuitRules {
-    /// Original adjacent-instruction rules.
-    Adjacent,
-    /// Commutation-aware wire lookback with rotation merging.
-    Commuting,
-}
-
-impl ExactCircuitRules {
-    const fn stage(self) -> &'static str {
-        match self {
-            Self::Adjacent => "optimization:circuit.exact-local@1",
-            Self::Commuting => "optimization:circuit.exact-local@2",
-        }
-    }
-}
-
 impl StaticCircuit {
     /// Simplify projected gates without changing phase, wires, or measurement slots.
     ///
     /// # Errors
     /// Rejects excessive work or region depth before returning a candidate.
-    pub fn simplify_exact(self, max_work: u64) -> Result<Self, StaticCircuitError> {
-        self.simplify_exact_with(max_work, ExactCircuitRules::Commuting)
-    }
-
-    pub(crate) fn simplify_exact_with(
-        mut self,
-        max_work: u64,
-        rules: ExactCircuitRules,
-    ) -> Result<Self, StaticCircuitError> {
+    pub fn simplify_exact(mut self, max_work: u64) -> Result<Self, StaticCircuitError> {
         let count =
             u64::try_from(self.operation_count).map_err(|_| StaticCircuitError::Overflow)?;
         if max_work == 0 || count > max_work {
@@ -64,18 +36,18 @@ impl StaticCircuit {
             .map(|c| c.instruction_index)
             .chain(self.scalar_checks.iter().map(|c| c.instruction_index))
             .collect::<HashSet<_>>();
-        let mut work = RewriteWork::new(max_work, rules);
+        let mut work = RewriteWork::new(max_work);
         let mut arena = ScalarArena::new(std::mem::take(&mut self.scalars).into_vec());
         // Live result wires must end in their recorded positions; otherwise
         // a trailing wire permutation is unobservable and is dropped.
         let restore = self.result_value.as_ref().is_some_and(contains_wires);
-        let (instructions, offsets) = simplify_block(
+        let (instructions, offsets) = simplify(
             self.instructions.into_vec(),
             &barriers,
             0,
             &mut work,
             &mut arena,
-            (rules == ExactCircuitRules::Commuting).then_some(restore),
+            Some(restore),
         )?;
         self.scalars = arena.into_nodes().into_boxed_slice();
         // Checks recorded while a nested region was being emitted can carry a
@@ -93,7 +65,8 @@ impl StaticCircuit {
         }
         self.operation_count = instruction_count(&instructions);
         self.instructions = instructions.into_boxed_slice();
-        self.optimization_stages.push(rules.stage().into());
+        self.optimization_stages
+            .push("optimization:circuit.exact-local@1".into());
         Ok(self)
     }
 
@@ -107,11 +80,6 @@ impl StaticCircuit {
         self.optimization_stages
             .clone_from(&source.optimization_stages);
         self
-    }
-
-    pub(crate) fn record_realization_selection(&mut self) {
-        self.optimization_stages
-            .push("optimization:realization.minimum-selectors@1".into());
     }
 }
 
@@ -214,16 +182,14 @@ enum Sum {
 
 struct RewriteWork {
     remaining: u64,
-    rules: ExactCircuitRules,
     // Retain both owners so pointer identities cannot be reused during rewriting.
     definitions: HashMap<usize, (CircuitDefinition, CircuitDefinition)>,
 }
 
 impl RewriteWork {
-    fn new(remaining: u64, rules: ExactCircuitRules) -> Self {
+    fn new(remaining: u64) -> Self {
         Self {
             remaining,
-            rules,
             definitions: HashMap::new(),
         }
     }
@@ -246,8 +212,14 @@ impl RewriteWork {
             ));
         }
         let mut arena = ScalarArena::new(source.scalars().to_vec());
-        let (instructions, _) =
-            simplify(body.to_vec(), &HashSet::new(), depth + 1, self, &mut arena)?;
+        let (instructions, _) = simplify(
+            body.to_vec(),
+            &HashSet::new(),
+            depth + 1,
+            self,
+            &mut arena,
+            None,
+        )?;
         let result = CircuitDefinition::body(
             source.width(),
             instructions,
@@ -267,16 +239,6 @@ fn contains_wires(value: &super::StaticCircuitValue) -> bool {
         Value::Record(fields) => fields.iter().any(|(_, item)| contains_wires(item)),
         Value::Unit | Value::Portable(_) | Value::Scalar(_) => false,
     }
-}
-
-fn simplify(
-    input: Vec<StaticInstruction>,
-    barriers: &HashSet<usize>,
-    depth: usize,
-    work: &mut RewriteWork,
-    arena: &mut ScalarArena,
-) -> Result<(Vec<StaticInstruction>, Vec<usize>), StaticCircuitError> {
-    simplify_block(input, barriers, depth, work, arena, None)
 }
 
 /// Wire relabeling that replaces uncontrolled, unconditioned SWAP gates.
@@ -302,12 +264,9 @@ impl WirePermutation {
     fn record(&mut self, logical: u64, physical: u64) {
         if logical == physical {
             self.logical.remove(&logical);
-        } else {
-            self.logical.insert(logical, physical);
-        }
-        if physical == logical {
             self.physical.remove(&physical);
         } else {
+            self.logical.insert(logical, physical);
             self.physical.insert(physical, logical);
         }
     }
@@ -370,13 +329,15 @@ fn elidable_swap(instruction: &StaticInstruction) -> bool {
         && instruction.regions.is_empty()
 }
 
-fn simplify_block(
+/// Simplify one block. `relabel_swaps` is `Some(restore)` for the top level,
+/// where SWAPs become relabeling and `restore` keeps live result wires.
+fn simplify(
     input: Vec<StaticInstruction>,
     barriers: &HashSet<usize>,
     depth: usize,
     work: &mut RewriteWork,
     arena: &mut ScalarArena,
-    elide_swaps: Option<bool>,
+    relabel_swaps: Option<bool>,
 ) -> Result<(Vec<StaticInstruction>, Vec<usize>), StaticCircuitError> {
     if depth >= 256 {
         return Err(StaticCircuitError::Unsupported(
@@ -395,7 +356,7 @@ fn simplify_block(
     let mut permutation = WirePermutation::default();
     for (index, mut instruction) in input.into_iter().enumerate() {
         let opaque = !instruction.regions.is_empty();
-        if elide_swaps.is_some() && (opaque || barriers.contains(&index)) {
+        if relabel_swaps.is_some() && (opaque || barriers.contains(&index)) {
             // Cuts and structured regions observe wires by their recorded names.
             for swap in permutation.restore() {
                 place(&mut output, swap, floor, arena);
@@ -405,7 +366,7 @@ fn simplify_block(
             floor = output.len();
         }
         offsets.push(output.len());
-        if elide_swaps.is_some() {
+        if relabel_swaps.is_some() {
             if elidable_swap(&instruction) {
                 permutation.swap(instruction.qubits[0], instruction.qubits[1]);
                 continue;
@@ -419,6 +380,7 @@ fn simplify_block(
                 depth + 1,
                 work,
                 arena,
+                None,
             )?;
             block.instructions = nested.into_boxed_slice();
         }
@@ -427,25 +389,16 @@ fn simplify_block(
                 *definition = work.definition(definition, depth)?;
             }
         }
-        match work.rules {
-            ExactCircuitRules::Adjacent => {
-                if reduce_tail(&mut output, &mut instruction, floor) {
-                    output.push(Some(instruction));
-                }
-            }
-            ExactCircuitRules::Commuting => {
-                // Structured instructions may touch wires outside their
-                // operand list, so nothing is moved across them.
-                let opaque = !instruction.regions.is_empty();
-                place(&mut output, instruction, floor, arena);
-                if opaque {
-                    floor = output.len();
-                }
-            }
+        place(&mut output, instruction, floor, arena);
+        if opaque {
+            // Structured instructions may touch wires outside their operand
+            // list, so nothing is moved across them.
+            floor = output.len();
         }
     }
     // A terminal cut or live result wires observe the recorded wire names.
-    if elide_swaps == Some(true) || (elide_swaps.is_some() && barriers.contains(&offsets.len())) {
+    if relabel_swaps == Some(true) || (relabel_swaps.is_some() && barriers.contains(&offsets.len()))
+    {
         for swap in permutation.restore() {
             place(&mut output, swap, floor, arena);
         }
@@ -475,9 +428,6 @@ enum Role {
 }
 
 fn target_roles(instruction: &StaticInstruction) -> &'static [Role] {
-    if instruction.condition.is_some() || !instruction.regions.is_empty() {
-        return &[];
-    }
     match (instruction.opcode.as_str(), instruction.qubits.len()) {
         ("z" | "s" | "sdg" | "t" | "tdg" | "rz" | "p", 1) => &[Role::Z],
         ("cz" | "cp" | "rzz", 2) => &[Role::Z, Role::Z],
@@ -586,7 +536,7 @@ fn combine(
         fused.clone_into(&mut result.opcode);
         return Some(Combined::Replace(result));
     }
-    if a != b || !matches!(a, "rz" | "p" | "rx" | "ry" | "cp" | "rzz") {
+    if a != b || !is_rotation(a) {
         return None;
     }
     let ([CircuitParameter::Scalar(left)], [CircuitParameter::Scalar(right)]) =
@@ -604,20 +554,17 @@ fn combine(
     }
 }
 
+/// Single-angle rotations that compose additively and vanish at zero.
+fn is_rotation(opcode: &str) -> bool {
+    matches!(opcode, "rz" | "p" | "rx" | "ry" | "cp" | "rzz")
+}
+
 fn is_identity(instruction: &StaticInstruction, arena: &ScalarArena) -> bool {
-    if instruction.condition.is_some()
-        || !instruction.regions.is_empty()
-        || !matches!(
-            instruction.opcode.as_str(),
-            "rz" | "p" | "rx" | "ry" | "cp" | "rzz"
+    is_rotation(&instruction.opcode)
+        && matches!(
+            &*instruction.parameters,
+            [CircuitParameter::Scalar(angle)] if arena.literal(*angle, 0) == Some(0.0)
         )
-    {
-        return false;
-    }
-    matches!(
-        &*instruction.parameters,
-        [CircuitParameter::Scalar(angle)] if arena.literal(*angle, 0) == Some(0.0)
-    )
 }
 
 /// Latest live slot at or above `floor` that shares a wire with `instruction`.
@@ -711,84 +658,9 @@ fn place(
     output.push(Some(instruction));
 }
 
-/// Every retry contracts the stack, so reaching a local fixed point is linear
-/// in the input length and cannot move a rewrite past a source-check barrier.
-fn reduce_tail(
-    output: &mut Vec<Option<StaticInstruction>>,
-    instruction: &mut StaticInstruction,
-    floor: usize,
-) -> bool {
-    loop {
-        if output.len() > floor && compatible(last(output, 1), instruction) {
-            let last = last(output, 1);
-            if inverse(&last.opcode) == Some(instruction.opcode.as_str()) {
-                output.pop();
-                return false;
-            }
-            if last.opcode == "reset" && instruction.opcode == "reset" {
-                return false;
-            }
-            let fused = match (last.opcode.as_str(), instruction.opcode.as_str()) {
-                ("t", "t") => Some("s"),
-                ("tdg", "tdg") => Some("sdg"),
-                ("s", "s") | ("sdg", "sdg") => Some("z"),
-                _ => None,
-            };
-            if let Some(opcode) = fused {
-                output.pop();
-                instruction.opcode = opcode.into();
-                continue;
-            }
-        }
-        if instruction.opcode == "h" && output.len() >= floor + 2 {
-            let a = last(output, 2);
-            let b = last(output, 1);
-            if a.opcode == "h" && compatible(a, instruction) && compatible(b, instruction) {
-                let replacement = match b.opcode.as_str() {
-                    "x" => Some("z"),
-                    "z" => Some("x"),
-                    _ => None,
-                };
-                if let Some(opcode) = replacement {
-                    output.truncate(output.len() - 2);
-                    instruction.opcode = opcode.into();
-                    continue;
-                }
-            }
-        }
-        return true;
-    }
-}
-
-/// Legacy adjacent mode never leaves removed slots in its output stack.
-fn last(output: &[Option<StaticInstruction>], back: usize) -> &StaticInstruction {
-    output[output.len() - back]
-        .as_ref()
-        .expect("adjacent rewriting keeps a dense stack")
-}
-
-fn compatible(left: &StaticInstruction, right: &StaticInstruction) -> bool {
-    left.qubits == right.qubits
-        && left.controls == right.controls
-        && left.condition == right.condition
-        && left.parameters.is_empty()
-        && right.parameters.is_empty()
-        && left.regions.is_empty()
-        && right.regions.is_empty()
-}
-
-fn inverse(opcode: &str) -> Option<&'static str> {
+fn inverse(opcode: &str) -> Option<&str> {
     match opcode {
-        "h" => Some("h"),
-        "x" => Some("x"),
-        "y" => Some("y"),
-        "z" => Some("z"),
-        "cx" => Some("cx"),
-        "cy" => Some("cy"),
-        "cz" => Some("cz"),
-        "ch" => Some("ch"),
-        "ccx" => Some("ccx"),
-        "swap" => Some("swap"),
+        "h" | "x" | "y" | "z" | "cx" | "cz" | "ccx" | "swap" => Some(opcode),
         "s" => Some("sdg"),
         "sdg" => Some("s"),
         "t" => Some("tdg"),
@@ -801,48 +673,162 @@ fn inverse(opcode: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
 
-    fn gate(op: &str) -> StaticInstruction {
-        StaticInstruction::test_new(op, vec![0], vec![], vec![], None, vec![])
+    fn on(op: &str, qubits: Vec<u64>, controls: Vec<u64>) -> StaticInstruction {
+        StaticInstruction::test_new(op, qubits, vec![], controls, None, vec![])
     }
 
+    fn gate(op: &str) -> StaticInstruction {
+        on(op, vec![0], vec![])
+    }
+
+    fn rotation(op: &str, qubits: Vec<u64>, angle: u32) -> StaticInstruction {
+        let angle = vec![CircuitParameter::Scalar(CircuitScalarId(angle))];
+        StaticInstruction::test_new(op, qubits, angle, vec![], None, vec![])
+    }
+
+    /// Simplify one block with no scalars; `relabel` enables SWAP relabeling.
     fn run(
         input: Vec<StaticInstruction>,
-        barriers: &HashSet<usize>,
-        work: &mut RewriteWork,
-    ) -> Result<(Vec<StaticInstruction>, Vec<usize>), StaticCircuitError> {
-        simplify(input, barriers, 0, work, &mut ScalarArena::new(Vec::new()))
+        barriers: &[usize],
+        relabel: Option<bool>,
+    ) -> (Vec<StaticInstruction>, Vec<usize>) {
+        let barriers = barriers.iter().copied().collect();
+        let mut arena = ScalarArena::new(Vec::new());
+        simplify(
+            input,
+            &barriers,
+            0,
+            &mut RewriteWork::new(100),
+            &mut arena,
+            relabel,
+        )
+        .unwrap()
+    }
+
+    fn opcodes(instructions: &[StaticInstruction]) -> Vec<&str> {
+        instructions.iter().map(StaticInstruction::opcode).collect()
     }
 
     #[test]
-    fn exact_phase_rules_and_barriers() {
-        let (result, _) = run(
-            vec![gate("h"), gate("z"), gate("h"), gate("t"), gate("t")],
-            &HashSet::new(),
-            &mut RewriteWork::new(100, ExactCircuitRules::Commuting),
-        )
-        .unwrap();
-        assert_eq!(
-            result
-                .iter()
-                .map(StaticInstruction::opcode)
-                .collect::<Vec<_>>(),
-            ["x", "s"]
+    fn local_rules_cancel_fuse_and_commute_exactly() {
+        let conditioned = StaticInstruction::test_new(
+            "z",
+            vec![0],
+            vec![],
+            vec![],
+            Some(CircuitScalarId(0)),
+            vec![],
         );
+        let region = StaticInstruction::test_new(
+            "if",
+            vec![],
+            vec![],
+            vec![],
+            Some(CircuitScalarId(0)),
+            vec![super::super::StaticBlock::test_new(vec![gate("x")])],
+        );
+        let cases: Vec<(Vec<StaticInstruction>, Vec<&str>)> = vec![
+            (
+                vec![gate("h"), gate("z"), gate("h"), gate("t"), gate("t")],
+                vec!["x", "s"],
+            ),
+            (vec![gate("s"), gate("t"), gate("t"), gate("z")], vec![]),
+            // CX controls commute with T; CX targets commute with X and controls with CZ.
+            (
+                vec![
+                    on("cx", vec![0, 1], vec![]),
+                    gate("t"),
+                    on("x", vec![2], vec![]),
+                    on("cx", vec![0, 1], vec![]),
+                ],
+                vec!["t", "x"],
+            ),
+            (
+                vec![
+                    on("cx", vec![0, 1], vec![]),
+                    on("x", vec![1], vec![]),
+                    on("cz", vec![0, 2], vec![]),
+                    on("cx", vec![0, 1], vec![]),
+                ],
+                vec!["x", "cz"],
+            ),
+            // Z S = Sdg and Sdg S = I under identical controls only.
+            (
+                vec![
+                    on("z", vec![1], vec![0]),
+                    on("s", vec![1], vec![0]),
+                    on("s", vec![1], vec![0]),
+                    on("s", vec![1], vec![3]),
+                ],
+                vec!["s"],
+            ),
+            // Nothing moves across H, measurement, conditioned gates or regions.
+            (
+                vec![
+                    on("cx", vec![0, 1], vec![]),
+                    gate("h"),
+                    on("cx", vec![0, 1], vec![]),
+                ],
+                vec!["cx", "h", "cx"],
+            ),
+            (
+                vec![gate("z"), gate("measure"), gate("z")],
+                vec!["z", "measure", "z"],
+            ),
+            (vec![gate("z"), conditioned, gate("z")], vec!["z", "z", "z"]),
+            (vec![gate("x"), region, gate("x")], vec!["x", "if", "x"]),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(opcodes(&run(input, &[], None).0), expected);
+        }
+        // A barrier before index 2 keeps T/Tdg and remaps offsets.
         let (result, offsets) = run(
-            vec![gate("h"), gate("h")],
-            &HashSet::from([1]),
-            &mut RewriteWork::new(100, ExactCircuitRules::Commuting),
-        )
-        .unwrap();
-        assert_eq!(result.len(), 2);
-        assert_eq!(offsets, [0, 1, 2]);
-        let (result, _) = run(
-            vec![gate("s"), gate("t"), gate("t"), gate("z")],
-            &HashSet::new(),
-            &mut RewriteWork::new(4, ExactCircuitRules::Commuting),
-        )
-        .unwrap();
-        assert!(result.is_empty());
+            vec![gate("t"), gate("x"), gate("tdg"), gate("x")],
+            &[2],
+            None,
+        );
+        assert_eq!(opcodes(&result), ["t", "x", "tdg", "x"]);
+        assert_eq!(offsets, [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn rotations_merge_exactly_and_vanish_at_zero() {
+        let quarter = std::f64::consts::FRAC_PI_4;
+        let mut arena = ScalarArena::new(vec![
+            CircuitScalarNode::RealBits(quarter.to_bits()),
+            CircuitScalarNode::Apply {
+                opcode: "classical.neg".to_owned(),
+                result_type: CircuitScalarType::Real,
+                attributes: Box::new([]),
+                operands: Box::new([CircuitScalarId(0)]),
+            },
+            CircuitScalarNode::Parameter {
+                name: "theta".to_owned(),
+                path: Box::new([]),
+                scalar_type: CircuitScalarType::Real,
+            },
+        ]);
+        let input = vec![
+            rotation("cp", vec![0, 1], 0),
+            rotation("rz", vec![2], 2),
+            rotation("cp", vec![1, 0], 1),
+            rotation("rz", vec![2], 2),
+            rotation("rz", vec![2], 0),
+        ];
+        let mut work = RewriteWork::new(100);
+        let (result, _) = simplify(input, &HashSet::new(), 0, &mut work, &mut arena, None).unwrap();
+        assert_eq!(opcodes(&result), ["rz"]);
+        let [CircuitParameter::Scalar(angle)] = &*result[0].parameters else {
+            panic!("angle");
+        };
+        let Some(CircuitScalarNode::Apply {
+            opcode, operands, ..
+        }) = arena.node(*angle)
+        else {
+            panic!("symbolic sum");
+        };
+        assert_eq!(opcode, "classical.add");
+        assert_eq!(arena.literal(operands[1], 0), Some(quarter));
     }
 
     #[test]
@@ -857,302 +843,80 @@ mod tests {
             None,
             vec![],
         );
-        let mut work = RewriteWork::new(5, ExactCircuitRules::Commuting);
-        let (result, _) =
-            run(vec![call.clone(), call.clone()], &HashSet::new(), &mut work).unwrap();
-        let CircuitParameter::Definition(first) = &result[0].parameters[0] else {
+        let mut arena = ScalarArena::new(Vec::new());
+        let mut work = RewriteWork::new(5);
+        let calls = vec![call.clone(), call];
+        let (result, _) = simplify(
+            calls.clone(),
+            &HashSet::new(),
+            0,
+            &mut work,
+            &mut arena,
+            None,
+        )
+        .unwrap();
+        let [CircuitParameter::Definition(first)] = &*result[0].parameters else {
             panic!("definition");
         };
-        let CircuitParameter::Definition(second) = &result[1].parameters[0] else {
+        let [CircuitParameter::Definition(second)] = &*result[1].parameters else {
             panic!("definition");
         };
         assert_eq!(first.identity(), second.identity());
         assert_eq!(first.instructions().unwrap()[0].opcode(), "x");
         assert_eq!(source.instructions().unwrap().len(), 3);
         assert_eq!(work.remaining, 0);
-        assert!(
-            run(
-                vec![call.clone(), call],
-                &HashSet::new(),
-                &mut RewriteWork::new(4, ExactCircuitRules::Commuting)
-            )
-            .is_err()
-        );
-    }
-
-    fn on(op: &str, qubits: Vec<u64>, controls: Vec<u64>) -> StaticInstruction {
-        StaticInstruction::test_new(op, qubits, vec![], controls, None, vec![])
-    }
-
-    fn rotation(op: &str, qubits: Vec<u64>, angle: u32) -> StaticInstruction {
-        StaticInstruction::test_new(
-            op,
-            qubits,
-            vec![CircuitParameter::Scalar(CircuitScalarId(angle))],
-            vec![],
-            None,
-            vec![],
-        )
-    }
-
-    fn opcodes(instructions: &[StaticInstruction]) -> Vec<&str> {
-        instructions.iter().map(StaticInstruction::opcode).collect()
-    }
-
-    #[test]
-    fn commuting_lookback_cancels_across_disjoint_and_commuting_gates() {
-        let mut work = RewriteWork::new(100, ExactCircuitRules::Commuting);
-        // CX(0,1) T(0) X(2) CX(0,1): the control commutes with T, so both CX cancel.
-        let (result, _) = run(
-            vec![
-                on("cx", vec![0, 1], vec![]),
-                on("t", vec![0], vec![]),
-                on("x", vec![2], vec![]),
-                on("cx", vec![0, 1], vec![]),
-            ],
-            &HashSet::new(),
-            &mut work,
-        )
-        .unwrap();
-        assert_eq!(opcodes(&result), ["t", "x"]);
-        // CX targets commute with X on the target wire, and controls with CZ.
-        let (result, _) = run(
-            vec![
-                on("cx", vec![0, 1], vec![]),
-                on("x", vec![1], vec![]),
-                on("cz", vec![0, 2], vec![]),
-                on("cx", vec![0, 1], vec![]),
-            ],
-            &HashSet::new(),
-            &mut RewriteWork::new(100, ExactCircuitRules::Commuting),
-        )
-        .unwrap();
-        assert_eq!(opcodes(&result), ["x", "cz"]);
-        // H does not commute with CX on its control, and the legacy rules only
-        // inspect the immediately preceding instruction.
-        for rules in [ExactCircuitRules::Commuting, ExactCircuitRules::Adjacent] {
-            let input = vec![
-                on("cx", vec![0, 1], vec![]),
-                on("h", vec![0], vec![]),
-                on("cx", vec![0, 1], vec![]),
-            ];
-            let (result, _) =
-                run(input, &HashSet::new(), &mut RewriteWork::new(100, rules)).unwrap();
-            assert_eq!(result.len(), 3);
-        }
-        let (result, _) = run(
-            vec![
-                on("x", vec![0], vec![]),
-                on("x", vec![1], vec![]),
-                on("x", vec![0], vec![]),
-            ],
-            &HashSet::new(),
-            &mut RewriteWork::new(100, ExactCircuitRules::Adjacent),
-        )
-        .unwrap();
-        assert_eq!(result.len(), 3);
-    }
-
-    #[test]
-    fn commuting_lookback_respects_measurements_conditions_regions_and_barriers() {
-        let measure = on("measure", vec![0], vec![]);
-        let conditioned = StaticInstruction::test_new(
-            "z",
-            vec![0],
-            vec![],
-            vec![],
-            Some(CircuitScalarId(0)),
-            vec![],
-        );
-        for blocker in [measure, conditioned] {
-            let (result, _) = run(
-                vec![on("z", vec![0], vec![]), blocker, on("z", vec![0], vec![])],
-                &HashSet::new(),
-                &mut RewriteWork::new(100, ExactCircuitRules::Commuting),
-            )
-            .unwrap();
-            assert_eq!(result.len(), 3);
-        }
-        let region = StaticInstruction::test_new(
-            "if",
-            vec![],
-            vec![],
-            vec![],
-            Some(CircuitScalarId(0)),
-            vec![super::super::StaticBlock::test_new(vec![on(
-                "x",
-                vec![0],
-                vec![],
-            )])],
-        );
-        let (result, _) = run(
-            vec![on("x", vec![0], vec![]), region, on("x", vec![0], vec![])],
-            &HashSet::new(),
-            &mut RewriteWork::new(100, ExactCircuitRules::Commuting),
-        )
-        .unwrap();
-        assert_eq!(result.len(), 3);
-        let (result, offsets) = run(
-            vec![
-                on("t", vec![0], vec![]),
-                on("x", vec![1], vec![]),
-                on("tdg", vec![0], vec![]),
-                on("x", vec![1], vec![]),
-            ],
-            &HashSet::from([2]),
-            &mut RewriteWork::new(100, ExactCircuitRules::Commuting),
-        )
-        .unwrap();
-        // The barrier before index 2 keeps T/Tdg; the later X still cancels
-        // with nothing earlier than the barrier.
-        assert_eq!(opcodes(&result), ["t", "x", "tdg", "x"]);
-        assert_eq!(offsets, [0, 1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn rotations_merge_exactly_and_vanish_at_zero() {
-        let quarter = std::f64::consts::FRAC_PI_4;
-        let scalars = vec![
-            CircuitScalarNode::RealBits(quarter.to_bits()),
-            CircuitScalarNode::Apply {
-                opcode: "classical.neg".to_owned(),
-                result_type: CircuitScalarType::Real,
-                attributes: Box::new([]),
-                operands: Box::new([CircuitScalarId(0)]),
-            },
-            CircuitScalarNode::Parameter {
-                name: "theta".to_owned(),
-                path: Box::new([]),
-                scalar_type: CircuitScalarType::Real,
-            },
-        ];
-        let mut arena = ScalarArena::new(scalars);
-        let (result, _) = simplify(
-            vec![
-                rotation("cp", vec![0, 1], 0),
-                rotation("rz", vec![2], 2),
-                rotation("cp", vec![1, 0], 1),
-                rotation("rz", vec![2], 2),
-                rotation("rz", vec![2], 0),
-            ],
-            &HashSet::new(),
-            0,
-            &mut RewriteWork::new(100, ExactCircuitRules::Commuting),
-            &mut arena,
-        )
-        .unwrap();
-        assert_eq!(opcodes(&result), ["rz"]);
-        let [CircuitParameter::Scalar(angle)] = &*result[0].parameters else {
-            panic!("angle");
-        };
-        let CircuitScalarNode::Apply {
-            opcode, operands, ..
-        } = arena.node(*angle).unwrap()
-        else {
-            panic!("symbolic sum");
-        };
-        assert_eq!(opcode, "classical.add");
-        assert_eq!(arena.literal(operands[1], 0), Some(quarter));
-    }
-
-    #[test]
-    fn phase_gates_fuse_exactly_under_identical_controls() {
-        let (result, _) = run(
-            vec![
-                on("z", vec![1], vec![0]),
-                on("s", vec![1], vec![0]),
-                on("x", vec![2], vec![]),
-                on("s", vec![1], vec![0]),
-                on("s", vec![1], vec![3]),
-            ],
-            &HashSet::new(),
-            &mut RewriteWork::new(100, ExactCircuitRules::Commuting),
-        )
-        .unwrap();
-        // Z S = Sdg, then Sdg S = I; S under a different control remains.
-        assert_eq!(opcodes(&result), ["x", "s"]);
-        assert_eq!(result[1].controls(), [3]);
-    }
-
-    fn elide(input: Vec<StaticInstruction>, restore: bool) -> Vec<StaticInstruction> {
-        simplify_block(
-            input,
-            &HashSet::new(),
-            0,
-            &mut RewriteWork::new(100, ExactCircuitRules::Commuting),
-            &mut ScalarArena::new(Vec::new()),
-            Some(restore),
-        )
-        .unwrap()
-        .0
+        let mut work = RewriteWork::new(4);
+        assert!(simplify(calls, &HashSet::new(), 0, &mut work, &mut arena, None).is_err());
     }
 
     #[test]
     fn swaps_become_relabeling_and_restore_live_wires() {
         let measure = |wire: u64, slot: u64| {
-            StaticInstruction::test_new(
-                "measure",
-                vec![wire],
-                vec![CircuitParameter::MeasurementIndex(slot)],
-                vec![],
-                None,
-                vec![],
-            )
+            let slot = vec![CircuitParameter::MeasurementIndex(slot)];
+            StaticInstruction::test_new("measure", vec![wire], slot, vec![], None, vec![])
         };
-        let result = elide(
-            vec![
-                on("swap", vec![0, 1], vec![]),
-                on("h", vec![0], vec![]),
-                on("x", vec![2], vec![0]),
-                measure(0, 0),
-                measure(1, 1),
-            ],
-            false,
-        );
+        let input = vec![
+            on("swap", vec![0, 1], vec![]),
+            gate("h"),
+            on("x", vec![2], vec![0]),
+            measure(0, 0),
+            measure(1, 1),
+        ];
+        let (result, _) = run(input, &[], Some(false));
+        let wires = result
+            .iter()
+            .map(|item| [item.qubits(), item.controls()].concat())
+            .collect::<Vec<_>>();
         assert_eq!(opcodes(&result), ["h", "x", "measure", "measure"]);
-        assert_eq!(result[0].qubits(), [1]);
-        assert_eq!(result[1].controls(), [1]);
-        assert_eq!(result[2].qubits(), [1]);
-        assert_eq!(result[3].qubits(), [0]);
+        assert_eq!(wires, [vec![1], vec![2, 1], vec![1], vec![0]]);
         // Controlled swaps stay, and live result wires are restored.
-        let result = elide(
-            vec![
-                on("swap", vec![0, 1], vec![]),
-                on("swap", vec![1, 2], vec![3]),
-                on("x", vec![0], vec![]),
-            ],
-            true,
-        );
+        let input = vec![
+            on("swap", vec![0, 1], vec![]),
+            on("swap", vec![1, 2], vec![3]),
+            gate("x"),
+        ];
+        let (result, _) = run(input, &[], Some(true));
         assert_eq!(opcodes(&result), ["swap", "x", "swap"]);
         assert_eq!(result[0].qubits(), [0, 2]);
         assert_eq!(result[1].qubits(), [1]);
         assert_eq!(result[2].qubits(), [0, 1]);
-    }
-
-    #[test]
-    fn restoring_any_swap_sequence_is_the_identity() {
-        // Pseudo-random swap networks on five wires: the relabeled stream plus
-        // the restoring swaps must equal the original permutation.
+        // Any swap network plus its restoring swaps is the original permutation.
+        let index = |wire: u64| usize::try_from(wire).unwrap();
         let mut seed = 0x9e37_79b9_u64;
         for _ in 0..200 {
             let mut input = Vec::new();
-            let mut expected = [0_u64, 1, 2, 3, 4];
+            let mut expected = [0_usize, 1, 2, 3, 4];
             for _ in 0..8 {
                 seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-                let a = (seed >> 33) % 5;
-                let b = (seed >> 43) % 5;
-                if a == b {
-                    continue;
+                let (a, b) = ((seed >> 33) % 5, (seed >> 43) % 5);
+                if a != b {
+                    input.push(on("swap", vec![a, b], vec![]));
+                    expected.swap(index(a), index(b));
                 }
-                input.push(on("swap", vec![a, b], vec![]));
-                expected.swap(usize::try_from(a).unwrap(), usize::try_from(b).unwrap());
             }
-            let mut actual = [0_u64, 1, 2, 3, 4];
-            for swap in elide(input, true) {
-                let [a, b] = swap.qubits() else {
-                    panic!("swap")
-                };
-                actual.swap(usize::try_from(*a).unwrap(), usize::try_from(*b).unwrap());
+            let mut actual = [0_usize, 1, 2, 3, 4];
+            for swap in run(input, &[], Some(true)).0 {
+                actual.swap(index(swap.qubits()[0]), index(swap.qubits()[1]));
             }
             assert_eq!(actual, expected);
         }

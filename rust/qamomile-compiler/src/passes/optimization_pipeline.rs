@@ -13,7 +13,6 @@ pub const MAX_OPTIMIZATION_PASSES: usize = 64;
 pub(crate) const MAX_REWRITE_WORK: u64 = 1_000_000;
 const MAX_CONFIGURATION_BYTES: usize = 65_536;
 const MAX_REWRITE_DEPTH: usize = 256;
-const REALIZATION_SELECTION_PASS: &str = "realization.minimum-selectors";
 const CIRCUIT_SIMPLIFICATION_PASS: &str = "circuit.exact-local";
 const STANDARD_SIMPLIFICATION_PASS: &str = "qcore.simplify";
 
@@ -173,18 +172,16 @@ pub struct OptimizationPolicy {
     target: String,
 }
 
-/// Closed, portable late strategies restored without Python callbacks.
+/// Closed, portable late circuit policy restored without Python callbacks.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LateOptimization {
-    minimum_selectors: bool,
-    exact_circuit: Option<crate::lowering::circuit::ExactCircuitRules>,
+    exact_circuit: bool,
     max_work: u64,
 }
 
 impl LateOptimization {
     pub(crate) const NONE: Self = Self {
-        minimum_selectors: false,
-        exact_circuit: None,
+        exact_circuit: false,
         max_work: MAX_REWRITE_WORK,
     };
 
@@ -192,60 +189,33 @@ impl LateOptimization {
         passes: &[OptimizationPassIdentity],
         max_work: u64,
     ) -> Result<Self, OptimizationError> {
-        let mut result = Self {
-            max_work,
-            ..Self::NONE
-        };
+        let mut exact_circuit = false;
         for pass in passes {
-            let unsupported = || {
-                OptimizationError::invalid("unsupported late optimization version or configuration")
-            };
-            if !matches!(
-                pass.name.as_str(),
-                REALIZATION_SELECTION_PASS | CIRCUIT_SIMPLIFICATION_PASS
-            ) {
+            if pass.name != CIRCUIT_SIMPLIFICATION_PASS {
                 continue;
             }
-            if !pass.configuration.is_empty() {
-                return Err(unsupported());
+            if pass.version != "1" || !pass.configuration.is_empty() {
+                return Err(OptimizationError::invalid(
+                    "unsupported late optimization version or configuration",
+                ));
             }
-            match (pass.name.as_str(), pass.version.as_str()) {
-                (REALIZATION_SELECTION_PASS, "1") => result.minimum_selectors = true,
-                // Version 1 is retained so restored artifacts reproduce their
-                // recorded projection; version 2 adds commutation lookback.
-                (CIRCUIT_SIMPLIFICATION_PASS, "1") => {
-                    result.exact_circuit =
-                        Some(crate::lowering::circuit::ExactCircuitRules::Adjacent);
-                }
-                (CIRCUIT_SIMPLIFICATION_PASS, "2") => {
-                    result.exact_circuit =
-                        Some(crate::lowering::circuit::ExactCircuitRules::Commuting);
-                }
-                _ => return Err(unsupported()),
-            }
+            exact_circuit = true;
         }
-        Ok(result)
-    }
-
-    pub(crate) const fn lowering(self, config: crate::LoweringConfig) -> crate::LoweringConfig {
-        if self.minimum_selectors {
-            config.minimizing_addition_selectors()
-        } else {
-            config
-        }
+        Ok(Self {
+            exact_circuit,
+            max_work,
+        })
     }
 
     pub(crate) fn finish(
         self,
-        mut circuit: crate::StaticCircuit,
+        circuit: crate::StaticCircuit,
     ) -> Result<crate::StaticCircuit, crate::StaticCircuitError> {
-        if self.minimum_selectors {
-            circuit.record_realization_selection();
+        if self.exact_circuit {
+            circuit.simplify_exact(self.max_work)
+        } else {
+            Ok(circuit)
         }
-        if let Some(rules) = self.exact_circuit {
-            circuit = circuit.simplify_exact_with(self.max_work, rules)?;
-        }
-        Ok(circuit)
     }
 }
 
@@ -356,12 +326,7 @@ impl OptimizationPreparation {
     pub fn stages(&self) -> impl Iterator<Item = String> + '_ {
         self.passes
             .iter()
-            .filter(|pass| {
-                !matches!(
-                    pass.name.as_str(),
-                    REALIZATION_SELECTION_PASS | CIRCUIT_SIMPLIFICATION_PASS
-                )
-            })
+            .filter(|pass| pass.name != CIRCUIT_SIMPLIFICATION_PASS)
             .map(|pass| {
                 if pass.name == STANDARD_SIMPLIFICATION_PASS && pass.version == "1" {
                     "rust-qcore-standard-optimization".to_owned()

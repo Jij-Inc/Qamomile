@@ -40,7 +40,6 @@ from ._compiler_optimization import (
     OptimizationPass as OptimizationPass,
     OptimizationPipeline,
     OptimizationProgram as OptimizationProgram,
-    RealizationSelection as RealizationSelection,
     StandardSimplification as StandardSimplification,
     _restore_optimization,
     _target_optimization_stages,
@@ -2304,9 +2303,7 @@ def compile(
         raise TypeError("to= must implement CompilationTarget")
     if optimizer is not None and not isinstance(optimizer, OptimizationPipeline):
         raise TypeError("optimizer= must be an OptimizationPipeline")
-    if optimizer is not None and (
-        optimizer.realization is not None or optimizer.circuit is not None
-    ):
+    if optimizer is not None and optimizer.circuit is not None:
         if (
             not isinstance(to, (CircuitTarget, Reference))
             and not to.capabilities.circuit_optimization
