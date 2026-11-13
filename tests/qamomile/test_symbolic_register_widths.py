@@ -169,3 +169,133 @@ def invalid(n: qm.Const[qm.Int], offset: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[n]
     expected = "Q5097" if boundary in {"0", "n"} else "Q5096"
     with pytest.raises(qm.FrontendError, match=expected):
         _module(source)
+
+
+def test_register_rotation_in_a_loop_goes_through_a_helper() -> None:
+    """A reordered owner is a new owner: rotate in a helper, not in the loop body."""
+
+    module = _module(
+        """
+@qm.qkernel
+def rotate_once(state: qm.Q[qm.Bits[n]]) -> qm.Q[qm.Bits[n]]:
+    head, tail = qm.split_at(state, 1)
+    return qm.concat(tail, head)
+
+@qm.qkernel
+def rotate(n: qm.Const[qm.Int], rounds: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[n]]:
+    state = qm.x(qm.qubits(n), target=0)
+    for _round in range(rounds):
+        state = rotate_once(state)
+    return qm.measure(state)
+"""
+    )
+    assert _values(module.specialize("rotate", n=3, rounds=1)) == {(0, 0, 1): 4}
+    assert _values(module.specialize("rotate", n=3, rounds=3)) == {(1, 0, 0): 4}
+
+    with pytest.raises(qm.CapabilityError, match="move the reordering into a helper"):
+        _module(
+            """
+@qm.qkernel
+def inline_rotate(n: qm.Const[qm.Int], rounds: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[n]]:
+    state = qm.qubits(n)
+    for _round in range(rounds):
+        head, tail = qm.split_at(state, 1)
+        state = qm.concat(tail, head)
+    return qm.measure(state)
+"""
+        )
+
+
+@pytest.mark.parametrize(("n", "half"), [(5, 2), (8, 4), (7, 3)])
+def test_floor_division_widths_split_and_allocate(n: int, half: int) -> None:
+    """``n // 2`` is a dimension: it splits, allocates, and annotates widths."""
+
+    module = _module(
+        """
+@qm.qkernel
+def halves(n: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[n]]:
+    head, tail = qm.split_at(qm.qubits(n), n // 2)
+    return qm.measure(qm.concat(qm.x(head), tail))
+
+@qm.qkernel
+def half_register(n: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[n // 2]]:
+    return qm.measure(qm.x(qm.qubits(n // 2)))
+"""
+    )
+    assert "Bits[-(n//2)+n]" in module.inspect()
+    assert _values(module.specialize("halves", n=n)) == {
+        (1,) * half + (0,) * (n - half): 4
+    }
+    assert _values(module.specialize("half_register", n=n)) == {(1,) * half: 4}
+    peak = qr.logical(module["halves"]).metric(qr.LOGICAL_PEAK_QUBITS)
+    assert peak.evaluate({"n": n}).numeric_enclosure() == (n, n)
+
+
+def test_floor_division_rejects_an_empty_part_at_specialization() -> None:
+    """``n // 2`` is zero for ``n = 1``, which leaves an empty prefix."""
+
+    module = _module(
+        """
+@qm.qkernel
+def halves(n: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[n]]:
+    head, tail = qm.split_at(qm.qubits(n), n // 2)
+    return qm.measure(qm.concat(head, tail))
+"""
+    )
+    with pytest.raises(qm.SpecializationError, match="Q3007"):
+        module.specialize("halves", n=1)
+
+
+def test_peak_width_survives_loop_index_splits_in_helpers() -> None:
+    """Widths ``k``, ``1``, and ``p-k-1`` cancel to ``p`` across loop iterations."""
+
+    module = _module(
+        """
+@qm.qkernel
+def lane(
+    counting: qm.Q[qm.Bits[p]], target: qm.Q[qm.Bits[2]], k: qm.Const[qm.Int]
+) -> tuple[qm.Q[qm.Bits[p]], qm.Q[qm.Bits[2]]]:
+    left, rest = qm.split_at(counting, k)
+    head, right = qm.split_at(rest, 1)
+    return qm.concat(left, qm.x(head), right), target
+
+@qm.qkernel
+def lanes(p: qm.Const[qm.Int]) -> tuple[qm.Shot[qm.Bits[p]], qm.Shot[qm.Bits[2]]]:
+    counting = qm.qubits(p)
+    target = qm.qubits(2)
+    for k in range(1, p - 1):
+        counting, target = lane(counting, target, k)
+    return qm.measure(counting), qm.measure(target)
+
+@qm.qkernel
+def chain(state: qm.Q[qm.Bits[w]], size: qm.Const[qm.Int]) -> qm.Q[qm.Bits[w]]:
+    for i in range(size - 1):
+        state = qm.cx(state, control=i, target=i + 1)
+    return state
+
+@qm.qkernel
+def two_chains(state: qm.Q[qm.Bits[w]], size: qm.Const[qm.Int], half: qm.Const[qm.Int]) -> qm.Q[qm.Bits[w]]:
+    state = qm.cx(state, control=0, target=half)
+    a, b = qm.split_at(state, half)
+    return qm.concat(chain(a, half), chain(b, size - half))
+
+@qm.qkernel
+def ghz(n: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[n]]:
+    return qm.measure(two_chains(qm.h(qm.qubits(n), target=0), n, n // 2))
+"""
+    )
+    lanes = qr.logical(module["lanes"]).metric(qr.LOGICAL_PEAK_QUBITS)
+    assert lanes.evaluate({"p": 6}).numeric_enclosure() == (8, 8)
+    ghz = qr.logical(module["ghz"])
+    assert ghz.metric(qr.LOGICAL_PEAK_QUBITS).evaluate(
+        {"n": 64}
+    ).numeric_enclosure() == (
+        64,
+        64,
+    )
+    assert (
+        ghz.metric(qr.LOGICAL_GATE_DEPTH).evaluate({"n": 64}).numeric_enclosure()[1]
+        == 33
+    )
+    outcomes = set(_values(module.specialize("ghz", n=7)))
+    assert outcomes <= {(0,) * 7, (1,) * 7}

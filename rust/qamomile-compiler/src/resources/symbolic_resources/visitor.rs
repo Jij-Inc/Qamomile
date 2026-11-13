@@ -738,6 +738,21 @@ impl SymbolicAnalyzer<'_> {
             Dimension::Symbol { .. } if bindings.values.contains_key(dimension) => {
                 Self::dimension_width(&mut self.arena, dimension, bindings).map(Some)
             }
+            // A polynomial width such as `-half+w` resolves when every symbol
+            // it mentions is bound in the caller.
+            Dimension::Symbol { scope, name }
+                if !name.starts_with("slice(")
+                    && crate::types::PolynomialDimension::parse(name).is_ok_and(|polynomial| {
+                        polynomial.symbols().iter().all(|symbol| {
+                            bindings.values.contains_key(&Dimension::Symbol {
+                                scope: std::sync::Arc::clone(scope),
+                                name: std::sync::Arc::from(symbol.as_str()),
+                            })
+                        })
+                    }) =>
+            {
+                Self::dimension_width(&mut self.arena, dimension, bindings).map(Some)
+            }
             Dimension::Symbol { .. } => Ok(None),
         }
     }
@@ -830,7 +845,16 @@ impl SymbolicAnalyzer<'_> {
         let timing = if branches[0].timing == branches[1].timing {
             branches[0].timing.clone()
         } else {
-            self.branch_barrier(&branches)
+            let predicate = match operation
+                .operands
+                .first()
+                .and_then(|operand| environment.get(operand))
+                .and_then(Option::as_ref)
+            {
+                Some(ValueFact::Scalar(ScalarFact::Predicate(predicate))) => Some(*predicate),
+                _ => None,
+            };
+            self.branch_barrier(&branches, predicate)
         };
         Ok(BlockSummary {
             counts,
@@ -842,9 +866,15 @@ impl SymbolicAnalyzer<'_> {
 
     /// Summarize branches with different schedules as one occupying region.
     ///
-    /// Either arm may run, so the region lasts the longer arm's makespan per
-    /// depth family and occupies every owner either arm touches.
-    fn branch_barrier(&mut self, branches: &[BlockSummary]) -> Option<Vec<SymbolicTimingNode>> {
+    /// The region occupies every owner either arm touches. With a symbolic
+    /// branch predicate (for example a Const comparison) its duration is the
+    /// selected arm's makespan as a piecewise expression; otherwise either arm
+    /// may run and it lasts the longer arm's makespan.
+    fn branch_barrier(
+        &mut self,
+        branches: &[BlockSummary],
+        predicate: Option<ExprId>,
+    ) -> Option<Vec<SymbolicTimingNode>> {
         let mut roots = Vec::new();
         let mut durations: Option<BTreeMap<String, ExprId>> = None;
         for branch in branches {
@@ -861,7 +891,18 @@ impl SymbolicAnalyzer<'_> {
                     let mut joined = BTreeMap::new();
                     for (family, left) in previous {
                         if let Some(right) = maxima.get(&family) {
-                            joined.insert(family, self.arena.extremum(true, [left, *right]).ok()?);
+                            let duration = match predicate {
+                                Some(predicate) => self
+                                    .arena
+                                    .piecewise(
+                                        &[predicate],
+                                        &[left, *right],
+                                        ResourceDomain::Natural,
+                                    )
+                                    .ok()?,
+                                None => self.arena.extremum(true, [left, *right]).ok()?,
+                            };
+                            joined.insert(family, duration);
                         }
                     }
                     joined

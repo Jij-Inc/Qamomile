@@ -1263,6 +1263,18 @@ fn polynomial_width_terms(
                 )?);
         }
         for symbol_name in monomial {
+            if let Some((numerator, divisor)) = crate::types::parse_floor_quotient(symbol_name) {
+                let terms = polynomial_width_terms(arena, scope, &numerator, bindings)?;
+                let numerator = arena.add(terms)?;
+                let divisor = arena.literal_u128(divisor.unsigned_abs().into())?;
+                // A nonnegative width divided by a positive literal is natural.
+                factors.push(arena.contracted(
+                    "qamomile.floor_divide",
+                    ResourceDomain::Natural,
+                    [numerator, divisor],
+                )?);
+                continue;
+            }
             let symbol = Dimension::Symbol {
                 scope: Arc::clone(scope),
                 name: Arc::from(symbol_name.as_str()),

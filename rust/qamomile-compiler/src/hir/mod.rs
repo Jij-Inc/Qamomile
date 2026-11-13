@@ -4101,6 +4101,18 @@ fn lower_structured_statement(
         .map(|operation| fresh_carry_groups(operation, &saved_environment, region_children))
         .filter(|groups| !groups.is_empty())
     else {
+        if let Some(name) = operations
+            .last()
+            .filter(|_| operations.len() > saved_length)
+            .and_then(|operation| reassembled_carry(operation, &saved_environment))
+        {
+            return Err(HirLoweringError::Unsupported(format!(
+                "loop carry {name:?} is replaced by a new owner inside the loop (for example \
+                 a reordered concat(tail, head) or a fresh allocation); a loop must carry the \
+                 owner it received, so move the reordering into a helper qkernel that takes \
+                 and returns {name:?}"
+            )));
+        }
         return Ok(terminator);
     };
     operations.truncate(saved_length);
@@ -4213,6 +4225,58 @@ fn fresh_carry_groups(
         })
         .map(|(_, members)| members.into_values().collect())
         .collect()
+}
+
+/// Name a loop carry whose yielded successor is a fresh owner.
+///
+/// Reassembling an owner's projections in another order (a register rotation)
+/// creates a new owner, which a loop cannot yield in place of the carry it
+/// received.
+fn reassembled_carry(
+    operation: &wire::OperationProto,
+    environment: &HashMap<String, wire::ValueProto>,
+) -> Option<String> {
+    // Branches may yield fresh owners (their results adopt them); only loop
+    // carries must keep the topology they entered with.
+    if !matches!(operation.opcode.as_str(), "qcore.for" | "qcore.while") {
+        return None;
+    }
+    let names = string_tuple_attribute(&operation.attributes, "capture_names").ok()?;
+    for region in &operation.regions {
+        let block = region.blocks.first()?;
+        let terminator = block
+            .terminator
+            .as_ref()
+            .filter(|terminator| terminator.kind == "yield")?;
+        let defined = block
+            .arguments
+            .iter()
+            .chain(block.operations.iter().flat_map(|op| op.results.iter()))
+            .map(|value| (value.id, value))
+            .collect::<HashMap<_, _>>();
+        let argument_roots = block
+            .arguments
+            .iter()
+            .filter_map(|value| value.region.as_ref().map(|region| region.root))
+            .collect::<HashSet<_>>();
+        for (name, id) in names.iter().zip(&terminator.operands) {
+            let (Some(observed), Some(expected)) = (
+                defined.get(id).and_then(|value| value.region.as_ref()),
+                environment
+                    .get(name)
+                    .and_then(|value| value.region.as_ref()),
+            ) else {
+                continue;
+            };
+            if observed != expected
+                && observed.projections.is_empty()
+                && !argument_roots.contains(&observed.root)
+            {
+                return Some(name.clone());
+            }
+        }
+    }
+    None
 }
 
 /// Make independently owned values sibling projections of one fresh owner.

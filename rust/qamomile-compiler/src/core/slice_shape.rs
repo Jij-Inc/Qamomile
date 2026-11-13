@@ -145,7 +145,7 @@ impl SliceShape {
                 .unwrap_or_default()
         } else {
             PolynomialDimension::parse(&self.extent)
-                .map(|p| p.symbols().map(str::to_owned).collect())
+                .map(|p| p.symbols().into_iter().collect())
                 .unwrap_or_default()
         };
         for bound in &self.bounds {

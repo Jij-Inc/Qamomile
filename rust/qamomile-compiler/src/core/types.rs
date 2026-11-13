@@ -179,7 +179,20 @@ impl PolynomialDimension {
         };
         let mut start = 0;
         let mut sign = 1_i64;
+        let mut depth = 0_usize;
         for (index, character) in source.char_indices() {
+            match character {
+                '(' => depth += 1,
+                ')' => {
+                    depth = depth
+                        .checked_sub(1)
+                        .ok_or_else(|| "unbalanced dimension parentheses".to_owned())?;
+                }
+                _ => {}
+            }
+            if depth > 0 || character == ')' {
+                continue;
+            }
             if index == 0 && character == '-' {
                 sign = -1;
                 start = 1;
@@ -190,6 +203,9 @@ impl PolynomialDimension {
                 sign = if character == '-' { -1 } else { 1 };
                 start = index + character.len_utf8();
             }
+        }
+        if depth != 0 {
+            return Err("unbalanced dimension parentheses".to_owned());
         }
         if start >= source.len() {
             return Err("dimension expression ends with an operator".to_owned());
@@ -233,7 +249,7 @@ impl PolynomialDimension {
                 .ok_or_else(|| "dimension constant exceeds i64".to_owned())?;
             return Ok(());
         }
-        let mut pieces = source.split('*').collect::<Vec<_>>();
+        let mut pieces = split_top_level_factors(source);
         let coefficient = pieces
             .first()
             .and_then(|piece| piece.parse::<i64>().ok())
@@ -243,7 +259,7 @@ impl PolynomialDimension {
             });
         if coefficient == 0
             || pieces.is_empty()
-            || pieces.iter().any(|piece| !valid_dimension_name(piece))
+            || pieces.iter().any(|piece| !valid_dimension_factor(piece))
             || !pieces.windows(2).all(|pair| pair[0] <= pair[1])
         {
             return Err("dimension term must be coefficient times ordered symbols".to_owned());
@@ -309,34 +325,111 @@ impl PolynomialDimension {
         Some(result)
     }
 
-    pub(crate) fn symbols(&self) -> impl Iterator<Item = &str> {
-        self.terms
-            .keys()
-            .flat_map(|monomial| monomial.iter().map(String::as_str))
+    /// Every dependent binder the polynomial mentions, including those inside
+    /// floor-quotient factors, in sorted order.
+    pub(crate) fn symbols(&self) -> Vec<String> {
+        let mut symbols = std::collections::BTreeSet::new();
+        for monomial in self.terms.keys() {
+            for factor in monomial {
+                if let Some((numerator, _)) = parse_floor_quotient(factor) {
+                    symbols.extend(numerator.symbols());
+                } else {
+                    symbols.insert(factor.clone());
+                }
+            }
+        }
+        symbols.into_iter().collect()
     }
 
-    pub(crate) fn evaluate(&self, mut resolve: impl FnMut(&str) -> Option<u64>) -> Option<u64> {
+    /// Evaluate with signed intermediate values, resolving binders by name.
+    fn evaluate_with(&self, resolve: &mut dyn FnMut(&str) -> Option<i128>) -> Option<i128> {
         let mut total = i128::from(self.constant);
         for (monomial, coefficient) in &self.terms {
             let mut product = 1_i128;
-            for symbol in monomial {
-                product = product.checked_mul(i128::from(resolve(symbol)?))?;
-            }
-            total = total.checked_add(i128::from(*coefficient).checked_mul(product)?)?;
-        }
-        u64::try_from(total).ok().filter(|value| *value > 0)
-    }
-    pub(crate) fn evaluate_signed(&self, resolve: &impl Fn(&str) -> Option<i64>) -> Option<i128> {
-        let mut total = i128::from(self.constant);
-        for (monomial, coefficient) in &self.terms {
-            let mut product = 1_i128;
-            for symbol in monomial {
-                product = product.checked_mul(i128::from(resolve(symbol)?))?;
+            for factor in monomial {
+                let value = if let Some((numerator, divisor)) = parse_floor_quotient(factor) {
+                    numerator
+                        .evaluate_with(resolve)?
+                        .div_euclid(i128::from(divisor))
+                } else {
+                    resolve(factor)?
+                };
+                product = product.checked_mul(value)?;
             }
             total = total.checked_add(i128::from(*coefficient).checked_mul(product)?)?;
         }
         Some(total)
     }
+
+    pub(crate) fn evaluate(&self, mut resolve: impl FnMut(&str) -> Option<u64>) -> Option<u64> {
+        let total = self.evaluate_with(&mut |name| resolve(name).map(i128::from))?;
+        u64::try_from(total).ok().filter(|value| *value > 0)
+    }
+    pub(crate) fn evaluate_signed(&self, resolve: &impl Fn(&str) -> Option<i64>) -> Option<i128> {
+        self.evaluate_with(&mut |name| resolve(name).map(i128::from))
+    }
+}
+
+/// Split one monomial at top-level `*`, keeping parenthesized factors whole.
+fn split_top_level_factors(source: &str) -> Vec<&str> {
+    let mut pieces = Vec::new();
+    let mut depth = 0_usize;
+    let mut start = 0;
+    for (index, character) in source.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            '*' if depth == 0 => {
+                pieces.push(&source[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    pieces.push(&source[start..]);
+    pieces
+}
+
+/// Parse a canonical floor-quotient factor `(name//d)` or `((poly)//d)`.
+///
+/// The numerator is a dimension polynomial and `d >= 2`. Inside a monomial the
+/// factor is an opaque atom, so `n - (n//2) + (n//2)` cancels to `n`; only
+/// evaluation computes the quotient.
+pub(crate) fn parse_floor_quotient(factor: &str) -> Option<(PolynomialDimension, i64)> {
+    let inner = factor.strip_prefix('(')?.strip_suffix(')')?;
+    let (numerator_text, divisor_text) = inner.rsplit_once("//")?;
+    if divisor_text.is_empty() || !divisor_text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let divisor = divisor_text
+        .parse::<i64>()
+        .ok()
+        .filter(|value| *value >= 2)?;
+    let numerator = if let Some(nested) = numerator_text
+        .strip_prefix('(')
+        .and_then(|text| text.strip_suffix(')'))
+    {
+        PolynomialDimension::parse(nested).ok()?
+    } else if valid_dimension_name(numerator_text) {
+        PolynomialDimension::parse(numerator_text).ok()?
+    } else {
+        return None;
+    };
+    (render_floor_quotient(&numerator, divisor) == factor).then_some((numerator, divisor))
+}
+
+/// Canonical spelling of the floor-quotient factor `numerator // divisor`.
+pub(crate) fn render_floor_quotient(numerator: &PolynomialDimension, divisor: i64) -> String {
+    let rendered = numerator.render();
+    if valid_dimension_name(&rendered) {
+        format!("({rendered}//{divisor})")
+    } else {
+        format!("(({rendered})//{divisor})")
+    }
+}
+
+fn valid_dimension_factor(factor: &str) -> bool {
+    valid_dimension_name(factor) || parse_floor_quotient(factor).is_some()
 }
 
 fn valid_dimension_name(name: &str) -> bool {
@@ -383,7 +476,6 @@ pub(crate) fn dimension_symbols(dimension: &Dimension) -> Vec<Dimension> {
             .map(|expression| {
                 expression
                     .symbols()
-                    .collect::<std::collections::BTreeSet<_>>()
                     .into_iter()
                     .map(|name| Dimension::Symbol {
                         scope: Arc::clone(scope),
@@ -2053,6 +2145,29 @@ mod tests {
         );
         assert!(PolynomialDimension::parse("m*d").is_err());
         assert!(PolynomialDimension::parse("d * m").is_err());
+    }
+
+    #[test]
+    fn floor_quotient_factors_are_atoms_that_evaluate() {
+        let expression = PolynomialDimension::parse("-(n//2)+n").expect("canonical floor quotient");
+        assert_eq!(expression.render(), "-(n//2)+n");
+        assert_eq!(expression.symbols(), vec!["n".to_owned()]);
+        let resolve = |name: &str| (name == "n").then_some(7);
+        assert_eq!(expression.evaluate(resolve), Some(4));
+
+        let nested = PolynomialDimension::parse("2*((n+1)//3)").expect("nested numerator");
+        assert_eq!(nested.evaluate(|name| (name == "n").then_some(8)), Some(6));
+
+        let half = PolynomialDimension::parse("(n//2)").expect("atom");
+        let suffix = PolynomialDimension::parse("-(n//2)+n").expect("suffix");
+        let whole = half.add_scaled(&suffix, 1).expect("sum");
+        assert_eq!(whole.render(), "n");
+
+        for invalid in [
+            "n//2", "(n//1)", "((n)//2)", "(n//2", "(2*n//2)", "(n+1//2)",
+        ] {
+            assert!(PolynomialDimension::parse(invalid).is_err(), "{invalid}");
+        }
     }
 
     fn scalar(name: &str) -> wire::TypeProto {

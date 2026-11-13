@@ -81,6 +81,16 @@ def guarded(n: qm.Const[qm.Int], steps: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[n]]
     return qm.measure(q)
 
 @qm.qkernel
+def branch_depth(n: qm.Const[qm.Int], c: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[n]]:
+    q = qm.h(qm.qubits(n), target=0)
+    if c > 0:
+        for i in range(n - 1):
+            q = qm.cx(q, control=i, target=i + 1)
+    else:
+        q = qm.x(q, target=0)
+    return qm.measure(q)
+
+@qm.qkernel
 def while_bound(n: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[n]]:
     q = qm.h(qm.qubits(n), target=0)
     levels = 0
@@ -123,6 +133,14 @@ def test_branches_with_different_schedules_keep_the_rest_of_the_schedule() -> No
 
     _low, high, _relation = _depth("guarded", {"n": 10, "steps": 1})
     assert high is not None and high <= 1 + 9
+
+
+@pytest.mark.parametrize(("selector", "bound"), [(0, 2), (1, 10)])
+def test_const_branch_depth_selects_the_taken_branch(selector: int, bound: int) -> None:
+    """A Const predicate makes the branch region's depth piecewise, not a max."""
+
+    _low, high, _relation = _depth("branch_depth", {"n": 10, "c": selector})
+    assert high == bound
 
 
 def test_loop_bound_from_a_const_while_is_an_unknown_not_a_failure() -> None:

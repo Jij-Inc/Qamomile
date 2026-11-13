@@ -266,7 +266,9 @@ impl ExpressionArena {
         arguments: impl IntoIterator<Item = ExprId>,
     ) -> Result<ExprId, SymbolicResourceError> {
         let mut flattened = Vec::new();
+        let mut inputs = Vec::new();
         for argument in arguments {
+            inputs.push(argument);
             match self.node(argument) {
                 Some(ResourceExpressionNode::Add { arguments, .. }) => {
                     flattened.extend_from_slice(arguments);
@@ -276,22 +278,22 @@ impl ExpressionArena {
             }
         }
         flattened.sort_unstable();
+        // The sum's domain follows its inputs: a natural sum whose normalized
+        // terms carry negative coefficients (for example `n - k` from
+        // complementary widths) remains natural.
+        let domain = self.aggregate_domain(&inputs);
         if flattened.len() > 1
             && let Some(polynomial) = self.polynomial_sum(&flattened)
         {
-            let domain = self.aggregate_domain(&flattened);
             return self.polynomial_expression(polynomial, Some(domain));
         }
         match flattened.as_slice() {
             [] => self.literal_u128(0),
             [only] => Ok(*only),
-            _ => {
-                let domain = self.aggregate_domain(&flattened);
-                self.intern(ResourceExpressionNode::Add {
-                    domain,
-                    arguments: flattened.into_boxed_slice(),
-                })
-            }
+            _ => self.intern(ResourceExpressionNode::Add {
+                domain,
+                arguments: flattened.into_boxed_slice(),
+            }),
         }
     }
 
@@ -519,6 +521,14 @@ impl ExpressionArena {
                     result = result.multiplied(&self.polynomial(*argument)?)?;
                 }
                 Some(result)
+            }
+            // A positive dimension equals its polynomial for every admitted
+            // binding, so normalization may cancel it against sibling widths
+            // (for example `k + 1 + (n-k-1)` is `n`).
+            ResourceExpressionNode::Contracted {
+                name, arguments, ..
+            } if name == "qamomile.positive_dimension" && arguments.len() == 1 => {
+                self.polynomial(arguments[0])
             }
             ResourceExpressionNode::Power { arguments, .. } => {
                 // A symbolic exponent such as `2**level` is an opaque atom.

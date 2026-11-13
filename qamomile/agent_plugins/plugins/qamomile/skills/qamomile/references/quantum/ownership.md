@@ -34,9 +34,10 @@ Here `n` is a dependent dimension bound by the input shape. Allocation widths
 and structural shapes need compile-time information. Keep quantum states
 inside kernel composition; executable host entries return classical data.
 
-Widths may be polynomials over `Const[Int]` parameters. A `split_at` boundary
-can be a literal or an integer expression over Const Int parameters that the
-kernel never rebinds, and `concat` adds the widths of its owners:
+Widths may be polynomials over `Const[Int]` parameters, including floor
+division by an integer such as `n // 2`. A `split_at` boundary can be a literal
+or such an expression over Const Int parameters that the kernel never rebinds,
+and `concat` adds the widths of its owners:
 
 ```python
 @qm.qkernel
@@ -47,8 +48,12 @@ def suffix_flip(n: qm.Const[qm.Int], k: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[n +
 ```
 
 `prefix` is `Bits[k]` and `rest` is `Bits[n-k]`; `qm.qubits(2 * n + 1)` is
-likewise `Bits[2*n+1]`. Widths compare as polynomials, so concatenating the two
-parts restores `Bits[n]` and the result can be a loop carry. Specialization
+likewise `Bits[2*n+1]`, and `qm.split_at(state, n // 2)` gives `Bits[(n//2)]`
+and `Bits[-(n//2)+n]`. Widths compare as polynomials, so concatenating the
+parts in their original order restores `Bits[n]` and the result can be a loop
+carry. A reordered concatenation such as a rotation `concat(tail, head)` is a
+new owner; inside a loop, rotate through a helper qkernel that takes and
+returns the register. Specialization
 rejects bindings that make any width nonpositive (`Q3007`). A loop index is not
 a dimension binder: select a lane with a gate selector or `qm.control(..., at=i)`.
 

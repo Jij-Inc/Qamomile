@@ -3358,7 +3358,8 @@ class _Frontend:
                     node,
                     "Q5096",
                     "qm.split_at boundary must be a compile-time integer or an "
-                    "integer expression over Const Int parameters",
+                    "integer expression (+, -, *, // by an integer) over Const Int "
+                    "parameters",
                 )
             prefix = _polynomial_dimension(*boundary_polynomial)
             suffix = _polynomial_dimension(
@@ -4216,6 +4217,12 @@ class _Frontend:
             if opcode == "classical.sub":
                 return _subtract_polynomials(left, right)
             return _multiply_polynomials(left, right)
+        if opcode == "classical.floordiv" and len(expression.operands) == 2:
+            numerator = self._dimension_polynomial(expression.operands[0])
+            divisor = _static_integer_value(expression.operands[1])
+            if numerator is None or divisor is None:
+                return None
+            return _floor_quotient(numerator, divisor)
         return None
 
     def _parse_dimension(self, expression: ast.expr) -> int | str:
@@ -4315,10 +4322,25 @@ class _Frontend:
                 )
             if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
                 return multiply(parse(node.left), parse(node.right))
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.FloorDiv):
+                divisor = parse(node.right)
+                quotient = (
+                    None
+                    if divisor[1]
+                    else _floor_quotient(parse(node.left), divisor[0])
+                )
+                if quotient is None:
+                    self._error(
+                        node,
+                        "Q5065",
+                        "dimension floor division needs an integer divisor of at least 2",
+                    )
+                return quotient
             self._error(
                 node,
                 "Q5065",
-                "dimension supports only symbols, integers, +, -, and multiplication",
+                "dimension supports only symbols, integers, +, -, multiplication, "
+                "and floor division by an integer",
             )
             raise AssertionError
 
@@ -4738,6 +4760,28 @@ def _multiply_polynomials(left: _Polynomial, right: _Polynomial) -> _Polynomial:
     }
 
 
+def _floor_quotient(numerator: _Polynomial, divisor: int) -> _Polynomial | None:
+    """Return ``numerator // divisor`` as a constant or one opaque atom.
+
+    The canonical atom spelling is ``(name//d)`` or ``((polynomial)//d)``,
+    matching the native dimension parser; the whole factor is parenthesized so
+    products such as ``2*(n//2)`` read the same in Python and Rust.
+    """
+
+    if divisor < 2:
+        return None
+    constant, terms = numerator
+    if not terms:
+        return constant // divisor, {}
+    rendered = _format_polynomial_dimension(constant, terms)
+    atom = (
+        f"({rendered}//{divisor})"
+        if rendered.isidentifier()
+        else f"(({rendered})//{divisor})"
+    )
+    return 0, {(atom,): 1}
+
+
 def _dimension_to_polynomial(dimension: Dimension) -> _Polynomial:
     """Read a fixed width or canonical symbolic spelling as a polynomial.
 
@@ -4771,6 +4815,15 @@ def _dimension_to_polynomial(dimension: Dimension) -> _Polynomial:
             return _subtract_polynomials(read(node.left), read(node.right))
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
             return _multiply_polynomials(read(node.left), read(node.right))
+        if (
+            isinstance(node, ast.BinOp)
+            and isinstance(node.op, ast.FloorDiv)
+            and isinstance(node.right, ast.Constant)
+            and type(node.right.value) is int
+        ):
+            quotient = _floor_quotient(read(node.left), node.right.value)
+            if quotient is not None:
+                return quotient
         raise TypeCheckError(f"invalid dimension spelling {dimension!r}")
 
     return read(tree)

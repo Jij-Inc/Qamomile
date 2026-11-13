@@ -1331,11 +1331,10 @@ fn unify_dimension(
                 };
                 if polynomial.constant == 0
                     && polynomial.terms.len() == 1
-                    && polynomial
-                        .terms
-                        .keys()
-                        .next()
-                        .is_some_and(|symbols| symbols.len() == 1)
+                    && polynomial.terms.keys().next().is_some_and(|symbols| {
+                        symbols.len() == 1
+                            && crate::types::parse_floor_quotient(&symbols[0]).is_none()
+                    })
                     && polynomial.terms.values().next() == Some(&1)
                 {
                     if let Some(bound) = bindings.get(expected) {
