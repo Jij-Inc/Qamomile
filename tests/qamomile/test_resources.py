@@ -1075,7 +1075,9 @@ def invalid_width(n: qm.Const[qm.Int]) -> qm.Unit:
 
     with pytest.raises(qm.VerificationError, match="Q1045"):
         qm.build_source(zero_step)
-    with pytest.raises(qm.VerificationError, match="Q1046"):
+    # The allocation width is the type dimension ``n+1``, so specialization
+    # rejects the nonpositive binding before the allocation value is checked.
+    with pytest.raises(qm.SpecializationError, match='Q3007: shape dimension "n\\+1"'):
         qm.specialize(qm.build_source(invalid_width)["invalid_width"], n=-1)
 
 
