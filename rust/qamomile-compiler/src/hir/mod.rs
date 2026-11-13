@@ -2889,6 +2889,7 @@ fn lower_if_statement(
         .collect::<Result<Vec<_>, _>>()?;
     let mut regions = Vec::with_capacity(2);
     let mut branch_outputs = Vec::with_capacity(2);
+    let mut yielding_regions = Vec::with_capacity(2);
     for source in &statement.regions {
         let arguments = capture_values
             .iter()
@@ -2923,7 +2924,25 @@ fn lower_if_statement(
             blocks: vec![block],
         });
         if normally_yields {
+            yielding_regions.push(regions.len() - 1);
             branch_outputs.push(yielded);
+        }
+    }
+    if let Some(group) = branch_rebinding_group(&branch_outputs) {
+        // Branches rebound carried owners under different roots. Give every
+        // yielding branch the same sibling projections of one fresh root.
+        let parent = allocate_root_region(next_region)?;
+        for (&region_index, yielded) in yielding_regions.iter().zip(&mut branch_outputs) {
+            rebind_block_outputs(
+                &mut regions[region_index].blocks[0],
+                yielded,
+                &group,
+                &parent,
+                statement.span.clone(),
+                next_id,
+                next_region,
+                region_children,
+            )?;
         }
     }
     let results = match branch_outputs.first() {
@@ -3001,7 +3020,7 @@ fn lower_while_statement(
             "while carry arity".to_owned(),
         ));
     }
-    let initial = names
+    let mut initial = names
         .iter()
         .zip(&statement.result_types)
         .map(|(name, expected)| {
@@ -3018,80 +3037,128 @@ fn lower_while_statement(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let arguments = initial
-        .iter()
-        .zip(&names)
-        .map(|(value, name)| clone_region_argument(value, name, next_id))
-        .collect::<Result<Vec<_>, _>>()?;
-    let local = names
-        .iter()
-        .cloned()
-        .zip(arguments.iter().cloned())
-        .collect();
-    let mut condition_operations = Vec::new();
-    let condition = lower_expression(
-        statement
-            .expression
-            .as_ref()
-            .expect("validated while condition"),
-        scope,
-        arena,
-        next_id,
-        next_region,
-        region_children,
-        &local,
-        &mut condition_operations,
-        work,
-    )?;
-    let condition_type = arena
-        .resolve_wire_type(condition.r#type.as_ref().expect("condition type"), scope)
-        .map_err(HirLoweringError::InvalidQCore)?;
-    let stage = control_stage(arena.stage_of(condition_type));
-    let condition_block = wire::BlockProto {
-        arguments,
-        operations: condition_operations,
-        terminator: Some(wire::TerminatorProto {
-            kind: "yield".to_owned(),
-            operands: std::iter::once(condition.id)
-                .chain(names.iter().map(|name| local[name].id))
-                .collect(),
-            span: statement.span.clone(),
-            ..Default::default()
-        }),
-    };
-    let mut regions = vec![wire::RegionProto {
-        blocks: vec![condition_block],
-    }];
-    for (index, source) in statement.regions.iter().enumerate() {
+    let entry_work = *work;
+    let mut rebinding: Option<(Vec<usize>, wire::RegionRefProto)> = None;
+    let (regions, stage) = loop {
         let arguments = initial
             .iter()
             .zip(&names)
             .map(|(value, name)| clone_region_argument(value, name, next_id))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut local = names
+        let local = names
             .iter()
             .cloned()
             .zip(arguments.iter().cloned())
             .collect();
-        let (block, _) = lower_yielding_block(
-            source,
-            &arguments,
-            &names,
-            &statement.result_types,
-            statement.span.clone(),
+        let mut condition_operations = Vec::new();
+        let condition = lower_expression(
+            statement
+                .expression
+                .as_ref()
+                .expect("validated while condition"),
             scope,
             arena,
             next_id,
             next_region,
             region_children,
-            &mut local,
-            if index == 0 { Some(&names) } else { outer_loop },
+            &local,
+            &mut condition_operations,
             work,
         )?;
-        regions.push(wire::RegionProto {
-            blocks: vec![block],
-        });
-    }
+        let condition_type = arena
+            .resolve_wire_type(condition.r#type.as_ref().expect("condition type"), scope)
+            .map_err(HirLoweringError::InvalidQCore)?;
+        let stage = control_stage(arena.stage_of(condition_type));
+        let condition_block = wire::BlockProto {
+            arguments,
+            operations: condition_operations,
+            terminator: Some(wire::TerminatorProto {
+                kind: "yield".to_owned(),
+                operands: std::iter::once(condition.id)
+                    .chain(names.iter().map(|name| local[name].id))
+                    .collect(),
+                span: statement.span.clone(),
+                ..Default::default()
+            }),
+        };
+        let mut regions = vec![wire::RegionProto {
+            blocks: vec![condition_block],
+        }];
+        let mut body_yielded = Vec::new();
+        for (index, source) in statement.regions.iter().enumerate() {
+            let arguments = initial
+                .iter()
+                .zip(&names)
+                .map(|(value, name)| clone_region_argument(value, name, next_id))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut local = names
+                .iter()
+                .cloned()
+                .zip(arguments.iter().cloned())
+                .collect();
+            let (block, yielded) = lower_yielding_block(
+                source,
+                &arguments,
+                &names,
+                &statement.result_types,
+                statement.span.clone(),
+                scope,
+                arena,
+                next_id,
+                next_region,
+                region_children,
+                &mut local,
+                if index == 0 { Some(&names) } else { outer_loop },
+                work,
+            )?;
+            if index == 0 {
+                body_yielded = yielded;
+            }
+            regions.push(wire::RegionProto {
+                blocks: vec![block],
+            });
+        }
+        let [_, body_region, ..] = regions.as_mut_slice() else {
+            return Err(HirLoweringError::InvalidQCore(
+                "while has no body region".to_owned(),
+            ));
+        };
+        let body = &mut body_region.blocks[0];
+        if let Some((group, parent)) = &rebinding {
+            if body_yielded.len() == names.len() {
+                rebind_block_outputs(
+                    body,
+                    &mut body_yielded,
+                    group,
+                    parent,
+                    statement.span.clone(),
+                    next_id,
+                    next_region,
+                    region_children,
+                )?;
+            }
+        } else if let Some(group) = loop_rebinding_group(&body_yielded, &body.arguments) {
+            // As in `for`, carry the rebound owners as siblings of one
+            // root and lower every while region again.
+            *work = entry_work;
+            let parent = allocate_root_region(next_region)?;
+            let packed = rebind_to_sibling_regions(
+                group.iter().map(|&index| initial[index].clone()).collect(),
+                &parent,
+                statement.span.clone(),
+                next_id,
+                next_region,
+                region_children,
+                operations,
+            )?;
+            for (&index, value) in group.iter().zip(packed) {
+                initial[index] = value;
+            }
+            rebinding = Some((group, parent));
+            continue;
+        }
+        break (regions, stage);
+    };
     let results = initial
         .iter()
         .zip(&names)
@@ -3451,7 +3518,9 @@ fn lower_for_statement(
             }
         }
     }
-    let (mut body, _) = lower_yielding_block(
+    let entry_environment = body_environment.clone();
+    let entry_work = *work;
+    let (mut body, yielded) = lower_yielding_block(
         &statement.regions[0],
         &body_arguments,
         &carry_names,
@@ -3466,6 +3535,57 @@ fn lower_for_statement(
         Some(&carry_names),
         work,
     )?;
+    if let Some(group) = loop_rebinding_group(&yielded, &body_arguments[1..=declared_carry_count]) {
+        // The body rebinds several carried owners through one multi-owner
+        // operation, so they return under a fresh root. Carry them as
+        // siblings of one root instead and lower the body again.
+        *work = entry_work;
+        let parent = allocate_root_region(next_region)?;
+        let packed = rebind_to_sibling_regions(
+            group.iter().map(|&index| initial[index].clone()).collect(),
+            &parent,
+            statement.span.clone(),
+            next_id,
+            next_region,
+            region_children,
+            operations,
+        )?;
+        body_environment = entry_environment;
+        for (&index, value) in group.iter().zip(packed) {
+            let argument = clone_region_argument(&value, &carry_names[index], next_id)?;
+            body_environment.insert(carry_names[index].clone(), argument.clone());
+            body_arguments[index + 1] = argument;
+            initial[index] = value;
+        }
+        let (mut rebound, mut yielded) = lower_yielding_block(
+            &statement.regions[0],
+            &body_arguments,
+            &carry_names,
+            &carry_types,
+            statement.span.clone(),
+            scope,
+            arena,
+            next_id,
+            next_region,
+            region_children,
+            &mut body_environment,
+            Some(&carry_names),
+            work,
+        )?;
+        if yielded.len() == carry_names.len() {
+            rebind_block_outputs(
+                &mut rebound,
+                &mut yielded,
+                &group,
+                &parent,
+                statement.span.clone(),
+                next_id,
+                next_region,
+                region_children,
+            )?;
+        }
+        body = rebound;
+    }
     body.operations.splice(0..0, prefix_operations);
     let results = carry_names
         .iter()
@@ -3657,6 +3777,207 @@ fn replace_source_environment(
 ) {
     environment.retain(|name, _| name.starts_with(INTERNAL_NAME_PREFIX));
     environment.extend(source_values);
+}
+
+/// Select the linear outputs that must share one sibling root.
+///
+/// One rebound owner cannot change root by itself: a structural tuple with
+/// one linear operand keeps that operand's region. It is therefore grouped
+/// with every other linear output when there is at least one.
+fn rebinding_group(linear: Vec<usize>, mismatched: Vec<usize>) -> Option<Vec<usize>> {
+    match mismatched.len() {
+        1 if linear.len() > 1 => Some(linear),
+        0 | 1 => None,
+        _ => Some(mismatched),
+    }
+}
+
+/// Return loop carries whose yielded owner differs from the carried owner.
+fn loop_rebinding_group(
+    yielded: &[wire::ValueProto],
+    arguments: &[wire::ValueProto],
+) -> Option<Vec<usize>> {
+    if yielded.len() < arguments.len() {
+        return None;
+    }
+    let linear = arguments
+        .iter()
+        .enumerate()
+        .filter(|(_, argument)| argument.region.is_some())
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let mismatched = linear
+        .iter()
+        .copied()
+        .filter(|&index| yielded[index].region != arguments[index].region)
+        .collect();
+    rebinding_group(linear, mismatched)
+}
+
+/// Return branch outputs whose owner differs between yielding branches.
+fn branch_rebinding_group(branch_outputs: &[Vec<wire::ValueProto>]) -> Option<Vec<usize>> {
+    let (first, rest) = branch_outputs.split_first()?;
+    let linear = first
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| value.region.is_some())
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let mismatched = linear
+        .iter()
+        .copied()
+        .filter(|&index| {
+            rest.iter().any(|outputs| {
+                outputs.get(index).map(|value| &value.region) != Some(&first[index].region)
+            })
+        })
+        .collect();
+    rebinding_group(linear, mismatched)
+}
+
+fn child_region(parent: &wire::RegionRefProto, index: usize) -> wire::RegionRefProto {
+    let mut child = parent.clone();
+    child.projections.push(index.to_string());
+    child
+}
+
+/// Rebind linear values to consecutive sibling projections of `parent`.
+///
+/// A structural tuple may own a root that none of its operands use, and its
+/// unpack yields that root's child projections. When an operand already uses
+/// `parent`'s root, the values first pass through a fresh intermediate root.
+/// Structural tuple and unpack operations emit no target instructions.
+fn rebind_to_sibling_regions(
+    values: Vec<wire::ValueProto>,
+    parent: &wire::RegionRefProto,
+    span: Option<wire::SourceSpanProto>,
+    next_id: &mut u64,
+    next_region: &mut u64,
+    region_children: &mut RegionChildren,
+    operations: &mut Vec<wire::OperationProto>,
+) -> Result<Vec<wire::ValueProto>, HirLoweringError> {
+    let aligned = values
+        .iter()
+        .enumerate()
+        .all(|(index, value)| value.region.as_ref() == Some(&child_region(parent, index)));
+    if aligned {
+        return Ok(values);
+    }
+    let mut current = values;
+    if current.iter().any(|value| {
+        value
+            .region
+            .as_ref()
+            .is_some_and(|region| region.root == parent.root)
+    }) {
+        let intermediate = allocate_root_region(next_region)?;
+        current = pack_and_unpack(
+            &current,
+            &intermediate,
+            span.clone(),
+            next_id,
+            region_children,
+            operations,
+        )?;
+    }
+    pack_and_unpack(&current, parent, span, next_id, region_children, operations)
+}
+
+fn pack_and_unpack(
+    values: &[wire::ValueProto],
+    parent: &wire::RegionRefProto,
+    span: Option<wire::SourceSpanProto>,
+    next_id: &mut u64,
+    region_children: &mut RegionChildren,
+    operations: &mut Vec<wire::OperationProto>,
+) -> Result<Vec<wire::ValueProto>, HirLoweringError> {
+    let types = values
+        .iter()
+        .map(|value| {
+            value.r#type.clone().ok_or_else(|| {
+                HirLoweringError::InvalidQCore("rebound owner has no type".to_owned())
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let product = new_value(
+        wire_product_type(types.iter().cloned()),
+        "rebound_owners".to_owned(),
+        Some(parent.clone()),
+        next_id,
+    )?;
+    operations.push(wire::OperationProto {
+        opcode: "qcore.tuple".to_owned(),
+        operands: values.iter().map(|value| value.id).collect(),
+        results: vec![product.clone()],
+        span: span.clone(),
+        ..Default::default()
+    });
+    region_children.insert(
+        (parent.root, parent.projections.clone()),
+        (0..values.len()).map(|index| index.to_string()).collect(),
+    );
+    let rebound = values
+        .iter()
+        .zip(types)
+        .enumerate()
+        .map(|(index, (value, r#type))| {
+            new_value(
+                r#type,
+                value.hint.clone(),
+                Some(child_region(parent, index)),
+                next_id,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    operations.push(wire::OperationProto {
+        opcode: "qcore.unpack".to_owned(),
+        operands: vec![product.id],
+        results: rebound.clone(),
+        span,
+        ..Default::default()
+    });
+    Ok(rebound)
+}
+
+/// Rebind selected yielded owners of one region block under `parent`.
+#[allow(clippy::too_many_arguments)]
+fn rebind_block_outputs(
+    block: &mut wire::BlockProto,
+    yielded: &mut [wire::ValueProto],
+    group: &[usize],
+    parent: &wire::RegionRefProto,
+    span: Option<wire::SourceSpanProto>,
+    next_id: &mut u64,
+    next_region: &mut u64,
+    region_children: &mut RegionChildren,
+) -> Result<(), HirLoweringError> {
+    let mut operations = Vec::new();
+    let rebound = rebind_to_sibling_regions(
+        group.iter().map(|&index| yielded[index].clone()).collect(),
+        parent,
+        span,
+        next_id,
+        next_region,
+        region_children,
+        &mut operations,
+    )?;
+    if operations.is_empty() {
+        return Ok(());
+    }
+    let terminator = block.terminator.as_mut().ok_or_else(|| {
+        HirLoweringError::InvalidQCore("rebound block has no terminator".to_owned())
+    })?;
+    for (&index, value) in group.iter().zip(rebound) {
+        let previous = yielded[index].id;
+        for operand in &mut terminator.operands {
+            if *operand == previous {
+                *operand = value.id;
+            }
+        }
+        yielded[index] = value;
+    }
+    block.operations.extend(operations);
+    Ok(())
 }
 
 fn loop_stage_and_induction_type(
