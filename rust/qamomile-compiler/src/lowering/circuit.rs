@@ -2370,9 +2370,11 @@ impl StaticLowerer<'_> {
                 self.retain_coherent_region(start, &label, controls.clone())?;
             }
         } else if !controls.is_empty() {
-            return Err(StaticCircuitError::Unsupported(
-                "nonunitary controlled callable".to_owned(),
-            ));
+            let offending = first_incoherent_instruction(&self.instructions[start..])
+                .unwrap_or_else(|| "unknown".to_owned());
+            return Err(StaticCircuitError::Unsupported(format!(
+                "nonunitary controlled callable {callee_name:?} (emits {offending})"
+            )));
         }
         self.controls = controls;
         if self.next_wire.checked_sub(start_wire)
@@ -5915,6 +5917,24 @@ fn distribute_controls(
     Ok(())
 }
 
+/// Describe the first instruction that prevents coherent control.
+fn first_incoherent_instruction(instructions: &[StaticInstruction]) -> Option<String> {
+    for instruction in instructions {
+        if !coherent_instructions(std::slice::from_ref(instruction)) {
+            if instruction.condition.is_some() {
+                return Some(format!("conditioned {}", instruction.opcode));
+            }
+            for block in &instruction.regions {
+                if let Some(nested) = first_incoherent_instruction(&block.instructions) {
+                    return Some(nested);
+                }
+            }
+            return Some(instruction.opcode.clone());
+        }
+    }
+    None
+}
+
 fn coherent_instructions(instructions: &[StaticInstruction]) -> bool {
     instructions.iter().all(|instruction| {
         instruction.condition.is_none()
@@ -5923,6 +5943,8 @@ fn coherent_instructions(instructions: &[StaticInstruction]) -> bool {
                 || matches!(
                     instruction.opcode.as_str(),
                     "for"
+                        | "deferred"
+                        | "inverse:deferred"
                         | "phase_oracle"
                         | "xor_oracle"
                         | "linear_function"

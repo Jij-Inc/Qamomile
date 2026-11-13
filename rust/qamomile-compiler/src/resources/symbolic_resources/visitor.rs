@@ -809,12 +809,14 @@ impl SymbolicAnalyzer<'_> {
                 .collect::<Vec<_>>(),
             &mut self.arena,
         )?;
-        if self.recurrences.encountered
-            && let Some(ValueFact::Scalar(ScalarFact::Predicate(predicate))) = operation
-                .operands
-                .first()
-                .and_then(|operand| environment.get(operand))
-                .and_then(Option::as_ref)
+        // A symbolic branch predicate (for example a Const comparison) selects
+        // one branch for every admitted binding, so additive costs are exact
+        // piecewise functions rather than the [min, max] join of both arms.
+        if let Some(ValueFact::Scalar(ScalarFact::Predicate(predicate))) = operation
+            .operands
+            .first()
+            .and_then(|operand| environment.get(operand))
+            .and_then(Option::as_ref)
         {
             counts = Counts::conditional(
                 &branches[0].counts,

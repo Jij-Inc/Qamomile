@@ -227,6 +227,15 @@ _PREDICATE_KINDS = {
     "not",
 }
 
+_PREDICATE_OPERATORS = {
+    "equal": "==",
+    "not_equal": "!=",
+    "less": "<",
+    "less_equal": "<=",
+    "greater": ">",
+    "greater_equal": ">=",
+}
+
 _MAX_CONSTRUCTION_INPUTS = 100_000
 _MAX_CONSTRUCTION_BYTES = 64 * 1024 * 1024
 
@@ -302,6 +311,22 @@ class Predicate:
         object.__setattr__(result, "arguments", arguments)
         object.__setattr__(result, "predicates", predicates)
         return result
+
+    def __str__(self) -> str:
+        """Render a stable compact Boolean representation."""
+
+        if self.kind in {"true", "false"}:
+            return self.kind
+        if self.kind in _PREDICATE_OPERATORS and len(self.arguments) == 2:
+            left, right = self.arguments
+            return f"{left} {_PREDICATE_OPERATORS[self.kind]} {right}"
+        if self.kind in {"and", "or"}:
+            return f" {self.kind} ".join(f"({item})" for item in self.predicates)
+        if self.kind == "not" and len(self.predicates) == 1:
+            return f"not ({self.predicates[0]})"
+        parts = [str(argument) for argument in self.arguments]
+        parts.extend(str(item) for item in self.predicates)
+        return f"{self.kind}({', '.join(parts)})"
 
     def substitute(self, values: Mapping[str, Expr | Number]) -> Predicate:
         """Substitute all scoped expression symbols in this predicate."""
@@ -586,6 +611,15 @@ class Expr:
             return " * ".join(_parenthesize(argument) for argument in self.arguments)
         if self.kind in {"minimum", "maximum"}:
             return f"{self.kind}({', '.join(map(str, self.arguments))})"
+        if self.kind == "piecewise" and len(self.arguments) == len(self.predicates) + 1:
+            arms = [
+                f"{predicate}: {value}"
+                for predicate, value in zip(
+                    self.predicates, self.arguments, strict=False
+                )
+            ]
+            arms.append(f"otherwise: {self.arguments[-1]}")
+            return f"piecewise({', '.join(arms)})"
         name = dict(self.attributes).get("name", self.kind)
         return f"{name}({', '.join(map(str, self.arguments))})"
 

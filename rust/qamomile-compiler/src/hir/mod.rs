@@ -4,7 +4,7 @@ mod finite_dependency_sets;
 mod function_results;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt::Write as _,
     sync::Arc,
 };
@@ -2689,7 +2689,8 @@ fn lower_straight_body(
                 });
             }
             "if" => {
-                terminator = lower_if_statement(
+                terminator = lower_structured_statement(
+                    lower_if_statement,
                     statement,
                     scope,
                     arena,
@@ -2703,7 +2704,8 @@ fn lower_straight_body(
                 )?;
             }
             "for" => {
-                terminator = lower_for_statement(
+                terminator = lower_structured_statement(
+                    lower_for_statement,
                     statement,
                     scope,
                     arena,
@@ -2717,7 +2719,8 @@ fn lower_straight_body(
                 )?;
             }
             "while" => {
-                terminator = lower_while_statement(
+                terminator = lower_structured_statement(
+                    lower_while_statement,
                     statement,
                     scope,
                     arena,
@@ -3938,7 +3941,8 @@ fn lower_yielding_block(
                 });
             }
             "if" => {
-                terminator = lower_if_statement(
+                terminator = lower_structured_statement(
+                    lower_if_statement,
                     statement,
                     scope,
                     arena,
@@ -3952,7 +3956,8 @@ fn lower_yielding_block(
                 )?;
             }
             "for" => {
-                terminator = lower_for_statement(
+                terminator = lower_structured_statement(
+                    lower_for_statement,
                     statement,
                     scope,
                     arena,
@@ -3966,7 +3971,8 @@ fn lower_yielding_block(
                 )?;
             }
             "while" => {
-                terminator = lower_while_statement(
+                terminator = lower_structured_statement(
+                    lower_while_statement,
                     statement,
                     scope,
                     arena,
@@ -4035,6 +4041,241 @@ fn lower_yielding_block(
         },
         yielded,
     ))
+}
+
+type StructuredLowering = fn(
+    &wire::HirStatementProto,
+    &std::sync::Arc<str>,
+    &mut TypeArena,
+    &mut u64,
+    &mut u64,
+    &mut RegionChildren,
+    &mut HashMap<String, wire::ValueProto>,
+    &mut Vec<wire::OperationProto>,
+    Option<&[String]>,
+    &mut HirSsaLoweringWork,
+) -> Result<Option<wire::TerminatorProto>, HirLoweringError>;
+
+/// Lower one structured statement, regrouping carried owners when required.
+///
+/// A call that consumes several owners, such as `a, b = helper(a, b)` or
+/// `controls, target = qm.control(f, controls, target)`, returns successors
+/// that are projections of the call's ownership region. A structured region
+/// must yield its carries with their entry topology, so independently owned
+/// carries would no longer match. When the lowered region shows exactly that
+/// shape, the statement is lowered again after packing those carries into one
+/// tuple and unpacking them, which makes them sibling projections of a shared
+/// owner that the call then preserves.
+#[allow(clippy::too_many_arguments)]
+fn lower_structured_statement(
+    lower: StructuredLowering,
+    statement: &wire::HirStatementProto,
+    scope: &std::sync::Arc<str>,
+    arena: &mut TypeArena,
+    next_id: &mut u64,
+    next_region: &mut u64,
+    region_children: &mut RegionChildren,
+    environment: &mut HashMap<String, wire::ValueProto>,
+    operations: &mut Vec<wire::OperationProto>,
+    loop_carries: Option<&[String]>,
+    work: &mut HirSsaLoweringWork,
+) -> Result<Option<wire::TerminatorProto>, HirLoweringError> {
+    let saved_environment = environment.clone();
+    let saved_children = region_children.clone();
+    let saved_length = operations.len();
+    let terminator = lower(
+        statement,
+        scope,
+        arena,
+        next_id,
+        next_region,
+        region_children,
+        environment,
+        operations,
+        loop_carries,
+        work,
+    )?;
+    let Some(groups) = operations
+        .last()
+        .filter(|_| operations.len() > saved_length)
+        .map(|operation| fresh_carry_groups(operation, &saved_environment, region_children))
+        .filter(|groups| !groups.is_empty())
+    else {
+        return Ok(terminator);
+    };
+    operations.truncate(saved_length);
+    *environment = saved_environment;
+    *region_children = saved_children;
+    for names in groups {
+        repack_owners(
+            &names,
+            statement.span.clone(),
+            next_id,
+            next_region,
+            region_children,
+            environment,
+            operations,
+        )?;
+    }
+    lower(
+        statement,
+        scope,
+        arena,
+        next_id,
+        next_region,
+        region_children,
+        environment,
+        operations,
+        loop_carries,
+        work,
+    )
+}
+
+/// Find carries whose yielded successors are projections of a fresh owner.
+///
+/// Each returned group lists carry names ordered by projection index; it
+/// covers every child of that owner and every member entered the statement
+/// as an independent owner.
+fn fresh_carry_groups(
+    operation: &wire::OperationProto,
+    environment: &HashMap<String, wire::ValueProto>,
+    region_children: &RegionChildren,
+) -> Vec<Vec<String>> {
+    let names_attribute = if operation.opcode == "qcore.if" {
+        "output_names"
+    } else {
+        "capture_names"
+    };
+    let Ok(names) = string_tuple_attribute(&operation.attributes, names_attribute) else {
+        return Vec::new();
+    };
+    let mut groups: BTreeMap<u64, BTreeMap<usize, String>> = BTreeMap::new();
+    let mut rejected = HashSet::new();
+    for region in &operation.regions {
+        let Some(block) = region.blocks.first() else {
+            continue;
+        };
+        let Some(terminator) = block
+            .terminator
+            .as_ref()
+            .filter(|terminator| terminator.kind == "yield")
+        else {
+            continue;
+        };
+        let defined = block
+            .arguments
+            .iter()
+            .chain(block.operations.iter().flat_map(|op| op.results.iter()))
+            .map(|value| (value.id, value))
+            .collect::<HashMap<_, _>>();
+        let argument_roots = block
+            .arguments
+            .iter()
+            .filter_map(|value| value.region.as_ref().map(|region| region.root))
+            .collect::<HashSet<_>>();
+        for (name, id) in names.iter().zip(&terminator.operands) {
+            let (Some(yielded), Some(entry)) = (defined.get(id), environment.get(name)) else {
+                continue;
+            };
+            let (Some(observed), Some(expected)) = (&yielded.region, &entry.region) else {
+                continue;
+            };
+            if observed == expected || argument_roots.contains(&observed.root) {
+                continue;
+            }
+            let ([index], false) = (
+                observed.projections.as_slice(),
+                !expected.projections.is_empty(),
+            ) else {
+                rejected.insert(observed.root);
+                continue;
+            };
+            let Ok(index) = index.parse::<usize>() else {
+                rejected.insert(observed.root);
+                continue;
+            };
+            let group = groups.entry(observed.root).or_default();
+            if group.get(&index).is_some_and(|existing| existing != name) {
+                rejected.insert(observed.root);
+            }
+            group.insert(index, name.clone());
+        }
+    }
+    groups
+        .into_iter()
+        .filter(|(root, members)| {
+            !rejected.contains(root)
+                && members.len() > 1
+                && members.keys().copied().eq(0..members.len())
+                && region_children
+                    .get(&(*root, Vec::new()))
+                    .is_none_or(|children| children.len() == members.len())
+        })
+        .map(|(_, members)| members.into_values().collect())
+        .collect()
+}
+
+/// Make independently owned values sibling projections of one fresh owner.
+fn repack_owners(
+    names: &[String],
+    span: Option<wire::SourceSpanProto>,
+    next_id: &mut u64,
+    next_region: &mut u64,
+    region_children: &mut RegionChildren,
+    environment: &mut HashMap<String, wire::ValueProto>,
+    operations: &mut Vec<wire::OperationProto>,
+) -> Result<(), HirLoweringError> {
+    let values = names
+        .iter()
+        .map(|name| {
+            environment
+                .get(name)
+                .cloned()
+                .ok_or_else(|| HirLoweringError::InvalidQCore(format!("unresolved carry {name:?}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let element_types = values
+        .iter()
+        .map(|value| {
+            value.r#type.clone().ok_or_else(|| {
+                HirLoweringError::InvalidQCore("carried owner has no type".to_owned())
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let owner = allocate_root_region(next_region)?;
+    let packed = new_value(
+        wire_product_type(element_types.iter().cloned()),
+        "carries".to_owned(),
+        Some(owner.clone()),
+        next_id,
+    )?;
+    operations.push(wire::OperationProto {
+        opcode: "qcore.tuple".to_owned(),
+        operands: values.iter().map(|value| value.id).collect(),
+        results: vec![packed.clone()],
+        span: span.clone(),
+        ..Default::default()
+    });
+    region_children.insert(
+        (owner.root, Vec::new()),
+        (0..names.len()).map(|index| index.to_string()).collect(),
+    );
+    let mut results = Vec::with_capacity(names.len());
+    for (index, (name, element_type)) in names.iter().zip(element_types).enumerate() {
+        let mut region = owner.clone();
+        region.projections.push(index.to_string());
+        let value = new_value(element_type, name.clone(), Some(region), next_id)?;
+        environment.insert(name.clone(), value.clone());
+        results.push(value);
+    }
+    operations.push(wire::OperationProto {
+        opcode: "qcore.unpack".to_owned(),
+        operands: vec![packed.id],
+        results,
+        span,
+        ..Default::default()
+    });
+    Ok(())
 }
 
 fn clone_region_argument(
@@ -5770,7 +6011,7 @@ fn lower_result_region(
     let owned_operands = operands.iter().filter(|operand| operand.has_region).count();
     if matches!(
         opcode,
-        "qcore.tuple" | "qcore.control_call" | "qcore.select_call"
+        "qcore.tuple" | "qcore.call" | "qcore.control_call" | "qcore.select_call"
     ) && owned_operands > 1
         && let Some(parent) = owned_sibling_parent(operands, region_children)
     {
