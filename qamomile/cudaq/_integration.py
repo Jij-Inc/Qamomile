@@ -288,12 +288,12 @@ def load_kernel(artifact: CompiledProgram) -> Any:
 
 
 @contextmanager
-def _selected_runtime_target(runtime_target: str, seed: int) -> Iterator[None]:
+def _selected_runtime_target(runtime_target: str, seed: int | None) -> Iterator[None]:
     """Serialize Qamomile CUDA-Q launches and restore the previous SDK target.
 
     Args:
         runtime_target (str): CUDA-Q target selected for this launch.
-        seed (int): Invocation seed passed to the SDK.
+        seed (int | None): Explicit SDK seed, or None to retain SDK randomness.
 
     Yields:
         None: Control while the requested target is active and locked.
@@ -318,7 +318,8 @@ def _selected_runtime_target(runtime_target: str, seed: int) -> Iterator[None]:
                 cudaq.set_target(runtime_target)
                 if cudaq.get_target().name != runtime_target:
                     raise RuntimeError("CUDA-Q selected a different target")
-                cudaq.set_random_seed(seed)
+                if seed is not None:
+                    cudaq.set_random_seed(seed)
             except ExecutionError:
                 raise
             except Exception as error:

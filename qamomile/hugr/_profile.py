@@ -11,6 +11,7 @@ CAPABILITIES = frozenset(
         Requirement.MEASUREMENT,
         Requirement.MID_CIRCUIT_MEASUREMENT,
         Requirement.DYNAMIC_BRANCH,
+        Requirement.DYNAMIC_CLASSICAL_INDEX,
         Requirement.DYNAMIC_LOOP,
         Requirement.DISCARD,
         Requirement.RESET,

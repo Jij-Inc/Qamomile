@@ -35,6 +35,7 @@ from qamomile.circuit import (
     postprocess_circuit_counts,
     scalar_parameter_bindings,
     scalar_parameters,
+    validate_artifact_angles,
 )
 from qamomile.compilation import (
     CapabilitySnapshot,
@@ -546,10 +547,10 @@ class CirqSampler:
             ExecutionError: If the artifact, seed, sampler, or result is invalid.
         """
 
-        if invocation.seed != 0:
+        if invocation.seed is not None:
             raise ExecutionError(
                 "Q8831: live Cirq samplers do not provide a portable seed contract; "
-                "use seed=0"
+                "use seed=None"
             )
         result = _execute_with_sampler(
             artifact,
@@ -660,10 +661,10 @@ class CirqProcessor:
             raise ExecutionError(
                 f"Q8830: Google processor accepts {FORMAT!r}, got {artifact.format!r}"
             )
-        if invocation.seed != 0:
+        if invocation.seed is not None:
             raise ExecutionError(
                 "Q8831: Google processors do not provide a portable seed contract; "
-                "use seed=0"
+                "use seed=None"
             )
         circuit = bind_circuit(load_circuit(artifact), artifact, invocation)
         try:
@@ -1112,14 +1113,17 @@ def bind_circuit(
         object: Fully resolved Cirq circuit.
 
     Raises:
-        ExecutionError: If a retained symbol is missing after binding.
+        ExecutionError: If a retained symbol is missing after binding or an
+            angle is not finite.
     """
 
     import cirq
 
+    parameters = dict(artifact.parameter_abi.bind(invocation.values()))
+    validate_artifact_angles(artifact, parameters)
     flattened = scalar_parameter_bindings(
         artifact.parameter_abi,
-        invocation.values(),
+        parameters,
     )
     resolver = {f"p{index}": value for index, (_, value) in enumerate(flattened)}
     resolved = cirq.resolve_parameters(circuit, cast(Any, resolver), recursive=True)
@@ -1661,16 +1665,18 @@ def _processor_id(processor: Any) -> str:
     return str(identity)
 
 
-def _cirq_seed(seed: int) -> int:
-    """Fold an unsigned 64-bit seed into NumPy's legacy 32-bit domain.
+def _cirq_seed(seed: int | None) -> int | None:
+    """Fold an optional unsigned seed into NumPy's legacy 32-bit domain.
 
     Args:
-        seed (int): Canonical unsigned invocation seed.
+        seed (int | None): Unsigned invocation seed, or SDK-default randomness.
 
     Returns:
-        int: Deterministic unsigned 32-bit seed.
+        int | None: Unsigned 32-bit seed, preserving zero and unspecified seeds.
     """
 
+    if seed is None:
+        return None
     return (seed ^ (seed >> 32)) & ((1 << 32) - 1)
 
 

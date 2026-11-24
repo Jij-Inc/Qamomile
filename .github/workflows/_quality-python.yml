@@ -49,10 +49,10 @@ jobs:
           cache-suffix: ${{ github.job }}
 
       - name: Install base dependencies
-        # Unmarked cross-engine tests also exercise Cirq in the base suite.
+        # Unmarked batch tests exercise every listed local SDK in the core suite.
         run: >-
           uv sync --frozen --no-default-groups --group test-core
-          --extra qiskit --extra cirq
+          --extra qiskit --extra cirq --extra quri_parts --extra braket
 
       - name: Verify Qiskit dependencies
         run: uv run --no-sync python -c "import qiskit"

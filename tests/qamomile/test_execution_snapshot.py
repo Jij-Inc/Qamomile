@@ -9,6 +9,7 @@ import pytest
 import qamomile as qm
 import qamomile.compilation as compilation_module
 from qamomile.compilation import CompletedJob, ResultABI
+from qamomile.ir import FrozenMapping
 
 
 def test_remote_snapshot_round_trips_deterministically() -> None:
@@ -117,3 +118,80 @@ def test_execution_reference_requires_sorted_unique_context() -> None:
             ("job",),
             context=(("z", "1"), ("a", "2")),
         )
+
+
+@pytest.mark.parametrize(
+    "status", [qm.JobStatus.COMPLETED, qm.JobStatus.FAILED, qm.JobStatus.CANCELLED]
+)
+def test_validation_result_snapshot_preserves_reports_without_measurements(status):
+    """Completed provider reports retain status, diagnostics, and unknown costs."""
+    report = qm.ValidationResult.from_metadata(
+        backend="test.validation",
+        status=status,
+        metadata={
+            "provider_status": status.value.upper(),
+            "estimated_quantum_seconds": None,
+            "cost_kind": "hardware_execution_estimate",
+            "message": "Provider report",
+            "error_detail": "Invalid instruction"
+            if status is qm.JobStatus.FAILED
+            else None,
+        },
+    )
+    snapshot = qm.ExecutionSnapshot.completed(report)
+    payload = snapshot.to_bytes()
+
+    restored = qm.ExecutionSnapshot.from_bytes(payload)
+    result = restored.result
+
+    assert isinstance(result, qm.ValidationResult)
+    assert result == report
+    assert result.metadata() == report.metadata()
+    assert result.status is status
+    assert restored.to_bytes() == payload
+    assert not hasattr(result, "counts")
+    assert not hasattr(result, "value")
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "missing_backend",
+        "missing_kind",
+        "missing_status",
+        "missing_metadata",
+        "extra",
+        "metadata",
+        "duplicate_status",
+        "pending",
+        "status",
+        "backend",
+    ],
+)
+def test_validation_snapshot_rejects_malformed_completed_reports(corruption):
+    """A valid outer seal does not allow malformed typed provider reports."""
+    record = {
+        "backend": "test.validation",
+        "kind": "validation",
+        "status": "completed",
+        "metadata": FrozenMapping.from_mapping({"estimated_quantum_seconds": None}),
+    }
+    if corruption.startswith("missing_"):
+        del record[corruption.removeprefix("missing_")]
+    elif corruption == "extra":
+        record["counts"] = ((0,),)
+    elif corruption == "metadata":
+        record["metadata"] = ("not a mapping",)
+    elif corruption == "duplicate_status":
+        record["metadata"] = FrozenMapping.from_mapping({"status": "failed"})
+    elif corruption == "pending":
+        record["status"] = "running"
+    elif corruption == "status":
+        record["status"] = "unknown"
+    else:
+        record["backend"] = ""
+    sealed = qm.ExecutionSnapshot.local(record).to_bytes()
+    snapshot = qm.ExecutionSnapshot.from_bytes(sealed)
+
+    with pytest.raises(qm.SerializationError):
+        _ = snapshot.result

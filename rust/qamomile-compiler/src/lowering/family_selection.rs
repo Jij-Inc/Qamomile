@@ -179,7 +179,7 @@ pub fn inspect_circuit_family_selection(
     let dispatch_parameters = decode_dispatch_parameters(&encoded.dispatch_parameters)?;
     let predicates = decode_predicates(&encoded.predicates, &dispatch_parameters)?;
     let variants = decode_variants(&encoded.variants, predicates.len())?;
-    validate_decision_tree(&variants)?;
+    validate_decision_tree(&variants, predicates.len())?;
     Ok(CircuitFamilySelectionPlan {
         dispatch_parameters: dispatch_parameters.into_boxed_slice(),
         predicates: predicates.into_boxed_slice(),
@@ -379,7 +379,9 @@ fn normalize_uint_bindings(
 
 fn validate_decision_tree(
     variants: &[CircuitFamilySelectionVariant],
+    predicate_count: usize,
 ) -> Result<(), CircuitFamilySelectionError> {
+    let mut used_predicates = vec![false; predicate_count];
     let mut pending = vec![(0_usize, variants.len(), 0_usize)];
     while let Some((start, end, depth)) = pending.pop() {
         let paths = &variants[start..end];
@@ -393,6 +395,7 @@ fn validate_decision_tree(
             continue;
         }
         let predicate_index = paths[0].decisions()[depth].predicate_index();
+        used_predicates[predicate_index] = true;
         if paths
             .iter()
             .any(|variant| variant.decisions()[depth].predicate_index() != predicate_index)
@@ -416,6 +419,9 @@ fn validate_decision_tree(
         }
         pending.push((start + split, end, depth + 1));
         pending.push((start, start + split, depth + 1));
+    }
+    if used_predicates.contains(&false) {
+        return Err(invalid("decision tree omits a declared predicate"));
     }
     Ok(())
 }
@@ -572,6 +578,46 @@ mod tests {
         )];
 
         assert_eq!(select_circuit_family_variant(&payload, &bindings), Ok(1));
+    }
+
+    #[test]
+    fn selector_rejects_a_single_unconditional_variant() {
+        let plan = wire::CircuitFamilySelectionProto {
+            schema_major: PLAN_SCHEMA_MAJOR,
+            schema_minor: PLAN_SCHEMA_MINOR,
+            variants: vec![wire::CircuitFamilyVariantProto::default()],
+            ..Default::default()
+        };
+        assert_eq!(
+            inspect_circuit_family_selection(&plan.encode_to_vec()),
+            Err(invalid("invalid selector dimensions"))
+        );
+    }
+
+    #[test]
+    fn selector_rejects_declared_predicates_missing_from_the_decision_tree() {
+        let no_decisions = plan_bytes(&[enabled_parameter()], 0, &[&[]]);
+        let two_paths = plan_bytes(&[enabled_parameter()], 0, &[&[(0, false)], &[(0, true)]]);
+        let mut plan = wire::CircuitFamilySelectionProto::decode(two_paths.as_slice()).unwrap();
+        let mut negated = plan.predicates[0].clone();
+        negated.scalars.push(
+            encode_scalar(&CircuitScalarNode::Apply {
+                opcode: "classical.not".to_owned(),
+                result_type: CircuitScalarType::Bool,
+                attributes: Box::new([]),
+                operands: Box::new([CircuitScalarId::from_index(0)]),
+            })
+            .unwrap(),
+        );
+        negated.root = 1;
+        plan.predicates.push(negated);
+
+        for payload in [no_decisions, plan.encode_to_vec()] {
+            assert_eq!(
+                inspect_circuit_family_selection(&payload),
+                Err(invalid("decision tree omits a declared predicate"))
+            );
+        }
     }
 
     #[test]

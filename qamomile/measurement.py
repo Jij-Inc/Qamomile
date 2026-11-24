@@ -25,6 +25,7 @@ from .compilation import (
     ExecutionEndpoint,
     ParameterABI,
     SampleResult,
+    ValidationEndpoint,
     compile,
     run,
 )
@@ -146,12 +147,12 @@ class Estimator:
         object.__setattr__(self, "allocation", allocation)
         object.__setattr__(self, "_cache", [])
 
-    def _plan(self, shots: int, seed: int) -> tuple[_MeasurementGroupPlan, ...]:
+    def _plan(self, shots: int, seed: int | None) -> tuple[_MeasurementGroupPlan, ...]:
         """Project a bounded Rust-owned grouping and uniform total allocation.
 
         Args:
             shots (int): Positive total shot budget.
-            seed (int): Unsigned portable base seed.
+            seed (int | None): Unsigned base seed, or None for endpoint randomness.
 
         Returns:
             tuple: Checked measurement groups in canonical order.
@@ -173,7 +174,7 @@ class Estimator:
         on: ExecutionEndpoint,
         parameters: Mapping[str, object] | None = None,
         shots: int = 1_000,
-        seed: int = 0,
+        seed: int | None = None,
     ) -> ExpectationResult:
         """Execute measurements and combine their covariance-aware estimates.
 
@@ -182,8 +183,8 @@ class Estimator:
             parameters (Mapping[str, object] | None): Runtime Param arguments.
             shots (int): Positive total budget, at least the number of groups.
                 Identity-only observables use zero actual device shots.
-            seed (int): Unsigned 64-bit seed; zero delegates randomness to the
-                endpoint. Reusing a nonzero seed reuses random streams.
+            seed (int | None): Unsigned 64-bit seed, including zero, for reproducible
+                random streams. None (the default) delegates randomness to the endpoint.
 
         Returns:
             ExpectationResult: Mean, standard error, actual shots and group data.
@@ -191,15 +192,23 @@ class Estimator:
 
         Raises:
             ValueError: If shots is not a positive integer.
-            ExecutionError: If the budget is insufficient or execution fails.
+            ExecutionError: If the budget is insufficient, the endpoint only
+                validates jobs, or execution fails.
             CapabilityError: If native planning or statistics are unavailable.
         """
         if type(shots) is not int or shots <= 0:
             raise ValueError("shots must be a positive integer")
-        if type(seed) is not int or not 0 <= seed < 1 << 64:
-            raise ExecutionError("Q8138: seed must be an unsigned 64-bit integer")
+        if seed is not None and (type(seed) is not int or not 0 <= seed < 1 << 64):
+            raise ExecutionError(
+                "Q8138: seed must be None or an unsigned 64-bit integer"
+            )
         if not isinstance(on, ExecutionEndpoint):
             raise TypeError("on= must implement ExecutionEndpoint")
+        if isinstance(on, ValidationEndpoint) and on.validation_only:
+            raise ExecutionError(
+                "Q8152: expectation estimation requires actual measurement results; "
+                "validation endpoints cannot estimate observables"
+            )
         normalized = dict(ParameterABI.from_program(self.source).bind(parameters or {}))
         plan = self._plan(shots, seed)
         if plan and isinstance(on, _EstimationEndpoint):

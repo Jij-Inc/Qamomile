@@ -35,7 +35,12 @@
 # %%
 from __future__ import annotations
 
+import os
+
 import qamomile as qm
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 4
 
 # %% [markdown]
 # ## 確認に使う推定結果を用意する
@@ -436,11 +441,11 @@ restored_bell_study = qm.resources.ResourceStudy.from_bytes(
     executable_bell_study.to_bytes()
 )
 bell_artifact = qm.compile(restored_bell_study, to=qm.Reference())
-bell_record = qm.run(bell_artifact, on=qm.Reference(), shots=4, seed=7)
+bell_record = qm.run(bell_artifact, on=qm.Reference(), shots=sample_shots, seed=7)
 
 assert restored_bell_study == executable_bell_study
 assert restored_bell_study.digest == executable_bell_study.digest
-assert sum(bell_record.result.counts.values()) == 4
+assert sum(bell_record.result.counts.values()) == sample_shots
 assert all(left == right for left, right in bell_record.result.counts)
 
 # %% [markdown]

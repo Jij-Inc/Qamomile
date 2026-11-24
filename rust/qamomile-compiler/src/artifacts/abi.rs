@@ -21,9 +21,73 @@ use crate::types::{
 use crate::verification::QCoreVerificationWork;
 use crate::wire;
 
+type DimensionBindings = HashMap<Dimension, Dimension>;
+
+/// Operand-derived dimension substitutions, indexed by the caller's SSA result
+/// and selected declaration. The same site may be reused in many call frames.
+#[derive(Debug, Default)]
+pub(crate) struct VerifiedCallDimensions {
+    callers: HashMap<String, CallerDimensions>,
+    binding_count: usize,
+}
+
+#[derive(Debug, Default)]
+struct CallerDimensions {
+    // Each callee has a row for every operation that invokes it in this caller.
+    by_callee: HashMap<String, HashMap<u64, DimensionBindings>>,
+}
+
+impl VerifiedCallDimensions {
+    /// Borrow the verified substitution for one callee at this call site.
+    pub(crate) fn get(
+        &self,
+        owner: &str,
+        operation: &wire::OperationProto,
+        callee: &str,
+    ) -> Option<&DimensionBindings> {
+        self.callers
+            .get(owner)?
+            .by_callee
+            .get(callee)?
+            .get(&operation.results.first()?.id)
+    }
+
+    fn retain(
+        &mut self,
+        owner: &str,
+        operation: &wire::OperationProto,
+        callee: &str,
+        bindings: DimensionBindings,
+    ) -> Result<(), CallAbiError> {
+        let id = operation.results[0].id;
+        let owner = if let Some(owner) = self.callers.get_mut(owner) {
+            owner
+        } else {
+            self.callers.entry(owner.to_owned()).or_default()
+        };
+        let sites = if let Some(sites) = owner.by_callee.get_mut(callee) {
+            sites
+        } else {
+            owner.by_callee.entry(callee.to_owned()).or_default()
+        };
+        if let std::collections::hash_map::Entry::Vacant(site) = sites.entry(id) {
+            // SELECT can list the same callee more than once with identical operands.
+            self.binding_count = self.binding_count.saturating_add(bindings.len());
+            if self.binding_count > crate::budget::MAX_MESSAGE_NODES {
+                return Err(CallAbiError::DimensionCapacity);
+            }
+            site.insert(bindings);
+        }
+        Ok(())
+    }
+}
+
 /// Failure of one ordinary `qcore.call` declaration boundary.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub(crate) enum CallAbiError {
+    /// Retaining the checked dimension substitutions would exceed the structural budget.
+    #[error("Q4002: verified call dimensions exceed the structural budget")]
+    DimensionCapacity,
     /// Operands do not instantiate the declared parameter list.
     #[error("Q1027: call to {callee:?} has an invalid parameter ABI")]
     InvalidParameterAbi { callee: String },
@@ -44,47 +108,15 @@ pub(crate) enum CallAbiError {
     MissingTypeRoots { function: String },
 }
 
-/// Verify every ordinary call against its statically resolved declaration.
-///
-/// Static symbol and exact attribute-schema checks must run before this pass.
-/// Adjoint, controlled, and selected call capability/ABI rules intentionally
-/// remain separate; this pass only establishes ordinary functional calls.
-///
-/// # Errors
-///
-/// Returns [`CallAbiError`] when an operand list is not assignable under one
-/// coherent dependent-dimension substitution, a result binder is not derived
-/// from operands, or the exact one-result type/stage contract is violated.
-#[cfg(test)]
-pub(crate) fn verify_ordinary_calls(
-    package: &wire::QCorePackageProto,
-    arena: &TypeArena,
-    operations: &LocallyCheckedOperations,
-) -> Result<(), CallAbiError> {
-    let mut work = QCoreVerificationWork::default();
-    let functions = package
-        .functions
-        .iter()
-        .map(|function| (function.symbol.as_str(), function))
-        .collect::<HashMap<_, _>>();
-    let entry_bindings = entry_dimension_bindings(package, true, &mut work);
-    verify_ordinary_calls_with_context(
-        package,
-        arena,
-        operations,
-        &functions,
-        &entry_bindings,
-        &mut work,
-    )
-}
-
+/// Check call signatures and retain their operand-derived dimension substitutions.
 pub(crate) fn verify_calls_with_work(
     package: &wire::QCorePackageProto,
     arena: &TypeArena,
     operations: &LocallyCheckedOperations,
     use_entry_bindings: bool,
     work: &mut QCoreVerificationWork,
-) -> Result<(), CallAbiError> {
+) -> Result<VerifiedCallDimensions, CallAbiError> {
+    let mut dimensions = VerifiedCallDimensions::default();
     work.charge_call_abi(package.functions.len());
     let functions = package
         .functions
@@ -99,6 +131,7 @@ pub(crate) fn verify_calls_with_work(
         &functions,
         &entry_bindings,
         work,
+        &mut dimensions,
     )?;
     verify_transformed_calls_with_context(
         package,
@@ -107,7 +140,9 @@ pub(crate) fn verify_calls_with_work(
         &functions,
         &entry_bindings,
         work,
-    )
+        &mut dimensions,
+    )?;
+    Ok(dimensions)
 }
 
 fn verify_ordinary_calls_with_context(
@@ -117,6 +152,7 @@ fn verify_ordinary_calls_with_context(
     functions: &HashMap<&str, &wire::FunctionProto>,
     entry_bindings: &HashMap<&str, u64>,
     work: &mut QCoreVerificationWork,
+    dimensions: &mut VerifiedCallDimensions,
 ) -> Result<(), CallAbiError> {
     for caller in &package.functions {
         work.charge_call_abi(1_usize.saturating_add(caller.parameters.len()));
@@ -149,7 +185,7 @@ fn verify_ordinary_calls_with_context(
                 .get(callee_name)
                 .copied()
                 .expect("static call graph resolves ordinary callees");
-            verify_one_call(
+            let bindings = verify_one_call(
                 operation,
                 callee,
                 caller_values,
@@ -158,44 +194,10 @@ fn verify_ordinary_calls_with_context(
                 arena,
                 operations,
             )?;
+            dimensions.retain(&caller.symbol, operation, callee_name, bindings)?;
         }
     }
     Ok(())
-}
-
-/// Verify adjoint, coherent-control, and coherent-selection call ABIs.
-///
-/// Capability proofs are derived later from closed callable contracts. This
-/// pass establishes the transformation-independent type, dependent-dimension,
-/// selector, and ownership equations first, so contract derivation never has
-/// to reason about a malformed call layout.
-///
-/// # Errors
-///
-/// Returns [`CallAbiError`] when an adjoint input/output is not the exact
-/// inverse signature, or a controlled/selected call does not preserve its
-/// coherent selector and callable result in one fresh owned product.
-#[cfg(test)]
-pub(crate) fn verify_transformed_calls(
-    package: &wire::QCorePackageProto,
-    arena: &TypeArena,
-    operations: &LocallyCheckedOperations,
-) -> Result<(), CallAbiError> {
-    let mut work = QCoreVerificationWork::default();
-    let functions = package
-        .functions
-        .iter()
-        .map(|function| (function.symbol.as_str(), function))
-        .collect::<HashMap<_, _>>();
-    let entry_bindings = entry_dimension_bindings(package, true, &mut work);
-    verify_transformed_calls_with_context(
-        package,
-        arena,
-        operations,
-        &functions,
-        &entry_bindings,
-        &mut work,
-    )
 }
 
 fn verify_transformed_calls_with_context(
@@ -205,6 +207,7 @@ fn verify_transformed_calls_with_context(
     functions: &HashMap<&str, &wire::FunctionProto>,
     entry_bindings: &HashMap<&str, u64>,
     work: &mut QCoreVerificationWork,
+    dimensions: &mut VerifiedCallDimensions,
 ) -> Result<(), CallAbiError> {
     for caller in &package.functions {
         work.charge_call_abi(1_usize.saturating_add(caller.parameters.len()));
@@ -230,26 +233,45 @@ fn verify_transformed_calls_with_context(
                     .saturating_add(operation.results.len()),
             );
             match operation.opcode.as_str() {
-                "qcore.adjoint_call" => verify_adjoint_call(
-                    operation,
-                    functions,
-                    caller_values,
-                    &definitions,
-                    &caller_dimensions,
-                    &producers,
-                    arena,
-                    operations,
-                )?,
-                "qcore.control_call" | "qcore.select_call" => verify_coherent_call(
-                    operation,
-                    functions,
-                    caller_values,
-                    &definitions,
-                    &caller_dimensions,
-                    &producers,
-                    arena,
-                    operations,
-                )?,
+                "qcore.adjoint_call" => {
+                    let callee_name = string_attribute(operation, "callee")
+                        .expect("the static call graph validates adjoint attributes");
+                    let callee = functions
+                        .get(callee_name)
+                        .copied()
+                        .expect("the static call graph resolves adjoint callees");
+                    let bindings = verify_adjoint_call(
+                        operation,
+                        callee,
+                        caller_values,
+                        &definitions,
+                        &caller_dimensions,
+                        &producers,
+                        arena,
+                        operations,
+                    )?;
+                    dimensions.retain(&caller.symbol, operation, callee_name, bindings)?;
+                }
+                "qcore.control_call" | "qcore.select_call" | "qcore.adjoint"
+                    if matches!(
+                        coherent_opcode(operation),
+                        Some("qcore.control_call" | "qcore.select_call")
+                    ) =>
+                {
+                    verify_coherent_call(
+                        operation,
+                        functions,
+                        caller_values,
+                        &definitions,
+                        &caller_dimensions,
+                        &producers,
+                        arena,
+                        operations,
+                        |callee, bindings| {
+                            dimensions.retain(&caller.symbol, operation, callee, bindings)
+                        },
+                    )?;
+                }
                 "qcore.phase_by" => verify_phase_by(
                     operation,
                     functions,
@@ -465,20 +487,18 @@ fn boolean_predicate_abi<'a>(
 #[allow(clippy::too_many_arguments)]
 fn verify_adjoint_call(
     operation: &wire::OperationProto,
-    functions: &HashMap<&str, &wire::FunctionProto>,
+    callee: &wire::FunctionProto,
     caller_values: &HashMap<u64, TypeId>,
     definitions: &HashMap<u64, &wire::ValueProto>,
     caller_dimensions: &HashMap<u64, Dimension>,
     producers: &HashMap<u64, &wire::OperationProto>,
     arena: &TypeArena,
     operations: &LocallyCheckedOperations,
-) -> Result<(), CallAbiError> {
-    let callee_name = string_attribute(operation, "callee")
-        .expect("the static call graph validates adjoint attributes");
+) -> Result<DimensionBindings, CallAbiError> {
+    let callee_name = callee.symbol.as_str();
     let invalid = || CallAbiError::InvalidAdjointAbi {
         callee: callee_name.to_owned(),
     };
-    let callee = functions.get(callee_name).copied().ok_or_else(invalid)?;
     let declared_values =
         operations
             .value_types(callee_name)
@@ -549,7 +569,7 @@ fn verify_adjoint_call(
     {
         return Err(invalid());
     }
-    Ok(())
+    Ok(bindings)
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -562,26 +582,40 @@ fn verify_coherent_call(
     producers: &HashMap<u64, &wire::OperationProto>,
     arena: &TypeArena,
     operations: &LocallyCheckedOperations,
+    mut retain: impl FnMut(&str, DimensionBindings) -> Result<(), CallAbiError>,
 ) -> Result<(), CallAbiError> {
-    let transform = if operation.opcode == "qcore.control_call" {
-        "control"
-    } else {
-        "select"
-    };
+    let adjoint = operation.opcode == "qcore.adjoint";
+    let control = coherent_opcode(operation) == Some("qcore.control_call");
+    let transform = if control { "control" } else { "select" };
     let invalid = || CallAbiError::InvalidCoherentAbi { transform };
     let selector_id = *operation.operands.first().ok_or_else(invalid)?;
     let selector_type = caller_values
         .get(&selector_id)
         .copied()
         .ok_or_else(invalid)?;
+    // A coherent adjoint receives the selector and forward result packed together.
+    let (selector_type, packed_target) = if adjoint {
+        let Some(SemanticType::Product(parts)) = arena.get(selector_type) else {
+            return Err(invalid());
+        };
+        let [selector, target] = parts.as_ref() else {
+            return Err(invalid());
+        };
+        (*selector, Some(*target))
+    } else {
+        (selector_type, None)
+    };
     let selector_width = arena.coherent_width(selector_type).ok().flatten();
-    let callee_names = if operation.opcode == "qcore.control_call" {
+    let callee_names = if control {
         vec![
-            string_attribute(operation, "callee")
-                .expect("the static call graph validates control attributes"),
+            coherent_attribute(operation, "callee")
+                .and_then(literal_string)
+                .ok_or_else(invalid)?,
         ]
     } else {
-        string_tuple_attribute(operation, "callees").ok_or_else(invalid)?
+        coherent_attribute(operation, "callees")
+            .and_then(literal_string_tuple)
+            .ok_or_else(invalid)?
     };
     let first_callee = callee_names
         .first()
@@ -590,9 +624,10 @@ fn verify_coherent_call(
     let offset = operation
         .operands
         .len()
-        .checked_sub(first_callee.parameters.len())
+        .checked_add(usize::from(adjoint))
+        .and_then(|arity| arity.checked_sub(first_callee.parameters.len()))
         .ok_or_else(invalid)?;
-    if operation.opcode == "qcore.control_call" {
+    if control {
         if arena
             .coherent_width_with(selector_type, |_| Some(1))
             .ok()
@@ -605,13 +640,8 @@ fn verify_coherent_call(
             return Err(invalid());
         }
         if offset == 2 {
-            let component_id = operation.operands[1];
-            let index_type = operation
-                .operands
-                .get(1)
-                .and_then(|value_id| caller_values.get(value_id))
-                .copied()
-                .ok_or_else(invalid)?;
+            let component_id = *operation.operands.get(1).ok_or_else(invalid)?;
+            let index_type = *caller_values.get(&component_id).ok_or_else(invalid)?;
             if !is_unstaged_int(arena, index_type) {
                 return Err(invalid());
             }
@@ -632,11 +662,7 @@ fn verify_coherent_call(
                 }
             }
         }
-        let control_state = operation
-            .attributes
-            .iter()
-            .find(|attribute| attribute.name == "control_state")
-            .and_then(|attribute| attribute.value.as_ref())
+        let control_state = coherent_attribute(operation, "control_state")
             .and_then(ControlState::decode)
             .ok_or_else(invalid)?;
         let effective_width = if offset == 2 { Some(1) } else { selector_width };
@@ -661,8 +687,23 @@ fn verify_coherent_call(
         return Err(invalid());
     }
     let callable_result = result_elements[1];
-    let actual_ids = operation.operands.get(offset..).ok_or_else(invalid)?;
-    let actual_types = actual_ids
+    let (target_type, classical_ids) = if let Some(target) = packed_target {
+        (
+            target,
+            operation.operands.get(offset..).ok_or_else(invalid)?,
+        )
+    } else {
+        let (target_id, classical) = operation
+            .operands
+            .get(offset..)
+            .and_then(<[_]>::split_first)
+            .ok_or_else(invalid)?;
+        (
+            *caller_values.get(target_id).ok_or_else(invalid)?,
+            classical,
+        )
+    };
+    let classical_types = classical_ids
         .iter()
         .map(|value_id| caller_values.get(value_id).copied().ok_or_else(invalid))
         .collect::<Result<Vec<_>, _>>()?;
@@ -675,7 +716,7 @@ fn verify_coherent_call(
                     function: (*callee_name).to_owned(),
                 })?;
         let parameter_types = parameter_types(callee, declared_values).ok_or_else(invalid)?;
-        if parameter_types.len() != actual_types.len()
+        if parameter_types.len() != classical_types.len() + 1
             || !parameter_types
                 .first()
                 .is_some_and(|type_id| arena.is_quantum(*type_id))
@@ -686,26 +727,33 @@ fn verify_coherent_call(
         {
             return Err(invalid());
         }
-        let mut bindings = HashMap::new();
-        if parameter_types
-            .iter()
-            .zip(&actual_types)
-            .any(|(expected, actual)| !unify_assignable(arena, *expected, *actual, &mut bindings))
-        {
-            return Err(invalid());
-        }
         let callee_result_type =
             operations
                 .result_type(callee_name)
                 .ok_or_else(|| CallAbiError::MissingTypeRoots {
                     function: (*callee_name).to_owned(),
                 })?;
+        let (target_input, target_output) = if adjoint {
+            (callee_result_type, parameter_types[0])
+        } else {
+            (parameter_types[0], callee_result_type)
+        };
+        let mut bindings = HashMap::new();
+        if !unify_assignable(arena, target_input, target_type, &mut bindings)
+            || parameter_types[1..]
+                .iter()
+                .zip(&classical_types)
+                .any(|(formal, actual)| !unify_assignable(arena, *formal, *actual, &mut bindings))
+        {
+            return Err(invalid());
+        }
         bind_direct_dimensions(
             callee
                 .parameters
                 .iter()
                 .zip(&parameter_types)
-                .zip(actual_ids)
+                .skip(1)
+                .zip(classical_ids)
                 .map(|((parameter, expected), actual)| (parameter, *expected, *actual)),
             callee_result_type,
             &parameter_types,
@@ -715,17 +763,23 @@ fn verify_coherent_call(
             arena,
         )
         .ok_or_else(invalid)?;
-        if !all_dimensions_bound(arena, [callee_result_type], &bindings)
-            || !matches_instantiated(arena, callee_result_type, callable_result, &bindings)
+        if !all_dimensions_bound(arena, [target_output], &bindings)
+            || !matches_instantiated(arena, target_output, callable_result, &bindings)
         {
             return Err(invalid());
         }
+        retain(callee_name, bindings)?;
+    }
+    if adjoint {
+        // The local adjoint equation already checks the packed result's region.
+        return Ok(());
     }
     let selector_region = definitions
         .get(&selector_id)
         .and_then(|value| value.region.as_ref());
-    let target_region = actual_ids
-        .first()
+    let target_region = operation
+        .operands
+        .get(offset)
         .and_then(|value_id| definitions.get(value_id))
         .and_then(|value| value.region.as_ref());
     let result_region = operation.results[0].region.as_ref();
@@ -749,7 +803,7 @@ fn verify_one_call(
     producers: &HashMap<u64, &wire::OperationProto>,
     arena: &TypeArena,
     operations: &LocallyCheckedOperations,
-) -> Result<(), CallAbiError> {
+) -> Result<DimensionBindings, CallAbiError> {
     let invalid_parameters = || CallAbiError::InvalidParameterAbi {
         callee: callee.symbol.clone(),
     };
@@ -862,7 +916,7 @@ fn verify_one_call(
     if !matches_call_result(arena, callee_result, result, &actual, &bindings) {
         return Err(invalid_result());
     }
-    Ok(())
+    Ok(bindings)
 }
 
 fn caller_parameter_dimensions(
@@ -873,6 +927,7 @@ fn caller_parameter_dimensions(
     work: &mut QCoreVerificationWork,
 ) -> HashMap<u64, Dimension> {
     work.charge_call_abi(function.parameters.len());
+    let scope = Arc::<str>::from(function.symbol.as_str());
     function
         .parameters
         .iter()
@@ -886,7 +941,7 @@ fn caller_parameter_dimensions(
                         .and_then(|values| values.get(parameter.name.as_str()))
                         .map_or_else(
                             || Dimension::Symbol {
-                                scope: Arc::from(function.symbol.as_str()),
+                                scope: Arc::clone(&scope),
                                 name: Arc::from(parameter.name.as_str()),
                             },
                             |fixed| Dimension::Fixed(*fixed),
@@ -992,43 +1047,64 @@ fn walk_operations<'a>(
     operations
 }
 
-fn string_attribute<'a>(operation: &'a wire::OperationProto, name: &str) -> Option<&'a str> {
-    use wire::literal_proto::Value;
-
-    operation
-        .attributes
-        .iter()
-        .find(|attribute| attribute.name == name)
-        .and_then(|attribute| attribute.value.as_ref())
-        .and_then(|literal| match literal.value.as_ref() {
-            Some(Value::StringValue(value)) => Some(value.as_str()),
-            _ => None,
-        })
+fn coherent_opcode(operation: &wire::OperationProto) -> Option<&str> {
+    if operation.opcode == "qcore.adjoint" {
+        string_attribute(operation, "original")
+    } else {
+        Some(&operation.opcode)
+    }
 }
 
-fn string_tuple_attribute<'a>(
+fn attribute<'a>(
     operation: &'a wire::OperationProto,
     name: &str,
-) -> Option<Vec<&'a str>> {
-    use wire::literal_proto::Value;
-
-    let literal = operation
+) -> Option<&'a wire::LiteralProto> {
+    operation
         .attributes
         .iter()
         .find(|attribute| attribute.name == name)?
         .value
-        .as_ref()?;
-    let Value::TupleValue(sequence) = literal.value.as_ref()? else {
+        .as_ref()
+}
+
+fn coherent_attribute<'a>(
+    operation: &'a wire::OperationProto,
+    name: &str,
+) -> Option<&'a wire::LiteralProto> {
+    if operation.opcode != "qcore.adjoint" {
+        return attribute(operation, name);
+    }
+    let wire::literal_proto::Value::MappingValue(mapping) =
+        attribute(operation, "original_attributes")?
+            .value
+            .as_ref()?
+    else {
         return None;
     };
-    sequence
-        .values
+    mapping
+        .entries
         .iter()
-        .map(|item| match item.value.as_ref() {
-            Some(Value::StringValue(value)) if !value.is_empty() => Some(value.as_str()),
-            _ => None,
-        })
-        .collect()
+        .find(|entry| entry.key == name)?
+        .value
+        .as_ref()
+}
+
+fn string_attribute<'a>(operation: &'a wire::OperationProto, name: &str) -> Option<&'a str> {
+    attribute(operation, name).and_then(literal_string)
+}
+
+fn literal_string(value: &wire::LiteralProto) -> Option<&str> {
+    match value.value.as_ref()? {
+        wire::literal_proto::Value::StringValue(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn literal_string_tuple(literal: &wire::LiteralProto) -> Option<Vec<&str>> {
+    let wire::literal_proto::Value::TupleValue(sequence) = literal.value.as_ref()? else {
+        return None;
+    };
+    sequence.values.iter().map(literal_string).collect()
 }
 
 fn is_unstaged_int(arena: &TypeArena, type_id: TypeId) -> bool {
@@ -1080,6 +1156,7 @@ fn positive_u64_attribute(operation: &wire::OperationProto, name: &str) -> Optio
     positive_u64_literal(literal)
 }
 
+/// Read a strictly positive machine-sized dimension from a canonical integer literal.
 fn positive_u64_literal(literal: &wire::LiteralProto) -> Option<u64> {
     use wire::literal_proto::Value;
 
@@ -1208,23 +1285,6 @@ fn matches_call_result(
         arena.strip_stage(actual),
         bindings,
     )
-}
-
-/// Recover the dependent-dimension substitution already proved by a call ABI.
-pub(crate) fn infer_call_dimensions(
-    arena: &TypeArena,
-    expected: &[TypeId],
-    actual: &[TypeId],
-) -> Option<HashMap<Dimension, Dimension>> {
-    if expected.len() != actual.len() {
-        return None;
-    }
-    let mut bindings = HashMap::new();
-    expected
-        .iter()
-        .zip(actual)
-        .all(|(expected, actual)| unify_assignable(arena, *expected, *actual, &mut bindings))
-        .then_some(bindings)
 }
 
 fn collect_dimensions(arena: &TypeArena, root: TypeId, dimensions: &mut HashSet<Dimension>) {
@@ -1516,18 +1576,149 @@ mod tests {
         }
     }
 
-    fn check(package: &wire::QCorePackageProto) -> Result<(), CallAbiError> {
+    fn checked_dimensions(
+        package: &wire::QCorePackageProto,
+    ) -> Result<VerifiedCallDimensions, CallAbiError> {
         let mut arena = validate_program_types(package).expect("test types are valid");
         let operations = validate_program_operations_with_types(package, &mut arena)
             .expect("test operations are locally valid");
-        verify_ordinary_calls(package, &arena, &operations)
+        verify_calls_with_work(
+            package,
+            &arena,
+            &operations,
+            true,
+            &mut QCoreVerificationWork::default(),
+        )
     }
 
-    fn check_transformed(package: &wire::QCorePackageProto) -> Result<(), CallAbiError> {
-        let mut arena = validate_program_types(package).expect("test types are valid");
-        let operations = validate_program_operations_with_types(package, &mut arena)
-            .expect("test operations are locally valid");
-        verify_transformed_calls(package, &arena, &operations)
+    fn check(package: &wire::QCorePackageProto) -> Result<(), CallAbiError> {
+        checked_dimensions(package).map(|_| ())
+    }
+
+    #[test]
+    fn selected_callees_retain_their_own_scoped_dims_forward_and_in_reverse() {
+        use wire::dimension_proto::Value::{Fixed, Symbol};
+
+        let names = ["test.left", "test.right"];
+        let mut functions = names
+            .iter()
+            .map(|name| {
+                let target = quantum(word(Symbol("n".to_owned())));
+                function(
+                    name,
+                    vec![parameter("target", owned(1, target.clone(), 1))],
+                    target,
+                    vec![],
+                )
+            })
+            .collect::<Vec<_>>();
+        let selector = quantum(word(Fixed(1)));
+        let target = quantum(word(Fixed(3)));
+        let packed = product(vec![selector.clone(), target.clone()]);
+        let select = wire::OperationProto {
+            opcode: "qcore.select_call".to_owned(),
+            operands: vec![10, 11],
+            results: vec![owned(12, packed.clone(), 12)],
+            attributes: vec![attribute("callees", string_tuple(&names))],
+            ..Default::default()
+        };
+        let adjoint = wire::OperationProto {
+            opcode: "qcore.adjoint".to_owned(),
+            operands: vec![12],
+            results: vec![owned(13, packed.clone(), 12)],
+            attributes: vec![
+                attribute("original", string("qcore.select_call")),
+                attribute(
+                    "original_attributes",
+                    wire::LiteralProto {
+                        value: Some(wire::literal_proto::Value::MappingValue(
+                            wire::literal_proto::Mapping {
+                                entries: vec![wire::literal_proto::Entry {
+                                    key: "callees".to_owned(),
+                                    value: Some(string_tuple(&names)),
+                                }],
+                            },
+                        )),
+                    },
+                ),
+                attribute("proof", string("modular-adjoint")),
+            ],
+            ..Default::default()
+        };
+        let main = function(
+            "test.main",
+            vec![
+                parameter("selector", owned(10, selector, 10)),
+                parameter("target", owned(11, target, 11)),
+            ],
+            packed,
+            vec![select.clone(), adjoint.clone()],
+        );
+        functions.push(main);
+        let package = wire::QCorePackageProto {
+            functions,
+            ..Default::default()
+        };
+        let facts = checked_dimensions(&package).expect("verified SELECT and its adjoint");
+        for site in [&select, &adjoint] {
+            for name in names {
+                let formal = Dimension::Symbol {
+                    scope: Arc::from(name),
+                    name: Arc::from("n"),
+                };
+                assert_eq!(
+                    facts.get("test.main", site, name).unwrap().get(&formal),
+                    Some(&Dimension::Fixed(3))
+                );
+            }
+            assert!(facts.get("test.left", site, "test.left").is_none());
+        }
+    }
+
+    #[test]
+    fn checked_empty_substitutions_are_distinct_from_missing_calls() {
+        let callee = function("test.callee", vec![], scalar("Unit"), vec![]);
+        let site = call(vec![], value(1, scalar("Unit")));
+        let entry = function("test.main", vec![], scalar("Unit"), vec![site.clone()]);
+        let package = wire::QCorePackageProto {
+            functions: vec![callee, entry],
+            ..Default::default()
+        };
+        let facts = checked_dimensions(&package).expect("valid call without dimension binders");
+        assert!(
+            facts
+                .get("test.main", &site, "test.callee")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(facts.get("test.main", &site, "test.main").is_none());
+    }
+
+    #[test]
+    fn repeated_select_targets_share_the_verified_binding_budget() {
+        let site = call(vec![], value(7, scalar("Unit")));
+        let next_site = call(vec![], value(8, scalar("Unit")));
+        let bindings = HashMap::from([(
+            Dimension::Symbol {
+                scope: Arc::from("test.case"),
+                name: Arc::from("n"),
+            },
+            Dimension::Fixed(2),
+        )]);
+        let mut facts = VerifiedCallDimensions {
+            binding_count: crate::budget::MAX_MESSAGE_NODES - 1,
+            ..VerifiedCallDimensions::default()
+        };
+        facts
+            .retain("test.main", &site, "test.case", bindings.clone())
+            .unwrap();
+        facts
+            .retain("test.main", &site, "test.case", bindings.clone())
+            .unwrap();
+        assert_eq!(
+            facts.retain("test.main", &next_site, "test.case", bindings),
+            Err(CallAbiError::DimensionCapacity)
+        );
     }
 
     #[test]
@@ -1552,7 +1743,23 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(check(&package), Ok(()));
+        let site = &package.functions[1].body.as_ref().unwrap().operations[0];
+        let facts = checked_dimensions(&package).unwrap();
+        let formal = Dimension::Symbol {
+            scope: Arc::from("test.callee"),
+            name: Arc::from("n"),
+        };
+        let actual = Dimension::Symbol {
+            scope: Arc::from("test.main"),
+            name: Arc::from("width"),
+        };
+        assert_eq!(
+            facts
+                .get("test.main", site, "test.callee")
+                .unwrap()
+                .get(&formal),
+            Some(&actual)
+        );
 
         let fixed_package = wire::QCorePackageProto {
             functions: vec![
@@ -1773,7 +1980,19 @@ mod tests {
             functions: vec![callee, main.clone()],
             ..Default::default()
         };
-        assert_eq!(check_transformed(&package), Ok(()));
+        let site = &main.body.as_ref().unwrap().operations[1];
+        let facts = checked_dimensions(&package).unwrap();
+        let formal = Dimension::Symbol {
+            scope: Arc::from("test.callee"),
+            name: Arc::from("n"),
+        };
+        assert_eq!(
+            facts
+                .get("test.main", site, "test.callee")
+                .unwrap()
+                .get(&formal),
+            Some(&Dimension::Fixed(3))
+        );
 
         let mut forged = main;
         forged.body.as_mut().expect("body").operations[1].results[0].region =
@@ -1786,7 +2005,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            check_transformed(&forged_package),
+            check(&forged_package),
             Err(CallAbiError::InvalidAdjointAbi {
                 callee: "test.callee".to_owned(),
             })
@@ -1826,7 +2045,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(check_transformed(&package), Ok(()));
+        assert_eq!(check(&package), Ok(()));
     }
 
     #[test]
@@ -1860,7 +2079,7 @@ mod tests {
             functions: vec![main.clone(), predicate.clone()],
             ..Default::default()
         };
-        assert_eq!(check_transformed(&package), Ok(()));
+        assert_eq!(check(&package), Ok(()));
 
         let forged_pair = product(vec![source, quantum(word(Fixed(1)))]);
         let forged = function(
@@ -1880,7 +2099,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            check_transformed(&forged_package),
+            check(&forged_package),
             Err(CallAbiError::InvalidBooleanPredicateAbi {
                 predicate: "test.predicate".to_owned(),
             })
@@ -1915,7 +2134,7 @@ mod tests {
             functions: vec![main, predicate.clone()],
             ..Default::default()
         };
-        assert_eq!(check_transformed(&package), Ok(()));
+        assert_eq!(check(&package), Ok(()));
 
         let forged_state = quantum(word(Fixed(1)));
         let forged = function(
@@ -1935,7 +2154,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            check_transformed(&forged_package),
+            check(&forged_package),
             Err(CallAbiError::InvalidBooleanPredicateAbi {
                 predicate: "test.permutation".to_owned(),
             })
@@ -1978,13 +2197,13 @@ mod tests {
             functions: vec![callee.clone(), main.clone()],
             ..Default::default()
         };
-        assert_eq!(check_transformed(&package), Ok(()));
+        assert_eq!(check(&package), Ok(()));
 
         let mut out_of_range = main;
         out_of_range.body.as_mut().expect("body").operations[0].attributes[1].value =
             Some(integer(4));
         assert_eq!(
-            check_transformed(&wire::QCorePackageProto {
+            check(&wire::QCorePackageProto {
                 functions: vec![callee, out_of_range],
                 ..Default::default()
             }),
@@ -2029,7 +2248,7 @@ mod tests {
         };
 
         assert_eq!(
-            check_transformed(&package),
+            check(&package),
             Err(CallAbiError::InvalidCoherentAbi {
                 transform: "select",
             })

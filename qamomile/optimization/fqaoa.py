@@ -272,9 +272,28 @@ class FQAOAExperiment:
         betas: Sequence[float],
         shots: int,
         hopping: float = 1.0,
-        seed: int = 0,
+        seed: int | None = None,
     ) -> OptimizationRun[BinaryDomain]:
-        """Compile, execute, and decode one FQAOA coordinate."""
+        """Compile, execute, and decode one FQAOA coordinate.
+
+        Args:
+            on (ExecutionEndpoint): Endpoint compatible with the experiment.
+            gammas (Sequence[float]): One cost angle per layer.
+            betas (Sequence[float]): One mixer angle per layer.
+            shots (int): Positive number of observations.
+            hopping (float): Finite hopping coefficient for the mixer.
+            seed (int | None): Unsigned 64-bit endpoint seed, including zero.
+                None leaves randomness to the endpoint.
+
+        Returns:
+            OptimizationRun[BinaryDomain]: Execution and decoded samples.
+
+        Raises:
+            TypeError: If coordinates are not real numbers or the program
+                returns a non-sampling result.
+            ValueError: If coordinates have invalid lengths or non-finite values.
+            ExecutionError: If the seed is invalid or unsupported by the endpoint.
+        """
 
         gamma_values = _angles("gammas", gammas, self.layers)
         beta_values = _angles("betas", betas, self.layers)
@@ -352,9 +371,28 @@ class CompiledFQAOAExperiment:
         betas: Sequence[float],
         shots: int,
         hopping: float = 1.0,
-        seed: int = 0,
+        seed: int | None = None,
     ) -> OptimizationRun[BinaryDomain]:
-        """Execute one coordinate without recompiling the experiment."""
+        """Execute one coordinate without recompiling the experiment.
+
+        Args:
+            on (ExecutionEndpoint): Endpoint compatible with the experiment.
+            gammas (Sequence[float]): One cost angle per layer.
+            betas (Sequence[float]): One mixer angle per layer.
+            shots (int): Positive number of observations.
+            hopping (float): Finite hopping coefficient for the mixer.
+            seed (int | None): Unsigned 64-bit endpoint seed, including zero.
+                None leaves randomness to the endpoint.
+
+        Returns:
+            OptimizationRun[BinaryDomain]: Execution and decoded samples.
+
+        Raises:
+            TypeError: If coordinates are not real numbers or the program
+                returns a non-sampling result.
+            ValueError: If coordinates have invalid lengths or non-finite values.
+            ExecutionError: If the seed is invalid or unsupported by the endpoint.
+        """
 
         return self._run_normalized(
             on=on,
@@ -373,9 +411,27 @@ class CompiledFQAOAExperiment:
         betas: tuple[float, ...],
         shots: int,
         hopping: float,
-        seed: int,
+        seed: int | None,
     ) -> OptimizationRun[BinaryDomain]:
-        """Execute already validated fixed-shape FQAOA coordinates."""
+        """Execute already validated fixed-shape FQAOA coordinates.
+
+        Args:
+            on (ExecutionEndpoint): Endpoint compatible with the experiment.
+            gammas (tuple[float, ...]): One cost angle per layer.
+            betas (tuple[float, ...]): One mixer angle per layer.
+            shots (int): Positive number of observations.
+            hopping (float): Finite hopping coefficient for the mixer.
+            seed (int | None): Unsigned 64-bit endpoint seed, including zero.
+                None leaves randomness to the endpoint.
+
+        Returns:
+            OptimizationRun[BinaryDomain]: Execution and decoded samples.
+
+        Raises:
+            TypeError: If the program returns a non-sampling result.
+            ValueError: If the returned samples have an incompatible width.
+            ExecutionError: If the seed is invalid or unsupported by the endpoint.
+        """
 
         execution = run_program(
             self.artifact,

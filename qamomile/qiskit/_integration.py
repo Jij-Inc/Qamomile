@@ -11,7 +11,7 @@ import hashlib
 import json
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib.metadata import version
 from typing import Any
 
@@ -26,10 +26,13 @@ from qamomile.circuit import (
     lower_to_circuit_at,
     postprocess_circuit_counts,
     scalar_parameter_bindings,
+    validate_artifact_angles,
+    validate_circuit_angles,
 )
 from qamomile.compilation import (
     CapabilitySnapshot,
     CompiledProgram,
+    CompletedJob,
     CouplingEdge,
     EdgeProperty,
     ExecutionReference,
@@ -41,6 +44,7 @@ from qamomile.compilation import (
     ParameterABI,
     QubitProperty,
     RealizationCapability,
+    ResultABI,
     SampleResult,
     TargetCalibration,
     TargetProfile,
@@ -50,12 +54,22 @@ from qamomile.effects import Requirement
 from qamomile.errors import ExecutionError
 from qamomile.expectation import ExpectationResult
 from qamomile.ir import FrozenMapping, Program
-from qamomile.local_execution import launch_local_sample
+from qamomile.local_execution import launch_local_sample, sample_job_id
 from qamomile.lowering import RealizationOptions
 from qamomile.observable import Hamiltonian
 from qamomile.source import ProgramFamily, QKernel, _close_program
 
 from ._emission import emit_circuit as _emit_circuit
+from ._indexed import (
+    IndexedChildren,
+    IndexedMaterializationGuard,
+    backend_indexed_counts,
+    indexed_circuits,
+    indexed_result,
+    require_batch_capacity,
+    require_indexed_cardinality,
+)
+from ._payload import copy_circuit
 
 FORMAT = "qiskit.qpy.v1"
 _CAPABILITIES = frozenset(
@@ -234,10 +248,91 @@ class Qiskit:
 
         return True
 
+    @property
+    def supports_indexed_shots(self) -> bool:
+        """Return whether native context binding can produce ordered one-shot batches.
+
+        Returns:
+            bool: True for the checked Qiskit indexed launch realization.
+        """
+        return True
+
     def lower(self, program: Program) -> LoweredProgram:
         """Retain one emitted SDK circuit with its ABI facts."""
 
         return lower_circuit_target(program, self)
+
+    def lower_indexed_shot(self, program: Program) -> LoweredProgram | None:
+        """Emit one compiler-certified fixed circuit with hidden numeric slots.
+
+        Args:
+            program (Program): Verified source retaining its logical Shot index.
+
+        Returns:
+            LoweredProgram | None: Fixed template, or None for native recipe topology.
+
+        Raises:
+            ExecutionError: If native projection or numeric checking fails.
+        """
+        from qamomile._compiler_optimization import _preserve_preparation
+        from qamomile._native import compiler as native
+        from qamomile.circuit import (
+            _circuit_from_native_projection,
+            _realization_labels,
+        )
+
+        from ._payload import QiskitExecutable
+
+        inspect = getattr(native, "inspect_indexed_circuit", None)
+        if not callable(inspect):
+            raise ExecutionError(
+                "Q4481: native indexed circuit projection is unavailable"
+            )
+        try:
+            realized = (
+                _preserve_preparation(
+                    program,
+                    Program.from_bytes(
+                        self.realizations._apply(program.to_bytes(), boundary="program")
+                    ),
+                )._native_program()
+                if self.realizations._custom
+                else program._native_program()
+            )
+            owner = inspect(
+                realized,
+                _realization_labels(self.capabilities.realization_capabilities),
+                self.realizations.overrides,
+            )
+        except ValueError as error:
+            raise ExecutionError(str(error)) from error
+        if owner is None:
+            return None
+        parameters = ParameterABI.from_program(program)
+        result = ResultABI.from_program(program)
+        logical = _circuit_from_native_projection(
+            program,
+            owner.projection,
+            semantic_id=program.semantic_digest,
+            parameter_abi=parameters,
+            result_abi=result,
+        )
+        logical = replace(logical, _hidden_binding_count=owner.slot_count)
+        circuit, stages = _emit_for_target(logical, self)
+        return LoweredProgram(
+            payload=QiskitExecutable(circuit, owner),
+            parameter_abi=parameters,
+            result_abi=result,
+            stages=(
+                *logical.realization_stages,
+                "native-indexed-circuit-template",
+                *stages,
+            ),
+            circuit_qubits=logical.width,
+            circuit_gates=logical.operation_count,
+            emitted_instructions=sum(circuit.count_ops().values()),
+            metadata=FrozenMapping.from_mapping({"qiskit_version": version("qiskit")}),
+        )
 
     def lower_circuit(self, logical: CircuitProgram) -> LoweredProgram:
         """Retain one verified circuit without QPY serialization."""
@@ -346,6 +441,14 @@ class Aer:
 
         return CapabilitySnapshot(FORMAT, _AER_CAPABILITIES, seeded_execution=True)
 
+    def _indexed_materialization_guard(self) -> IndexedMaterializationGuard:
+        """Create one producer-side bound for indexed SDK child preparation.
+
+        Returns:
+            IndexedMaterializationGuard: Fresh guard for one invocation.
+        """
+        return IndexedMaterializationGuard()
+
     def _prepare_estimation(
         self,
         source: Program,
@@ -399,6 +502,145 @@ class Aer:
                 optimization_level=self.optimization_level,
                 seed_transpiler=self.seed_transpiler,
             ),
+        )
+
+    def _launch_shot_template(
+        self, artifact: CompiledProgram, invocation: Invocation
+    ) -> Job:
+        """Execute native parameter rows using one retained prepared SDK circuit.
+
+        Args:
+            artifact (CompiledProgram): Artifact retaining a native fixed template.
+            invocation (Invocation): Validated public parameters and shot policy.
+
+        Returns:
+            Job: Completed local samples evaluated at their logical coordinates.
+
+        Raises:
+            ExecutionError: If native parameter rows or SDK results are invalid.
+        """
+        from qiskit_aer import AerSimulator
+
+        from ._payload import QiskitExecutable
+        from ._shot_template import (
+            MeasurementFreeShots,
+            aer_parameter_bindings,
+            aer_template_counts,
+            template_inputs,
+            template_result,
+        )
+
+        backend = AerSimulator(
+            method=self.method,
+            max_parallel_threads=1,
+            max_parallel_experiments=1,
+            max_parallel_shots=1,
+        )
+        payload = artifact.execution_payload(QiskitExecutable)
+        try:
+            prepared = payload.aer_circuit(
+                backend, self.method, self.optimization_level, self.seed_transpiler
+            )
+        except Exception as error:
+            raise ExecutionError("Q8233: Aer template preparation failed") from error
+        circuit, hidden, rows = template_inputs(artifact, invocation, prepared)
+        if circuit.num_qubits:
+            require_batch_capacity(backend, 1)
+            bindings = aer_parameter_bindings(circuit, hidden, rows)
+            sdk_shots = 1 if bindings else invocation.shots
+            limit = getattr(backend.configuration(), "max_shots", None)
+            if type(limit) is int and limit > 0 and sdk_shots > limit:
+                raise ExecutionError(
+                    f"Q8234: Aer experiment has {sdk_shots} shots; backend limit is {limit}"
+                )
+            try:
+                options = (
+                    {
+                        "parameter_binds": [bindings],
+                        "runtime_parameter_bind_enable": True,
+                    }
+                    if bindings
+                    else {"memory": True}
+                )
+                native = backend.run(
+                    circuit,
+                    shots=sdk_shots,
+                    seed_simulator=_aer_seed(invocation.seed),
+                    **options,
+                ).result()
+            except Exception as error:
+                raise ExecutionError("Q8233: Aer template execution failed") from error
+            raw = aer_template_counts(
+                native, circuit, invocation.shots, parameterized=bool(bindings)
+            )
+        else:
+            raw = MeasurementFreeShots(invocation.shots)
+        return CompletedJob(
+            sample_job_id("aer-shot-template", artifact, invocation),
+            template_result(
+                artifact, invocation, raw, len(circuit.clbits), backend=self.name
+            ),
+        )
+
+    def _launch_indexed(
+        self,
+        artifact: CompiledProgram,
+        invocation: Invocation,
+        children: IndexedChildren,
+    ) -> Job:
+        """Execute native-assigned logical children in one local SDK job.
+
+        Args:
+            artifact (CompiledProgram): Original target-bound invocation recipe.
+            invocation (Invocation): Original shot and seed policy.
+            children (IndexedChildren): Ordered native-materialized one-shot children.
+
+        Returns:
+            Job: Completed samples evaluated before logical-index aggregation.
+
+        Raises:
+            ExecutionError: If preparation exceeds the adapter limits, the SDK
+                fails, or the result lacks exact one-shot experiment coverage.
+        """
+        from qiskit_aer import AerSimulator
+
+        from ._payload import QiskitExecutable
+
+        require_indexed_cardinality(children, invocation)
+        guard = self._indexed_materialization_guard()
+        for child, _ in children:
+            guard.add(child)
+        backend = AerSimulator(
+            method=self.method,
+            max_parallel_threads=1,
+            max_parallel_experiments=1,
+            max_parallel_shots=1,
+        )
+        circuits = tuple(
+            bind_circuit(
+                child.execution_payload(QiskitExecutable).aer_circuit(
+                    backend, self.method, self.optimization_level, self.seed_transpiler
+                ),
+                child,
+                child_invocation,
+            )
+            for child, child_invocation in children
+        )
+        active = [circuit for circuit in circuits if circuit.num_qubits]
+        require_batch_capacity(backend, len(active))
+        if active:
+            try:
+                native = backend.run(
+                    active, shots=1, seed_simulator=_aer_seed(invocation.seed)
+                ).result()
+            except Exception as error:
+                raise ExecutionError("Q8233: Aer indexed execution failed") from error
+            raw = backend_indexed_counts(native, circuits)
+        else:
+            raw = tuple({"": 1} for _ in circuits)
+        return CompletedJob(
+            sample_job_id("aer-indexed", artifact, invocation),
+            indexed_result(artifact, children, circuits, raw, backend=self.name),
         )
 
 
@@ -495,10 +737,10 @@ class QiskitBackend:
             )
         if artifact.result_abi.width == 0:
             raise ExecutionError("Q8215: Qiskit backend execution requires sampling")
-        if invocation.seed != 0:
+        if invocation.seed is not None:
             raise ExecutionError(
                 "Q8216: live Qiskit backends do not provide a portable seed contract; "
-                "use seed=0"
+                "use seed=None"
             )
         circuit = load_circuit(artifact)
         circuit = bind_circuit(circuit, artifact, invocation)
@@ -512,6 +754,122 @@ class QiskitBackend:
             backend=self.name,
         )
 
+    def _indexed_materialization_guard(self) -> IndexedMaterializationGuard:
+        """Create a producer-side preparation bound for this exact backend.
+
+        Returns:
+            IndexedMaterializationGuard: Fresh guard for one invocation.
+        """
+        return IndexedMaterializationGuard(self.backend)
+
+    def _launch_shot_template(
+        self, artifact: CompiledProgram, invocation: Invocation
+    ) -> Job:
+        """Submit one-shot copies of one retained native parameter template.
+
+        Args:
+            artifact (CompiledProgram): Artifact retaining a native fixed template.
+            invocation (Invocation): Validated public parameters and shot policy.
+
+        Returns:
+            Job: One native batch job or completed measurement-free samples.
+
+        Raises:
+            ExecutionError: If the endpoint cannot honor the seed policy or batch
+                size, or the native parameter rows are invalid.
+        """
+        from ._shot_template import (
+            MeasurementFreeShots,
+            template_circuits,
+            template_inputs,
+            template_result,
+        )
+
+        if invocation.seed is not None:
+            raise ExecutionError(
+                "Q8216: live Qiskit backends do not provide a portable seed contract; use seed=None"
+            )
+        circuit, hidden, rows = template_inputs(artifact, invocation)
+        if not circuit.num_qubits:
+            return CompletedJob(
+                sample_job_id("qiskit-shot-template", artifact, invocation),
+                template_result(
+                    artifact,
+                    invocation,
+                    MeasurementFreeShots(invocation.shots),
+                    len(circuit.clbits),
+                    backend=self.name,
+                ),
+            )
+        self._indexed_materialization_guard().add(artifact, copies=invocation.shots)
+        circuits = template_circuits(circuit, hidden, rows)
+        try:
+            native = self.backend.run(circuits, shots=1)
+        except Exception as error:
+            raise ExecutionError("Q8233: Qiskit template submission failed") from error
+        return _QiskitJob(
+            native=native,
+            circuit=circuit,
+            artifact=artifact,
+            parameters=invocation.parameters,
+            shots=invocation.shots,
+            backend=self.name,
+            circuits=circuits,
+            shot_template=True,
+        )
+
+    def _launch_indexed(
+        self,
+        artifact: CompiledProgram,
+        invocation: Invocation,
+        children: IndexedChildren,
+    ) -> Job:
+        """Submit logical children as one ordered one-shot backend batch.
+
+        Args:
+            artifact (CompiledProgram): Original target-bound invocation recipe.
+            invocation (Invocation): Original shot and seed policy.
+            children (IndexedChildren): Ordered native-materialized one-shot children.
+
+        Returns:
+            Job: Native batch job or completed measurement-free samples.
+
+        Raises:
+            ExecutionError: If the endpoint cannot honor the seed policy.
+        """
+        if invocation.seed is not None:
+            raise ExecutionError(
+                "Q8216: live Qiskit backends do not provide a portable seed contract; use seed=None"
+            )
+        circuits = indexed_circuits(children, invocation, backend=self.backend)
+        active = [circuit for circuit in circuits if circuit.num_qubits]
+        require_batch_capacity(self.backend, len(active))
+        if not active:
+            return CompletedJob(
+                sample_job_id("qiskit-indexed", artifact, invocation),
+                indexed_result(
+                    artifact,
+                    children,
+                    circuits,
+                    tuple({"": 1} for _ in circuits),
+                    backend=self.name,
+                ),
+            )
+        try:
+            native = self.backend.run(active, shots=1)
+        except Exception as error:
+            raise ExecutionError("Q8233: Qiskit indexed submission failed") from error
+        return _QiskitJob(
+            native=native,
+            circuit=circuits[0],
+            artifact=artifact,
+            parameters=invocation.parameters,
+            shots=invocation.shots,
+            backend=self.name,
+            children=children,
+            circuits=circuits,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class _QiskitJob:
@@ -523,6 +881,9 @@ class _QiskitJob:
     parameters: FrozenMapping = field(repr=False)
     shots: int
     backend: str
+    children: IndexedChildren = field(default=(), repr=False)
+    circuits: tuple[Any, ...] = field(default=(), repr=False)
+    shot_template: bool = field(default=False, repr=False)
 
     @property
     def job_id(self) -> str:
@@ -552,12 +913,43 @@ class _QiskitJob:
         return JobStatus.FAILED
 
     def result(self, timeout: float | None = None) -> SampleResult:
-        """Wait for native counts and decode them through the sealed ABI."""
+        """Wait for native counts and decode them through the sealed ABI.
+
+        Args:
+            timeout (float | None): Provider wait limit in seconds, or None.
+
+        Returns:
+            SampleResult: Logical counts checked against the sealed result ABI.
+
+        Raises:
+            ExecutionError: If SDK result retrieval or indexed decoding fails.
+        """
 
         result_method = getattr(self.native, "result", None)
         if not callable(result_method):
             raise ExecutionError("Q8218: Qiskit job has no result() method")
-        native_result = result_method(timeout=timeout)
+        try:
+            native_result = result_method(timeout=timeout)
+        except Exception as error:
+            raise ExecutionError("Q8218: Qiskit job result retrieval failed") from error
+        if self.shot_template:
+            from ._shot_template import backend_template_counts, template_result
+
+            return template_result(
+                self.artifact,
+                Invocation(self.parameters, self.shots, 0),
+                backend_template_counts(native_result, self.circuits),
+                len(self.circuit.clbits),
+                backend=self.backend,
+            )
+        if self.children:
+            return indexed_result(
+                self.artifact,
+                self.children,
+                self.circuits,
+                backend_indexed_counts(native_result, self.circuits),
+                backend=self.backend,
+            )
         try:
             native_counts = native_result.get_counts(self.circuit)
         except Exception as error:
@@ -596,7 +988,17 @@ class _QiskitJob:
                 provider="qiskit-backend",
                 job_ids=(self.job_id,),
                 target=self.backend,
-                context={"kind": "sample"},
+                context=(
+                    {
+                        "kind": "shot_template_sample"
+                        if self.shot_template
+                        else "indexed_sample",
+                        "compilation_identity": self.artifact.execution_identity,
+                        "shots": str(self.shots),
+                    }
+                    if self.children or self.shot_template
+                    else {"kind": "sample"}
+                ),
             )
         )
 
@@ -660,9 +1062,18 @@ def _execute_local(
     )
 
 
-def _aer_seed(seed: int) -> int:
-    """Project one unsigned seed to Aer's signed 64-bit Python boundary."""
+def _aer_seed(seed: int | None) -> int | None:
+    """Project an optional seed to Aer's signed 64-bit Python boundary.
 
+    Args:
+        seed (int | None): Unsigned invocation seed, or SDK-default randomness.
+
+    Returns:
+        int | None: The signed SDK seed, preserving zero and unspecified seeds.
+    """
+
+    if seed is None:
+        return None
     return seed if seed < 1 << 63 else seed - (1 << 64)
 
 
@@ -758,12 +1169,12 @@ def bind_circuit(
 
     Raises:
         ExecutionError: If the artifact retains a parameter not supplied by the
-            canonical invocation projection.
+            canonical invocation projection, or an angle is not finite.
     """
 
-    return _bind_circuit_parameters(
-        circuit, artifact.parameter_abi, invocation.values()
-    )
+    parameters = dict(artifact.parameter_abi.bind(invocation.values()))
+    validate_artifact_angles(artifact, parameters)
+    return _bind_circuit_parameters(circuit, artifact.parameter_abi, parameters)
 
 
 def _bind_circuit_parameters(
@@ -793,7 +1204,7 @@ def _bind_circuit_parameters(
         if f"p{index}" in native_names
     }
     if bindings:
-        circuit = circuit.assign_parameters(bindings, inplace=False)
+        circuit = copy_circuit(circuit, bindings)
     if unbound := _free_circuit_parameters(circuit):
         missing = ", ".join(sorted(parameter.name for parameter in unbound))
         raise ExecutionError(f"Q8203: missing Qiskit parameters: {missing}")
@@ -1020,6 +1431,7 @@ def to_circuit(
         realization_capabilities=capabilities.realization_capabilities,
         realizations=capabilities.realizations,
     )
+    validate_circuit_angles(logical, normalized)
     retained = {
         slot.name: normalized[slot.name] for slot in logical.parameter_abi.slots
     }

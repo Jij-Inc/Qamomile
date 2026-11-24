@@ -307,6 +307,8 @@ pub struct ResultAbiProto {
     pub source_order: ::prost::alloc::vec::Vec<u32>,
     #[prost(uint32, tag = "3")]
     pub native_width: u32,
+    #[prost(bool, tag = "4")]
+    pub per_shot: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CompilationReportProto {
@@ -1020,9 +1022,21 @@ pub struct CircuitResultApplyProto {
     #[prost(uint32, repeated, tag = "4")]
     pub operands: ::prost::alloc::vec::Vec<u32>,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CircuitResultIndexedProto {
+    #[prost(uint32, tag = "1")]
+    pub index: u32,
+    #[prost(uint32, repeated, tag = "2")]
+    pub elements: ::prost::alloc::vec::Vec<u32>,
+    #[prost(enumeration = "CircuitResultScalarTypeProto", tag = "3")]
+    pub r#type: i32,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CircuitResultScalarProto {
-    #[prost(oneof = "circuit_result_scalar_proto::Node", tags = "1, 2, 3, 4, 5, 6")]
+    #[prost(
+        oneof = "circuit_result_scalar_proto::Node",
+        tags = "1, 2, 3, 4, 5, 6, 7, 8"
+    )]
     pub node: ::core::option::Option<circuit_result_scalar_proto::Node>,
 }
 /// Nested message and enum types in `CircuitResultScalarProto`.
@@ -1041,6 +1055,10 @@ pub mod circuit_result_scalar_proto {
         Parameter(super::CircuitResultParameterProto),
         #[prost(message, tag = "6")]
         Apply(super::CircuitResultApplyProto),
+        #[prost(bool, tag = "7")]
+        CurrentShot(bool),
+        #[prost(message, tag = "8")]
+        Indexed(super::CircuitResultIndexedProto),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1093,6 +1111,32 @@ pub struct CircuitResultPostprocessingProto {
     pub scalars: ::prost::alloc::vec::Vec<CircuitResultScalarProto>,
     #[prost(message, optional, tag = "5")]
     pub result: ::core::option::Option<CircuitResultValueProto>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ShotBindingSlotProto {
+    #[prost(uint32, tag = "1")]
+    pub arena: u32,
+    #[prost(uint32, tag = "2")]
+    pub root: u32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ShotCircuitTemplateProto {
+    #[prost(uint32, tag = "1")]
+    pub schema_major: u32,
+    #[prost(message, repeated, tag = "2")]
+    pub arenas: ::prost::alloc::vec::Vec<CircuitResultPostprocessingProto>,
+    #[prost(message, repeated, tag = "3")]
+    pub slots: ::prost::alloc::vec::Vec<ShotBindingSlotProto>,
+    #[prost(bytes = "vec", tag = "4")]
+    pub result_plan: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "5")]
+    pub parameter_abi: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "6")]
+    pub result_abi: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag = "7")]
+    pub target_fingerprint: ::prost::alloc::string::String,
+    #[prost(string, tag = "8")]
+    pub source_digest: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]

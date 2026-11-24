@@ -2,6 +2,7 @@
 
 import importlib.util
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -121,6 +122,91 @@ def test_partial_replacement_and_empty_pipeline_do_not_rerun_standard():
     assert "rust-qcore-standard-optimization" not in empty.report.stages
     assert qm.execute(selected, on=qm.Reference(), shots=4).shots == 4
     assert len(observer.calls) == 1
+
+
+@pytest.mark.parametrize("selection", ["default", "empty", "custom"])
+def test_target_preparation_prunes_unused_const_captures(selection):
+    """Prune only target QCore, preserving used captures and portable optimization."""
+    program = qm.build_source(
+        """
+import qamomile as qm
+
+@qm.qkernel
+def feedback(offset: qm.Const[qm.Int], enabled: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[2]]:
+    state = qm.qubits(2)
+    bit = qm.measure(qm.prepare(True))
+    if bit:
+        state = qm.x(state, target=enabled)
+    state = qm.x(state, target=offset - 2147483648)
+    return qm.measure(state)
+"""
+    ).specialize("feedback", offset=2**31, enabled=1)
+    original = program.to_bytes()
+    original_branch = next(
+        op for op in program.entry.body.operations if op.opcode == "qcore.if"
+    )
+    assert "offset" in original_branch.attribute("capture_names")
+    assert "offset" in original_branch.attribute("output_names")
+
+    observer = Observer()
+    optimizer = {
+        "default": None,
+        "empty": OptimizationPipeline(),
+        "custom": OptimizationPipeline((observer,)),
+    }[selection]
+    artifact = qm.compile(program, to=qm.Reference(), optimizer=optimizer)
+    prepared = qm.Program.from_bytes(export_payload(artifact))
+    branch = next(
+        op for op in prepared.entry.body.operations if op.opcode == "qcore.if"
+    )
+    assert "offset" not in branch.attribute("capture_names")
+    assert "offset" not in branch.attribute("output_names")
+    assert "enabled" in branch.attribute("capture_names")
+
+    assert program.to_bytes() == original
+    assert artifact.report.resources._semantic_source().to_bytes() == original
+    if optimizer is not None:
+        receipt = dict(artifact.metadata.entries)["qamomile.optimization.v1"]
+        selected = program._native_program().restore_optimization(receipt)
+        assert selected.to_bytes() == original
+    if selection == "custom":
+        assert [payload for payload, _ in observer.calls] == [original]
+
+    restored = deserialize(serialize(artifact))
+    assert qm.execute(restored, on=qm.Reference(), shots=4).counts == {(1, 1): 4}
+
+
+def test_conditional_cleanup_survives_capture_pruning():
+    """The producer and its synthesized inverse keep matching interfaces."""
+    program = qm.build_source(
+        """
+import qamomile as qm
+
+@qm.qkernel
+def cleanup(unused: qm.Const[qm.Int]) -> qm.Shot[qm.Bit]:
+    flag = qm.measure(qm.prepare(True))
+    scratch = qm.qubits(1)
+    if flag:
+        scratch = qm.x(scratch)
+    return flag
+"""
+    ).specialize("cleanup", unused=0)
+    artifact = qm.compile(program, to=qm.Reference())
+    prepared = qm.Program.from_bytes(export_payload(artifact))
+    forward, inverse = (
+        op for op in prepared.entry.body.operations if op.opcode == "qcore.if"
+    )
+    for branch in (forward, inverse):
+        assert "unused" not in branch.attribute("capture_names")
+        assert "unused" not in branch.attribute("output_names")
+    assert qm.execute(artifact, on=qm.Reference(), shots=4, seed=7).counts == {(1,): 4}
+
+
+def test_load_reference_artifact_before_conditional_capture_pruning():
+    """Replay the same cleanup saved by 833945cdb with its original captures."""
+    fixture = Path(__file__).with_name("fixtures") / "conditional_cleanup_reference.qma"
+    artifact = deserialize(fixture.read_bytes())
+    assert qm.execute(artifact, on=qm.Reference(), shots=4, seed=7).counts == {(1,): 4}
 
 
 def test_composition_preflight_and_portable_context():

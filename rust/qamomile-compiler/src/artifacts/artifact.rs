@@ -245,6 +245,7 @@ mod tests {
             target_fingerprint: "reference-v1".to_owned(),
             parameter_abi: None,
             result_abi: Some(wire::ResultAbiProto {
+                per_shot: false,
                 r#type: Some(scalar("Unit")),
                 ..Default::default()
             }),

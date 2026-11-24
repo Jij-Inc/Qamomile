@@ -36,7 +36,12 @@
 # %%
 from __future__ import annotations
 
+import os
+
 import qamomile as qm
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 32
 
 # %% [markdown]
 # ## `for` を用いた量子ゲートの反復
@@ -73,7 +78,7 @@ chain_program = qm.specialize(hadamard_chain, width=5)
 chain_result = qm.run(
     chain_program,
     on=qm.Reference(),
-    shots=32,
+    shots=sample_shots,
     seed=5,
 ).result
 
@@ -81,7 +86,7 @@ print("Number of shots:", chain_result.shots)
 print("Measurement counts:", chain_result.counts)
 
 assert chain_result.width == 5
-assert chain_result.shots == 32
+assert chain_result.shots == sample_shots
 
 
 # %% [markdown]
@@ -138,16 +143,17 @@ assert enabled_result == (1,)
 # ## 測定結果から次の演算を決定する
 #
 # 量子カーネルの中では、量子ビットの測定結果を `if` の条件として使うこともできます。
-# この例では、`qm.prepare(True)`で最初の量子ビットを $\lvert 1\rangle$ に準備するため、その測定結果は `True` になります。
-# `qm.prepare(False)`は、操作対象の量子ビットを $\lvert 0 \rangle$ に準備します。
-# 最初の測定結果が `True` なら、操作対象の量子ビットに X ゲートを適用します。
+# この例では、`qm.prepare(1)`で最初の量子ビットを$\lvert 1\rangle$に準備するため、その測定結果は整数の`1`になります。
+# `qm.prepare(0)`は、操作対象の量子ビットを $\lvert 0 \rangle$ に準備します。
+# これらの整数による準備では状態の型は`qm.Q[qm.Bit]`です。測定結果の型は`qm.Shot[qm.Bit]`となり、Pythonでは整数の`0`か`1`として得られます。
+# 最初の測定結果が`1`なら`if`の条件を満たすため、操作対象の量子ビットにXゲートを適用します。
 
 
 # %%
 @qm.qkernel
-def conditional_flip() -> qm.Shot[qm.Bool]:
-    condition = qm.measure(qm.prepare(True))
-    target = qm.prepare(False)
+def conditional_flip() -> qm.Shot[qm.Bit]:
+    condition = qm.measure(qm.prepare(1))
+    target = qm.prepare(0)
     if condition:
         target = qm.x(target)
     return qm.measure(target)
@@ -159,10 +165,11 @@ feedback_result = qm.evaluate(feedback_program)
 
 print("Measurement feedback result:", feedback_result)
 
-assert feedback_result is True
+assert type(feedback_result) is int
+assert feedback_result == 1
 
 # %% [markdown]
-# 最初の測定結果が True になるため、出力も `True` になります。
+# 最初の測定結果が`1`になるため、出力も整数の`1`になります。
 # 測定を行い、その結果を確認して、条件を満たす場合にゲートを適用します。
 # `qm.measure(...)` が返す値は、実行中に得られます。
 # ここでは、その古典的な値を `if` の条件に使って演算を選びます。

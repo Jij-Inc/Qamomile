@@ -10,6 +10,7 @@ from typing import Any
 
 from qamomile.compilation import (
     CapabilitySnapshot,
+    Invocation,
     LoweredProgram,
     ParameterABI,
     ResultABI,
@@ -40,12 +41,26 @@ class Hugr:
     flattening the program into a circuit data model.
 
     Args:
-        record_results (bool): Include result-recording operations in HUGR.
         realizations (RealizationOptions): Exact operation implementations.
+        current_shot_origin (int | None): Native counter origin for the local Selene
+            profile, defaulting to zero. None
+            leaves logical current-shot execution unavailable.
     """
 
-    record_results: bool = True
     realizations: RealizationOptions = RealizationOptions()
+    current_shot_origin: int | None = 0
+
+    def __post_init__(self) -> None:
+        """Validate an explicitly supplied current-shot convention natively.
+
+        Raises:
+            ValueError: If the origin is not a supported counter convention.
+        """
+
+        if self.current_shot_origin is not None:
+            from qamomile._native import compiler as native
+
+            native.current_shot_policy(self.current_shot_origin)
 
     @property
     def name(self) -> str:
@@ -61,7 +76,16 @@ class Hugr:
             CapabilitySnapshot: Supported format and requirements.
         """
 
-        return CapabilitySnapshot(FORMAT, _CAPABILITIES, realizations=self.realizations)
+        return CapabilitySnapshot(
+            FORMAT,
+            _CAPABILITIES
+            | (
+                frozenset({Requirement.LOGICAL_SHOT_CONTEXT})
+                if self.current_shot_origin is not None
+                else frozenset()
+            ),
+            realizations=self.realizations,
+        )
 
     @property
     def launch_materialized_requirements(self) -> frozenset[Requirement]:
@@ -82,14 +106,18 @@ class Hugr:
 
     @property
     def fingerprint(self) -> str:
-        """Return the pinned HUGR and TKET extension identity."""
+        """Return the pinned HUGR and TKET extension identity.
+
+        Returns:
+            str: Deterministic identity for the current emission policy.
+        """
 
         return (
             "hugr-tket-"
             + hashlib.sha256(
                 (
-                    "hugr-tket-v2:"
-                    + str(self.record_results)
+                    "hugr-tket-v2:current-shot="
+                    + str(self.current_shot_origin)
                     + repr(self.realizations.overrides)
                     + ":"
                     + version("hugr")
@@ -117,15 +145,15 @@ class Hugr:
     def lower_at(
         self,
         program: Program,
-        parameters: Mapping[str, object],
+        invocation: Invocation,
     ) -> LoweredProgram:
         """Emit a closed HUGR package for one exact invocation.
 
         Args:
-            program: Verified QCore program retained by the sealed launch
+            program (Program): Verified QCore program retained by the sealed launch
                 artifact.
-            parameters: Exact launch values already selected by the public
-                artifact ABI.
+            invocation (Invocation): Exact launch values and count already
+                selected by the public artifact ABI.
 
         Returns:
             LoweredProgram: Argument-free HUGR package for this profile.
@@ -137,7 +165,7 @@ class Hugr:
                 launch ABI mapping.
         """
 
-        bound = dict(ParameterABI.from_program(program).bind(parameters))
+        bound = dict(ParameterABI.from_program(program).bind(invocation.values()))
         self._verify_native_launch(program, bound)
         return self._lower(program, entry_bindings=bound)
 
@@ -165,7 +193,9 @@ class Hugr:
 
         name = program.entrypoint if link_name is None else link_name
         _validate_link_name(name)
-        prepared = _prepare_hugr_module(program, self.realizations)
+        prepared = _prepare_hugr_module(
+            program, self.realizations, current_shot_origin=self.current_shot_origin
+        )
         function = prepared.program.entry
         bindings = dict(prepared.program.const_bindings)
         parameters = tuple(
@@ -186,6 +216,7 @@ class Hugr:
             adjoint_helpers=prepared.adjoint_helpers,
             boolean_plans=prepared.boolean_plans,
             emission_budget=prepared.emission_budget,
+            current_shot_origin=self.current_shot_origin,
         )
         inputs = _reconstruct_parameter_row(parameters, tuple(definition.inputs()))
         supplied = iter(inputs)
@@ -194,7 +225,9 @@ class Hugr:
             if parameter.name in bindings:
                 environment[parameter.value.id] = thaw_value(bindings[parameter.name])
             else:
-                environment[parameter.value.id] = next(supplied)
+                environment[parameter.value.id] = lowerer._guard_value_domain(
+                    next(supplied), parameter.value.type
+                )
         lowerer.live_qubits = _parameter_qubit_width(parameters)
         lowerer.allocated_qubits = lowerer.live_qubits
         kind, returned = lowerer._emit_function_body(function, environment)
@@ -256,7 +289,11 @@ class Hugr:
                 "Q8601: the HUGR/Selene profile requires launch materialization "
                 "before direct emission of Param entrypoints"
             )
-        prepared = _prepare_hugr_module(program, self.realizations)
+        prepared = _prepare_hugr_module(
+            program,
+            self.realizations,
+            current_shot_origin=self.current_shot_origin,
+        )
         main = prepared.module.define_function("main", [], [], visibility="Public")
         lowerer = _DirectHugrLowerer(
             prepared.program,
@@ -266,25 +303,21 @@ class Hugr:
             boolean_plans=prepared.boolean_plans,
             entry_bindings=entry_bindings,
             emission_budget=prepared.emission_budget,
-            record_results=self.record_results,
+            current_shot_origin=self.current_shot_origin,
         )
         lowerer.lower(declared_result)
         main.set_outputs()
-        if self.record_results and lowerer.previous_measurement is not None:
+        if lowerer.previous_measurement is not None:
             main.add_state_order(lowerer.previous_measurement, main.output_node)
         package, _ = _finish_hugr_package(
             prepared.module,
-            record_results=self.record_results,
-        )
-        native_result_width = (
-            declared_result.width
-            if lowerer.uses_tail_result_measurements
-            else lowerer.next_measurement
+            record_results=True,
         )
         result_abi = ResultABI(
             declared_result.type,
-            lowerer.result_order,
-            native_result_width,
+            tuple(range(declared_result.width)),
+            declared_result.width,
+            declared_result.per_shot,
         )
         from ._payload import HugrExecutable
 
@@ -320,13 +353,9 @@ class Hugr:
                 (
                     ("retained_functions", len(prepared.definitions)),
                     ("hugr_version", version("hugr")),
-                    ("record_results", self.record_results),
-                    (
-                        "result_measurements",
-                        "trailing"
-                        if lowerer.uses_tail_result_measurements
-                        else "absolute",
-                    ),
+                    ("current_shot_origin", self.current_shot_origin),
+                    ("integer_domain", "signed32-checked-v1"),
+                    ("result_measurements", "named-records"),
                     ("tket_exts_version", version("tket-exts")),
                 )
             ),

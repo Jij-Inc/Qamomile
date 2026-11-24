@@ -847,6 +847,26 @@ def _encode_native_type(type_spec: TypeSpec) -> bytes:
     return encoded.SerializeToString(deterministic=True)
 
 
+def infer_measurement_observation_type(payload: TypeSpec) -> TypeSpec:
+    """Project a coherent payload to its native measurement observation type.
+
+    Args:
+        payload (TypeSpec): Logical payload of the measured quantum state.
+
+    Returns:
+        TypeSpec: Classical observation with binary scalar leaves typed as Bit.
+
+    Raises:
+        TypeError: If native inference is unavailable.
+        ValueError: If the payload is not coherent.
+        RuntimeError: If the native projection is malformed.
+    """
+    infer = getattr(native, "infer_measurement_observation_type", None)
+    if not callable(infer):
+        raise TypeError("Q4511: native measurement type inference is unavailable")
+    return _decode_native_type(infer(_encode_native_type(payload)))
+
+
 def infer_function_application(
     function_type: TypeSpec,
     argument_types: tuple[TypeSpec, ...],

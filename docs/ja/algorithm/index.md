@@ -33,6 +33,12 @@ Suzuki積公式でRabi振動をシミュレーションし、解析解と比較�
 :::
 
 :::{card}
+:header: **量子フーリエ変換（QFT）**
+:link: qft
+QFTをスクラッチ実装と組み込みの`qft`で実装し、周波数の推定結果を比較して、必要なゲート数を確認します。
+:::
+
+:::{card}
 :header: **量子振幅推定によるオプション価格計算**
 :link: option_pricing
 資産価格の分布とペイオフを量子状態に符号化し、期待ペイオフを推定して割引後のオプション価格を求めます。
@@ -47,7 +53,13 @@ Suzuki積公式でRabi振動をシミュレーションし、解析解と比較�
 :::{card}
 :header: **Pauli相関エンコーディング**
 :link: pce_maxcut
-4変数のMaxCut問題を2量子ビットに符号化し、推定したPauli相関から分割を復元します。
+20変数のMaxCut問題を3量子ビットに符号化し、推定したPauli相関から分割を復元します。
+:::
+
+:::{card}
+:header: **Pauli相関エンコーディングを用いたポートフォリオ最適化**
+:link: portfolio_PCE
+30銘柄の相関グラフをPCEで再帰的に分割し、各クラスタから選んだ銘柄のポートフォリオを等比率のベースラインと比較します。
 :::
 
 :::{card}
@@ -59,7 +71,7 @@ JijModelingとOMMXで制約付き問題を定式化し、QAOAの結果から制�
 :::{card}
 :header: **QAOAによるMaxCut**
 :link: qaoa_maxcut
-再利用可能な関数からQAOAを構成し、4頂点の閉路グラフの分割を求めます。
+量子近似最適化アルゴリズム（QAOA）をQamomileで実装する例です。MaxCutについて、ゼロから構築する方法と組み込みの`qaoa_state`の2通りを紹介します。
 :::
 
 :::{card}
@@ -71,7 +83,7 @@ JijModelingとOMMXで制約付き問題を定式化し、QAOAの結果から制�
 :::{card}
 :header: **量子回路を用いたMarkov連鎖Monte Carlo法**
 :link: qe_mcmc
-量子時間発展回路で古典側の候補を生成し、詳細釣り合いを確認します。
+Quantum-enhanced MCMC（QeMCMC）をQamomileで実装する例です。イジング模型のボルツマン分布に対するサンプリングについて、QeMCMCを実行し、古典MCMCと比較します。
 :::
 
 :::{card}
@@ -113,7 +125,13 @@ Steane符号を構成し、シンドロームからPauli誤りを訂正します
 :::{card}
 :header: **水素分子のVQE**
 :link: vqe_for_hydrogen
-分子ハミルトニアンを構成し、2量子ビットの試行状態を最適化して基底状態エネルギーを推定します。
+分子ハミルトニアンを構成し、4量子ビットの試行状態を最適化して基底状態エネルギーを推定します。
+:::
+
+:::{card}
+:header: **ADAPT-VQE**
+:link: adapt_vqe
+適応的に演算子を追加することでアンザッツを構築する、VQE の改良版です。
 :::
 
 ::::

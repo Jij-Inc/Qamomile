@@ -177,12 +177,12 @@ def test_first_class_arithmetic_on_every_local_backend(backend: str) -> None:
     for program, expected in _ARITHMETIC_CASES:
         artifact = qm.compile(program, to=endpoint.target)
         assert isinstance(artifact, qm.CompiledProgram)
-        assert qm.execute(artifact, on=endpoint, shots=4, seed=0).counts == {
+        assert qm.execute(artifact, on=endpoint, shots=4, seed=None).counts == {
             expected: 4
         }
     assert (
         qm.expectation(
-            first_class_mod_mul_state, qm.Z(2), on=endpoint, shots=4, seed=0
+            first_class_mod_mul_state, qm.Z(2), on=endpoint, shots=4, seed=None
         ).value
         == -1.0
     )

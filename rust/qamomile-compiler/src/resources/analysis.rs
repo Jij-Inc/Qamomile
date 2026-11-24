@@ -10,6 +10,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use num_traits::ToPrimitive;
 use thiserror::Error;
 
 use crate::operations::{
@@ -465,6 +466,7 @@ struct ExactAnalyzer<'a> {
     functions: HashMap<&'a str, &'a wire::FunctionProto>,
     types: &'a TypeArena,
     operations: &'a LocallyCheckedOperations,
+    verified_calls: &'a crate::abi::VerifiedCallDimensions,
     analysis_cache: RefCell<HashMap<ExactAnalysisKey, BlockSummary>>,
     operation_visits: Cell<u128>,
 }
@@ -473,11 +475,11 @@ struct ExactAnalyzer<'a> {
 struct ExactAnalysisKey {
     symbol: String,
     arguments: Box<[Option<ExactValue>]>,
-    dimensions: Box<[(Dimension, u64)]>,
+    dimensions: Box<[(Dimension, Dimension)]>,
 }
 
 struct ExactDimensionBindings {
-    values: HashMap<Dimension, u64>,
+    values: HashMap<Dimension, Dimension>,
 }
 
 #[derive(Clone, Copy)]
@@ -604,18 +606,18 @@ fn merge_counts(destination: &mut BTreeMap<String, usize>, source: &BTreeMap<Str
 }
 
 pub(crate) fn exact_logical_counts(
-    package: &wire::QCorePackageProto,
-    types: &TypeArena,
-    operations: &LocallyCheckedOperations,
+    checked: &crate::CheckedProgramGraph,
 ) -> Result<ExactLogicalCounts, ExactResourceError> {
+    let package = &checked.package;
     let analyzer = ExactAnalyzer {
         functions: package
             .functions
             .iter()
             .map(|function| (function.symbol.as_str(), function))
             .collect(),
-        types,
-        operations,
+        types: &checked.type_arena,
+        operations: &checked.operations,
+        verified_calls: &checked.call_dimensions,
         analysis_cache: RefCell::new(HashMap::new()),
         operation_visits: Cell::new(0),
     };
@@ -638,7 +640,7 @@ pub(crate) fn exact_logical_counts(
             exact_typed_literal(literal, type_spec)
         })
         .collect::<Vec<_>>();
-    let dimensions = exact_dimension_bindings(entry, &arguments, &HashMap::new());
+    let dimensions = exact_dimension_bindings(entry, &arguments, &HashMap::new())?;
     let input_qubits = analyzer.input_width(entry, &dimensions);
     let summary = analyzer.analyze_function(entry, &arguments, &HashMap::new())?;
     let allocated_qubits = analyzer
@@ -688,6 +690,23 @@ impl ExactAnalyzer<'_> {
         );
     }
 
+    fn evaluate_classical(
+        &self,
+        operation: &wire::OperationProto,
+        environment: &HashMap<u64, Option<ExactValue>>,
+        context: ExactFunctionContext<'_>,
+    ) -> Option<ExactValue> {
+        if operation.opcode == "classical.len"
+            && let Some(dimension) =
+                super::length_dimension(self.types, self.operations, context.owner, operation)
+            && let Some(extent) = dimension_width(&dimension, context.dimensions)
+            && let Ok(length) = i64::try_from(extent)
+        {
+            return Some(ExactValue::Scalar(StaticScalar::Int(length)));
+        }
+        evaluate_exact_classical(operation, environment)
+    }
+
     fn input_width(
         &self,
         function: &wire::FunctionProto,
@@ -710,7 +729,7 @@ impl ExactAnalyzer<'_> {
         &self,
         function: &wire::FunctionProto,
         arguments: &[Option<ExactValue>],
-        dimension_arguments: &HashMap<Dimension, u64>,
+        dimension_arguments: &HashMap<Dimension, Dimension>,
     ) -> Result<Option<u128>, ExactResourceError> {
         if function.external || arguments.len() != function.parameters.len() {
             return Ok(None);
@@ -732,7 +751,7 @@ impl ExactAnalyzer<'_> {
                     })
             })
             .collect::<Result<HashMap<_, _>, _>>()?;
-        let dimensions = exact_dimension_bindings(function, arguments, dimension_arguments);
+        let dimensions = exact_dimension_bindings(function, arguments, dimension_arguments)?;
         let Some(types) = self.operations.value_types(&function.symbol) else {
             return Ok(None);
         };
@@ -823,7 +842,7 @@ impl ExactAnalyzer<'_> {
         else {
             return Ok(None);
         };
-        let dimensions = exact_dimension_bindings(callee, &arguments, &dimension_arguments);
+        let dimensions = exact_dimension_bindings(callee, &arguments, &dimension_arguments)?;
         let Some(input_width) = self.input_width(callee, &dimensions) else {
             return Ok(None);
         };
@@ -940,7 +959,7 @@ impl ExactAnalyzer<'_> {
                 bind_exact_results(operation, environment, &summary.values)
             }
             opcode if opcode.starts_with("classical.") => {
-                let value = evaluate_exact_classical(operation, environment);
+                let value = self.evaluate_classical(operation, environment, context);
                 bind_results(operation, environment, value.as_ref());
                 Ok(())
             }
@@ -986,7 +1005,7 @@ impl ExactAnalyzer<'_> {
         &self,
         function: &wire::FunctionProto,
         arguments: &[Option<ExactValue>],
-        dimension_arguments: &HashMap<Dimension, u64>,
+        dimension_arguments: &HashMap<Dimension, Dimension>,
         roots: &HashMap<u64, ExactTimingRoot>,
         instance: u64,
         next_instance: &mut u64,
@@ -1011,7 +1030,7 @@ impl ExactAnalyzer<'_> {
                     })
             })
             .collect::<Result<HashMap<_, _>, _>>()?;
-        let dimensions = exact_dimension_bindings(function, arguments, dimension_arguments);
+        let dimensions = exact_dimension_bindings(function, arguments, dimension_arguments)?;
         let body = function.body.as_ref().ok_or_else(|| {
             ExactResourceError::Missing(format!("body for {:?}", function.symbol))
         })?;
@@ -1329,10 +1348,11 @@ impl ExactAnalyzer<'_> {
             return Ok(None);
         };
         let call_instance = take_timing_instance(next_instance)?;
+        let dimensions = self.call_dimensions(operation, callee, context)?;
         let Some(mut summary) = self.timing_function(
             callee,
             &arguments,
-            &HashMap::new(),
+            &dimensions,
             &bindings,
             call_instance,
             next_instance,
@@ -1538,7 +1558,7 @@ impl ExactAnalyzer<'_> {
         &self,
         function: &wire::FunctionProto,
         arguments: &[Option<ExactValue>],
-        dimension_arguments: &HashMap<Dimension, u64>,
+        dimension_arguments: &HashMap<Dimension, Dimension>,
     ) -> Result<Option<u128>, ExactResourceError> {
         if function.external || arguments.len() != function.parameters.len() {
             return Ok(None);
@@ -1560,7 +1580,7 @@ impl ExactAnalyzer<'_> {
                     })
             })
             .collect::<Result<HashMap<_, _>, _>>()?;
-        let dimensions = exact_dimension_bindings(function, arguments, dimension_arguments);
+        let dimensions = exact_dimension_bindings(function, arguments, dimension_arguments)?;
         let body = function.body.as_ref().ok_or_else(|| {
             ExactResourceError::Missing(format!("body for {:?}", function.symbol))
         })?;
@@ -1613,7 +1633,7 @@ impl ExactAnalyzer<'_> {
                     bind_results(operation, environment, None);
                 }
                 opcode if opcode.starts_with("classical.") => {
-                    let value = evaluate_exact_classical(operation, environment);
+                    let value = self.evaluate_classical(operation, environment, context);
                     bind_results(operation, environment, value.as_ref());
                 }
                 _ => bind_results(operation, environment, None),
@@ -1761,11 +1781,11 @@ impl ExactAnalyzer<'_> {
         &self,
         function: &wire::FunctionProto,
         arguments: &[Option<ExactValue>],
-        dimension_arguments: &HashMap<Dimension, u64>,
+        dimension_arguments: &HashMap<Dimension, Dimension>,
     ) -> Result<BlockSummary, ExactResourceError> {
         let mut dimensions = dimension_arguments
             .iter()
-            .map(|(dimension, value)| (dimension.clone(), *value))
+            .map(|(dimension, value)| (dimension.clone(), value.clone()))
             .collect::<Vec<_>>();
         dimensions.sort_unstable_by(|(left, _), (right, _)| compare_dimensions(left, right));
         let key = ExactAnalysisKey {
@@ -1787,7 +1807,7 @@ impl ExactAnalyzer<'_> {
         &self,
         function: &wire::FunctionProto,
         arguments: &[Option<ExactValue>],
-        dimension_arguments: &HashMap<Dimension, u64>,
+        dimension_arguments: &HashMap<Dimension, Dimension>,
     ) -> Result<BlockSummary, ExactResourceError> {
         if function.external {
             return Err(ExactResourceError::Unsupported(format!(
@@ -1818,7 +1838,7 @@ impl ExactAnalyzer<'_> {
                     })
             })
             .collect::<Result<HashMap<_, _>, _>>()?;
-        let dimensions = exact_dimension_bindings(function, arguments, dimension_arguments);
+        let dimensions = exact_dimension_bindings(function, arguments, dimension_arguments)?;
         let body = function.body.as_ref().ok_or_else(|| {
             ExactResourceError::Missing(format!("body for {:?}", function.symbol))
         })?;
@@ -1865,11 +1885,11 @@ impl ExactAnalyzer<'_> {
                     bind_exact_results(operation, environment, &summary.values)?;
                 }
                 "qcore.adjoint_call" => {
-                    counts.then(&self.analyze_adjoint_call(operation, environment)?)?;
+                    counts.then(&self.analyze_adjoint_call(operation, environment, context)?)?;
                     bind_results(operation, environment, None);
                 }
                 "qcore.control_call" | "qcore.select_call" => {
-                    counts.then(&self.analyze_coherent_call(operation, environment)?)?;
+                    counts.then(&self.analyze_coherent_call(operation, environment, context)?)?;
                     bind_results(operation, environment, None);
                 }
                 opcode @ ("qcore.phase_by" | "qcore.xor_by" | "qcore.permute_by") => {
@@ -1906,7 +1926,7 @@ impl ExactAnalyzer<'_> {
                     bind_results(operation, environment, None);
                 }
                 opcode if opcode.starts_with("classical.") => {
-                    let value = evaluate_exact_classical(operation, environment);
+                    let value = self.evaluate_classical(operation, environment, context);
                     bind_results(operation, environment, value.as_ref());
                 }
                 _ => bind_results(operation, environment, None),
@@ -1995,45 +2015,18 @@ impl ExactAnalyzer<'_> {
         operation: &wire::OperationProto,
         callee: &wire::FunctionProto,
         context: ExactFunctionContext<'_>,
-    ) -> Result<HashMap<Dimension, u64>, ExactResourceError> {
-        let declared_types = self.operations.value_types(&callee.symbol).ok_or_else(|| {
-            ExactResourceError::Missing(format!("type roots for {:?}", callee.symbol))
-        })?;
-        let expected = callee
-            .parameters
-            .iter()
-            .map(|parameter| {
-                parameter
-                    .value
-                    .as_ref()
-                    .and_then(|value| declared_types.get(&value.id))
-                    .copied()
-                    .ok_or_else(|| {
-                        ExactResourceError::Missing(format!(
-                            "parameter type in {:?}",
-                            callee.symbol
-                        ))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let local_types = self.operations.value_types(context.owner).ok_or_else(|| {
-            ExactResourceError::Missing(format!("type roots for {:?}", context.owner))
-        })?;
-        let actual = operation
-            .operands
-            .iter()
-            .map(|operand| {
-                local_types.get(operand).copied().ok_or_else(|| {
-                    ExactResourceError::Missing(format!("operand type in {:?}", context.owner))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let inferred = crate::abi::infer_call_dimensions(self.types, &expected, &actual)
+    ) -> Result<HashMap<Dimension, Dimension>, ExactResourceError> {
+        let bindings = self
+            .verified_calls
+            .get(context.owner, operation, &callee.symbol)
             .ok_or_else(|| ExactResourceError::Missing("verified call dimensions".to_owned()))?;
-        Ok(inferred
-            .into_iter()
-            .filter_map(|(formal, actual)| {
-                resolve_exact_dimension(&actual, context.dimensions).map(|value| (formal, value))
+        Ok(bindings
+            .iter()
+            .map(|(formal, actual)| {
+                (
+                    formal.clone(),
+                    crate::types::instantiate_dimension(actual, &context.dimensions.values),
+                )
             })
             .collect())
     }
@@ -2243,6 +2236,7 @@ impl ExactAnalyzer<'_> {
         &self,
         operation: &wire::OperationProto,
         environment: &HashMap<u64, Option<ExactValue>>,
+        context: ExactFunctionContext<'_>,
     ) -> Result<Counts, ExactResourceError> {
         let callee_name = string_attribute(operation, "callee")
             .ok_or_else(|| ExactResourceError::Missing("adjoint callee".to_owned()))?;
@@ -2272,8 +2266,9 @@ impl ExactAnalyzer<'_> {
                 "adjoint classical argument ABI".to_owned(),
             ));
         }
+        let dimensions = self.call_dimensions(operation, callee, context)?;
         let direct = self
-            .analyze_function(callee, &arguments, &HashMap::new())?
+            .analyze_function(callee, &arguments, &dimensions)?
             .counts;
         let mut opcodes = BTreeMap::new();
         if direct.work != 0 {
@@ -2302,7 +2297,7 @@ impl ExactAnalyzer<'_> {
         let original = string_attribute(operation, "original")
             .ok_or_else(|| ExactResourceError::Missing("adjoint original opcode".to_owned()))?;
         if matches!(original, "qcore.control_call" | "qcore.select_call") {
-            return self.analyze_coherent_adjoint(operation, environment);
+            return self.analyze_coherent_adjoint(operation, environment, context);
         }
         let mut counts = Counts::default();
         let event_width = self.event_width(context.owner, operation, context.dimensions);
@@ -2321,6 +2316,7 @@ impl ExactAnalyzer<'_> {
         &self,
         operation: &wire::OperationProto,
         environment: &HashMap<u64, Option<ExactValue>>,
+        context: ExactFunctionContext<'_>,
     ) -> Result<Counts, ExactResourceError> {
         let callee_names = if operation.opcode == "qcore.control_call" {
             vec![
@@ -2352,9 +2348,10 @@ impl ExactAnalyzer<'_> {
             let callee = self.functions.get(callee_name).copied().ok_or_else(|| {
                 ExactResourceError::Missing(format!("coherent callable {callee_name:?}"))
             })?;
+            let dimensions = self.call_dimensions(operation, callee, context)?;
             result.then(
                 &self
-                    .analyze_function(callee, &arguments, &HashMap::new())?
+                    .analyze_function(callee, &arguments, &dimensions)?
                     .counts,
             )?;
         }
@@ -2366,6 +2363,7 @@ impl ExactAnalyzer<'_> {
         &self,
         operation: &wire::OperationProto,
         environment: &HashMap<u64, Option<ExactValue>>,
+        context: ExactFunctionContext<'_>,
     ) -> Result<Counts, ExactResourceError> {
         let original = string_attribute(operation, "original")
             .ok_or_else(|| ExactResourceError::Missing("coherent adjoint opcode".to_owned()))?;
@@ -2428,9 +2426,10 @@ impl ExactAnalyzer<'_> {
             let callee = self.functions.get(callee_name).copied().ok_or_else(|| {
                 ExactResourceError::Missing(format!("coherent callable {callee_name:?}"))
             })?;
+            let dimensions = self.call_dimensions(operation, callee, context)?;
             direct.then(
                 &self
-                    .analyze_function(callee, &arguments, &HashMap::new())?
+                    .analyze_function(callee, &arguments, &dimensions)?
                     .counts,
             )?;
         }
@@ -2911,49 +2910,45 @@ fn coherent_width(
 }
 
 fn dimension_width(dimension: &Dimension, bindings: &ExactDimensionBindings) -> Option<u64> {
-    match dimension {
-        Dimension::Fixed(width) => Some(*width),
-        Dimension::Symbol { .. } => bindings.values.get(dimension).copied(),
+    match crate::types::instantiate_dimension(dimension, &bindings.values) {
+        Dimension::Fixed(width) => Some(width),
+        Dimension::Symbol { .. } => None,
     }
 }
 
 fn exact_dimension_bindings(
     function: &wire::FunctionProto,
     arguments: &[Option<ExactValue>],
-    inherited: &HashMap<Dimension, u64>,
-) -> ExactDimensionBindings {
+    inherited: &HashMap<Dimension, Dimension>,
+) -> Result<ExactDimensionBindings, ExactResourceError> {
     let mut values = inherited.clone();
-    values.extend(
-        function
-            .parameters
-            .iter()
-            .zip(arguments)
-            .filter_map(|(parameter, value)| {
-                value
-                    .as_ref()
-                    .and_then(ExactValue::scalar)
-                    .and_then(static_int)
-                    .and_then(|value| u64::try_from(value).ok())
-                    .filter(|value| *value != 0)
-                    .map(|value| {
-                        (
-                            Dimension::Symbol {
-                                scope: Arc::from(function.symbol.as_str()),
-                                name: Arc::from(parameter.name.as_str()),
-                            },
-                            value,
-                        )
-                    })
-            }),
-    );
-    ExactDimensionBindings { values }
-}
-
-fn resolve_exact_dimension(
-    dimension: &Dimension,
-    bindings: &ExactDimensionBindings,
-) -> Option<u64> {
-    dimension_width(dimension, bindings)
+    for (parameter, argument) in function.parameters.iter().zip(arguments) {
+        let Some(value) = argument
+            .as_ref()
+            .and_then(crate::numeric_values::integer_value)
+        else {
+            continue;
+        };
+        let key = Dimension::Symbol {
+            scope: Arc::from(function.symbol.as_str()),
+            name: Arc::from(parameter.name.as_str()),
+        };
+        match inherited.get(&key) {
+            Some(Dimension::Fixed(expected)) if value.to_u64() != Some(*expected) => {
+                return Err(ExactResourceError::Unsupported(super::dimension_conflict(
+                    &parameter.name,
+                    *expected,
+                )));
+            }
+            Some(_) => {}
+            None => {
+                if let Some(width) = value.to_u64().filter(|width| *width > 0) {
+                    values.insert(key, Dimension::Fixed(width));
+                }
+            }
+        }
+    }
+    Ok(ExactDimensionBindings { values })
 }
 
 fn bind_structural_exact_facts(

@@ -81,7 +81,8 @@ def _zero_signal_projector(experiment) -> qm.Hamiltonian:
 
 
 @pytest.mark.parametrize("mu", (-0.25, 0.75))
-def test_filter_threshold_uses_original_energy_units_and_immutable_model(mu):
+@pytest.mark.parametrize("seed", (None, 0, 31))
+def test_filter_threshold_uses_original_energy_units_and_immutable_model(mu, seed):
     """Offsets, either shift sign, sparse IDs, and domain survive composition."""
 
     model = _sparse_model()
@@ -105,7 +106,8 @@ def test_filter_threshold_uses_original_energy_units_and_immutable_model(mu):
 
     endpoint = qm.Reference()
     compiled = experiment.compile(to=endpoint.target)
-    run = compiled.run(on=endpoint, shots=128, seed=31)
+    run = compiled.run(on=endpoint, shots=128, seed=seed)
+    assert run.execution.invocation.seed == seed
     assert run.identity == compiled.identity == experiment.identity
     assert run.execution.artifact is compiled.artifact
     assert run.success.shots == run.execution.result.shots == 128

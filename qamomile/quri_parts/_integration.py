@@ -251,7 +251,7 @@ class QuriPartsSampler:
             A completed job containing normalized logical counts.
 
         Raises:
-            ExecutionError: If the artifact is incompatible, a nonzero seed is
+            ExecutionError: If the artifact is incompatible, an explicit seed is
                 requested, or the sampler returns malformed counts.
         """
 
@@ -259,10 +259,10 @@ class QuriPartsSampler:
             raise ExecutionError(
                 f"Q8716: QURI Parts sampler accepts {FORMAT!r}, got {artifact.format!r}"
             )
-        if invocation.seed != 0:
+        if invocation.seed is not None:
             raise ExecutionError(
                 "Q8717: live QURI Parts samplers do not provide a portable "
-                "seed contract; use seed=0"
+                "seed contract; use seed=None"
             )
         circuit, measurements = _materialize_circuit(artifact, invocation)
         try:

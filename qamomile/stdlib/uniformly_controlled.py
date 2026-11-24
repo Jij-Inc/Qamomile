@@ -56,10 +56,10 @@ def uniformly_controlled_ry(branch_angles: Sequence[float]) -> qm.QKernel:
     operation or backend implementation is introduced.
 
     Args:
-        branch_angles: One desired rotation per computational-basis address.
+        branch_angles (Sequence[float]): One rotation in radians per address.
 
     Returns:
-        A unary unitary over the address and one target component.
+        qm.QKernel: A unary unitary over the address and one target component.
 
     Raises:
         TypeError: If the angle input is invalid.
@@ -67,8 +67,7 @@ def uniformly_controlled_ry(branch_angles: Sequence[float]) -> qm.QKernel:
     """
 
     angles = uniformly_controlled_angles(branch_angles)
-    count = len(angles)
-    control_width = count.bit_length() - 1
+    control_width = len(angles).bit_length() - 1
     controls = _gray_controls(control_width)
     if control_width == 0:
 
@@ -89,44 +88,24 @@ def uniformly_controlled_ry(branch_angles: Sequence[float]) -> qm.QKernel:
     total_width = control_width + 1
 
     @qm.qkernel
-    def identity(
+    def rotate(
         state: qm.Q[qm.Bits[total_width]],  # type: ignore[valid-type]
     ) -> qm.Q[qm.Bits[total_width]]:  # type: ignore[valid-type]
-        """Return the address and target state unchanged.
+        """Apply the configured rotations in cyclic Gray order.
 
         Args:
-            state (qm.Q[qm.Bits[total_width]]): Owned complete state.
+            state (qm.Q[qm.Bits[total_width]]): Address and target register.
 
         Returns:
-            qm.Q[qm.Bits[total_width]]: Unchanged state.
+            qm.Q[qm.Bits[total_width]]: Address and rotated target.
         """
 
+        for angle, control in zip(angles, controls):
+            state = qm.ry(state, angle, target=control_width)
+            state = qm.cx(state, control=control, target=control_width)
         return state
 
-    current = identity
-    for index, control in enumerate(controls):
-        previous = current
-        angle = angles[index]
-
-        @qm.qkernel
-        def append_step(
-            state: qm.Q[qm.Bits[total_width]],  # type: ignore[valid-type]
-        ) -> qm.Q[qm.Bits[total_width]]:  # type: ignore[valid-type]
-            """Append one configured Gray-walk rotation step.
-
-            Args:
-                state (qm.Q[qm.Bits[total_width]]): Owned complete state.
-
-            Returns:
-                qm.Q[qm.Bits[total_width]]: State after the accumulated step.
-            """
-
-            state = previous(state)
-            state = qm.ry(state, angle, target=control_width)
-            return qm.cx(state, control=control, target=control_width)
-
-        current = append_step
-    return current
+    return rotate
 
 
 def uniformly_controlled_ry_from_angles(control_width: int) -> qm.QKernel:
@@ -138,10 +117,10 @@ def uniformly_controlled_ry_from_angles(control_width: int) -> qm.QKernel:
     scalar-leaf ABI.
 
     Args:
-        control_width: Nonnegative number of leading address components.
+        control_width (int): Nonnegative number of leading address components.
 
     Returns:
-        A unitary accepting ``state`` and a runtime angle vector.
+        qm.QKernel: A unitary accepting ``state`` and a runtime angle vector.
 
     Raises:
         TypeError: If ``control_width`` is not an integer.
@@ -179,49 +158,27 @@ def uniformly_controlled_ry_from_angles(control_width: int) -> qm.QKernel:
         return rotate_one
 
     @qm.qkernel
-    def identity(
+    def rotate(
         state: qm.Q[qm.Bits[total_width]],  # type: ignore[valid-type]
         angles: qm.Param[qm.Vector[qm.Real, count]],  # type: ignore[valid-type]
     ) -> qm.Q[qm.Bits[total_width]]:  # type: ignore[valid-type]
-        """Return the state unchanged while accepting runtime coordinates.
+        """Apply the runtime rotations in cyclic Gray order.
 
         Args:
-            state (qm.Q[qm.Bits[total_width]]): Owned complete state.
-            angles (qm.Param[qm.Vector[qm.Real, count]]): Runtime rotation
-                coordinates.
+            state (qm.Q[qm.Bits[total_width]]): Address and target register.
+            angles (qm.Param[qm.Vector[qm.Real, count]]): Rotation coordinates
+                in radians.
 
         Returns:
-            qm.Q[qm.Bits[total_width]]: Unchanged state.
+            qm.Q[qm.Bits[total_width]]: Address and rotated target.
         """
 
+        for angle, control in zip(angles, controls):
+            state = qm.ry(state, angle, target=control_width)
+            state = qm.cx(state, control=control, target=control_width)
         return state
 
-    current = identity
-    for index, control in enumerate(controls):
-        previous = current
-
-        @qm.qkernel
-        def append_step(
-            state: qm.Q[qm.Bits[total_width]],  # type: ignore[valid-type]
-            angles: qm.Param[qm.Vector[qm.Real, count]],  # type: ignore[valid-type]
-        ) -> qm.Q[qm.Bits[total_width]]:  # type: ignore[valid-type]
-            """Append one runtime Gray-walk rotation step.
-
-            Args:
-                state (qm.Q[qm.Bits[total_width]]): Owned complete state.
-                angles (qm.Param[qm.Vector[qm.Real, count]]): Runtime rotation
-                    coordinates.
-
-            Returns:
-                qm.Q[qm.Bits[total_width]]: State after the accumulated step.
-            """
-
-            state = previous(state, angles)
-            state = qm.ry(state, angles[index], target=control_width)
-            return qm.cx(state, control=control, target=control_width)
-
-        current = append_step
-    return current
+    return rotate
 
 
 def _gray_controls(width: int) -> tuple[int, ...]:

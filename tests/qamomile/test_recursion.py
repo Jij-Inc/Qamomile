@@ -365,10 +365,13 @@ def recursively_flip(state: qm.Q[qm.Bits[n]], rounds: qm.Const[qm.Int]) -> qm.Q[
     else:
         return recursively_flip(qm.x(state), rounds - 1)
 @qm.qkernel
-def sample() -> qm.Shot[qm.Bits[3]]:
-    return qm.measure(recursively_flip(qm.prepare((0, 1, 0)), 3))
+def sample(rounds: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[3]]:
+    return qm.measure(recursively_flip(qm.prepare((0, 1, 0)), rounds))
 """
-    program = qm.build_source(source).specialize("sample")
+    module = qm.build_source(source)
+    gates = qr.logical(module["sample"]).metric(qr.LOGICAL_GATES).expression
+    assert gates.evaluate({"rounds": 3}).numeric() == 9
+    program = module.specialize("sample", rounds=3)
     assert qm.run(program, on=qm.Reference(), shots=8, seed=7).result.counts == {
         (1, 0, 1): 8
     }

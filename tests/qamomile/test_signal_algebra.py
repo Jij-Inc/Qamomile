@@ -292,17 +292,17 @@ def exercise_signal_algebra_backend(*, endpoint):
         (signal_amplified_readout, {True: 4}),
     ):
         artifact = qm.compile(program, to=endpoint.target)
-        result = qm.execute(artifact, on=endpoint, shots=4, seed=0)
+        result = qm.execute(artifact, on=endpoint, shots=4, seed=None)
         assert result.values == expected
         assert estimate_success(result).probability == 1
     artifact = qm.compile(signal_interference_readout, to=endpoint.target)
-    result = qm.execute(artifact, on=endpoint, shots=4, seed=0)
+    result = qm.execute(artifact, on=endpoint, shots=4, seed=None)
     estimate = estimate_success(result, z_indices=(0,))
     assert estimate.probability == 0
     assert estimate.conditional is None
     assert (
         qm.expectation(
-            signal_algebra_expectation_state, qm.Z(1), on=endpoint, shots=4, seed=0
+            signal_algebra_expectation_state, qm.Z(1), on=endpoint, shots=4, seed=None
         ).value
         == -1
     )

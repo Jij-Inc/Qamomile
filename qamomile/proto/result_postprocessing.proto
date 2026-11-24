@@ -31,6 +31,12 @@ message CircuitResultApplyProto {
   repeated uint32 operands = 4;
 }
 
+message CircuitResultIndexedProto {
+  uint32 index = 1;
+  repeated uint32 elements = 2;
+  CircuitResultScalarTypeProto type = 3;
+}
+
 message CircuitResultScalarProto {
   oneof node {
     bool bool_value = 1;
@@ -39,6 +45,8 @@ message CircuitResultScalarProto {
     uint64 measurement = 4;
     CircuitResultParameterProto parameter = 5;
     CircuitResultApplyProto apply = 6;
+    bool current_shot = 7;
+    CircuitResultIndexedProto indexed = 8;
   }
 }
 
@@ -71,4 +79,20 @@ message CircuitResultPostprocessingProto {
   uint64 measurement_count = 3;
   repeated CircuitResultScalarProto scalars = 4;
   CircuitResultValueProto result = 5;
+}
+
+message ShotBindingSlotProto {
+  uint32 arena = 1;
+  uint32 root = 2;
+}
+
+message ShotCircuitTemplateProto {
+  uint32 schema_major = 1;
+  repeated CircuitResultPostprocessingProto arenas = 2;
+  repeated ShotBindingSlotProto slots = 3;
+  bytes result_plan = 4;
+  bytes parameter_abi = 5;
+  bytes result_abi = 6;
+  string target_fingerprint = 7;
+  string source_digest = 8;
 }

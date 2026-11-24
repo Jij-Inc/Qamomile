@@ -19,22 +19,28 @@
 #
 # # 組合せ多項式二値最適化のためのGrover適応探索
 #
-# Grover適応探索（GAS）は、二値変数上の多項式目的関数を最小化する手法です。Groverオラクルに「どの $x$ が $f(x) < y$ を満たすか」という1つの問いを繰り返し投げ、より良い解が見つかるたびに閾値 $y$ を下げていきます {cite:p}`10.22331/q-2021-04-08-428`。
+# このチュートリアルでは、Grover適応探索（Grover Adaptive Search、GAS）で小さな**ポートフォリオ選択**問題を解きます。9つの資産のそれぞれについて買うかどうかを決め、リスクと期待リターンを組み合わせたコストをできるだけ小さくします。コストは二値変数の多項式で、制約はありません。
 #
-# このページでは、Qamomileのimmutableな`BinaryModel`と`GASExperiment`を使って制約なしの**ポートフォリオ選択**問題を解きます。
+# GASは、1つのステップを繰り返して、このようなコストの最小値を探します（[Gilliam, Woerner and Gonciulea, Quantum 5, 428 (2021)](https://doi.org/10.22331/q-2021-04-08-428)）。GASは閾値$y$を保持します。これは、それまでに見つかった最小のコストです。Groverの探索アルゴリズムを用いてどの割り当てによるコストが$y$より小さいかという問いを繰り返し投げます。測定でコストが$y$より小さい割り当てが得られると、そのコストが新しい閾値になります。古典的なループが、閾値が改善しなくなるまでこれを繰り返します。
 #
-# このチュートリアルは次の構成で進めます。
+# このチュートリアルは次の手順で進みます。
 #
-# 1. 多項式目的関数を`BinaryModel`として定式化します。
-# 2. 具体的なデータから9資産のインスタンスを作成します。
-# 3. `GASExperiment`で現在の閾値に対応するGrover回路を構築します。
-# 4. サンプリングして最良の候補を保持し、停止条件を満たすまで繰り返します。GASは単一の回路ではなくハイブリッドなループです。
+# 1. コストを`BinaryModel`として書き、すべての割り当てを試して厳密な最小値を求めます。
+# 2. Qamomileの`GASExperiment`で、閾値を固定した1ラウンド分の回路を作ります。
+# 3. 1ラウンドを実行し、そのサンプルをGroverのアルゴリズムの予測と比べます。
+# 4. 閾値を下げていく古典的なループを書き、その結果を厳密な最小値と比べます。
+#
+# **前提知識**: Groverのアルゴリズムと[`BinaryModel`の使い方](../usage/binary_model.ipynb)。
+
+# %% [markdown]
+# ## インストール
 
 # %%
-# 最新のQamomileをpipでインストールしましょう！
-# # !pip install "qamomile[qiskit]"
+# 最新のQamomileをpipからインストールします！
+# # !pip install qamomile
 
 # %%
+import functools
 import itertools
 import math
 import os
@@ -43,55 +49,28 @@ import numpy as np
 
 import qamomile as qm
 from qamomile.optimization import BinaryModel, GASExperiment
-from qamomile.qiskit import Aer
-from qamomile.stdlib import grover_iteration_count
 
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 # %% [markdown]
-# ## 背景
-#
-# Grover探索は、目的の状態の位相を反転させて区別するオラクルを受け取り、振幅増幅によってその測定確率を高めます。これは判定問題を解く手続きです。固定された判定条件はどの状態が条件を満たすかを示すだけで、どれが最良かは示しません。
-#
-# GASは判定条件を変更することで、これを最小化に応用します。$f(x) < y$ を満たす候補に対応する量子状態の位相を反転させて区別し、候補をサンプリングします。候補の目的関数値が現在の閾値を下回る場合、古典レイヤーが $y$ をその値に更新します。量子回路が一度に1つの固定された問いに答え、古典レイヤーが閾値を更新するという処理を繰り返します。
-
-
-# %% [markdown]
 # ## 問題設定
 #
-# このチュートリアルでは、GASを適用する問題例としてポートフォリオ選択問題を扱います。
+# ### 問題の定義
 #
-# $n$ 個の資産（株式、債券など）があり、それぞれを購入するかどうかという二値の選択をします。リターンを最大化しつつリスクを最小化したいのですが、次のような対立があります。
+# $n$個の資産のそれぞれについて、買うかどうかを決めます。資産$i$を買うなら$x_i = 1$、買わないなら$x_i = 0$です。*割り当て*$\boldsymbol{x} = (x_0, \dots, x_{n-1})$は、1つのポートフォリオを表します。ベクトル$\boldsymbol{\mu}$は各資産の期待リターンを並べたもので、行列$\Sigma$はリターンの共分散行列です。次の*コスト*が最小になる割り当てを探します。
 #
-# - $\mu$ は各資産に期待される収益性を表します
-# - $\Sigma$ は資産同士の連動の仕方を表します（相関のある資産はリスクを増幅させます）
-# - $q$ はリターンに対してリスクをどれだけ重視するかを制御します
+# $$
+# f(\boldsymbol{x}) = q\,\boldsymbol{x}^{\mathsf T}\Sigma\,\boldsymbol{x} - \boldsymbol{\mu}^{\mathsf T}\boldsymbol{x}
+# $$
 #
-# 相関リスクを過度に負うことなく、できるだけ大きな収益を得られる資産の部分集合を選ぶ必要があります。
-#
-# \begin{equation}
-# \min_{x\in \lbrace 0 , 1 \rbrace^n} \big( q x^T \Sigma x - \mu^T x \big)
-# \end{equation}
-
+# 第1項は、ポートフォリオのリターンの分散に*リスク回避度*$q \ge 0$を掛けたものです。分散はリスクの大きさを表し、$q$は期待リターンに比べてリスクにどれだけ強いペナルティを課すかを表します。第2項はポートフォリオの期待リターンです。制約はなく、$2^n$通りの割り当てのすべてが許されます。
 
 # %% [markdown]
-# 以下のインスタンスは9個の資産を持ちます。
+# ### 使用するインスタンス
 #
-# | 名前     | 期待収益 | 分散       |
-# |---------|-----------------|------------|
-# | 資産1 | 22              | 12         |
-# | 資産2 | 4               | 15         |
-# | 資産3 | 19              | 10         |
-# | 資産4 | 3               | 18         |
-# | 資産5 | 23              | 14         |
-# | 資産6 | 2               | 20         |
-# | 資産7 | 5               | 11         |
-# | 資産8 | 25              | 16         |
-# | 資産9 | 3               | 13         |
-
-
-# %% [markdown]
-# 以下の係数表から、同じimmutableなbinary modelを直接構築します。
+# インスタンスは$n = 9$個の資産と$q = 1$からなります。下のコードの配列`expected_returns`と`covariance`が、$\boldsymbol{\mu}$と$\Sigma$です。
+#
+# `BinaryModel.from_hubo`は、二値変数の多項式を、項ごとに1つのエントリを持つ辞書として受け取ります。キーは、その項で掛け合わされる変数の添字のタプルで、値はその項の係数です。$x_i^2 = x_i$であり$\Sigma$は対称なので、このコストは、資産ごとの項$(q\,\Sigma_{ii} - \mu_i)\,x_i$と、ペア$i < j$ごとの項$2q\,\Sigma_{ij}\,x_i x_j$からなります。たとえば、資産0の項は$(12 - 22)\,x_0 = -10\,x_0$で、エントリは`(0,): -10.0`です。資産0と1の項は$2 \times (-3)\,x_0 x_1 = -6\,x_0 x_1$で、エントリは`(0, 1): -6.0`です。`BinaryModel`では、割り当てのコストを*エネルギー*と呼びます。
 
 # %%
 expected_returns = np.array([22, 4, 19, 3, 23, 2, 5, 25, 3], dtype=int)
@@ -109,274 +88,240 @@ covariance = np.array(
     ],
     dtype=int,
 )
-risk_aversion = 1
+RISK_AVERSION = 1
+
+NUM_ASSETS = 3 if docs_test_mode else 9
 
 
 def portfolio_model(num_assets: int) -> BinaryModel:
-    terms: dict[tuple[int, ...], float] = {}
-    for left in range(num_assets):
-        terms[(left,)] = float(
-            risk_aversion * covariance[left, left] - expected_returns[left]
-        )
-        for right in range(left + 1, num_assets):
-            coefficient = float(2 * risk_aversion * covariance[left, right])
-            if coefficient:
-                terms[(left, right)] = coefficient
+    """Build the cost of the first `num_assets` assets as a `BinaryModel`."""
+    terms = {}
+    for i in range(num_assets):
+        # x_i * x_i = x_iなので、資産iの分散は1次の項に入ります。
+        terms[(i,)] = float(RISK_AVERSION * covariance[i, i] - expected_returns[i])
+        for j in range(i + 1, num_assets):
+            # 行列は対称なので、ペア(i, j)と(j, i)から係数2が出ます。
+            coefficient = float(2 * RISK_AVERSION * covariance[i, j])
+            if coefficient != 0:
+                terms[(i, j)] = coefficient
     return BinaryModel.from_hubo(terms, variables=tuple(range(num_assets)))
 
 
-full_model = portfolio_model(9)
-MODEL_ASSETS = 3 if docs_test_mode else 9
-model = portfolio_model(MODEL_ASSETS)
+model = portfolio_model(NUM_ASSETS)
 
-assert full_model.num_variables == 9
-assert model.num_variables == MODEL_ASSETS
+print(f"Number of assets: {model.num_variables}")
+assert model.num_variables == NUM_ASSETS
 
-energies = {
-    bits: model.energy(bits)
-    for bits in itertools.product((0, 1), repeat=model.num_variables)
+# %% [markdown]
+# ### 厳密解（全探索）
+#
+# 資産が9個なら割り当ては$2^9 = 512$通りしかないので、すべての割り当てのコストを計算できます。これで厳密な最小値が求まり、GASの結果を比べる基準になります。`model.energy(bits)`は割り当てのコストを返します。
+
+# %%
+# すべての割り当てのコストを計算します。
+costs = {
+    bits: model.energy(bits) for bits in itertools.product((0, 1), repeat=NUM_ASSETS)
 }
-optimal_bits, optimal_energy = min(energies.items(), key=lambda item: item[1])
 
-print("exact optimum:", optimal_bits, optimal_energy)
-assert optimal_bits == ((1, 0, 1) if docs_test_mode else (1, 0, 0, 0, 1, 0, 0, 1, 0))
-assert optimal_energy == (-11.0 if docs_test_mode else -28.0)
+# 最小のコストと、それを達成するすべての割り当てを求めます。
+min_cost = min(costs.values())
+optimal_assignments = [bits for bits, cost in costs.items() if cost == min_cost]
 
-full_energies = {
-    bits: full_model.energy(bits)
-    for bits in itertools.product((0, 1), repeat=full_model.num_variables)
-}
-full_optimal_bits, full_optimal_energy = min(
-    full_energies.items(), key=lambda item: item[1]
-)
-print("nine-asset exact optimum:", full_optimal_bits, full_optimal_energy)
-assert full_optimal_bits == (1, 0, 0, 0, 1, 0, 0, 1, 0)
-assert full_optimal_energy == -28.0
+print(f"Number of assignments: {len(costs)}")
+print(f"Smallest cost: {min_cost}")
+for bits in optimal_assignments:
+    print(f"Optimal assignment: {bits}")
+print(f"Largest cost: {max(costs.values())}")
+
+if not docs_test_mode:
+    assert min_cost == -28.0
+    assert optimal_assignments == [(1, 0, 0, 0, 1, 0, 0, 1, 0)]
+
+# %% [markdown]
+# 最小のコスト$-28$を達成するポートフォリオは、資産0、4、7の組だけです。この組では、分散が$12 + 14 + 16 + 2 \times (-2 + 2 + 0) = 42$、期待リターンが$22 + 23 + 25 = 70$なので、コストは$42 - 70 = -28$です。コストは$-28$から$94$までの値をとります。何も買わない割り当て、つまりすべてが0の割り当てのコストは0です。
 
 # %% [markdown]
 # ## アルゴリズム
 #
-# GASでは、候補解の目的関数値を閾値 $y$ として設定し、それを下回る候補をGrover探索で探します。量子回路から得られた候補を古典計算で評価し、より良い候補が見つかれば閾値を更新するという処理を、停止条件を満たすまで繰り返します。ここでの $y$ は候補解ではなく、目的関数値に対する閾値です。GASは、判定条件 $f(x) < y$ を満たす候補に対応する量子状態の位相を反転させ、ほかの候補と区別します。Groverアンザッツは次の3つの要素から構成されます。
-#
-# - $A_y$：準備演算子です。量子辞書の状態 $\sum_x \ket{x, f(x) - y}$ を構築することで、各入力に $f(x) - y$ を対応付けます。回路実装は {cite:p}`10.22331/q-2021-04-08-428` により、QFTを用いる方法で与えられています。レジスタは $f(x) - y$ を2の補数で保持するため、判定条件を満たす候補は、最上位ビット（MSB）が $1$ になるものとして識別できます。
-# - $O_y$：位相オラクルです。判定条件 $f(x) < y$ を満たす候補の位相を反転させます。符号化された値 $f(x) - y$ が負かどうかは最上位ビット（MSB）で判別できるため、そのMSBに作用する1つの $Z$ ゲートで実装できます。
-# - $D$：拡散演算子で、位相を反転させて区別した状態の振幅を増幅します。$X$ 層に挟まれた1つの多重制御 $Z$ ゲートで構成されます。
-#
-# 1回の反復では $O_y$ を適用し、続いて $A_y^\dagger$、$D$、$A_y$ を適用します。位相反転 $O_y$ だけでは測定確率は変わりません。それを振幅へ変換するのが反射 $A_y D A_y^\dagger$ です。入力レジスタの測定で得られた候補を古典レイヤーで評価し、その目的関数値が現在の閾値を下回る場合にのみ、$y$ をその値に更新します。
-#
-# 残る問題は、Grover演算子を何回適用するかです。GASはこれに対して、改善が得られなかったラウンドのたびに少しずつ広がる範囲から繰り返し回数をサンプリングすることで答えます。
-
+# GASは、目標が動いていくGroverのアルゴリズムです。閾値$y$、つまりそれまでに見つかった最良の割り当てのコストを保持し、Groverのアルゴリズムで$f(\boldsymbol{x}) < y$を満たす割り当てを探します。見つかると、その割り当てのコストが新しい閾値になります。この節は、Groverのアルゴリズムを知っていることを前提に、GASがそこに加えるものを説明します。
 
 # %% [markdown]
-# ## 1回の固定閾値ラウンドの構築
+# ### GASが使うGroverのアルゴリズムの要素
 #
-# 現在の古典的な候補のenergyが$-10$だとします。次のオラクルは$f(x) < -10$を満たす割り当てをmarkします。documentation testでは3資産の厳密解だけがこの条件を満たします。通常実行では元の9資産問題に同じ固定閾値ラウンドを適用します。
+# $N = 2^n$通りの割り当てのうち、$M$個がある条件を満たすとします。Groverのアルゴリズムは、一様な重ね合わせから始めて、1回の*反復*を繰り返します。反復は、条件を満たすすべての割り当ての振幅の符号を変える*オラクル*と、それに続く開始状態についての反射からなります。$r$回の反復のあと、測定で条件を満たす割り当てが得られる確率は次のとおりです（[Boyer, Brassard, Høyer and Tapp, arXiv:quant-ph/9605034](https://doi.org/10.48550/arXiv.quant-ph/9605034)）。
 #
-# `GASExperiment`はhost側のexperiment境界であり、2つ目の量子decoratorではありません。modelと閾値をverified `Program`へ閉じます。回路は通常のQamomile合成と可逆整数算術だけで構成され、GAS専用のIR演算やbackend実装はありません。
+# $$
+# P_r = \sin^2\big((2r+1)\,\theta\big), \qquad \sin^2\theta = M/N
+# $$
+#
+# $r$を増やすと、この確率は上がったあと再び下がるので、最適な反復回数は$M$によって決まります。
+
+# %% [markdown]
+# ### $f(\boldsymbol{x}) < y$のオラクル
+#
+# 回路には2つのレジスタがあります。割り当てを表す$n$個の*決定量子ビット*と、整数を2の補数で保持する*値レジスタ*です。準備の操作$A_y$は、決定量子ビットを一様な重ね合わせにし、値レジスタに$f(\boldsymbol{x}) - y$を書き込みます（[Gilliam, Woerner and Gonciulea, Quantum 5, 428 (2021)](https://doi.org/10.22331/q-2021-04-08-428)）。
+#
+# $$
+# A_y\,|0\rangle = \frac{1}{\sqrt{N}} \sum_{\boldsymbol{x}} |\boldsymbol{x}\rangle\,|f(\boldsymbol{x}) - y\rangle
+# $$
+#
+# 2の補数では、値レジスタの最上位の量子ビットは、負の数のとき、つまり$f(\boldsymbol{x}) < y$のときに限って1になります。したがって、オラクルはこの量子ビットへの$Z$ゲート1つです。開始状態についての反射の代わりに、回路は$A_y D_0 A_y^\dagger$を適用します。ここで$D_0$は、すべての決定量子ビットが状態$|0\rangle$にあるとき振幅に$-1$を掛け、それ以外では何もしません。この積は因子$-1$を除いて反射に等しく、この因子は確率を変えません。
+#
+# 値レジスタには、すべての$f(\boldsymbol{x}) - y$を保持できる幅が必要です。幅が足りないと、値が折り返して符号が誤ります。`GASExperiment`は係数から幅を決めます。
+
+# %% [markdown]
+# ### 適応ループ
+#
+# 1回の*ラウンド*では、現在の閾値と反復回数$r$で回路を実行し、決定量子ビットを測定します。古典的なループは次のとおりです。
+#
+# 1. ある割り当て$\boldsymbol{x}$から始め、$y = f(\boldsymbol{x})$とします。
+# 2. $r$を選び、閾値$y$でGrover反復を$r$回行い、最後に決定量子ビットを測定します。
+# 3. 測定で得た割り当てのコストが$y$より小さければ、それを新しい$\boldsymbol{x}$とし、そのコストを新しい$y$とします。
+# 4. 手順2から繰り返し、コストを更新できないラウンドが所定の回数続いたら終了します。
+#
+# 閾値より下にある割り当ての数$M$は未知で、$y$とともに変わるので、固定した$r$ではうまくいきません。Gilliamらにならい、ループは$r$を$0, \dots, \lceil k \rceil - 1$から一様に選びます。最初は$k = 1$です。改善のなかったラウンドのあとは$k$に因子$\lambda > 1$を掛け、改善があれば$k$を1に戻します。最小値では条件を満たす割り当てがなく、どのラウンドも改善できません。そのため、改善のないラウンドが決まった回数だけ続いたら、ループを止めます。結果はそれまでに見た最良の割り当てであり、最適であるという証明はありません。
+
+# %% [markdown]
+# ## Qamomileによる実装
+#
+# ### 1ラウンドの構築
+#
+# `GASExperiment`は、モデル、閾値、反復回数から、1ラウンド分のプログラムを作ります。プログラムは、準備の操作$A_y$、`iterations`回のオラクルと反射、そして測定からなります。ここでは閾値を$y = 0$とし、反復を1回にします。何も買わないときのコストは$f(0, \dots, 0) = 0$なので、このラウンドは、何も買わないよりも良いポートフォリオを探します。
 
 # %%
-threshold = -10.0
-experiment = GASExperiment(
-    model,
-    threshold=threshold,
-    iterations=1,
-)
+# 何も買わないときのコストです。
+threshold = 0.0
+experiment = GASExperiment(model, threshold=threshold, iterations=1)
 
-print("output bits:", experiment.resolved_output_bits)
-print("program digest:", experiment.program.semantic_digest)
+print(f"Decision qubits: {model.num_variables}")
+print(f"Value register qubits: {experiment.resolved_output_bits}")
 
-inspection = experiment.program.inspect()
-assert "quantum.gas" not in inspection
-assert "qcore.control_call" in inspection
+# プログラム全体の量子ビット数を、実行せずに数えます。
+study = qm.resources.logical(experiment.program)
+num_qubits, _ = study.metric(qm.resources.LOGICAL_PEAK_QUBITS).numeric_enclosure()
+print(f"Qubits of one round: {num_qubits}")
 
 # %% [markdown]
-# ### 振幅増幅scalingの再現
+# 1ラウンドは18個の量子ビットを使います。内訳は、決定量子ビットが9個、値レジスタの量子ビットが9個です。`qm.resources.logical`は、プログラムを実行せずにこの数を読み取ります（[リソース推定](../tutorial/04_resource_estimation.ipynb)を参照）。反復回数を変えても、この数は変わりません。
 #
-# [](https://doi.org/10.48550/arXiv.2310.03011)のSection 14.1は、初期成功振幅
-# $a$に対して$m=O(a^{-1})$回のGrover iterationを与えます。$N=2^n$個のうち
-# 1個がmarked itemなら$a=N^{-1/2}$なので$m=O(\sqrt N)$です。Qamomileの
-# bounded plannerはfloating-point overflowなしに通常の
-# $\lfloor(\pi/4)\sqrt{2^n}\rfloor$を返します。
-
-# %%
-grover_plans = {width: grover_iteration_count(width) for width in range(2, 11)}
-for width, iterations in grover_plans.items():
-    assert iterations == math.floor((math.pi / 4.0) * math.sqrt(2**width))
-
-print("Grover plans (n: iterations):", grover_plans)
+# :::{note}
+# ここでは係数が整数なので、値レジスタはすべての$f(\boldsymbol{x}) - y$を正確に保持します。係数が実数の場合、`GASExperiment`はモデルと閾値をまとめて量子化し、その結果を`effective_model`と`quantization_scale`として公開します。
+# :::
 
 # %% [markdown]
-# 固定したGAS thresholdでは、state preparation、oracle、inverse、reflectionから
-# なるbody全体をGrover iterationごとに1回繰り返します。compilerはこのbodyから
-# exactなsemantic workを導出します。controlled coherent-arithmetic transformには
-# 完全なlogical gate profileがまだないため、gate-familyの上限は意図的にopenです。
-# `GASExperiment`は意図的にclosed programを公開するため、2つのendpoint studyから
-# affineな切片と傾きを求めます。残りの表示rowは算術であり、compiler解析の繰り返し
-# ではありません。
-
-# %%
-gas_endpoint_studies = tuple(
-    qm.resources.logical(
-        GASExperiment(model, threshold=threshold, iterations=iterations).program
-    )
-    for iterations in (0, 1)
-)
-gas_endpoint_work = tuple(
-    study.metric(qm.resources.LOGICAL_WORK).numeric_enclosure()
-    for study in gas_endpoint_studies
-)
-gas_endpoint_gate_bounds = tuple(
-    study.metric(qm.resources.LOGICAL_GATES).numeric_enclosure()
-    for study in gas_endpoint_studies
-)
-
-assert all(lower == upper for lower, upper in gas_endpoint_work)
-assert all(upper is None for _, upper in gas_endpoint_gate_bounds)
-work_base = gas_endpoint_work[0][0]
-work_step = gas_endpoint_work[1][0] - work_base
-gate_base = gas_endpoint_gate_bounds[0][0]
-gate_step = gas_endpoint_gate_bounds[1][0] - gate_base
-gas_work = tuple(
-    (work_base + iterations * work_step, work_base + iterations * work_step)
-    for iterations in range(4)
-)
-gas_gate_bounds = tuple(
-    (gate_base + iterations * gate_step, None) for iterations in range(4)
-)
-
-print("GAS semantic work for 0..3 iterations:", gas_work)
-print("GAS logical-gate bounds for 0..3 iterations:", gas_gate_bounds)
-
-# %% [markdown]
-# loop構造により、この具体的Grover bodyのcostは$m$についてaffineであり、2つの
-# studyがその有限係数を与えます。$m=\Theta(\sqrt N)$と合成するとサーベイのquery
-# scalingを再現します。部分的な
-# gate enclosureも重要なevidenceです。Qamomileは欠けているtransform profileを
-# name付きで報告し、zeroやexactなtarget gate countとして扱いません。
-
-# %% [markdown]
-# 整数係数は厳密にencodeされます。実数係数を使う場合、`GASExperiment`はmodel全体と閾値を同じscaleで量子化し、`effective_model`と`quantization_scale`を公開します。非整数算術を拒否するには`approximate_real_coefficients=False`を指定します。通常、`output_bits`は安全な2の補数範囲から推論されます。明示したregister幅が不足する場合、暗黙にwrapせずエラーになります。
-
-# %% [markdown]
-# ## 1度コンパイルしてsampling
+# ### コンパイルと実行
 #
-# このexperimentはほかのQamomileプログラムと同じlifecycleを使います。closed programをendpointのtarget向けにコンパイルし、そのartifactを再利用します。documentation testでは組み込みReference endpointを使い、通常実行では元のtutorialと同じくlocal Qiskit Aerを使います。
+# ここでは、Qamomile組み込みのシミュレータ`qm.Reference()`を量子コンピュータの代わりに使います。このエンジン向けにプログラムをコンパイルし、1*ショット*だけ実行します。1ショットでは、回路を1回準備して1回測定し、割り当てが1つ得られます。
 
 # %%
-endpoint = qm.Reference() if docs_test_mode else Aer()
+endpoint = qm.Reference()
+
 compiled = experiment.compile(to=endpoint.target)
-shots = 32 if docs_test_mode else 256
-run = compiled.run(on=endpoint, shots=shots, seed=7)
+run = compiled.run(on=endpoint, shots=1, seed=7)
 
-for sample in run.samples.samples:
-    print(sample.assignment, sample.energy, sample.occurrences)
-
-best = run.samples.lowest
-assert best.assignment == tuple(enumerate(optimal_bits))
-assert best.energy == optimal_energy
-if docs_test_mode:
-    assert best.occurrences > shots * 0.75
-assert run.execution.artifact is compiled.artifact
-assert run.identity == compiled.identity == experiment.identity
+sample = run.samples.lowest
+bits = tuple(bit for _, bit in sample.assignment)
+print(f"Measured assignment: {bits}")
+print(f"Cost: {sample.energy}")
 
 # %% [markdown]
-# `run.samples`は型付きの`DecodedSamples`値です。元の変数ID、目的関数値、出現回数を保持し、backend adapterが最適化modelを再解釈することはありません。
-#
-# 振幅増幅の効果を確認するため、同じ閾値でGrover反復を0回にした結果と比較します。このプログラムはdecision registerを一様重ね合わせにしますが、振幅増幅は行いません。
-
-# %%
-baseline = GASExperiment(model, threshold=threshold, iterations=0).run(
-    on=endpoint,
-    shots=shots,
-    seed=7,
-)
-
-baseline_optimum_count = next(
-    (
-        sample.occurrences
-        for sample in baseline.samples.samples
-        if sample.assignment == best.assignment
-    ),
-    0,
-)
-
-print("uniform optimum count:", baseline_optimum_count)
-print("amplified optimum count:", best.occurrences)
-assert best.occurrences > baseline_optimum_count
+# `run.samples`は、測定された割り当てを保持します。1ショットではサンプルは1つで、`run.samples.lowest`がそれを返します。サンプルの`assignment`は各変数とその値の組で、`energy`はその割り当てのコストです。
 
 # %% [markdown]
-# ## 適応的な外側のループ
+# ## 結果
 #
-# GASが適応的なのは、samplingした各ラウンドの後でhostが新しい閾値を選ぶためです。一般的なループは次の手順で進みます。
+# ### 閾値を固定した1ラウンド
 #
-# 1. 現在の古典的な候補を評価し、そのenergyを`threshold`に使います。
-# 2. boundedなGrover反復回数を選びます。
-# 3. 対応するimmutableな`GASExperiment`を作成してコンパイルします。
-# 4. samplingし、`run.samples.lowest`を確認します。候補が改善した場合だけ閾値を下げます。
-#
-# 閾値と反復回数は回路構造を変えるため、launch時の`Param`値ではなく明示的なexperiment設定です。1回のラウンド内では、生成したartifactを再利用でき、厳密なproblem/program identityを保持します。
-
+# $y = 0$では、512通りの割り当てのうち104個のコストが閾値より小さくなります。反復回数0、1、2のそれぞれについて、1ショットのラウンドを256回繰り返し、閾値より下になったラウンドの割合を$P_r$と比べます。閾値と反復回数が変わると回路が変わるので、その組み合わせごとにコンパイル済みのプログラムが必要です。`compiled_round`は、それぞれを1回だけ作って使い回します。
 
 # %%
-def adaptive_search(
-    binary_model: BinaryModel,
-    *,
-    initial_threshold: float,
-    max_rounds: int,
-    shots_per_round: int,
-) -> tuple[tuple[tuple[int, int], ...], float, tuple[float, ...]]:
-    threshold = initial_threshold
-    best_assignment = tuple((index, 0) for index in range(binary_model.num_variables))
-    history = [threshold]
-
-    for round_index in range(max_rounds):
-        round_experiment = GASExperiment(
-            binary_model,
-            threshold=threshold,
-            iterations=1,
-        )
-        round_result = round_experiment.run(
-            on=endpoint,
-            shots=shots_per_round,
-            seed=11 + round_index,
-        )
-        candidate = round_result.samples.lowest
-        if candidate.energy < threshold:
-            threshold = candidate.energy
-            best_assignment = candidate.assignment
-        history.append(threshold)
-        if threshold == optimal_energy:
-            break
-
-    return best_assignment, threshold, tuple(history)
+NUM_ROUNDS = 4 if docs_test_mode else 256
 
 
-adaptive_assignment, adaptive_energy, threshold_history = adaptive_search(
-    model,
-    initial_threshold=0.0,
-    max_rounds=4,
-    shots_per_round=shots,
-)
+@functools.cache
+def compiled_round(threshold: float, iterations: int):
+    """Compile the round for one threshold and one number of iterations."""
+    round_experiment = GASExperiment(model, threshold=threshold, iterations=iterations)
+    return round_experiment.compile(to=endpoint.target)
 
-print("threshold history:", threshold_history)
-assert adaptive_assignment == tuple(enumerate(optimal_bits))
-assert adaptive_energy == optimal_energy
-assert all(
-    next_threshold <= current_threshold
-    for current_threshold, next_threshold in zip(
-        threshold_history,
-        threshold_history[1:],
+
+def run_round(threshold: float, iterations: int, seed: int):
+    """Run one round with one shot and return the measured assignment and its cost."""
+    run = compiled_round(threshold, iterations).run(on=endpoint, shots=1, seed=seed)
+    sample = run.samples.lowest
+    return tuple(bit for _, bit in sample.assignment), sample.energy
+
+
+num_marked = sum(cost < threshold for cost in costs.values())
+theta = math.asin(math.sqrt(num_marked / len(costs)))
+
+for iterations in range(3):
+    measured = [run_round(threshold, iterations, seed)[1] for seed in range(NUM_ROUNDS)]
+    below = sum(cost < threshold for cost in measured)
+    predicted = math.sin((2 * iterations + 1) * theta) ** 2
+    print(
+        f"r = {iterations}: {below} of {NUM_ROUNDS} rounds below the threshold, "
+        f"share {below / NUM_ROUNDS:.3f}, predicted {predicted:.3f}"
     )
-)
+    if not docs_test_mode:
+        assert abs(below / NUM_ROUNDS - predicted) < 0.1
 
 # %% [markdown]
-# 実行したsearchは厳密解へ到達し、単調非増加の閾値履歴を記録します。通常実行では元の9資産の定式化を全体で使い、documentation testだけがmodel幅と実行budgetを縮小します。
+# 反復なしのラウンドは割り当てをランダムに選ぶのと同じで、閾値より下になったラウンドの割合は0.215です。反復が1回だと割合は0.965に上がり、2回だと0.559に下がります。これは$P_r$の予測どおりです。最適な反復回数は、閾値より下にある割り当ての数で決まりますが、ループはその数を知りません。
+
+# %% [markdown]
+# ### 適応ループの実行
+#
+# 次に、アルゴリズムの節のループを実行します。各ラウンドは`run_round`の1回の呼び出しです。ループは何も買わない割り当てから始め、反復回数をランダムに選び、改善のないラウンドが`MAX_FAILURES`回続いたら止まります。
+
+# %%
+GROWTH = 1.2  # 改善のなかったラウンドのあとに範囲へ掛ける因子λです。
+MAX_FAILURES = 2 if docs_test_mode else 20
+
+
+def adaptive_search(seed: int):
+    """Run the adaptive loop and return the best assignment, its cost and the history."""
+    rng = np.random.default_rng(seed)
+    best_bits = (0,) * NUM_ASSETS  # 何も買わない割り当てから始めます。
+    threshold = model.energy(best_bits)
+    k, failures, rounds = 1.0, 0, 0
+    history = []
+
+    while failures < MAX_FAILURES:
+        rounds += 1
+        # 反復回数を0, ..., ceil(k) - 1から一様に選びます。
+        iterations = int(rng.integers(math.ceil(k)))
+        bits, cost = run_round(threshold, iterations, seed=int(rng.integers(2**31)))
+        if cost < threshold:
+            best_bits, threshold = bits, cost
+            history.append((rounds, iterations, threshold))
+            k, failures = 1.0, 0
+        else:
+            k *= GROWTH
+            failures += 1
+
+    return best_bits, threshold, history, rounds
+
+
+best_bits, best_cost, history, num_rounds = adaptive_search(seed=0)
+
+for round_number, iterations, new_threshold in history:
+    print(f"Round {round_number}: r = {iterations}, new threshold {new_threshold}")
+print(f"Stopped after {num_rounds} rounds")
+print(f"Best assignment: {best_bits}, cost {best_cost}")
+
+assert best_cost == model.energy(best_bits)
+if not docs_test_mode:
+    assert best_cost == min_cost
+
+# %% [markdown]
+# 閾値は0から$-4$、$-11$、$-13$、$-16$、$-24$、$-25$と下がり、50ラウンド目に$-28$に達します。続く20ラウンドでは改善がなく、70ラウンド目でループが止まります。結果は、唯一の最適な割り当てです。ループは厳密な最小値を使っておらず、最後に比べているだけです。実行によっては、最小値より上で止まることもあります。`MAX_FAILURES = 20`のとき、$P_r$を使った計算では、このインスタンスの実行1,000回のうち約997回が最小値に達します。
 
 # %% [markdown]
 # ## まとめ
 #
-# このノートブックでは、次のことを行いました。
+# このチュートリアルでは、Grover適応探索でポートフォリオ選択問題を解きました。
 #
-# - 制約なしのポートフォリオ問題をGrover適応探索で解きました。量子回路が「どの $x$ が $f(x) < y$ を満たすか」に答え、古典ループがより良い候補を得たときに閾値 $y$ を更新します。
-# - GASをQamomileで実装する例を紹介しました。量子側の処理には`GASExperiment`を使います。`compile()`が現在の閾値とGrover反復回数に対応するGrover回路を構築し、`run()`がsamplingしたビット列を元の変数順へdecodeします。
-# - ポートフォリオ選択問題を例にGASを実行し、得られた目的関数値が全探索による最適値と一致することを確認しました。
+# 1. コストを`BinaryModel`として書き、すべての割り当てを試して厳密な最小値を求めました。
+# 2. `GASExperiment`で閾値を固定した1ラウンドを作り、閾値より下になるラウンドの割合が$\sin^2((2r+1)\,\theta)$に従うことを確かめました。
+# 3. 適応ループを実行しました。ループは改善のたびに閾値を下げ、反復回数をランダムに選び、厳密な最小値に達しました。

@@ -30,7 +30,9 @@ def _search_model() -> BinaryModel[VarType]:
     return BinaryModel.from_hubo({(4,): 1.0, (9,): 1.0}, variables=(4, 9))
 
 
-def exercise_gas_backend(*, endpoint: ExecutionEndpoint, seed: int = 0) -> None:
+def exercise_gas_backend(
+    *, endpoint: ExecutionEndpoint, seed: int | None = None
+) -> None:
     """Compile and execute the same closed GAS source on one endpoint.
 
     GAS exposes sampling rather than expectation-value semantics. With a
@@ -39,7 +41,7 @@ def exercise_gas_backend(*, endpoint: ExecutionEndpoint, seed: int = 0) -> None:
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Optional deterministic simulator seed.
+        seed (int | None): Explicit simulator seed or endpoint-default randomness.
 
     Raises:
         AssertionError: If compilation, execution, or source-order decoding
@@ -75,19 +77,21 @@ def test_gas_amplifies_the_only_assignment_below_threshold() -> None:
     exercise_gas_backend(endpoint=qm.Reference(), seed=4)
 
 
-def test_gas_experiment_retains_identity_and_compiled_artifact() -> None:
+@pytest.mark.parametrize("seed", (None, 0, 2))
+def test_gas_experiment_retains_identity_and_compiled_artifact(seed) -> None:
     """The high-level lifecycle remains an ordinary closed program."""
 
     experiment = GASExperiment(_search_model(), threshold=0.5, iterations=1)
     endpoint = qm.Reference()
     compiled = experiment.compile(to=endpoint.target)
-    run = compiled.run(on=endpoint, shots=4, seed=2)
+    run = compiled.run(on=endpoint, shots=4, seed=seed)
 
     assert "quantum.gas" not in experiment.program.inspect()
     assert run.execution.artifact is compiled.artifact
     assert run.identity == compiled.identity == experiment.identity
     assert run.identity.problem_digest == experiment.model.semantic_digest
     assert run.invocation.values() == {}
+    assert run.invocation.seed == seed
     with pytest.raises(TypeError, match="process-local"):
         pickle.dumps(compiled)
     restored = deserialize(serialize(compiled.artifact))

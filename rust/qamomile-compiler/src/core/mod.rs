@@ -15,6 +15,7 @@ pub(crate) mod numeric_finiteness;
 pub(crate) mod numeric_values;
 pub(crate) mod operation_catalog;
 pub(crate) mod operations;
+pub(crate) mod shot_context;
 pub(crate) mod slice_shape;
 pub(crate) mod structure;
 pub(crate) mod target_profile;

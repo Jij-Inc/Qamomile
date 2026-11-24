@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import math
 import os
 from importlib import metadata
 from pathlib import Path
@@ -38,6 +39,12 @@ def one() -> qm.Bits[1]:
     state = qm.qubits(1)
     state = qm.x(state)
     return qm.measure(state)
+
+@qm.qkernel
+def pi_rotation() -> qm.Shot[qm.Bits[1]]:
+    state = qm.qubits(1)
+    state = qm.rx(state, qm.pi)
+    return qm.measure(state)
 """
 
 
@@ -46,6 +53,7 @@ def main() -> None:
 
     expected_version = os.environ["EXPECTED_VERSION"]
     assert metadata.version("qamomile") == expected_version
+    assert qm.pi == math.pi
     try:
         metadata.distribution("qamomile-native")
     except metadata.PackageNotFoundError:
@@ -79,6 +87,9 @@ def main() -> None:
     )
     result = qm.run(program, on=qm.Reference(), shots=4, seed=7).result
     assert result.counts == {(True,): 4}
+    pi_program = qm.build_source(SOURCE).specialize("pi_rotation")
+    pi_result = qm.run(pi_program, on=qm.Reference(), shots=4, seed=7).result
+    assert pi_result.counts == {(True,): 4}
 
 
 if __name__ == "__main__":

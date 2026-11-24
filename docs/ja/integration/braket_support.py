@@ -18,37 +18,65 @@
 # tags: [integration]
 # ---
 #
-# # Amazon Braket Support
+# # Amazon Braketサポート
 #
-# QamomileはAmazon Braketをrealization境界に保ちます。ユーザーは1つの型付きQamomile programを書き、`Braket` targetがportable OpenQASM 3をemitし、`BraketLocal`が分離されたlocal-simulator workerで実行します。`BraketDevice` endpointを使うと、AWS sessionやdevice objectをQCoreへ入れずに、互換性のあるartifactをmanaged deviceへsubmitできます。
+# 2量子ビットの回路をローカルで実行し、同じ回路を[Amazon Braket](https://aws.amazon.com/jp/braket/)の実機に送信する例を紹介します{cite:p}`amazon-braket-ja`。
 #
-# このページでは、Braketのdynamic OpenQASM routeをstatic logical-circuit統合と区別するため、measurement feedbackを使います。source-levelの意味、linear ownership、resource、result shapeを所有するのは引き続きRustです。
+# :::{note}
+# このページの「対応」「非対応」は、Qamomile経由で利用できるかどうかを示します。Amazon Braketのデバイス自体の対応状況とは異なる場合があります。
+# :::
 
 # %% [markdown]
-# ## インストール
+# ## 準備
+#
+# Braket連携を含めてQamomileをインストールします。ローカルシミュレーションにはAWSの認証情報は不要です。
 #
 # ```bash
 # pip install "qamomile[braket]"
 # ```
 
 # %%
-# Install the latest Qamomile and its Amazon Braket integration through pip!
-# # !pip install "qamomile[braket]"
+# # %pip install "qamomile[braket]"
 
 # %%
+# ruff: noqa: F401 -- The hardware example uses the AWS imports.
 import math
+import os
+
+from braket.aws import AwsDevice
+from braket.devices import Devices
 
 import qamomile as qm
+from qamomile.braket import Braket, BraketDevice, BraketLocal
 
-from qamomile.persistence import deserialize, serialize
-from qamomile.braket import Braket, BraketLocal, load_openqasm
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+shots = 1 if docs_test_mode else 32
+local = BraketLocal()
 
 # %% [markdown]
-# ## Qamomileで構築する
+# ## Amazon Braketでできること
 #
-# runtime parameterはemitted Braket program内でsymbolicなまま保持されます。
-# endpointはinvocation時に値を渡すため、provider側のcompileとparameter handlingを
-# 維持しながら、1つのimmutable artifactを再利用できます。
+# ローカルシミュレーター（`BraketLocal`）でも、AWSのデバイス（`BraketDevice`）でも、同じ回路の回転角を変えて繰り返し実行できます。
+#
+# ✅は対応、✗は非対応です。デバイスによって対応が異なる場合は「機種依存」と表記します。
+#
+# | 機能 | `BraketLocal` | `BraketDevice` |
+# | --- | :---: | :---: |
+# | 実行時に回転角を指定する | ✅ | ✅ |
+# | 量子ビットを測定せずに捨てる（`qm.discard`） | ✅ | ✅ |
+# | 中間測定する（`qm.measure_z`, `qm.measure_x`, `qm.measure_y`） | ✅ | ✗ |
+# | 中間測定の結果に応じて同じ回路内で分岐する（`if`） | ✅ | ✗ |
+# | 中間測定の結果で、同じ回路内の繰り返し条件（`while`）や回数（`for`）を決める | ✗ | ✗ |
+# | 回路の途中で量子ビットをリセットして再利用する（`qm.reset`） | ✅ | ✗ |
+# | 中間測定の結果から決まる添字を使って古典配列の要素を選ぶ | ✗ | ✗ |
+# | 回路内で現在の試行番号を読む（`qm.get_current_shot`） | ✗ | ✗ |
+
+# %% [markdown]
+# ## ローカルシミュレーション
+#
+# ### 実行時に回転角を指定する
+#
+# 1つ目の量子ビットを`theta`ラジアンだけ回転させます。次にCNOTゲートを適用します。この回路では、最後に両方の量子ビットをまとめて測定します。`theta`を`qm.Param`で宣言すると、実行のたびに角度を指定できます。
 
 
 # %%
@@ -72,44 +100,68 @@ def parameterized_bell(
 
 
 # %% [markdown]
-# ## Braketへtranspileする
-#
-# `Braket` targetはportableなOpenQASM 3をemitします。terminal measurementは
-# Qamomileのresult ABIに保持され、endpointがBraketのmeasured-qubit orderを
-# 一貫してnormalizeできます。
+# `Braket()`を変換先に指定して、回路をOpenQASM 3に一度だけコンパイルします。次に`BraketLocal()`を実行先に指定し、2通りの角度で試します。`shots`は角度ごとの実行回数です。どちらの実行先でも乱数は固定できないため、`seed`は省略します。
 
 # %%
 bell_program = qm.specialize(parameterized_bell)
 bell_artifact = qm.compile(bell_program, to=Braket())
-bell_source = load_openqasm(bell_artifact)
 
-assert bell_artifact.format == "braket.openqasm3.v1"
-assert tuple(slot.name for slot in bell_artifact.parameter_abi.slots) == ("theta",)
-print(bell_source)
-assert "input float[64] p0;" in bell_source
+for theta, expected_bits in [(0.0, (0, 0)), (math.pi, (1, 1))]:
+    result = qm.run(
+        bell_artifact, on=local, parameters={"theta": theta}, shots=shots
+    ).result
+    counts = result.counts
+    print(f"theta = {theta:.3f}", counts)
+    assert counts == {expected_bits: shots}
 
 # %% [markdown]
-# ## localで実行する
+# `counts`は、測定したビットの組と、その組が出た回数を対応づけた辞書です。角度が0のときは32回とも両方が0、$\pi$のときは32回とも両方が1です。
+
+# %% [markdown]
+# ### 量子ビットを測定せずに捨てる（`qm.discard`）
 #
-# `BraketLocal`はisolated worker内でBraketのlocal simulatorを作ります。
-# 同じartifactを異なる`theta`で繰り返しinvokeできます。
+# 2つのビットが異なるかどうかだけを調べます。CNOTゲートを使うと、2つの値が等しければ0、異なれば1が最初の量子ビットに残ります。`qm.split_at()`で2つに分け、`qm.discard()`で2つ目を手放し、最初の量子ビットだけを測定します。この例の入力は`(1, 1)`なので、結果は0です。
+
 
 # %%
-bell_result = qm.run(
-    bell_artifact,
-    on=BraketLocal(),
-    parameters={"theta": math.pi},
-    shots=32,
-    seed=0,
-).result
+@qm.qkernel
+def parity_only() -> qm.Shot[qm.Bits[1]]:  # type: ignore[valid-type]
+    """Return the parity of two bits and discard the unused qubit."""
+    state = qm.prepare((1, 1))
+    state = qm.cx(state, control=1, target=0)
+    parity, unused = qm.split_at(state, 1)
+    qm.discard(unused)
+    return qm.measure(parity)
 
-assert bell_result.counts == {(1, 1): 32}
-print(bell_result.counts)
+
+parity_counts = qm.run(parity_only, on=local, shots=shots).result.counts
+print(parity_counts)
+assert parity_counts == {(0,): shots}
 
 # %% [markdown]
-# ## 型付きfeedback programを1つ書く
+# ### 中間測定する（`qm.measure_z`, `qm.measure_x`, `qm.measure_y`）
 #
-# `measure_z`はshot-time Booleanと同じaffine量子状態を返します。その後、通常のPython `if`構文で2番目の量子ビットに対する操作を選択します。両branchは所有された状態を1つだけ返します。実行時のmeasurement eventは3つですが、最後のmeasurementが返す公開resultは2 bitです。
+# 1に準備した量子ビットを`qm.measure_z(state, target=0)`で測定すると、測定値と測定後の量子ビットが返ります。その量子ビットをXゲートで反転してからもう一度測定すると、2回の測定結果は毎回`(1, 0)`になります。
+
+
+# %%
+@qm.qkernel
+def measure_then_flip() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
+    """Measure the same qubit before and after a flip."""
+    state = qm.prepare((1,))
+    before, state = qm.measure_z(state, target=0)
+    state = qm.x(state, target=0)
+    return bool(before), bool(qm.measure(state)[0])
+
+
+measurement_counts = qm.run(measure_then_flip, on=local, shots=shots).result.counts
+print(measurement_counts)
+assert measurement_counts == {(1, 0): shots}
+
+# %% [markdown]
+# ### 中間測定の結果に応じて同じ回路内で分岐する（`if`）
+#
+# まず、1つ目の量子ビットを、測ると0と1のどちらも出る状態にします。`measure_z`は測定結果のビット（`flag`）と測定後の状態を返します。`flag`が1のときだけ、初めは0だった2つ目の量子ビットを反転します。これで最後に測定する2つのビットが一致します。
 
 
 # %%
@@ -123,132 +175,63 @@ def correlated_feedback() -> qm.Shot[qm.Bits[2]]:  # type: ignore[valid-type]
 
     state = qm.qubits(2)
     state = qm.h(state, target=0)
-    flag, state = qm.measure_z(state, 0)
+    flag, state = qm.measure_z(state, target=0)
     if flag:
         state = qm.x(state, target=1)
-    else:
-        state = qm.z(state, target=1)
     return qm.measure(state)
 
 
-program = correlated_feedback.specialize()
-study = qm.resources.logical(program)
-
-assert study.metric(qm.resources.LOGICAL_GATES).numeric_enclosure() == (2, 2)
-assert study.metric(qm.resources.LOGICAL_PEAK_QUBITS).numeric_enclosure() == (2, 2)
+counts = qm.run(correlated_feedback, on=local, shots=shots).result.counts
+print(counts)
+assert set(counts) <= {(0, 0), (1, 1)}
+assert sum(counts.values()) == shots
 
 # %% [markdown]
-# ## 一度コンパイルして実行対象を保持する
+# それぞれの回数は実行するたびに変わり得ます。
+
+# %% [markdown]
+# ### 回路の途中で量子ビットをリセットして再利用する（`qm.reset`）
 #
-# `qm.compile`は、Braket OpenQASM Program、SDKオブジェクトの所有者、コンパイラが導出したABIとリソース情報を保持する`CompiledProgram`を返します。通常の実行では保存・復元を行いません。以下の`serialize`と`deserialize`は、必要な場合だけ`qamomile.persistence`で保存する例です。復元時には新しい実行対象を生成するため、Pythonオブジェクトの等値ではなくコンパイル識別子を比較します。
-
-# %%
-target = Braket()
-artifact = qm.compile(program, to=target)
-restored = deserialize(serialize(artifact))
-
-assert artifact.format == "braket.openqasm3.v1"
-assert restored.execution_identity == artifact.execution_identity
-assert artifact.execution_identity == qm.compile(program, to=target).execution_identity
-assert artifact.result_abi.width == 2
-
-# %% [markdown]
-# `load_openqasm`は明示的なinspection helperであり、別のcompilerやexecution pathではありません。非公開のfeedback measurementは`c[0]`を使い、最後の2つのmeasurementは残りのnative bitを使います。result ABIは宣言された2 bit値だけを保持し、source順序を所有します。
-
-# %%
-source = load_openqasm(restored)
-
-print(source)
-
-assert source.startswith("OPENQASM 3.0;")
-assert "bit[3] c;" in source
-assert "if (c[0])" in source
-assert "c[1] = measure" in source
-assert "c[2] = measure" in source
-
-# %% [markdown]
-# ## 分離されたlocal simulatorで実行する
-#
-# `BraketLocal`がSDK simulatorを構築するのはworker process内だけです。endpointはコンパイル済みOpenQASMを実行し、Braket nativeのq0-first resultを1回だけ正規化して、共通の型付き`SampleResult`を返します。このlocal profileはsimulator seedの再現性を約束しないため、portable seedを明示的に0にします。
-
-# %%
-record = qm.run(
-    restored,
-    on=BraketLocal(),
-    shots=32,
-    seed=0,
-)
-
-print(record.result.counts)
-
-assert record.artifact is restored
-assert sum(record.result.counts.values()) == 32
-assert set(record.result.counts) <= {(0, 0), (1, 1)}
-assert all(left == right for left, right in record.result.counts)
-
-# %% [markdown]
-# ## 同じlocal endpointでexpectation valueを評価する
-#
-# samplingはBraket専用の特別なAPIではありません。状態を返すsourceはQamomile共通のexpectation contractで評価でき、observable measurement workは同じOpenQASM targetへloweringされます。plus stateに対する$X$の厳密なexpectationは1です。
+# 最初の3つの量子ビットに`010`を用意し、隣り合う2つの値が異なるかを4つ目の量子ビットで調べます。2回のCNOTゲートで、調べる組に1があるたびに4つ目を反転します。初期値は0なので、左の`01`を調べると1になります。`qm.reset()`で0に戻してから右の`10`を調べると、こちらも1です。
 
 
 # %%
 @qm.qkernel
-def plus_state() -> qm.Q[qm.Bits[1]]:  # type: ignore[valid-type]
-    """Prepare a one-qubit plus state.
+def check_neighbors() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
+    """Use one auxiliary qubit to compare two neighboring pairs."""
+    state = qm.prepare((0, 1, 0, 0))
+    state = qm.cx(state, control=0, target=3)
+    state = qm.cx(state, control=1, target=3)
+    left, state = qm.measure_z(state, target=3)
 
-    Returns:
-        qm.Q[qm.Bits[1]]: Owned plus state.
-    """
+    data, probe = qm.split_at(state, 3)
+    probe = qm.reset(probe)
+    state = qm.concat(data, probe)
 
-    return qm.h(qm.qubits(1), target=0)
+    state = qm.cx(state, control=1, target=3)
+    state = qm.cx(state, control=2, target=3)
+    right, state = qm.measure_z(state, target=3)
+    qm.discard(state)
+    return bool(left), bool(right)
 
 
-plus_x = qm.expectation(
-    plus_state,
-    qm.X(0),
-    on=BraketLocal(),
-    shots=8,
-    seed=0,
-)
-print("<X> =", plus_x.value)
-assert plus_x.value == 1.0
+checks = qm.run(check_neighbors, on=local, shots=shots).result.counts
+print(checks)
+assert checks == {(1, 1): shots}
 
 # %% [markdown]
-# ## 互換性のあるprogramをmanaged deviceへrouteする
+# ## 実機での実行
 #
-# live deviceはendpoint内だけに残ります。`BraketDevice.target`はimmutableなdevice capabilityとcalibration snapshotをartifact fingerprintへ反映しますが、SDK object、credential、taskはpersistent program dataへ入りません。managed deviceはlocalのdynamic-control capabilityやportable seed contractを約束しません。そのためQamomileはsubmit前にcapabilityを確認し、requestを暗黙に弱めず`seed=0`を要求します。
+# ### IQM Emeraldへの送信例
+#
+# 「実行時に回転角を指定する」で定義した`bell_program`を、Amazon Braketの実機IQM Emeraldに送信する例です。送信には料金がかかるため、このノートブックでは自動実行しません。
+#
+# `qm.submit()`で回路を送信し、`job.job_id`でジョブIDを確認します。`job.result()`は実行の完了を待って結果を返します。
 #
 # ```python
-# from braket.aws import AwsDevice
-# from qamomile.braket import BraketDevice
-#
-# device = AwsDevice("your-device-arn")
-# endpoint = BraketDevice(
-#     device,
-#     poll_timeout_seconds=600,
-#     poll_interval_seconds=2,
-# )
-# job = qm.submit(your_static_program, on=endpoint, shots=100, seed=0)
-# print(job.job_id, job.status)
-# result = job.result()
-# print(result.counts)
-# job.cancel()  # best effort; the task reference remains available
+# endpoint = BraketDevice(AwsDevice(Devices.IQM.Emerald))
+# aws_artifact = qm.compile(bell_program, to=endpoint.target)
+# job = qm.submit(aws_artifact, on=endpoint, parameters={"theta": math.pi}, shots=100)
+# print(job.job_id)
+# print(job.result().counts)
 # ```
-#
-# remote submissionには設定済みAWS credentialが必要で、費用が発生する場合があるため、このページでは実行しません。local endpointとmanaged endpointは同じ`run`と型付きresult contractに従います。
-
-# %% [markdown]
-# ## 制限事項
-#
-# local OpenQASM simulatorは上で示したdynamic feedbackを受け付けます。managed deviceは固有のimmutable capability snapshotをadvertiseし、defaultの`BraketDevice` contractはdynamic branchとresetを除外するため、そのprogramはsubmission前のcapability checkで失敗します。remote taskにはAWS credentialが必要で、costが発生する場合があり、portable random seedも保証されません。device選択、polling limit、cancellation、retry policyはquantum programへ埋め込まずendpoint境界に置きます。
-
-# %% [markdown]
-# ## まとめ
-#
-# - QCoreはfeedback programの唯一のpersistentな意味であり続けます。
-# - `Braket`はSDK objectを保存せず、deterministicなOpenQASM 3をemitします。
-# - shot-time controlはBraketのemission境界でのみloweringされます。
-# - `BraketLocal`はlocal simulationを分離し、native bit順序を正規化します。
-# - `BraketDevice`はlive device、credential、task、capability snapshotをendpoint境界に保ちます。
-# - 実行ページは最大2量子ビットで、32 sampling shotsとboundedな8-shot expectation evaluationだけを使います。

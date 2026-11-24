@@ -37,7 +37,12 @@
 # %%
 from __future__ import annotations
 
+import os
+
 import qamomile as qm
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 32
 
 # %% [markdown]
 # ## Repeating Quantum Gates with `for`
@@ -73,7 +78,7 @@ chain_program = qm.specialize(hadamard_chain, width=5)
 chain_result = qm.run(
     chain_program,
     on=qm.Reference(),
-    shots=32,
+    shots=sample_shots,
     seed=5,
 ).result
 
@@ -81,7 +86,7 @@ print("Number of shots:", chain_result.shots)
 print("Measurement counts:", chain_result.counts)
 
 assert chain_result.width == 5
-assert chain_result.shots == 32
+assert chain_result.shots == sample_shots
 
 
 # %% [markdown]
@@ -137,16 +142,17 @@ assert enabled_result == (1,)
 # ## Choosing the Next Operation from a Measurement Result
 #
 # Inside a quantum kernel, you can also use a qubit’s measurement result as an `if` condition.
-# In this example, `qm.prepare(True)` prepares the first qubit in $\lvert 1 \rangle$, so measuring it returns `True`.
-# `qm.prepare(False)` prepares the target qubit in $\lvert 0 \rangle$.
-# If the first measurement returns `True`, an X gate is applied to the target.
+# In this example, `qm.prepare(1)` prepares the first qubit in $\lvert 1 \rangle$, so measuring it returns the integer `1`.
+# `qm.prepare(0)` prepares the target qubit in $\lvert 0 \rangle$.
+# These integer preparations create `qm.Q[qm.Bit]` states. Their measurement results have type `qm.Shot[qm.Bit]` and are Python integers `0` or `1`.
+# If the first measurement returns `1`, the `if` condition is satisfied and an X gate is applied to the target.
 
 
 # %%
 @qm.qkernel
-def conditional_flip() -> qm.Shot[qm.Bool]:
-    condition = qm.measure(qm.prepare(True))
-    target = qm.prepare(False)
+def conditional_flip() -> qm.Shot[qm.Bit]:
+    condition = qm.measure(qm.prepare(1))
+    target = qm.prepare(0)
     if condition:
         target = qm.x(target)
     return qm.measure(target)
@@ -158,11 +164,12 @@ feedback_result = qm.evaluate(feedback_program)
 
 print("Measurement feedback result:", feedback_result)
 
-assert feedback_result is True
+assert type(feedback_result) is int
+assert feedback_result == 1
 
 
 # %% [markdown]
-# Since the first measurement returns `True`, the output is also `True`.
+# Since the first measurement returns `1`, the output is also the integer `1`.
 #
 # The sequence is: measure, check the measurement result, then apply a gate if the condition is met.
 # The value returned by `qm.measure(...)` becomes available during execution.

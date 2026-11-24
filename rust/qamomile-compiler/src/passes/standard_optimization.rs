@@ -4,6 +4,8 @@
 //! pass rewrites a transient copy, seals it again, and requires the complete
 //! verifier (including cleanup-proof replay) to accept the result before any
 //! target may consume it.
+//! Per-shot callable applications remain as execution-cardinality witnesses,
+//! even when their quantum actions would otherwise cancel with their adjoints.
 
 use std::collections::{HashMap, HashSet};
 
@@ -198,6 +200,20 @@ fn optimize_with_options(
 ) -> Result<(VerifiedProgram, StandardOptimizationWork), StandardOptimizationError> {
     super::static_diagnostics::check(program)?;
     let mut package = program.local.checked.package.clone();
+    let per_shot_callees = package
+        .functions
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            program
+                .local
+                .checked
+                .contracts
+                .contract(*index)
+                .is_some_and(crate::CallableContract::is_per_shot)
+        })
+        .map(|(_, function)| function.symbol.clone())
+        .collect::<HashSet<_>>();
     let mut work = StandardOptimizationWork::default();
     for function in &mut package.functions {
         let facts = function_facts(function);
@@ -206,6 +222,7 @@ fn optimize_with_options(
                 body,
                 &facts.values,
                 &facts.owned_values,
+                &per_shot_callees,
                 0,
                 &mut work,
                 options,
@@ -241,6 +258,7 @@ fn optimize_block(
         block,
         values,
         owned_values,
+        &HashSet::new(),
         depth,
         work,
         StandardOptimizationOptions::default(),
@@ -251,6 +269,7 @@ fn optimize_block_with_options(
     block: &mut wire::BlockProto,
     values: &HashMap<u64, wire::ValueProto>,
     owned_values: &HashSet<u64>,
+    per_shot_callees: &HashSet<String>,
     depth: usize,
     work: &mut StandardOptimizationWork,
     options: StandardOptimizationOptions,
@@ -266,6 +285,7 @@ fn optimize_block_with_options(
                     nested,
                     values,
                     owned_values,
+                    per_shot_callees,
                     depth + 1,
                     work,
                     options,
@@ -282,7 +302,8 @@ fn optimize_block_with_options(
                 "quantum.release" | "quantum.unprepare"
             )
     });
-    let mut state = BlockRewriteState::new(values, owned_values, source.len(), work);
+    let mut state =
+        BlockRewriteState::new(values, owned_values, per_shot_callees, source.len(), work);
 
     for mut operation in source {
         state.work.visit();
@@ -322,6 +343,7 @@ fn optimize_block_with_options(
 struct BlockRewriteState<'a> {
     values: &'a HashMap<u64, wire::ValueProto>,
     owned_values: &'a HashSet<u64>,
+    per_shot_callees: &'a HashSet<String>,
     operations: Vec<Option<wire::OperationProto>>,
     retained_links: Vec<Option<RetainedLinks>>,
     retained_tail: Option<usize>,
@@ -336,12 +358,14 @@ impl<'a> BlockRewriteState<'a> {
     fn new(
         values: &'a HashMap<u64, wire::ValueProto>,
         owned_values: &'a HashSet<u64>,
+        per_shot_callees: &'a HashSet<String>,
         capacity: usize,
         work: &'a mut StandardOptimizationWork,
     ) -> Self {
         Self {
             values,
             owned_values,
+            per_shot_callees,
             operations: Vec::with_capacity(capacity),
             retained_links: Vec::with_capacity(capacity),
             retained_tail: None,
@@ -554,6 +578,14 @@ impl<'a> BlockRewriteState<'a> {
         operation: &wire::OperationProto,
         analysis: OperationAnalysis,
     ) -> bool {
+        // Quantum identity alone does not preserve the observable number of
+        // completions. Keep the existing checked body/call graph as the witness
+        // rather than erasing the final transitive source of per-shot execution.
+        if string_attribute(operation, "callee")
+            .is_some_and(|callee| self.per_shot_callees.contains(callee))
+        {
+            return false;
+        }
         let Some(region) = owned_transform_region(operation, self.values, self.owned_values) else {
             return false;
         };
@@ -1249,7 +1281,9 @@ fn equivalent_operands(
         })
 }
 
-fn eliminate_dead_total_operations(
+/// Remove dead total definitions in a block whose traversal is already bounded.
+/// Callers handle nested regions and account for the operation visits.
+pub(crate) fn eliminate_dead_total_operations(
     operations: &mut Vec<wire::OperationProto>,
     terminator: Option<&wire::TerminatorProto>,
     work: &mut StandardOptimizationWork,
@@ -1756,6 +1790,47 @@ mod tests {
     }
 
     #[test]
+    fn retains_per_shot_callable_inverse_pairs() {
+        for opcodes in [
+            ["qcore.call", "qcore.adjoint_call"],
+            ["qcore.adjoint_call", "qcore.call"],
+        ] {
+            let mut block = wire::BlockProto {
+                arguments: vec![value(0, quantum(), true)],
+                operations: vec![call(opcodes[0], 0, 1, 0), call(opcodes[1], 1, 2, 0)],
+                terminator: Some(wire::TerminatorProto {
+                    kind: "return".to_owned(),
+                    operands: vec![2],
+                    ..Default::default()
+                }),
+            };
+            let function = wire::FunctionProto {
+                parameters: vec![wire::ParameterProto {
+                    value: Some(value(0, quantum(), true)),
+                    ..Default::default()
+                }],
+                body: Some(block.clone()),
+                ..Default::default()
+            };
+            let values = function_values(&function);
+            let owned = function_owned_values(&function);
+            optimize_block_with_options(
+                &mut block,
+                &values,
+                &owned,
+                &HashSet::from(["unitary".to_owned()]),
+                0,
+                &mut StandardOptimizationWork::default(),
+                StandardOptimizationOptions::default(),
+            )
+            .expect("optimization succeeds");
+
+            assert_eq!(block.operations.len(), 2);
+            assert_eq!(block.terminator.unwrap().operands, [2]);
+        }
+    }
+
+    #[test]
     fn restores_selector_frontier_after_barrier_inverse_cancellation() {
         let mut block = wire::BlockProto {
             arguments: vec![value(0, quantum(), true)],
@@ -1787,6 +1862,7 @@ mod tests {
             &mut block,
             &values,
             &owned,
+            &HashSet::new(),
             0,
             &mut StandardOptimizationWork::default(),
             StandardOptimizationOptions::default(),

@@ -23,7 +23,7 @@ struct ShotExecutionRequest {
     #[pyo3(get)]
     shots: u64,
     #[pyo3(get)]
-    seed: u64,
+    seed: Option<u64>,
     result_abi: Vec<u8>,
     interface: Vec<u8>,
 }
@@ -54,7 +54,7 @@ struct ShotExecutionHandle {
 #[pymethods]
 impl ShotExecutionHandle {
     #[new]
-    #[pyo3(signature = (payload, bindings, shots, seed, realization_capabilities=None, lowering=None, seeded_execution=false))]
+    #[pyo3(signature = (payload, bindings, shots, seed, realization_capabilities=None, lowering=None))]
     #[allow(clippy::needless_pass_by_value)]
     fn new(
         #[gen_stub(override_type(type_repr = "bytes | VerifiedProgramHandle"))] payload: &Bound<
@@ -63,10 +63,9 @@ impl ShotExecutionHandle {
         >,
         bindings: &Bound<'_, PyDict>,
         shots: u64,
-        seed: u64,
+        seed: Option<u64>,
         realization_capabilities: Option<Vec<String>>,
         lowering: Option<Vec<String>>,
-        seeded_execution: bool,
     ) -> PyResult<Self> {
         let owner = program_owner(payload)?;
         let bindings = circuit_launch_bindings(bindings)?;
@@ -94,11 +93,7 @@ impl ShotExecutionHandle {
             .static_circuit_with_lowering(config)
             .map_err(value_error)?;
         let abi = owner.verified.artifact_abi().map_err(value_error)?;
-        let seed = if seeded_execution || seed != 0 {
-            ShotSeedPolicy::Seeded(seed)
-        } else {
-            ShotSeedPolicy::ProviderDefault
-        };
+        let seed = seed.map_or(ShotSeedPolicy::ProviderDefault, ShotSeedPolicy::Seeded);
         let state =
             ShotExecutionState::new(circuit, bindings, abi.result_abi().to_vec(), shots, seed)
                 .map_err(value_error)?;

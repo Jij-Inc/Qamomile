@@ -24,6 +24,119 @@ const MAX_RELATION_TYPES: usize = 1_000_000;
 const MAX_RELATION_BINDINGS: usize = 1_000_000;
 const MAX_RELATION_BYTES: usize = 64 * 1024 * 1024;
 
+pub(crate) struct ObservationType {
+    root: TypeId,
+    nodes: HashMap<TypeId, ObservationNode>,
+}
+
+enum ObservationNode {
+    Bit,
+    Preserved,
+    Product(Box<[TypeId]>),
+}
+
+impl ObservationType {
+    pub(crate) fn from_payload(arena: &TypeArena, root: TypeId) -> Option<Self> {
+        if !arena.is_coherent_payload(root) {
+            return None;
+        }
+        let mut nodes = HashMap::new();
+        let mut pending = vec![root];
+        while let Some(id) = pending.pop() {
+            if nodes.contains_key(&id) {
+                continue;
+            }
+            let node = match arena.get(id)? {
+                SemanticType::Scalar(ScalarType::Bool | ScalarType::Bit) => ObservationNode::Bit,
+                SemanticType::Product(elements) => {
+                    pending.extend(elements.iter().copied());
+                    ObservationNode::Product(elements.clone())
+                }
+                _ => ObservationNode::Preserved,
+            };
+            nodes.insert(id, node);
+        }
+        Some(Self { root, nodes })
+    }
+
+    pub(crate) fn matches(&self, arena: &TypeArena, actual: TypeId) -> bool {
+        let mut pending = vec![(self.root, actual)];
+        let mut visited = HashSet::new();
+        while let Some((expected, actual)) = pending.pop() {
+            if !visited.insert((expected, actual)) {
+                continue;
+            }
+            if visited.len() > budget::MAX_MESSAGE_NODES {
+                return false;
+            }
+            match &self.nodes[&expected] {
+                ObservationNode::Bit => {
+                    if arena.get(actual) != Some(&SemanticType::Scalar(ScalarType::Bit)) {
+                        return false;
+                    }
+                }
+                ObservationNode::Preserved if expected != actual => return false,
+                ObservationNode::Preserved => {}
+                ObservationNode::Product(expected) => {
+                    let Some(SemanticType::Product(actual)) = arena.get(actual) else {
+                        return false;
+                    };
+                    if expected.len() != actual.len() {
+                        return false;
+                    }
+                    pending.extend(expected.iter().copied().zip(actual.iter().copied()));
+                }
+            }
+        }
+        true
+    }
+
+    fn intern(&self, arena: &mut TypeArena) -> Result<TypeId, String> {
+        let mut mapped = HashMap::new();
+        let mut pending = vec![(self.root, false)];
+        while let Some((id, ready)) = pending.pop() {
+            if mapped.contains_key(&id) {
+                continue;
+            }
+            let result = match &self.nodes[&id] {
+                ObservationNode::Bit => {
+                    arena.intern_derived(SemanticType::Scalar(ScalarType::Bit))?
+                }
+                ObservationNode::Preserved => id,
+                ObservationNode::Product(elements) => {
+                    if !ready {
+                        pending.push((id, true));
+                        pending.extend(elements.iter().map(|child| (*child, false)));
+                        continue;
+                    }
+                    let elements = elements.iter().map(|child| mapped[child]).collect();
+                    arena.intern_derived(SemanticType::Product(elements))?
+                }
+            };
+            mapped.insert(id, result);
+        }
+        Ok(mapped[&self.root])
+    }
+}
+
+/// Infer the classical observation of a coherent payload.
+///
+/// # Errors
+///
+/// Rejects malformed types and types outside the coherent domain.
+pub fn infer_measurement_observation_type(source: &[u8]) -> Result<Vec<u8>, TypeRelationError> {
+    let mut arena = TypeArena::default();
+    let scope = arena.intern_scope("source");
+    let root = decode_single_type(&mut arena, source, &scope)?;
+    let observation = ObservationType::from_payload(&arena, root).ok_or_else(|| {
+        TypeRelationError::InvalidInput("measurement requires a coherent payload".to_owned())
+    })?;
+    let result = observation
+        .intern(&mut arena)
+        .map_err(TypeRelationError::InvalidInput)?;
+    encode_type_id(&arena, result)
+}
+
 /// A source-portable dependent-dimension value.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PortableDimension {
@@ -1417,6 +1530,26 @@ fn unify_dimension(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn observation_preserves_sharing_in_deep_products() {
+        let mut arena = TypeArena::default();
+        let mut payload = arena
+            .intern_derived(SemanticType::Scalar(ScalarType::Bool))
+            .unwrap();
+        for _ in 0..100 {
+            payload = arena
+                .intern_derived(SemanticType::Product(
+                    vec![payload, payload].into_boxed_slice(),
+                ))
+                .unwrap();
+        }
+        let observation = ObservationType::from_payload(&arena, payload).unwrap();
+        assert_eq!(observation.nodes.len(), 101);
+        let result = observation.intern(&mut arena).unwrap();
+        assert!(observation.matches(&arena, result));
+        assert!(!observation.matches(&arena, payload));
+    }
+
     use prost::Message;
 
     use super::*;

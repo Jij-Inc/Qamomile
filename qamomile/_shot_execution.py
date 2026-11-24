@@ -199,7 +199,6 @@ class ShotJob:
                 self.invocation.seed,
                 _realization_labels(target.capabilities.realization_capabilities),
                 target.capabilities.realizations.overrides,
-                self.endpoint.capabilities.seeded_execution,
             )
         except (TypeError, ValueError) as error:
             raise ExecutionError(str(error)) from error
@@ -326,11 +325,18 @@ class ShotJob:
         Raises:
             ExecutionError: If emission or the endpoint changes native facts.
         """
-        from .circuit import _circuit_from_native_projection
+        from .circuit import (
+            _circuit_from_native_projection,
+            validate_circuit_angles,
+            with_circuit_angle_validation,
+        )
 
         encoded = wire.ResultABIProto.FromString(request.result_abi)
         abi = ResultABI(
-            decode_type(encoded.type), tuple(encoded.source_order), encoded.native_width
+            decode_type(encoded.type),
+            tuple(encoded.source_order),
+            encoded.native_width,
+            encoded.per_shot,
         )
         circuit = _circuit_from_native_projection(
             self._program,
@@ -339,6 +345,7 @@ class ShotJob:
             parameter_abi=self.artifact.parameter_abi,
             result_abi=abi,
         )
+        validate_circuit_angles(circuit, self.invocation.values())
         target = self.endpoint.target
         if not isinstance(target, CircuitTarget):
             raise ExecutionError("Q4470: endpoint lost its circuit profile")
@@ -358,6 +365,7 @@ class ShotJob:
             raise ExecutionError(
                 "Q4470: segment emitter changed its native transport ABI"
             )
+        lowered = with_circuit_angle_validation(lowered, circuit)
         metadata = dict(lowered.metadata.entries)
         if INTERFACE_KEY in metadata:
             raise ExecutionError("Q4470: target metadata shadows the native interface")

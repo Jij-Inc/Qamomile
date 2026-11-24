@@ -33,7 +33,18 @@ MAX_HUGR_PACKAGE_BYTES = 64 * 1024 * 1024
 
 @dataclass(frozen=True, slots=True)
 class _PreparedHugrModule:
-    """Shared callable definitions prepared for one HUGR package."""
+    """Shared callable definitions prepared for one HUGR package.
+
+    Args:
+        program (_EmissionProgram): Verified program after target adjoint lowering.
+        module (Any): HUGR module containing the retained callable definitions.
+        definitions (dict[str, Any]): Callable symbols mapped to HUGR definitions.
+        adjoint_helpers (dict[str, str]): Shared inverse callable symbols.
+        boolean_plans (dict[str, _BooleanLiftPlan]): Native Boolean realization plans.
+        emission_budget (_EmissionBudget): Work budget shared by the package.
+        helper_logical_operations (int): Source operations emitted for helpers.
+        helper_native_operations (int): HUGR operations emitted for helpers.
+    """
 
     program: _EmissionProgram
     module: Any
@@ -46,17 +57,21 @@ class _PreparedHugrModule:
 
 
 def _prepare_hugr_module(
-    program: Program, options: RealizationOptions = RealizationOptions()
+    program: Program,
+    options: RealizationOptions = RealizationOptions(),
+    *,
+    current_shot_origin: int | None = None,
 ) -> _PreparedHugrModule:
     """Prepare shared private callables and checked realizations for HUGR emission.
 
     Args:
         program (Program): Verified and specialized QCore program.
         options (RealizationOptions): Exact realization choices.
+        current_shot_origin (int | None): Certified raw counter origin.
 
     Returns:
-        Shared HUGR module, target-lowered program, definitions, metrics, and
-        one package-wide emission budget.
+        _PreparedHugrModule: Shared module, target-lowered program, definitions,
+            metrics, and one package-wide emission budget.
 
     Raises:
         CapabilityError: If native adjoint lowering or a retained callable
@@ -118,6 +133,7 @@ def _prepare_hugr_module(
             adjoint_helpers=adjoint_helpers,
             boolean_plans=boolean_plans,
             emission_budget=emission_budget,
+            current_shot_origin=current_shot_origin,
         )
         inputs = _reconstruct_parameters(function, tuple(helper.inputs()))
         kind, returned = lowerer.lower_function(function, inputs)
@@ -303,6 +319,7 @@ def _finish_hugr_package(
         tket_exts.rotation(),
         tket_exts.bool(),
         tket_exts.global_phase(),
+        tket_exts.qsystem_utils(),
     ]
     if record_results:
         extensions.append(tket_exts.result())

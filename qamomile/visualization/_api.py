@@ -27,7 +27,9 @@ class Diagram:
     """Read-only diagram supporting notebook display and portable export.
 
     Attributes:
-        display (Display): Native-derived structured view.
+        display (Display): Native-derived structured view. A concrete circuit
+            can retain a symbolic body here when only circuit lowering resolves
+            the loop. Its SVG always renders the resolved instructions.
         loops (LoopMode): Selected loop presentation.
         classical (ClassicalMode): Connected expression tiles with inline
             literals, or all native classical operations and their dependencies.
@@ -223,7 +225,16 @@ def draw(
         raise ValueError(
             "qubit wires require a specialized Program and loops='expanded'"
         )
-    display = _project(payload, family, loops, inline_depth, max_nodes)
+    expansion_error = None
+    try:
+        display = _project(payload, family, loops, inline_depth, max_nodes)
+    except CapabilityError as error:
+        if wires != "qubits" or error.diagnostic.code != "Q7402":
+            raise
+        # Circuit lowering can resolve more static conditions than the
+        # structured viewer. Keep the body for inspection and its width guard.
+        expansion_error = error
+        display = _project(payload, family, "body", inline_depth, max_nodes)
     circuit = None
     if wires == "qubits":
         if any(
@@ -234,7 +245,12 @@ def draw(
                 "Q7401: qubit lanes exceed max_nodes; increase max_nodes or use registers"
             )
         assert isinstance(source, Program)
-        circuit = lower_to_circuit(source)
+        try:
+            circuit = lower_to_circuit(source)
+        except CapabilityError as error:
+            if expansion_error is not None:
+                raise expansion_error from error
+            raise
         if circuit.width + circuit.operation_count > max_nodes:
             raise CapabilityError(
                 "Q7401: concrete qubit lanes and instructions exceed max_nodes"

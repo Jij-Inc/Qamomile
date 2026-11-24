@@ -233,7 +233,7 @@ fn quantum_type(ty: &wire::TypeProto) -> bool {
 pub struct ShotExecutionRequest {
     circuit: StaticCircuit,
     shots: u64,
-    seed: u64,
+    seed: Option<u64>,
     measurement_range: (u32, u32),
 }
 
@@ -248,9 +248,9 @@ impl ShotExecutionRequest {
     pub const fn shots(&self) -> u64 {
         self.shots
     }
-    /// Return a fresh deterministic child stream identity.
+    /// Return an explicit child stream identity, or defer randomness to the endpoint.
     #[must_use]
-    pub const fn seed(&self) -> u64 {
+    pub const fn seed(&self) -> Option<u64> {
         self.seed
     }
 
@@ -275,7 +275,7 @@ impl ShotExecutionRequest {
 /// Endpoint seed contract for conditional quantum occurrences.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShotSeedPolicy {
-    /// Defer independent sampling to a provider without explicit seed support.
+    /// Defer independent sampling to the endpoint's default randomness.
     ProviderDefault,
     /// Derive child simulator streams from the original invocation seed.
     Seeded(u64),
@@ -407,9 +407,9 @@ impl ShotExecutionState {
                 .circuit
                 .closed_segment(start, end, prefix, &self.bindings)?;
             let seed = match self.seed {
-                ShotSeedPolicy::ProviderDefault => 0,
+                ShotSeedPolicy::ProviderDefault => None,
                 ShotSeedPolicy::Seeded(seed) => {
-                    seed.wrapping_add(self.submissions.wrapping_mul(0x9e37_79b9_7f4a_7c15))
+                    Some(seed.wrapping_add(self.submissions.wrapping_mul(0x9e37_79b9_7f4a_7c15)))
                 }
             };
             if circuit.instructions().is_empty() {
@@ -606,7 +606,11 @@ fn shareable_scalar(node: &CircuitScalarNode) -> bool {
                 _ => false,
             }
         }
-        CircuitScalarNode::CallValue { .. } | CircuitScalarNode::LoopIndex(_) => false,
+        CircuitScalarNode::CallValue { .. }
+        | CircuitScalarNode::LoopIndex(_)
+        | CircuitScalarNode::CurrentShot
+        | CircuitScalarNode::HiddenBinding(_)
+        | CircuitScalarNode::Indexed { .. } => false,
     }
 }
 
@@ -653,6 +657,11 @@ fn shareable_classical(op: crate::operations::ClassicalOpcode) -> bool {
 
 impl StaticCircuit {
     pub(crate) fn validate_shot_checks(&self) -> Result<(), ShotExecutionError> {
+        if self.has_nested_checks() {
+            return Err(invalid(
+                "nested classical checks require ordered in-job execution",
+            ));
+        }
         let dependencies = scalar_dependencies(self.scalars());
         let mut cuts = self.execution_cuts();
         cuts.insert(
@@ -1178,6 +1187,7 @@ pub fn shot_segment_result_abi(width: u64) -> Result<Vec<u8>, ShotExecutionError
         ..Default::default()
     };
     Ok(wire::ResultAbiProto {
+        per_shot: false,
         r#type: Some(ty),
         source_order: (0..native_width).collect(),
         native_width,

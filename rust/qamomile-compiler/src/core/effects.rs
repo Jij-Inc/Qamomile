@@ -216,6 +216,8 @@ pub enum Requirement {
     DynamicQubitSelection,
     /// Execution crosses an opaque external callable boundary.
     ExternalCall,
+    /// The program reads its immutable invocation-local logical shot index.
+    LogicalShotContext,
 }
 
 impl Requirement {
@@ -240,6 +242,7 @@ impl Requirement {
             Self::DynamicClassicalIndex => "dynamic_classical_index",
             Self::DynamicQubitSelection => "dynamic_qubit_selection",
             Self::ExternalCall => "external_call",
+            Self::LogicalShotContext => "logical_shot_context",
         }
     }
 
@@ -253,7 +256,7 @@ impl Requirement {
 
     /// Return every requirement in stable target-contract order.
     #[must_use]
-    pub const fn all() -> [Self; 17] {
+    pub const fn all() -> [Self; 18] {
         [
             Self::ClassicalCompute,
             Self::ParameterizedExecution,
@@ -272,6 +275,7 @@ impl Requirement {
             Self::DynamicClassicalIndex,
             Self::DynamicQubitSelection,
             Self::ExternalCall,
+            Self::LogicalShotContext,
         ]
     }
 }
@@ -333,6 +337,7 @@ pub(crate) const fn operation_effects(opcode: Opcode) -> EffectSet {
         Opcode::Classical(_)
         | Opcode::QCore(
             QCoreOpcode::Constant
+            | QCoreOpcode::CurrentShot
             | QCoreOpcode::Reshape
             | QCoreOpcode::StageLift
             | QCoreOpcode::Tuple
@@ -408,6 +413,9 @@ pub(crate) const fn operation_requirements(opcode: Opcode) -> RequirementSet {
 
     match opcode {
         Opcode::Classical(_) => RequirementSet::only(ClassicalCompute),
+        Opcode::QCore(QCoreOpcode::CurrentShot) => {
+            RequirementSet::only(Requirement::LogicalShotContext)
+        }
         Opcode::QCore(QCoreOpcode::ControlCall | QCoreOpcode::SelectCall) => {
             RequirementSet::only(CoherentControl)
         }

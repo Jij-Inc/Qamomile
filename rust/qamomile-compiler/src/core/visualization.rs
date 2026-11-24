@@ -1,9 +1,10 @@
 //! Bounded, transient display projections over verified structured `QCore`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use thiserror::Error;
 
+use crate::control_state::ControlState;
 use crate::operations::LocallyCheckedOperations;
 use crate::static_values::{self, StaticScalar, StaticValue};
 use crate::types::{TypeArena, TypeId};
@@ -81,7 +82,7 @@ pub struct DisplayNode {
     pub outputs: Vec<usize>,
     /// Structured children; branch alternatives remain separate regions.
     pub children: Vec<Self>,
-    /// Original source line, absent for synthetic boundaries.
+    /// Line in the compiled source unit, absent for synthetic boundaries.
     pub line: Option<u32>,
 }
 
@@ -116,6 +117,21 @@ pub enum VisualizationError {
 struct Environment {
     ids: HashMap<u64, usize>,
     constants: HashMap<u64, Option<StaticValue>>,
+}
+
+/// One region argument or yield, with its exact fact when available.
+struct DisplayBinding {
+    id: usize,
+    constant: Option<StaticValue>,
+}
+
+impl Environment {
+    fn binding(&self, value: u64) -> DisplayBinding {
+        DisplayBinding {
+            id: self.ids[&value],
+            constant: self.constants.get(&value).cloned().flatten(),
+        }
+    }
 }
 
 struct Projector<'a> {
@@ -324,6 +340,7 @@ impl Projector<'_> {
             .collect::<Vec<_>>();
         let mut label = expression(operation, &labels);
         let mut children = Vec::new();
+        let mut call_result = None;
         let kind = match opcode {
             "qcore.for" => {
                 let induction = string_attr(operation, "induction_name").unwrap_or("index");
@@ -336,38 +353,26 @@ impl Projector<'_> {
             }
             "qcore.while" => {
                 "while".clone_into(&mut label);
-                for (index, region) in operation.regions.iter().enumerate() {
-                    children.push(self.region(
-                        function,
-                        &region.blocks[0],
-                        &operation.operands,
-                        environment,
-                        depth + 1,
-                        calls,
-                        ["condition", "body", "else"][index],
-                    )?);
-                }
+                children = self.while_children(function, operation, environment, depth, calls)?;
                 DisplayKind::Loop
             }
             "qcore.if" => {
-                label = bounded(&format!("if {}", labels[0]));
-                for (index, region) in operation.regions.iter().enumerate() {
-                    children.push(self.region(
-                        function,
-                        &region.blocks[0],
-                        &operation.operands[1..],
-                        environment,
-                        depth + 1,
-                        calls,
-                        if index == 0 { "true" } else { "false" },
-                    )?);
-                }
+                let predicate = labels[0]
+                    .strip_prefix('(')
+                    .and_then(|s| s.strip_suffix(')'))
+                    .unwrap_or(labels[0]);
+                label = bounded(&format!("if {predicate}"));
+                children = self.branch_children(function, operation, environment, depth, calls)?;
                 DisplayKind::Branch
             }
             "qcore.call" => {
                 let callee = string_attr(operation, "callee").expect("verified callee");
-                label = bounded(callee.rsplit('.').next().unwrap_or(callee));
                 let target = self.functions[callee];
+                label = call_name(target);
+                self.charge(label.len())?;
+                if self.loops == LoopDisplay::Expanded && !target.external {
+                    call_result = self.static_call_result(target, operation, environment)?;
+                }
                 if calls < self.inline_depth && !target.external {
                     let mut inner = Environment::default();
                     for (parameter, operand) in target.parameters.iter().zip(&operation.operands) {
@@ -390,6 +395,49 @@ impl Projector<'_> {
                 }
                 DisplayKind::Call
             }
+            "qcore.control_call" => {
+                let callee = string_attr(operation, "callee").expect("verified callee");
+                let state = ControlState::decode(
+                    literal_attr(operation, "control_state").expect("verified control state"),
+                )
+                .expect("verified control state");
+                let target = call_name(self.functions[callee]);
+                self.charge(target.len())?;
+                // Hex uses one digit per four bits, including for masks too
+                // large to fit in a normal decimal caption.
+                let mask = match &state {
+                    ControlState::Exact(mask) if mask.bits() > (MAX_TEXT * 3) as u64 => {
+                        self.charge(
+                            usize::try_from(mask.bits().div_ceil(4))
+                                .map_err(|_| VisualizationError::Budget)?,
+                        )?;
+                        format!("{mask:#x}")
+                    }
+                    _ => state.to_string(),
+                };
+                label = format!("control_state={mask} · {target}");
+                DisplayKind::Call
+            }
+            "qcore.select_call" => {
+                "multiplex(".clone_into(&mut label);
+                for (index, callee) in string_items(operation, "callees").enumerate() {
+                    if index > 0 {
+                        label.push_str(", ");
+                    }
+                    let target = call_name(self.functions[callee]);
+                    self.charge(target.len() + 2)?;
+                    label.push_str(&target);
+                }
+                label.push(')');
+                DisplayKind::Call
+            }
+            "qcore.phase_by" | "qcore.xor_by" | "qcore.permute_by" => {
+                let predicate = string_attr(operation, "predicate").expect("verified predicate");
+                let name = opcode.trim_start_matches("qcore.");
+                label = format!("{name}({})", call_name(self.functions[predicate]));
+                self.charge(label.len())?;
+                DisplayKind::Call
+            }
             _ if opcode.starts_with("quantum.") => DisplayKind::Quantum,
             _ if opcode.starts_with("classical.") || opcode == "qcore.constant" => {
                 DisplayKind::Classical
@@ -397,13 +445,7 @@ impl Projector<'_> {
             _ if opcode.contains("call") => DisplayKind::Call,
             _ => DisplayKind::Structure,
         };
-        let constant = if opcode == "qcore.constant" {
-            literal_attr(operation, "value").and_then(static_values::value_literal)
-        } else if opcode.starts_with("classical.") {
-            static_values::evaluate_value(operation, &environment.constants)
-        } else {
-            None
-        };
+        let constant = call_result.or_else(|| display_constant(operation, &environment.constants));
         let mut outputs = Vec::new();
         for result in &operation.results {
             let output_label = if matches!(kind, DisplayKind::Classical) {
@@ -416,7 +458,7 @@ impl Projector<'_> {
             let id = self.value(function, result, output_label)?;
             environment.ids.insert(result.id, id);
             // Only facts proved by the shared exact evaluator are propagated.
-            if opcode != "qcore.for" {
+            if !matches!(opcode, "qcore.for" | "qcore.while" | "qcore.if") {
                 environment.constants.insert(result.id, constant.clone());
             }
             outputs.push(id);
@@ -437,29 +479,314 @@ impl Projector<'_> {
         &mut self,
         function: &wire::FunctionProto,
         block: &wire::BlockProto,
-        operands: &[u64],
-        environment: &Environment,
+        carries: &mut Vec<DisplayBinding>,
         depth: usize,
         calls: usize,
+        opcode: &str,
         label: &str,
     ) -> Result<DisplayNode, VisualizationError> {
         self.node(depth)?;
-        let mut inner = self.fork(environment)?;
-        for (argument, operand) in block.arguments.iter().zip(operands) {
-            inner.ids.insert(argument.id, environment.ids[operand]);
-            inner.constants.insert(
-                argument.id,
-                environment.constants.get(operand).cloned().flatten(),
-            );
+        self.charge(carries.len())?;
+        let inputs = carries.iter().map(|carry| carry.id).collect();
+        // Verified region blocks refer only to their explicit arguments.
+        let mut inner = Environment::default();
+        for (argument, carry) in block.arguments.iter().zip(carries.iter()) {
+            inner.ids.insert(argument.id, carry.id);
+            inner.constants.insert(argument.id, carry.constant.clone());
         }
         let (children, outputs) = self.block(function, block, &mut inner, depth + 1, calls)?;
+        let exit = block.terminator.as_ref().expect("verified terminator");
+        *carries = exit.operands.iter().map(|id| inner.binding(*id)).collect();
         Ok(DisplayNode {
             kind: DisplayKind::Region,
-            opcode: "region".to_owned(),
+            opcode: opcode.to_owned(),
             label: label.to_owned(),
-            inputs: operands.iter().map(|id| environment.ids[id]).collect(),
+            inputs,
             outputs,
             children,
+            line: None,
+        })
+    }
+
+    fn branch_children(
+        &mut self,
+        function: &wire::FunctionProto,
+        operation: &wire::OperationProto,
+        environment: &mut Environment,
+        depth: usize,
+        calls: usize,
+    ) -> Result<Vec<DisplayNode>, VisualizationError> {
+        let decision = environment
+            .constants
+            .get(&operation.operands[0])
+            .and_then(Option::as_ref)
+            .and_then(StaticValue::scalar)
+            .map(static_values::truth);
+        let mut children = Vec::new();
+        let mut possible: Option<Vec<DisplayBinding>> = None;
+        for (index, region) in operation.regions.iter().enumerate() {
+            let is_true = index == 0;
+            let block = &region.blocks[0];
+            let mut bindings = operation.operands[1..]
+                .iter()
+                .map(|id| environment.binding(*id))
+                .collect();
+            children.push(self.region(
+                function,
+                block,
+                &mut bindings,
+                depth + 1,
+                calls,
+                "region",
+                if is_true { "true" } else { "false" },
+            )?);
+            if decision.is_some_and(|known| known != is_true)
+                || block.terminator.as_ref().expect("verified terminator").kind != "yield"
+            {
+                continue;
+            }
+            if let Some(other) = &mut possible {
+                for (merged, arm) in other.iter_mut().zip(bindings) {
+                    // Identical forwarded values, or equal exact scalar results,
+                    // survive an unknown choice without choosing a branch.
+                    if merged.id != arm.id
+                        && !matches!(
+                            (merged.constant.as_ref().and_then(StaticValue::scalar), arm.constant.as_ref().and_then(StaticValue::scalar)),
+                            (Some(left), Some(right)) if left == right
+                        )
+                    {
+                        merged.constant = None;
+                    }
+                }
+            } else {
+                possible = Some(bindings);
+            }
+        }
+        for (result, binding) in operation.results.iter().zip(possible.into_iter().flatten()) {
+            environment.constants.insert(result.id, binding.constant);
+        }
+        Ok(children)
+    }
+
+    fn static_call_result(
+        &mut self,
+        target: &wire::FunctionProto,
+        call: &wire::OperationProto,
+        environment: &Environment,
+    ) -> Result<Option<StaticValue>, VisualizationError> {
+        // Inline depth controls appearance. A boxed, straight-line calculation
+        // can still determine the number of iterations that follow it.
+        let body = target.body.as_ref().expect("verified internal function");
+        let mut facts = HashMap::new();
+        for (parameter, operand) in target.parameters.iter().zip(&call.operands) {
+            let Some(Some(value)) = environment.constants.get(operand) else {
+                return Ok(None);
+            };
+            facts.insert(
+                parameter.value.as_ref().expect("verified parameter").id,
+                Some(value.clone()),
+            );
+        }
+        for operation in &body.operations {
+            self.charge(1 + operation.operands.len())?;
+            let [result] = operation.results.as_slice() else {
+                return Ok(None);
+            };
+            let Some(value) = display_constant(operation, &facts) else {
+                return Ok(None);
+            };
+            facts.insert(result.id, Some(value));
+        }
+        let exit = body.terminator.as_ref().expect("verified terminator");
+        Ok(match exit.operands.as_slice() {
+            [id] if exit.kind == "return" => facts.remove(id).flatten(),
+            _ => None,
+        })
+    }
+
+    fn while_children(
+        &mut self,
+        function: &wire::FunctionProto,
+        operation: &wire::OperationProto,
+        environment: &mut Environment,
+        depth: usize,
+        calls: usize,
+    ) -> Result<Vec<DisplayNode>, VisualizationError> {
+        if self.loops == LoopDisplay::Folded {
+            return Ok(Vec::new());
+        }
+        let condition = &operation.regions[0].blocks[0];
+        let body = &operation.regions[1].blocks[0];
+        let completion = &operation.regions[2].blocks[0];
+        let symbolic = self.loops == LoopDisplay::Body;
+        if !symbolic && has_early_exit(condition) {
+            return Err(VisualizationError::Expansion(
+                "while condition contains an early exit".to_owned(),
+            ));
+        }
+        let mut carries: Vec<_> = operation
+            .operands
+            .iter()
+            .map(|id| environment.binding(*id))
+            .collect();
+        let mut regions = Vec::new();
+        let mut iteration = 0;
+        loop {
+            let (guard, enter_body) =
+                self.while_condition(function, condition, &mut carries, depth + 1, calls)?;
+            regions.push(guard);
+            if !enter_body {
+                break;
+            }
+            if !symbolic && iteration == 0 && has_early_exit(body) {
+                return Err(VisualizationError::Expansion(
+                    "while body contains an early exit".to_owned(),
+                ));
+            }
+            iteration += 1;
+            let mut step = self.region(
+                function,
+                body,
+                &mut carries,
+                depth + 1,
+                calls,
+                if symbolic {
+                    "loop.body"
+                } else {
+                    "loop.iteration"
+                },
+                if symbolic {
+                    "if true: body (yield to next condition)"
+                } else {
+                    "body"
+                },
+            )?;
+            if !symbolic {
+                step.kind = DisplayKind::Iteration;
+                step.label = format!("iteration {iteration}");
+            }
+            regions.push(step);
+            if symbolic {
+                regions.push(self.while_exit_state(
+                    function,
+                    body,
+                    completion,
+                    &regions[0].outputs[1..],
+                    &mut carries,
+                    depth + 1,
+                )?);
+                break;
+            }
+        }
+        if !symbolic && has_early_exit(completion) {
+            return Err(VisualizationError::Expansion(
+                "while completion contains an early exit".to_owned(),
+            ));
+        }
+        regions.push(self.region(
+            function,
+            completion,
+            &mut carries,
+            depth + 1,
+            calls,
+            "loop.completion",
+            "if false: normal completion / else",
+        )?);
+        if !symbolic {
+            for (result, carry) in operation.results.iter().zip(carries) {
+                environment.constants.insert(result.id, carry.constant);
+            }
+        }
+        Ok(regions)
+    }
+
+    fn while_condition(
+        &mut self,
+        function: &wire::FunctionProto,
+        condition: &wire::BlockProto,
+        carries: &mut Vec<DisplayBinding>,
+        depth: usize,
+        calls: usize,
+    ) -> Result<(DisplayNode, bool), VisualizationError> {
+        let mut guard = self.region(
+            function,
+            condition,
+            carries,
+            depth,
+            calls,
+            "while.condition",
+            "condition",
+        )?;
+        // The condition yields its decision followed by all post-test carries.
+        let predicate = carries.remove(0);
+        let decision = predicate
+            .constant
+            .as_ref()
+            .and_then(StaticValue::scalar)
+            .map(static_values::truth);
+        let predicate_operand = condition
+            .terminator
+            .as_ref()
+            .expect("verified condition")
+            .operands[0];
+        let expression = condition
+            .arguments
+            .iter()
+            .find(|argument| argument.id == predicate_operand && !argument.hint.is_empty())
+            .map_or(self.values[predicate.id].label.as_str(), |argument| {
+                argument.hint.as_str()
+            });
+        guard.label = bounded(&if self.loops == LoopDisplay::Body {
+            format!("first check: {expression}")
+        } else if let Some(decision) = decision {
+            format!("condition: {expression} = {decision}")
+        } else {
+            return Err(VisualizationError::Expansion(
+                "while iteration count cannot be determined before execution".to_owned(),
+            ));
+        });
+        Ok((
+            guard,
+            self.loops == LoopDisplay::Body || decision == Some(true),
+        ))
+    }
+
+    fn while_exit_state(
+        &mut self,
+        function: &wire::FunctionProto,
+        body: &wire::BlockProto,
+        completion: &wire::BlockProto,
+        initial: &[usize],
+        carries: &mut Vec<DisplayBinding>,
+        depth: usize,
+    ) -> Result<DisplayNode, VisualizationError> {
+        let mut inputs = initial.to_vec();
+        if body
+            .terminator
+            .as_ref()
+            .is_some_and(|exit| matches!(exit.kind.as_str(), "yield" | "continue"))
+        {
+            inputs.extend(carries.iter().map(|carry| carry.id));
+        }
+        let mut seen = HashSet::new();
+        inputs.retain(|id| seen.insert(*id));
+        // Zero or more body yields can precede the final failed test.
+        // Create its outputs here, not as inputs to the entire diagram.
+        carries.clear();
+        for argument in &completion.arguments {
+            carries.push(DisplayBinding {
+                id: self.value(function, argument, "final carried value")?,
+                constant: None,
+            });
+        }
+        self.node(depth)?;
+        Ok(DisplayNode {
+            kind: DisplayKind::Region,
+            opcode: "while.exit_state".to_owned(),
+            label: "Loop exit".to_owned(),
+            inputs,
+            outputs: carries.iter().map(|carry| carry.id).collect(),
+            children: Vec::new(),
             line: None,
         })
     }
@@ -667,6 +994,20 @@ impl Projector<'_> {
     }
 }
 
+fn display_constant(
+    operation: &wire::OperationProto,
+    facts: &HashMap<u64, Option<StaticValue>>,
+) -> Option<StaticValue> {
+    match operation.opcode.as_str() {
+        "qcore.constant" => literal_attr(operation, "value").and_then(static_values::value_literal),
+        "qcore.stage_lift" => facts.get(&operation.operands[0]).cloned().flatten(),
+        opcode if opcode.starts_with("classical.") => {
+            static_values::evaluate_value(operation, facts)
+        }
+        _ => None,
+    }
+}
+
 fn display_range(
     operation: &wire::OperationProto,
     environment: &Environment,
@@ -739,6 +1080,37 @@ fn bounded(source: &str) -> String {
     text
 }
 
+fn call_name(function: &wire::FunctionProto) -> String {
+    let (_, compiled) = function
+        .symbol
+        .rsplit_once('.')
+        .unwrap_or(("", &function.symbol));
+    if let Some((template, digest)) = compiled
+        .strip_prefix("__fn_")
+        .and_then(|name| name.rsplit_once('_'))
+        && digest.len() == 64
+        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return format!("{template} [#{digest}]");
+    }
+    compiled.to_owned()
+}
+
+fn string_items<'a>(
+    operation: &'a wire::OperationProto,
+    name: &str,
+) -> impl Iterator<Item = &'a str> {
+    let Some(wire::literal_proto::Value::TupleValue(items)) =
+        literal_attr(operation, name).and_then(|literal| literal.value.as_ref())
+    else {
+        unreachable!("verified string tuple")
+    };
+    items.values.iter().map(|literal| match &literal.value {
+        Some(wire::literal_proto::Value::StringValue(item)) => item.as_str(),
+        _ => unreachable!("verified string tuple member"),
+    })
+}
+
 fn literal_label(literal: &wire::LiteralProto) -> String {
     use wire::literal_proto::Value;
     bounded(&match literal.value.as_ref() {
@@ -769,6 +1141,30 @@ fn expression(operation: &wire::OperationProto, operands: &[&str]) -> String {
         _ => None,
     };
     if opcode.starts_with("classical.") {
+        if suffix == "compare_chain" {
+            let mut text = format!("({}", operands[0]);
+            for (operator, operand) in string_items(operation, "operators").zip(&operands[1..]) {
+                let sign = match operator {
+                    "eq" => "==",
+                    "ne" => "!=",
+                    "lt" => "<",
+                    "le" => "<=",
+                    "gt" => ">",
+                    "ge" => ">=",
+                    "not_in" => "not in",
+                    other => other,
+                };
+                text.push(' ');
+                text.push_str(sign);
+                text.push(' ');
+                text.push_str(operand);
+                if text.chars().count() > MAX_TEXT {
+                    break;
+                }
+            }
+            text.push(')');
+            return bounded(&text);
+        }
         if let Some(symbol) = binary
             && operands.len() == 2
         {

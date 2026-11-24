@@ -96,7 +96,7 @@ impl Number {
     }
 }
 
-fn integer_to_real(value: &BigInt) -> Result<f64, NumericEvaluationError> {
+pub(crate) fn integer_to_real(value: &BigInt) -> Result<f64, NumericEvaluationError> {
     let converted = value.to_f64().filter(|value| value.is_finite());
     converted.ok_or(NumericEvaluationError::Undefined(
         "integer is too large to convert to binary64",
@@ -560,6 +560,14 @@ fn cast(
         "numeric cast received a non-numeric value",
     ))?;
     match string_attribute(operation, "target") {
+        Some("Bit") => match number {
+            Number::Int(value) if value.is_zero() || value == BigInt::from(1) => {
+                Ok(StaticValue::Scalar(StaticScalar::Bool(!value.is_zero())))
+            }
+            _ => Err(NumericEvaluationError::Undefined(
+                "qm.prepare integer value must be 0 or 1",
+            )),
+        },
         Some("Bool") => Ok(StaticValue::Scalar(StaticScalar::Bool(!number.is_zero()))),
         Some("Int") => match number {
             Number::Int(value) => checked_static(Number::Int(value)),
@@ -615,7 +623,7 @@ fn integer_operands(operands: &[&StaticValue]) -> Result<[BigInt; 2], NumericEva
     ])
 }
 
-fn integer_value(value: &StaticValue) -> Option<BigInt> {
+pub(crate) fn integer_value(value: &StaticValue) -> Option<BigInt> {
     match value {
         StaticValue::Scalar(StaticScalar::Int(value)) => Some(BigInt::from(*value)),
         StaticValue::BigInt(value) => Some(BigInt::from_signed_bytes_be(value)),

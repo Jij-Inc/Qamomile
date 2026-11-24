@@ -127,34 +127,34 @@ def exercise_realization_backend(
     assert isinstance(artifact, qm.CompiledProgram)
     assert any(stage.startswith("realization:add.") for stage in artifact.report.stages)
     restored = deserialize(serialize(artifact))
-    assert qm.execute(restored, on=endpoint, shots=4, seed=0).counts == {
+    assert qm.execute(restored, on=endpoint, shots=4, seed=None).counts == {
         (1, 0, 0, 0): 4
     }
     assert qm.run(
-        realization_subtract_sample, on=endpoint, shots=4, seed=0
+        realization_subtract_sample, on=endpoint, shots=4, seed=None
     ).result.counts == {(1, 0, 1, 1): 4}
     assert qm.run(
-        operator_arithmetic_sample, on=endpoint, shots=4, seed=0
+        operator_arithmetic_sample, on=endpoint, shots=4, seed=None
     ).result.counts == {(1, 1, 0, 1, 1, 1, 0, 1): 4}
     assert qm.run(
-        stdlib_arithmetic_ux_sample, on=endpoint, shots=4, seed=0
+        stdlib_arithmetic_ux_sample, on=endpoint, shots=4, seed=None
     ).result.counts == {(1, 1, 1, 0, 1, 1, 0, 0, 1, 1): 4}
     if supports_mod_pow:
         assert qm.run(
-            mod_pow_identity_sample, on=endpoint, shots=4, seed=0
+            mod_pow_identity_sample, on=endpoint, shots=4, seed=None
         ).result.counts == {(1, 1): 4}
     assert qm.run(
-        realization_add_coherent_sample, on=endpoint, shots=4, seed=0
+        realization_add_coherent_sample, on=endpoint, shots=4, seed=None
     ).result.counts == {(0, 0, 0, 0, 0): 4}
     assert (
         qm.expectation(
-            realization_add_state, qm.Z(0), on=endpoint, shots=4, seed=0
+            realization_add_state, qm.Z(0), on=endpoint, shots=4, seed=None
         ).value
         == -1.0
     )
     assert (
         qm.expectation(
-            realization_add_coherent_state, qm.Z(0), on=endpoint, shots=4, seed=0
+            realization_add_coherent_state, qm.Z(0), on=endpoint, shots=4, seed=None
         ).value
         == 1.0
     )

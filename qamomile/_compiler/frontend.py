@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import ast
 import hashlib
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
+from math import pi
 from pathlib import Path
 from typing import NoReturn, TypeAlias, cast
 
@@ -60,6 +61,7 @@ from ..types import (
     infer_declared_function_application,
     infer_function_application,
     infer_literal_type,
+    infer_measurement_observation_type,
     is_type_assignable,
     local_peer_types,
     logical_width,
@@ -77,6 +79,7 @@ from .hir import (
     HIRParameter,
     HIRStatement,
 )
+from .hir_wire import infer_preparation_result_type
 
 MAX_INTENT_DOC_BYTES = 4000
 """UTF-8 budget for one captured docstring, under the native intent literal bound."""
@@ -242,6 +245,7 @@ class _Frontend:
         self.signatures: dict[str, _Signature] = {}
         self._loop_depth = 0
         self._slice_parameters: set[str] = set()
+        self._local_names: set[str] = set()
 
     def compile(self) -> HIRModule:
         """Collect all signatures, then capture every declared body.
@@ -281,15 +285,22 @@ class _Frontend:
         for statement in self.tree.body:
             if isinstance(statement, ast.Import):
                 for alias in statement.names:
-                    local = alias.asname or alias.name
-                    if alias.name == "qamomile":
+                    local = alias.asname or alias.name.split(".", 1)[0]
+                    self._unbind_qamomile_name(local)
+                    self.constants.pop(local, None)
+                    if alias.name == "qamomile" or (
+                        alias.name.startswith("qamomile.") and alias.asname is None
+                    ):
                         self.qamomile_aliases.add(local)
                     elif alias.name == "typing":
                         self.typing_aliases.add(local)
                 continue
             if isinstance(statement, ast.ImportFrom):
                 module = statement.module or ""
-                if module == "qamomile":
+                for alias in statement.names:
+                    self._unbind_qamomile_name(alias.asname or alias.name)
+                    self.constants.pop(alias.asname or alias.name, None)
+                if module == "qamomile" and statement.level == 0:
                     for alias in statement.names:
                         local = alias.asname or alias.name
                         self.imported_qamomile_names[local] = alias.name
@@ -299,10 +310,193 @@ class _Frontend:
                             self.named_tuple_names.add(alias.asname or alias.name)
                 continue
             if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                if isinstance(statement, ast.AnnAssign) and statement.value is None:
+                    continue
                 self._collect_constant(statement)
+                targets = (
+                    statement.targets
+                    if isinstance(statement, ast.Assign)
+                    else [statement.target]
+                )
+                for target in targets:
+                    for node in ast.walk(target):
+                        if isinstance(node, ast.Name):
+                            self._unbind_qamomile_name(node.id)
+            elif isinstance(
+                statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ):
+                self._normalize_defaults(statement)
+                self._unbind_qamomile_name(statement.name)
+
+    def _normalize_defaults(
+        self, declaration: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+    ) -> None:
+        """Freeze direct default references in their declaration-time scope.
+
+        Args:
+            declaration (ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                Function or record whose defaults precede later module bindings.
+        """
+
+        if isinstance(declaration, ast.ClassDef):
+            if not self._is_named_tuple(declaration):
+                return
+            fields: dict[str, PortableValue] = {}
+            for item in declaration.body:
+                if isinstance(item, ast.AnnAssign) and isinstance(
+                    item.target, ast.Name
+                ):
+                    if item.value is not None:
+                        item.value = self._literal_default(item.value, fields)
+                        try:
+                            fields[item.target.id] = freeze_value(
+                                ast.literal_eval(item.value)
+                            )
+                        except (ValueError, TypeError):
+                            pass
+            return
+        declaration.args.defaults = [
+            self._literal_default(default, {}) for default in declaration.args.defaults
+        ]
+        declaration.args.kw_defaults = [
+            self._literal_default(default, {}) if default is not None else None
+            for default in declaration.args.kw_defaults
+        ]
+
+    def _literal_default(
+        self, expression: ast.expr, fields: Mapping[str, PortableValue]
+    ) -> ast.expr:
+        """Replace a direct constant reference without evaluating expressions.
+
+        Args:
+            expression (ast.expr): Default evaluated in the current source scope.
+            fields (Mapping[str, PortableValue]): Previously bound record fields.
+
+        Returns:
+            ast.expr: Literal syntax, or the original unsupported expression.
+        """
+
+        if isinstance(expression, ast.Name) and expression.id in fields:
+            value = fields[expression.id]
+        elif (
+            isinstance(expression, ast.Attribute)
+            and isinstance(expression.value, ast.Name)
+            and expression.value.id in fields
+        ):
+            return expression
+        elif isinstance(expression, (ast.Name, ast.Attribute)):
+            try:
+                value = self._portable_literal(expression)
+            except (ValueError, TypeError):
+                return expression
+        elif (
+            isinstance(expression, (ast.Tuple, ast.List, ast.Set, ast.Dict))
+            or (
+                isinstance(expression, ast.UnaryOp)
+                and isinstance(expression.op, (ast.UAdd, ast.USub))
+                and isinstance(
+                    expression.operand, (ast.Constant, ast.Name, ast.Attribute)
+                )
+            )
+            or (
+                isinstance(expression, ast.BinOp)
+                and isinstance(expression.op, (ast.Add, ast.Sub))
+                and isinstance(
+                    expression.left,
+                    (ast.Constant, ast.Name, ast.Attribute, ast.UnaryOp),
+                )
+                and isinstance(expression.right, ast.Constant)
+                and isinstance(expression.right.value, complex)
+            )
+        ):
+            for name, child in ast.iter_fields(expression):
+                if isinstance(child, ast.expr):
+                    setattr(expression, name, self._literal_default(child, fields))
+                elif isinstance(child, list):
+                    setattr(
+                        expression,
+                        name,
+                        [
+                            self._literal_default(item, fields)
+                            if isinstance(item, ast.expr)
+                            else item
+                            for item in child
+                        ],
+                    )
+            return expression
+        else:
+            return expression
+        if value is None or isinstance(value, (bool, int, float, complex, str, bytes)):
+            return ast.copy_location(ast.Constant(value=value), expression)
+        return expression
+
+    def _unbind_qamomile_name(self, name: str) -> None:
+        """Remove an import spelling when a module declaration shadows it.
+
+        Args:
+            name (str): Name rebound by a source-level declaration or import.
+        """
+
+        self.qamomile_aliases.discard(name)
+        self.imported_qamomile_names.pop(name, None)
+
+    def _is_pi_reference(
+        self, expression: ast.expr, environment: Collection[str]
+    ) -> bool:
+        """Recognize only unshadowed references to the public Qamomile constant.
+
+        Args:
+            expression (ast.expr): Source name or shallow attribute reference.
+            environment (Collection[str]): Lexical bindings that take precedence.
+
+        Returns:
+            bool: Whether the expression names the imported Qamomile pi value.
+        """
+
+        if isinstance(expression, ast.Name):
+            return (
+                expression.id not in environment
+                and expression.id not in self.constants
+                and self.imported_qamomile_names.get(expression.id) == "pi"
+            )
+        return (
+            isinstance(expression, ast.Attribute)
+            and expression.attr == "pi"
+            and isinstance(expression.value, ast.Name)
+            and expression.value.id not in environment
+            and expression.value.id not in self.constants
+            and expression.value.id in self.qamomile_aliases
+        )
+
+    def _portable_literal(self, expression: ast.expr) -> PortableValue:
+        """Read a literal or a direct reference to an available source constant.
+
+        Args:
+            expression (ast.expr): Literal, module constant, or Qamomile pi syntax.
+
+        Returns:
+            PortableValue: Immutable value for an existing literal position.
+
+        Raises:
+            ValueError: If the expression requires computation or unknown names.
+            TypeError: If a literal value is not portable.
+        """
+
+        if isinstance(expression, ast.Name) and expression.id in self.constants:
+            return self.constants[expression.id][1]
+        if self._is_pi_reference(expression, {}):
+            return pi
+        return freeze_value(ast.literal_eval(expression))
 
     def _collect_constant(self, statement: ast.Assign | ast.AnnAssign) -> None:
-        """Collect a top-level literal constant when it is portable."""
+        """Collect a top-level literal or direct constant reference.
+
+        Args:
+            statement (ast.Assign | ast.AnnAssign): Module-level declaration.
+
+        Raises:
+            TypeCheckError: If a portable value violates its annotation.
+        """
 
         if isinstance(statement, ast.Assign):
             if len(statement.targets) != 1 or not isinstance(
@@ -319,8 +513,11 @@ class _Frontend:
             value_node = statement.value
             annotation = statement.annotation
         try:
-            value = freeze_value(ast.literal_eval(value_node))
+            value = freeze_value(
+                ast.literal_eval(self._literal_default(value_node, {}))
+            )
         except (ValueError, TypeError):
+            self.constants.pop(name, None)
             return
         if annotation is not None:
             type_spec = self._parse_annotation(annotation)
@@ -515,7 +712,18 @@ class _Frontend:
             )
 
     def _parse_parameters(self, arguments: ast.arguments) -> tuple[HIRParameter, ...]:
-        """Parse the supported non-variadic parameter forms."""
+        """Parse parameters with their names bound in dependent annotations.
+
+        Args:
+            arguments (ast.arguments): Source parameter declarations and defaults.
+
+        Returns:
+            tuple[HIRParameter, ...]: Typed parameters in declaration order.
+
+        Raises:
+            FrontendError: If parameters use unsupported syntax or defaults.
+            TypeCheckError: If an annotation and default are incompatible.
+        """
 
         if arguments.vararg or arguments.kwarg:
             self._error(
@@ -524,6 +732,9 @@ class _Frontend:
                 "variadic parameters are not supported",
             )
         positional = tuple(arguments.posonlyargs) + tuple(arguments.args)
+        self._local_names = {
+            argument.arg for argument in (*positional, *arguments.kwonlyargs)
+        }
         defaults: list[ast.expr | None] = [
             None for _ in range(len(positional) - len(arguments.defaults))
         ]
@@ -544,7 +755,19 @@ class _Frontend:
         argument: ast.arg,
         default_node: ast.expr | None,
     ) -> HIRParameter:
-        """Parse one typed parameter and portable default."""
+        """Parse one typed parameter and portable default.
+
+        Args:
+            argument (ast.arg): Annotated source parameter.
+            default_node (ast.expr | None): Declaration-time default literal.
+
+        Returns:
+            HIRParameter: Typed parameter with its optional portable default.
+
+        Raises:
+            FrontendError: If an annotation is missing or a default is unsupported.
+            TypeCheckError: If a default violates the parameter type.
+        """
 
         if argument.annotation is None:
             self._error(
@@ -607,6 +830,11 @@ class _Frontend:
 
         environment = {
             parameter.name: parameter.type for parameter in signature.parameters
+        }
+        self._local_names = set(environment) | {
+            node.id
+            for node in ast.walk(signature.node)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
         }
         self._slice_parameters = set(environment)
         body, _, terminated = self._compile_block(
@@ -1541,6 +1769,13 @@ class _Frontend:
             FrontendError: The syntax or operation is unsupported or ill-typed.
         """
 
+        if self._is_pi_reference(expression, self._local_names):
+            return HIRExpression(
+                "literal",
+                infer_literal_type(pi),
+                attributes=attributes(value=pi),
+                span=self._span(expression),
+            )
         if isinstance(expression, ast.Constant):
             try:
                 value = freeze_value(expression.value)
@@ -2884,6 +3119,15 @@ class _Frontend:
         """
 
         operands = positional + tuple(value for _, value in keywords)
+        if name == "get_current_shot":
+            if positional or keywords:
+                self._error(node, "Q5105", "qm.get_current_shot expects no arguments")
+            return HIRExpression(
+                "qcore.current_shot",
+                Shot[Int],
+                (),
+                span=self._span(node),
+            )
         if name in {"ceil", "log2", "sqrt"}:
             if len(positional) != 1 or keywords:
                 self._error(node, "Q5105", f"qm.{name} expects one argument")
@@ -3202,26 +3446,13 @@ class _Frontend:
         if name == "prepare":
             if len(positional) != 1 or keywords:
                 self._error(node, "Q5035", "qm.prepare expects one logical value")
-            inner = strip_stage(positional[0].type)
-            if isinstance(inner, QuantumType):
-                self._error(node, "Q5036", "qm.prepare expects classical data")
-            if positional[0].opcode in {"tuple", "array"} and all(
-                item.opcode == "literal"
-                and item.attribute("value") in {0, 1, False, True}
-                for item in positional[0].operands
-            ):
-                inner = Bits[len(positional[0].operands)]
-            if logical_width(inner) is None:
-                self._error(
-                    node,
-                    "Q5077",
-                    f"qm.prepare currently supports only logical bit data, got {inner}",
-                )
+            try:
+                result_type = infer_preparation_result_type(positional[0])
+            except ValueError as error:
+                self._error(node, "Q5077", str(error))
             return HIRExpression(
                 "quantum.prepare",
-                Q[Bits[inner.width]]
-                if isinstance(inner, WordType) and inner.kind == "Bits"
-                else Q[inner],
+                result_type,
                 operands,
                 span=self._span(node),
             )
@@ -3414,7 +3645,7 @@ class _Frontend:
                 self._error(node, "Q5040", f"qm.measure expects Q[T], got {state_type}")
             return HIRExpression(
                 "quantum.measure",
-                Shot[state_type.inner],
+                Shot[infer_measurement_observation_type(state_type.inner)],
                 operands,
                 span=self._span(node),
             )
@@ -3433,7 +3664,9 @@ class _Frontend:
             )
             return HIRExpression(
                 f"quantum.{name}",
-                ProductType((Shot[Bool], state_type)),
+                ProductType(
+                    (Shot[infer_measurement_observation_type(Bit)], state_type)
+                ),
                 measurement_operands,
                 attributes=attributes(keywords=measurement_keywords),
                 span=self._span(node),
@@ -3450,7 +3683,12 @@ class _Frontend:
                 self._error(node, "Q5084", "qm.measure_reset expects Q[T]")
             return HIRExpression(
                 "quantum.measure_reset",
-                ProductType((Shot[state_type.inner], state_type)),
+                ProductType(
+                    (
+                        Shot[infer_measurement_observation_type(state_type.inner)],
+                        state_type,
+                    )
+                ),
                 operands,
                 span=self._span(node),
             )
@@ -4215,12 +4453,24 @@ class _Frontend:
             }
 
         def parse(node: ast.expr) -> tuple[int, dict[tuple[str, ...], int]]:
+            """Resolve dimension names in the current lexical scope.
+
+            Args:
+                node (ast.expr): Polynomial dimension expression to reduce.
+
+            Returns:
+                tuple[int, dict[tuple[str, ...], int]]: Constant and monomials.
+
+            Raises:
+                FrontendError: If the expression is not supported polynomial syntax.
+            """
+
             if isinstance(node, ast.Constant) and isinstance(node.value, int):
                 if isinstance(node.value, bool):
                     self._error(node, "Q5065", "dimension must be polynomial")
                 return node.value, {}
             if isinstance(node, ast.Name):
-                if node.id in self.constants:
+                if node.id in self.constants and node.id not in self._local_names:
                     value = self.constants[node.id][1]
                     if isinstance(value, int) and not isinstance(value, bool):
                         return value, {}
@@ -4302,12 +4552,24 @@ class _Frontend:
         """
 
         def parse(node: ast.expr) -> tuple[int, dict[str, int]]:
+            """Resolve dimension names in the current lexical scope.
+
+            Args:
+                node (ast.expr): Affine dimension expression to reduce.
+
+            Returns:
+                tuple[int, dict[str, int]]: Constant and symbol coefficients.
+
+            Raises:
+                FrontendError: If the expression is not supported affine syntax.
+            """
+
             if isinstance(node, ast.Constant) and isinstance(node.value, int):
                 if isinstance(node.value, bool):
                     self._error(node, "Q5065", "dimension must be affine")
                 return node.value, {}
             if isinstance(node, ast.Name):
-                if node.id in self.constants:
+                if node.id in self.constants and node.id not in self._local_names:
                     value = self.constants[node.id][1]
                     if isinstance(value, int) and not isinstance(value, bool):
                         return value, {}

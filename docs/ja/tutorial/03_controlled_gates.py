@@ -40,9 +40,13 @@
 # %%
 from __future__ import annotations
 
+import os
 from math import pi
 
 import qamomile as qm
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 8
 
 # %% [markdown]
 # ## 1. 最初の例：制御RXゲート
@@ -77,7 +81,9 @@ import qamomile as qm
 #
 # この回転を`rotate`という量子カーネルとして定義し、`qm.control`に渡すことで、制御量子ビットの状態に応じて適用します。
 #
-# 以下の二つの例は、制御量子ビットの初期状態だけが異なります。`qm.prepare(False)`は$|0\rangle$を、`qm.prepare(True)`は$|1\rangle$を用意します。どちらの例でも、ターゲットの初期状態は$|0\rangle$、回転角は$\pi$です。
+# 以下の二つの例は、制御量子ビットの初期状態だけが異なります。`qm.prepare(0)`は$|0\rangle$を、`qm.prepare(1)`は$|1\rangle$を用意します。どちらの例でも、ターゲットの初期状態は$|0\rangle$、回転角は$\pi$です。
+# どちらの制御量子ビットも、1つの量子ビットを表す`qm.Q[qm.Bit]`型です。`qm.prepare(...)`には、値が`0`か`1`になる整数の変数や計算式も使えます。それ以外の整数や、`0.0`のような実数は使えません。
+# `False`や`True`による準備も制御量子ビットに使え、この場合の型は`qm.Q[qm.Bool]`のままです。どちらの型の1量子ビットを測定しても、戻り値は`qm.Shot[qm.Bit]`となり、Pythonでは整数の`0`か`1`として得られます。
 
 
 # %%
@@ -88,7 +94,7 @@ def rotate(state: qm.Q[qm.Bits[1]], theta: qm.Real) -> qm.Q[qm.Bits[1]]:
 
 @qm.qkernel
 def crx_control_off() -> qm.Shot[qm.Bits[2]]:
-    control = qm.prepare(False)
+    control = qm.prepare(0)
     target = qm.qubits(1)
     control, target = qm.control(
         rotate,
@@ -101,7 +107,7 @@ def crx_control_off() -> qm.Shot[qm.Bits[2]]:
 
 @qm.qkernel
 def crx_control_on() -> qm.Shot[qm.Bits[2]]:
-    control = qm.prepare(True)
+    control = qm.prepare(1)
     target = qm.qubits(1)
     control, target = qm.control(
         rotate,
@@ -146,7 +152,7 @@ def x_all_two(state: qm.Q[qm.Bits[2]]) -> qm.Q[qm.Bits[2]]:
 
 @qm.qkernel
 def vector_target_demo() -> qm.Shot[qm.Bits[3]]:
-    control = qm.prepare(True)
+    control = qm.prepare(1)
     target = qm.qubits(2)
     control, target = qm.control(x_all_two, control, target)
     return qm.measure(qm.concat(control, target))
@@ -364,19 +370,19 @@ def repeated_control(
 # 演算$U$を同じ制御条件で$k$回繰り返すと、制御付きの$U^k$に相当します。この例では、同じ制御量子ビットを使ってRX回転を繰り返しています。
 
 # %%
-program = qm.specialize(repeated_control, repetitions=3)
+program = qm.specialize(repeated_control, repetitions=1 if docs_test_mode else 3)
 artifact = qm.compile(program, to=qm.Reference())
 
 record = qm.run(
     artifact,
     on=qm.Reference(),
     parameters={"theta": pi},
-    shots=8,
+    shots=sample_shots,
     seed=7,
 )
 
 print("controlled rotations:", record.result.counts)
-assert record.result.counts == {(1, 1): 8}
+assert record.result.counts == {(1, 1): sample_shots}
 
 # %% [markdown]
 # 制御量子ビットを$|1\rangle$で準備しているため、3回すべての回転が適用されます。$\theta=\pi$ではターゲットの測定結果が1になり、各ショットで`(1, 1)`が得られます。
@@ -401,7 +407,7 @@ def scalar_phase(state: qm.Q[qm.Bits[1]], angle: qm.Real) -> qm.Q[qm.Bits[1]]:
 
 @qm.qkernel
 def phase_kickback() -> qm.Shot[qm.Bits[2]]:
-    control = qm.prepare(False)
+    control = qm.prepare(0)
     control = qm.h(control)
     target = qm.qubits(1)
     control, target = qm.control(

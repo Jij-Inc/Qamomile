@@ -11,19 +11,19 @@ Qamomileを外部ライブラリや量子プラットフォームと組み合わ
 :::{card}
 :header: **Amazon Braketサポート**
 :link: braket_support
-型付きmeasurement feedbackをportable OpenQASM 3へコンパイルしてlocalで実行し、managed deviceをendpoint境界に保ちます。
+2量子ビットの回路をローカルで実行し、回転角を変えて試します。Amazon Braketの実機に同じ回路を送信する例も紹介します。
 :::
 
 :::{card}
-:header: **serialized kernel artifactによるCUDA-Qサポート**
+:header: **CUDA-Qサポート**
 :link: cudaq_support
-1つの型付きprogramをserialized CUDA-Q kernel dataへコンパイルし、inspectionして分離された`qpp-cpu` workerで実行します。
+CUDA-QのCPUシミュレーターで量子回路を動かし、利用できる操作を確認します。
 :::
 
 :::{card}
 :header: **HUGRサポート**
 :link: hugr_support
-QamomileプログラムをHUGRへコンパイルし、Seleneでローカル実行します。
+Seleneで回路をシミュレーションし、Quantinuumの実機Heliosに同じ回路を送信する例を紹介します。
 :::
 
 :::{card}
@@ -33,21 +33,21 @@ QamomileプログラムをHUGRへコンパイルし、Seleneでローカル実�
 :::
 
 :::{card}
-:header: **qBraid providerでの実行**
-:link: qbraid_executor
-型付きQamomileプログラムから決定的なQPYを生成し、live qBraid endpointから送信します。
+:header: **qBraidサポート**
+:link: qbraid_support
+2量子ビットの回路を準備し、qBraid経由でIQM Emeraldの実機に送信する例を紹介します。
 :::
 
 :::{card}
-:header: **Qiskit サポート**
+:header: **Qiskitサポート**
 :link: qiskit_support
-1つの型付きprogramをportable QPYへコンパイルし、Aerで再利用して、同じsourceをlive BackendV2へrouteします。
+Qiskit Aerで回路をシミュレーションし、IBMの量子コンピューターに回路を送信する例を紹介します。
 :::
 
 :::{card}
-:header: **QURI Parts サポート**
+:header: **QURI Partsサポート**
 :link: quri_parts_support
-1つの型付きprogramをportable logical circuitへコンパイルし、inspection、Qulacs sampling、期待値評価に再利用します。
+Qulacsで回路を動かし、QURI Partsのサンプラーで同じ回路をIQM Emeraldの実機に送信する例を紹介します。
 :::
 
 ::::

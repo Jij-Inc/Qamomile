@@ -6,6 +6,11 @@ portable preparation receipts. Original logical resource studies stay intact.
 ``TargetProfile`` and its facets expose native-validated device facts through
 ``CapabilitySnapshot.profile`` and ``OptimizationContext.profile``; the profile
 is target identity, never a capability check or an IR element.
+Circuit artifacts retain Rust-owned angle validation plans. The shared launch
+boundary checks their final numeric expressions before endpoint submission;
+general Real parameters retain their full binary64 domain. Provider validation
+uses a distinct immutable result and a mode fixed before submission; those
+reports never acquire source measurement or observed-execution semantics.
 """
 
 from __future__ import annotations
@@ -115,6 +120,7 @@ LAUNCH_MATERIALIZER_FORMAT = "qamomile.launch-materializer.v1"
 _MAX_EXECUTION_BATCH_INVOCATIONS = 4096
 _LAUNCH_CLOSABLE_REQUIREMENTS = frozenset(
     {
+        Requirement.LOGICAL_SHOT_CONTEXT,
         Requirement.DYNAMIC_CLASSICAL_INDEX,
         Requirement.DYNAMIC_QUBIT_SELECTION,
         Requirement.HOST_DISPATCH,
@@ -225,7 +231,7 @@ class ParameterABI:
                 rejects the Program.
         """
 
-        return cls(_derive_native_artifact_abis(program)[0].slots)
+        return cls(_derive_native_artifact_abis(program, single_value=True)[0].slots)
 
     def _to_bytes(self) -> bytes:
         """Encode this ABI through its canonical persistent schema."""
@@ -310,11 +316,14 @@ class ResultABI:
         source_order (tuple[int, ...]): Native measurement positions in logical
             source order.
         native_width (int): Total width of the native measurement row.
+        per_shot (bool): Whether native execution retains one result per shot,
+            including results that require no bits.
     """
 
     type: TypeSpec
     source_order: tuple[int, ...]
     native_width: int
+    per_shot: bool = False
 
     def __post_init__(self) -> None:
         """Validate logical-to-native measurement provenance.
@@ -341,6 +350,7 @@ class ResultABI:
         encoded = wire.ResultABIProto(
             source_order=self.source_order,
             native_width=self.native_width,
+            per_shot=self.per_shot,
         )
         encode_type(self.type, encoded.type)
         return encoded.SerializeToString(deterministic=True)
@@ -361,7 +371,9 @@ class ResultABI:
         """
 
         derived = _derive_native_artifact_abis(program)[1]
-        return cls(derived.type, derived.source_order, derived.native_width)
+        return cls(
+            derived.type, derived.source_order, derived.native_width, derived.per_shot
+        )
 
     @property
     def width(self) -> int:
@@ -491,11 +503,15 @@ class ResultABI:
 
 def _derive_native_artifact_abis(
     program: Program,
+    *,
+    single_value: bool = False,
 ) -> tuple[ParameterABI, ResultABI]:
     """Decode the ABIs derived by the required native compiler.
 
     Args:
         program: Closed verified program whose entrypoint defines both ABIs.
+        single_value (bool): Derive an unpacked value layout for one evaluation,
+            rather than the repeated sampled execution layout.
 
     Returns:
         The native parameter and result ABIs.
@@ -509,7 +525,11 @@ def _derive_native_artifact_abis(
     if not callable(derive):
         raise ArtifactError("Q7013: native artifact ABI derivation is unavailable")
     try:
-        raw_parameter_abi, raw_result_abi = derive(program._native_program())
+        raw_parameter_abi, raw_result_abi = (
+            derive(program._native_program(), True)
+            if single_value
+            else derive(program._native_program())
+        )
         parameter_payload = bytes(raw_parameter_abi)
         result_payload = bytes(raw_result_abi)
         encoded_parameters = wire.ParameterABIProto()
@@ -537,6 +557,7 @@ def _derive_native_artifact_abis(
             decode_type(encoded_result.type),
             tuple(encoded_result.source_order),
             encoded_result.native_width,
+            encoded_result.per_shot,
         )
     except (
         DecodeError,
@@ -942,6 +963,7 @@ def _encode_compilation_metadata(compiled: CompiledProgram) -> wire.ArtifactProt
     encode_type(compiled.result_abi.type, encoded.result_abi.type)
     encoded.result_abi.source_order.extend(compiled.result_abi.source_order)
     encoded.result_abi.native_width = compiled.result_abi.native_width
+    encoded.result_abi.per_shot = compiled.result_abi.per_shot
     for name, value in sorted(compiled.metadata.entries):
         encode_literal(value, encoded.metadata.add(name=name).value)
     return encoded
@@ -949,11 +971,18 @@ def _encode_compilation_metadata(compiled: CompiledProgram) -> wire.ArtifactProt
 
 @dataclass(frozen=True, slots=True)
 class Invocation:
-    """Launch-time values and finite execution policy, separate from artifacts."""
+    """Launch-time values and finite execution policy, separate from artifacts.
+
+    Attributes:
+        parameters (FrozenMapping): Immutable runtime parameter values.
+        shots (int): Positive observation count.
+        seed (int | None): Explicit unsigned 64-bit seed, including zero.
+            None leaves randomness to the endpoint and is the default.
+    """
 
     parameters: FrozenMapping = FrozenMapping(())
     shots: int = 1
-    seed: int = 0
+    seed: int | None = None
 
     @classmethod
     def create(
@@ -961,18 +990,33 @@ class Invocation:
         *,
         parameters: Mapping[str, object] | None = None,
         shots: int = 1,
-        seed: int = 0,
+        seed: int | None = None,
     ) -> Invocation:
-        """Create an immutable invocation from ordinary Python values."""
+        """Create an immutable invocation from ordinary Python values.
+
+        Args:
+            parameters (Mapping[str, object] | None): Runtime parameter values.
+            shots (int): Positive observation count, defaulting to one.
+            seed (int | None): Explicit unsigned 64-bit seed, including zero;
+                None leaves randomness to the endpoint.
+
+        Returns:
+            Invocation: Checked immutable launch request.
+
+        Raises:
+            ExecutionError: If shots or seed is outside the accepted domain.
+        """
 
         if isinstance(shots, bool) or not isinstance(shots, int) or shots <= 0:
             raise ExecutionError("Q8105: shots must be a positive integer")
-        if (
+        if seed is not None and (
             isinstance(seed, bool)
             or not isinstance(seed, int)
             or not 0 <= seed <= (1 << 64) - 1
         ):
-            raise ExecutionError("Q8138: seed must be an unsigned 64-bit integer")
+            raise ExecutionError(
+                "Q8138: seed must be None or an unsigned 64-bit integer"
+            )
         return cls(
             FrozenMapping.from_mapping(parameters or {}),
             shots,
@@ -1316,7 +1360,93 @@ def _native_sample_count_summary(
         ) from error
 
 
-ExecutionResult: TypeAlias = ValueResult | SampleResult
+@dataclass(frozen=True, slots=True)
+class ValidationResult:
+    """A terminal provider validation report, separate from program return values.
+
+    Args:
+        backend (str): Nonempty execution endpoint identity.
+        status (JobStatus): Completed, failed, or cancelled validation state.
+        _metadata (FrozenMapping): Immutable portable provider diagnostics.
+            Use :meth:`from_metadata` for ordinary mappings.
+
+    Raises:
+        ValueError: If the identity or terminal status is invalid, or metadata
+            duplicates the authoritative status.
+        TypeError: If the metadata does not use the immutable representation.
+    """
+
+    backend: str
+    status: JobStatus
+    _metadata: FrozenMapping = field(default=FrozenMapping(()), repr=False)
+
+    def __post_init__(self) -> None:
+        """Require an immutable terminal report without sampled result fields.
+
+        Raises:
+            ValueError: If the backend, terminal status, or metadata is invalid.
+            TypeError: If metadata is not a FrozenMapping.
+        """
+
+        if type(self.backend) is not str or not self.backend:
+            raise ValueError("validation result backend must be nonempty")
+        if not isinstance(self.status, JobStatus) or self.status not in {
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        }:
+            raise ValueError("validation result requires a terminal job status")
+        if not isinstance(self._metadata, FrozenMapping):
+            raise TypeError("validation result metadata must be immutable")
+        if any(name == "status" for name, _ in self._metadata.entries):
+            raise ValueError("validation metadata must not duplicate status")
+
+    @classmethod
+    def from_metadata(
+        cls,
+        *,
+        backend: str,
+        status: JobStatus,
+        metadata: Mapping[str, object],
+    ) -> ValidationResult:
+        """Freeze provider diagnostics without treating them as a program value.
+
+        Args:
+            backend (str): Nonempty execution endpoint identity.
+            status (JobStatus): Terminal provider validation outcome.
+            metadata (Mapping[str, object]): Portable string-keyed diagnostics.
+                Its status entry is replaced by the authoritative status.
+
+        Returns:
+            ValidationResult: Immutable report with independently owned metadata.
+
+        Raises:
+            TypeError: If metadata is not a portable string-keyed mapping.
+            ValueError: If the backend or terminal status is invalid.
+        """
+
+        if not isinstance(metadata, Mapping) or any(
+            type(name) is not str for name in metadata
+        ):
+            raise TypeError("validation metadata must have string keys")
+        values = dict(metadata)
+        values.pop("status", None)
+        return cls(backend, status, FrozenMapping.from_mapping(values))
+
+    def metadata(self) -> Mapping[str, object]:
+        """Read detached provider diagnostics and the authoritative outcome.
+
+        Returns:
+            Mapping[str, object]: Provider details and the portable status string.
+        """
+
+        return {
+            **{name: thaw_value(value) for name, value in self._metadata.entries},
+            "status": self.status.value,
+        }
+
+
+ExecutionResult: TypeAlias = ValueResult | SampleResult | ValidationResult
 
 
 class ExecutionSnapshotKind(str, Enum):
@@ -1536,7 +1666,7 @@ class ExecutionSnapshot:
         """Capture one completed typed execution result.
 
         Args:
-            result (ExecutionResult): Validated sample or value result.
+            result (ExecutionResult): Validated program output or provider report.
 
         Returns:
             ExecutionSnapshot: Local leaf retaining the complete public result.
@@ -1569,7 +1699,7 @@ class ExecutionSnapshot:
         """Restore the typed result held by a local completed snapshot.
 
         Returns:
-            ExecutionResult: Revalidated sample or value result.
+            ExecutionResult: Revalidated program output or provider report.
 
         Raises:
             ValueError: If this snapshot is not a local completed result.
@@ -1665,7 +1795,7 @@ def _freeze_execution_result(result: ExecutionResult) -> FrozenMapping:
     """Encode one validated public result as a canonical portable record.
 
     Args:
-        result (ExecutionResult): Sample or deterministic value result.
+        result (ExecutionResult): Sample, deterministic value, or provider report.
 
     Returns:
         FrozenMapping: Tagged portable execution-result record.
@@ -1674,6 +1804,15 @@ def _freeze_execution_result(result: ExecutionResult) -> FrozenMapping:
         TypeError: If ``result`` is not a supported execution result.
     """
 
+    if isinstance(result, ValidationResult):
+        return FrozenMapping.from_mapping(
+            {
+                "backend": result.backend,
+                "kind": "validation",
+                "status": result.status.value,
+                "metadata": result._metadata,
+            }
+        )
     if isinstance(result, SampleResult):
         return FrozenMapping.from_mapping(
             {
@@ -1710,7 +1849,7 @@ def _thaw_execution_result(value: PortableValue) -> ExecutionResult:
         value (PortableValue): Tagged result record from a local snapshot.
 
     Returns:
-        ExecutionResult: Reconstructed sample or deterministic value result.
+        ExecutionResult: Reconstructed sample, value, or provider report.
 
     Raises:
         SerializationError: If the record shape or value is invalid.
@@ -1727,6 +1866,16 @@ def _thaw_execution_result(value: PortableValue) -> ExecutionResult:
             raise TypeError("completed result backend is invalid")
         if worker_pid is not None and type(worker_pid) is not int:
             raise TypeError("completed result worker PID is invalid")
+        if kind == "validation":
+            if (
+                record.keys() != {"backend", "kind", "status", "metadata"}
+                or type(record["status"]) is not str
+                or not isinstance(record["metadata"], FrozenMapping)
+            ):
+                raise TypeError("validation result fields are invalid")
+            return ValidationResult(
+                backend, JobStatus(record["status"]), record["metadata"]
+            )
         if kind == "value" and record.keys() == {
             "backend",
             "kind",
@@ -1779,6 +1928,7 @@ def _thaw_execution_result(value: PortableValue) -> ExecutionResult:
                     decode_type(encoded.type),
                     tuple(encoded.source_order),
                     encoded.native_width,
+                    encoded.per_shot,
                 ),
             )
         return result
@@ -1910,6 +2060,30 @@ class Job(Protocol):
         ...
 
 
+@runtime_checkable
+class SubmittedJob(Job, Protocol):
+    """A submitted job exposing provider diagnostics independently of results.
+
+    Endpoint implementations only need the base :class:`Job` contract. The
+    ordinary submission facade also exposes optional provider metadata without
+    interpreting it as a source program's return value.
+    """
+
+    def metadata(self) -> Mapping[str, object]:
+        """Read current provider metadata without retrieving a program result.
+
+        Returns:
+            Mapping[str, object]: Independently owned top-level metadata,
+                including the job identity. Provider-specific fields may be
+                unavailable until the provider reports them.
+
+        Raises:
+            ExecutionError: If provider metadata is malformed or unavailable.
+        """
+
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class CompletedJob:
     """An eager local job implementing the same interface as remote jobs."""
@@ -1919,8 +2093,15 @@ class CompletedJob:
 
     @property
     def status(self) -> JobStatus:
-        """Return the terminal completed status."""
+        """Return the validation outcome or completed program execution status.
 
+        Returns:
+            JobStatus: Retained terminal validation state, or completed for
+                sampled and deterministic program results.
+        """
+
+        if isinstance(self.value, ValidationResult):
+            return self.value.status
         return JobStatus.COMPLETED
 
     def result(self, timeout: float | None = None) -> ExecutionResult:
@@ -1944,11 +2125,20 @@ class CompletedJob:
 
 @dataclass(frozen=True, slots=True)
 class _ValidatedJob:
-    """A job wrapper enforcing the artifact ResultABI at retrieval time."""
+    """Enforce program results or an explicitly selected provider validation.
+
+    Args:
+        inner (Job): Submitted endpoint job.
+        artifact (CompiledProgram): Sealed program with its source result ABI.
+        shots (int): Requested logical sample population.
+        validation_only (bool): Whether the endpoint explicitly validates the
+            request instead of executing it for program results.
+    """
 
     inner: Job
     artifact: CompiledProgram
     shots: int
+    validation_only: bool = False
 
     @property
     def job_id(self) -> str:
@@ -1962,11 +2152,54 @@ class _ValidatedJob:
 
         return self.inner.status
 
+    def metadata(self) -> Mapping[str, object]:
+        """Expose optional provider diagnostics without requiring new job methods.
+
+        Returns:
+            Mapping[str, object]: Detached top-level metadata with the checked
+                job identity, or only that identity for a basic endpoint job.
+
+        Raises:
+            ExecutionError: If a provider metadata hook returns an invalid shape.
+        """
+
+        metadata = getattr(self.inner, "metadata", None)
+        if not callable(metadata):
+            return {"job_id": self.job_id}
+        values = metadata()
+        if not isinstance(values, Mapping) or any(
+            not isinstance(key, str) for key in values
+        ):
+            raise ExecutionError("Q8150: endpoint job metadata must have string keys")
+        return {**values, "job_id": self.job_id}
+
     def result(self, timeout: float | None = None) -> ExecutionResult:
-        """Retrieve and validate the endpoint result against the sealed ABI."""
+        """Require the result kind selected before submission.
+
+        Args:
+            timeout (float | None): Optional nonnegative wait limit in seconds.
+
+        Returns:
+            ExecutionResult: Validated program output or provider validation.
+
+        Raises:
+            ExecutionError: If the endpoint returns the wrong result kind or
+                its program output disagrees with the source ABI.
+            TimeoutError: If the endpoint's local wait deadline expires.
+        """
 
         result = self.inner.result(timeout)
-        if self.artifact.result_abi.width:
+        if self.validation_only:
+            if not isinstance(result, ValidationResult):
+                raise ExecutionError(
+                    "Q8151: validation endpoint did not return a validation report"
+                )
+            return result
+        if isinstance(result, ValidationResult):
+            raise ExecutionError(
+                "Q8151: execution endpoint returned validation instead of program results"
+            )
+        if self.artifact.result_abi.per_shot or self.artifact.result_abi.width:
             if not isinstance(result, SampleResult):
                 raise ExecutionError("Q8118: sampled ResultABI received a value result")
             if (
@@ -2014,7 +2247,7 @@ class RunRecord:
             raise TypeError("run record artifact must be an CompiledProgram")
         if not isinstance(self.invocation, Invocation):
             raise TypeError("run record invocation must be an Invocation")
-        if not isinstance(self.result, (SampleResult, ValueResult)):
+        if not isinstance(self.result, (SampleResult, ValueResult, ValidationResult)):
             raise TypeError("run record result must be an execution result")
         if (
             isinstance(self.result, SampleResult)
@@ -2154,7 +2387,12 @@ class CompilationTarget(Protocol):
 
 @runtime_checkable
 class CircuitTarget(CompilationTarget, Protocol):
-    """An artifact target that emits an already verified static circuit."""
+    """An artifact target that emits an already verified static circuit.
+
+    Implement ``lower`` through ``qamomile.circuit.lower_circuit_target`` so
+    the emitted artifact retains shared native angle validation. Family and
+    launch-time lowering attach the same checks around ``lower_circuit``.
+    """
 
     def lower_circuit(self, circuit: CircuitProgram, /) -> LoweredProgram:
         """Emit one target-neutral static circuit without projecting QCore.
@@ -2193,20 +2431,63 @@ class LaunchTarget(CompilationTarget, Protocol):
     differs from :class:`CircuitTarget`: structured targets need not
     flatten QCore into a circuit merely to participate in the artifact
     lifecycle.
+
+    Preparation reuse requires exact shots and seed, source values, ABIs,
+    and target identity.
     """
 
     @property
     def launch_materialized_requirements(self) -> frozenset[Requirement]:
-        """Return requirements discharged by exact launch-time lowering."""
+        """Return requirements closed or checked by exact invocation lowering."""
 
         ...
 
     def lower_at(
         self,
         program: Program,
-        parameters: Mapping[str, object],
+        invocation: Invocation,
     ) -> LoweredProgram:
-        """Emit one transient target artifact for exact invocation values."""
+        """Emit one transient target artifact for exact values and shot count.
+
+        Args:
+            program (Program): Verified source retained by the launch recipe.
+            invocation (Invocation): Exact parameters, logical count and policy.
+
+        Returns:
+            LoweredProgram: Target executable and its native-derived layouts.
+
+        Raises:
+            CapabilityError: If this invocation cannot be emitted by the target.
+            ExecutionError: If invocation values or execution policy are invalid.
+        """
+
+        ...
+
+
+@runtime_checkable
+class InvocationPolicyEndpoint(Protocol):
+    """An endpoint that validates local invocation policy before submission."""
+
+    def validate_invocation(self, invocation: Invocation) -> None:
+        """Reject unsupported execution policy without contacting a provider.
+
+        Args:
+            invocation (Invocation): Canonically bound execution request.
+        """
+        ...
+
+
+@runtime_checkable
+class ValidationEndpoint(Protocol):
+    """An endpoint that explicitly selects provider validation results."""
+
+    @property
+    def validation_only(self) -> bool:
+        """Identify requests that validate a program instead of executing it.
+
+        Returns:
+            bool: True only when retrieval must yield a ValidationResult.
+        """
 
         ...
 
@@ -2364,22 +2645,26 @@ def compile(
             family = optimizer.optimize_family(optimization_source, context=context)
             candidate = family.module.specialize(family.entrypoint, **bindings)
         program = optimizer._prepare(program, context, candidate=candidate)
-    (
-        required,
-        missing,
-        _materialized,
-        unsupported,
-        lowering_route,
-        planning_stage,
-    ) = _plan_target_lowering(program, to)
-    if unsupported:
+    plan = _plan_target_lowering(program, to)
+    if plan.unsupported:
         raise ArtifactError(
             "Q7015: target lacks required capabilities: "
-            + ", ".join(sorted(item.value for item in unsupported))
+            + ", ".join(sorted(item.value for item in plan.unsupported))
         )
+    required = plan.required
+    planning_stage = "native-lowering-planning"
     if study is None:
         study = logical(program)
-    if lowering_route == "shot_execution":
+    lowered = None
+    if plan.reusable_circuit_requirements is not None:
+        from .circuit import _try_lower_reusable_circuit
+
+        if not isinstance(to, CircuitTarget):
+            raise ArtifactError("Q7016: reusable circuit requires a circuit target")
+        lowered = _try_lower_reusable_circuit(program, to)
+    if lowered is not None and plan.reusable_circuit_requirements is not None:
+        required = plan.reusable_circuit_requirements
+    elif plan.route == "shot_execution":
         from ._shot_execution import compile_shot_program
 
         if not isinstance(to, CircuitTarget):
@@ -2387,7 +2672,7 @@ def compile(
         return _with_optimization_provenance(
             compile_shot_program(program, to, required, study, planning_stage), program
         )
-    if lowering_route == "circuit_family":
+    elif plan.route == "circuit_family":
         if not isinstance(to, CircuitTarget):
             raise ArtifactError(
                 "Q7016: native target planner selected an invalid circuit-family route"
@@ -2402,7 +2687,13 @@ def compile(
             ),
             program,
         )
-    if lowering_route == "launch_materialized":
+    elif plan.route == "launch_materialized":
+        if Requirement.LOGICAL_SHOT_CONTEXT in required:
+            indexed = _compile_indexed_shot_template(
+                program, to, required, planning_stage, study
+            )
+            if indexed is not None:
+                return _with_optimization_provenance(indexed, program)
         return _with_optimization_provenance(
             _compile_launch_materializer(
                 program,
@@ -2413,10 +2704,11 @@ def compile(
             ),
             program,
         )
-    if lowering_route != "direct" or missing:
+    elif plan.route == "direct" and not plan.missing:
+        lowered = to.lower(program)
+    else:
         raise ArtifactError("Q7016: native target planner returned an invalid route")
     contract = ExecutionContract(to.name, required)
-    lowered = to.lower(program)
     if not isinstance(lowered, LoweredProgram):
         raise ArtifactError("Q7042: target lower() did not return LoweredProgram")
     report = compilation_report(
@@ -2530,7 +2822,7 @@ def _compile_artifact_family(
             target returns inconsistent ABI facts for a variant.
     """
 
-    from .circuit import lower_to_circuit_family
+    from .circuit import lower_to_circuit_family, with_circuit_angle_validation
     from .errors import CapabilityError
 
     try:
@@ -2575,6 +2867,7 @@ def _compile_artifact_family(
             or lowered.result_abi != family.result_abi
         ):
             raise ArtifactError("Q7044: target changed a circuit-family variant ABI")
+        lowered = with_circuit_angle_validation(lowered, variant.circuit)
         child_report = compilation_report(
             program,
             target=to.name,
@@ -2723,29 +3016,6 @@ def _compile_launch_materializer(
     )
 
 
-def _launch_materialized_requirements(
-    target: CompilationTarget,
-    required: frozenset[Requirement],
-) -> frozenset[Requirement]:
-    """Return required capabilities an exact launch can discharge.
-
-    Args:
-        target: Candidate artifact target.
-        required: Whole-program execution requirements.
-
-    Returns:
-        Required capabilities that the target promises to close before its
-        execution endpoint receives the transient artifact.
-
-    Raises:
-        ArtifactError: If a structured target advertises an invalid empty or
-            non-requirement materialization contract.
-    """
-
-    materialized, _ = _target_launch_profile(target)
-    return materialized & (required - target.capabilities.requirements)
-
-
 def _target_launch_profile(
     target: CompilationTarget,
 ) -> tuple[frozenset[Requirement], bool]:
@@ -2766,7 +3036,10 @@ def _target_launch_profile(
     if isinstance(target, CircuitTarget) and isinstance(target, LaunchTarget):
         raise ArtifactError("Q7046: target has ambiguous launch protocols")
     if isinstance(target, CircuitTarget):
-        return _CIRCUIT_LAUNCH_CLOSABLE_REQUIREMENTS, True
+        materialized = _CIRCUIT_LAUNCH_CLOSABLE_REQUIREMENTS
+        if getattr(target, "supports_indexed_shots", False) is True:
+            materialized = materialized | {Requirement.LOGICAL_SHOT_CONTEXT}
+        return materialized, True
     if not isinstance(target, LaunchTarget):
         return frozenset(), False
     materialized = target.launch_materialized_requirements
@@ -2868,21 +3141,182 @@ def _select_artifact_family_variant(
     return family.variants[selected_index].artifact
 
 
+def _compile_indexed_shot_template(
+    program: Program,
+    target: CompilationTarget,
+    required: frozenset[Requirement],
+    planning_stage: str,
+    study: ResourceStudy,
+) -> CompiledProgram | None:
+    """Retain a native-selected fixed circuit before the logical count is known.
+
+    Args:
+        program (Program): Selected verified source program.
+        target (CompilationTarget): Exact compile-time SDK policy.
+        required (frozenset[Requirement]): Source execution requirements.
+        planning_stage (str): Existing native target-planning report stage.
+        study (ResourceStudy): Original logical resource evidence.
+
+    Returns:
+        CompiledProgram | None: Sealed fixed template, or None for a source recipe.
+
+    Raises:
+        ArtifactError: If the target or its native template changes checked facts.
+    """
+    from .circuit import ANGLE_VALIDATION_METADATA
+
+    lower = getattr(target, "lower_indexed_shot", None)
+    if not callable(lower):
+        return None
+    lowered = lower(program)
+    if lowered is None:
+        return None
+    if not isinstance(lowered, LoweredProgram):
+        raise ArtifactError(
+            "Q4481: target returned an invalid indexed circuit template"
+        )
+    owner = getattr(lowered.payload, "shot_template", None)
+    if owner is None:
+        raise ArtifactError("Q4481: indexed circuit lost its native numeric plan")
+    try:
+        plan = bytes(
+            owner.to_bytes(
+                lowered.parameter_abi._to_bytes(),
+                lowered.result_abi._to_bytes(),
+                target.fingerprint,
+                study.semantic_digest,
+            )
+        )
+    except ValueError as error:
+        raise ArtifactError(str(error)) from error
+    report = compilation_report(
+        program,
+        target=target.name,
+        stages=(planning_stage, *lowered.stages),
+        circuit_qubits=lowered.circuit_qubits,
+        circuit_gates=lowered.circuit_gates,
+        emitted_instructions=lowered.emitted_instructions,
+        assumptions=lowered.assumptions,
+        warnings=lowered.warnings,
+        resources=study,
+    )
+    return CompiledProgram(
+        payload=lowered.payload,
+        target_fingerprint=target.fingerprint,
+        parameter_abi=lowered.parameter_abi,
+        result_abi=lowered.result_abi,
+        report=report,
+        execution_contract=ExecutionContract(target.name, required),
+        metadata=FrozenMapping.from_mapping(
+            {
+                **dict(lowered.metadata.entries),
+                "qamomile.native_shot_template.v1": plan,
+                ANGLE_VALIDATION_METADATA: tuple(owner.projection.angle_validation),
+            }
+        ),
+    )
+
+
+def _current_shot_children(
+    artifact: CompiledProgram,
+    endpoint: ExecutionEndpoint,
+    invocation: Invocation,
+) -> tuple[tuple[CompiledProgram, Invocation], ...]:
+    """Materialize native-checked logical indices for one target-bound launch.
+
+    Args:
+        artifact (CompiledProgram): Sealed source recipe with a logical context.
+        endpoint (ExecutionEndpoint): Exact endpoint selected by compilation.
+        invocation (Invocation): Normalized parameters and total logical shots.
+
+    Returns:
+        tuple[tuple[CompiledProgram, Invocation], ...]: Ordered one-shot children.
+
+    Raises:
+        ExecutionError: If context binding, limits or target materialization fail.
+    """
+
+    from .circuit import validate_artifact_angles
+
+    recipe = artifact.execution_payload(_LaunchMaterializerPayload)
+    if artifact.target_fingerprint != endpoint.target.fingerprint:
+        raise ExecutionError("Q8129: logical shot recipe does not match endpoint")
+    owner = recipe.program._native_program()
+    preflight = getattr(owner, "check_indexed_invocation", None)
+    binder = getattr(owner, "bind_current_shot", None)
+    if not callable(preflight) or not callable(binder):
+        raise ExecutionError(
+            "Q4480: native logical shot preflight or binding is unavailable"
+        )
+    guard_factory = getattr(endpoint, "_indexed_materialization_guard", None)
+    if not callable(guard_factory):
+        raise ExecutionError(
+            "Q4480: indexed target allocation preflight is unavailable"
+        )
+    children: list[tuple[CompiledProgram, Invocation]] = []
+    try:
+        preflight(invocation.shots)
+        guard = guard_factory()
+        for index in range(invocation.shots):
+            bound = binder(index, invocation.shots)
+            program = Program.from_bytes(bytes(bound.to_bytes()))
+            child = compile(program, to=endpoint.target)
+            values = invocation.values()
+            names = {slot.name for slot in child.parameter_abi.slots}
+            values = {name: value for name, value in values.items() if name in names}
+            if child.format == LAUNCH_MATERIALIZER_FORMAT:
+                child = _materialize_launch_artifact(
+                    child, values, target=endpoint.target
+                )
+                names = {slot.name for slot in child.parameter_abi.slots}
+                values = {
+                    name: value for name, value in values.items() if name in names
+                }
+            if child.result_abi != artifact.result_abi:
+                raise ExecutionError(
+                    "Q4480: logical shot binding changed its result ABI"
+                )
+            validate_artifact_angles(child, values)
+            guard.add(child)
+            children.append(
+                (
+                    child,
+                    Invocation.create(parameters=values, shots=1, seed=invocation.seed),
+                )
+            )
+    except ExecutionError:
+        raise
+    except (ValueError, QamomileError) as error:
+        raise ExecutionError(
+            f"Q4480: logical shot materialization failed: {error}"
+        ) from error
+    return tuple(children)
+
+
 def _materialize_launch_artifact(
     artifact: CompiledProgram,
     parameters: Mapping[str, object],
     *,
     target: CompilationTarget,
+    invocation: Invocation | None = None,
 ) -> CompiledProgram:
-    """Reuse the most recent exact launch materialization without persistence.
+    """Reuse the most recent compatible launch materialization without persistence.
+
+    Structured targets require exact shots and seed for preparation reuse.
 
     Args:
         artifact (CompiledProgram): Verified target-bound launch recipe.
         parameters (Mapping): Complete bound invocation values.
         target (CompilationTarget): Endpoint's exact target profile.
+        invocation (Invocation | None): Exact count and policy for a structured
+            target. Circuit-only preparation does not consume these facts.
 
     Returns:
         CompiledProgram: Retained child for these values, with independent shot state.
+
+    Raises:
+        ArtifactError: If the native compiler cannot plan the target.
+        ExecutionError: If launch materialization fails.
     """
     recipe = artifact.execution_payload(_LaunchMaterializerPayload)
     # Structured targets may bake every launch value into their executable.
@@ -2893,6 +3327,9 @@ def _materialize_launch_artifact(
         consumed = launch_control_bindings(recipe.program, parameters)
     else:
         consumed = parameters
+    context = None
+    if isinstance(target, LaunchTarget) and invocation is not None:
+        context = (invocation.shots, invocation.seed)
     key = (
         target.name,
         target.fingerprint,
@@ -2901,12 +3338,13 @@ def _materialize_launch_artifact(
         artifact.result_abi,
         artifact.source_digest,
         artifact.execution_contract,
+        context,
     )
     with recipe._lock:
         if recipe._last is not None and recipe._last[0] == key:
             return recipe._last[1]
         child = _materialize_launch_artifact_uncached(
-            artifact, parameters, target=target
+            artifact, parameters, target=target, invocation=invocation
         )
         object.__setattr__(recipe, "_last", (key, child))
         return child
@@ -2917,6 +3355,7 @@ def _materialize_launch_artifact_uncached(
     parameters: Mapping[str, object],
     *,
     target: CompilationTarget,
+    invocation: Invocation | None = None,
 ) -> CompiledProgram:
     """Materialize one sealed launch-controlled program for a static target.
 
@@ -2924,6 +3363,7 @@ def _materialize_launch_artifact_uncached(
         artifact: Outer target-bound materialization recipe.
         parameters: Validated and default-filled launch parameter values.
         target: Endpoint target whose fingerprint already matches the recipe.
+        invocation (Invocation | None): Exact structured target invocation.
 
     Returns:
         CompiledProgram: Transient backend artifact for this invocation.
@@ -2933,20 +3373,17 @@ def _materialize_launch_artifact_uncached(
             violates the sealed source and ABI contracts.
     """
 
-    materialized_requirements = _launch_materialized_requirements(
-        target,
-        artifact.execution_contract.requirements,
-    )
-    if not materialized_requirements:
-        raise ExecutionError("Q8133: endpoint cannot materialize launch requirements")
-    program = _decode_launch_materializer_program(
-        artifact,
-        target_format=target.name,
-        materialized_requirements=materialized_requirements,
+    program, materialized_requirements = _decode_launch_materializer_program(
+        artifact, target=target
     )
     try:
         if isinstance(target, CircuitTarget):
-            from .circuit import launch_control_bindings, lower_to_circuit_at
+            from .circuit import (
+                launch_control_bindings,
+                lower_to_circuit_at,
+                validate_circuit_angles,
+                with_circuit_angle_validation,
+            )
 
             closed_parameters = launch_control_bindings(program, parameters)
 
@@ -2956,6 +3393,7 @@ def _materialize_launch_artifact_uncached(
                 realization_capabilities=target.capabilities.realization_capabilities,
                 realizations=target.capabilities.realizations,
             )
+            validate_circuit_angles(circuit, parameters)
             if circuit.requires_result_postprocessing and not (
                 isinstance(target, CircuitResultPostprocessingTarget)
                 and target.supports_circuit_result_postprocessing is True
@@ -2964,12 +3402,23 @@ def _materialize_launch_artifact_uncached(
                     "Q7246: target must opt in to static-circuit result postprocessing"
                 )
             lowered = target.lower_circuit(circuit)
+            if isinstance(lowered, LoweredProgram):
+                lowered = with_circuit_angle_validation(lowered, circuit)
             expected_parameter_abi = circuit.parameter_abi
             preparation_stages: tuple[str, ...] = _target_optimization_stages(program)
             materialization_stage = "rust-launch-circuit-materialization"
         elif isinstance(target, LaunchTarget):
             closed_parameters = parameters
-            lowered = target.lower_at(program, parameters)
+            if invocation is None:
+                raise ExecutionError("Q8134: structured lowering needs an invocation")
+            lowered = target.lower_at(
+                program,
+                Invocation.create(
+                    parameters=parameters,
+                    shots=invocation.shots,
+                    seed=invocation.seed,
+                ),
+            )
             expected_parameter_abi = (
                 ParameterABI()
                 if Requirement.PARAMETERIZED_EXECUTION in materialized_requirements
@@ -3027,7 +3476,8 @@ def _materialize_launch_artifact_uncached(
         report=report,
         execution_contract=ExecutionContract(
             target.name,
-            artifact.execution_contract.requirements - materialized_requirements,
+            artifact.execution_contract.requirements
+            - (materialized_requirements - {Requirement.LOGICAL_SHOT_CONTEXT}),
         ),
         metadata=FrozenMapping(
             tuple(
@@ -3053,25 +3503,26 @@ def _materialize_launch_artifact_uncached(
 def _decode_launch_materializer_program(
     artifact: CompiledProgram,
     *,
-    target_format: str,
-    materialized_requirements: frozenset[Requirement],
-) -> Program:
-    """Decode and validate the program sealed into a launch materializer.
+    target: CompilationTarget,
+) -> tuple[Program, frozenset[Requirement]]:
+    """Validate a launch recipe against the target plan used at compilation.
 
     Args:
-        artifact: Outer target-bound materialization recipe.
-        target_format: Static child format expected by the endpoint target.
-        materialized_requirements: Capabilities the target closes before
-            execution.
+        artifact (CompiledProgram): Sealed launch recipe.
+        target (CompilationTarget): Target that will emit the child artifact.
 
     Returns:
-        Program: Canonical verified program retained by the recipe.
+        tuple[Program, frozenset[Requirement]]: Verified program and the
+            requirements the target can satisfy at launch.
 
     Raises:
-        ExecutionError: If payload or artifact identities disagree.
+        ArtifactError: If the native compiler cannot plan the target.
+        ExecutionError: If the recipe disagrees with the artifact or target.
     """
 
     recipe = artifact.execution_payload(_LaunchMaterializerPayload)
+    if recipe.target_format != target.name:
+        raise ExecutionError("Q8133: launch recipe targets a different format")
     program = recipe.program
     receipt = dict(artifact.metadata.entries).get(OPTIMIZATION_METADATA_KEY)
     if receipt is not None:
@@ -3079,21 +3530,22 @@ def _decode_launch_materializer_program(
         if not isinstance(source, Program) or not isinstance(receipt, bytes):
             raise ExecutionError("Q7802: malformed optimization recipe")
         program = _restore_optimization(source, program, receipt)
-    required, _, _ = _plan_target_requirements(program, frozenset(Requirement))
     if (
-        recipe.target_format != target_format
-        or program._native_program().compilation_source_digest()
-        != artifact.source_digest
+        program._native_program().compilation_source_digest() != artifact.source_digest
         or ParameterABI.from_program(program) != artifact.parameter_abi
         or ResultABI.from_program(program) != artifact.result_abi
-        or required != artifact.execution_contract.requirements
-        or not materialized_requirements
-        or not materialized_requirements <= required
     ):
         raise ExecutionError(
             "Q8133: launch recipe disagrees with its artifact contract"
         )
-    return program
+    plan = _plan_target_lowering(program, target)
+    if (
+        plan.required != artifact.execution_contract.requirements
+        or plan.unsupported
+        or not plan.materialized
+    ):
+        raise ExecutionError("Q8133: launch recipe disagrees with target requirements")
+    return program, plan.materialized
 
 
 def _plan_target_requirements(
@@ -3137,26 +3589,40 @@ def _plan_target_requirements(
     return required, missing, "native-capability-planning"
 
 
+@dataclass(frozen=True)
+class _TargetLoweringPlan:
+    """Retain checked native requirements and the fallback for circuit emission.
+
+    Args:
+        required (frozenset[Requirement]): Source requirements after shot placement.
+        missing (frozenset[Requirement]): Requirements absent from the target.
+        materialized (frozenset[Requirement]): Requirements satisfied at launch.
+        unsupported (frozenset[Requirement]): Requirements with no available route.
+        route (str): Native route when a reusable circuit cannot be emitted.
+        reusable_circuit_requirements (frozenset[Requirement] | None): Residual
+            execution requirements if a certified circuit can be emitted now.
+    """
+
+    required: frozenset[Requirement]
+    missing: frozenset[Requirement]
+    materialized: frozenset[Requirement]
+    unsupported: frozenset[Requirement]
+    route: str
+    reusable_circuit_requirements: frozenset[Requirement] | None
+
+
 def _plan_target_lowering(
     program: Program,
     target: CompilationTarget,
-) -> tuple[
-    frozenset[Requirement],
-    frozenset[Requirement],
-    frozenset[Requirement],
-    frozenset[Requirement],
-    str,
-    str,
-]:
+) -> _TargetLoweringPlan:
     """Select one transient target-lowering route through Rust.
 
     Args:
-        program: Closed verified program whose requirements are authoritative.
-        target: Target supplying capabilities and launch protocol facts.
+        program (Program): Closed verified program whose requirements are authoritative.
+        target (CompilationTarget): Target supplying capabilities and launch protocol facts.
 
     Returns:
-        Required, missing, materialized, and unsupported requirement sets,
-        followed by the selected route and planning-stage identity.
+        _TargetLoweringPlan: Validated requirements and available lowering routes.
 
     Raises:
         ArtifactError: If target protocols are invalid or an installed native
@@ -3183,15 +3649,38 @@ def _plan_target_lowering(
         materialized = frozenset(Requirement(item) for item in plan.materialized)
         unsupported = frozenset(Requirement(item) for item in plan.unsupported)
         route = plan.route
-    except (TypeError, ValueError) as error:
+        reusable = (
+            None
+            if plan.reusable_circuit_requirements is None
+            else frozenset(
+                Requirement(item) for item in plan.reusable_circuit_requirements
+            )
+        )
+    except (AttributeError, TypeError, ValueError) as error:
         raise ArtifactError(
             f"Q7016: native lowering planning failed: {error}"
         ) from error
     if (
         native_supported != supported
         or missing != required - supported
-        or materialized != missing & promised
+        or materialized
+        != (missing & promised)
+        | (
+            required & promised & {Requirement.LOGICAL_SHOT_CONTEXT}
+            if isinstance(target, LaunchTarget)
+            else frozenset()
+        )
         or unsupported != missing - materialized
+        or (
+            reusable is not None
+            and (
+                route not in {"circuit_family", "launch_materialized"}
+                or not circuit_family
+                or not missing
+                or unsupported
+                or reusable != required - materialized
+            )
+        )
         or route
         not in {
             "direct",
@@ -3202,13 +3691,8 @@ def _plan_target_lowering(
         }
     ):
         raise ArtifactError("Q7016: native lowering plan is internally inconsistent")
-    return (
-        required,
-        missing,
-        materialized,
-        unsupported,
-        route,
-        "native-lowering-planning",
+    return _TargetLoweringPlan(
+        required, missing, materialized, unsupported, route, reusable
     )
 
 
@@ -3218,7 +3702,7 @@ def execute(
     on: ExecutionEndpoint,
     parameters: Mapping[str, object] | None = None,
     shots: int = 1,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> ExecutionResult:
     """Execute an already compiled CompiledProgram and return its raw result.
 
@@ -3234,10 +3718,12 @@ def execute(
         parameters (Mapping[str, object] | None): Runtime Param values keyed by
             source parameter name.
         shots (int): Positive number of observations to request.
-        seed (int): Unsigned deterministic execution seed.
+        seed (int | None): Explicit unsigned 64-bit seed, including zero.
+            None (the default) leaves randomness to the endpoint.
 
     Returns:
-        ExecutionResult: Normalized sampled or deterministic result.
+        ExecutionResult: Program output or a provider validation report,
+            according to the selected endpoint.
 
     Raises:
         TypeError: If the artifact, endpoint, or parameters have an invalid
@@ -3261,14 +3747,18 @@ def execute_batch(
     on: ExecutionEndpoint,
     parameters: Sequence[Mapping[str, object]],
     shots: int = 1,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> tuple[ExecutionResult, ...]:
     """Execute an ordered parameter batch against one compiled artifact.
 
-    Each row is an independent invocation. Seeds advance from ``seed`` in
-    source order, and returned results retain that same order. Reference
+    Each row is an independent invocation. Explicit integer seeds advance from
+    ``seed`` in source order; None remains unspecified for every row.
+    Returned results retain that same order. Reference
     execution reuses the retained verified owner; other endpoints retain
     their ordinary per-invocation launch behavior.
+    All argument shapes are checked before the first launch. Sequential
+    endpoints can still fail on later preparation or execution; the operation
+    does not promise atomic submission.
 
     Args:
         artifact (CompiledProgram): Compiled immutable target artifact reused
@@ -3278,11 +3768,13 @@ def execute_batch(
         parameters (Sequence[Mapping[str, object]]): Ordered runtime parameter
             mappings. At most 4096 invocations may be submitted together.
         shots (int): Positive observation count used for every invocation.
-        seed (int): Unsigned 64-bit seed for the first row. Each later row uses
-            the next seed.
+        seed (int | None): Explicit unsigned 64-bit seed for the first row,
+            including zero. Each later row uses the next seed, without wrapping.
+            None (the default) leaves randomness to the endpoint for every row.
 
     Returns:
-        tuple[ExecutionResult, ...]: Validated results in parameter-row order.
+        tuple[ExecutionResult, ...]: Program outputs or validation reports in
+            parameter-row order, according to the selected endpoint.
 
     Raises:
         TypeError: If the artifact, endpoint, or parameter batch has an invalid
@@ -3297,6 +3789,7 @@ def execute_batch(
         raise TypeError("execute_batch expects an CompiledProgram")
     if not isinstance(on, ExecutionEndpoint):
         raise TypeError("on= must implement ExecutionEndpoint")
+    validation_only = isinstance(on, ValidationEndpoint) and on.validation_only
     if not isinstance(parameters, Sequence):
         raise TypeError("parameters= must be an ordered sequence of mappings")
     if len(parameters) > _MAX_EXECUTION_BATCH_INVOCATIONS:
@@ -3312,36 +3805,40 @@ def execute_batch(
     rows = tuple(parameters)
     if any(not isinstance(row, Mapping) for row in rows):
         raise TypeError("parameters= rows must be mappings")
-    if (
-        not isinstance(on, BatchExecutionEndpoint)
-        or artifact.format == "qamomile.shot-execution.v1"
-    ):
-        return tuple(
-            execute(
-                artifact,
-                on=on,
-                parameters=row,
-                shots=shots,
-                seed=seed + index,
-            )
-            for index, row in enumerate(rows)
-        )
-
+    base = Invocation.create(shots=shots, seed=seed)
     invocations: list[Invocation] = []
     for index, row in enumerate(rows):
-        invocation = Invocation.create(
-            parameters=row,
-            shots=shots,
-            seed=seed + index,
-        )
+        row_seed = None if base.seed is None else base.seed + index
+        invocation = Invocation.create(parameters=row, shots=shots, seed=row_seed)
         bound = artifact.parameter_abi.bind(invocation.values())
-        invocations.append(
-            Invocation(
-                FrozenMapping.from_mapping(dict(bound)),
-                invocation.shots,
-                invocation.seed,
-            )
+        invocation = Invocation(
+            FrozenMapping.from_mapping(dict(bound)), invocation.shots, invocation.seed
         )
+        if isinstance(on, InvocationPolicyEndpoint):
+            on.validate_invocation(invocation)
+        invocations.append(invocation)
+    if not isinstance(on, BatchExecutionEndpoint) or artifact.format in {
+        "qamomile.shot-execution.v1",
+        LAUNCH_MATERIALIZER_FORMAT,
+        ARTIFACT_FAMILY_FORMAT,
+    }:
+        return tuple(
+            _submit_with_invocation(
+                artifact,
+                on=on,
+                parameters=invocation.values(),
+                shots=invocation.shots,
+                seed=invocation.seed,
+                validation_only=validation_only,
+            )[0].result()
+            for invocation in invocations
+        )
+
+    from .circuit import validate_artifact_angles
+
+    if isinstance(on.target, CircuitTarget):
+        for invocation in invocations:
+            validate_artifact_angles(artifact, invocation.values())
     jobs = on.launch_batch(artifact, tuple(invocations))
     if (
         not isinstance(jobs, tuple)
@@ -3352,7 +3849,12 @@ def execute_batch(
             "Q8128: endpoint batch launch did not return one Job per invocation"
         )
     return tuple(
-        _ValidatedJob(job, artifact, invocation.shots).result()
+        _ValidatedJob(
+            job,
+            artifact,
+            invocation.shots,
+            validation_only,
+        ).result()
         for job, invocation in zip(jobs, invocations, strict=True)
     )
 
@@ -3363,9 +3865,29 @@ def submit(
     on: ExecutionEndpoint,
     parameters: Mapping[str, object] | None = None,
     shots: int = 1,
-    seed: int = 0,
-) -> Job:
-    """Validate and submit an existing artifact without recompiling source."""
+    seed: int | None = None,
+) -> SubmittedJob:
+    """Validate and submit an existing artifact without recompiling source.
+
+    Args:
+        artifact (CompiledProgram): Compiled immutable target artifact.
+        on (ExecutionEndpoint): Endpoint accepting the artifact's target.
+        parameters (Mapping[str, object] | None): Runtime values keyed by source
+            parameter name; None supplies no explicit values.
+        shots (int): Positive observation count, defaulting to one.
+        seed (int | None): Explicit unsigned 64-bit seed, including zero;
+            None (the default) leaves randomness to the endpoint.
+
+    Returns:
+        SubmittedJob: Job with status, provider metadata, cancellation, and
+            restorable execution state. Retrieval returns program output or
+            a provider validation report according to the selected endpoint.
+
+    Raises:
+        TypeError: If the artifact, endpoint, or parameters have an invalid shape.
+        ValueError: If an invocation value is outside its accepted range.
+        ExecutionError: If preparation, endpoint policy, or submission fails.
+    """
 
     return _submit_with_invocation(
         artifact,
@@ -3382,14 +3904,37 @@ def _submit_with_invocation(
     on: ExecutionEndpoint,
     parameters: Mapping[str, object] | None = None,
     shots: int = 1,
-    seed: int = 0,
-) -> tuple[Job, Invocation]:
-    """Submit once and retain the Rust-normalized outer invocation."""
+    seed: int | None = None,
+    validation_only: bool | None = None,
+) -> tuple[SubmittedJob, Invocation]:
+    """Submit once with a fixed result kind and normalized outer invocation.
+
+    Args:
+        artifact (CompiledProgram): Immutable compiled target artifact.
+        on (ExecutionEndpoint): Endpoint accepting the artifact's target.
+        parameters (Mapping[str, object] | None): Source runtime values, or None
+            when no explicit values are supplied.
+        shots (int): Positive requested observation count.
+        seed (int | None): Explicit unsigned 64-bit seed, including zero;
+            None leaves randomness to the endpoint.
+        validation_only (bool | None): Result kind already selected by a batch;
+            None derives it from the endpoint before preparation.
+
+    Returns:
+        tuple[SubmittedJob, Invocation]: Checked job and Rust-normalized request.
+
+    Raises:
+        TypeError: If the artifact, endpoint, or arguments have invalid shapes.
+        ValueError: If invocation values are outside their accepted range.
+        ExecutionError: If endpoint compatibility, preparation, or launch fails.
+    """
 
     if not isinstance(artifact, CompiledProgram):
         raise TypeError("submit expects an CompiledProgram")
     if not isinstance(on, ExecutionEndpoint):
         raise TypeError("on= must implement ExecutionEndpoint")
+    if validation_only is None:
+        validation_only = isinstance(on, ValidationEndpoint) and on.validation_only
     if artifact.target_fingerprint != on.target.fingerprint:
         raise ExecutionError(
             "Q8129: artifact target does not match execution endpoint target"
@@ -3401,22 +3946,74 @@ def _submit_with_invocation(
         invocation.shots,
         invocation.seed,
     )
+    if isinstance(on, InvocationPolicyEndpoint):
+        on.validate_invocation(recorded_invocation)
     from ._shot_execution import ShotExecutable, ShotJob
+    from .circuit import validate_artifact_angles
 
+    if getattr(artifact.payload, "shot_template", None) is not None:
+        validate_artifact_angles(artifact, recorded_invocation.values())
+        launch = getattr(on, "_launch_shot_template", None)
+        if not callable(launch):
+            raise ExecutionError(
+                "Q4481: endpoint does not support compiled indexed templates"
+            )
+        on.capabilities.require(
+            ExecutionContract(
+                on.target.name,
+                artifact.execution_contract.requirements
+                - {
+                    Requirement.LOGICAL_SHOT_CONTEXT,
+                    Requirement.DYNAMIC_CLASSICAL_INDEX,
+                    Requirement.HOST_DISPATCH,
+                },
+            )
+        )
+        job = launch(artifact, recorded_invocation)
+        if not isinstance(job, Job):
+            raise ExecutionError("Q8128: indexed template launch did not return a Job")
+        return (
+            _ValidatedJob(job, artifact, invocation.shots, validation_only),
+            recorded_invocation,
+        )
     if isinstance(artifact.payload, ShotExecutable):
+        if validation_only:
+            raise ExecutionError(
+                "Q8152: validation endpoints cannot execute segmented shot plans; "
+                "subsequent submissions require actual measurement results"
+            )
         if artifact.payload.target_format != on.target.name:
             raise ExecutionError("Q8129: shot plan target does not match endpoint")
         on.capabilities.require(
             ExecutionContract(on.target.name, artifact.execution_contract.requirements)
         )
         job = ShotJob(artifact, on, recorded_invocation)
-        return _ValidatedJob(job, artifact, invocation.shots), recorded_invocation
+        return (
+            _ValidatedJob(job, artifact, invocation.shots, validation_only),
+            recorded_invocation,
+        )
     selected_artifact = artifact
     if artifact.format == LAUNCH_MATERIALIZER_FORMAT:
+        if (
+            Requirement.LOGICAL_SHOT_CONTEXT in artifact.execution_contract.requirements
+            and isinstance(on.target, CircuitTarget)
+        ):
+            launch = getattr(on, "_launch_indexed", None)
+            if not callable(launch):
+                raise ExecutionError(
+                    "Q4480: endpoint does not support indexed shot execution"
+                )
+            children = _current_shot_children(artifact, on, recorded_invocation)
+            job = launch(artifact, recorded_invocation, children)
+            return (
+                _ValidatedJob(job, artifact, invocation.shots, validation_only),
+                recorded_invocation,
+            )
         selected_artifact = _materialize_launch_artifact(
             artifact,
             dict(bound),
             target=on.target,
+            invocation=recorded_invocation,
         )
         selected_names = {slot.name for slot in selected_artifact.parameter_abi.slots}
         bound = tuple((name, value) for name, value in bound if name in selected_names)
@@ -3434,10 +4031,15 @@ def _submit_with_invocation(
         invocation.shots,
         invocation.seed,
     )
+    if isinstance(on.target, CircuitTarget):
+        validate_artifact_angles(selected_artifact, normalized.values())
     job = on.launch(selected_artifact, normalized)
     if not isinstance(job, Job):
         raise ExecutionError("Q8128: endpoint launch did not return a Job")
-    return _ValidatedJob(job, artifact, invocation.shots), recorded_invocation
+    return (
+        _ValidatedJob(job, artifact, invocation.shots, validation_only),
+        recorded_invocation,
+    )
 
 
 def run(
@@ -3446,7 +4048,7 @@ def run(
     on: ExecutionEndpoint,
     parameters: Mapping[str, object] | None = None,
     shots: int = 1,
-    seed: int = 0,
+    seed: int | None = None,
     optimizer: OptimizationPipeline | None = None,
     **bindings: object,
 ) -> RunRecord:
@@ -3459,14 +4061,16 @@ def run(
         parameters (Mapping[str, object] | None): Runtime Param values keyed by
             source parameter name.
         shots (int): Positive number of observations to request.
-        seed (int): Unsigned deterministic execution seed.
+        seed (int | None): Explicit unsigned 64-bit seed, including zero.
+            None (the default) leaves randomness to the endpoint.
         optimizer (OptimizationPipeline | None): Pipeline used when compiling
             source; existing artifacts cannot select another optimizer.
         **bindings (object): Const values, or BlockEncoding values for a
             source qkernel, keyed by parameter name.
 
     Returns:
-        RunRecord: Immutable artifact, invocation, and normalized result.
+        RunRecord: Immutable artifact and invocation, with program output or a
+            validation report selected by the endpoint.
 
     Raises:
         TypeError: If an existing artifact receives Const bindings or an input
@@ -3495,14 +4099,15 @@ def evaluate(
     program: Program,
     /,
     *,
-    seed: int = 0,
+    seed: int | None = None,
     **parameters: object,
 ) -> object:
     """Evaluate one program shot through the verified Reference runtime.
 
     Args:
         program (Program): Closed verified program to compile and execute.
-        seed (int): Deterministic unsigned 64-bit seed for quantum execution.
+        seed (int | None): Explicit unsigned 64-bit seed, including zero;
+            None (the default) requests fresh Reference randomness.
         **parameters (object): Launch-time values keyed by source parameter
             name.
 
@@ -3531,14 +4136,15 @@ def evaluate(
         _verify_native_program(payload)
     except ValueError as error:
         raise VerificationError(str(error)) from error
-    bound = dict(ParameterABI.from_program(program).bind(invocation.values()))
-    result_abi = ResultABI.from_program(program)
+    parameter_abi, result_abi = _derive_native_artifact_abis(program, single_value=True)
+    bound = dict(parameter_abi.bind(invocation.values()))
     execution = _native_reference_execution(
         payload,
         bound,
         result_abi,
         shots=1,
         seed=invocation.seed,
+        single_value=True,
     )
     counts, value = execution
     if counts is None:
@@ -3659,21 +4265,24 @@ def _native_reference_execution(
     result_abi: ResultABI,
     *,
     shots: int,
-    seed: int,
+    seed: int | None,
+    single_value: bool = False,
 ) -> tuple[dict[tuple[int, ...], int] | None, object]:
     """Execute one Reference invocation through the unified native bridge.
 
     Args:
         payload (bytes | _ReferenceExecutable): Canonical QCore or retained native owner.
-        parameters: Complete ABI-normalized launch values.
-        result_abi: Verified logical result ABI used to validate the native
-            execution route and restore record values.
-        shots: Positive observation count.
-        seed: Unsigned 64-bit deterministic seed for quantum effects.
+        parameters (Mapping[str, object]): Complete ABI-normalized launch values.
+        result_abi (ResultABI): Verified logical result ABI used to validate the
+            native execution route and restore record values.
+        shots (int): Positive observation count.
+        seed (int | None): Explicit unsigned 64-bit seed or None for fresh
+            Reference randomness.
+        single_value (bool): Whether to return one native value without bit packing.
 
     Returns:
-        A pair containing either canonical sample counts or an externalized
-        value.
+        tuple[dict[tuple[int, ...], int] | None, object]: Canonical sample counts
+        or an externalized value.
 
     Raises:
         ExecutionError: If an installed bridge is incomplete, rejects the
@@ -3685,12 +4294,13 @@ def _native_reference_execution(
     if not callable(executor):
         raise ExecutionError("Q8145: native Reference execution is unavailable")
     try:
-        execution = executor(
+        arguments = (
             payload.handle if isinstance(payload, _ReferenceExecutable) else payload,
             dict(parameters),
             shots,
             seed,
         )
+        execution = executor(*arguments, True) if single_value else executor(*arguments)
     except NotImplementedError as error:
         raise ExecutionError(
             f"Q8145: native Reference execution is unsupported: {error}"
@@ -3708,7 +4318,7 @@ def _native_reference_batch_execution(
     result_abi: ResultABI,
     *,
     shots: int,
-    seed: int,
+    seed: int | None,
 ) -> tuple[tuple[dict[tuple[int, ...], int] | None, object], ...]:
     """Execute ordered Reference invocations through one native restoration.
 
@@ -3719,7 +4329,8 @@ def _native_reference_batch_execution(
         result_abi (ResultABI): Verified result ABI used to check every native
             projection.
         shots (int): Positive observation count shared by every row.
-        seed (int): Unsigned 64-bit seed for the first row.
+        seed (int | None): Explicit unsigned 64-bit seed for the first row,
+            or None for fresh Reference randomness for each row.
 
     Returns:
         tuple[tuple[dict[tuple[int, ...], int] | None, object], ...]: Ordered
@@ -3786,7 +4397,7 @@ def _native_reference_projection(
         raise ExecutionError(
             "Q8145: native Reference execution returned a malformed result"
         ) from error
-    if result_abi.width:
+    if result_abi.per_shot or result_abi.width:
         if kind != "samples" or payload_value is not None:
             raise ExecutionError(
                 "Q8145: native Reference execution disagrees with the sampled ABI"
@@ -3944,15 +4555,16 @@ class Reference:
             artifact (CompiledProgram): Sealed Reference artifact reused by
                 every invocation.
             invocations (tuple[Invocation, ...]): ABI-normalized invocations
-                with one shared shot count and consecutive seeds.
+                with one shared shot count and consecutive explicit seeds, or all
+                seeds unspecified.
 
         Returns:
             tuple[Job, ...]: Completed local jobs in invocation order.
 
         Raises:
             ExecutionError: If the artifact or an invocation is inconsistent,
-                seeds are not consecutive, shot counts differ, or native batch
-                execution fails.
+                seeds are neither all unspecified nor consecutive integers,
+                shot counts differ, or native batch execution fails.
         """
 
         self._validate_artifact(artifact)
@@ -3962,10 +4574,11 @@ class Reference:
         base_seed = invocations[0].seed
         rows: list[Mapping[str, object]] = []
         for index, invocation in enumerate(invocations):
-            if invocation.shots != shots or invocation.seed != base_seed + index:
+            expected_seed = None if base_seed is None else base_seed + index
+            if invocation.shots != shots or invocation.seed != expected_seed:
                 raise ExecutionError(
                     "Q8145: Reference batch requires one shot count and "
-                    "consecutive seeds"
+                    "consecutive explicit seeds or all seeds unspecified"
                 )
             rows.append(self._validate_invocation(artifact, invocation))
         executions = _native_reference_batch_execution(

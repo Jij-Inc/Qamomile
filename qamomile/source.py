@@ -7,9 +7,11 @@ import copy
 import hashlib
 import inspect
 import textwrap
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
+from math import pi
 from pathlib import Path
+from types import ModuleType
 from typing import Generic, ParamSpec, TypeVar, cast, overload
 
 from ._compiler.frontend import SourceUnit, parse_source
@@ -805,6 +807,7 @@ def _qkernel_ref(
         TypeError: If a referenced capture is not portable.
     """
 
+    lexical_scope = {**function_value.__globals__, **lexical_scope}
     module_name = function_value.__module__.replace("<", "_").replace(">", "_")
     display_name = f"{function_value.__name__}.py"
     source_file = inspect.getsourcefile(function_value)
@@ -828,27 +831,48 @@ def _qkernel_ref(
                     note="use qm.build_source(...) or a notebook source provider",
                 )
             ) from error
-        source_text = "import qamomile as qm\n\n" + declaration
+        module_aliases = {
+            name
+            for name, candidate in lexical_scope.items()
+            if isinstance(candidate, ModuleType) and candidate.__name__ == "qamomile"
+        }
+        loaded_names = {
+            node.id
+            for node in ast.walk(ast.parse(declaration))
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+        }
+        module_aliases.intersection_update(loaded_names)
+        imports = "".join(
+            f"import qamomile as {name}\n" for name in sorted({"qm", *module_aliases})
+        )
+        source_text = imports + "\n" + declaration
     function_name = function_value.__name__
-    annotation_names = _annotation_names(source_text, function_name)
+    signature_names = _signature_names(source_text, function_name)
     if is_file_backed:
         record_source, record_names = None, frozenset()
     else:
         record_source, record_names = _capture_annotation_records(
-            annotation_names,
+            signature_names,
             lexical_scope,
         )
     dependencies, captures = _function_captures(
         function_value,
         lexical_scope=lexical_scope,
-        annotation_names=annotation_names,
+        signature_names=signature_names,
         record_names=record_names,
     )
-    if dependencies or captures:
+    signature_module_aliases = {
+        name
+        for name in signature_names
+        if isinstance(candidate := lexical_scope.get(name), ModuleType)
+        and candidate.__name__ == "qamomile"
+    }
+    if dependencies or captures or signature_module_aliases:
         source_text = _close_lexical_captures(
             source_text,
             function_name,
             captures,
+            signature_module_aliases=signature_module_aliases,
         )
         source_text = _isolated_file_declaration(source_text, function_name)
     if record_source is not None:
@@ -884,10 +908,23 @@ def _function_captures(
     function_value: Callable[..., object],
     *,
     lexical_scope: Mapping[str, object],
-    annotation_names: frozenset[str],
+    signature_names: frozenset[str],
     record_names: frozenset[str],
 ) -> tuple[tuple[tuple[str, QKernel], ...], dict[str, ast.expr]]:
-    """Collect portable immutable expressions for closure conversion."""
+    """Collect portable immutable expressions for closure conversion.
+
+    Args:
+        function_value (Callable[..., object]): Source function being captured.
+        lexical_scope (Mapping[str, object]): Values visible to its decorator.
+        signature_names (frozenset[str]): Names in annotations and defaults.
+        record_names (frozenset[str]): Records already captured as declarations.
+
+    Returns:
+        tuple: Linked qkernels and portable expressions indexed by capture name.
+
+    Raises:
+        SourceUnavailableError: If a nonlocal value cannot be captured safely.
+    """
 
     try:
         closure = inspect.getclosurevars(function_value)
@@ -899,6 +936,8 @@ def _function_captures(
     nonlocal_names = closure.nonlocals.keys()
     for name, candidate in captured:
         if name in record_names:
+            continue
+        if isinstance(candidate, ModuleType) and candidate.__name__ == "qamomile":
             continue
         captured_expression = _capture_ast(candidate, name)
         if captured_expression is not None:
@@ -916,7 +955,7 @@ def _function_captures(
                     ),
                 )
             )
-    for name in sorted(annotation_names):
+    for name in sorted(signature_names):
         if name in expressions or name not in lexical_scope:
             continue
         candidate = lexical_scope[name]
@@ -1128,8 +1167,19 @@ def _named_tuple_declaration(
     )
 
 
-def _annotation_names(source: str, function_name: str) -> frozenset[str]:
-    """Return names read by one declaration's parameter and result annotations."""
+def _signature_names(source: str, function_name: str) -> frozenset[str]:
+    """Return names read by one declaration's annotations and defaults.
+
+    Args:
+        source (str): Captured source containing the declaration.
+        function_name (str): Name of the function whose signature is inspected.
+
+    Returns:
+        frozenset[str]: Names to capture even when absent from the function body.
+
+    Raises:
+        SourceUnavailableError: If the declaration cannot be uniquely located.
+    """
 
     tree = ast.parse(source)
     matches = [
@@ -1164,6 +1214,10 @@ def _annotation_names(source: str, function_name: str) -> frozenset[str]:
         annotations.append(declaration.args.kwarg.annotation)
     if declaration.returns is not None:
         annotations.append(declaration.returns)
+    annotations.extend(declaration.args.defaults)
+    annotations.extend(
+        default for default in declaration.args.kw_defaults if default is not None
+    )
     return frozenset(
         node.id
         for annotation in annotations
@@ -1311,10 +1365,37 @@ class _CaptureRewriter(ast.NodeTransformer):
     def __init__(
         self,
         expressions: Mapping[str, ast.expr],
+        *,
+        qamomile_aliases: Collection[str] = (),
     ) -> None:
-        """Store the finite lexical environment being closed."""
+        """Store the finite lexical environment being closed.
+
+        Args:
+            expressions (Mapping[str, ast.expr]): Portable outer name values.
+            qamomile_aliases (Collection[str]): Module aliases whose pi default
+                references can be captured at declaration time.
+        """
 
         self.expressions = expressions
+        self.qamomile_aliases = qamomile_aliases
+
+    def visit_Attribute(self, node: ast.Attribute) -> ast.expr:
+        """Capture only a known Qamomile pi attribute in signature scope.
+
+        Args:
+            node (ast.Attribute): Attribute syntax from a function signature.
+
+        Returns:
+            ast.expr: Pi literal or recursively rewritten original syntax.
+        """
+
+        if (
+            isinstance(node.value, ast.Name)
+            and node.value.id in self.qamomile_aliases
+            and node.attr == "pi"
+        ):
+            return ast.copy_location(ast.Constant(value=pi), node)
+        return cast(ast.expr, self.generic_visit(node))
 
     def visit_Name(self, node: ast.Name) -> ast.expr:
         """Rewrite only reads; local bindings retain ordinary Python scope."""
@@ -1331,19 +1412,92 @@ def _close_lexical_captures(
     source: str,
     function_name: str,
     expressions: Mapping[str, ast.expr],
+    *,
+    signature_module_aliases: Collection[str] = (),
 ) -> str:
-    """Close one declaration without executing it or changing persistent IR."""
+    """Close one declaration while preserving local name shadowing.
+
+    Defaults read the outer scope. Dependent type annotations retain parameter
+    names, and the body retains all of its local bindings.
+
+    Args:
+        source (str): Source module containing the declaration to close.
+        function_name (str): Declaration whose outer names are captured.
+        expressions (Mapping[str, ast.expr]): Portable expressions for outer names.
+        signature_module_aliases (Collection[str]): Qamomile module names visible
+            while parameter defaults were evaluated.
+
+    Returns:
+        str: Closed source with separate annotation, default, and body scopes.
+
+    Raises:
+        SourceUnavailableError: If the declaration cannot be located.
+    """
 
     tree = ast.parse(source)
     rewritten = False
-    transformer = _CaptureRewriter(expressions)
+    transformer = _CaptureRewriter(
+        expressions, qamomile_aliases=signature_module_aliases
+    )
     body: list[ast.stmt] = []
     for statement in tree.body:
         if (
             isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
             and statement.name == function_name
         ):
-            statement = transformer.visit(statement)
+            parameters = (
+                *statement.args.posonlyargs,
+                *statement.args.args,
+                *statement.args.kwonlyargs,
+            )
+            parameter_names = {argument.arg for argument in parameters}
+            local_names = {
+                node.id
+                for node in ast.walk(statement)
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+            }
+            local_names.update(parameter_names)
+            annotation_transformer = _CaptureRewriter(
+                {
+                    name: value
+                    for name, value in expressions.items()
+                    if name not in parameter_names
+                },
+                qamomile_aliases=signature_module_aliases,
+            )
+            body_transformer = _CaptureRewriter(
+                {
+                    name: value
+                    for name, value in expressions.items()
+                    if name not in local_names
+                }
+            )
+            for argument in (
+                *parameters,
+                *(
+                    (statement.args.vararg,)
+                    if statement.args.vararg is not None
+                    else ()
+                ),
+                *((statement.args.kwarg,) if statement.args.kwarg is not None else ()),
+            ):
+                if argument.annotation is not None:
+                    argument.annotation = annotation_transformer.visit(
+                        argument.annotation
+                    )
+            statement.args.defaults = [
+                transformer.visit(default) for default in statement.args.defaults
+            ]
+            statement.args.kw_defaults = [
+                transformer.visit(default) if default is not None else None
+                for default in statement.args.kw_defaults
+            ]
+            if statement.returns is not None:
+                statement.returns = annotation_transformer.visit(statement.returns)
+            statement.decorator_list = [
+                transformer.visit(decorator) for decorator in statement.decorator_list
+            ]
+            statement.body = [body_transformer.visit(item) for item in statement.body]
             rewritten = True
         body.append(statement)
     if not rewritten:

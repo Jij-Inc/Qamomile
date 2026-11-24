@@ -125,12 +125,20 @@ fn simplify(
         }
         offsets.push(output.len());
         for block in &mut instruction.regions {
-            let (nested, _) = simplify(
+            let barriers = block
+                .scalar_checks
+                .iter()
+                .map(|check| check.instruction_index)
+                .collect();
+            let (nested, offsets) = simplify(
                 std::mem::take(&mut block.instructions).into_vec(),
-                &HashSet::new(),
+                &barriers,
                 depth + 1,
                 work,
             )?;
+            for check in &mut block.scalar_checks {
+                check.instruction_index = offsets[check.instruction_index];
+            }
             block.instructions = nested.into_boxed_slice();
         }
         for parameter in &mut instruction.parameters {
@@ -267,6 +275,57 @@ mod tests {
         )
         .unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn nested_checks_survive_exact_rewrites_and_reject_portable_exports() {
+        use super::super::{
+            CircuitScalarAttribute, CircuitScalarAttributeValue, CircuitScalarCheck,
+            CircuitScalarId, CircuitScalarNode, CircuitScalarType, StaticBlock, StaticCircuitValue,
+        };
+        let mut block = StaticBlock::test_returning(
+            vec![gate("h"), gate("h")],
+            StaticCircuitValue::Scalar(CircuitScalarId::test_new(0)),
+        );
+        block.scalar_checks = Box::new([CircuitScalarCheck {
+            instruction_index: 2,
+            root: CircuitScalarId::test_new(2),
+        }]);
+        let circuit = StaticCircuit::test_new_with_result(
+            1,
+            0,
+            vec![StaticInstruction::test_new(
+                "if",
+                vec![],
+                vec![],
+                vec![],
+                Some(CircuitScalarId::test_new(0)),
+                vec![block, StaticBlock::test_new(vec![])],
+            )],
+            vec![
+                CircuitScalarNode::Bool(true),
+                CircuitScalarNode::Int(2),
+                CircuitScalarNode::Apply {
+                    opcode: "classical.cast".to_owned(),
+                    result_type: CircuitScalarType::Bool,
+                    attributes: Box::new([CircuitScalarAttribute {
+                        name: "target".to_owned(),
+                        value: CircuitScalarAttributeValue::String("Bit".to_owned()),
+                    }]),
+                    operands: Box::new([CircuitScalarId::test_new(1)]),
+                },
+            ],
+            StaticCircuitValue::Scalar(CircuitScalarId::test_new(0)),
+        )
+        .simplify_exact(100)
+        .unwrap();
+        let block = &circuit.instructions()[0].regions()[0];
+        assert!(block.instructions().is_empty());
+        assert_eq!(block.scalar_checks()[0].instruction_index, 0);
+        let error = crate::simulation::sample_static_circuit(&circuit, &[], 1, 0).unwrap_err();
+        assert!(error.to_string().contains("0 or 1"));
+        assert!(crate::encode_result_postprocessing(&circuit).is_err());
+        assert!(crate::project_result_postprocessing(&circuit, 0).is_err());
     }
 
     #[test]

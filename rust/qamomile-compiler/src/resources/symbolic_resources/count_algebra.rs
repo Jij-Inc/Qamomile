@@ -12,6 +12,42 @@ use super::{
 };
 
 impl SymbolicCount {
+    fn unresolved_unless_zero(&mut self, reason: &str, arena: &ExpressionArena) {
+        if !(self.exact
+            && self.unknown.is_empty()
+            && arena.is_literal(self.lower, "0")
+            && self.upper.is_some_and(|upper| arena.is_literal(upper, "0")))
+        {
+            *self = Self::invalidated(self, self.lower, reason);
+        }
+    }
+
+    pub(super) fn conditional(
+        left: &Self,
+        right: &Self,
+        predicate: ExprId,
+        arena: &mut ExpressionArena,
+    ) -> Result<Self, SymbolicResourceError> {
+        let lower_domain = arena.aggregate_domain(&[left.lower, right.lower]);
+        Ok(Self {
+            lower: arena.piecewise(&[predicate], &[left.lower, right.lower], lower_domain)?,
+            upper: left
+                .upper
+                .zip(right.upper)
+                .map(|(left, right)| {
+                    let domain = arena.aggregate_domain(&[left, right]);
+                    arena.piecewise(&[predicate], &[left, right], domain)
+                })
+                .transpose()?,
+            exact: left.exact && right.exact,
+            unknown: merge_unknown([left.unknown.as_ref(), right.unknown.as_ref()]),
+            rule_identities: merge_rule_identities([
+                left.rule_identities.as_ref(),
+                right.rule_identities.as_ref(),
+            ]),
+        })
+    }
+
     pub(super) fn exact_value(expression: ExprId) -> Self {
         Self {
             lower: expression,
@@ -437,6 +473,29 @@ pub(super) fn branch_named_counts(
 }
 
 impl Counts {
+    pub(super) fn unresolved_control_flow(&mut self, reason: &str, arena: &ExpressionArena) {
+        for count in std::iter::once(&mut self.work)
+            .chain(std::iter::once(&mut self.span))
+            .chain(std::iter::once(&mut self.cleanup_work))
+            .chain(
+                self.depths
+                    .iter_mut()
+                    .flat_map(|counts| counts.values_mut()),
+            )
+            .chain(self.opcodes.values_mut())
+            .chain(self.extra_metrics.values_mut())
+            .chain(
+                self.families
+                    .iter_mut()
+                    .flat_map(|counts| counts.values_mut()),
+            )
+            .chain(self.measurements.iter_mut())
+            .chain(self.resets.iter_mut())
+        {
+            count.unresolved_unless_zero(reason, arena);
+        }
+    }
+
     pub(super) fn zero(arena: &mut ExpressionArena) -> Result<Self, SymbolicResourceError> {
         let zero = SymbolicCount::exact_value(arena.literal_u128(0)?);
         Ok(Self {
@@ -926,4 +985,80 @@ pub(super) fn external_metrics_with_structural_counts(
     );
     metrics.insert(format!("qamomile.algorithmic.query_count.{callable}"), one);
     Ok(metrics)
+}
+
+impl Counts {
+    pub(super) fn map_conditional_counts(
+        &mut self,
+        mut map: impl FnMut(&str, &mut SymbolicCount) -> Result<(), SymbolicResourceError>,
+    ) -> Result<(), SymbolicResourceError> {
+        map("work", &mut self.work)?;
+        map("cleanup_work", &mut self.cleanup_work)?;
+        for (name, value) in &mut self.opcodes {
+            map(&format!("opcode:{name}"), value)?;
+        }
+        for (name, value) in &mut self.extra_metrics {
+            map(&format!("metric:{name}"), value)?;
+        }
+        if let Some(families) = &mut self.families {
+            for (name, value) in families {
+                map(&format!("family:{name}"), value)?;
+            }
+        }
+        if let Some(value) = &mut self.measurements {
+            map("measurements", value)?;
+        }
+        if let Some(value) = &mut self.resets {
+            map("resets", value)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn conditional_counts(
+        &self,
+    ) -> Result<BTreeMap<String, SymbolicCount>, SymbolicResourceError> {
+        let mut counts = self.clone();
+        let mut result = BTreeMap::new();
+        counts.map_conditional_counts(|name, count| {
+            result.insert(name.to_owned(), count.clone());
+            Ok(())
+        })?;
+        Ok(result)
+    }
+
+    pub(super) fn conditional(
+        left: &Self,
+        right: &Self,
+        predicate: ExprId,
+        unproved_composition_metrics: &BTreeMap<String, ResourceDomain>,
+        arena: &mut ExpressionArena,
+    ) -> Result<Self, SymbolicResourceError> {
+        let mut result = Self::branch(&[left.clone(), right.clone()], arena)?;
+        result.span = SymbolicCount::conditional(&left.span, &right.span, predicate, arena)?;
+        if let (Some(target), Some(left), Some(right)) =
+            (&mut result.depths, &left.depths, &right.depths)
+        {
+            for (name, count) in target {
+                if let Some((left, right)) = left.get(name).zip(right.get(name)) {
+                    *count = SymbolicCount::conditional(left, right, predicate, arena)?;
+                }
+            }
+        }
+        let left = left.conditional_counts()?;
+        let right = right.conditional_counts()?;
+        let zero = SymbolicCount::exact_value(arena.literal_u128(0)?);
+        result.map_conditional_counts(|name, count| {
+            if name
+                .strip_prefix("metric:")
+                .is_some_and(|metric| unproved_composition_metrics.contains_key(metric))
+            {
+                return Ok(());
+            }
+            let left = left.get(name).unwrap_or(&zero);
+            let right = right.get(name).unwrap_or(&zero);
+            *count = SymbolicCount::conditional(left, right, predicate, arena)?;
+            Ok(())
+        })?;
+        Ok(result)
+    }
 }

@@ -1,4 +1,7 @@
 //! Deterministic statevector execution for target-neutral static circuits.
+//!
+//! One simulation budget reserves statevector and scalar work before allocation.
+//! Indexed Reference execution shares that budget across its bound circuits.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -21,7 +24,7 @@ use crate::{
 
 const MAX_SIMULATION_QUBITS: u64 = 20;
 const MAX_SIMULATION_SHOTS: u64 = 10_000_000;
-const MAX_SIMULATION_WORK: u128 = 100_000_000;
+const MAX_SIMULATION_WORK: u128 = 51_200_000_000;
 const MIN_PROBABILITY: f64 = 1e-15;
 const MAX_PROBABILITY_DRIFT: f64 = 1e-9;
 
@@ -78,41 +81,61 @@ pub fn sample_static_circuit(
     shots: u64,
     seed: u64,
 ) -> Result<StaticSampleCounts, StaticSimulationError> {
-    let retained_scalar_count = if circuit.result_measurements().is_empty() {
-        circuit
-            .runtime_result_value()
-            .map_or(0, count_result_scalars)
-    } else {
-        0
-    };
-    let (dimension, measurement_count, call_value_count) =
-        validate_simulation(circuit, bindings, shots, retained_scalar_count)?;
-    let mut random = SplitMix64::new(seed);
-    let mut counts = BTreeMap::<Box<[u8]>, u64>::new();
-    for _ in 0..shots {
-        let mut state = initialized_shot(
-            circuit,
-            &mut random,
-            dimension,
-            measurement_count,
-            call_value_count,
-            shots,
-        )?;
-        let returned =
-            match state.execute_instructions(circuit.instructions(), circuit, bindings)? {
+    SimulationBudget::new().sample(circuit, bindings, shots, seed)
+}
+
+pub(crate) struct SimulationBudget {
+    remaining_work: u128,
+}
+
+impl SimulationBudget {
+    pub(crate) const fn new() -> Self {
+        Self {
+            remaining_work: MAX_SIMULATION_WORK,
+        }
+    }
+
+    pub(crate) fn sample(
+        &mut self,
+        circuit: &StaticCircuit,
+        bindings: &[CircuitLaunchBinding],
+        shots: u64,
+        seed: u64,
+    ) -> Result<StaticSampleCounts, StaticSimulationError> {
+        let retained_scalar_count = if circuit.result_measurements().is_empty() {
+            circuit
+                .runtime_result_value()
+                .map_or(0, count_result_scalars)
+        } else {
+            0
+        };
+        let layout = validate_simulation(circuit, bindings, shots, retained_scalar_count, self)?;
+        let mut random = SplitMix64::new(seed);
+        let mut counts = BTreeMap::<Box<[u8]>, u64>::new();
+        for _ in 0..shots {
+            let mut state = initialized_shot(circuit, &mut random, &layout, shots)?;
+            let returned = match state.execute_circuit(circuit, bindings)? {
                 RuntimeControl::Next => None,
                 RuntimeControl::Return(value) => Some(value),
             };
-        let result = sample_result(
-            circuit,
-            bindings,
-            &state.measurements,
-            &state.call_values,
-            returned.as_ref(),
-        )?;
-        *counts.entry(result).or_default() += 1;
+            let result = sample_result(
+                circuit,
+                bindings,
+                &state.measurements,
+                &state.call_values,
+                returned.as_ref(),
+            )?;
+            *counts.entry(result).or_default() += 1;
+        }
+        Ok(StaticSampleCounts::from_entries(counts))
     }
-    Ok(StaticSampleCounts::from_entries(counts))
+
+    fn charge(&mut self, work: u128) -> Result<(), StaticSimulationError> {
+        self.remaining_work = self.remaining_work.checked_sub(work).ok_or_else(|| {
+            StaticSimulationError::Budget(format!("the {MAX_SIMULATION_WORK}-step work limit"))
+        })?;
+        Ok(())
+    }
 }
 
 fn sample_result(
@@ -226,18 +249,16 @@ pub(crate) fn evaluate_static_circuit(
         StaticSimulationError::Unsupported("a retained non-sampled result".to_owned())
     })?;
     let result_scalar_count = count_result_scalars(result);
-    let (dimension, measurement_count, call_value_count) =
-        validate_simulation(circuit, bindings, 1, result_scalar_count)?;
-    let mut random = SplitMix64::new(seed);
-    let mut state = initialized_shot(
+    let layout = validate_simulation(
         circuit,
-        &mut random,
-        dimension,
-        measurement_count,
-        call_value_count,
+        bindings,
         1,
+        result_scalar_count,
+        &mut SimulationBudget::new(),
     )?;
-    let value = match state.execute_instructions(circuit.instructions(), circuit, bindings)? {
+    let mut random = SplitMix64::new(seed);
+    let mut state = initialized_shot(circuit, &mut random, &layout, 1)?;
+    let value = match state.execute_circuit(circuit, bindings)? {
         RuntimeControl::Next => evaluate_result(
             result,
             circuit,
@@ -259,6 +280,15 @@ pub(crate) fn evaluate_retained_result(
     bindings: &[CircuitLaunchBinding],
     measurements: &[u8],
 ) -> Result<wire::LiteralProto, StaticSimulationError> {
+    evaluate_retained_result_at(circuit, bindings, measurements, None)
+}
+
+fn evaluate_retained_result_at(
+    circuit: &StaticCircuit,
+    bindings: &[CircuitLaunchBinding],
+    measurements: &[u8],
+    logical_index: Option<crate::LogicalShotIndex>,
+) -> Result<wire::LiteralProto, StaticSimulationError> {
     let measurement_values = measurements
         .iter()
         .map(|value| match value {
@@ -277,18 +307,34 @@ pub(crate) fn evaluate_retained_result(
             "result measurement width".to_owned(),
         ));
     }
-    let result = evaluate_result(
+    let mut cache = vec![None; circuit.scalars().len()];
+    let result = evaluate_result_with_cache_at(
         circuit
             .runtime_result_value()
             .ok_or_else(|| StaticSimulationError::Missing("retained result".to_owned()))?,
         circuit,
-        bindings,
-        &measurement_values,
-        &[],
+        &ScalarEvaluationContext {
+            bindings,
+            measurements: &measurement_values,
+            call_values: &[],
+            logical_index,
+            loop_indices: &[],
+        },
+        &mut cache,
     )?;
     static_values::value_to_literal(&result).ok_or_else(|| {
         StaticSimulationError::Malformed("incomplete retained result value".to_owned())
     })
+}
+
+/// Evaluate a retained result with an invocation-checked logical coordinate.
+pub(crate) fn evaluate_indexed_retained_result(
+    circuit: &StaticCircuit,
+    bindings: &[CircuitLaunchBinding],
+    measurements: &[u8],
+    index: crate::LogicalShotIndex,
+) -> Result<wire::LiteralProto, StaticSimulationError> {
+    evaluate_retained_result_at(circuit, bindings, measurements, Some(index))
 }
 
 pub(crate) struct CircuitScalarEvaluator<'a> {
@@ -296,6 +342,8 @@ pub(crate) struct CircuitScalarEvaluator<'a> {
     bindings: &'a [CircuitLaunchBinding],
     measurements: Vec<Option<bool>>,
     cache: Vec<Option<Scalar>>,
+    logical_index: Option<crate::LogicalShotIndex>,
+    loop_indices: Vec<(u32, i64)>,
 }
 
 impl<'a> CircuitScalarEvaluator<'a> {
@@ -318,23 +366,60 @@ impl<'a> CircuitScalarEvaluator<'a> {
             bindings,
             measurements,
             cache: vec![None; circuit.scalars().len()],
+            logical_index: None,
+            loop_indices: Vec::new(),
         })
+    }
+
+    pub(crate) fn for_index(
+        circuit: &'a StaticCircuit,
+        bindings: &'a [CircuitLaunchBinding],
+        index: crate::LogicalShotIndex,
+    ) -> Self {
+        Self {
+            circuit,
+            bindings,
+            measurements: Vec::new(),
+            cache: vec![None; circuit.scalars().len()],
+            logical_index: Some(index),
+            loop_indices: Vec::new(),
+        }
     }
 
     pub(crate) fn evaluate(
         &mut self,
         id: CircuitScalarId,
     ) -> Result<wire::LiteralProto, StaticSimulationError> {
-        let value = scalar_with_cache(
-            id,
-            self.circuit.scalars(),
-            self.bindings,
-            &self.measurements,
-            &[],
-            &mut self.cache,
-        )?;
+        let value = self.value(id)?;
         static_values::value_to_literal(&scalar_value(&value))
             .ok_or_else(|| StaticSimulationError::Malformed("scalar result".into()))
+    }
+
+    /// Evaluate a gate consumer through the same finite-angle boundary as simulation.
+    pub(crate) fn angle(&mut self, id: CircuitScalarId) -> Result<f64, StaticSimulationError> {
+        self.value(id)?.real()
+    }
+
+    /// Select one scoped loop coordinate and invalidate its dependent scalar cache.
+    pub(crate) fn set_loop_indices(&mut self, indices: &[(u32, i64)]) {
+        self.loop_indices.clear();
+        self.loop_indices.extend_from_slice(indices);
+        self.cache.fill(None);
+    }
+
+    fn value(&mut self, id: CircuitScalarId) -> Result<Scalar, StaticSimulationError> {
+        scalar_with_cache_at(
+            id,
+            self.circuit.scalars(),
+            &ScalarEvaluationContext {
+                bindings: self.bindings,
+                measurements: &self.measurements,
+                call_values: &[],
+                logical_index: self.logical_index,
+                loop_indices: &self.loop_indices,
+            },
+            &mut self.cache,
+        )
     }
 }
 
@@ -359,12 +444,19 @@ pub(crate) fn evaluate_dispatch_predicate(
     }
 }
 
+struct SimulationLayout {
+    dimension: usize,
+    measurement_count: usize,
+    call_value_count: usize,
+}
+
 fn validate_simulation(
     circuit: &StaticCircuit,
     bindings: &[CircuitLaunchBinding],
     shots: u64,
     additional_scalar_evaluations: u128,
-) -> Result<(usize, usize, usize), StaticSimulationError> {
+    budget: &mut SimulationBudget,
+) -> Result<SimulationLayout, StaticSimulationError> {
     let mut binding_names = BTreeSet::new();
     if let Some(binding) = bindings
         .iter()
@@ -412,12 +504,12 @@ fn validate_simulation(
         })
         .and_then(|work| work.checked_mul(u128::from(shots)))
         .ok_or_else(|| StaticSimulationError::Budget("the simulation work budget".to_owned()))?;
-    if work > MAX_SIMULATION_WORK {
-        return Err(StaticSimulationError::Budget(format!(
-            "the {MAX_SIMULATION_WORK}-step work limit"
-        )));
-    }
-    Ok((dimension, measurement_count, call_value_count))
+    budget.charge(work)?;
+    Ok(SimulationLayout {
+        dimension,
+        measurement_count,
+        call_value_count,
+    })
 }
 
 fn call_value_count(instructions: &[StaticInstruction]) -> Result<u64, StaticSimulationError> {
@@ -446,19 +538,17 @@ fn call_value_count(instructions: &[StaticInstruction]) -> Result<u64, StaticSim
 fn initialized_shot<'a>(
     circuit: &StaticCircuit,
     random: &'a mut SplitMix64,
-    dimension: usize,
-    measurement_count: usize,
-    call_value_count: usize,
+    layout: &SimulationLayout,
     shots: u64,
 ) -> Result<ShotState<'a>, StaticSimulationError> {
     let remaining_operation_work = MAX_SIMULATION_WORK
         .checked_div(u128::from(shots))
-        .and_then(|work| work.checked_div(dimension as u128))
+        .and_then(|work| work.checked_div(layout.dimension as u128))
         .ok_or_else(|| StaticSimulationError::Budget("the simulation work budget".to_owned()))?;
     let mut state = ShotState {
-        amplitudes: vec![Complex64::new(0.0, 0.0); dimension],
-        measurements: vec![None; measurement_count],
-        call_values: vec![None; call_value_count],
+        amplitudes: vec![Complex64::new(0.0, 0.0); layout.dimension],
+        measurements: vec![None; layout.measurement_count],
+        call_values: vec![None; layout.call_value_count],
         remaining_operation_work,
         width: usize::try_from(circuit.width())
             .map_err(|_| StaticSimulationError::Budget("statevector width".to_owned()))?,
@@ -490,51 +580,38 @@ fn evaluate_result(
     call_values: &[Option<Scalar>],
 ) -> Result<StaticValue, StaticSimulationError> {
     let mut cache = vec![None; circuit.scalars().len()];
-    evaluate_result_with_cache(
+    evaluate_result_with_cache_at(
         result,
         circuit,
-        bindings,
-        measurements,
-        call_values,
+        &ScalarEvaluationContext {
+            bindings,
+            measurements,
+            call_values,
+            logical_index: None,
+            loop_indices: &[],
+        },
         &mut cache,
     )
 }
 
-fn evaluate_result_with_cache(
+fn evaluate_result_with_cache_at(
     result: &StaticCircuitValue,
     circuit: &StaticCircuit,
-    bindings: &[CircuitLaunchBinding],
-    measurements: &[Option<bool>],
-    call_values: &[Option<Scalar>],
+    context: &ScalarEvaluationContext<'_>,
     cache: &mut [Option<Scalar>],
 ) -> Result<StaticValue, StaticSimulationError> {
     match result {
         StaticCircuitValue::Unit | StaticCircuitValue::Wires(_) => Ok(StaticValue::Unit),
         StaticCircuitValue::Portable(value) => Ok(value.clone()),
         StaticCircuitValue::Scalar(identifier) => {
-            let value = scalar_with_cache(
-                *identifier,
-                circuit.scalars(),
-                bindings,
-                measurements,
-                call_values,
-                cache,
-            )?;
+            let value = scalar_with_cache_at(*identifier, circuit.scalars(), context, cache)?;
             Ok(scalar_value(&value))
         }
         StaticCircuitValue::Aggregate(values) => Ok(StaticValue::Aggregate(
             values
                 .iter()
                 .map(|value| {
-                    evaluate_result_with_cache(
-                        value,
-                        circuit,
-                        bindings,
-                        measurements,
-                        call_values,
-                        cache,
-                    )
-                    .map(Some)
+                    evaluate_result_with_cache_at(value, circuit, context, cache).map(Some)
                 })
                 .collect::<Result<Vec<_>, _>>()?
                 .into(),
@@ -543,15 +620,8 @@ fn evaluate_result_with_cache(
             fields
                 .iter()
                 .map(|(name, value)| {
-                    evaluate_result_with_cache(
-                        value,
-                        circuit,
-                        bindings,
-                        measurements,
-                        call_values,
-                        cache,
-                    )
-                    .map(|value| (Arc::from(name.as_str()), Some(value)))
+                    evaluate_result_with_cache_at(value, circuit, context, cache)
+                        .map(|value| (Arc::from(name.as_str()), Some(value)))
                 })
                 .collect::<Result<Vec<_>, _>>()?
                 .into(),
@@ -563,7 +633,7 @@ fn simulation_operation_count(
     circuit: &StaticCircuit,
 ) -> Result<(u128, u128), StaticSimulationError> {
     let mut count = u128::from(circuit.measurement_count());
-    let mut scalar_evaluations = 0u128;
+    let mut scalar_evaluations = circuit.scalar_checks().len() as u128;
     let mut pending = vec![circuit.instructions()];
     while let Some(instructions) = pending.pop() {
         count = count
@@ -595,6 +665,11 @@ fn simulation_operation_count(
                     StaticSimulationError::Budget("the simulation work budget".to_owned())
                 })?;
             for region in instruction.regions() {
+                scalar_evaluations = scalar_evaluations
+                    .checked_add(region.scalar_checks().len() as u128)
+                    .ok_or_else(|| {
+                        StaticSimulationError::Budget("the simulation work budget".to_owned())
+                    })?;
                 if let Some(value) = region.runtime_return_value() {
                     scalar_evaluations = scalar_evaluations
                         .checked_add(count_result_scalars(value))
@@ -624,17 +699,52 @@ enum RuntimeControl {
 }
 
 impl ShotState<'_> {
-    fn execute_instructions(
+    fn execute_circuit(
         &mut self,
-        instructions: &[StaticInstruction],
         circuit: &StaticCircuit,
         bindings: &[CircuitLaunchBinding],
     ) -> Result<RuntimeControl, StaticSimulationError> {
-        for instruction in instructions {
-            let control = self.execute_instruction(instruction, circuit, bindings)?;
-            if !matches!(control, RuntimeControl::Next) {
-                return Ok(control);
+        self.execute_checked_instructions(
+            circuit.instructions(),
+            circuit.scalar_checks(),
+            circuit,
+            bindings,
+        )
+    }
+
+    fn execute_checked_instructions(
+        &mut self,
+        instructions: &[StaticInstruction],
+        scalar_checks: &[crate::lowering::shot_execution::CircuitScalarCheck],
+        circuit: &StaticCircuit,
+        bindings: &[CircuitLaunchBinding],
+    ) -> Result<RuntimeControl, StaticSimulationError> {
+        let mut checks = scalar_checks.iter().peekable();
+        for index in 0..=instructions.len() {
+            while checks
+                .peek()
+                .is_some_and(|check| check.instruction_index == index)
+            {
+                let check = checks.next().expect("pending scalar check");
+                scalar(
+                    check.root,
+                    circuit,
+                    bindings,
+                    &self.measurements,
+                    &self.call_values,
+                )?;
             }
+            if let Some(instruction) = instructions.get(index) {
+                let control = self.execute_instruction(instruction, circuit, bindings)?;
+                if !matches!(control, RuntimeControl::Next) {
+                    return Ok(control);
+                }
+            }
+        }
+        if checks.next().is_some() {
+            return Err(StaticSimulationError::Malformed(
+                "unordered scalar check position".to_owned(),
+            ));
         }
         Ok(RuntimeControl::Next)
     }
@@ -645,7 +755,12 @@ impl ShotState<'_> {
         circuit: &StaticCircuit,
         bindings: &[CircuitLaunchBinding],
     ) -> Result<RuntimeControl, StaticSimulationError> {
-        let control = self.execute_instructions(block.instructions(), circuit, bindings)?;
+        let control = self.execute_checked_instructions(
+            block.instructions(),
+            block.scalar_checks(),
+            circuit,
+            bindings,
+        )?;
         if !matches!(control, RuntimeControl::Next) {
             return Ok(control);
         }
@@ -1040,13 +1155,19 @@ impl Scalar {
 
     fn real(&self) -> Result<f64, StaticSimulationError> {
         match self {
-            Self::Int(value) => value.to_f64().ok_or_else(|| {
-                StaticSimulationError::Unsupported(
-                    "integer angle cannot be represented as binary64".to_owned(),
-                )
-            }),
+            Self::Int(value) => value
+                .to_f64()
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| {
+                    StaticSimulationError::Unsupported(
+                        "integer angle cannot be represented as finite binary64".to_owned(),
+                    )
+                }),
             Self::Real(value) if value.is_finite() => Ok(*value),
-            _ => Err(StaticSimulationError::Unsupported(
+            Self::Real(_) => Err(StaticSimulationError::Unsupported(
+                "non-finite circuit angle".to_owned(),
+            )),
+            Self::Bool(_) => Err(StaticSimulationError::Unsupported(
                 "non-real circuit angle".to_owned(),
             )),
         }
@@ -1095,6 +1216,34 @@ fn scalar_with_cache(
     call_values: &[Option<Scalar>],
     cache: &mut [Option<Scalar>],
 ) -> Result<Scalar, StaticSimulationError> {
+    scalar_with_cache_at(
+        identifier,
+        scalars,
+        &ScalarEvaluationContext {
+            bindings,
+            measurements,
+            call_values,
+            logical_index: None,
+            loop_indices: &[],
+        },
+        cache,
+    )
+}
+
+struct ScalarEvaluationContext<'a> {
+    bindings: &'a [CircuitLaunchBinding],
+    measurements: &'a [Option<bool>],
+    call_values: &'a [Option<Scalar>],
+    logical_index: Option<crate::LogicalShotIndex>,
+    loop_indices: &'a [(u32, i64)],
+}
+
+fn scalar_with_cache_at(
+    identifier: CircuitScalarId,
+    scalars: &[CircuitScalarNode],
+    context: &ScalarEvaluationContext<'_>,
+    cache: &mut [Option<Scalar>],
+) -> Result<Scalar, StaticSimulationError> {
     let root = usize::try_from(identifier.index())
         .map_err(|_| StaticSimulationError::Malformed("scalar index".to_owned()))?;
     if root >= scalars.len() {
@@ -1109,6 +1258,9 @@ fn scalar_with_cache(
             .get(index)
             .ok_or_else(|| StaticSimulationError::Malformed("scalar index".to_owned()))?;
         if advance_lazy_select(index, node, cache, &mut pending, operands_ready)? {
+            continue;
+        }
+        if advance_lazy_index(index, node, cache, &mut pending)? {
             continue;
         }
         if let CircuitScalarNode::Apply { operands, .. } = node
@@ -1129,58 +1281,128 @@ fn scalar_with_cache(
             }
             continue;
         }
-        let value = match node {
-            CircuitScalarNode::LoopIndex(_) => {
-                return Err(StaticSimulationError::Malformed(
-                    "scoped loop index is not a runtime scalar".to_owned(),
-                ));
-            }
-            CircuitScalarNode::Bool(value) => Scalar::Bool(*value),
-            CircuitScalarNode::Int(value) => Scalar::Int(Arc::new(BigInt::from(*value))),
-            CircuitScalarNode::RealBits(value) => Scalar::Real(f64::from_bits(*value)),
-            CircuitScalarNode::Measurement(index) => Scalar::Bool(
-                usize::try_from(*index)
-                    .ok()
-                    .and_then(|index| measurements.get(index))
-                    .copied()
-                    .flatten()
-                    .ok_or_else(|| {
-                        StaticSimulationError::Missing(format!("measurement {index}"))
-                    })?,
-            ),
-            CircuitScalarNode::CallValue { index, scalar_type } => {
-                runtime_slot_value(*index, *scalar_type, call_values, "call value")?
-            }
-            CircuitScalarNode::Parameter {
-                name,
-                path,
-                scalar_type,
-            } => parameter_scalar(name, path, *scalar_type, bindings)?,
-            CircuitScalarNode::Apply {
-                opcode,
-                result_type,
-                attributes,
-                operands,
-            } => {
-                let args = operands
-                    .iter()
-                    .map(|operand| {
-                        let operand = usize::try_from(operand.index()).map_err(|_| {
-                            StaticSimulationError::Malformed("scalar index".to_owned())
-                        })?;
-                        cache.get(operand).cloned().flatten().ok_or_else(|| {
-                            StaticSimulationError::Malformed("unresolved scalar operand".to_owned())
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                apply_scalar(opcode, *result_type, attributes, &args)?
-            }
-        };
+        let value = evaluate_scalar_node(node, context, cache)?;
         cache[index] = Some(value);
     }
     cache[root]
         .clone()
         .ok_or_else(|| StaticSimulationError::Malformed("unresolved scalar root".to_owned()))
+}
+
+fn advance_lazy_index(
+    index: usize,
+    node: &CircuitScalarNode,
+    cache: &mut [Option<Scalar>],
+    pending: &mut Vec<(usize, bool)>,
+) -> Result<bool, StaticSimulationError> {
+    let CircuitScalarNode::Indexed {
+        index: selector,
+        elements,
+        ..
+    } = node
+    else {
+        return Ok(false);
+    };
+    let selector = selector.index() as usize;
+    if selector >= index {
+        return Err(StaticSimulationError::Malformed(
+            "non-topological indexed selector".into(),
+        ));
+    }
+    let Some(selector_value) = cache[selector].as_ref() else {
+        pending.push((index, false));
+        pending.push((selector, false));
+        return Ok(true);
+    };
+    let Scalar::Int(value) = selector_value else {
+        return Err(StaticSimulationError::Malformed(
+            "indexed selector type".into(),
+        ));
+    };
+    let selected =
+        static_values::normalize_aggregate_index(elements.len(), value).ok_or_else(|| {
+            StaticSimulationError::Malformed("aggregate index is out of bounds".into())
+        })?;
+    let selected = elements[selected].index() as usize;
+    if selected >= index {
+        return Err(StaticSimulationError::Malformed(
+            "non-topological indexed element".into(),
+        ));
+    }
+    if let Some(value) = cache[selected].clone() {
+        cache[index] = Some(value);
+    } else {
+        pending.push((index, false));
+        pending.push((selected, false));
+    }
+    Ok(true)
+}
+
+fn evaluate_scalar_node(
+    node: &CircuitScalarNode,
+    context: &ScalarEvaluationContext<'_>,
+    cache: &[Option<Scalar>],
+) -> Result<Scalar, StaticSimulationError> {
+    Ok(match node {
+        CircuitScalarNode::CurrentShot => Scalar::Int(Arc::new(BigInt::from(
+            context
+                .logical_index
+                .ok_or_else(|| {
+                    StaticSimulationError::Missing("checked logical shot context".into())
+                })?
+                .value(),
+        ))),
+        CircuitScalarNode::HiddenBinding(_) | CircuitScalarNode::Indexed { .. } => {
+            return Err(StaticSimulationError::Malformed(
+                "adapter scalar used outside its native template".into(),
+            ));
+        }
+        CircuitScalarNode::LoopIndex(index) => Scalar::Int(Arc::new(BigInt::from(
+            context
+                .loop_indices
+                .iter()
+                .find(|(id, _)| id == index)
+                .map(|(_, value)| *value)
+                .ok_or_else(|| StaticSimulationError::Missing("scoped loop coordinate".into()))?,
+        ))),
+        CircuitScalarNode::Bool(value) => Scalar::Bool(*value),
+        CircuitScalarNode::Int(value) => Scalar::Int(Arc::new(BigInt::from(*value))),
+        CircuitScalarNode::RealBits(value) => Scalar::Real(f64::from_bits(*value)),
+        CircuitScalarNode::Measurement(index) => Scalar::Bool(
+            usize::try_from(*index)
+                .ok()
+                .and_then(|index| context.measurements.get(index))
+                .copied()
+                .flatten()
+                .ok_or_else(|| StaticSimulationError::Missing(format!("measurement {index}")))?,
+        ),
+        CircuitScalarNode::CallValue { index, scalar_type } => {
+            runtime_slot_value(*index, *scalar_type, context.call_values, "call value")?
+        }
+        CircuitScalarNode::Parameter {
+            name,
+            path,
+            scalar_type,
+        } => parameter_scalar(name, path, *scalar_type, context.bindings)?,
+        CircuitScalarNode::Apply {
+            opcode,
+            result_type,
+            attributes,
+            operands,
+        } => {
+            let args = operands
+                .iter()
+                .map(|operand| {
+                    let operand = usize::try_from(operand.index())
+                        .map_err(|_| StaticSimulationError::Malformed("scalar index".to_owned()))?;
+                    cache.get(operand).cloned().flatten().ok_or_else(|| {
+                        StaticSimulationError::Malformed("unresolved scalar operand".to_owned())
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            apply_scalar(opcode, *result_type, attributes, &args)?
+        }
+    })
 }
 
 fn runtime_slot_value(
@@ -1427,6 +1649,29 @@ fn scalar_cast(
             _ => None,
         })
         .ok_or_else(|| StaticSimulationError::Malformed("scalar cast target".to_owned()))?;
+    if target == "Bit" {
+        let operation = wire::OperationProto {
+            opcode: "classical.cast".to_owned(),
+            attributes: vec![wire::AttributeProto {
+                name: "target".to_owned(),
+                value: Some(crate::literals::string_literal("Bit")),
+            }],
+            ..Default::default()
+        };
+        let value = numeric_values::evaluate(&operation, &[&scalar_value(&value)])
+            .map_err(|error| match error {
+                NumericEvaluationError::Undefined(reason) => {
+                    StaticSimulationError::Invalid(reason.to_owned())
+                }
+                NumericEvaluationError::Limit(reason) => {
+                    StaticSimulationError::Budget(reason.to_owned())
+                }
+            })?
+            .ok_or_else(|| {
+                StaticSimulationError::Malformed("checked Bit cast operand".to_owned())
+            })?;
+        return runtime_scalar_from_value(result_type, value);
+    }
     let converted = match (target, value) {
         ("Bool", Scalar::Bool(value)) => Scalar::Bool(value),
         ("Bool", Scalar::Int(value)) => Scalar::Bool(!value.is_zero()),
@@ -2332,6 +2577,107 @@ mod tests {
     }
 
     #[test]
+    fn shares_preflight_work_across_indexed_circuits() {
+        let expanded_loop = StaticCircuit::test_new(
+            10,
+            1,
+            (0..200)
+                .map(|_| instruction("x", &[0], vec![]))
+                .chain(std::iter::once(instruction(
+                    "measure",
+                    &[0],
+                    vec![CircuitParameter::MeasurementIndex(0)],
+                )))
+                .collect(),
+            vec![],
+            vec![0],
+        );
+        let wide_state = StaticCircuit::test_new(
+            20,
+            1,
+            vec![instruction(
+                "measure",
+                &[0],
+                vec![CircuitParameter::MeasurementIndex(0)],
+            )],
+            vec![],
+            vec![0],
+        );
+        // Each shot costs 202 × 2^10 or 2 × 2^20 work units, respectively.
+        for (circuit, accepted_shots) in [(expanded_loop, 247_524), (wide_state, 24_414)] {
+            assert!(
+                validate_simulation(
+                    &circuit,
+                    &[],
+                    accepted_shots,
+                    0,
+                    &mut SimulationBudget::new(),
+                )
+                .is_ok()
+            );
+            assert!(matches!(
+                validate_simulation(
+                    &circuit,
+                    &[],
+                    accepted_shots + 1,
+                    0,
+                    &mut SimulationBudget::new(),
+                ),
+                Err(StaticSimulationError::Budget(_))
+            ));
+            let mut budget = SimulationBudget::new();
+            for shots in [accepted_shots - 1, 1] {
+                validate_simulation(&circuit, &[], shots, 0, &mut budget)
+                    .expect("bounded indexed circuit");
+            }
+            assert!(matches!(
+                validate_simulation(&circuit, &[], 1, 0, &mut budget),
+                Err(StaticSimulationError::Budget(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn shared_budget_charges_each_topology_and_retained_scalar_work() {
+        let measured = |width| {
+            StaticCircuit::test_new(
+                width,
+                1,
+                vec![
+                    instruction("h", &[0], vec![]),
+                    instruction("measure", &[0], vec![CircuitParameter::MeasurementIndex(0)]),
+                ],
+                vec![],
+                vec![0],
+            )
+        };
+        let scalar_result = StaticCircuit::test_new_with_result(
+            0,
+            0,
+            vec![],
+            vec![
+                CircuitScalarNode::Bool(true),
+                CircuitScalarNode::Int(1),
+                CircuitScalarNode::Int(2),
+            ],
+            StaticCircuitValue::Scalar(CircuitScalarId::test_new(0)),
+        );
+        let mut budget = SimulationBudget::new();
+        budget.charge(MAX_SIMULATION_WORK - 22).unwrap();
+        for circuit in [measured(1), measured(2), scalar_result] {
+            assert_eq!(
+                budget.sample(&circuit, &[], 1, 7).unwrap(),
+                sample_static_circuit(&circuit, &[], 1, 7).unwrap()
+            );
+        }
+        let empty = StaticCircuit::test_new(0, 0, vec![], vec![], vec![]);
+        assert!(matches!(
+            budget.sample(&empty, &[], 1, 7),
+            Err(StaticSimulationError::Budget(_))
+        ));
+    }
+
+    #[test]
     fn rejects_unbounded_statevectors_and_unknown_instructions() {
         let duplicate_bindings = [
             CircuitLaunchBinding::new("theta".to_owned(), CircuitLaunchValue::Int(1)),
@@ -2359,7 +2705,7 @@ mod tests {
             vec![0],
         );
         assert!(matches!(
-            sample_static_circuit(&too_much_work, &[], 64, 0),
+            validate_simulation(&too_much_work, &[], 25_000, 0, &mut SimulationBudget::new()),
             Err(StaticSimulationError::Budget(_))
         ));
         let unknown = StaticCircuit::test_new(

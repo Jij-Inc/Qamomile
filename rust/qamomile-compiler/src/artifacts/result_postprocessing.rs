@@ -1,4 +1,7 @@
 //! Canonical sampled-result plans shared by every static backend.
+//!
+//! Indexed reconstruction borrows each immutable scalar plan and checks its
+//! aggregate structural work before evaluating invocation-local result rows.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -19,7 +22,7 @@ use crate::{
 };
 
 const PLAN_SCHEMA_MAJOR: u32 = 1;
-const PLAN_SCHEMA_MINOR: u32 = 1;
+const PLAN_SCHEMA_MINOR: u32 = 3;
 const MAX_PLAN_BYTES: usize = 64 * 1024 * 1024;
 const MAX_MEASUREMENTS: u64 = 1_000_000;
 const MAX_DISTRIBUTION_ROWS: usize = 1_000_000;
@@ -96,6 +99,11 @@ pub fn project_result_postprocessing(
     circuit: &StaticCircuit,
     sampled_width: u32,
 ) -> Result<StaticCircuitResultProjection, ResultPostprocessingError> {
+    if circuit.has_nested_checks() || circuit.has_ordered_binary_checks() {
+        return Err(ResultPostprocessingError::InvalidPlan(
+            "classical checks require ordered in-job execution".to_owned(),
+        ));
+    }
     let direct_width = u32::try_from(circuit.result_measurements().len()).map_err(|_| {
         ResultPostprocessingError::InvalidPlan(
             "direct measurement width exceeds the result ABI".to_owned(),
@@ -143,6 +151,11 @@ pub fn project_result_postprocessing(
 pub fn encode_result_postprocessing(
     circuit: &StaticCircuit,
 ) -> Result<Option<Vec<u8>>, ResultPostprocessingError> {
+    if circuit.has_nested_checks() || circuit.has_ordered_binary_checks() {
+        return Err(ResultPostprocessingError::InvalidPlan(
+            "classical checks require ordered in-job execution".to_owned(),
+        ));
+    }
     if !circuit.result_measurements().is_empty() && !circuit.has_terminal_checks() {
         return Ok(None);
     }
@@ -158,6 +171,12 @@ pub fn encode_result_postprocessing(
     {
         return Ok(None);
     }
+    let indexed = scalars.iter().any(|node| {
+        matches!(
+            node,
+            CircuitScalarNode::CurrentShot | CircuitScalarNode::Indexed { .. }
+        )
+    });
     let scalars = scalars
         .iter()
         .map(encode_scalar)
@@ -166,7 +185,7 @@ pub fn encode_result_postprocessing(
     Ok(Some(
         wire::CircuitResultPostprocessingProto {
             schema_major: PLAN_SCHEMA_MAJOR,
-            schema_minor: u32::from(circuit.has_terminal_checks()),
+            schema_minor: u32::from(circuit.has_terminal_checks()) + if indexed { 2 } else { 0 },
             measurement_count: circuit.measurement_count(),
             scalars,
             result: Some(result),
@@ -235,6 +254,133 @@ pub fn postprocess_static_counts(
     Ok(StaticSampleCounts::from_entries(logical))
 }
 
+/// Evaluate indexed one-shot rows without losing invocation-local coordinates.
+///
+/// # Errors
+/// Rejects excessive aggregate reconstruction work and missing, repeated,
+/// reordered, out-of-range, or non-single-shot rows.
+pub fn postprocess_indexed_counts(
+    payload: &[u8],
+    rows: &[(u64, Box<[u8]>, u64)],
+    bindings: &[CircuitLaunchBinding],
+    shots: u64,
+    result_abi: &[u8],
+) -> Result<StaticSampleCounts, ResultPostprocessingError> {
+    postprocess_indexed_measurements(
+        payload,
+        IndexedMeasurements::Rows(rows),
+        bindings,
+        shots,
+        result_abi,
+    )
+}
+
+/// Evaluate measurement-free coordinates using only their invocation cardinality.
+///
+/// Every logical index still executes its retained result and runtime checks.
+/// No per-index input rows are allocated; only distinct logical outputs persist.
+///
+/// # Errors
+/// Rejects plans requiring measurements, invalid cardinality, excessive native
+/// work, or a retained expression that fails at any logical index.
+pub fn postprocess_unmeasured_indexed_counts(
+    payload: &[u8],
+    bindings: &[CircuitLaunchBinding],
+    shots: u64,
+    result_abi: &[u8],
+) -> Result<StaticSampleCounts, ResultPostprocessingError> {
+    postprocess_indexed_measurements(
+        payload,
+        IndexedMeasurements::Unmeasured,
+        bindings,
+        shots,
+        result_abi,
+    )
+}
+
+/// Transport either observed ordered rows or certified measurement-free coverage.
+#[derive(Clone, Copy)]
+enum IndexedMeasurements<'a> {
+    Rows(&'a [(u64, Box<[u8]>, u64)]),
+    Unmeasured,
+}
+
+fn postprocess_indexed_measurements(
+    payload: &[u8],
+    measurements: IndexedMeasurements<'_>,
+    bindings: &[CircuitLaunchBinding],
+    shots: u64,
+    result_abi: &[u8],
+) -> Result<StaticSampleCounts, ResultPostprocessingError> {
+    if shots == 0
+        || shots > crate::MAX_INDEXED_SHOTS
+        || matches!(&measurements, IndexedMeasurements::Rows(rows) if rows.len() as u64 != shots)
+    {
+        return Err(ResultPostprocessingError::InvalidCounts(
+            "indexed coverage differs from invocation".into(),
+        ));
+    }
+    let decoded = decode_plan(payload)?;
+    if matches!(measurements, IndexedMeasurements::Unmeasured)
+        && decoded.circuit.measurement_count() != 0
+    {
+        return Err(ResultPostprocessingError::InvalidCounts(
+            "measurement-free coverage disagrees with the plan".into(),
+        ));
+    }
+    let result_abi = checked_result_abi(result_abi)
+        .map_err(|error| ResultPostprocessingError::Evaluation(error.to_string()))?;
+    if decoded
+        .per_row_work(result_abi.logical_width())
+        .saturating_mul(u128::from(shots))
+        > crate::core::shot_context::MAX_INDEXED_WORK
+    {
+        return Err(ResultPostprocessingError::Evaluation(
+            "indexed result exceeds its native scalar work budget".into(),
+        ));
+    }
+    let mut logical = BTreeMap::<Box<[u8]>, u64>::new();
+    for (position, expected) in (0..shots).enumerate() {
+        let bits = match &measurements {
+            IndexedMeasurements::Unmeasured => &[][..],
+            IndexedMeasurements::Rows(rows) => {
+                let (index, bits, count) = &rows[position];
+                if *index != expected || *count != 1 {
+                    return Err(ResultPostprocessingError::InvalidCounts(
+                        "indexed rows must be ordered, complete, and single-shot".into(),
+                    ));
+                }
+                bits.as_ref()
+            }
+        };
+        let index = crate::LogicalShotIndex::new(expected, shots)
+            .map_err(|error| ResultPostprocessingError::InvalidCounts(error.to_string()))?;
+        let mut literal = crate::simulation::evaluate_indexed_retained_result(
+            &decoded.circuit,
+            bindings,
+            bits,
+            index,
+        )
+        .map_err(|error| ResultPostprocessingError::Evaluation(error.to_string()))?;
+        if decoded.checked_result {
+            let Some(wire::literal_proto::Value::TupleValue(mut tuple)) = literal.value else {
+                return Err(ResultPostprocessingError::InvalidPlan(
+                    "checked result tuple".into(),
+                ));
+            };
+            literal = tuple.values.pop().ok_or_else(|| {
+                ResultPostprocessingError::InvalidPlan("checked result arity".into())
+            })?;
+        }
+        let bits = result_abi
+            .encode_literal(&literal)
+            .map_err(|error| ResultPostprocessingError::Evaluation(error.to_string()))?
+            .into_boxed_slice();
+        *logical.entry(bits).or_default() += 1;
+    }
+    Ok(StaticSampleCounts::from_entries(logical))
+}
+
 pub(crate) fn encode_scalar(
     scalar: &CircuitScalarNode,
 ) -> Result<wire::CircuitResultScalarProto, ResultPostprocessingError> {
@@ -244,6 +390,21 @@ pub(crate) fn encode_scalar(
         CircuitScalarNode::LoopIndex(_) => {
             return Err(ResultPostprocessingError::InvalidPlan(
                 "scoped loop index escaped its body".to_owned(),
+            ));
+        }
+        CircuitScalarNode::CurrentShot => Node::CurrentShot(true),
+        CircuitScalarNode::Indexed {
+            index,
+            elements,
+            scalar_type,
+        } => Node::Indexed(wire::CircuitResultIndexedProto {
+            index: index.index(),
+            elements: elements.iter().map(|element| element.index()).collect(),
+            r#type: encode_scalar_type(*scalar_type).into(),
+        }),
+        CircuitScalarNode::HiddenBinding(_) => {
+            return Err(ResultPostprocessingError::InvalidPlan(
+                "hidden adapter binding escaped numeric emission".into(),
             ));
         }
         CircuitScalarNode::Bool(value) => Node::BoolValue(*value),
@@ -318,7 +479,7 @@ fn encode_attribute(attribute: &CircuitScalarAttribute) -> wire::AttributeProto 
     }
 }
 
-fn encode_result(
+pub(crate) fn encode_result(
     result: &StaticCircuitValue,
 ) -> Result<wire::CircuitResultValueProto, ResultPostprocessingError> {
     use wire::circuit_result_value_proto::Value;
@@ -361,18 +522,26 @@ fn encode_result(
     Ok(wire::CircuitResultValueProto { value: Some(value) })
 }
 
-struct DecodedResultPlan {
-    circuit: StaticCircuit,
+pub(crate) struct DecodedResultPlan {
+    pub(crate) circuit: StaticCircuit,
     checked_result: bool,
+    per_row_work: u128,
 }
 
-fn decode_plan(payload: &[u8]) -> Result<DecodedResultPlan, ResultPostprocessingError> {
+impl DecodedResultPlan {
+    /// Return structural, measurement-row, and encoded-result reconstruction work.
+    pub(crate) const fn per_row_work(&self, logical_width: usize) -> u128 {
+        self.per_row_work.saturating_add(logical_width as u128)
+    }
+}
+
+pub(crate) fn decode_plan(payload: &[u8]) -> Result<DecodedResultPlan, ResultPostprocessingError> {
     if payload.len() > MAX_PLAN_BYTES {
         return Err(ResultPostprocessingError::InvalidPlan(
             "plan exceeds its byte budget".to_owned(),
         ));
     }
-    budget::preflight_result_postprocessing(payload)
+    let structural_work = budget::preflight_result_postprocessing_with_work(payload)
         .map_err(|error| ResultPostprocessingError::InvalidPlan(preflight_reason(error)))?;
     let plan = wire::CircuitResultPostprocessingProto::decode(payload)
         .map_err(|error| ResultPostprocessingError::InvalidPlan(error.to_string()))?;
@@ -406,7 +575,7 @@ fn decode_plan(payload: &[u8]) -> Result<DecodedResultPlan, ResultPostprocessing
         })?,
         scalars.len(),
     )?;
-    if plan.schema_minor == 1 {
+    if plan.schema_minor % 2 == 1 {
         let StaticCircuitValue::Aggregate(values) = &result else {
             return Err(ResultPostprocessingError::InvalidPlan(
                 "checked result structure".to_owned(),
@@ -419,8 +588,9 @@ fn decode_plan(payload: &[u8]) -> Result<DecodedResultPlan, ResultPostprocessing
         }
     }
     Ok(DecodedResultPlan {
+        per_row_work: structural_work.saturating_add(u128::from(plan.measurement_count)),
         circuit: StaticCircuit::from_result_plan(plan.measurement_count, scalars, result),
-        checked_result: plan.schema_minor == 1,
+        checked_result: plan.schema_minor % 2 == 1,
     })
 }
 
@@ -475,6 +645,31 @@ pub(crate) fn decode_scalar(
     use wire::circuit_result_scalar_proto::Node;
 
     match scalar.node.as_ref() {
+        Some(Node::CurrentShot(true)) => Ok(CircuitScalarNode::CurrentShot),
+        Some(Node::CurrentShot(false)) => Err(ResultPostprocessingError::InvalidPlan(
+            "invalid current-shot marker".into(),
+        )),
+        Some(Node::Indexed(indexed)) => {
+            let checked = |reference: u32| {
+                if (reference as usize) < index {
+                    Ok(CircuitScalarId::from_index(reference))
+                } else {
+                    Err(ResultPostprocessingError::InvalidPlan(
+                        "non-topological indexed scalar reference".into(),
+                    ))
+                }
+            };
+            Ok(CircuitScalarNode::Indexed {
+                index: checked(indexed.index)?,
+                elements: indexed
+                    .elements
+                    .iter()
+                    .map(|element| checked(*element))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_boxed_slice(),
+                scalar_type: decode_scalar_type(indexed.r#type)?,
+            })
+        }
         Some(Node::BoolValue(value)) => Ok(CircuitScalarNode::Bool(*value)),
         Some(Node::IntValue(value)) => Ok(CircuitScalarNode::Int(*value)),
         Some(Node::RealBits(value)) => Ok(CircuitScalarNode::RealBits(*value)),
@@ -709,8 +904,216 @@ fn preflight_reason(error: budget::PreflightError) -> String {
 mod tests {
     use super::*;
 
+    fn result_plan(scalars: Vec<CircuitScalarNode>, measurement_count: u64) -> Vec<u8> {
+        let root = CircuitScalarId::test_new(u32::try_from(scalars.len() - 1).unwrap());
+        let circuit = StaticCircuit::from_result_plan(
+            measurement_count,
+            scalars.into_boxed_slice(),
+            StaticCircuitValue::Scalar(root),
+        );
+        encode_result_postprocessing(&circuit).unwrap().unwrap()
+    }
+
+    #[test]
+    fn unmeasured_reconstruction_checks_coverage_and_plan_width() {
+        let payload = result_plan(vec![CircuitScalarNode::Bool(true)], 0);
+        for shots in [0, crate::MAX_INDEXED_SHOTS + 1] {
+            assert!(matches!(
+                postprocess_unmeasured_indexed_counts(&payload, &[], shots, &bool_result_abi()),
+                Err(ResultPostprocessingError::InvalidCounts(_))
+            ));
+        }
+        let measured = result_plan(vec![CircuitScalarNode::Bool(true)], 1);
+        assert!(matches!(
+            postprocess_unmeasured_indexed_counts(&measured, &[], 2, &bool_result_abi()),
+            Err(ResultPostprocessingError::InvalidCounts(reason)) if reason.contains("measurement-free")
+        ));
+        let counts = postprocess_unmeasured_indexed_counts(
+            &payload,
+            &[],
+            crate::MAX_INDEXED_SHOTS,
+            &bool_result_abi(),
+        )
+        .expect("cardinality-only completion at the supported shot limit");
+        assert_eq!(
+            counts.entries(),
+            &[(vec![1].into_boxed_slice(), crate::MAX_INDEXED_SHOTS)]
+        );
+    }
+
+    #[test]
+    fn indexed_reconstruction_checks_aggregate_work_before_evaluating_rows() {
+        let mut scalars = vec![CircuitScalarNode::Parameter {
+            name: "missing".into(),
+            path: Box::new([]),
+            scalar_type: CircuitScalarType::Bool,
+        }];
+        for index in 0..4096 {
+            scalars.push(CircuitScalarNode::Apply {
+                opcode: "classical.not".into(),
+                result_type: CircuitScalarType::Bool,
+                attributes: Box::new([]),
+                operands: vec![CircuitScalarId::test_new(index)].into_boxed_slice(),
+            });
+        }
+        let payload = result_plan(scalars, 0);
+        assert!(matches!(
+            postprocess_unmeasured_indexed_counts(&payload, &[], 4096, &bool_result_abi()),
+            Err(ResultPostprocessingError::Evaluation(reason)) if reason.contains("work budget")
+        ));
+        let rows = (0..4096)
+            .map(|index| (index, Box::<[u8]>::default(), 1))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            postprocess_indexed_counts(
+                &payload,
+                &rows,
+                &[],
+                4096,
+                &bool_result_abi(),
+            ),
+            Err(ResultPostprocessingError::Evaluation(reason)) if reason.contains("work budget")
+        ));
+        assert!(matches!(
+            postprocess_indexed_counts(&payload, &rows[..1], &[], 1, &bool_result_abi()),
+            Err(ResultPostprocessingError::Evaluation(reason)) if reason.contains("missing")
+        ));
+    }
+
+    #[test]
+    fn indexed_reconstruction_accounts_for_full_measurement_rows() {
+        let payload = result_plan(vec![CircuitScalarNode::Bool(true)], 32_768);
+        let rows = (0..4096)
+            .map(|index| (index, Box::<[u8]>::default(), 1))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            postprocess_indexed_counts(
+                &payload,
+                &rows,
+                &[],
+                4096,
+                &bool_result_abi(),
+            ),
+            Err(ResultPostprocessingError::Evaluation(reason)) if reason.contains("work budget")
+        ));
+    }
+
+    #[test]
+    fn indexed_reconstruction_accounts_for_encoded_result_width() {
+        let width = 65_536;
+        let result_abi = wire::ResultAbiProto {
+            per_shot: false,
+            r#type: Some(wire::TypeProto {
+                kind: wire::type_proto::Kind::Array.into(),
+                name: "UInt".into(),
+                arguments: vec![wire::TypeProto {
+                    kind: wire::type_proto::Kind::Scalar.into(),
+                    name: "Bit".into(),
+                    ..Default::default()
+                }],
+                dimensions: vec![wire::DimensionProto {
+                    value: Some(wire::dimension_proto::Value::Fixed(u64::from(width))),
+                }],
+                ..Default::default()
+            }),
+            source_order: (0..width).collect(),
+            native_width: width,
+        }
+        .encode_to_vec();
+        let payload = result_plan(vec![CircuitScalarNode::Int(0)], 0);
+        let rows = (0..4096)
+            .map(|index| (index, Box::<[u8]>::default(), 1))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            postprocess_indexed_counts(&payload, &rows, &[], 4096, &result_abi),
+            Err(ResultPostprocessingError::Evaluation(reason)) if reason.contains("work budget")
+        ));
+        let counts = postprocess_indexed_counts(&payload, &rows[..1], &[], 1, &result_abi)
+            .expect("the individual wide word is a valid sampled result");
+        assert_eq!(counts.entries().len(), 1);
+        assert_eq!(counts.entries()[0].0.len(), width as usize);
+        assert!(counts.entries()[0].0.iter().all(|bit| *bit == 0));
+    }
+
+    #[test]
+    fn indexed_results_borrow_context_and_keep_select_and_index_branches_lazy() {
+        let payload = result_plan(
+            vec![
+                CircuitScalarNode::CurrentShot,
+                CircuitScalarNode::Bool(true),
+                CircuitScalarNode::Bool(false),
+                CircuitScalarNode::Int(1),
+                CircuitScalarNode::Int(0),
+                CircuitScalarNode::Apply {
+                    opcode: "classical.floordiv".into(),
+                    result_type: CircuitScalarType::Int,
+                    attributes: Box::new([]),
+                    operands: vec![CircuitScalarId::test_new(3), CircuitScalarId::test_new(4)]
+                        .into_boxed_slice(),
+                },
+                CircuitScalarNode::Apply {
+                    opcode: "classical.not".into(),
+                    result_type: CircuitScalarType::Bool,
+                    attributes: Box::new([]),
+                    operands: vec![CircuitScalarId::test_new(5)].into_boxed_slice(),
+                },
+                CircuitScalarNode::Indexed {
+                    index: CircuitScalarId::test_new(0),
+                    elements: vec![
+                        CircuitScalarId::test_new(1),
+                        CircuitScalarId::test_new(2),
+                        CircuitScalarId::test_new(6),
+                    ]
+                    .into_boxed_slice(),
+                    scalar_type: CircuitScalarType::Bool,
+                },
+                CircuitScalarNode::Apply {
+                    opcode: "classical.select".into(),
+                    result_type: CircuitScalarType::Bool,
+                    attributes: Box::new([]),
+                    operands: vec![
+                        CircuitScalarId::test_new(1),
+                        CircuitScalarId::test_new(7),
+                        CircuitScalarId::test_new(6),
+                    ]
+                    .into_boxed_slice(),
+                },
+            ],
+            0,
+        );
+        let rows = vec![
+            (0, Box::<[u8]>::default(), 1),
+            (1, Box::<[u8]>::default(), 1),
+        ];
+        let counts = postprocess_indexed_counts(&payload, &rows, &[], 2, &bool_result_abi())
+            .expect("unselected division by zero must remain lazy");
+        assert_eq!(
+            counts.entries(),
+            &[
+                (vec![0].into_boxed_slice(), 1),
+                (vec![1].into_boxed_slice(), 1)
+            ]
+        );
+        let counts = postprocess_indexed_counts(&payload, &rows[..1], &[], 1, &bool_result_abi())
+            .expect("each invocation starts again at zero");
+        assert_eq!(counts.entries(), &[(vec![1].into_boxed_slice(), 1)]);
+        let compact = postprocess_unmeasured_indexed_counts(&payload, &[], 2, &bool_result_abi())
+            .expect("compact coverage retains lazy indexed evaluation");
+        assert_eq!(
+            compact.entries(),
+            &[
+                (vec![0].into_boxed_slice(), 1),
+                (vec![1].into_boxed_slice(), 1),
+            ]
+        );
+        assert!(matches!(
+            postprocess_unmeasured_indexed_counts(&payload, &[], 3, &bool_result_abi()),
+            Err(ResultPostprocessingError::Evaluation(reason)) if reason.contains("zero")
+        ));
+    }
     fn bool_result_abi() -> Vec<u8> {
         wire::ResultAbiProto {
+            per_shot: false,
             r#type: Some(wire::TypeProto {
                 kind: wire::type_proto::Kind::Scalar.into(),
                 name: "Bool".to_owned(),

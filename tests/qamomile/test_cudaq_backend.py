@@ -169,6 +169,27 @@ def test_cudaq_materializes_dynamic_classical_index_at_launch() -> None:
     exercise_dynamic_classical_index_backend(endpoint=CudaqLocal(), seed=2)
 
 
+def test_cudaq_accepts_unbounded_integers_in_shape_only_parameter() -> None:
+    """Unused Python integers do not need to fit a CUDA-Q kernel input."""
+    from qamomile.cudaq import CudaqLocal
+
+    program = qm.build_source("""
+import qamomile as qm
+@qm.qkernel
+def sample(values: qm.Param[qm.Vector[qm.Int, 2]]) -> qm.Shot[qm.Bits[1]]:
+    state = qm.qubits(1)
+    if len(values) == 2:
+        state = qm.x(state)
+    return qm.measure(state)
+""").specialize("sample")
+    endpoint = CudaqLocal()
+    artifact = qm.compile(program, to=endpoint.target)
+    result = qm.execute(
+        artifact, on=endpoint, parameters={"values": (1 << 80, 0)}, shots=4, seed=2
+    )
+    assert result.counts == {(1,): 4}
+
+
 def test_cudaq_executes_launch_bound_structural_math() -> None:
     """CUDA-Q receives the loop after Rust evaluates structural math."""
 
@@ -909,7 +930,7 @@ def test_cudaq_coexists_with_other_local_sdk_endpoints() -> None:
 
     program = qm.build_source(BASIS_SOURCE).specialize("basis")
     for endpoint in (CudaqLocal(), Aer(), CirqSimulator(), Qulacs(), BraketLocal()):
-        assert qm.run(program, on=endpoint, shots=4, seed=0).result.counts == {
+        assert qm.run(program, on=endpoint, shots=4, seed=None).result.counts == {
             (1, 0, 0): 4
         }
 
@@ -944,6 +965,7 @@ def test_cudaq_executes_nondestructive_pauli_measurements() -> None:
     result = qm.run(program, on=CudaqLocal(), shots=4, seed=2).result
 
     assert result.values == {(1, 1, 0, 0, 0, 0, (1,), (0,), (0,)): 4}
+    assert all(type(bit) is int for row in result.values for bit in row[:6])
 
 
 def test_cudaq_run_executes_measurement_feedback() -> None:

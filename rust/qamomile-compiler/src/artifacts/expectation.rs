@@ -29,7 +29,7 @@ pub struct PauliMeasurementGroup {
     basis: Vec<(u64, Pauli)>,
     term_indices: Vec<usize>,
     shots: BigUint,
-    seed: u64,
+    seed: Option<u64>,
 }
 
 impl PauliMeasurementGroup {
@@ -51,9 +51,9 @@ impl PauliMeasurementGroup {
         &self.shots
     }
 
-    /// Return the endpoint-portable seed for this group.
+    /// Return an explicit portable seed, or None for endpoint-default randomness.
     #[must_use]
-    pub const fn seed(&self) -> u64 {
+    pub const fn seed(&self) -> Option<u64> {
         self.seed
     }
 }
@@ -120,7 +120,7 @@ pub struct CommutingPauliMeasurementGroup {
     readouts: Vec<CommutingPauliReadout>,
     gates: Vec<CommutingMeasurementGate>,
     shots: BigUint,
-    seed: u64,
+    seed: Option<u64>,
 }
 
 impl CommutingPauliMeasurementGroup {
@@ -142,9 +142,9 @@ impl CommutingPauliMeasurementGroup {
         &self.shots
     }
 
-    /// Return the endpoint-portable seed for this group.
+    /// Return an explicit portable seed, or None for endpoint-default randomness.
     #[must_use]
-    pub const fn seed(&self) -> u64 {
+    pub const fn seed(&self) -> Option<u64> {
         self.seed
     }
 
@@ -201,9 +201,9 @@ pub enum PauliExpectationError {
 /// Derive portable random streams for Pauli-term measurements.
 ///
 /// The source observable is already in canonical term order when this plan is
-/// requested. Seed zero preserves the endpoint-default randomness contract.
-/// Every nonzero base seed is mixed into a 32-bit start, then an odd wrapping
-/// stride assigns distinct SDK-portable seeds to every supported term ordinal.
+/// requested. An absent seed preserves endpoint-default randomness.
+/// Every explicit base seed, including zero, is mixed into a 32-bit start. An
+/// odd wrapping stride assigns distinct SDK-portable seeds to every term ordinal.
 /// Runtime and output allocation are linear in `term_count`.
 ///
 /// # Errors
@@ -211,31 +211,31 @@ pub enum PauliExpectationError {
 /// Returns [`PauliExpectationError::Budget`] before allocation when the term
 /// count exceeds [`MAX_EXPECTATION_TERMS`].
 fn expectation_term_seeds(
-    base_seed: u64,
+    base_seed: Option<u64>,
     term_count: usize,
-) -> Result<Vec<u64>, PauliExpectationError> {
+) -> Result<Vec<Option<u64>>, PauliExpectationError> {
     expectation_seeds(base_seed, term_count, EXPECTATION_SEED_DOMAIN)
 }
 
 fn expectation_seeds(
-    base_seed: u64,
+    base_seed: Option<u64>,
     count: usize,
     domain: u64,
-) -> Result<Vec<u64>, PauliExpectationError> {
+) -> Result<Vec<Option<u64>>, PauliExpectationError> {
     if count > MAX_EXPECTATION_TERMS {
         return Err(PauliExpectationError::Budget);
     }
-    if base_seed == 0 {
-        return Ok(vec![0; count]);
-    }
+    let Some(base_seed) = base_seed else {
+        return Ok(vec![None; count]);
+    };
     let mixed = mix_seed(base_seed ^ domain).to_le_bytes();
     let start = u32::from_le_bytes([mixed[0], mixed[1], mixed[2], mixed[3]]);
     let mut seeds = Vec::with_capacity(count);
     for ordinal in 0..count {
         let ordinal = u32::try_from(ordinal).map_err(|_| PauliExpectationError::Budget)?;
-        seeds.push(u64::from(
+        seeds.push(Some(u64::from(
             start.wrapping_add(ordinal.wrapping_mul(EXPECTATION_SEED_STEP)),
-        ));
+        )));
     }
     Ok(seeds)
 }
@@ -244,7 +244,7 @@ fn expectation_seeds(
 ///
 /// `total_shots` is divided exactly across the resulting groups. Every group
 /// receives at least one shot, the first groups receive any integer remainder,
-/// and nonzero group seeds occupy a domain distinct from independent-term
+/// and explicit group seeds occupy a domain distinct from independent-term
 /// seeds. The plan is transient and depends only on the canonical observable.
 ///
 /// # Errors
@@ -255,7 +255,7 @@ fn expectation_seeds(
 pub fn plan_qwc_pauli_expectation(
     observable: &[u8],
     total_shots: &BigUint,
-    base_seed: u64,
+    base_seed: Option<u64>,
 ) -> Result<PauliMeasurementPlan, PauliExpectationError> {
     plan_qwc_pauli_expectation_with_limit(observable, total_shots, base_seed, MAX_EXPECTATION_WORK)
 }
@@ -267,7 +267,7 @@ pub fn plan_qwc_pauli_expectation(
 pub fn plan_independent_pauli_expectation(
     observable: &[u8],
     total_shots: &BigUint,
-    base_seed: u64,
+    base_seed: Option<u64>,
 ) -> Result<PauliMeasurementPlan, PauliExpectationError> {
     plan_local_pauli_expectation(
         observable,
@@ -298,7 +298,7 @@ enum LocalGrouping {
 pub fn plan_commuting_pauli_expectation(
     observable: &[u8],
     total_shots: &BigUint,
-    base_seed: u64,
+    base_seed: Option<u64>,
 ) -> Result<CommutingPauliMeasurementPlan, PauliExpectationError> {
     plan_commuting_pauli_expectation_with_limit(
         observable,
@@ -311,7 +311,7 @@ pub fn plan_commuting_pauli_expectation(
 fn plan_commuting_pauli_expectation_with_limit(
     observable: &[u8],
     total_shots: &BigUint,
-    base_seed: u64,
+    base_seed: Option<u64>,
     work_limit: usize,
 ) -> Result<CommutingPauliMeasurementPlan, PauliExpectationError> {
     if total_shots.is_zero() {
@@ -736,7 +736,7 @@ fn append_commuting_gate(
 fn plan_qwc_pauli_expectation_with_limit(
     observable: &[u8],
     total_shots: &BigUint,
-    base_seed: u64,
+    base_seed: Option<u64>,
     work_limit: usize,
 ) -> Result<PauliMeasurementPlan, PauliExpectationError> {
     plan_local_pauli_expectation(
@@ -751,7 +751,7 @@ fn plan_qwc_pauli_expectation_with_limit(
 fn plan_local_pauli_expectation(
     observable: &[u8],
     total_shots: &BigUint,
-    base_seed: u64,
+    base_seed: Option<u64>,
     work_limit: usize,
     grouping: LocalGrouping,
 ) -> Result<PauliMeasurementPlan, PauliExpectationError> {
@@ -941,19 +941,33 @@ mod tests {
 
     #[test]
     fn term_seed_plan_is_stable_distinct_and_bounded() {
-        let seeds = expectation_term_seeds(7, 4).expect("seed plan");
+        let seeds = expectation_term_seeds(Some(7), 4).expect("seed plan");
 
-        assert_eq!(expectation_term_seeds(7, 4), Ok(seeds.clone()));
+        assert_eq!(expectation_term_seeds(Some(7), 4), Ok(seeds.clone()));
         let unique = seeds
             .iter()
             .copied()
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(unique.len(), seeds.len());
-        assert!(seeds.iter().all(|seed| u32::try_from(*seed).is_ok()));
-        assert_eq!(expectation_term_seeds(0, 4), Ok(vec![0; 4]));
-        assert_eq!(expectation_term_seeds(7, 0), Ok(Vec::new()));
+        assert!(
+            seeds
+                .iter()
+                .all(|seed| seed.is_some_and(|seed| u32::try_from(seed).is_ok()))
+        );
+        assert_eq!(expectation_term_seeds(None, 4), Ok(vec![None; 4]));
+        let zero_seeds = expectation_term_seeds(Some(0), 4).expect("explicit zero seed");
+        assert!(zero_seeds.iter().all(Option::is_some));
         assert_eq!(
-            expectation_term_seeds(7, MAX_EXPECTATION_TERMS + 1),
+            zero_seeds
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            4
+        );
+        assert_eq!(expectation_term_seeds(Some(0), 4), Ok(zero_seeds));
+        assert_eq!(expectation_term_seeds(Some(7), 0), Ok(Vec::new()));
+        assert_eq!(
+            expectation_term_seeds(Some(7), MAX_EXPECTATION_TERMS + 1),
             Err(PauliExpectationError::Budget)
         );
     }
@@ -961,8 +975,8 @@ mod tests {
     #[test]
     fn independent_plan_uses_total_budget_and_rejects_short_budget() {
         let observable = observable(2, &[(vec![(0, Pauli::Z)], 1.0), (vec![(1, Pauli::Z)], 2.0)]);
-        let plan =
-            plan_independent_pauli_expectation(&observable, &BigUint::from(5_u8), 7).expect("plan");
+        let plan = plan_independent_pauli_expectation(&observable, &BigUint::from(5_u8), Some(7))
+            .expect("plan");
         assert_eq!(plan.groups().len(), 2);
         assert_eq!(plan.groups()[0].shots(), &BigUint::from(3_u8));
         assert_eq!(plan.groups()[1].shots(), &BigUint::from(2_u8));
@@ -973,21 +987,21 @@ mod tests {
                 .iter()
                 .map(PauliMeasurementGroup::seed)
                 .collect::<Vec<_>>(),
-            expectation_term_seeds(7, 2).expect("seeds")
+            expectation_term_seeds(Some(7), 2).expect("seeds")
         );
         assert_eq!(
-            plan_independent_pauli_expectation(&observable, &BigUint::from(1_u8), 7),
+            plan_independent_pauli_expectation(&observable, &BigUint::from(1_u8), Some(7)),
             Err(PauliExpectationError::InsufficientShots)
         );
         assert_eq!(
-            plan_independent_pauli_expectation(&observable, &BigUint::from(0_u8), 7),
+            plan_independent_pauli_expectation(&observable, &BigUint::from(0_u8), Some(7)),
             Err(PauliExpectationError::InvalidShots)
         );
         assert_eq!(
             plan_independent_pauli_expectation(
                 &observable,
                 &(BigUint::from(1_u8) << MAX_SAMPLE_COUNT_BITS),
-                7
+                Some(7)
             ),
             Err(PauliExpectationError::Budget)
         );
@@ -1003,8 +1017,8 @@ mod tests {
                 (vec![(1, Pauli::Z)], 3.0),
             ],
         );
-        let plan =
-            plan_qwc_pauli_expectation(&observable, &BigUint::from(5_u8), 7).expect("QWC plan");
+        let plan = plan_qwc_pauli_expectation(&observable, &BigUint::from(5_u8), Some(7))
+            .expect("QWC plan");
 
         assert_eq!(plan.groups().len(), 2);
         assert_eq!(plan.groups()[0].basis(), &[(0, Pauli::X), (1, Pauli::Z)]);
@@ -1016,10 +1030,10 @@ mod tests {
         assert_ne!(plan.groups()[0].seed(), plan.groups()[1].seed());
         assert_ne!(
             plan.groups()[0].seed(),
-            expectation_term_seeds(7, 2).expect("term seeds")[0]
+            expectation_term_seeds(Some(7), 2).expect("term seeds")[0]
         );
         assert_eq!(
-            plan_qwc_pauli_expectation(&observable, &BigUint::from(1_u8), 7),
+            plan_qwc_pauli_expectation(&observable, &BigUint::from(1_u8), Some(7)),
             Err(PauliExpectationError::InsufficientShots)
         );
     }
@@ -1029,10 +1043,11 @@ mod tests {
         let observable = observable(1, &[(vec![(0, Pauli::X)], 1.0), (vec![(0, Pauli::Z)], 1.0)]);
 
         assert!(
-            plan_qwc_pauli_expectation_with_limit(&observable, &BigUint::from(2_u8), 0, 3,).is_ok()
+            plan_qwc_pauli_expectation_with_limit(&observable, &BigUint::from(2_u8), Some(0), 3,)
+                .is_ok()
         );
         assert_eq!(
-            plan_qwc_pauli_expectation_with_limit(&observable, &BigUint::from(2_u8), 0, 2,),
+            plan_qwc_pauli_expectation_with_limit(&observable, &BigUint::from(2_u8), Some(0), 2,),
             Err(PauliExpectationError::Budget)
         );
     }
@@ -1047,7 +1062,7 @@ mod tests {
                 (vec![(0, Pauli::Z), (1, Pauli::Z)], 1.0),
             ],
         );
-        let plan = plan_commuting_pauli_expectation(&observable, &BigUint::from(4_u8), 7)
+        let plan = plan_commuting_pauli_expectation(&observable, &BigUint::from(4_u8), Some(7))
             .expect("commuting plan");
 
         assert_eq!(plan.groups().len(), 1);
@@ -1074,11 +1089,16 @@ mod tests {
     fn commuting_plan_separates_noncommuting_terms_and_bounds_work() {
         let observable = observable(1, &[(vec![(0, Pauli::X)], 1.0), (vec![(0, Pauli::Z)], 1.0)]);
 
-        let plan = plan_commuting_pauli_expectation(&observable, &BigUint::from(2_u8), 0)
+        let plan = plan_commuting_pauli_expectation(&observable, &BigUint::from(2_u8), Some(0))
             .expect("two groups");
         assert_eq!(plan.groups().len(), 2);
         assert_eq!(
-            plan_commuting_pauli_expectation_with_limit(&observable, &BigUint::from(2_u8), 0, 0,),
+            plan_commuting_pauli_expectation_with_limit(
+                &observable,
+                &BigUint::from(2_u8),
+                Some(0),
+                0,
+            ),
             Err(PauliExpectationError::Budget)
         );
     }

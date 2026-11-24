@@ -18,6 +18,8 @@ use qamomile_compiler::{
     infer_declared_function_application as infer_native_declared_function_application,
     infer_function_application as infer_native_function_application,
     infer_literal_type as infer_native_literal_type,
+    infer_measurement_observation_type as native_measurement_observation_type,
+    infer_preparation_result_type as native_preparation_result_type,
     infer_type_dimensions as infer_native_type_dimensions,
     inspect_type_admissibility as inspect_native_type_admissibility,
     inspect_type_shape as inspect_native_type_shape,
@@ -410,6 +412,34 @@ fn infer_literal_type<'py>(
     Ok(inferred.map(|payload| PyBytes::new(py, &payload)))
 }
 
+/// Infer the observation type of a coherent payload.
+#[cfg_attr(feature = "stub-gen", pyo3_stub_gen::derive::gen_stub_pyfunction)]
+#[cfg_attr(not(feature = "stub-gen"), pyo3_stub_gen_derive::remove_gen_stub)]
+#[pyfunction]
+fn infer_measurement_observation_type<'py>(
+    py: Python<'py>,
+    #[gen_stub(override_type(type_repr = "bytes"))] source: &[u8],
+) -> PyResult<Bound<'py, PyBytes>> {
+    let result = py
+        .detach(|| native_measurement_observation_type(source))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok(PyBytes::new(py, &result))
+}
+
+/// Infer preparation from an original source HIR operand.
+#[cfg_attr(feature = "stub-gen", pyo3_stub_gen::derive::gen_stub_pyfunction)]
+#[cfg_attr(not(feature = "stub-gen"), pyo3_stub_gen_derive::remove_gen_stub)]
+#[pyfunction]
+fn infer_preparation_result_type<'py>(
+    py: Python<'py>,
+    #[gen_stub(override_type(type_repr = "bytes"))] source: &[u8],
+) -> PyResult<Bound<'py, PyBytes>> {
+    let result = py
+        .detach(|| native_preparation_result_type(source))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    Ok(PyBytes::new(py, &result))
+}
+
 /// Substitute dependent dimensions through the native semantic type algebra.
 #[cfg_attr(feature = "stub-gen", pyo3_stub_gen::derive::gen_stub_pyfunction)]
 #[cfg_attr(not(feature = "stub-gen"), pyo3_stub_gen_derive::remove_gen_stub)]
@@ -543,6 +573,11 @@ pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(are_local_peer_types, module)?)?;
     module.add_function(wrap_pyfunction!(literal_conforms_type, module)?)?;
     module.add_function(wrap_pyfunction!(infer_literal_type, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        infer_measurement_observation_type,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(infer_preparation_result_type, module)?)?;
     module.add_function(wrap_pyfunction!(substitute_type_dimensions, module)?)?;
     module.add_function(wrap_pyfunction!(type_symbolic_dimensions, module)?)?;
     module.add_function(wrap_pyfunction!(inspect_type_shape, module)?)?;

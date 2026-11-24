@@ -72,13 +72,13 @@ def test_modular_phase_and_result_abi_across_targets(
     artifact = qm.compile(modular_interference_sample, to=endpoint.target)
     assert "realization:arithmetic.portable" in artifact.report.stages
     restored = deserialize(serialize(artifact))
-    assert qm.execute(restored, on=endpoint, shots=4, seed=0).counts == {
-        (0, 0, 0, 0): 4
-    }
+    assert qm.execute(
+        restored, on=endpoint, shots=4, seed=0 if backend == "quration" else None
+    ).counts == {(0, 0, 0, 0): 4}
     assert qm.expectation(
         modular_interference_state,
         qm.Z(0) + qm.Z(1) + qm.Z(2) + qm.Z(3),
         on=endpoint,
         shots=4,
-        seed=0,
+        seed=0 if backend == "quration" else None,
     ).value == pytest.approx(4.0)

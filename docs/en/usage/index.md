@@ -11,7 +11,7 @@ How-to guides for Qamomile features and API patterns.
 :::{card}
 :header: **Immutable Binary and Spin Models**
 :link: binary_model
-Keep arbitrary IDs, energy, Hamiltonian, decoding, persistence, and OMMX evaluation under one Rust-backed model.
+Build a model from polynomial coefficients, evaluate assignments, and map measurement results back to the original variable IDs.
 :::
 
 :::{card}

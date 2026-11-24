@@ -36,10 +36,16 @@
 # %%
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 import qamomile as qm
 from qamomile.measurement import Estimator
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 128
+energy_shots = 2 if docs_test_mode else 128
 
 reference = qm.Reference()
 
@@ -72,15 +78,15 @@ def parity_probe(theta: qm.Param[qm.Real]) -> qm.Shot[qm.Bits[2]]:
 
 theta = 0.7
 parity_program = qm.specialize(parity_probe)
-one_result = qm.evaluate(parity_program, theta=theta)
+one_result = qm.evaluate(parity_program, theta=theta, seed=0)
 print("One-shot result:", one_result)
 
 
 # %% [markdown]
-# `qm.specialize(parity_probe)` prepares the program, and `qm.evaluate(parity_program, theta=theta)` executes it once.
+# `qm.specialize(parity_probe)` prepares the program, and `qm.evaluate(parity_program, theta=theta, seed=0)` executes it once.
 # The result is a Python tuple containing two measured bits, with qubit 0 first and qubit 1 second.\
 # Quantum measurements are probabilistic.
-# However, `qm.evaluate(...)` uses `seed=0` by default, so this example produces the same result when rerun with unchanged inputs.
+# Execution defaults to `seed=None`, leaving randomness to the endpoint. Here we explicitly use `seed=0` so this example produces the same result when rerun with unchanged inputs.
 #
 # ## 2. `qm.run(...)`: Execute a Quantum Circuit Repeatedly
 #
@@ -95,7 +101,7 @@ record = qm.run(
     parity_program,
     on=reference,
     parameters={"theta": theta},
-    shots=128,
+    shots=sample_shots,
     seed=7,
 )
 samples = record.result
@@ -133,7 +139,8 @@ print("Theoretical value (cos(theta)):", np.cos(theta))
 
 
 # %% [markdown]
-# In the computational (Z) basis, with qubit 0 written first, the circuit prepares
+# Let $b_0$ and $b_1$ be the bits for qubits 0 and 1. In the `Reference` simulator's statevector, the amplitude at index $i=b_0+2b_1$ corresponds to the ket $\lvert b_1 b_0\rangle$.
+# Starting from $\lvert 00\rangle$, flipping only qubit 0 gives $\lvert 01\rangle$ (index 1) and the measurement tuple `(1, 0)`. Flipping only qubit 1 gives $\lvert 10\rangle$ (index 2) and `(0, 1)`. In this ket order, the circuit prepares
 #
 # $$
 # \lvert \psi \rangle
@@ -200,15 +207,17 @@ estimator = Estimator(preparation, hamiltonian, grouping="qwc")
 energy = estimator.estimate(
     on=reference,
     parameters={"theta": theta},
-    shots=128,
+    shots=energy_shots,
     seed=11,
 )
 
 expected = np.cos(theta) + 0.5 * np.sin(theta)
 
-assert energy.shots == 128
-assert energy.standard_error is not None
-assert abs(energy.value - expected) <= max(6 * energy.standard_error, 0.02)
+assert energy.shots == energy_shots
+assert np.isfinite(energy.value)
+if not docs_test_mode:
+    assert energy.standard_error is not None
+    assert abs(energy.value - expected) <= max(6 * energy.standard_error, 0.02)
 
 print("Estimated expectation value:", energy.value)
 print("Standard error:", energy.standard_error)

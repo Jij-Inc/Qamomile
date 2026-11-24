@@ -111,7 +111,7 @@ pub fn lower_adjoint_calls_for_target(
     payload: &[u8],
 ) -> Result<TargetLoweredProgram, AdjointLoweringError> {
     let program = VerifiedProgram::from_bytes(payload)?;
-    lower_adjoint_calls(&program)
+    crate::TargetPreparedProgram::from_verified(program)?.lower_adjoint_calls()
 }
 
 pub(crate) fn lower_adjoint_calls(
@@ -191,7 +191,7 @@ pub fn lower_optimized_adjoint_calls_for_target(
 ) -> Result<TargetLoweredProgram, AdjointLoweringError> {
     let program = VerifiedProgram::from_bytes(payload)?;
     let (prepared, _) = program.prepare_standard()?;
-    lower_adjoint_calls(prepared.as_verified())
+    prepared.lower_adjoint_calls()
 }
 
 #[allow(clippy::too_many_arguments)]

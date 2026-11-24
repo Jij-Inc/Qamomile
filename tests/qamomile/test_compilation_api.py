@@ -713,17 +713,25 @@ def repeat(rounds: qm.Param[qm.Int], theta: qm.Param[qm.Real]) -> qm.Bits[1]:
     assert even.counts == {(0,): 3}
     assert odd.counts == {(1,): 2}
     assert len(target.payloads) == 2
-    with pytest.raises(qm.ExecutionError, match="Q8133"):
-        _decode_launch_materializer_program(
-            restored,
-            target_format="probe.other.v1",
-            materialized_requirements=frozenset({Requirement.HOST_DISPATCH}),
+    other_target = StaticProbeTarget()
+    other_target.name = "probe.other.v1"
+    with patch.object(compilation_module, "_plan_target_lowering") as planner:
+        with pytest.raises(qm.ExecutionError, match="Q8133.*different format"):
+            _decode_launch_materializer_program(restored, target=other_target)
+        planner.assert_not_called()
+    for supported in (target.capabilities.requirements, frozenset(Requirement)):
+        direct_target = SimpleNamespace(
+            name=target.name,
+            fingerprint=target.fingerprint,
+            capabilities=CapabilitySnapshot(target.name, supported),
+            lower=target.lower,
         )
+        with pytest.raises(qm.ExecutionError, match="Q8133.*target requirements"):
+            _decode_launch_materializer_program(restored, target=direct_target)
     with pytest.raises(qm.ExecutionError, match="Q8133"):
         _decode_launch_materializer_program(
             replace(restored, parameter_abi=ParameterABI()),
-            target_format=target.name,
-            materialized_requirements=frozenset({Requirement.HOST_DISPATCH}),
+            target=target,
         )
     with pytest.raises(qm.ArtifactError, match="Q7001"):
         qm.execute(
@@ -737,20 +745,19 @@ def repeat(rounds: qm.Param[qm.Int], theta: qm.Param[qm.Real]) -> qm.Bits[1]:
             on=endpoint,
             parameters={"rounds": 1_000_001, "theta": 0.25},
         )
-    with monkeypatch.context() as patch:
-        patch.delattr(compilation_module.native, "seal_launch_materializer_payload")
+    with monkeypatch.context() as overrides:
+        overrides.delattr(compilation_module.native, "seal_launch_materializer_payload")
         with pytest.raises(qm.ArtifactError, match="Q7047"):
             serialize(qm.compile(program, to=target))
-    with monkeypatch.context() as patch:
-        patch.delattr(compilation_module.native, "inspect_launch_materializer_artifact")
-        assert (
-            _decode_launch_materializer_program(
-                restored,
-                target_format=target.name,
-                materialized_requirements=frozenset({Requirement.HOST_DISPATCH}),
-            ).semantic_digest
-            == program.semantic_digest
+    with monkeypatch.context() as overrides:
+        overrides.delattr(
+            compilation_module.native, "inspect_launch_materializer_artifact"
         )
+        verified, materialized = _decode_launch_materializer_program(
+            restored, target=target
+        )
+        assert verified.semantic_digest == program.semantic_digest
+        assert materialized == {Requirement.HOST_DISPATCH}
 
 
 def test_structured_target_materializes_exact_launch_abi_without_a_circuit() -> None:
@@ -789,11 +796,11 @@ def test_structured_target_materializes_exact_launch_abi_without_a_circuit() -> 
         def lower_at(
             self,
             program: Program,
-            parameters: dict[str, object],
+            invocation: qm.Invocation,
         ) -> LoweredProgram:
             """Emit one argument-free structured child artifact."""
 
-            values = dict(parameters)
+            values = invocation.values()
             self.lowered.append(values)
             return LoweredProgram(
                 payload=_ProbeExecutable(json.dumps(values, sort_keys=True).encode()),
@@ -864,6 +871,78 @@ def test_structured_target_materializes_exact_launch_abi_without_a_circuit() -> 
     assert target.lowered == [{"first": True, "theta": 0.25, "limit": 0}]
 
 
+def test_structured_current_shot_obligation_retains_context_and_count_cache() -> None:
+    """Structured launch preparation isolates both shot counts and seeds."""
+
+    class Target:
+        name = "probe.context-launch.v1"
+        fingerprint = "probe.context-launch.v1"
+        capabilities = CapabilitySnapshot(name, frozenset(Requirement))
+        launch_materialized_requirements = frozenset({Requirement.LOGICAL_SHOT_CONTEXT})
+
+        def __init__(self):
+            self.contexts = []
+
+        def lower(self, program):
+            raise AssertionError("context-only source bypassed invocation preparation")
+
+        def lower_at(self, program, invocation):
+            self.contexts.append((invocation.shots, invocation.seed))
+            if invocation.shots > 4:
+                raise qm.CapabilityError("checked domain exceeds four")
+            return LoweredProgram(
+                payload=_ProbeExecutable(b"context"),
+                parameter_abi=ParameterABI(),
+                result_abi=ResultABI.from_program(program),
+                stages=("context-preparation",),
+            )
+
+    class Endpoint:
+        name = "probe.context-launch"
+
+        def __init__(self, target):
+            self.target = target
+            self.capabilities = target.capabilities
+            self.launched = []
+
+        def launch_batch(self, artifact, invocations):
+            raise AssertionError("batch preparation was bypassed")
+
+        def launch(self, artifact, invocation):
+            assert (
+                Requirement.LOGICAL_SHOT_CONTEXT
+                in artifact.execution_contract.requirements
+            )
+            self.launched.append(invocation.shots)
+            return CompletedJob(
+                "context",
+                qm.SampleResult.from_counts(
+                    backend=self.name, counts={(1,): invocation.shots}
+                ),
+            )
+
+    target = Target()
+    endpoint = Endpoint(target)
+    program = qm.build_source("""
+import qamomile as qm
+@qm.qkernel
+def sample() -> qm.Shot[qm.Bool]:
+    return qm.get_current_shot() < 4
+""").specialize("sample")
+    artifact = qm.compile(program, to=target)
+    assert artifact.format == compilation_module.LAUNCH_MATERIALIZER_FORMAT
+    assert target.contexts == []
+    for count in (2, 2, 4):
+        assert qm.execute(artifact, on=endpoint, shots=count).shots == count
+    assert target.contexts == [(2, None), (4, None)]
+    with pytest.raises(qm.ExecutionError, match="checked domain exceeds four"):
+        qm.execute(artifact, on=endpoint, shots=5)
+    assert endpoint.launched == [2, 2, 4]
+    results = qm.execute_batch(artifact, on=endpoint, parameters=[{}, {}], shots=3)
+    assert [result.shots for result in results] == [3, 3]
+    assert target.contexts == [(2, None), (4, None), (5, None), (3, None)]
+
+
 def test_launch_target_cannot_claim_to_discharge_quantum_requirements() -> None:
     """Exact host values close staging requirements, not device semantics."""
 
@@ -886,7 +965,7 @@ def test_launch_target_cannot_claim_to_discharge_quantum_requirements() -> None:
         def lower_at(
             self,
             _program: Program,
-            _parameters: dict[str, object],
+            _invocation: qm.Invocation,
         ) -> LoweredProgram:
             """Reject materialization because planning must fail first."""
 
@@ -1118,7 +1197,7 @@ def sample(enabled: qm.Param[qm.Bool]) -> qm.Shot[qm.Bits[1]]:
         ("qiskit_aer", "qamomile.qiskit", "Aer", 2),
         ("cirq", "qamomile.cirq", "CirqSimulator", 2),
         ("qulacs", "qamomile.quri_parts", "Qulacs", 2),
-        ("braket", "qamomile.braket", "BraketLocal", 1),
+        ("braket", "qamomile.braket", "BraketLocal", 2),
     ],
 )
 def test_local_sdk_batches_execute_without_workers(
@@ -1143,14 +1222,15 @@ def test_local_sdk_batches_execute_without_workers(
             on=endpoint,
             parameters=[{} for _ in range(rows)],
             shots=4,
-            seed=0,
+            seed=None,
         )
 
     assert tuple(result.counts for result in results) == ({(1, 0, 0): 4},) * rows
     assert all(result.worker_pid is None for result in results)
 
 
-def test_execute_batch_uses_endpoint_batch_capability() -> None:
+@pytest.mark.parametrize("seed", [None, 0, 5])
+def test_execute_batch_uses_endpoint_batch_capability(seed: int | None) -> None:
     """Any structurally batch-capable endpoint can launch the batch once."""
 
     from qamomile.compilation import BatchExecutionEndpoint, Job
@@ -1222,12 +1302,14 @@ def choose(value: qm.Param[qm.Int]) -> qm.Int:
         artifact,
         on=endpoint,
         parameters=[{"value": 7}, {"value": -3}],
-        seed=5,
+        seed=seed,
     )
 
     assert tuple(result.value for result in results) == (7, -3)
     assert len(endpoint.batches) == 1
-    assert tuple(invocation.seed for invocation in endpoint.batches[0]) == (5, 6)
+    assert tuple(invocation.seed for invocation in endpoint.batches[0]) == (
+        (None, None) if seed is None else (seed, seed + 1)
+    )
 
 
 def test_execute_batch_supports_empty_and_value_batches() -> None:
@@ -1255,6 +1337,59 @@ def choose(value: qm.Param[qm.Int]) -> qm.Int:
         seed=5,
     )
     assert tuple(result.value for result in results) == (7, -3)
+
+
+@pytest.mark.parametrize("seed", [True, False, -1, 1 << 64, 1.5, "0"])
+@pytest.mark.parametrize("rows", [0, 2])
+def test_execute_batch_rejects_invalid_seeds_before_launch(seed, rows, monkeypatch):
+    """Invalid base seeds never become valid integers through row arithmetic."""
+    endpoint = qm.Reference()
+    artifact = qm.compile(
+        qm.build_source(BASIS_SOURCE).specialize("basis"), to=endpoint
+    )
+
+    def unexpected_launch(*args, **kwargs):
+        raise AssertionError("an invalid batch reached execution")
+
+    monkeypatch.setattr(qm.Reference, "launch_batch", unexpected_launch)
+    with pytest.raises(qm.ExecutionError, match="Q8138"):
+        qm.execute_batch(artifact, on=endpoint, parameters=[{}] * rows, seed=seed)
+
+
+def test_execute_batch_rejects_seed_overflow_before_launch(monkeypatch):
+    """Explicit seeds advance without wrapping or launching a partial batch."""
+    endpoint = qm.Reference()
+    artifact = qm.compile(
+        qm.build_source(BASIS_SOURCE).specialize("basis"), to=endpoint
+    )
+
+    def unexpected_launch(*args, **kwargs):
+        raise AssertionError("an overflowing batch reached execution")
+
+    monkeypatch.setattr(qm.Reference, "launch_batch", unexpected_launch)
+    with pytest.raises(qm.ExecutionError, match="Q8138"):
+        qm.execute_batch(artifact, on=endpoint, parameters=[{}, {}], seed=(1 << 64) - 1)
+
+
+@pytest.mark.parametrize("seed", [None, 0, (1 << 64) - 1])
+def test_execution_entrypoints_preserve_optional_seed(seed):
+    """Every public execution entrypoint accepts the same optional seed domain."""
+    endpoint = qm.Reference()
+    program = qm.build_source(BASIS_SOURCE).specialize("basis")
+    artifact = qm.compile(program, to=endpoint)
+    record = qm.run(artifact, on=endpoint, shots=4, seed=seed)
+    assert record.invocation.seed == seed
+    assert record.result.counts == {(1, 0, 0): 4}
+    assert (
+        qm.execute(artifact, on=endpoint, shots=4, seed=seed).counts
+        == record.result.counts
+    )
+    assert (
+        qm.submit(artifact, on=endpoint, shots=4, seed=seed).result().counts
+        == record.result.counts
+    )
+    assert qm.evaluate(program, seed=seed) == (1, 0, 0)
+    assert qm.Invocation.create().seed is None
 
 
 def test_execute_batch_fails_closed_on_limits_and_native_contract(
@@ -1315,13 +1450,14 @@ def sample(enabled: qm.Param[qm.Bool]) -> qm.Shot[qm.Bits[1]]:
         module_name="native_evaluate_lifecycle",
     ).specialize("sample")
     executor = native.execute_reference_at
-    calls: list[tuple[dict[str, object], int, int]] = []
+    calls: list[tuple[dict[str, object], int, int, bool]] = []
 
     def recording_executor(
         payload: bytes,
         parameters: dict[str, object],
         shots: int,
         seed: int,
+        single_value: bool = False,
     ) -> object:
         """Record and delegate the native one-shot invocation.
 
@@ -1330,18 +1466,19 @@ def sample(enabled: qm.Param[qm.Bool]) -> qm.Shot[qm.Bits[1]]:
             parameters (dict[str, object]): ABI-bound launch parameters.
             shots (int): Requested observation count.
             seed (int): Deterministic simulation seed.
+            single_value (bool): Native value mode without histogram bit packing.
 
         Returns:
             object: Native sampler result forwarded unchanged.
         """
 
-        calls.append((parameters, shots, seed))
-        return executor(payload, parameters, shots, seed)
+        calls.append((parameters, shots, seed, single_value))
+        return executor(payload, parameters, shots, seed, single_value)
 
     monkeypatch.setattr(native, "execute_reference_at", recording_executor)
 
     assert qm.evaluate(program, enabled=True, seed=23) == (1,)
-    assert calls == [({"enabled": True}, 1, 23)]
+    assert calls == [({"enabled": True}, 1, 23, True)]
 
 
 def test_evaluate_samples_measurement_derived_booleans_natively() -> None:
@@ -1353,7 +1490,7 @@ import qamomile as qm
 from qamomile._execution_payload import ExecutablePayload
 
 @qm.qkernel
-def sample() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
+def sample() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bit]]:
     bit = qm.measure(qm.h(qm.prepare(True)))
     return not bit, bit
 """,
@@ -1374,7 +1511,7 @@ import qamomile as qm
 from qamomile._execution_payload import ExecutablePayload
 
 @qm.qkernel
-def choose() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
+def choose() -> tuple[qm.Shot[qm.Bit], qm.Shot[qm.Bit]]:
     selector = qm.measure(qm.h(qm.prepare(False)))
     if selector:
         selected = qm.measure(qm.prepare(True))
@@ -1399,7 +1536,7 @@ import qamomile as qm
 from qamomile._execution_payload import ExecutablePayload
 
 @qm.qkernel
-def choose() -> qm.Shot[qm.Bool]:
+def choose() -> qm.Shot[qm.Bit]:
     selector = qm.measure(qm.h(qm.prepare(False)))
     if selector:
         return qm.measure(qm.prepare(True))
@@ -1407,7 +1544,7 @@ def choose() -> qm.Shot[qm.Bool]:
         return qm.measure(qm.prepare(False))
 
 @qm.qkernel
-def caller() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
+def caller() -> tuple[qm.Shot[qm.Bit], qm.Shot[qm.Bool]]:
     selected = choose()
     return selected, not selected
 """,
@@ -1432,14 +1569,14 @@ import qamomile as qm
 from qamomile._execution_payload import ExecutablePayload
 
 @qm.qkernel
-def choose() -> qm.Shot[qm.Bool]:
+def choose() -> qm.Shot[qm.Bit]:
     selector = qm.measure(qm.h(qm.prepare(False)))
     if selector:
         return qm.measure(qm.prepare(True))
     return qm.measure(qm.prepare(False))
 
 @qm.qkernel
-def caller() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
+def caller() -> tuple[qm.Shot[qm.Bit], qm.Shot[qm.Bool]]:
     selected = choose()
     return selected, not selected
 """,
@@ -1986,6 +2123,7 @@ def test_installed_native_lowering_planner_fails_closed(
             supported=plan.supported,
             missing=plan.missing,
             materialized=plan.materialized,
+            reusable_circuit_requirements=plan.reusable_circuit_requirements,
             unsupported=plan.unsupported,
             route="unsupported",
         )
@@ -2003,6 +2141,7 @@ def test_installed_native_lowering_planner_fails_closed(
             supported=plan.supported,
             missing=plan.missing,
             materialized=plan.materialized,
+            reusable_circuit_requirements=plan.reusable_circuit_requirements,
             unsupported=plan.unsupported,
             route="circuit_family",
         )

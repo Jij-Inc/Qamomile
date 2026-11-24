@@ -857,7 +857,7 @@ def sparse_lookup_sample() -> qm.Shot[qm.Bits[6]]:
 def exercise_uniformly_controlled_backend(
     *,
     endpoint: object,
-    seed: int = 0,
+    seed: int | None = 0,
 ) -> None:
     """Execute the public multiplexer through one backend unchanged."""
 
@@ -3080,6 +3080,26 @@ def test_qsvt_phase_coordinates_canonicalize_qsp_wx_without_an_enum() -> None:
     assert isinstance(qsvt(identity_block_encoding, phases=phases), qm.QKernel)
 
 
+@pytest.mark.parametrize(("constant", "expected_bit"), [(1.0, 0), (-1.0, 1)])
+def test_qsvt_constant_preserves_phase_under_control(
+    constant: float, expected_bit: int
+) -> None:
+    """Interfere the zero-signal block with an unchanged reference branch."""
+
+    certificate = synthesize_qsvt_polynomial((constant,))
+    transform = qsvt(identity_block_encoding, polynomial=certificate)
+
+    @qm.qkernel
+    def sample() -> qm.Shot[qm.Bits[3]]:
+        control = qm.h(qm.qubits(1))
+        control, state = qm.control(transform, control, qm.qubits(2))
+        return qm.measure(qm.concat(qm.h(control), state))
+
+    assert qm.run(sample, on=qm.Reference(), shots=8, seed=42).result.counts == {
+        (expected_bit, 0, 0): 8
+    }
+
+
 def test_qsvt_phase_conversion_requires_well_formed_native_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3088,23 +3108,6 @@ def test_qsvt_phase_conversion_requires_well_formed_native_authority(
     import importlib
 
     qsvt_module = importlib.import_module("qamomile.stdlib.qsvt")
-
-    scalar = QSVTPhases.from_qsp_wx((0.25,))
-    assert scalar.phases == pytest.approx((0.25 - math.pi / 2.0,), abs=1e-15)
-    converted_transform = qsvt(
-        identity_block_encoding,
-        phases=QSVTPhases.from_qsp_wx((math.pi,)),
-    )
-
-    @qm.qkernel
-    def converted_sample() -> qm.Bits[2]:
-        """Interfere one native-converted degree-zero projector phase."""
-
-        state = qm.h(qm.qubits(2), target=0)
-        state = converted_transform(state)
-        return qm.measure(qm.h(state, target=0))
-
-    assert qm.evaluate(converted_sample.specialize()) == (1, 0)
 
     monkeypatch.setattr(qsvt_module.native, "convert_qsp_wx_phases", None)
     with pytest.raises(TypeError, match="Q7620"):
@@ -3330,6 +3333,143 @@ def test_uniformly_controlled_rotation_is_one_shared_gray_walk() -> None:
     assert qm.resources.logical(static_program).metric(
         qm.resources.LOGICAL_ROTATION_GATES
     ).numeric_enclosure() == (4, 4)
+
+
+def _six_bit_rotation_program(
+    runtime: bool,
+) -> tuple[qm.Program, tuple[float, ...], dict[str, tuple[float, ...]]]:
+    """Prepare seven independent inputs and apply the selected public rotation."""
+
+    generator = random.Random(174)
+    branch_angles = tuple(generator.uniform(-math.pi, math.pi) for _ in range(64))
+
+    @qm.qkernel
+    def prepare(rotations: qm.Param[qm.Vector[qm.Real, 7]]) -> qm.Q[qm.Bits[7]]:
+        state = qm.qubits(7)
+        for index in range(7):
+            state = qm.ry(state, rotations[index], target=index)
+        return state
+
+    if runtime:
+        runtime_rotate = uniformly_controlled_ry_from_angles(6)
+
+        @qm.qkernel
+        def runtime_sample(
+            rotations: qm.Param[qm.Vector[qm.Real, 7]],
+            angles: qm.Param[qm.Vector[qm.Real, 64]],
+        ) -> qm.Shot[qm.Bits[7]]:
+            return qm.measure(runtime_rotate(prepare(rotations), angles))
+
+        return (
+            runtime_sample.specialize(),
+            branch_angles,
+            {"angles": uniformly_controlled_angles(branch_angles)},
+        )
+
+    static_rotate = uniformly_controlled_ry(branch_angles)
+
+    @qm.qkernel
+    def static_sample(
+        rotations: qm.Param[qm.Vector[qm.Real, 7]],
+    ) -> qm.Shot[qm.Bits[7]]:
+        return qm.measure(static_rotate(prepare(rotations)))
+
+    return static_sample.specialize(), branch_angles, {}
+
+
+@pytest.mark.parametrize("runtime", [False, True], ids=["static", "runtime"])
+def test_uniformly_controlled_ry_lowers_sixty_four_steps(runtime: bool) -> None:
+    """Both public factories lower to 64 successive RY/CX pairs."""
+
+    from qamomile.circuit import lower_to_circuit
+
+    program, _, _ = _six_bit_rotation_program(runtime)
+    circuit = lower_to_circuit(program)
+    gates = [
+        item.opcode for item in circuit.body.instructions if item.opcode != "measure"
+    ]
+    assert gates == ["ry"] * 7 + ["ry", "cx"] * 64
+
+
+@pytest.mark.backend_slow
+@pytest.mark.parametrize("backend", ["reference", "qiskit"])
+@pytest.mark.parametrize("runtime", [False, True], ids=["static", "runtime"])
+def test_uniformly_controlled_ry_at_every_six_bit_address(
+    backend: str, runtime: bool
+) -> None:
+    """Each of 64 distinct branch rotations cancels its known input rotation."""
+
+    if backend == "qiskit":
+        pytest.importorskip("qiskit_aer")
+        from qamomile.qiskit import Aer
+
+        endpoint = Aer()
+    else:
+        endpoint = qm.Reference()
+
+    program, branch_angles, parameters = _six_bit_rotation_program(runtime)
+    artifact = qm.compile(program, to=endpoint.target)
+    for address, angle in enumerate(branch_angles):
+        bits = _little_endian(address, 6)
+        rotations = (*(bit * math.pi for bit in bits), -angle)
+        result = qm.execute(
+            artifact,
+            on=endpoint,
+            parameters={**parameters, "rotations": rotations},
+            shots=32,
+            seed=address,
+        )
+        assert result.counts == {(*bits, 0): 32}, f"address {address}"
+
+    if backend == "qiskit":
+        from qiskit.quantum_info import Statevector
+        from qiskit.transpiler.passes import UnrollForLoops
+
+        from qamomile.qiskit import bind_circuit, load_circuit
+
+        # Equal address amplitudes expose every signed branch in one statevector.
+        invocation = qm.Invocation.create(
+            parameters={**parameters, "rotations": (math.pi / 2,) * 6 + (0.0,)}
+        )
+        circuit = bind_circuit(load_circuit(artifact), artifact, invocation)
+        circuit.remove_final_measurements()
+        amplitudes = Statevector.from_instruction(UnrollForLoops()(circuit)).data
+        expected = [
+            component(angle / 2) / 8
+            for component in (math.cos, math.sin)
+            for angle in branch_angles
+        ]
+        assert amplitudes == pytest.approx(expected, abs=1e-12, rel=0.0)
+
+
+@pytest.mark.parametrize("width", [0, 2])
+def test_uniformly_controlled_ry_adjoint_rebinds_one_artifact(width: int) -> None:
+    """A matching inverse cancels, and changing its branch by pi flips the bit."""
+
+    count = 1 << width
+    total = width + 1
+    bits = (*_little_endian(1, width), 0)
+    branches = tuple(0.4 + i for i in range(count))
+    rotate = uniformly_controlled_ry(branches)
+    runtime_rotate = uniformly_controlled_ry_from_angles(width)
+
+    @qm.qkernel
+    def sample(
+        angles: qm.Param[qm.Vector[qm.Real, count]],  # type: ignore[valid-type]
+    ) -> qm.Shot[qm.Bits[total]]:  # type: ignore[valid-type]
+        state = rotate(qm.prepare(bits))
+        return qm.measure(qm.adjoint(runtime_rotate, state, angles))
+
+    endpoint = qm.Reference()
+    artifact = qm.compile(sample.specialize(), to=endpoint)
+    for target in (0, 1):
+        angles = uniformly_controlled_angles(
+            tuple(a + target * math.pi for a in branches)
+        )
+        result = qm.execute(
+            artifact, on=endpoint, parameters={"angles": angles}, shots=4, seed=2
+        )
+        assert result.counts == {(*bits[:-1], target): 4}
 
 
 def test_uniformly_controlled_rotation_coordinates_are_rust_owned(

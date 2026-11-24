@@ -67,7 +67,7 @@ def exercise_standard_optimization_backend(*, endpoint: object) -> None:
 
     artifact = qm.compile(standard_optimization_sample, to=endpoint.target)
     assert artifact.report.stages.count("rust-qcore-standard-optimization") == 1
-    result = qm.execute(artifact, on=endpoint, shots=4, seed=0)
+    result = qm.execute(artifact, on=endpoint, shots=4, seed=None)
     assert result.counts == {(0, 0): 4}
     assert (
         qm.expectation(
@@ -75,7 +75,7 @@ def exercise_standard_optimization_backend(*, endpoint: object) -> None:
             qm.Z(0),
             on=endpoint,
             shots=4,
-            seed=0,
+            seed=None,
         ).value
         == 1.0
     )

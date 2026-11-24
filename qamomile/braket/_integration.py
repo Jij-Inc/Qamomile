@@ -189,6 +189,9 @@ class Braket:
 class BraketLocal:
     """Execute OpenQASM artifacts in this process with Braket LocalSimulator.
 
+    Execution accepts only ``seed=None`` because LocalSimulator has no portable
+    explicit seed contract. Integer seeds, including zero, are rejected.
+
     Args:
         backend (str): Local simulator implementation name.
         realizations (RealizationOptions): Exact choices used when compiling source.
@@ -308,7 +311,19 @@ class BraketDevice:
         )
 
     def launch(self, artifact: CompiledProgram, invocation: Invocation) -> Job:
-        """Create one native Braket task from an inspected OpenQASM artifact."""
+        """Create one native Braket task from an inspected OpenQASM artifact.
+
+        Args:
+            artifact (CompiledProgram): Checked OpenQASM artifact to execute.
+            invocation (Invocation): Bound parameters, shots, and unspecified seed.
+
+        Returns:
+            Job: Submitted provider job with normalized results.
+
+        Raises:
+            ExecutionError: If the artifact is incompatible or an explicit seed
+                is requested, including zero.
+        """
 
         if artifact.format != FORMAT:
             raise ExecutionError(
@@ -316,10 +331,10 @@ class BraketDevice:
             )
         if artifact.result_abi.width == 0:
             raise ExecutionError("Q8416: Braket device execution requires sampling")
-        if invocation.seed != 0:
+        if invocation.seed is not None:
             raise ExecutionError(
                 "Q8417: managed Braket devices do not provide a portable seed "
-                "contract; use seed=0"
+                "contract; use seed=None"
             )
         inputs = {
             f"p{index}": value
@@ -653,10 +668,10 @@ def _execute_local(
     }
     device: Any = LocalSimulator(backend=backend)
     program = _load_program(artifact)
-    if invocation.seed != 0:
+    if invocation.seed is not None:
         raise ExecutionError(
             "Q8414: this Braket LocalSimulator profile does not provide a "
-            "reproducible seed contract; use seed=0"
+            "reproducible seed contract; use seed=None"
         )
     task = device.run(program, shots=invocation.shots, inputs=inputs)
     native_result: Any = task.result()

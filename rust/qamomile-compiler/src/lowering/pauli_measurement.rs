@@ -6,6 +6,8 @@
 
 use std::collections::BTreeMap;
 
+use prost::Message;
+
 use thiserror::Error;
 
 use crate::expectation::{CommutingMeasurementGate, MAX_COMMUTING_MEASUREMENT_GATES};
@@ -241,7 +243,14 @@ fn transform_gates(
     let result_type = wire::TypeProto {
         kind: wire::type_proto::Kind::Staged.into(),
         name: "Shot".to_owned(),
-        arguments: vec![inner],
+        arguments: vec![
+            wire::TypeProto::decode(
+                crate::type_relations::infer_measurement_observation_type(&inner.encode_to_vec())
+                    .map_err(|_| PauliMeasurementError::InvalidSource)?
+                    .as_slice(),
+            )
+            .map_err(|_| PauliMeasurementError::InvalidSource)?,
+        ],
         ..Default::default()
     };
     body.operations.push(wire::OperationProto {

@@ -74,7 +74,7 @@ impl CircuitDefinition {
     }
 
     /// Borrow an already retained body without materializing an arithmetic recipe.
-    pub(super) fn retained_body(&self) -> Option<&[StaticInstruction]> {
+    pub(crate) fn retained_body(&self) -> Option<&[StaticInstruction]> {
         match &self.0.source {
             DefinitionSource::Body(body) => Some(body),
             DefinitionSource::Arithmetic(_) | DefinitionSource::Modular(_) => None,
@@ -152,6 +152,7 @@ impl CircuitDefinition {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) struct CallCacheKey {
     callee: String,
+    dimensions: Vec<(crate::Dimension, crate::Dimension)>,
     arguments: Vec<CircuitValue>,
     partitions: WirePartitions,
 }
@@ -239,6 +240,7 @@ impl StaticLowerer<'_> {
         &self,
         callee: &str,
         arguments: &[CircuitValue],
+        dimensions: &HashMap<crate::Dimension, crate::Dimension>,
     ) -> Option<(CallCacheKey, Vec<u64>)> {
         let mut wires = BTreeSet::new();
         for value in arguments {
@@ -255,8 +257,16 @@ impl StaticLowerer<'_> {
         for value in &mut arguments {
             remap_value(value, &map).ok()?;
         }
+        let mut dimensions = dimensions
+            .iter()
+            .map(|(formal, actual)| (formal.clone(), actual.clone()))
+            .collect::<Vec<_>>();
+        dimensions.sort_unstable_by(|(left, _), (right, _)| {
+            crate::types::compare_dimensions(left, right)
+        });
         Some((
             CallCacheKey {
+                dimensions,
                 callee: callee.to_owned(),
                 arguments,
                 partitions: self.local_partitions(&map),

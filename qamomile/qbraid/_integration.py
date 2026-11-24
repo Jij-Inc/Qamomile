@@ -164,7 +164,19 @@ class QBraidDevice:
         return CapabilitySnapshot(FORMAT, _CAPABILITIES)
 
     def launch(self, artifact: CompiledProgram, invocation: Invocation) -> Job:
-        """Bind and submit one inspected QPY artifact to qBraid."""
+        """Bind and submit one inspected QPY artifact to qBraid.
+
+        Args:
+            artifact (CompiledProgram): Checked QPY artifact to execute.
+            invocation (Invocation): Bound parameters, shots, and unspecified seed.
+
+        Returns:
+            Job: Submitted provider job with normalized results.
+
+        Raises:
+            ExecutionError: If the artifact is incompatible or an explicit seed
+                is requested, including zero.
+        """
 
         if artifact.format != FORMAT:
             raise ExecutionError(
@@ -172,10 +184,10 @@ class QBraidDevice:
             )
         if artifact.result_abi.width == 0:
             raise ExecutionError("Q8802: qBraid execution requires sampling")
-        if invocation.seed != 0:
+        if invocation.seed is not None:
             raise ExecutionError(
                 "Q8803: qBraid devices do not provide one portable seed "
-                "contract; use seed=0"
+                "contract; use seed=None"
             )
         circuit = bind_circuit(load_circuit(artifact), artifact, invocation)
         native = self.device.run(

@@ -15,6 +15,7 @@ pub struct DerivedArtifactAbi {
     parameter_abi: Vec<u8>,
     result_abi: Vec<u8>,
     sampled_width: u32,
+    per_shot: bool,
 }
 
 impl DerivedArtifactAbi {
@@ -34,6 +35,12 @@ impl DerivedArtifactAbi {
     #[must_use]
     pub const fn sampled_width(&self) -> u32 {
         self.sampled_width
+    }
+
+    /// Return whether execution retains one completion per logical shot.
+    #[must_use]
+    pub const fn is_per_shot(&self) -> bool {
+        self.per_shot
     }
 }
 
@@ -117,12 +124,11 @@ pub(crate) fn require_classical(
     }
 }
 
-pub(crate) fn derive(
+pub(crate) fn derive_parameters(
     package: &wire::QCorePackageProto,
     arena: &TypeArena,
     operations: &LocallyCheckedOperations,
-    has_measurement: bool,
-) -> Result<DerivedArtifactAbi, ArtifactAbiError> {
+) -> Result<Vec<u8>, ArtifactAbiError> {
     let entry = package
         .functions
         .iter()
@@ -156,6 +162,21 @@ pub(crate) fn derive(
             has_default: parameter.has_default,
         });
     }
+    Ok(wire::ParameterAbiProto { slots }.encode_to_vec())
+}
+
+pub(crate) fn derive(
+    package: &wire::QCorePackageProto,
+    arena: &TypeArena,
+    operations: &LocallyCheckedOperations,
+    per_shot: bool,
+) -> Result<DerivedArtifactAbi, ArtifactAbiError> {
+    let parameter_abi = derive_parameters(package, arena, operations)?;
+    let entry = package
+        .functions
+        .iter()
+        .find(|function| function.symbol == package.entrypoint)
+        .ok_or(ArtifactAbiError::MissingEntrypoint)?;
     let result_type = entry
         .result_type
         .clone()
@@ -163,7 +184,7 @@ pub(crate) fn derive(
     let result_id = operations
         .result_type(&entry.symbol)
         .ok_or(ArtifactAbiError::MissingType)?;
-    let logical_width = if has_measurement {
+    let logical_width = if per_shot {
         match arena
             .sampled_width(result_id)
             .map_err(|_| ArtifactAbiError::ResultWidthOverflow)?
@@ -181,13 +202,15 @@ pub(crate) fn derive(
         u32::try_from(logical_width).map_err(|_| ArtifactAbiError::ResultWidthOverflow)?;
     let source_order = (0..native_width).collect();
     Ok(DerivedArtifactAbi {
-        parameter_abi: wire::ParameterAbiProto { slots }.encode_to_vec(),
+        parameter_abi,
         result_abi: wire::ResultAbiProto {
             r#type: Some(result_type),
             source_order,
             native_width,
+            per_shot,
         }
         .encode_to_vec(),
         sampled_width: native_width,
+        per_shot,
     })
 }

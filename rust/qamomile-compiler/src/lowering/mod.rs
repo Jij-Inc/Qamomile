@@ -1,5 +1,6 @@
 //! Late target planning, circuit projection, and launch materialization.
 
+pub(crate) mod angle_validation;
 pub(crate) mod approximation;
 pub(crate) mod arithmetic;
 pub(crate) mod arithmetic_permutation;
@@ -15,3 +16,4 @@ pub(crate) mod planning;
 pub(crate) mod realization;
 pub(crate) mod selection;
 pub(crate) mod shot_execution;
+pub(crate) mod shot_template;

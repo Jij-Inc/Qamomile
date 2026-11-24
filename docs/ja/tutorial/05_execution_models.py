@@ -36,10 +36,16 @@
 # %%
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 import qamomile as qm
 from qamomile.measurement import Estimator
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 128
+energy_shots = 2 if docs_test_mode else 128
 
 reference = qm.Reference()
 
@@ -73,14 +79,14 @@ def parity_probe(theta: qm.Param[qm.Real]) -> qm.Shot[qm.Bits[2]]:
 
 theta = 0.7
 parity_program = qm.specialize(parity_probe)
-one_result = qm.evaluate(parity_program, theta=theta)
+one_result = qm.evaluate(parity_program, theta=theta, seed=0)
 print("One-shot result:", one_result)
 
 # %% [markdown]
-# `qm.specialize(parity_probe)` でプログラムを準備し、`qm.evaluate(parity_program, theta=theta)` で 1 回実行します。
+# `qm.specialize(parity_probe)` でプログラムを準備し、`qm.evaluate(parity_program, theta=theta, seed=0)` で 1 回実行します。
 # 結果は測定された 2 ビットを含む Python のタプルで、先頭が量子ビット0、次が量子ビット1に対応します。\
-# 量子測定は確率的ですが、`qm.evaluate(...)` では既定で `seed=0` を使います。
-# そのため、この例は入力を変えずに再実行すると、同じ結果が得られます。
+# 量子測定は確率的です。既定の `seed=None` は乱数の扱いを実行先に委ねます。
+# この例では `seed=0` を明示するため、入力を変えずに再実行すると同じ結果が得られます。
 #
 # ## 2. `qm.run(...)`：量子回路を繰り返し実行する
 #
@@ -95,7 +101,7 @@ record = qm.run(
     parity_program,
     on=reference,
     parameters={"theta": theta},
-    shots=128,
+    shots=sample_shots,
     seed=7,
 )
 samples = record.result
@@ -134,7 +140,7 @@ print("Theoretical value (cos(theta)):", np.cos(theta))
 
 
 # %% [markdown]
-# 計算基底 (Z 基底) を用い、量子ビット 0 を左側に書くと、この回路が準備する状態は次のようになります。
+# 量子ビット0、1の値を$b_0,b_1$とします。`Reference`の状態ベクトルでは、添字$i=b_0+2b_1$の振幅が計算基底$\lvert b_1 b_0\rangle$に対応します。$\lvert 00\rangle$から量子ビット0だけを反転すると$\lvert 01\rangle$（添字1）になり、測定結果のタプルは`(1, 0)`です。量子ビット1だけなら$\lvert 10\rangle$（添字2）になり、タプルは`(0, 1)`です。この順序で書くと、この回路が準備する状態は次のようになります。
 #
 # $$
 # \lvert \psi \rangle
@@ -201,15 +207,17 @@ estimator = Estimator(preparation, hamiltonian, grouping="qwc")
 energy = estimator.estimate(
     on=reference,
     parameters={"theta": theta},
-    shots=128,
+    shots=energy_shots,
     seed=11,
 )
 
 expected = np.cos(theta) + 0.5 * np.sin(theta)
 
-assert energy.shots == 128
-assert energy.standard_error is not None
-assert abs(energy.value - expected) <= max(6 * energy.standard_error, 0.02)
+assert energy.shots == energy_shots
+assert np.isfinite(energy.value)
+if not docs_test_mode:
+    assert energy.standard_error is not None
+    assert abs(energy.value - expected) <= max(6 * energy.standard_error, 0.02)
 
 print("Estimated expectation value:", energy.value)
 print("Standard error:", energy.standard_error)

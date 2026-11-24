@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from qamomile import statistics
 from qamomile._measurement_plan import _MeasurementGroupPlan
-from qamomile.circuit import lower_to_circuit_at
+from qamomile.circuit import lower_to_circuit_at, validate_circuit_angles
 from qamomile.effects import Effect
 from qamomile.errors import ExecutionError
 from qamomile.expectation import (
@@ -107,6 +107,7 @@ def prepare_estimation(
         realization_capabilities=target.capabilities.realization_capabilities,
         realizations=target.capabilities.realizations,
     )
+    validate_circuit_angles(logical, parameters)
     if logical.output_wires is None:
         return None
     circuit = _bind_circuit_parameters(
@@ -139,7 +140,7 @@ def prepare_estimation(
             operator = operator.apply_layout(circuit.layout)
         primitive = BackendEstimatorV2(
             backend=backend,
-            options={"abelian_grouping": False, "seed_simulator": group.seed or None},
+            options={"abelian_grouping": False, "seed_simulator": group.seed},
         )
         jobs.append((primitive, operator, precision))
 

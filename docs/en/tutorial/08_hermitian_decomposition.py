@@ -44,12 +44,17 @@
 # Finally, as an optional extension, we will check the accuracy of the time-evolution approximation.
 
 # %%
+import os
+
 import numpy as np
 from qiskit.quantum_info import Statevector
 
 import qamomile as qm
 from qamomile.qiskit import to_circuit
 from qamomile.stdlib import suzuki_trotter
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 128
 
 # %% [markdown]
 # ## 1. Create a Hermitian Matrix with NumPy
@@ -64,7 +69,7 @@ from qamomile.stdlib import suzuki_trotter
 #
 # The two-site Hamiltonian is represented by a $4 \times 4$ matrix.
 # We construct it with `np.kron(A, B)`, which computes the Kronecker product—the matrix representation of the tensor product $A \otimes B$.\
-# Qamomile uses the computational-basis order $\lvert q_1 q_0 \rangle: \lvert 00 \rangle, \lvert 01 \rangle, \lvert 10 \rangle, \lvert 11 \rangle$, where $q_i$ is the bit associated with qubit $i$.
+# For `HermitianMatrix`, row and column index $i=b_0+2b_1$ corresponds to the basis state $\lvert b_1 b_0\rangle$, where $b_j$ is the bit for qubit $j$. Indices 0 through 3 correspond to $\lvert 00\rangle, \lvert 01\rangle, \lvert 10\rangle, \lvert 11\rangle$, respectively.
 # Thus, `np.kron(identity, pauli_x)` applies X to qubit 0, while `np.kron(pauli_x, identity)` applies it to qubit 1.
 
 # %%
@@ -136,7 +141,7 @@ assert hamiltonian == expected
 # %%
 interaction = -qm.Z(0) * qm.Z(1)
 transverse_field = hamiltonian - interaction
-evolve = suzuki_trotter(term_count=2, order=2, steps=2)
+evolve = suzuki_trotter(term_count=2, order=2, steps=1 if docs_test_mode else 2)
 
 
 # %% [markdown]
@@ -193,18 +198,18 @@ result = qm.run(
     program,
     on=qm.Reference(),
     parameters={"time": 0.8},
-    shots=128,
+    shots=sample_shots,
     seed=7,
 ).result
 
 print("Number of shots:", result.shots)
 print("Measurement counts:", result.counts)
 
-assert result.shots == 128
-assert sum(result.counts.values()) == 128
+assert result.shots == sample_shots
+assert sum(result.counts.values()) == sample_shots
 
 # %% [markdown]
-# `result.counts` stores each observed bit string and the number of times it appeared.
+# `result.counts` stores the measured bits in tuples $(b_0,b_1)$ and counts how often each tuple appeared. For example, the key `(1, 0)` corresponds to $\lvert 01\rangle$, at index 1 in the matrix above.
 # We have now obtained measurement results from a quantum circuit using the Hamiltonian represented by our NumPy matrix.
 #
 # ## 5. Check the Accuracy of the Time Evolution
@@ -223,27 +228,28 @@ assert sum(result.counts.values()) == 128
 # The closer $F$ is to 1, the more closely the two states agree.
 
 # %%
-unitary_circuit = to_circuit(
-    ising_state,
-    hamiltonians=(interaction, transverse_field),
-    parameters={"time": 0.8},
-)
-approximate_state = np.asarray(Statevector.from_instruction(unitary_circuit).data)
+if not docs_test_mode:
+    unitary_circuit = to_circuit(
+        ising_state,
+        hamiltonians=(interaction, transverse_field),
+        parameters={"time": 0.8},
+    )
+    approximate_state = np.asarray(Statevector.from_instruction(unitary_circuit).data)
 
-# In |q1 q0> order, the initial state is |0+> = (|00> + |01>) / sqrt(2).
-initial_state = np.zeros(4, dtype=np.complex128)
-initial_state[0] = 1.0 / np.sqrt(2.0)
-initial_state[1] = 1.0 / np.sqrt(2.0)
+    # H on qubit 0 prepares |0+> = (|00> + |01>) / sqrt(2), at indices 0 and 1.
+    initial_state = np.zeros(4, dtype=np.complex128)
+    initial_state[0] = 1.0 / np.sqrt(2.0)
+    initial_state[1] = 1.0 / np.sqrt(2.0)
 
-eigenvalues, eigenvectors = np.linalg.eigh(matrix)
-exact_unitary = (
-    eigenvectors @ np.diag(np.exp(-1j * 0.8 * eigenvalues)) @ eigenvectors.conj().T
-)
-exact_state = exact_unitary @ initial_state
+    eigenvalues, eigenvectors = np.linalg.eigh(matrix)
+    exact_unitary = (
+        eigenvectors @ np.diag(np.exp(-1j * 0.8 * eigenvalues)) @ eigenvectors.conj().T
+    )
+    exact_state = exact_unitary @ initial_state
 
-fidelity = float(abs(np.vdot(exact_state, approximate_state)) ** 2)
-print(f"State fidelity: {fidelity:.6f}")
-assert fidelity > 0.99
+    fidelity = float(abs(np.vdot(exact_state, approximate_state)) ** 2)
+    print(f"State fidelity: {fidelity:.6f}")
+    assert fidelity > 0.99
 
 # %% [markdown]
 # ## 6. Summary

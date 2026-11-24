@@ -12,10 +12,33 @@ result = qm.execute(artifact, on=qm.Reference(), shots=128, seed=7)
 print(result.counts)
 ```
 
+Execution and measurement default to `seed=None`, which leaves randomness to
+the endpoint. An integer from `0` through `2**64 - 1` requests a reproducible
+simulator stream; zero is an explicit seed too. Endpoints without seed control,
+including BraketLocal and managed devices, accept `None` and reject every
+integer instead of silently ignoring it. For repeatable local runs, pass an
+explicit seed. `execute_batch` advances an integer seed for each row; `None`
+stays unspecified for all rows. Measurement groups likewise retain `None` or
+derive distinct streams from an explicit integer seed.
+`QurationLocal` currently requires an explicit integer: its simulator has no
+unseeded execution mode, so it rejects `None` rather than substituting zero.
+
 Bind named `Const` inputs with `qm.specialize(kernel, width=3)`. Pass named
 `Param` values at launch with `parameters={"theta": 0.25}`. An artifact's ABI
 checks names, types, and shapes. `qm.run` combines the lifecycle and returns a
-`RunRecord`; its result is `record.result`. `qm.submit` returns a `Job`.
+`RunRecord`; its result is `record.result`. `qm.submit` returns a `SubmittedJob`
+with status, cancellation, saved snapshots, and provider metadata. Use
+`job.result()` to wait for its result. Sampling endpoints return a `SampleResult`,
+and value endpoints return a `ValueResult`.
+
+Rotation and phase angles must be finite. Qamomile checks the final angle
+expressions before passing concrete circuit bindings to an SDK, including
+`Estimator` execution and numeric circuit extraction. A nonfinite final angle
+is rejected whether supplied directly or produced by arithmetic. General `Real` values
+may still contain `NaN` or infinity when they are not consumed as angles;
+for example, an infinite input can produce the valid angle `1.0 / inf == 0.0`.
+Older saved circuit artifacts containing rotations require recompilation from
+source so they carry the angle checks.
 
 For fixed dictionary keys with values that change at launch, use a host
 `ParameterMap`. Bind its `indices` as a Const Map and pass `pack(values)` as a
@@ -38,13 +61,18 @@ def keyed_rotation(
 keyed_program = qm.specialize(keyed_rotation, keys=keyed_angles.indices)
 keyed_artifact = qm.compile(keyed_program, to=qm.Reference())
 keyed_result = qm.execute(
-    keyed_artifact, on=qm.Reference(), shots=8, seed=7,
-    parameters={"angles": keyed_angles.pack({(3, 7): 3.141592653589793, (8, 2): 0.0})},
+    keyed_artifact, on=qm.Reference(), shots=8, seed=0,
+    parameters={"angles": keyed_angles.pack({(3, 7): qm.pi, (8, 2): 0.0})},
+)
+unseeded_result = qm.execute(
+    keyed_artifact, on=qm.Reference(), shots=8, seed=None,
+    parameters={"angles": keyed_angles.pack({(3, 7): qm.pi, (8, 2): 0.0})},
 )
 ```
 
-This produces `(1,)`. Reuse `keyed_artifact` with newly packed values for later
-launches. The selected endpoint must support the ordinary Param Vector ABI.
+Both calls produce `(1,)` because this rotation is deterministic. The second
+call leaves the random stream unspecified. Reuse `keyed_artifact` with newly
+packed values for later launches. The selected endpoint must support the ordinary Param Vector ABI.
 
 Sampled bit registers have canonical tuple-keyed `counts`; scalar and aggregate
 logical values are available through `values`. SDK adapters normalize native
@@ -56,9 +84,50 @@ Choose compilation target and execution endpoint separately. With the
 `qamomile.qiskit`. Other SDKs have their own namespaces and capability contracts.
 Keep a small local Reference witness useful for checking the algorithm.
 
+For IBM cloud execution, use `IBMRuntime` from `qamomile.qiskit`. Its `backend`
+argument is the backend object returned by `service.backend(name)`, not the
+device-name string. The `qamomile[qiskit]` extra requires
+`qiskit-ibm-runtime>=0.51`, which supports server-side dry runs. With an
+authorized cloud backend and the measured `program` prepared above:
+
+```python
+from qamomile.qiskit import IBMRuntime
+
+preview = IBMRuntime(backend=backend, dry_run=True)
+checked = qm.run(program, on=preview, shots=128)
+report = checked.result
+details = report.metadata()
+print(report.status)
+print(details["usage"])
+```
+
+Dry runs validate the submission in IBM's cloud without consuming QPU time.
+They require an eligible IBM plan and support job or Batch mode, not Session
+mode or a local simulator. IBM returns randomized mock data, not simulated
+measurements. Qamomile returns a `ValidationResult` containing `dry_run`,
+`job_id`, and `usage` metadata rather than sampled counts. Usage describes the
+estimated consumption of the corresponding real job, with seconds in
+`estimated_quantum_seconds` and resource units in `estimated_resource_units`.
+Unavailable or unfinished estimates remain `None`; inspect the provider's
+usage status in `details["metrics"]` instead of treating them as zero.
+
+Use `qm.execute(artifact, on=preview, shots=128)` for an existing matching
+artifact, or `qm.submit(...)` to obtain a job before completion. For real
+execution, construct `IBMRuntime(backend=backend)` with the same compilation
+settings and reuse `checked.artifact` while its target still matches. Dry-run
+snapshots must be restored through a dry-run endpoint. Expectation estimation,
+segmented execution that uses measurement results to schedule later circuits,
+and zero-qubit paths that complete locally are unsupported for dry runs and
+fail before submission. An unsupported dry run never falls back to real
+execution.
+
 `artifact.report.stages` records the steps performed by compilation and the
 selected target. Built-in targets record standard QCore optimization when they
 prepare their executable; a custom target supplies its own performed stages.
+For repeated runs, compile once and pass the artifact to `qm.execute` with
+each new parameter set. For example, when the width of `row` is fixed and
+`row[len(row) - 1]` supplies a rotation angle, a circuit target can emit one
+parameterized circuit and bind the angle at each execution.
 A retained launch-materialization recipe records planning first, and its child
 artifact records the lowering performed once launch parameters are known.
 
@@ -71,6 +140,12 @@ For LLVM text or bitcode export, use `QIR()` from `qamomile.qir` with the
 `qamomile[qir]` extra. Read [QIR export](qir.md) for the Base Profile restrictions,
 output ordering, and a complete example for an external QIR consumer.
 
+For direct HUGR execution, choose `Selene()` or `Helios()` from `qamomile.hugr`.
+Compile with `endpoint.target` and execute on that endpoint. HUGR records returned
+measurements and computed Boolean values directly in source order, including
+repeated values and branches with different measurement counts. Selene and Helios
+share this output path without allocating qubits solely to report results.
+
 For a quantum component, `qm.qiskit.to_circuit(program)` retains symbolic angles.
 Pass `parameters={"theta": 0.25}` to obtain a numeric circuit. Specialize `Const`
 arguments before extraction, including those forwarded to controlled helpers;
@@ -79,6 +154,9 @@ values that select branches or circuit topology in that dictionary.
 
 Use canonical `Program.to_bytes`/`Program.from_bytes` for program persistence;
 inspect `qamomile.persistence` for artifact export and supported target formats.
+Regenerate saved Programs whose measurements return `Shot[Bool]` from source
+with `Shot[Bit]` annotations. Previously saved execution results retain their
+stored interpretation, including Boolean results.
 A missing native compiler is resolved by the compatible package dependency.
 Remote execution uses the user's selected provider and execution authorization.
 
@@ -118,9 +196,8 @@ A branch with quantum work but no readout remains fused when supported.
 `physical_segment_shots`, and `submissions`; `RunRecord.resources` includes the
 observed physical demand. Source symbolic costs continue to describe one
 logical trajectory. Reusing an explicit seed repeats the same plan's simulator
-streams; different child occurrences receive different streams. The default seed also
-uses distinct repeatable child streams on seeded local endpoints; managed
-endpoints retain their provider's seed contract.
+streams; different child occurrences receive different streams. With `seed=None`,
+children leave their random streams to the endpoint and repetition is not promised.
 
 Export/restore the reusable artifact through `qamomile.persistence` as usual.
 A segmented artifact contains a source recipe rather than one SDK circuit, so

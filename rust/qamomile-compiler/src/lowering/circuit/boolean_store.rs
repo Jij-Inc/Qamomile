@@ -23,7 +23,9 @@ impl StaticLowerer<'_> {
         let mut available = HashSet::new();
         let mut stored = HashMap::new();
         let mut output = Vec::with_capacity(self.instructions.len());
+        let mut offsets = Vec::with_capacity(self.instructions.len() + 1);
         for mut instruction in std::mem::take(&mut self.instructions) {
+            offsets.push(output.len());
             if let Some(root) = instruction.condition {
                 if let Some(replacement) = stored.get(&root) {
                     instruction.condition = Some(*replacement);
@@ -65,10 +67,17 @@ impl StaticLowerer<'_> {
             }
             output.push(instruction);
         }
+        offsets.push(output.len());
         if output.len() > super::MAX_STATIC_CIRCUIT_INSTRUCTIONS {
             return Err(StaticCircuitError::Unsupported(
                 "Boolean store instruction budget".to_owned(),
             ));
+        }
+        for check in &mut self.scalar_checks {
+            check.instruction_index = offsets[check.instruction_index];
+        }
+        for cut in &mut self.closed_cuts {
+            cut.instruction_index = offsets[cut.instruction_index];
         }
         self.instructions = output;
         Ok(())

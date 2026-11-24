@@ -51,9 +51,13 @@
 # %%
 from __future__ import annotations
 
+import os
 from math import pi
 
 import qamomile as qm
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 8
 
 # %% [markdown]
 # ## 1. A First Example: Controlled RX
@@ -94,9 +98,15 @@ import qamomile as qm
 # `qm.control` to make the operation conditional on a control qubit.
 #
 # The two examples below differ only in how they prepare the control.
-# `qm.prepare(False)` prepares $|0\rangle$, while `qm.prepare(True)` prepares
+# `qm.prepare(0)` prepares $|0\rangle$, while `qm.prepare(1)` prepares
 # $|1\rangle$. Both examples initialize the target in $|0\rangle$ and use the
 # same rotation angle, $\pi$.
+# Each control has type `qm.Q[qm.Bit]`, a single quantum bit.
+# Integer variables and expressions also work in `qm.prepare(...)` when their
+# value is `0` or `1`. Other integers and real values such as `0.0` are rejected.
+# Boolean preparation with `False` or `True` also works for controls and keeps
+# type `qm.Q[qm.Bool]`. Measuring either scalar state returns `qm.Shot[qm.Bit]`,
+# exposed to Python as an integer `0` or `1`.
 
 
 # %%
@@ -107,7 +117,7 @@ def rotate(state: qm.Q[qm.Bits[1]], theta: qm.Real) -> qm.Q[qm.Bits[1]]:
 
 @qm.qkernel
 def crx_control_off() -> qm.Shot[qm.Bits[2]]:
-    control = qm.prepare(False)
+    control = qm.prepare(0)
     target = qm.qubits(1)
     control, target = qm.control(
         rotate,
@@ -120,7 +130,7 @@ def crx_control_off() -> qm.Shot[qm.Bits[2]]:
 
 @qm.qkernel
 def crx_control_on() -> qm.Shot[qm.Bits[2]]:
-    control = qm.prepare(True)
+    control = qm.prepare(1)
     target = qm.qubits(1)
     control, target = qm.control(
         rotate,
@@ -178,7 +188,7 @@ def x_all_two(state: qm.Q[qm.Bits[2]]) -> qm.Q[qm.Bits[2]]:
 
 @qm.qkernel
 def vector_target_demo() -> qm.Shot[qm.Bits[3]]:
-    control = qm.prepare(True)
+    control = qm.prepare(1)
     target = qm.qubits(2)
     control, target = qm.control(x_all_two, control, target)
     return qm.measure(qm.concat(control, target))
@@ -470,19 +480,19 @@ def repeated_control(
 # control.
 
 # %%
-program = qm.specialize(repeated_control, repetitions=3)
+program = qm.specialize(repeated_control, repetitions=1 if docs_test_mode else 3)
 artifact = qm.compile(program, to=qm.Reference())
 
 record = qm.run(
     artifact,
     on=qm.Reference(),
     parameters={"theta": pi},
-    shots=8,
+    shots=sample_shots,
     seed=7,
 )
 
 print("controlled rotations:", record.result.counts)
-assert record.result.counts == {(1, 1): 8}
+assert record.result.counts == {(1, 1): sample_shots}
 
 # %% [markdown]
 # The control is prepared in $|1\rangle$, so all three rotations are applied.
@@ -519,7 +529,7 @@ def scalar_phase(state: qm.Q[qm.Bits[1]], angle: qm.Real) -> qm.Q[qm.Bits[1]]:
 
 @qm.qkernel
 def phase_kickback() -> qm.Shot[qm.Bits[2]]:
-    control = qm.prepare(False)
+    control = qm.prepare(0)
     control = qm.h(control)
     target = qm.qubits(1)
     control, target = qm.control(

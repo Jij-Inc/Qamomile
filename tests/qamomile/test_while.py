@@ -169,7 +169,7 @@ def test_while_measured_stage_and_dynamic_capability():
     source = """
 import qamomile as qm
 @qm.qkernel
-def dynamic() -> qm.Shot[qm.Bool]:
+def dynamic() -> qm.Shot[qm.Bit]:
     bit, state = qm.measure_reset(qm.prepare(True))
     while bit:
         bit, state = qm.measure_reset(qm.x(state))

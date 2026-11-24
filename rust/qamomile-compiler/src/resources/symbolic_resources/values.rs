@@ -4,15 +4,13 @@ use crate::resource_rules::Domain as ResourceDomain;
 use crate::static_values::{
     StaticScalar, StaticValue, evaluate_value as evaluate_static_value, value_to_literal,
 };
-use crate::types::{Dimension, SemanticType};
 use crate::wire;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use super::{
     ResourceExpressionNode, ResourcePredicateKind, ScalarFact, SymbolicAnalyzer,
-    SymbolicFunctionContext, SymbolicResourceError, ValueFact, attribute, bool_attribute,
-    exact_static_value, int_fact, project_aggregate, scalar_expression,
+    SymbolicFunctionContext, SymbolicResourceError, ValueFact, attribute, exact_static_value,
+    int_fact, project_aggregate, scalar_expression, string_attribute,
 };
 
 impl SymbolicAnalyzer<'_> {
@@ -22,12 +20,11 @@ impl SymbolicAnalyzer<'_> {
         environment: &HashMap<u64, Option<ValueFact>>,
         context: SymbolicFunctionContext<'_>,
     ) -> Result<Option<ValueFact>, SymbolicResourceError> {
-        let name = operation
-            .opcode
-            .strip_prefix("classical.")
-            .unwrap_or(&operation.opcode);
-        if name == "len" && bool_attribute(operation, "shape_only") == Some(true) {
-            return self.evaluate_shape_length(operation, context);
+        let name = operation.opcode.trim_start_matches("classical.");
+        if name == "len"
+            && let Some(length) = self.evaluate_shape_length(operation, context)?
+        {
+            return Ok(Some(length));
         }
         if matches!(name, "index" | "project") {
             return Ok(project_aggregate(operation, environment));
@@ -56,6 +53,9 @@ impl SymbolicAnalyzer<'_> {
                 SymbolicResourceError::Missing("static classical result literal".to_owned())
             })?;
             return self.literal_fact(&literal);
+        }
+        if name == "cast" && string_attribute(operation, "target") != Some("Int") {
+            return Ok(None);
         }
         if matches!(name, "ceil" | "log2" | "sqrt") {
             return self.evaluate_structural_math(name, operation, environment);
@@ -125,55 +125,14 @@ impl SymbolicAnalyzer<'_> {
         operation: &wire::OperationProto,
         context: SymbolicFunctionContext<'_>,
     ) -> Result<Option<ValueFact>, SymbolicResourceError> {
-        let source = operation
-            .operands
-            .first()
-            .and_then(|operand| self.operations.value_types(context.owner)?.get(operand))
-            .copied()
-            .ok_or_else(|| SymbolicResourceError::Missing("shape-only length type".to_owned()))?;
-        let dimension = match self.types.get(self.types.strip_stage(source)) {
-            Some(SemanticType::Array { shape, .. }) => shape.first().cloned(),
-            Some(SemanticType::Word { width, .. }) => Some(width.clone()),
-            Some(SemanticType::Product(elements)) => Some(Dimension::Fixed(
-                u64::try_from(elements.len()).map_err(|_| SymbolicResourceError::Overflow)?,
-            )),
-            Some(SemanticType::Record { fields, .. }) => Some(Dimension::Fixed(
-                u64::try_from(fields.len()).map_err(|_| SymbolicResourceError::Overflow)?,
-            )),
-            _ => None,
-        }
-        .ok_or_else(|| SymbolicResourceError::Missing("shape-only length extent".to_owned()))?;
-        let expression = if let Dimension::Symbol { scope, name } = &dimension
-            && name.starts_with("slice(")
-        {
-            let extent = crate::core::slice_shape::SliceShape::parse(name)
-                .and_then(|shape| {
-                    shape.evaluate(&|name| {
-                        let dimension = Dimension::Symbol {
-                            scope: Arc::clone(scope),
-                            name: Arc::from(name),
-                        };
-                        let expression = context.dimensions.values.get(&dimension)?;
-                        match self.arena.node(*expression)? {
-                            ResourceExpressionNode::Literal {
-                                value,
-                                domain: ResourceDomain::Natural | ResourceDomain::Integer,
-                            } => value.parse::<i64>().ok(),
-                            _ => None,
-                        }
-                    })
-                })
-                .map_err(|reason| {
-                    SymbolicResourceError::Unsupported(format!(
-                        "invalid Const slice shape: {reason}"
-                    ))
-                })?;
-            extent
-                .map(|extent| self.arena.literal_u128(u128::from(extent)))
-                .transpose()?
-        } else {
-            self.resolve_dimension(&dimension, context.dimensions)?
-        };
+        let dimension = crate::resources::length_dimension(
+            self.types,
+            self.operations,
+            context.owner,
+            operation,
+        )
+        .ok_or_else(|| SymbolicResourceError::Missing("collection length type".to_owned()))?;
+        let expression = self.resolve_dimension(&dimension, context.dimensions)?;
         let Some(expression) = expression else {
             return Ok(None);
         };

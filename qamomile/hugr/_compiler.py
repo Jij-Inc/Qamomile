@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Literal, cast
 
@@ -35,6 +35,7 @@ from qamomile.types import (
     Bit,
     Bool,
     FixedType,
+    Int,
     QuantumType,
     RecordType,
     ScalarType,
@@ -70,19 +71,22 @@ _RealRuntimeGuard = Literal["none", "nonzero_divisor", "power_domain"]
 
 
 @dataclass(frozen=True, slots=True)
-class _MeasuredWire:
-    """A HUGR wire carrying stable source-measurement provenance."""
-
-    wire: Any
-    index: int
-
-
-@dataclass(frozen=True, slots=True)
 class _RealWire:
     """A HUGR float64 wire retaining its verified QCore Real type."""
 
     wire: Any
     guaranteed_finite: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _IntWire:
+    """A signed32 QCore Int carried exactly on a HUGR int64 wire.
+
+    Args:
+        wire (Any): Typed int64 wire whose value passed the signed32 boundary.
+    """
+
+    wire: Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,24 +99,35 @@ class _BooleanCondition:
 
 @dataclass(frozen=True, slots=True)
 class _DynamicReturn:
-    """A HUGR sum selecting structured fallthrough or a callable return."""
+    """A HUGR sum selecting structured fallthrough or a callable return.
+
+    Args:
+        wire (Any): Either wire carrying the selected control-flow row.
+        normal_kind (_NormalExitKind): Exit represented by the fallthrough row.
+        normal_types (tuple[TypeSpec, ...]): Verified fallthrough value types.
+    """
 
     wire: Any
     normal_kind: _NormalExitKind
     normal_types: tuple[TypeSpec, ...]
-    normal_provenance: tuple[int | None, ...]
-    return_provenance: tuple[int | None, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class _DynamicIfBranch:
-    """One emitted conditional arm before its common output row is selected."""
+    """One emitted conditional arm before its common output row is selected.
+
+    Args:
+        builder (Any): Active builder for this conditional arm.
+        lowerer (_DirectHugrLowerer): Emission state for the arm.
+        kind (str): Verified structured exit kind.
+        flattened (tuple[Any, ...]): Ordered typed output values.
+        flow (_DynamicReturn | None): Mixed return/fallthrough representation.
+    """
 
     builder: Any
     lowerer: _DirectHugrLowerer
     kind: str
     flattened: tuple[Any, ...]
-    provenance: tuple[int | None, ...]
     flow: _DynamicReturn | None
 
 
@@ -153,9 +168,21 @@ class _DirectHugrLowerer:
         boolean_plans: dict[str, _BooleanLiftPlan],
         entry_bindings: Mapping[str, object] | None = None,
         emission_budget: _EmissionBudget | None = None,
-        record_results: bool = False,
+        current_shot_origin: int | None = None,
     ) -> None:
-        """Initialize QCore definitions and HUGR emission state."""
+        """Initialize QCore definitions and HUGR emission state.
+
+        Args:
+            program (_EmissionProgram): Verified source or target-lowered program.
+            builder (Any): Active HUGR dataflow builder.
+            definitions (dict[str, Any]): Retained callable definitions.
+            adjoint_helpers (dict[str, str]): Prepared adjoint helper symbols.
+            boolean_plans (dict[str, _BooleanLiftPlan]): Native Boolean lift plans.
+            entry_bindings (Mapping[str, object] | None): Closed launch values.
+            emission_budget (_EmissionBudget | None): Shared package work budget.
+            current_shot_origin (int | None): Certified native counter origin,
+                or None when logical context reads are unavailable.
+        """
 
         self.program = program
         self.builder = builder
@@ -165,23 +192,26 @@ class _DirectHugrLowerer:
         self.boolean_plans = boolean_plans
         self.entry_bindings = dict(entry_bindings or {})
         self.emission_budget = emission_budget or _EmissionBudget()
-        self.record_results = record_results
+        self.current_shot_origin = current_shot_origin
         self.previous_measurement: Any | None = None
         self.live_qubits = 0
         self.allocated_qubits = 0
         self.logical_operations = 0
         self.native_operations = 0
-        self.next_measurement = 0
-        self.result_order: tuple[int, ...] = ()
-        self.uses_tail_result_measurements = False
-        self.has_dynamic_measurements = False
         self.coherent_controls: list[object] = []
         self.coherent_partitions: dict[int, tuple[int, ...]] = {}
         self.function_result_types: list[TypeSpec] = []
         self.function_value_types: list[dict[int, TypeSpec]] = []
 
     def _nested_lowerer(self, builder: Any) -> _DirectHugrLowerer:
-        """Create a region lowerer with the current emission state."""
+        """Create a region lowerer with the current emission state.
+
+        Args:
+            builder (Any): Active nested-region HUGR builder.
+
+        Returns:
+            _DirectHugrLowerer: Region emitter sharing the package work budget.
+        """
 
         nested = _DirectHugrLowerer(
             self.program,
@@ -190,12 +220,10 @@ class _DirectHugrLowerer:
             adjoint_helpers=self.adjoint_helpers,
             boolean_plans=self.boolean_plans,
             emission_budget=self.emission_budget,
-            record_results=self.record_results,
+            current_shot_origin=self.current_shot_origin,
         )
-        nested.next_measurement = self.next_measurement
         nested.live_qubits = self.live_qubits
         nested.allocated_qubits = self.allocated_qubits
-        nested.has_dynamic_measurements = self.has_dynamic_measurements
         nested.coherent_partitions = dict(self.coherent_partitions)
         nested.function_result_types = list(self.function_result_types)
         nested.function_value_types = list(self.function_value_types)
@@ -211,8 +239,13 @@ class _DirectHugrLowerer:
         """Lower the closed QCore entrypoint into the HUGR main graph.
 
         Args:
-            declared_result: ABI derived from the verified semantic program
-                before target-local callable expansion.
+            declared_result (ResultABI): Native-derived logical result type,
+                source order, and width before target-local callable expansion.
+                Every HUGR profile records that Boolean row directly.
+
+        Raises:
+            CapabilityError: If entry values remain open or the emitted return
+                does not match the declared sampled result.
         """
 
         environment: dict[int, object] = {}
@@ -235,59 +268,11 @@ class _DirectHugrLowerer:
             if len(returned) != 1:
                 raise CapabilityError("Q8651: HUGR sampled entrypoint result arity")
             wires = _flatten_logical_value(returned[0], self.program.entry.result_type)
-            derived_result = any(not isinstance(wire, _MeasuredWire) for wire in wires)
-            if self.has_dynamic_measurements or derived_result:
-                self._emit_tail_result_measurements(wires)
-                self.uses_tail_result_measurements = True
-                self.result_order = tuple(range(len(wires)))
-            else:
-                try:
-                    self.result_order = tuple(
-                        _measurement_index(wire) for wire in wires
-                    )
-                except TypeError as error:
-                    raise CapabilityError(
-                        "Q8652: HUGR result bit is not produced by measurement"
-                    ) from error
-                if self.record_results:
-                    self._record_result_bits(wires)
-            if len(self.result_order) != declared_result.width:
-                raise CapabilityError("Q8653: HUGR result measurement width mismatch")
-        elif self.has_dynamic_measurements:
-            self.uses_tail_result_measurements = True
-
-    def _emit_tail_result_measurements(self, values: tuple[Any, ...]) -> None:
-        """Report dynamic-event results through a fixed trailing measurement row."""
-
-        from tket_exts import quantum
-
-        for value in values:
-            self._reserve_qubits(1)
-            condition = self._materialize_boolean_condition(value)
-            ancilla = self.builder.add_op(quantum.qAlloc)[0]
-            self.live_qubits += 1
-            self.allocated_qubits += 1
-            branch = self.builder.add_if(condition, ancilla)
-            true_ancilla = branch.add_op(quantum.X, branch.inputs()[0])[0]
-            branch.set_outputs(true_ancilla)
-            otherwise = branch.add_else()
-            otherwise.set_outputs(*otherwise.inputs())
-            measurement = self.builder.add_op(
-                quantum.measure,
-                branch.conditional_node[0],
+            if len(wires) != declared_result.width:
+                raise CapabilityError("Q8653: HUGR logical result width mismatch")
+            self._record_result_bits(
+                tuple(self._materialize_boolean_condition(value) for value in wires)
             )
-            if self.previous_measurement is not None:
-                self.builder.hugr.add_order_link(
-                    self.previous_measurement,
-                    measurement,
-                )
-            self.previous_measurement = measurement
-            post, bit = measurement
-            if self.record_results:
-                self._record_result_bits((bit,))
-            self.builder.add_op(quantum.qFree, post)
-            self.live_qubits -= 1
-            self.native_operations += 4
 
     def _record_result_bits(self, values: tuple[Any, ...]) -> None:
         """Emit ordered QSystem records for logical result bits.
@@ -298,9 +283,8 @@ class _DirectHugrLowerer:
 
         from tket_exts import result
 
-        for value in values:
-            wire = value.wire if isinstance(value, _MeasuredWire) else value
-            record = self.builder.add_op(result.result_bool("qamomile"), wire)
+        for index, value in enumerate(values):
+            record = self.builder.add_op(result.result_bool(f"qamomile_{index}"), value)
             if self.previous_measurement is not None:
                 self.builder.hugr.add_order_link(self.previous_measurement, record)
             self.previous_measurement = record
@@ -328,7 +312,19 @@ class _DirectHugrLowerer:
         function: Function,
         environment: dict[int, object],
     ) -> tuple[str, tuple[object, ...]]:
-        """Emit one function while retaining its result type for nested exits."""
+        """Emit one function while retaining its result type for nested exits.
+
+        Args:
+            function (Function): Verified callable whose body is emitted.
+            environment (dict[int, object]): Bound values keyed by QCore identity.
+
+        Returns:
+            tuple[str, tuple[object, ...]]: Exit kind and emitted return values.
+
+        Raises:
+            CapabilityError: If the body exceeds emission limits or contains
+                unsupported operations or control flow.
+        """
 
         self.function_result_types.append(function.result_type)
         self.function_value_types.append(_function_value_type_index(function))
@@ -359,7 +355,20 @@ class _DirectHugrLowerer:
         environment: dict[int, object],
         start: int,
     ) -> tuple[str, tuple[object, ...]]:
-        """Emit a block continuation from one operation index."""
+        """Emit a block continuation from one operation index.
+
+        Args:
+            block (Block): Verified block containing the continuation.
+            environment (dict[int, object]): Bound values updated as emission proceeds.
+            start (int): Zero-based index of the first operation to emit.
+
+        Returns:
+            tuple[str, tuple[object, ...]]: Exit kind and emitted exit values.
+
+        Raises:
+            CapabilityError: If emission exceeds its budget or an operation,
+                result row, or control-flow exit is unsupported.
+        """
 
         for index, operation in enumerate(block.operations[start:], start=start):
             self.emission_budget.consume_operation()
@@ -420,6 +429,8 @@ class _DirectHugrLowerer:
         if opcode == "qcore.constant":
             value = cast(PortableValue, operation.attribute("value"))
             return (thaw_value(value),)
+        if opcode == "qcore.current_shot":
+            return (self._emit_current_shot(),)
         if opcode == "qcore.stage_lift":
             return operands
         if opcode == "qcore.reshape":
@@ -494,6 +505,9 @@ class _DirectHugrLowerer:
                 )
                 if structured is not None:
                     return (structured,)
+                integer = self._emit_dynamic_int(operation, operands)
+                if integer is not None:
+                    return (integer,)
                 boolean = self._emit_dynamic_boolean(operation, operands)
                 if boolean is not None:
                     return (boolean,)
@@ -837,6 +851,364 @@ class _DirectHugrLowerer:
         self.native_operations += 1
         return wires
 
+    def _emit_current_shot(self) -> _IntWire:
+        """Emit one read using the native-checked endpoint origin convention.
+
+        Returns:
+            _IntWire: Zero-based logical index within the certified endpoint.
+
+        Raises:
+            CapabilityError: If no certified current-shot convention is present.
+        """
+
+        if self.current_shot_origin is None:
+            raise CapabilityError(
+                "Q8694: HUGR current shot requires a certified endpoint"
+            )
+        import tket_exts
+        from hugr import tys
+        from hugr.std.int import int_t
+
+        raw = self.builder.add_op(
+            tket_exts.qsystem_utils()
+            .get_op("GetCurrentShot")
+            .instantiate(concrete_signature=tys.FunctionType([], [int_t(6)]))
+        )[0]
+        self.native_operations += 1
+        return self._normalize_current_shot_wire(raw)
+
+    def _normalize_current_shot_wire(self, raw: Any) -> _IntWire:
+        """Normalize a raw counter using the Rust-checked endpoint convention.
+
+        Args:
+            raw (Any): Unsigned int64 provider counter.
+
+        Returns:
+            _IntWire: Checked zero-based finite Int coordinate.
+
+        Raises:
+            CapabilityError: If no certified current-shot convention is present.
+        """
+
+        if self.current_shot_origin is None:
+            raise CapabilityError(
+                "Q8694: no native current-shot convention was selected"
+            )
+        policy = native.current_shot_policy(self.current_shot_origin)
+        lower = self.builder.add_op(
+            _int64_operation("ige_u", 2, boolean=True),
+            raw,
+            self._int_wire(policy.origin),
+        )[0]
+        upper = self.builder.add_op(
+            _int64_operation("ilt_u", 2, boolean=True),
+            raw,
+            self._int_wire(policy.origin + policy.max_shots, bounded=False),
+        )[0]
+        valid = self._materialize_boolean_condition(
+            _BooleanCondition("and", (lower, upper))
+        )
+        raw = _guard_int_wire(
+            self.builder, raw, valid, "Q8694: native shot index outside certified range"
+        )
+        normalized = self.builder.add_op(
+            _int64_operation("isub", 2), raw, self._int_wire(policy.origin)
+        )[0]
+        self.native_operations += 5
+        return _IntWire(normalized)
+
+    def _int_wire(self, value: object, *, bounded: bool = True) -> Any:
+        """Materialize an exact finite Int operand without modular conversion.
+
+        Args:
+            value (object): Runtime Int wire or static integer.
+            bounded (bool): Whether the value must fit the source target domain.
+
+        Returns:
+            Any: HUGR int64 wire.
+
+        Raises:
+            CapabilityError: If a static value exceeds the certified domain.
+        """
+
+        if isinstance(value, _IntWire):
+            return value.wire
+        if type(value) is not int or not -(1 << 63) <= value < (1 << 63):
+            raise CapabilityError("Q8695: HUGR Int operand is outside int64 transport")
+        policy = native.current_shot_policy(0)
+        if bounded and not policy.integer_min <= value <= policy.integer_max:
+            raise CapabilityError(
+                "Q8695: HUGR Int operand is outside signed32 target range"
+            )
+        from hugr.std.int import IntVal
+
+        return self.builder.load(IntVal(value, 6))[0]
+
+    def _int_compare(self, operator: str, left: object, right: object) -> Any:
+        """Emit one exact signed comparison in the finite Int target domain.
+
+        Args:
+            operator (str): Verified QCore comparison operator.
+            left (object): Left Int operand.
+            right (object): Right Int operand.
+
+        Returns:
+            Any: HUGR Bool wire.
+        """
+
+        name = {
+            "eq": "ieq",
+            "ne": "ine",
+            "lt": "ilt_s",
+            "le": "ile_s",
+            "gt": "igt_s",
+            "ge": "ige_s",
+        }[operator]
+        self.native_operations += 1
+        return self.builder.add_op(
+            _int64_operation(name, 2, boolean=True),
+            self._int_wire(left),
+            self._int_wire(right),
+        )[0]
+
+    def _checked_int(self, wire: Any) -> _IntWire:
+        """Guard an exact int64 calculation before exposing a finite target Int.
+
+        Args:
+            wire (Any): Exact calculation with no int64 overflow.
+
+        Returns:
+            _IntWire: Signed32 result, or a terminating range diagnostic.
+        """
+
+        policy = native.current_shot_policy(0)
+        lower = self.builder.add_op(
+            _int64_operation("ige_s", 2, boolean=True),
+            wire,
+            self._int_wire(policy.integer_min),
+        )[0]
+        upper = self.builder.add_op(
+            _int64_operation("ile_s", 2, boolean=True),
+            wire,
+            self._int_wire(policy.integer_max),
+        )[0]
+        valid = self._materialize_boolean_condition(
+            _BooleanCondition("and", (lower, upper))
+        )
+        return _IntWire(
+            _guard_int_wire(
+                self.builder,
+                wire,
+                valid,
+                "Q8695: Int result exceeds signed32 HUGR target range",
+            )
+        )
+
+    def _signed_int_magnitude(self, magnitude: Any, negative: object) -> Any:
+        """Apply a Boolean sign to a magnitude bounded below 2**32.
+
+        Args:
+            magnitude (Any): Nonnegative int64 magnitude.
+            negative (object): Verified Boolean sign condition.
+
+        Returns:
+            Any: Exact signed int64 value.
+        """
+
+        condition = self._materialize_boolean_condition(negative)
+        branch = self.builder.add_if(condition, magnitude)
+        result = branch.add_op(_int64_operation("ineg", 1), branch.inputs()[0])[0]
+        branch.set_outputs(result)
+        otherwise = branch.add_else()
+        otherwise.set_outputs(*otherwise.inputs())
+        return branch.conditional_node[0]
+
+    def _emit_dynamic_int(
+        self, operation: Operation, operands: tuple[object, ...]
+    ) -> object | None:
+        """Emit checked finite Int arithmetic, exact Real casts and comparisons.
+
+        Args:
+            operation (Operation): Verified classical operation.
+            operands (tuple[object, ...]): Static integers and typed runtime wires.
+
+        Returns:
+            object | None: Result, or None for another scalar representation.
+
+        Raises:
+            CapabilityError: If the operation has no exact finite implementation.
+        """
+
+        if not any(isinstance(value, _IntWire) for value in operands):
+            return None
+        name = operation.opcode.removeprefix("classical.")
+        if name == "cast" and operation.attribute("target") == "Real":
+            if len(operands) != 1 or not isinstance(operands[0], _IntWire):
+                raise CapabilityError("Q8611: malformed dynamic Int-to-Real cast")
+            from hugr import tys
+            from hugr.std.float import FLOAT_T
+            from hugr.std.int import CONVERSIONS_EXTENSION, int_t
+
+            conversion = CONVERSIONS_EXTENSION.get_op("convert_s").instantiate(
+                args=[tys.BoundedNatArg(6)],
+                concrete_signature=tys.FunctionType([int_t(6)], [FLOAT_T]),
+            )
+            result = self.builder.add_op(conversion, operands[0].wire)[0]
+            self.native_operations += 1
+            return _RealWire(result, guaranteed_finite=True)
+        if name == "cast" and operation.attribute("target") == "Bool":
+            return self._int_compare("ne", operands[0], 0)
+        if name == "compare_chain":
+            operators = operation.attribute("operators")
+            if not isinstance(operators, tuple) or any(
+                op not in {"eq", "ne", "lt", "le", "gt", "ge"} for op in operators
+            ):
+                return None
+            comparisons = tuple(
+                self._int_compare(op, left, right)
+                for op, left, right in zip(
+                    operators, operands[:-1], operands[1:], strict=True
+                )
+            )
+            return _fold_boolean_condition("and", comparisons)
+        if name in {"add", "sub", "mul", "and_bits", "or_bits", "xor"}:
+            extension = {
+                "add": "iadd",
+                "sub": "isub",
+                "mul": "imul",
+                "and_bits": "iand",
+                "or_bits": "ior",
+                "xor": "ixor",
+            }[name]
+            result = self.builder.add_op(
+                _int64_operation(extension, 2),
+                *(self._int_wire(value) for value in operands),
+            )[0]
+            self.native_operations += 1
+            return self._checked_int(result)
+        if name in {"neg", "pos", "abs", "invert"}:
+            wire = self._int_wire(operands[0])
+            if name == "pos":
+                return _IntWire(wire)
+            result = self.builder.add_op(
+                _int64_operation(
+                    {"neg": "ineg", "abs": "iabs", "invert": "inot"}[name], 1
+                ),
+                wire,
+            )[0]
+            self.native_operations += 1
+            return self._checked_int(result)
+        if name in {"floordiv", "mod"}:
+            left, right = (self._int_wire(value) for value in operands)
+            nonzero = self.builder.add_op(
+                _int64_operation("ine", 2, boolean=True), right, self._int_wire(0)
+            )[0]
+            right = _guard_int_wire(
+                self.builder,
+                right,
+                nonzero,
+                "Q4305: integer division or modulo by zero",
+            )
+            left_negative = self.builder.add_op(
+                _int64_operation("ilt_s", 2, boolean=True), left, self._int_wire(0)
+            )[0]
+            right_negative = self.builder.add_op(
+                _int64_operation("ilt_s", 2, boolean=True), right, self._int_wire(0)
+            )[0]
+            signs_differ = _BooleanCondition(
+                "not", (_boolean_equality(left_negative, right_negative),)
+            )
+            absolute_left = self.builder.add_op(_int64_operation("iabs", 1), left)[0]
+            absolute_right = self.builder.add_op(_int64_operation("iabs", 1), right)[0]
+            quotient_magnitude = self.builder.add_op(
+                _int64_operation("idiv_u", 2), absolute_left, absolute_right
+            )[0]
+            remainder_magnitude = self.builder.add_op(
+                _int64_operation("imod_u", 2), absolute_left, absolute_right
+            )[0]
+            quotient = self._signed_int_magnitude(quotient_magnitude, signs_differ)
+            remainder = self._signed_int_magnitude(remainder_magnitude, left_negative)
+            remainder_nonzero = self.builder.add_op(
+                _int64_operation("ine", 2, boolean=True),
+                remainder_magnitude,
+                self._int_wire(0),
+            )[0]
+            correction = self._materialize_boolean_condition(
+                _BooleanCondition("and", (remainder_nonzero, signs_differ))
+            )
+            branch = self.builder.add_if(correction, quotient, remainder, right)
+            q, r, divisor = branch.inputs()
+            from hugr.std.int import IntVal
+
+            if name == "floordiv":
+                one = branch.load(IntVal(1, 6))[0]
+                adjusted = branch.add_op(_int64_operation("isub", 2), q, one)[0]
+            else:
+                adjusted = branch.add_op(_int64_operation("iadd", 2), r, divisor)[0]
+            branch.set_outputs(adjusted)
+            otherwise = branch.add_else()
+            otherwise.set_outputs(otherwise.inputs()[0 if name == "floordiv" else 1])
+            self.native_operations += 8
+            return self._checked_int(branch.conditional_node[0])
+        return None
+
+    def _emit_int_index(
+        self, operation: Operation, aggregate: tuple[object, ...], index: _IntWire
+    ) -> object:
+        """Select a fixed aggregate through bounded native index aliases.
+
+        Args:
+            operation (Operation): Verified aggregate index operation.
+            aggregate (tuple[object, ...]): Fixed candidate values.
+            index (_IntWire): Runtime exact Int index.
+
+        Returns:
+            object: Value with the operation's declared result type.
+
+        Raises:
+            CapabilityError: If the aggregate is empty or exceeds emission bounds.
+        """
+
+        extent = len(aggregate)
+        if not extent or extent > MAX_HUGR_PORTS:
+            raise CapabilityError(
+                "Q8696: dynamic HUGR index requires a bounded nonempty aggregate"
+            )
+        result_type = operation.results[0].type
+        if extent * len(_hugr_type_row(result_type)) > MAX_HUGR_PORTS:
+            raise CapabilityError("Q8696: dynamic HUGR table exceeds the port budget")
+        valid = self._materialize_boolean_condition(
+            _BooleanCondition(
+                "and",
+                (
+                    self._int_compare("ge", index, -extent),
+                    self._int_compare("lt", index, extent),
+                ),
+            )
+        )
+        checked = _IntWire(
+            _guard_int_wire(
+                self.builder, index.wire, valid, "Q4303: aggregate index outside extent"
+            )
+        )
+        rows = tuple(self._flatten_value(value, result_type) for value in aggregate)
+        selected = rows[-1]
+        for alias in range(-extent, extent - 1):
+            position = _native_aggregate_position(extent, alias)
+            if position is None:
+                raise CapabilityError("Q8696: native aggregate alias projection failed")
+            self.emission_budget.consume_operation()
+            condition = self._int_compare("eq", checked, alias)
+            candidate = rows[position]
+            branch = self.builder.add_if(condition, *candidate, *selected)
+            width = len(candidate)
+            branch.set_outputs(*branch.inputs()[:width])
+            otherwise = branch.add_else()
+            otherwise.set_outputs(*otherwise.inputs()[width:])
+            selected = tuple(branch.conditional_node)
+            self.native_operations += 1
+        return _reconstruct_hugr_value(result_type, selected)
+
     def _emit_dynamic_classical_structure(
         self,
         operation: Operation,
@@ -916,6 +1288,8 @@ class _DirectHugrLowerer:
             raise CapabilityError("Q8611: malformed dynamic aggregate projection")
         aggregate = operands[0]
         if name == "index":
+            if len(operands) == 2 and isinstance(operands[1], _IntWire):
+                return self._emit_int_index(operation, aggregate, operands[1])
             if (
                 len(operands) != 2
                 or isinstance(operands[1], bool)
@@ -1086,6 +1460,8 @@ class _DirectHugrLowerer:
                 left_wire,
                 right_wire,
             )[0]
+        if isinstance(left, _IntWire) or isinstance(right, _IntWire):
+            return self._int_compare("eq", left, right)
         if _is_boolean_operand(left) and _is_boolean_operand(right):
             return _boolean_equality(left, right)
         if not _contains_hugr_wire(left) and not _contains_hugr_wire(right):
@@ -1583,7 +1959,20 @@ class _DirectHugrLowerer:
         condition: object,
         captures: tuple[object, ...],
     ) -> tuple[str, tuple[object, ...]]:
-        """Preserve a measurement-backed conditional and its callable exits."""
+        """Preserve a measurement-backed conditional and its callable exits.
+
+        Args:
+            operation (Operation): Verified conditional with two branch regions.
+            condition (object): Boolean wire selecting the branch.
+            captures (tuple[object, ...]): Bound values shared by both branches.
+
+        Returns:
+            tuple[str, tuple[object, ...]]: Joined exit kind and emitted values.
+
+        Raises:
+            CapabilityError: If branch inputs, outputs, qubit ownership, or
+                control-flow exits cannot be represented by this profile.
+        """
 
         from hugr import ops, tys
 
@@ -1608,12 +1997,13 @@ class _DirectHugrLowerer:
         normal_types = tuple(result.type for result in operation.results)
         for index, region in enumerate(operation.regions):
             branch = self._nested_lowerer(branch_builder)
+            inputs = tuple(branch_builder.inputs())
             branch.allocated_qubits = parent_allocations
-            arguments = _copy_provenance(
+            arguments = _copy_wire_guarantees(
                 captures,
                 _reconstruct_block_arguments(
                     region.entry,
-                    tuple(branch_builder.inputs()),
+                    inputs,
                 ),
             )
             kind, values = branch._emit_block(region.entry, {}, arguments)
@@ -1647,11 +2037,7 @@ class _DirectHugrLowerer:
             flattened_values = tuple(
                 wire
                 for value, type_spec in zip(values, value_types, strict=True)
-                for wire in _flatten_logical_value(value, type_spec)
-            )
-            provenance = tuple(
-                item.index if isinstance(item, _MeasuredWire) else None
-                for item in flattened_values
+                for wire in branch._flatten_region_value(value, type_spec)
             )
             branches.append(
                 _DynamicIfBranch(
@@ -1659,32 +2045,28 @@ class _DirectHugrLowerer:
                     branch,
                     kind,
                     flattened_values,
-                    provenance,
                     flow,
                 )
             )
             self.logical_operations += branch.logical_operations
             self.native_operations += branch.native_operations
             branch_allocation_bounds.append(branch.allocated_qubits)
-            if branch.live_qubits != self.live_qubits:
-                raise CapabilityError(
-                    "Q8657: HUGR branches have different live-qubit counts"
-                )
             if index == 0:
                 branch_builder = true_builder.add_else()
+        branch_liveness = {branch.lowerer.live_qubits for branch in branches}
+        if len(branch_liveness) == 1 and all(
+            branch.kind == "return" for branch in branches
+        ):
+            self.live_qubits = next(iter(branch_liveness))
+        elif any(branch.lowerer.live_qubits != self.live_qubits for branch in branches):
+            raise CapabilityError(
+                "Q8657: HUGR branches have different live-qubit counts"
+            )
         self.allocated_qubits = max(
             branch_allocation_bounds, default=parent_allocations
         )
-        if any(
-            branch.lowerer.next_measurement != self.next_measurement
-            for branch in branches
-        ):
-            self.has_dynamic_measurements = True
+        if any(branch.lowerer.previous_measurement is not None for branch in branches):
             self.previous_measurement = true_builder.conditional_node
-        self.next_measurement = max(
-            self.next_measurement,
-            *(branch.lowerer.next_measurement for branch in branches),
-        )
         branch_kinds = {branch.kind for branch in branches}
         if len(branch_kinds) == 1 and "yield" in branch_kinds:
             for branch in branches:
@@ -1698,13 +2080,6 @@ class _DirectHugrLowerer:
             reconstructed = _reconstruct_typed_values(
                 operation.results, tuple(conditional)
             )
-            provenance = _common_provenance(branch.provenance for branch in branches)
-            if provenance:
-                reconstructed = _apply_flat_provenance(
-                    reconstructed,
-                    operation.results,
-                    provenance,
-                )
             return "yield", reconstructed
         result_type = self.function_result_types[-1]
         if len(branch_kinds) == 1 and "return" in branch_kinds:
@@ -1717,21 +2092,12 @@ class _DirectHugrLowerer:
                 )
             conditional = true_builder.conditional_node
             returned = _reconstruct_hugr_value(result_type, tuple(conditional))
-            provenance = _common_provenance(branch.provenance for branch in branches)
-            if provenance:
-                returned = _apply_value_provenance(
-                    returned,
-                    result_type,
-                    provenance,
-                )
             return "return", (returned,)
         normal_row = [
             item for type_spec in normal_types for item in _hugr_type_row(type_spec)
         ]
         return_row = _hugr_type_row(result_type)
         flow_type = tys.Either(normal_row, return_row)
-        normal_provenance: list[tuple[int | None, ...]] = []
-        return_provenance: list[tuple[int | None, ...]] = []
         for branch in branches:
             if branch.kind == "yield":
                 tagged = branch.builder.add_op(
@@ -1741,7 +2107,6 @@ class _DirectHugrLowerer:
                         for item in branch.flattened
                     ),
                 )[0]
-                normal_provenance.append(branch.provenance)
             elif branch.kind == "return":
                 tagged = branch.builder.add_op(
                     ops.Tag(1, flow_type),
@@ -1750,13 +2115,10 @@ class _DirectHugrLowerer:
                         for item in branch.flattened
                     ),
                 )[0]
-                return_provenance.append(branch.provenance)
             else:
                 if branch.flow is None:
                     raise CapabilityError("Q8647: missing dynamic HUGR if return flow")
                 tagged = branch.flow.wire
-                normal_provenance.append(branch.flow.normal_provenance)
-                return_provenance.append(branch.flow.return_provenance)
             branch.builder.set_outputs(tagged)
         conditional = true_builder.conditional_node
         return "dynamic_return", (
@@ -1764,8 +2126,6 @@ class _DirectHugrLowerer:
                 conditional[0],
                 "yield",
                 normal_types,
-                _common_provenance(normal_provenance),
-                _common_provenance(return_provenance),
             ),
         )
 
@@ -1810,6 +2170,54 @@ class _DirectHugrLowerer:
             else_builder.set_outputs(else_builder.inputs()[0])
         return true_builder.conditional_node[0]
 
+    def _guard_value_domain(self, value: object, type_spec: TypeSpec) -> object:
+        """Validate finite Int inputs at a public HUGR callable boundary.
+
+        Args:
+            value (object): Reconstructed SDK input value.
+            type_spec (TypeSpec): Verified source input type.
+
+        Returns:
+            object: Structurally identical value with guarded Int wires.
+        """
+
+        if strip_stage(type_spec) == Int:
+            return self._checked_int(self._int_wire(value))
+        elements = aggregate_element_types(strip_stage(type_spec))
+        if elements is not None and isinstance(value, tuple):
+            return tuple(
+                self._guard_value_domain(item, element)
+                for item, element in zip(value, elements, strict=True)
+            )
+        return value
+
+    def _flatten_region_value(
+        self, value: object, type_spec: TypeSpec
+    ) -> tuple[Any, ...]:
+        """Materialize typed scalar and aggregate region exits.
+
+        Args:
+            value (object): Exact constant or emitted region result.
+            type_spec (TypeSpec): Verified result type.
+
+        Returns:
+            tuple[Any, ...]: Typed flat values ready for region output materialization.
+        """
+
+        base = strip_stage(type_spec)
+        if base == Int:
+            return (_IntWire(self._int_wire(value)),)
+        if isinstance(base, ScalarType) and base.name == "Real":
+            return (_RealWire(_real_operand_wire(self.builder, value)),)
+        elements = aggregate_element_types(base)
+        if elements is not None and isinstance(value, tuple):
+            return tuple(
+                wire
+                for item, element in zip(value, elements, strict=True)
+                for wire in self._flatten_region_value(item, element)
+            )
+        return _flatten_logical_value(value, type_spec)
+
     def _flatten_value(
         self,
         value: object,
@@ -1817,6 +2225,18 @@ class _DirectHugrLowerer:
     ) -> tuple[Any, ...]:
         """Flatten one value and materialize deferred Boolean expressions."""
 
+        base = strip_stage(type_spec)
+        if base == Int:
+            return (self._int_wire(value),)
+        if isinstance(base, ScalarType) and base.name == "Real":
+            return (_real_operand_wire(self.builder, value),)
+        elements = aggregate_element_types(base)
+        if elements is not None and isinstance(value, tuple):
+            return tuple(
+                wire
+                for item, element in zip(value, elements, strict=True)
+                for wire in self._flatten_value(item, element)
+            )
         return tuple(
             self._materialize_boolean_condition(item)
             for item in _flatten_logical_value(value, type_spec)
@@ -1930,7 +2350,21 @@ class _DirectHugrLowerer:
         operation: Operation,
         flow: _DynamicReturn,
     ) -> tuple[str, tuple[object, ...]]:
-        """Compose an early structured return with the remaining continuation."""
+        """Compose an early structured return with the remaining continuation.
+
+        Args:
+            block (Block): Verified block containing the remaining operations.
+            start (int): First remaining operation position.
+            environment (dict[int, object]): Values visible after the conditional.
+            operation (Operation): Conditional providing the fallthrough row.
+            flow (_DynamicReturn): Either row selecting return or fallthrough.
+
+        Returns:
+            tuple[str, tuple[object, ...]]: Composed exit and ordered values.
+
+        Raises:
+            CapabilityError: If the flow type or continuation exit is invalid.
+        """
 
         if not self.function_result_types:
             raise CapabilityError("Q8666: dynamic return has no callable result type")
@@ -1945,12 +2379,6 @@ class _DirectHugrLowerer:
             operation.results,
             tuple(normal_builder.inputs()),
         )
-        if flow.normal_provenance:
-            normal_values = _apply_flat_provenance(
-                normal_values,
-                operation.results,
-                flow.normal_provenance,
-            )
         normal_environment = dict(environment)
         for definition, value in zip(
             operation.results,
@@ -1981,11 +2409,6 @@ class _DirectHugrLowerer:
             for value, type_spec in zip(returned, normal_types, strict=True)
             for wire in normal._flatten_value(value, type_spec)
         )
-        normal_provenance = tuple(
-            item.index if isinstance(item, _MeasuredWire) else None
-            for value, type_spec in zip(returned, normal_types, strict=True)
-            for item in _flatten_logical_value(value, type_spec)
-        )
         returned_builder = conditional.add_case(1)
         if kind == "return":
             normal_builder.set_outputs(*flat_normal)
@@ -2008,13 +2431,8 @@ class _DirectHugrLowerer:
             )[0]
             normal_builder.set_outputs(normal_flow)
             returned_builder.set_outputs(returned_flow)
-        if normal.next_measurement != self.next_measurement:
-            self.has_dynamic_measurements = True
+        if normal.previous_measurement is not None:
             self.previous_measurement = conditional.parent_node
-        self.next_measurement = max(
-            self.next_measurement,
-            normal.next_measurement,
-        )
         self.logical_operations += normal.logical_operations
         self.native_operations += normal.native_operations
         self.allocated_qubits = max(self.allocated_qubits, normal.allocated_qubits)
@@ -2024,20 +2442,12 @@ class _DirectHugrLowerer:
                     conditional.parent_node[0],
                     cast(_NormalExitKind, kind),
                     normal_types,
-                    normal_provenance,
-                    flow.return_provenance,
                 ),
             )
         selected = _reconstruct_hugr_value(
             result_type,
             tuple(conditional.parent_node),
         )
-        if normal_provenance == flow.return_provenance:
-            selected = _apply_value_provenance(
-                selected,
-                result_type,
-                normal_provenance,
-            )
         return "return", (selected,)
 
     def _emit_quantum(
@@ -2099,8 +2509,6 @@ class _DirectHugrLowerer:
                     )
                 self.previous_measurement = measurement
                 post, bit = measurement
-                bit = _MeasuredWire(bit, self.next_measurement)
-                self.next_measurement += 1
                 self.builder.add_op(quantum.qFree, post)
                 self.live_qubits -= 1
                 measured_bits.append(bit)
@@ -2142,8 +2550,6 @@ class _DirectHugrLowerer:
                 self.builder.hugr.add_order_link(self.previous_measurement, measurement)
             self.previous_measurement = measurement
             wire, bit = measurement
-            bit = _MeasuredWire(bit, self.next_measurement)
-            self.next_measurement += 1
             self.native_operations += 1
             for gate in after:
                 wire = self.builder.add_op(gate, wire)[0]
@@ -2161,8 +2567,7 @@ class _DirectHugrLowerer:
                     )
                 self.previous_measurement = measurement
                 post, bit = measurement
-                measured_bits.append(_MeasuredWire(bit, self.next_measurement))
-                self.next_measurement += 1
+                measured_bits.append(bit)
                 reset_wires.append(self.builder.add_op(quantum.reset, post)[0])
                 self.native_operations += 2
             return (
@@ -2181,7 +2586,6 @@ class _DirectHugrLowerer:
                     )
                 self.previous_measurement = measurement
                 post, _ = measurement
-                self.next_measurement += 1
                 self.builder.add_op(quantum.qFree, post)
                 self.live_qubits -= 1
                 self.native_operations += 2
@@ -3304,6 +3708,10 @@ def _hugr_type_row(type_spec: TypeSpec) -> list[Any]:
         return row
     if base in {Bit, Bool}:
         return [tys.Bool]
+    if base == Int:
+        from hugr.std.int import int_t
+
+        return [int_t(6)]
     if isinstance(base, ScalarType) and base.name == "Real":
         return [FLOAT_T]
     if isinstance(base, ScalarType) and base.name == "Unit":
@@ -3391,25 +3799,6 @@ def _block_terminator_definitions(block: Block) -> tuple[Value, ...]:
         ) from error
 
 
-def _common_provenance(
-    rows: Iterable[tuple[int | None, ...]],
-) -> tuple[int | None, ...]:
-    """Retain only measurement provenance shared by every possible path."""
-
-    candidates = tuple(rows)
-    if not candidates:
-        return ()
-    width = len(candidates[0])
-    if any(len(candidate) != width for candidate in candidates[1:]):
-        raise CapabilityError("Q8647: dynamic HUGR flow provenance arity mismatch")
-    return tuple(
-        first
-        if all(candidate[index] == first for candidate in candidates[1:])
-        else None
-        for index, first in enumerate(candidates[0])
-    )
-
-
 def _reconstruct_typed_values(
     definitions: tuple[Value, ...],
     wires: tuple[Any, ...],
@@ -3483,13 +3872,26 @@ def _reconstruct_hugr_value(
         return tuple(values)
     if isinstance(base, ScalarType) and base.name == "Unit":
         return None
+    if base == Int:
+        return wires[0] if isinstance(wires[0], _IntWire) else _IntWire(wires[0])
     if isinstance(base, ScalarType) and base.name == "Real":
         return wires[0] if isinstance(wires[0], _RealWire) else _RealWire(wires[0])
     return wires[0]
 
 
 def _flatten_logical_value(value: object, type_spec: TypeSpec) -> tuple[Any, ...]:
-    """Flatten a logical HUGR value while retaining provenance wrappers."""
+    """Flatten a logical HUGR value while retaining scalar type wrappers.
+
+    Args:
+        value (object): Verified scalar or aggregate value.
+        type_spec (TypeSpec): Native-derived logical value type.
+
+    Returns:
+        tuple[Any, ...]: Wires or Boolean constants in logical source order.
+
+    Raises:
+        CapabilityError: If the runtime value disagrees with its logical shape.
+    """
 
     base = strip_stage(type_spec)
     if isinstance(base, ScalarType) and base.name == "Unit":
@@ -3524,73 +3926,34 @@ def _flatten_logical_value(value: object, type_spec: TypeSpec) -> tuple[Any, ...
     )
 
 
-def _copy_provenance(
+def _copy_wire_guarantees(
     originals: tuple[object, ...],
     reconstructed: tuple[object, ...],
 ) -> tuple[object, ...]:
-    """Copy measurement provenance through a region's block arguments."""
+    """Preserve verified Real guarantees through a region's block arguments.
+
+    Args:
+        originals (tuple[object, ...]): Values passed into the region.
+        reconstructed (tuple[object, ...]): Region arguments with the same shape.
+
+    Returns:
+        tuple[object, ...]: Arguments retaining proved finite Real values.
+
+    Raises:
+        CapabilityError: If the argument rows have different arities.
+    """
 
     if len(originals) != len(reconstructed):
-        raise CapabilityError("Q8658: HUGR provenance argument arity mismatch")
+        raise CapabilityError("Q8658: HUGR region argument arity mismatch")
     copied: list[object] = []
     for original, value in zip(originals, reconstructed, strict=True):
-        if isinstance(original, _MeasuredWire):
-            narrowed = (
-                value[0] if isinstance(value, tuple) and len(value) == 1 else value
-            )
-            copied.append(_MeasuredWire(_raw_wire(narrowed), original.index))
-        elif isinstance(original, _RealWire):
+        if isinstance(original, _RealWire):
             copied.append(_RealWire(_raw_wire(value), original.guaranteed_finite))
-        elif (
-            isinstance(original, tuple)
-            and len(original) == 1
-            and isinstance(original[0], _MeasuredWire)
-            and _is_hugr_wire(value)
-        ):
-            copied.append(_MeasuredWire(_raw_wire(value), original[0].index))
         elif isinstance(original, tuple) and isinstance(value, tuple):
-            copied.append(_copy_provenance(original, value))
+            copied.append(_copy_wire_guarantees(original, value))
         else:
             copied.append(value)
     return tuple(copied)
-
-
-def _apply_flat_provenance(
-    values: tuple[object, ...],
-    definitions: tuple[Value, ...],
-    provenance: tuple[int | None, ...],
-) -> tuple[object, ...]:
-    """Reapply common branch provenance to conditional output wires."""
-
-    flat = [
-        item
-        for value, definition in zip(values, definitions, strict=True)
-        for item in _flatten_logical_value(value, definition.type)
-    ]
-    if len(flat) != len(provenance):
-        raise CapabilityError("Q8659: HUGR branch provenance width mismatch")
-    tagged = tuple(
-        _MeasuredWire(_raw_wire(item), index) if index is not None else item
-        for item, index in zip(flat, provenance, strict=True)
-    )
-    return _reconstruct_typed_values(definitions, tagged)
-
-
-def _apply_value_provenance(
-    value: object,
-    type_spec: TypeSpec,
-    provenance: tuple[int | None, ...],
-) -> object:
-    """Reapply common branch provenance to one returned logical value."""
-
-    flat = _flatten_logical_value(value, type_spec)
-    if len(flat) != len(provenance):
-        raise CapabilityError("Q8659: HUGR return provenance width mismatch")
-    tagged = tuple(
-        _MeasuredWire(_raw_wire(item), index) if index is not None else item
-        for item, index in zip(flat, provenance, strict=True)
-    )
-    return _reconstruct_hugr_value(type_spec, tagged)
 
 
 def _validate_selectors(opcode: str, width: int, selected: tuple[int, ...]) -> None:
@@ -3635,9 +3998,16 @@ def _require_wires(value: object, opcode: str) -> tuple[Any, ...]:
 
 
 def _is_hugr_wire(value: object) -> bool:
-    """Return whether a value is a HUGR wire without importing its class eagerly."""
+    """Recognize HUGR wires without importing their SDK class eagerly.
 
-    if isinstance(value, (_MeasuredWire, _RealWire, _BooleanCondition)):
+    Args:
+        value (object): Scalar wire, typed wrapper, or ordinary value.
+
+    Returns:
+        bool: Whether the value represents a HUGR dataflow wire.
+    """
+
+    if isinstance(value, (_RealWire, _IntWire, _BooleanCondition)):
         return True
     return value.__class__.__module__.startswith("hugr.") and hasattr(value, "out_port")
 
@@ -3653,7 +4023,7 @@ def _contains_hugr_wire(value: object) -> bool:
 def _is_boolean_operand(value: object) -> bool:
     """Return whether a verified runtime value has HUGR Bool representation."""
 
-    if isinstance(value, _RealWire):
+    if isinstance(value, (_RealWire, _IntWire)):
         return False
     if isinstance(value, bool):
         return True
@@ -3725,21 +4095,23 @@ def _coherent_value_leaf_widths(value: object) -> tuple[int, ...] | None:
 
 
 def _raw_wire(value: object) -> Any:
-    """Return the underlying HUGR wire from a provenance wrapper."""
+    """Return the underlying HUGR wire from a scalar type wrapper.
 
-    if isinstance(value, (_MeasuredWire, _RealWire)):
+    Args:
+        value (object): SDK wire or typed scalar wrapper.
+
+    Returns:
+        Any: Underlying wire, or the unchanged ordinary value.
+
+    Raises:
+        TypeError: If a compound Boolean condition has not been materialized.
+    """
+
+    if isinstance(value, (_RealWire, _IntWire)):
         return value.wire
     if isinstance(value, _BooleanCondition):
         raise TypeError("compound Boolean conditions have no single HUGR wire")
     return value
-
-
-def _measurement_index(value: object) -> int:
-    """Return stable measurement provenance for a sampled result wire."""
-
-    if not isinstance(value, _MeasuredWire):
-        raise TypeError("wire has no measurement provenance")
-    return value.index
 
 
 def _require_int(value: object, label: str) -> int:
@@ -3946,8 +4318,46 @@ def _guard_real_wire(
         The guarded HUGR float64 wire.
     """
 
-    from hugr import tys
     from hugr.std.float import FLOAT_T
+
+    return _guard_typed_wire(builder, value, condition, message, FLOAT_T)
+
+
+def _guard_int_wire(builder: Any, value: Any, condition: Any, message: str) -> Any:
+    """Return an int64 value on success and terminate on a failed domain guard.
+
+    Args:
+        builder (Any): Active dataflow builder.
+        value (Any): int64 value to preserve.
+        condition (Any): Boolean success condition.
+        message (str): Stable runtime diagnostic.
+
+    Returns:
+        Any: Guarded int64 wire.
+    """
+
+    from hugr.std.int import int_t
+
+    return _guard_typed_wire(builder, value, condition, message, int_t(6))
+
+
+def _guard_typed_wire(
+    builder: Any, value: Any, condition: Any, message: str, wire_type: Any
+) -> Any:
+    """Preserve a typed wire on success or emit a typed runtime panic.
+
+    Args:
+        builder (Any): Active dataflow builder.
+        value (Any): Value carried by both paths.
+        condition (Any): Boolean success condition.
+        message (str): Stable runtime diagnostic.
+        wire_type (Any): Exact HUGR type of the value.
+
+    Returns:
+        Any: Wire from the conditional output.
+    """
+
+    from hugr import tys
     from hugr.std.prelude import PRELUDE_EXTENSION, STRING_T, StringVal
 
     successful = builder.add_if(condition, value)
@@ -3973,15 +4383,15 @@ def _guard_real_wire(
         text,
     )[0]
     panic_args = [
-        tys.ListArg([tys.TypeTypeArg(FLOAT_T)]),
-        tys.ListArg([tys.TypeTypeArg(FLOAT_T)]),
+        tys.ListArg([tys.TypeTypeArg(wire_type)]),
+        tys.ListArg([tys.TypeTypeArg(wire_type)]),
     ]
     terminated = failed.add_op(
         PRELUDE_EXTENSION.get_op("panic").instantiate(
             args=panic_args,
             concrete_signature=tys.FunctionType(
-                [error_type, FLOAT_T],
-                [FLOAT_T],
+                [error_type, wire_type],
+                [wire_type],
             ),
         ),
         error,

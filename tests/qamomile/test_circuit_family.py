@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import qamomile as qm
 from qamomile.circuit import (
     ClassicalExpr,
     MeasurementBit,
+    _circuit_from_native_projection,
     circuit_result_postprocessing,
     lower_to_circuit,
     lower_to_circuit_at,
     lower_to_circuit_family,
     postprocess_circuit_counts,
 )
-from qamomile.compilation import ResultABI
+from qamomile.compilation import ParameterABI, ResultABI
 
 native = pytest.importorskip("qamomile._qamomile_native")
 
@@ -77,8 +80,8 @@ def sample() -> qm.Bits[1]:
         monkeypatch.setattr(
             native,
             "inspect_static_circuit",
-            lambda _payload, _capabilities, _lowering, hidden=hidden: BrokenProjection(
-                projection, hidden
+            lambda _payload, _capabilities, _lowering, _reuse, hidden=hidden: (
+                BrokenProjection(projection, hidden)
             ),
         )
         with pytest.raises(TypeError, match="native circuit projection violates"):
@@ -120,7 +123,7 @@ def test_public_circuit_retains_measurement_result_expressions() -> None:
 import qamomile as qm
 
 @qm.qkernel
-def sample() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
+def sample() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bit]]:
     bit = qm.measure(qm.h(qm.prepare(True)))
     return not bit, bit
 """,
@@ -137,6 +140,53 @@ def sample() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
     assert circuit.requires_result_postprocessing
     assert circuit.result_abi == ResultABI.from_program(program)
     assert b'"result":{"tuple"' in circuit.to_bytes()
+
+
+def test_public_circuit_encodes_current_shot_result_expression() -> None:
+    """Circuit inspection encodes nested logical-shot reads deterministically."""
+    program = qm.build_source(
+        """
+import qamomile as qm
+
+@qm.qkernel
+def sample() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
+    return qm.get_current_shot() == 0, qm.get_current_shot() % 2 == 1
+"""
+    ).specialize("sample")
+    circuit = lower_to_circuit(program)
+    encoded = circuit.to_bytes()
+    result = json.loads(encoded)["result"]["tuple"]
+    assert result[0]["operands"][0] == {"current_shot": True}
+    assert result[1]["operands"][0]["operands"][0] == {"current_shot": True}
+    assert circuit.to_bytes() == encoded
+
+
+def test_native_shot_template_projection_encodes_hidden_binding() -> None:
+    """Circuit inspection preserves internal slots without adding public parameters."""
+    program = qm.build_source(
+        """
+import qamomile as qm
+
+@qm.qkernel
+def sample(angle: qm.Param[qm.Real]) -> qm.Shot[qm.Bit]:
+    theta = float(qm.get_current_shot() % 2) * 3.141592653589793 + angle
+    return qm.measure(qm.ry(qm.prepare(False), theta))
+"""
+    ).specialize("sample")
+    owner = native.inspect_indexed_circuit(program._native_program())
+    assert owner is not None
+    circuit = _circuit_from_native_projection(
+        program,
+        owner.projection,
+        semantic_id=program.semantic_digest,
+        parameter_abi=ParameterABI.from_program(program),
+        result_abi=ResultABI.from_program(program),
+    )
+    encoded = circuit.to_bytes()
+    rotation = next(item for item in json.loads(encoded)["body"] if item["op"] == "ry")
+    assert rotation["parameters"] == [{"hidden_binding": 0}]
+    assert [slot.name for slot in circuit.parameter_abi.slots] == ["angle"]
+    assert circuit.to_bytes() == encoded
 
 
 def test_public_circuit_restores_portable_result_literals() -> None:
@@ -175,7 +225,7 @@ import qamomile as qm
 def sample(enabled: qm.Param[qm.Bool]) -> qm.Shot[qm.Bool]:
     bit, state = qm.measure_z(qm.qubits(1), 0)
     qm.discard(state)
-    return bit != enabled
+    return bool(bit) != enabled
 """,
         module_name="public_result_postprocessing",
     ).specialize("sample")
@@ -474,7 +524,7 @@ def sample(enabled: qm.Param[qm.Bool]) -> qm.Shot[qm.Bool]:
         state = qm.x(state)
     bit, state = qm.measure_z(state, 0)
     qm.discard(state)
-    return bit == enabled
+    return bool(bit) == enabled
 """
     family = lower_to_circuit_family(
         qm.build_source(

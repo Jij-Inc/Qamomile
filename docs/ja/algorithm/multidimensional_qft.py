@@ -1,11 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.5
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -23,10 +24,27 @@
 # しかし従来のQFTに基づく構成では、入力データが2のべき乗のグリッドサイズに自然に定義されない場合に制約がありました。
 # そこで本記事では、[](https://doi.org/10.1039/d4cp04399e)で提案された、任意のグリッドサイズの入力に対する多次元量子フーリエ変換の実装についてまとめました。
 # 多次元量子フーリエ変換実装を通して、Qamomileの使い方を学ぶことができます。
-#
+
+# %%
+# From the repository root, install this Qamomile checkout and Matplotlib.
+# # pip install -e . matplotlib
+
+# %%
+from __future__ import annotations
+
+import os
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+import qamomile as qm
+from qamomile.stdlib import amplitude_encoding, qft
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 2**14
+
+# %% [markdown]
 # ## 背景
-#
-# ### 問題: ナノシート材料の特性評価
 #
 # ナノシート材料は、幅広い化学応用のために注目を集めています。
 # その物理化学的な特性は、その厚さに応じて劇的に変化します。
@@ -41,8 +59,35 @@
 # この有望な解決手法として、近年では量子コンピュータによる量子フーリエ変換（QFT）が脚光を浴びるようになりました。
 # 厳密な標準QFTユニタリは、$n$量子ビット上で$\mathcal{O} (n^2)$ゲートにより実装できます。このことが、QFTを量子フーリエ変換プリミティブとして利用する動機になります。ただし、状態準備と読み出しのコストは別途考慮する必要があります。
 # そこでこの論文では多次元QFTの応用可能性を探求し、その利用可能な入力データをより詳細に特性評価することを目的として、QFTを用いた$\mathrm{CeO_2}$ナノシートの近似的なSAEDパターンのシミュレーションを行いました。
+
+# %% [markdown]
+# ## 問題設定
 #
-# ### 多次元QFT
+# 入力データを作成しましょう。
+# ここでは、次のような仮想的な周期データを用いることにします。
+
+# %%
+Nx = 6
+Ny = 6
+xs = np.arange(Nx)
+ys = np.arange(Ny)
+X, Y = np.meshgrid(xs, ys, indexing="ij")
+f = np.cos(np.pi * X / 2) * np.cos(np.pi * Y / 2)
+
+# %% [markdown]
+# 作成された入力データは、次のような単純な周期性を持つ2次元データです。
+
+# %%
+im1 = plt.pcolormesh(f.T, cmap="viridis")
+cbar = plt.colorbar(im1)
+cbar.set_label("f", fontsize=14)
+plt.xlabel("x", fontsize=14)
+plt.ylabel("y", fontsize=14)
+plt.show()
+
+
+# %% [markdown]
+# ## アルゴリズム
 #
 # QFTは、Shorのアルゴリズムや量子位相推定のコア技術としてよく知られています。
 # QFTに関連する拡張として、[](https://doi.org/10.48550/arXiv.2301.13835)が挙げられます。
@@ -58,79 +103,21 @@
 # 上図の${\mathrm{initialize}}(\vert v \rangle)$は、入力データに応じて量子状態を準備するサブルーチンを表しています。
 # 状態準備の手法にはいくつかありますが、以降に示す実装では[Möttönen状態準備ルーチンによる振幅エンコーディング](mottonen_amplitude_encoding)を用いています。
 # しかしこの手法は、各次元サイズが $N_i = 2^{n_i}$ でなければならないという制限がありました。
-# そこで、[](https://doi.org/10.1039/d4cp04399e)ではこの制限を解消する手法を提案しました。
+# そこで、[](https://doi.org/10.1039/d4cp04399e)では、QFTの前に入力を2のべき乗のグリッドに合わせる前処理を提案しました。
 # Qamomileには、1次元QFTが標準で備わっています。
 # Qamomileの機能を活用することで、多次元QFTも容易に実装することが可能です。
-#
-
-# %% [markdown]
-# ## インストール
-#
-# Qamomile distributionをインストールします。
-#
-# ```bash
-# pip install qamomile
-# ```
-
-# %%
-# 最新のQamomileをpipからインストールします！
-# # !pip install qamomile
-
-# %%
-from __future__ import annotations
-
-import numpy as np
-
-import qamomile as qm
-from qamomile.stdlib import amplitude_encoding, qft
-
-# %% [markdown]
-# ## 小さな2次元入力のencoding
-#
-# 次のlittle-endianなflat indexを持つ$4\times4$ gridを使います。
-#
-# $$
-# j=x+4y
-# $$
-#
-# 入力は$x$軸に沿って一様で、$y=1$に局在しています。したがって正規化後の状態は
-#
-# $$
-# \frac{1}{2}\sum_{x=0}^{3}|x\rangle|1\rangle
-# $$
-#
-# です。$x$軸のQFTでは逆格子座標0が得られます。局在した$y$座標は、4つすべての逆格子値に等しいsupportを持つ状態へ変換されます。
-
-# %%
-side = 4
-input_amplitudes = tuple(
-    1.0 if side <= index < 2 * side else 0.0 for index in range(side * side)
-)
-prepare = amplitude_encoding(input_amplitudes)
-
-assert len(input_amplitudes) == 16
-assert sum(value * value for value in input_amplitudes) == 4.0
-
-# %% [markdown]
-# `amplitude_encoding`は有限vectorを正規化し、Rustが導出したexact-phase座標を通常のunitary Qamomile関数に閉じ込めます。入力がSDKのstate-preparation objectになることはありません。
-
-# %% [markdown]
-# ## アルゴリズム: 任意の周期性をもつ多次元入力のためのQFT
 #
 # 結晶やナノシートの実空間構造は、一般に2のべき乗のグリッド上でサンプリングされるとは限りません。
 # その格子周期性は、任意の整数個のグリッド点に対応しえます。
 # そこで、[](https://doi.org/10.1039/d4cp04399e)では、結晶の周期性をそのまま量子状態に符号化するための、前処理手法を提案しました。
 #
-# ### 領域の切り捨て/ゼロ埋め
-#
 # 実際に得られる結晶構造のデータは、2のべき乗のグリッド上に定義されているとは限りません。
 # ある次元方向のサンプリング点数が$2^p$より大きい場合、最初の$2^p$点のみを抜き出すことで、QFTを適用可能にします。
 # またある次元方向のサンプリング点数が$2^p$より小さい場合、その前後にゼロを追加することでも、QFTを適用可能にします。
 #
-# ### フラットトップ窓関数の適用
-#
-# 領域の切り捨て/ゼロ埋めだけを適用したデータの周波数解析を行うと、本来のスペクトルの横に余分な成分が生じます。
+# 領域の切り捨てによって、本来のスペクトルの横に余分な成分が生じることがあります。
 # これをサイドローブと呼び、これは領域を切り取ったことで生まれる人工的なスペクトルです。
+# ゼロ埋めをすると、このスペクトルをより細かい間隔でサンプリングできます。
 # そこでこれを抑えるために、切り捨て/ゼロ埋めされた入力データ区間の両端を滑らかにゼロに近づける重みづけ関数 (窓関数) を導入しましょう。
 # この論文では、次のようなフラットトップ関数を用いています。
 #
@@ -141,269 +128,208 @@ assert sum(value * value for value in input_amplitudes) == 4.0
 # ここで$(a_0, a_1, a_2, a_3, a_4) = (0.1881, 0.36923, 0.28702, 0.13077, 0.02488)$であり、$N$は考えている次元方向の点の総数、$n$はその点の位置$(n=0, 1, \dots, N-1)$を表します。
 # 2次元の場合、$w_5(x) w_5(y)$ のような積を、入力に掛け合わせます。
 
+# %% [markdown]
+# ## 実装
+#
+# Qamomileを用いて、多次元QFTのための量子回路を実装しましょう。
+#
+# このデータはサイズが2のべき乗でないために、そのままでは実装されたQFTを適用することができません。
+# そこでゼロ埋めを施すことで、サイズを2のべき乗に拡張しましょう。
+# ここでは、$x$方向と$y$方向の座標レジスタそれぞれに3量子ビットを使います。
+# すなわち、各次元が$2^3 = 8$個のグリッド点を持つようにゼロ埋めします。
 
 # %%
-def pad_center(array: np.ndarray, target_shape: tuple[int, int]) -> np.ndarray:
-    """Center-pad a two-dimensional array to one power-of-two shape."""
-
-    padding = []
-    for size, target in zip(array.shape, target_shape, strict=True):
-        total = target - size
-        padding.append(((total + 1) // 2, total // 2))
-    return np.pad(array, tuple(padding))
-
-
-def flat_top(size: int) -> np.ndarray:
-    """Return the five-term flat-top window used by the workflow."""
-
-    coefficients = np.array([0.1881, 0.36923, 0.28702, 0.13077, 0.02488])
-    positions = np.arange(size)
-    return sum(
-        (-1) ** order * coefficient * np.cos(2.0 * np.pi * order * positions / size)
-        for order, coefficient in enumerate(coefficients)
+def crop_and_pad(
+    array_2d: np.ndarray, num_x_target: int, num_y_target: int
+) -> np.ndarray:
+    array_2d = array_2d[:num_x_target, :num_y_target]
+    num_x, num_y = array_2d.shape
+    pad_width_x = num_x_target - num_x
+    pad_width_y = num_y_target - num_y
+    pad_x_left = int(np.ceil(pad_width_x / 2.0))
+    pad_x_right = int(np.floor(pad_width_x / 2.0))
+    pad_y_left = int(np.ceil(pad_width_y / 2.0))
+    pad_y_right = int(np.floor(pad_width_y / 2.0))
+    array_2d_padding = np.pad(
+        array_2d, ((pad_x_left, pad_x_right), (pad_y_left, pad_y_right))
     )
+    return array_2d_padding
 
 
-source_side = 6
-x, y = np.meshgrid(
-    np.arange(source_side),
-    np.arange(source_side),
-    indexing="ij",
-)
-periodic_data = np.cos(np.pi * x / 2.0) * np.cos(np.pi * y / 2.0)
-padded_data = pad_center(periodic_data, (8, 8))
-window_2d = flat_top(8)[:, None] * flat_top(8)[None, :]
-windowed_data = padded_data * window_2d
-
-assert periodic_data.shape == (6, 6)
-assert padded_data.shape == (8, 8)
-assert windowed_data.shape == (8, 8)
+Nqx = 3
+Nqy = 3
+Nx_target = 2**Nqx
+Ny_target = 2**Nqy
+f_padding = crop_and_pad(f, Nx_target, Ny_target)
 
 # %% [markdown]
-# ## Qamomileによる実装
-#
-# ### 軸の分割、変換、再結合
-#
-# `split_at(state, 2)`は`Q[Bits[4]]`を消費し、source順に2つのownedな`Q[Bits[2]]`を返します。各componentは同じ`qft` callによって消費されます。その後、`concat`が両方の結果を消費して`Q[Bits[4]]`を再構築します。
-
+# ゼロ埋めされたデータを見てみましょう。
 
 # %%
-@qm.qkernel
-def two_axis_qft_state() -> qm.Q[qm.Bits[4]]:
-    """Prepare the grid and apply one QFT to each logical axis.
-
-    Returns:
-        qm.Q[qm.Bits[4]]: Reciprocal-grid state with two two-bit axes.
-    """
-
-    state = prepare(qm.qubits(4))
-    x_axis, y_axis = qm.split_at(state, 2)
-    x_axis = qft(x_axis, 2)
-    y_axis = qft(y_axis, 2)
-    return qm.concat(x_axis, y_axis)
-
-
-@qm.qkernel
-def two_axis_qft_samples() -> qm.Shot[qm.Bits[4]]:
-    """Measure the two-dimensional reciprocal coordinate.
-
-    Returns:
-        qm.Shot[qm.Bits[4]]: Two little-endian two-bit coordinates.
-    """
-
-    return qm.measure(two_axis_qft_state())
+im2 = plt.pcolor(f_padding.T, cmap="viridis")
+cbar = plt.colorbar(im2)
+cbar.set_label("f", fontsize=14)
+plt.xlabel("x", fontsize=14)
+plt.ylabel("y", fontsize=14)
+plt.show()
 
 
 # %% [markdown]
-# slice aliasや重複するviewは存在しません。returnされないcomponent、componentの複製、誤った幅の式、owned stateの2回目の使用は、target lowering前に型またはownership errorになります。
-
-# %% [markdown]
-# ## 同じprogramのinspectionと推定
-#
-# specialized QCore programは1つの`qft`定義と2本のcall edgeを保持します。構造的なfactorとtensorは検証済みのzero-cost reshapeになります。多次元QFT opcodeやbackend algorithm caseはありません。
+# 続いてはサイドローブを抑えるために、窓関数の実装を行いましょう。
 
 # %%
-program = qm.specialize(two_axis_qft_samples)
-inspection = program.inspect()
-qft_symbols = {
-    function.symbol
-    for function in program.functions
-    if function.symbol.rsplit(".", 1)[-1] == "qft"
-}
+def w5(N: int) -> np.ndarray:
+    a = np.array([0.1881, 0.36923, 0.28702, 0.13077, 0.02488])
+    n = np.arange(N)
+    results = [(-1) ** k * a[k] * np.cos(2 * np.pi * k * n / N) for k in range(5)]
+    return sum(results)
 
-assert len(qft_symbols) == 1
-assert inspection.count(f"callee='{next(iter(qft_symbols))}'") == 2
-assert "quantum.multidimensional_qft" not in inspection
 
-study = qm.resources.logical(program)
-assert study.metric(
-    qm.resources.logical_operation_count("quantum.h")
-).numeric_enclosure() == (4, 4)
-assert study.metric(
-    qm.resources.logical_operation_count("quantum.cp")
-).numeric_enclosure() == (2, 2)
-assert study.metric(
-    qm.resources.logical_operation_count("quantum.swap")
-).numeric_enclosure() == (2, 2)
-assert qm.resources.ResourceStudy.from_bytes(study.to_bytes()) == study
+wx = w5(Nx_target)
+wy = w5(Ny_target)
+w2d = wx[:, None] * wy[None, :]
 
 # %% [markdown]
-# QFT部分の厳密なresourceは、実行用にloweringされるものと同じcall graphから導出されます。状態準備のworkも別に見えるため、backend-native boxによってlogical estimateが0になることはありません。
-
-# %% [markdown]
-# ### サーベイにあるQFT scalingの再現
-#
-# [](https://doi.org/10.48550/arXiv.2310.03011)のSection 12では、$N=2^n$
-# 振幅に対する教科書的QFTは$O(\log N)$量子ビットと$O(\log^2 N)$量子ゲートを
-# 使うとされています。その回路は$n$個のHadamard、$n(n-1)/2$個のcontrolled
-# phase shift、最後の$\lfloor n/2\rfloor$個のswapからなります。ここでは集約値の
-# slopeをfitするのではなく、この有限サイズの係数を直接検証します。compilerが
-# QFT本体を1度解析する間、幅はsymbolicなままです。`evaluate`は下のtableに
-# 表示する幅を代入するだけです。
-
+# 窓関数の概形を描画してみましょう。
 
 # %%
-@qm.qkernel
-def surveyed_qft(width: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[width]]:
-    """Resource sweepに使う教科書的QFT familyを構築する。"""
+im3 = plt.pcolor(w2d.T, cmap="plasma")
+cbar = plt.colorbar(im3)
+cbar.set_label("Flat-top window function", fontsize=14)
+plt.xlabel("x", fontsize=14)
+plt.ylabel("y", fontsize=14)
+plt.show()
 
-    return qm.measure(qft(qm.qubits(width), width))
-
-
-qft_scaling_study = qm.resources.logical(surveyed_qft)
-
-
-def qft_resource_row(width: int) -> tuple[int, int, int, int]:
-    """1つのregister幅について教科書的QFTの厳密なresource countを返す。"""
-
-    qft_study = qft_scaling_study.evaluate(width=width)
-    hadamards = qft_study.metric(
-        qm.resources.logical_operation_count("quantum.h")
-    ).numeric_enclosure()
-    controlled_phases = qft_study.metric(
-        qm.resources.logical_operation_count("quantum.cp")
-    ).numeric_enclosure()
-    swaps = qft_study.metric(
-        qm.resources.logical_operation_count("quantum.swap")
-    ).numeric_enclosure()
-    peak = qft_study.metric(qm.resources.LOGICAL_PEAK_QUBITS).numeric_enclosure()
-    assert hadamards[0] == hadamards[1]
-    assert controlled_phases[0] == controlled_phases[1]
-    assert swaps[0] == swaps[1]
-    assert peak[0] == peak[1]
-    return hadamards[0], controlled_phases[0], swaps[0], peak[0]
-
-
-qft_scaling = {width: qft_resource_row(width) for width in range(2, 9)}
-for width, (hadamards, controlled_phases, swaps, peak) in qft_scaling.items():
-    assert hadamards == width
-    assert controlled_phases == width * (width - 1) // 2
-    assert swaps == width // 2
-    assert peak == width
-
-print("QFT scaling (n: H, CP, SWAP, peak qubits):", qft_scaling)
 
 # %% [markdown]
-# Qamomileは有限サイズの教科書的回路を厳密に再現します。したがって主要な
-# controlled-phase数は$\Theta(n^2)=\Theta(\log^2 N)$、peak widthは
-# $n=\log_2N$となり、サーベイと一致します。これはlogical circuitの比較です。
-# サーベイのcaveatと同様、amplitude loadingとtomographyはQFT本体の外です。
+# 窓関数の重みは中心領域で最も大きく、端の近くでは小さくなっていることがわかります。
+# この窓関数をゼロ埋めされたデータに適用し、2次元QFTを実行しましょう。
 
 # %% [markdown]
-# ## compileと実行
-#
-# `ResultABI`は4つの論理bitをsource順に保持します。backend固有のbit orderによらず、先頭2bitがlittle-endianな$x$座標、末尾2bitがlittle-endianな$y$座標です。
+# Qamomileの`qft`関数を用いて、多次元QFTを実装しましょう。
+
+# %%
+def make_multidimensional_qft(inputs: np.ndarray, nqx: int, nqy: int) -> qm.QKernel:
+    if nqx < 1 or nqy < 1 or inputs.shape != (2**nqx, 2**nqy):
+        raise ValueError("The input shape must match the two nonempty qubit registers.")
+    width = nqx + nqy
+    prepare = amplitude_encoding(tuple(inputs.ravel(order="F")))
+
+    @qm.qkernel
+    def qft_for_multidimension() -> qm.Shot[qm.Bits[width]]:
+        state = prepare(qm.qubits(width))
+        x_axis, y_axis = qm.split_at(state, nqx)
+        x_axis = qft(x_axis, nqx)
+        y_axis = qft(y_axis, nqy)
+        return qm.measure(qm.concat(x_axis, y_axis))
+
+    return qft_for_multidimension
+
+# %% [markdown]
+# これでQFTの適用が可能になりました。
+
+# %% [markdown]
+# 先ほど実装したQFT回路をQamomileの組み込みシミュレーター `qm.Reference()` 向けにコンパイルしましょう。
+# 下位の量子ビットが $x$ を表すよう、$x$ が最も速く変わる順に入力を平坦化します。
 
 # %%
 reference = qm.Reference()
-artifact = qm.compile(program, to=reference)
-record = qm.run(
-    artifact,
-    on=reference,
-    shots=32,
-    seed=2,
-)
-
-observed_y = {
-    sum(bit << index for index, bit in enumerate(bits[2:]))
-    for bits in record.result.counts
-}
-
-assert record.result.shots == 32
-assert sum(record.result.counts.values()) == 32
-assert all(bits[:2] == (0, 0) for bits in record.result.counts)
-assert observed_y == set(range(side))
-print("reciprocal-grid samples:", record.result.counts)
-
-# %% [markdown]
-# すべてのsampleで$k_x=0$となり、一様な$x$入力と一致します。基底に局在した$y$入力は一様なFourier振幅を持つため、4つすべての$k_y$値が現れます。この構造的な性質により、大規模な統計比較なしで軸の入れ替えやresult bitの反転を検出できます。
+program = qm.specialize(make_multidimensional_qft(f_padding, Nqx, Nqy))
+exe = qm.compile(program, to=reference)
 
 # %% [markdown]
 # ## 結果
 #
-# ### classical methodであるFFTとの比較
-#
-# 同じcompositionをpadded 6×6 periodic inputに適用します。以下のhelperは1つのnormalized amplitude vectorをcloseし、6量子ビットを2つの3量子ビット軸へfactorし、再利用可能なQFTを両方へ適用します。classical inverse FFTはこのQFTと同じpositive-exponent conventionを使います。残るphase conventionはmagnitudeに影響しません。
-
+# コンパイルした回路を実行し、サンプリングされたビット列を2次元の逆格子空間グリッド上の確率にマッピングしましょう。ここで $k_x$ と $k_y$ は、それぞれ $x$ 方向と $y$ 方向の周波数の番号です。
 
 # %%
-def make_grid_qft(amplitudes: tuple[float, ...]) -> qm.QKernel:
-    """Build one fixed six-qubit two-axis QFT program."""
-
-    prepare_grid = amplitude_encoding(amplitudes)
-
-    @qm.qkernel
-    def grid_qft() -> qm.Shot[qm.Bits[6]]:
-        state = prepare_grid(qm.qubits(6))
-        x_axis, y_axis = qm.split_at(state, 3)
-        x_axis = qft(x_axis, 3)
-        y_axis = qft(y_axis, 3)
-        return qm.measure(qm.concat(x_axis, y_axis))
-
-    return grid_qft
-
-
-def classical_probabilities(array: np.ndarray) -> np.ndarray:
-    """Return normalized two-dimensional inverse-FFT probabilities."""
-
-    normalized = array / np.linalg.norm(array)
-    transformed = np.fft.ifft2(normalized) * np.sqrt(array.size)
-    return np.abs(transformed) ** 2
-
-
-def sampled_grid(array: np.ndarray, seed: int) -> np.ndarray:
-    """Execute the QFT program and return an 8×8 sampled distribution."""
-
-    kernel = make_grid_qft(tuple(array.reshape(-1)))
-    result = qm.run(
-        qm.specialize(kernel),
-        on=qm.Reference(),
-        shots=512,
-        seed=seed,
-    ).result
-    probabilities = np.zeros((8, 8))
+def compute_prob(result: qm.SampleResult, nqx: int, nqy: int) -> np.ndarray:
+    prob = np.zeros((2**nqx, 2**nqy))
     for bits, count in result.counts.items():
-        kx = sum(bit << index for index, bit in enumerate(bits[:3]))
-        ky = sum(bit << index for index, bit in enumerate(bits[3:]))
-        probabilities[kx, ky] += count / result.shots
-    return probabilities
+        kx = sum(bits[i] << i for i in range(nqx))
+        ky = sum(bits[nqx + i] << i for i in range(nqy))
+        prob[kx, ky] += count / result.shots
+    return prob
 
 
-padded_classical = classical_probabilities(padded_data)
-padded_quantum = sampled_grid(padded_data, seed=5)
-windowed_classical = classical_probabilities(windowed_data)
-windowed_quantum = sampled_grid(windowed_data, seed=7)
-
-padded_distance = np.abs(padded_quantum - padded_classical).sum()
-windowed_distance = np.abs(windowed_quantum - windowed_classical).sum()
-print("distribution distances:", padded_distance, windowed_distance)
-assert padded_distance < 0.5
-assert windowed_distance < 0.5
-print("padded peak:", np.unravel_index(padded_quantum.argmax(), (8, 8)))
-print("windowed peak:", np.unravel_index(windowed_quantum.argmax(), (8, 8)))
+result1 = qm.run(exe, on=reference, shots=sample_shots, seed=5).result
+prob = compute_prob(result1, Nqx, Nqy)
 
 # %% [markdown]
-# sampled QFT distributionはfinite-shot variationの範囲でclassical FFT referenceと一致します。windowを適用するとmain lobeは広がりますがboundary由来のsidelobeが局在し、nanosheet workflowのpreprocessing tradeoffを再現します。
+# 比較のため、同じ入力に対して古典FFTを適用した場合の結果も計算しましょう。
+
+# %%
+def compute_classical_fft(f: np.ndarray) -> np.ndarray:
+    Nx_target, Ny_target = f.shape
+    f_normalized = f / np.linalg.norm(f)
+    fft = np.fft.ifft2(f_normalized) * np.sqrt(Nx_target * Ny_target)
+    prob = np.abs(fft) ** 2
+    return prob
+
+
+prob_classical = compute_classical_fft(f_padding)
+assert np.allclose(prob, prob_classical, atol=3 / np.sqrt(sample_shots))
+
+# %% [markdown]
+# 結果を可視化しましょう。
+
+# %%
+vmin = min(prob_classical.min(), prob.min())
+vmax = max(prob_classical.max(), prob.max())
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+im4 = axes[0].pcolor(prob_classical.T, vmin=vmin, vmax=vmax, cmap="viridis")
+axes[0].set_title("Classical")
+axes[0].set_xlabel("kx")
+axes[0].set_ylabel("ky")
+im5 = axes[1].pcolor(prob.T, vmin=vmin, vmax=vmax, cmap="viridis")
+axes[1].set_title("Quantum")
+axes[1].set_xlabel("kx")
+print("Classical peak value: {}".format(prob_classical.max()))
+print("Quantum peak value: {}".format(prob.max()))
+fig.colorbar(im5, ax=axes, fraction=0.046, pad=0.04)
+plt.show()
+
+# %% [markdown]
+# FFT参照結果とQFTサンプリング結果のどちらにも、同様のサイドローブ構造が見られます。
+
+# %% [markdown]
+# 窓関数を適用した入力を用い、同じ計算を行いましょう。
+
+# %%
+fw = w2d * f_padding
+program = qm.specialize(make_multidimensional_qft(fw, Nqx, Nqy))
+exe = qm.compile(program, to=reference)
+result2 = qm.run(exe, on=reference, shots=sample_shots, seed=7).result
+prob2 = compute_prob(result2, Nqx, Nqy)
+
+# %% [markdown]
+# また比較のため、同じく窓関数を適用した入力に古典FFTを適用しましょう。
+
+# %%
+prob_classical2 = compute_classical_fft(fw)
+assert np.allclose(prob2, prob_classical2, atol=3 / np.sqrt(sample_shots))
+
+# %% [markdown]
+# これら2つの結果を可視化しましょう。
+
+# %%
+vmin = min(prob_classical2.min(), prob2.min())
+vmax = max(prob_classical2.max(), prob2.max())
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+im6 = axes[0].pcolor(prob_classical2.T, vmin=vmin, vmax=vmax, cmap="viridis")
+axes[0].set_title("Classical")
+axes[0].set_xlabel("kx")
+axes[0].set_ylabel("ky")
+im7 = axes[1].pcolor(prob2.T, vmin=vmin, vmax=vmax, cmap="viridis")
+axes[1].set_title("Quantum")
+axes[1].set_xlabel("kx")
+print("Classical peak value: {}".format(prob_classical2.max()))
+print("Quantum peak value: {}".format(prob2.max()))
+fig.colorbar(im7, ax=axes, fraction=0.046, pad=0.04)
+plt.show()
+
+# %% [markdown]
+# この例では、窓関数を適用するとピークの確率が下がり、その周辺の周波数にも確率が広がります。
 
 # %% [markdown]
 # ## まとめ
@@ -413,4 +339,4 @@ print("windowed peak:", np.unravel_index(windowed_quantum.argmax(), (8, 8)))
 #
 # * Qamomileには標準でQFTを実装する機能が備わっています。
 # * 入力が2のべき乗でない場合、領域を切り捨て/ゼロ埋めすることでQFTを適用可能にします。
-# * 領域の切り捨て/ゼロ埋めにより生じるスペクトル漏れやサイドローブを、窓関数により抑制します。
+# * 領域の切り捨てにより生じるサイドローブを、窓関数により抑制できます。

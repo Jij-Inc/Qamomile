@@ -8,6 +8,8 @@ Read the branch that matches the quantum part of the task:
   and selecting a control lane.
 - [Measured and classical flow](quantum/flow.md): scalar results, per-shot
   calculations, measure-reset loops, and typed sparse maps.
+- [Logical shot index](quantum/current-shot.md): invocation-local indices,
+  measurement-free predicates, and index-dependent quantum work.
 - [Reusable components](quantum/reuse.md): annotated helpers, callable
   parameters, and composition inside kernels.
 - [Coherent integer arithmetic](quantum/arithmetic.md): little-endian

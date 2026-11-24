@@ -50,7 +50,6 @@
 # # !pip install "qamomile[qiskit]"
 
 # %%
-import math
 import os
 
 import qamomile as qm
@@ -120,7 +119,7 @@ endpoint = Aer()
 record = qm.run(
     biased_coin,
     on=endpoint,
-    parameters={"theta": math.pi / 4},
+    parameters={"theta": qm.pi / 4},
     shots=sample_shots,
     seed=7,
 )
@@ -135,7 +134,7 @@ assert sum(result.counts.values()) == sample_shots
 # %% [markdown]
 # Let's look at the key parts:
 #
-# - **`parameters={"theta": math.pi / 4}`** sets the rotation angle to π/4 radians for this run.
+# - **`parameters={"theta": qm.pi / 4}`** sets the rotation angle to π/4 radians for this run.
 #
 # - **`shots=sample_shots`** specifies how many times to repeat the computation. With `sample_shots` set to 256, this example produces 256 measurement results, each containing one classical bit.
 #
@@ -194,7 +193,7 @@ artifact = qm.compile(biased_coin, to=endpoint.target)
 compiled_record = qm.run(
     artifact,
     on=endpoint,
-    parameters={"theta": math.pi / 4},
+    parameters={"theta": qm.pi / 4},
     shots=sample_shots,
     seed=7,
 )

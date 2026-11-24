@@ -115,7 +115,10 @@ class _FakeQsysShot:
     def collate_tags(self) -> dict[str, list[int]]:
         """Return the records emitted by the Helios HUGR target."""
 
-        return {"qamomile": list(self.bits)}
+        return {
+            f"qamomile_{index}": [bit]
+            for index, bit in reversed(tuple(enumerate(self.bits)))
+        }
 
 
 class _FakeNexusJobs:
@@ -222,7 +225,7 @@ def test_helios_submit_snapshot_cancel_and_restore() -> None:
     program = qm.build_source(BELL_SOURCE).specialize("bell")
     artifact = qm.compile(program, to=endpoint.target)
 
-    job = qm.submit(artifact, on=endpoint, shots=4, seed=0)
+    job = qm.submit(artifact, on=endpoint, shots=4, seed=None)
     assert job.status is qm.JobStatus.SUBMITTED
     snapshot = qm.ExecutionSnapshot.from_bytes(job.snapshot().to_bytes())
     reference = snapshot.references()[0]
@@ -239,7 +242,7 @@ def test_helios_submit_snapshot_cancel_and_restore() -> None:
     detached = endpoint.restore(cached, artifact=artifact)
     assert detached.result() == restored_result
 
-    pending = qm.submit(artifact, on=endpoint, shots=2, seed=0)
+    pending = qm.submit(artifact, on=endpoint, shots=2, seed=None)
     pending.cancel()
     assert pending.status is qm.JobStatus.CANCELLED
 
@@ -255,7 +258,7 @@ def test_helios_measures_unsigned_integer_registers() -> None:
         HeliosOptions(system_name="Helios-1E-lite", timeout=1.0),
         client=client,
     )
-    exercise_uint_measurement_backend(endpoint=endpoint, seed=0)
+    exercise_uint_measurement_backend(endpoint=endpoint, seed=None)
 
     client.jobs.rows = ((0,),)
     state = qm.build_source(
@@ -268,7 +271,7 @@ def zero() -> qm.Q[qm.Bits[1]]:
 """,
         module_name="helios_expectation",
     ).specialize("zero")
-    estimate = qm.expectation(state, qm.Z(0), on=endpoint, shots=4, seed=0)
+    estimate = qm.expectation(state, qm.Z(0), on=endpoint, shots=4, seed=None)
     assert estimate.value == 1.0
     assert estimate.shots == 4
 
@@ -384,11 +387,124 @@ def sample() -> qm.Bits[1]:
     assert result.counts == {(1,): 4}
 
 
+def _assert_feedback_without_int_ports(
+    program: qm.Program, expected_counts: dict[tuple[int, ...], int]
+) -> None:
+    from hugr import ops
+    from hugr.std.int import int_t
+
+    from qamomile.hugr import Hugr, Selene, load_package
+
+    artifact = qm.compile(program, to=Hugr())
+    conditionals = [
+        node.op
+        for _, node in load_package(artifact).modules[0].items()
+        if isinstance(node.op, ops.Conditional)
+    ]
+    assert conditionals
+    for conditional in conditionals:
+        assert int_t(6) not in conditional.other_inputs
+        assert int_t(6) not in conditional.outputs
+    assert (
+        qm.run(program, on=qm.Reference(), shots=4, seed=7).result.counts
+        == expected_counts
+    )
+    assert (
+        qm.execute(artifact, on=Selene(timeout=30.0), shots=4, seed=7).counts
+        == expected_counts
+    )
+
+
+@pytest.mark.parametrize("unused", [0, 2**31])
+def test_hugr_omits_unused_const_integer_branch_ports(unused: int) -> None:
+    """A measured conditional has no ports for an unused bound Int."""
+    source = """
+import qamomile as qm
+
+@qm.qkernel
+def integer_capture(unused: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[1]]:
+    q = qm.qubits(1)
+    bit = qm.measure(qm.prepare(True))
+    if bit:
+        q = qm.x(q, target=0)
+    return qm.measure(q)
+"""
+    program = qm.build_source(source).specialize("integer_capture", unused=unused)
+    _assert_feedback_without_int_ports(program, {(1,): 4})
+
+
+def test_hugr_forwards_const_tuple_across_feedback() -> None:
+    """The tuple is first read after feedback, where its index fits the target."""
+    program = qm.build_source(
+        """
+import qamomile as qm
+
+@qm.qkernel
+def tuple_capture(offset: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[1]]:
+    values = (offset, offset)
+    q = qm.qubits(1)
+    if qm.measure(qm.prepare(True)):
+        q = qm.x(q)
+    q = qm.x(q, target=values[0] - 2147483648)
+    return qm.measure(q)
+"""
+    ).specialize("tuple_capture", offset=2**31)
+    _assert_feedback_without_int_ports(program, {(0,): 4})
+
+
+def test_hugr_prunes_forwarding_through_nested_const_condition() -> None:
+    """Forwarding through a Const branch does not introduce a feedback port."""
+    program = qm.build_source(
+        """
+import qamomile as qm
+
+@qm.qkernel
+def nested(unused: qm.Const[qm.Int], enabled: qm.Const[qm.Bool]) -> qm.Shot[qm.Bits[1]]:
+    q = qm.qubits(1)
+    if qm.measure(qm.prepare(True)):
+        if enabled:
+            q = qm.x(q)
+    return qm.measure(q)
+"""
+    ).specialize("nested", unused=2**31, enabled=True)
+    _assert_feedback_without_int_ports(program, {(1,): 4})
+
+
+def test_hugr_reuses_const_forwarded_by_nested_branches() -> None:
+    """A Const read after nested feedback stays available outside its branches."""
+
+    from qamomile.compilation import OptimizationPipeline
+    from qamomile.hugr import Hugr, Selene
+
+    source = """
+import qamomile as qm
+
+@qm.qkernel
+def nested(offset: qm.Const[qm.Int], enabled: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[2]]:
+    state = qm.qubits(2)
+    outer = qm.measure(qm.prepare(True))
+    if outer:
+        inner = qm.measure(qm.prepare(True))
+        if inner and enabled == 1:
+            state = qm.x(state, target=1)
+    state = qm.x(state, target=offset - 2147483648)
+    return qm.measure(state)
+"""
+    program = qm.build_source(source).specialize("nested", offset=2**31, enabled=1)
+    program = qm.Program.from_bytes(program.to_bytes())
+    expected = qm.run(program, on=qm.Reference(), shots=4, seed=7).result.counts
+    artifact = qm.compile(program, to=Hugr(), optimizer=OptimizationPipeline())
+    actual = qm.execute(artifact, on=Selene(timeout=30.0), shots=4, seed=7)
+
+    assert expected == {(1, 1): 4}
+    assert actual.counts == expected
+
+
 @pytest.mark.parametrize("initial", [False, True])
 def test_hugr_executes_measurement_sites_inside_a_dynamic_branch(
     initial: bool,
 ) -> None:
-    """A trailing result row is independent of selected branch event count."""
+    """Direct Boolean records are independent of selected branch event count."""
 
     from qamomile.hugr import Hugr, Selene
 
@@ -396,7 +512,7 @@ def test_hugr_executes_measurement_sites_inside_a_dynamic_branch(
 import qamomile as qm
 
 @qm.qkernel
-def sample() -> qm.Shot[qm.Bool]:
+def sample() -> qm.Shot[qm.Bit]:
     selector = qm.measure(qm.prepare({initial!r}))
     if selector:
         ignored = qm.measure(qm.prepare(False))
@@ -424,7 +540,7 @@ def sample() -> qm.Shot[qm.Bool]:
     )
 
     assert expected == {((1,) if initial else (0,)): 4}
-    assert dict(artifact.metadata.entries)["result_measurements"] == "trailing"
+    assert dict(artifact.metadata.entries)["result_measurements"] == "named-records"
     assert artifact.result_abi.native_width == 1
     assert artifact.result_abi.source_order == (0,)
     assert result.counts == expected
@@ -442,7 +558,7 @@ def test_hugr_composes_branch_measurements_with_an_early_return(
 import qamomile as qm
 
 @qm.qkernel
-def sample() -> qm.Shot[qm.Bool]:
+def sample() -> qm.Shot[qm.Bit]:
     selector = qm.measure(qm.prepare({initial!r}))
     if selector:
         return qm.measure(qm.prepare(True))
@@ -467,7 +583,7 @@ def sample() -> qm.Shot[qm.Bool]:
     )
 
     assert expected == {((1,) if initial else (0,)): 4}
-    assert dict(artifact.metadata.entries)["result_measurements"] == "trailing"
+    assert dict(artifact.metadata.entries)["result_measurements"] == "named-records"
     assert artifact.result_abi.native_width == 1
     assert result.counts == expected
 
@@ -492,7 +608,7 @@ def choose() -> qm.Q[qm.Bool]:
     return state
 
 @qm.qkernel
-def sample() -> qm.Shot[qm.Bool]:
+def sample() -> qm.Shot[qm.Bit]:
     return qm.measure(choose())
 """
     program = qm.build_source(
@@ -815,38 +931,167 @@ def test_selene_rejects_invalid_options(kwargs: dict[str, object]) -> None:
         Selene(**kwargs)
 
 
-def test_selene_requires_result_instrumentation() -> None:
-    """Reject HUGR artifacts that omit ordered QSystem result records."""
+def test_hugr_requires_named_result_records_at_execution() -> None:
+    """Execution rejects an artifact whose record-format metadata is absent."""
+
+    from dataclasses import replace
 
     from qamomile.compilation import Invocation
     from qamomile.hugr import Hugr, Selene
+    from qamomile.ir import FrozenMapping
 
     program = qm.build_source(BELL_SOURCE).specialize("bell")
-    artifact = qm.compile(program, to=Hugr(record_results=False))
-
+    artifact = qm.compile(program, to=Hugr())
+    metadata = FrozenMapping(
+        tuple(
+            (name, value)
+            for name, value in artifact.metadata.entries
+            if name != "result_measurements"
+        )
+    )
+    artifact = replace(artifact, metadata=metadata)
     with pytest.raises(qm.ExecutionError, match="Q8690"):
         Selene().launch(artifact, Invocation.create(shots=1, seed=0))
 
 
 def test_selene_decodes_only_well_formed_result_streams() -> None:
-    """Validate Selene shot count, tag width, value domain, and stream shape."""
+    """Named tags determine ordering and reject missing, repeated, or bad bits."""
 
     from qamomile.hugr._selene import _decode_result_counts
 
     assert _decode_result_counts(
-        [[("qamomile", True), ("qamomile", 0)]],
+        [[("qamomile_1", 0), ("other", 9), ("qamomile_0", True)]],
         shots=1,
         width=2,
     ) == {(1, 0): 1}
     for native_shots, shots, width in (
-        ([[("qamomile", 1)]], 1, 2),
-        ([[("qamomile", 2)]], 1, 1),
-        ([[("qamomile", 1)]], 2, 1),
+        ([[("qamomile_0", 1)]], 1, 2),
+        ([[("qamomile_0", 2)]], 1, 1),
+        ([[("qamomile_0", 1)]], 2, 1),
+        ([[("qamomile_0", 1), ("qamomile_0", 0)]], 1, 1),
+        ([[("qamomile_0", 1), ("qamomile_1", 0)]], 1, 1),
+        ([[("qamomile_0", "1")]], 1, 1),
+        ([[("qamomile", 1)]], 1, 1),
+        ([[("malformed",)]], 1, 1),
     ):
         with pytest.raises(qm.ExecutionError, match="Q8692"):
             _decode_result_counts(native_shots, shots=shots, width=width)
-    with pytest.raises(qm.ExecutionError, match="Q8693"):
-        _decode_result_counts([[("malformed",)]], shots=1, width=1)
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [
+        {},
+        {"qamomile_0": [0, 1]},
+        {"qamomile_0": [2]},
+        {"qamomile_0": ["1"]},
+        {"qamomile_1": [1]},
+        {"qamomile": [1]},
+    ],
+)
+def test_helios_rejects_invalid_named_result_records(tags) -> None:
+    """The common logical row rejects invalid QSystem columns at the boundary."""
+
+    from qamomile.hugr._nexus import _decode_qsystem_counts
+
+    raw = SimpleNamespace(results=[SimpleNamespace(collate_tags=lambda: tags)])
+    with pytest.raises(qm.ExecutionError, match="Q8646"):
+        _decode_qsystem_counts(raw, shots=1, width=1)
+
+
+_DIRECT_RECORD_CASES = (
+    pytest.param(
+        """    bits = qm.measure(qm.prepare((True, False)))
+    return bits[1], not bits[1], bits[0], bits[0], bits[1] == bits[0]""",
+        "tuple[qm.Bit, qm.Bool, qm.Bit, qm.Bit, qm.Bool]",
+        (0, 1, 1, 1, 0),
+        2,
+        2,
+        id="mixed-reordered-repeated",
+    ),
+    pytest.param(
+        "    return True, False, True and not False",
+        "tuple[qm.Bool, qm.Bool, qm.Bool]",
+        (1, 0, 1),
+        0,
+        0,
+        id="classical-only",
+    ),
+    pytest.param(
+        "    return None",
+        "qm.Unit",
+        (),
+        0,
+        0,
+        id="unit",
+    ),
+    *(
+        pytest.param(
+            f"""    selector = qm.measure(qm.prepare({initial!r}))
+    if selector:
+        ignored = qm.measure(qm.prepare(False))
+        value = qm.measure(qm.prepare(True))
+    else:
+        value = qm.measure(qm.prepare(False))
+    return value, not selector, selector, value""",
+            "tuple[qm.Bit, qm.Bool, qm.Bit, qm.Bit]",
+            (int(initial), int(not initial), int(initial), int(initial)),
+            3,
+            4,
+            id=f"unequal-branch-{initial}",
+        )
+        for initial in (False, True)
+    ),
+    pytest.param(
+        """    state = qm.prepare(False)
+    bit, state = qm.measure_reset(state)
+    for step in range(2):
+        state = qm.x(state)
+        bit, state = qm.measure_reset(state)
+    qm.discard(state)
+    return bit, not bit, bit""",
+        "tuple[qm.Bit, qm.Bool, qm.Bit]",
+        (1, 0, 1),
+        1,
+        1,
+        id="loop-measurements",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    "body,result_type,expected,qubits,allocations", _DIRECT_RECORD_CASES
+)
+def test_hugr_direct_boolean_records_share_all_execution_profiles(
+    body, result_type, expected, qubits, allocations
+) -> None:
+    """Selene and Helios preserve direct logical rows without output qubits."""
+
+    from qamomile.hugr import Helios, HeliosOptions, Hugr, Selene, load_package
+
+    source = f"import qamomile as qm\n@qm.qkernel\ndef sample() -> qm.Shot[{result_type}]:\n{body}\n"
+    program = qm.build_source(source).specialize("sample")
+    artifact = qm.compile(program, to=Hugr())
+    assert artifact.result_abi.source_order == tuple(range(len(expected)))
+    assert artifact.result_abi.native_width == len(expected)
+    assert artifact.report.literal_int("qamomile.circuit.virtual_qubits") == qubits
+    package = load_package(artifact)
+    operations = [str(data.op) for _, data in package.modules[0].nodes()]
+    assert sum("name='QAlloc'" in operation for operation in operations) == allocations
+    reference = qm.run(program, on=qm.Reference(), shots=4).result
+    actual = qm.execute(artifact, on=Selene(timeout=30.0), shots=4)
+    assert actual.counts == reference.counts == {expected: 4}
+
+    client = _FakeNexus()
+    client.jobs.rows = (expected,)
+    endpoint = Helios(HeliosOptions(system_name="Helios-1E-lite"), client=client)
+    remote_artifact = qm.compile(program, to=endpoint.target)
+    remote = qm.execute(remote_artifact, on=endpoint, shots=4)
+    assert remote.counts == {expected: 4}
+    assert remote.result_abi == remote_artifact.result_abi
+    assert (
+        remote_artifact.report.literal_int("qamomile.circuit.virtual_qubits") == qubits
+    )
 
 
 def test_selene_fails_closed_without_the_optional_runtime(
@@ -929,7 +1174,12 @@ def test_hugr_materializes_launch_controlled_qcore(
 
     program = qm.build_source(source).specialize(entrypoint)
     artifact = qm.compile(program, to=Hugr())
-    child = _materialize_launch_artifact(artifact, parameters, target=Hugr())
+    child = _materialize_launch_artifact(
+        artifact,
+        parameters,
+        target=Hugr(),
+        invocation=qm.Invocation.create(parameters=parameters, shots=4, seed=2),
+    )
     assert "rust-qcore-standard-optimization" not in artifact.report.stages
     assert child.report.stages.count("rust-qcore-standard-optimization") == 1
     result = qm.execute(
@@ -1430,8 +1680,8 @@ def discard_state() -> qm.Bits[1]:
 
     assert Requirement.DISCARD in program.entry.requirements
     assert Requirement.DISCARD in Selene().capabilities.requirements
-    assert artifact.result_abi.native_width == 2
-    assert artifact.result_abi.source_order == (1,)
+    assert artifact.result_abi.native_width == 1
+    assert artifact.result_abi.source_order == (0,)
     assert set(reference.counts) == {(0,), (1,)}
     assert set(result.counts) == {(0,), (1,)}
     assert result.shots == 8
@@ -1439,7 +1689,7 @@ def discard_state() -> qm.Bits[1]:
 
 @pytest.mark.parametrize("initial", [False, True])
 def test_hugr_discards_a_branch_local_owner(initial: bool) -> None:
-    """A selected discard participates in the dynamic trailing-event protocol."""
+    """A selected discard does not add logical result records."""
 
     from qamomile.hugr import Hugr, Selene
 
@@ -1447,7 +1697,7 @@ def test_hugr_discards_a_branch_local_owner(initial: bool) -> None:
 import qamomile as qm
 
 @qm.qkernel
-def sample() -> qm.Shot[qm.Bool]:
+def sample() -> qm.Shot[qm.Bit]:
     selector = qm.measure(qm.prepare({initial!r}))
     if selector:
         scratch = qm.prepare(True)
@@ -1469,7 +1719,7 @@ def sample() -> qm.Shot[qm.Bool]:
         seed=3,
     )
 
-    assert dict(artifact.metadata.entries)["result_measurements"] == "trailing"
+    assert dict(artifact.metadata.entries)["result_measurements"] == "named-records"
     assert artifact.result_abi.native_width == 1
     assert result.counts == {((1,) if initial else (0,)): 4}
 
@@ -2241,11 +2491,25 @@ def rotate(
         Hugr().export_library(program)
 
 
-def test_hugr_library_rejects_arbitrary_precision_integer_abi() -> None:
-    """QCore Int is not silently narrowed to HUGR's fixed-width integer."""
+@pytest.mark.parametrize(
+    "value",
+    [-(1 << 31) - 1, -(1 << 31), (1 << 31) - 1, 1 << 31],
+)
+def test_hugr_library_guards_finite_integer_abi(value: int, tmp_path: Path) -> None:
+    """Linked Int inputs retain boundary values and reject narrowing outside them."""
+
+    import selene_sim as selene
+    from hugr import tys
+    from hugr.build import Module
+    from hugr.std.int import IntVal, int_t
+    from selene_sim.exceptions import SelenePanicError
+    from tket_exts import result
 
     from qamomile.hugr import Hugr
+    from qamomile.hugr._compiler import _int64_operation
+    from qamomile.hugr._module import _finish_hugr_package
 
+    link_name = "qamomile.tests.integer_identity"
     source = """
 import qamomile as qm
 
@@ -2256,9 +2520,43 @@ def identity(value: qm.Param[qm.Int]) -> qm.Int:
     program = qm.build_source(source, module_name="hugr_integer_abi").specialize(
         "identity"
     )
+    provider = Hugr().export_library(program, link_name=link_name)
+    module = Module()
+    signature = tys.PolyFuncType([], tys.FunctionType([int_t(6)], [int_t(6)]))
+    declaration = module.declare_function(link_name, signature)
+    main = module.define_function("main", [], [], visibility="Public")
+    argument = main.load(IntVal(value, 6))[0]
+    returned = main.call(declaration, argument)[0]
+    exact = main.add_op(_int64_operation("ieq", 2, boolean=True), returned, argument)[0]
+    record = main.add_op(result.result_bool("exact"), exact)
+    main.set_outputs()
+    main.add_state_order(record, main.output_node)
+    consumer, _ = _finish_hugr_package(module, record_results=True)
+    runner = selene.build(
+        consumer.link(provider), name="integer_identity", build_dir=tmp_path
+    )
 
-    with pytest.raises(qm.CapabilityError, match="Q8641"):
-        Hugr().export_library(program)
+    def run_program(processes: int) -> list[list[tuple[str, object]]]:
+        """Observe every record emitted after the exported Int boundary."""
+
+        return [
+            list(shot)
+            for shot in runner.run_shots(
+                selene.Quest(),
+                n_qubits=1,
+                n_shots=3,
+                n_processes=processes,
+                random_seed=2,
+                timeout=30.0,
+            )
+        ]
+
+    if -(1 << 31) <= value < (1 << 31):
+        for processes in (1, 2):
+            assert run_program(processes) == [[("exact", 1)]] * 3
+    else:
+        with pytest.raises(SelenePanicError, match="Q8695"):
+            run_program(1)
 
 
 @pytest.mark.guppy
@@ -2428,6 +2726,7 @@ def test_hugr_executes_nondestructive_pauli_measurements() -> None:
     result = qm.run(program, on=Selene(timeout=30.0), shots=4, seed=2).result
 
     assert result.values == {(1, 1, 0, 0, 0, 0, (1,), (0,), (0,)): 4}
+    assert all(type(bit) is int for row in result.values for bit in row[:6])
 
 
 def test_hugr_preserves_and_executes_measurement_control() -> None:
@@ -2444,7 +2743,7 @@ def test_hugr_preserves_and_executes_measurement_control() -> None:
         seed=5,
     )
 
-    assert artifact.result_abi.source_order == (1, 2)
+    assert artifact.result_abi.source_order == (0, 1)
     assert set(result.counts) <= {(0, 0), (1, 1)}
 
 
@@ -2752,8 +3051,8 @@ def test_hugr_executes_multi_input_automatic_uncomputation() -> None:
     assert result.counts == {(1,): 4}
 
 
-def test_hugr_preserves_private_trailing_measurement_width() -> None:
-    """Selene receives the full measurement record and projects the result."""
+def test_hugr_records_only_returned_measurement_values() -> None:
+    """Selene receives logical records independently of ignored measurements."""
 
     from qamomile.hugr import Hugr, Selene
 
@@ -2768,13 +3067,13 @@ def test_hugr_preserves_private_trailing_measurement_width() -> None:
         seed=3,
     )
 
-    assert artifact.result_abi.native_width == 2
+    assert artifact.result_abi.native_width == 1
     assert artifact.result_abi.source_order == (0,)
     assert result.counts == {(0,): 4}
 
 
-def test_hugr_tracks_measurement_provenance_through_conditional_phi() -> None:
-    """A measured bit keeps semantic provenance after branch pass-through."""
+def test_hugr_records_measurement_values_through_conditional_outputs() -> None:
+    """A measured value remains the logical result after branch pass-through."""
 
     from qamomile.hugr import Hugr, Selene
 
@@ -2782,7 +3081,7 @@ def test_hugr_tracks_measurement_provenance_through_conditional_phi() -> None:
 import qamomile as qm
 
 @qm.qkernel
-def passthrough() -> qm.Shot[qm.Bool]:
+def passthrough() -> qm.Shot[qm.Bit]:
     state = qm.qubits(1)
     flag, state = qm.measure_z(state, 0)
     if flag:
@@ -2796,7 +3095,7 @@ def passthrough() -> qm.Shot[qm.Bool]:
     result = qm.execute(artifact, on=Selene(timeout=30.0), shots=3, seed=9)
 
     assert artifact.result_abi.source_order == (0,)
-    assert artifact.result_abi.native_width == 2
+    assert artifact.result_abi.native_width == 1
     assert result.counts == {(0,): 3}
 
 
@@ -2931,3 +3230,18 @@ def test_hugr_sqrt() -> None:
     from .test_sqrt import exercise_sqrt_backend
 
     exercise_sqrt_backend(Selene(timeout=30.0), seed=7)
+
+
+@pytest.mark.parametrize("seed", [0, 1])
+def test_helios_rejects_explicit_seeds(seed: int) -> None:
+    """Helios rejects explicit zero before provider submission."""
+    from qamomile.hugr import Helios, HeliosOptions
+
+    client = _FakeNexus()
+    endpoint = Helios(
+        HeliosOptions(system_name="Helios-1E-lite", timeout=1.0), client=client
+    )
+    program = qm.build_source(BELL_SOURCE).specialize("bell")
+    with pytest.raises(qm.ExecutionError, match="Q8643"):
+        qm.run(program, on=endpoint, shots=4, seed=seed)
+    assert client.submissions == 0

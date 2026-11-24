@@ -149,9 +149,9 @@ impl CertifiedQsvtPolynomial {
 /// Convert QSP `Wx` phases into canonical projector-convention coordinates.
 ///
 /// The endpoint corrections follow the Qamomile projector convention. Every
-/// result is reduced to the half-open interval `[-pi, pi)`. A degree-zero
-/// sequence receives both endpoint corrections because its sole coordinate is
-/// simultaneously the first and last phase.
+/// result is reduced to the half-open interval `[-pi, pi)`. At degree zero,
+/// the only operation is a phase rotation in either convention: its angle
+/// requires no endpoint correction.
 ///
 /// # Errors
 ///
@@ -167,19 +167,25 @@ pub fn convert_qsp_wx_phases(phases: &[f64]) -> Result<Vec<f64>, QsvtPhaseError>
     if phases.iter().any(|phase| !phase.is_finite()) {
         return Err(QsvtPhaseError::NonFinite);
     }
+    if let [phase] = phases {
+        let remainder = phase % TAU;
+        let angle = if remainder >= PI {
+            remainder - TAU
+        } else if remainder < -PI {
+            remainder + TAU
+        } else {
+            remainder
+        };
+        return Ok(vec![angle]);
+    }
     let degree = phases.len() - 1;
-    let degree_factor = if degree == 0 {
-        -1.0
-    } else {
-        let factor = degree
-            .checked_mul(2)
-            .and_then(|value| value.checked_sub(1))
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or(QsvtPhaseError::Budget)?;
-        f64::from(factor)
-    };
+    let factor = degree
+        .checked_mul(2)
+        .and_then(|value| value.checked_sub(1))
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or(QsvtPhaseError::Budget)?;
     let mut converted = phases.to_vec();
-    converted[0] += degree_factor * FRAC_PI_4;
+    converted[0] += f64::from(factor) * FRAC_PI_4;
     for phase in converted.iter_mut().take(degree).skip(1) {
         *phase -= FRAC_PI_2;
     }
@@ -701,10 +707,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn converts_endpoints_including_the_degree_zero_overlap() {
-        let scalar = convert_qsp_wx_phases(&[0.25]).expect("scalar phase");
-        assert!((scalar[0] - (0.25 - FRAC_PI_2)).abs() < 4.0 * f64::EPSILON);
+    fn degree_zero_preserves_the_wx_phase_modulo_one_turn() {
+        for phase in [0.0, f64::EPSILON / 4.0, 0.25, -PI, PI.next_down()] {
+            assert_eq!(convert_qsp_wx_phases(&[phase]), Ok(vec![phase]));
+        }
+        assert_eq!(convert_qsp_wx_phases(&[PI]), Ok(vec![-PI]));
+        assert_eq!(
+            convert_qsp_wx_phases(&[(-PI).next_down()]),
+            Ok(vec![PI.next_down()])
+        );
+        assert_eq!(
+            convert_qsp_wx_phases(&[3.0 * FRAC_PI_2]),
+            Ok(vec![-FRAC_PI_2])
+        );
+    }
 
+    #[test]
+    fn converts_endpoints_of_a_quadratic_sequence() {
         let phases = convert_qsp_wx_phases(&[0.1, 0.2, 0.3]).expect("quadratic phases");
         assert!((phases[0] - (0.1 + 3.0 * FRAC_PI_4)).abs() < 4.0 * f64::EPSILON);
         assert!((phases[1] - (0.2 - FRAC_PI_2)).abs() < 4.0 * f64::EPSILON);

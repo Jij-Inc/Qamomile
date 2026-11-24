@@ -331,7 +331,7 @@ def test_qiskit_ibm_runtime_submit_snapshot_cancel_and_restore(
     monkeypatch.setattr(qpy, "dump", forbid_qpy)
     monkeypatch.setattr(qpy, "load", forbid_qpy)
 
-    job = qm.submit(artifact, on=endpoint, shots=4, seed=0)
+    job = qm.submit(artifact, on=endpoint, shots=4, seed=None)
     native = endpoint._sampler.jobs[-1]
     restored_jobs[job.job_id] = native
 
@@ -349,7 +349,7 @@ def test_qiskit_ibm_runtime_submit_snapshot_cancel_and_restore(
     detached = endpoint.restore(cached, artifact=artifact)
     assert detached.result() == restored_result
 
-    other = qm.submit(artifact, on=endpoint, shots=2, seed=0)
+    other = qm.submit(artifact, on=endpoint, shots=2, seed=None)
     other_native = endpoint._sampler.jobs[-1]
     other.cancel()
     assert other.status is qm.JobStatus.CANCELLED
@@ -373,7 +373,7 @@ def test_qiskit_ibm_runtime_measures_unsigned_integer_registers(
         lambda: SimpleNamespace(SamplerV2=_FakeRuntimeSampler),
     )
     endpoint = IBMRuntime(BasicSimulator())
-    exercise_uint_measurement_backend(endpoint=endpoint, seed=0)
+    exercise_uint_measurement_backend(endpoint=endpoint, seed=None)
 
     monkeypatch.setattr(_FakeRuntimeSampler, "rows", ["0"])
     state = qm.build_source(
@@ -386,13 +386,15 @@ def zero() -> qm.Q[qm.Bits[1]]:
 """,
         module_name="ibm_runtime_expectation",
     ).specialize("zero")
-    estimate = qm.expectation(state, qm.Z(0), on=endpoint, shots=4, seed=0)
+    estimate = qm.expectation(state, qm.Z(0), on=endpoint, shots=4, seed=None)
     assert estimate.value == 1.0
     assert estimate.shots == 4
 
 
+@pytest.mark.parametrize("seed", [0, 3])
 def test_qiskit_ibm_runtime_rejects_nonportable_seed(
     monkeypatch: pytest.MonkeyPatch,
+    seed: int,
 ) -> None:
     """Runtime never pretends provider sampling implements seeded execution."""
 
@@ -413,7 +415,7 @@ def test_qiskit_ibm_runtime_rejects_nonportable_seed(
     )
 
     with pytest.raises(qm.ExecutionError, match="portable seed contract"):
-        qm.submit(artifact, on=endpoint, shots=2, seed=3)
+        qm.submit(artifact, on=endpoint, shots=2, seed=seed)
 
 
 def test_qiskit_executes_boolean_lifting() -> None:
@@ -443,8 +445,8 @@ def test_qiskit_executes_python_collection_loops() -> None:
 def test_qiskit_executes_derived_measurement_results() -> None:
     """Qiskit evaluates the retained result tree after each raw sample."""
 
-    exercise_derived_result_backend(endpoint=_basic_simulator_endpoint(), seed=0)
-    exercise_broadcast_gate_backend(endpoint=_basic_simulator_endpoint(), seed=0)
+    exercise_derived_result_backend(endpoint=_basic_simulator_endpoint(), seed=None)
+    exercise_broadcast_gate_backend(endpoint=_basic_simulator_endpoint(), seed=None)
 
 
 def test_qiskit_measures_unsigned_integer_registers() -> None:
@@ -726,7 +728,7 @@ def test_qiskit_executes_standard_python_record_results() -> None:
         program,
         on=_basic_simulator_endpoint(),
         shots=4,
-        seed=0,
+        seed=None,
     ).result.values == {(("first", (1,)), ("pair", (0, 1))): 4}
 
 
@@ -1192,7 +1194,7 @@ def test_qiskit_materializes_dynamic_classical_index_at_launch() -> None:
     """Rust resolves an aggregate path before QPY parameter emission."""
 
     exercise_dynamic_classical_index_backend(
-        endpoint=_basic_simulator_endpoint(), seed=0
+        endpoint=_basic_simulator_endpoint(), seed=None
     )
 
 
@@ -1254,6 +1256,7 @@ def test_qiskit_executes_nondestructive_pauli_measurements() -> None:
     result = qm.run(program, on=Aer(), shots=4, seed=2).result
 
     assert result.values == {(1, 1, 0, 0, 0, 0, (1,), (0,), (0,)): 4}
+    assert all(type(bit) is int for row in result.values for bit in row[:6])
 
 
 @pytest.mark.parametrize(("theta", "expected"), [(0.0, (0,)), (math.pi, (1,))])
@@ -1279,6 +1282,59 @@ def test_qiskit_parameterized_rotation_executes(
     if theta == 0.0:
         defaulted = qm.execute(artifact, on=Aer(), shots=4, seed=7)
         assert defaulted.counts == {(0,): 4}
+
+
+@pytest.mark.filterwarnings(
+    r"ignore:.*QuantumCircuit\.(duration|unit).*:DeprecationWarning"
+)
+def test_qiskit_binding_preserves_block_local_conditions_and_schedule() -> None:
+    """Binding keeps each block's own classical wires, phase, and circuit schedule."""
+    from qiskit import ClassicalRegister, QuantumCircuit, transpile
+
+    program = qm.build_source(ROTATION_SOURCE).specialize("rotate")
+    artifact = qm.compile(program, to=qm.qiskit.Qiskit())
+    circuit = transpile(qm.qiskit.load_circuit(artifact), initial_layout=[0])
+    (theta,) = circuit.parameters
+    body = QuantumCircuit(circuit.qubits, ClassicalRegister(1, "inner"))
+    with body.if_test((body.clbits[0], True)):
+        body.ry(theta, 0)
+    circuit.for_loop(range(2), None, body, circuit.qubits, circuit.clbits)
+    circuit.global_phase = theta / 2
+    circuit.duration = 42
+    circuit.unit = "ns"
+
+    bound = qm.qiskit.bind_circuit(
+        circuit, artifact, qm.Invocation.create(parameters={"theta": 1.0})
+    )
+    branch = bound.data[-1].operation.blocks[0].data[0].operation
+    assert branch.condition == (body.clbits[0], True)
+    assert branch.blocks[0].data[0].operation.params == [1.0]
+    assert circuit.global_phase == theta / 2
+    assert bound.global_phase == 0.5
+    assert bound.layout == circuit.layout
+    assert (bound.duration, bound.unit) == (42, "ns")
+
+
+@pytest.mark.parametrize("exit_name", ["break_loop", "continue_loop"])
+def test_qiskit_binding_preserves_loop_exits(exit_name: str) -> None:
+    """Loop exits are leaf instructions inside the labeled switch that guards them."""
+    program = qm.build_source(ROTATION_SOURCE).specialize("rotate")
+    artifact = qm.compile(program, to=qm.qiskit.Qiskit())
+    circuit = qm.qiskit.load_circuit(artifact)
+    (theta,) = circuit.parameters
+    with circuit.for_loop(range(2)):
+        with circuit.switch(circuit.clbits[0], label="exit condition") as case:
+            with case(1):
+                getattr(circuit, exit_name)()
+        circuit.ry(theta, 0)
+
+    bound = qm.qiskit.bind_circuit(
+        circuit, artifact, qm.Invocation.create(parameters={"theta": 1.0})
+    )
+    switch, rotation = bound.data[-1].operation.blocks[0]
+    assert switch.label == "exit condition"
+    assert switch.operation.blocks[0].data[0].name == exit_name
+    assert rotation.operation.params == [1.0]
 
 
 def test_qiskit_accepts_the_full_unsigned_seed_domain() -> None:
@@ -1372,7 +1428,7 @@ def test_qiskit_preserves_private_trailing_measurement_width() -> None:
     program = qm.build_source(TRAILING_MEASUREMENT_SOURCE).specialize(
         "trailing_measurement"
     )
-    record = qm.run(program, on=_basic_simulator_endpoint(), shots=4, seed=0)
+    record = qm.run(program, on=_basic_simulator_endpoint(), shots=4, seed=None)
 
     assert record.artifact.result_abi.source_order == (0,)
     assert record.artifact.format == "qamomile.shot-execution.v1"
@@ -1558,3 +1614,35 @@ def test_qiskit_target_profile_is_derived_from_the_backend_and_fingerprinted() -
     from qiskit.providers.basic_provider import BasicSimulator
 
     assert profile_from_backend(BasicSimulator()) is None
+
+
+@pytest.mark.parametrize("seed", [None, 0])
+def test_aer_preserves_unspecified_and_explicit_zero_seeds(
+    monkeypatch: pytest.MonkeyPatch, seed: int | None
+) -> None:
+    """Aer receives None and zero distinctly and executes both requests."""
+    from qiskit_aer import AerSimulator
+
+    from qamomile.qiskit import Aer
+
+    seen = []
+    original = AerSimulator.run
+
+    def observed_run(self, *args, **kwargs):
+        seen.append(kwargs.get("seed_simulator"))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(AerSimulator, "run", observed_run)
+    program = qm.build_source(BASIS_SOURCE).specialize("basis")
+    result = qm.run(program, on=Aer(), shots=8, seed=seed).result
+    assert result.counts == {(1, 0, 0): 8}
+    assert seen == [seed]
+
+
+@pytest.mark.parametrize("seed", [0, 1])
+def test_qiskit_backend_rejects_explicit_seeds(seed: int) -> None:
+    """Live backends reject zero as well as other explicit seeds."""
+    endpoint = _basic_simulator_endpoint()
+    program = qm.build_source(BASIS_SOURCE).specialize("basis")
+    with pytest.raises(qm.ExecutionError, match="Q8216"):
+        qm.run(program, on=endpoint, shots=4, seed=seed)

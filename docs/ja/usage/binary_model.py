@@ -20,14 +20,7 @@
 #
 # # `BinaryModel`の使い方
 #
-# `BinaryModel`はBINARY（0/1）変数またはSPIN（-1/1）変数の制約なし多項式目的関数を表します。このページでは係数mappingからモデルを作り、assignmentの評価、変数domainの変換、Hamiltonian・sample・OMMXとの連携を順に説明します。
-
-# %% [markdown]
-# ## インストール
-#
-# ```bash
-# pip install qamomile
-# ```
+# `BinaryModel`は、バイナリ変数（0または1）やスピン変数（$-1$または$+1$）を使った、制約のない最適化問題の目的関数を多項式で表します。このノートブックでは、`BinaryModel`の使い方を見ていきます。
 
 # %%
 # Install the latest Qamomile through pip!
@@ -36,391 +29,199 @@
 # %%
 import itertools
 import math
-
-import ommx.v1
+import os
 
 import qamomile as qm
-from qamomile.optimization import BinaryModel, OMMXProblem, VarType
+from qamomile.optimization import BinaryModel, VarType
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 # %% [markdown]
-# ## 係数からモデルを作る
+# ## 入力に合わせてモデルの作り方を選ぶ
 #
-# BINARY多項式には`BinaryModel.from_hubo`を使います。各キーは1つの項に含まれる変数IDのtupleで、値はその項の係数です。定数項は別に指定します。変数IDは0から始まる連番でなくても構いません。
+# ### HUBO入力
 #
-# 例として$x_1+2x_3+3x_1x_3+5$を構築します。
+# 0または1を取る変数の最適化問題では、目的関数を整理したとき、異なる3個以上の変数を掛け合わせた項があればHUBO、どの項も2個以下の変数しか含まなければQUBOと呼びます。
+#
+# どちらの場合も、モデルを作るには`BinaryModel.from_hubo`を使います。引数には辞書を渡し、キーには掛け合わせる変数のIDを、値にはその項の係数を指定します。
+#
+# 例えば、目的関数$f(x_1,x_3)=x_1+2x_3+3x_1x_3+5$はQUBOです。変数を列ベクトル$\mathbf{x}=(x_1,x_3)^{\mathsf T}$に並べると、次の上三角行列で表せます。
+#
+# $$
+# Q=\begin{bmatrix}1&3\\0&2\end{bmatrix},
+# \qquad f(\mathbf{x})=\mathbf{x}^{\mathsf T}Q\mathbf{x}+5.
+# $$
+#
+# バイナリ変数では$x_i^2=x_i$なので、対角成分の1と2がそれぞれ`(1,)`と`(3,)`の係数になります。対角線の右上にある3は`(1, 3)`の係数です。
 
 # %%
-COEFFICIENTS = {
-    (1,): 1.0,
-    (3,): 2.0,
-    (1, 3): 3.0,
-}
+coefficients = {(1,): 1.0, (3,): 2.0, (1, 3): 3.0}
+constant = 5.0
+variables = (1, 3)
 
-model = BinaryModel.from_hubo(
-    COEFFICIENTS,
-    constant=5.0,
-    variables=(1, 3),
-)
-
-print("vartype:", model.vartype)
-print("constant:", model.constant)
-print("variables:", model.variables)
-print("order:", model.order)
-print("coefficients:", dict(model.coefficients))
-
+model = BinaryModel.from_hubo(coefficients, constant=constant, variables=variables)
+print("Variable IDs:", model.variables)
+print("Polynomial degree:", model.order)
 assert model.vartype is VarType.BINARY
-assert model.constant == 5.0
-assert model.variables == (1, 3)
-assert model.num_variables == 2
+assert model.variables == tuple(sorted(variables))
 assert model.order == 2
-assert model.coefficients == {
-    (1,): 1.0,
-    (1, 3): 3.0,
-    (3,): 2.0,
-}
 
 # %% [markdown]
-# 要素が1つのキー`(1,)`と`(3,)`は一次項、`(1, 3)`は二次項です。`model.variables == (1, 3)`はsequence assignment、Hamiltonianの量子ビット、decodeしたsampleで使う順序を表します。モデルは元の変数IDを保持します。
-
-# %% [markdown]
-# `to_ising()`を使うとBINARYモデルを等価なSPINモデルへ変換できます。逆変換には`to_binary()`を使います。
+# ここにキー`(1, 3, 7)`を加えると、異なる3変数の積$0.1x_1x_3x_7$を含むHUBOになります。一方、`(7, 7, 2)`のように同じIDを繰り返すと、$x_7^2x_2=x_7x_2$となります。`(2, 7)`の項もあれば両方の係数が足し合わされます。空のタプル`()`に指定した値は定数項に加わります。
 
 # %%
-spin_equivalent = model.to_ising()
-
-print("vartype:", spin_equivalent.vartype)
-print("constant:", spin_equivalent.constant)
-print("coefficients:", dict(spin_equivalent.coefficients))
-
-assert spin_equivalent.vartype is VarType.SPIN
-assert spin_equivalent.constant == 29.0 / 4.0
-assert spin_equivalent.coefficients == {
-    (1,): -5.0 / 4.0,
-    (1, 3): 3.0 / 4.0,
-    (3,): -7.0 / 4.0,
-}
-
-# %% [markdown]
-# spin変数とbinary変数には$s=1-2x$の関係があります。この関係を例題へ代入すると、
-#
-# $$
-# \begin{align*}
-# x_1 + 2x_3 + 3x_1x_3 + 5
-# &= \left(\frac{1-s_1}{2}\right)
-# + 2\left(\frac{1-s_3}{2}\right)
-# + 3\left(\frac{1-s_1}{2}\right)\left(\frac{1-s_3}{2}\right)+5 \\
-# &= \frac{3}{4}s_1s_3-\frac{5}{4}s_1-\frac{7}{4}s_3+\frac{29}{4}
-# \end{align*}
-# $$
-#
-# これは上に表示した値と一致します。SPINモデルでも変数ID`(1, 3)`を保持します。
-
-# %% [markdown]
-# ## QUBO、HUBO、Isingから`BinaryModel`を構築する
-#
-# `from_hubo`は二次のQUBOモデルと高次のBINARY多項式も受け取ります。SPIN多項式には`from_ising`を使います。どちらも変数IDのtupleを係数のキーにします。
-#
-# ### QUBOから構築する
-#
-# QUBOは次数が二次以下のBINARY多項式なので、`from_hubo`で直接扱えます。対角成分はBINARYの恒等式$x_i^2=x_i$によって簡約されます。次のQUBO行列を考えます。
-#
-# $$
-# \begin{bmatrix}
-# 1 & 0.5 & 0 \\
-# 0 & 2 & 1 \\
-# 0 & 0 & 3
-# \end{bmatrix}
-# $$
-#
-# これは$x_0+2x_1+3x_2+0.5x_0x_1+x_1x_2$を表します。
-
-# %%
-qubo_model = BinaryModel.from_hubo(
-    {
-        (0, 0): 1.0,
-        (1, 1): 2.0,
-        (2, 2): 3.0,
-        (0, 1): 0.5,
-        (1, 2): 1.0,
-    },
-    variables=(0, 1, 2),
-)
-assert qubo_model.order == 2
-assert qubo_model.coefficients == {
-    (0,): 1.0,
-    (0, 1): 0.5,
-    (1,): 2.0,
-    (1, 2): 1.0,
-    (2,): 3.0,
-}
-
-print("vartype:", qubo_model.vartype)
-print("constant:", qubo_model.constant)
-print("coefficients:", dict(qubo_model.coefficients))
-
-# %% [markdown]
-# ### HUBOから構築する
-#
-# `from_hubo`は同じ係数mappingで三次以上の積も受け取ります。例えば、$x_0+2x_1+3x_2+0.5x_0x_1+x_1x_2+0.1x_0x_1x_2$を考えます。
-
-# %%
-hubo_model = BinaryModel.from_hubo(
-    {
-        (0,): 1.0,
-        (1,): 2.0,
-        (2,): 3.0,
-        (0, 1): 0.5,
-        (1, 2): 1.0,
-        (0, 1, 2): 0.1,
-    }
-)
+hubo_model = BinaryModel.from_hubo({**coefficients, (1, 3, 7): 0.1}, constant=constant)
+print("HUBO degree:", hubo_model.order)
 assert hubo_model.order == 3
-assert hubo_model.coefficients[(0, 1, 2)] == 0.1
-
-print("vartype:", hubo_model.vartype)
-print("constant:", hubo_model.constant)
-print("coefficients:", dict(hubo_model.coefficients))
+assert hubo_model.coefficients[(1, 3, 7)] == 0.1
 
 # %% [markdown]
+# ### イジングモデル入力
 #
-# ### Isingから構築する
-#
-# `from_ising`はSPIN変数について同じ係数キー形式を受け取り、高次の項も扱えます。
+# 変数が$-1$または$+1$を取るときは、`BinaryModel.from_ising`を使います。スピン変数では$s_7^2=1$なので、同じキー`(7, 7, 2)`でも$s_7^2s_2=s_2$となり、その係数は`(2,)`の係数に加わります。次の例では$s_2$の係数は$3-1=2$となり、空のタプル`()`に指定した2が定数項に加わります。
 
 # %%
-ising_model = BinaryModel.from_ising(
-    {
-        (0,): -1.0,
-        (1,): 2.0,
-        (2,): -3.0,
-        (0, 1): 0.5,
-        (1, 2): -1.0,
-    }
-)
-assert ising_model.vartype is VarType.SPIN
-assert ising_model.order == 2
-assert ising_model.coefficients[(1, 2)] == -1.0
+terms = {(7, 7, 2): 3.0, (2,): -1.0, (): 2.0}
+ising_example = BinaryModel.from_ising(terms, variables=(2, 7))
 
-print("vartype:", ising_model.vartype)
-print("constant:", ising_model.constant)
-print("coefficients:", dict(ising_model.coefficients))
+print("Ising terms:", dict(ising_example.coefficients))
+assert ising_example.coefficients == {(2,): 2.0}
+assert ising_example.constant == 2.0
+assert ising_example.variables == (2, 7)
 
 # %% [markdown]
-# ## 正規化とenergy評価
+# このイジングモデルの目的関数は$2s_2+2$です。`variables=(2, 7)`を指定すると、式から消えた変数のID`7`もモデルに残ります。
+
+# %% [markdown]
+# ## 目的関数の評価
 #
-# `BinaryModel`には`normalize_by_abs_max`と`normalize_by_rms`という2つの正規化methodと、energyを評価する`energy` methodがあります。順に見ていきます。
-#
-# ### 正規化
-#
-# Rustは、選択した代数に従って重複IDをcanonical化します。BINARY値では$x_i^n=x_i$です。SPIN値では$s_i^2=1$なので、重複IDは個数の偶奇だけが残ります。その後、同類項と空キーの定数を結合します。小さな科学計算用の係数をtoleranceで破棄することはありません。
+# HUBO入力の例で作った2変数のQUBO（`model`）に戻ります。$x_1=1$、$x_3=0$を代入すると、$1+2(0)+3(1)(0)+5=6$です。`energy`を使うと、この目的関数の値を計算できます。辞書で値を渡すときは、元の変数IDをキーにします。タプルで渡すときは、`model.variables`に表示される変数IDの昇順（ここでは`(1, 3)`）に値を並べます。
 
 # %%
-binary_alias = BinaryModel.from_hubo(
-    {
-        (7, 7, 2): 3.0,
-        (2, 7): -1.0,
-        (): 2.0,
-    },
-    constant=0.5,
-)
-spin_alias = BinaryModel.from_ising(
-    {
-        (7, 7, 2): 3.0,
-        (2,): -1.0,
-    }
-)
-
-assert binary_alias.coefficients == {(2, 7): 2.0}
-assert binary_alias.constant == 2.5
-assert spin_alias.coefficients == {(2,): 2.0}
-assert spin_alias.constant == 0.0
+assignment = {1: 1, 3: 0}
+energy = model.energy(assignment)
+print("Objective value:", energy)
+assert energy == model.energy((1, 0)) == 6.0
 
 # %% [markdown]
-# ### minimizerを変えずに係数をrescaleする
-#
-# `normalize_by_abs_max`は、すべての係数を絶対値が最大の係数で割ります。$x_1+2x_3+3x_1x_3+5$では最大の係数が3なので、正規化後のモデルは
-#
-# $$
-# \frac{1}{3}x_1+\frac{2}{3}x_3+x_1x_3+\frac{5}{3}
-# $$
-#
-# です。`normalize_by_rms`は次数別のRMS scaleを使います。
-#
-# $$
-# W=\sqrt{\sum_k \frac{1}{|E_k|}\sum_{e\in E_k}w_e^2}.
-# $$
-#
-# この例には線形項が2つ、二次項が1つあります。
-#
-# - $|E_1|=2$、$1^2+2^2=5$
-# - $|E_2|=1$、$3^2=9$
-#
-# したがって$W=\sqrt{5/2+9}=\sqrt{11.5}\approx3.391$であり、正規化後の目的関数はおよそ
-#
-# $$
-# 0.295x_1+0.590x_3+0.884x_1x_3+1.475
-# $$
-#
-# となります。
-#
-# どちらもimmutableなモデルを返します。元のモデル、値domain、変数ID、minimizerは変わらず、energy scaleだけが変化します。
-
-# %%
-normalization_model = model
-abs_max_model = normalization_model.normalize_by_abs_max()
-rms_model = normalization_model.normalize_by_rms()
-rms_factor = math.sqrt(11.5)
-
-assert normalization_model.coefficients == {(1,): 1.0, (1, 3): 3.0, (3,): 2.0}
-assert normalization_model.constant == 5.0
-assert abs_max_model.coefficients == {
-    (1,): 1.0 / 3.0,
-    (1, 3): 1.0,
-    (3,): 2.0 / 3.0,
-}
-assert abs_max_model.constant == 5.0 / 3.0
-assert rms_model.coefficients == {
-    (1,): 1.0 / rms_factor,
-    (1, 3): 3.0 / rms_factor,
-    (3,): 2.0 / rms_factor,
-}
-assert rms_model.constant == 5.0 / rms_factor
+# BINARYモデルで使える値は0と1です。例えば、`model.energy((-1, 1))`を実行すると`ValueError`が発生します。スピンモデルでも`energy`を使えますが、各変数には−1または+1を指定します。
 
 # %% [markdown]
-# ### 目的関数（energy）の評価
+# ## バイナリ変数とスピン変数の変換
 #
-# `energy`は変数assignmentに対して目的関数を評価します。$x_1+2x_3+3x_1x_3+5$について$x_1=1$、$x_3=0$のenergyを計算すると、
+# 最初に作ったモデルはバイナリ変数を使っています。*同じ目的関数*をスピン変数で表すには、`model.to_ising()`を使います。$s_i=1-2x_i$とおくと、ビット0はスピン$+1$に、ビット1はスピン$-1$に対応します。元の多項式に$x_i=(1-s_i)/2$を代入すると、次の式が得られます。
 #
 # $$
-# 1+2\cdot0+3\cdot1\cdot0+5=6
+# f=\tfrac{29}{4}-\tfrac{5}{4}s_1-\tfrac{7}{4}s_3+\tfrac{3}{4}s_1s_3.
 # $$
 #
-# です。mappingは元問題のID空間で記述します。sequenceは`model.variables`に表示された密な順序、ここでは`(1, 3)`を使います。どちらも同じ検査済みRust評価境界を通ります。
-
-# %%
-assignment = {3: 0, 1: 1}
-
-energy_from_ids = model.energy(assignment)
-energy_from_dense_order = model.energy((1, 0))
-
-print("energy:", energy_from_ids)
-assert energy_from_ids == energy_from_dense_order == 6.0
-
-# %% [markdown]
-# 値domainは型と実行時契約の一部です。BINARYモデルはSPIN値を別の問題として解釈せず、エラーにします。
-
-# %%
-try:
-    model.energy((-1, 1))
-except ValueError as error:
-    print("expected domain error:", error)
-else:
-    raise AssertionError("a BINARY model accepted a SPIN assignment")
-
-# %% [markdown]
-# ## BINARYとSPINを正確に変換する
-#
-# `to_ising`は元のIDとすべての目的関数値を保持しながら$s_i=1-2x_i$を適用します。`to_binary`はその逆変換です。この例は小さいため、sampleではなく4通りすべてのassignmentを決定論的に確認します。
+# `to_binary()`でバイナリ変数に戻せます。4通りの値の組み合わせについて、スピン変数に変換したときとバイナリ変数に戻したときの目的関数値を、元の値と比べてみます。浮動小数点数の係数には変換時に丸め誤差が生じることがあるため、比較では小さな差を許容します。
 
 # %%
 spin_model = model.to_ising()
-
+roundtrip_model = spin_model.to_binary()
+print("Spin constant:", spin_model.constant)
+print("Spin coefficients:", dict(spin_model.coefficients))
 assert spin_model.vartype is VarType.SPIN
-assert spin_model.variables == model.variables
-assert spin_model.to_binary() == model
+assert roundtrip_model.vartype is VarType.BINARY
+assert spin_model.variables == roundtrip_model.variables == model.variables
 
-for bits in itertools.product((0, 1), repeat=model.num_variables):
+assignments = itertools.product((0, 1), repeat=model.num_variables)
+if docs_test_mode:
+    assignments = itertools.islice(assignments, 1)
+for bits in assignments:
     spins = tuple(1 - 2 * bit for bit in bits)
-    assert spin_model.energy(spins) == model.energy(bits)
+    expected = model.energy(bits)
+    assert math.isclose(
+        spin_model.energy(spins), expected, rel_tol=1e-12, abs_tol=1e-12
+    )
+    assert math.isclose(
+        roundtrip_model.energy(bits), expected, rel_tol=1e-12, abs_tol=1e-12
+    )
 
 # %% [markdown]
-# ## 同じ目的関数をHamiltonianへ射影する
+# ## 目的関数の正規化
 #
-# `model.hamiltonian`は、可換なPauli-Z wordの和で表すimmutableかつbackend-neutralな値です。量子ビット位置0は変数ID `1`、位置1は`3`に対応し、Pythonが係数を再構築することはありません。
+# 次の2つの正規化メソッドは、新しいモデルを返します。目的関数が定数だけなら、その値は変わりません。変数を含む場合は、定数項を含む目的関数全体を1つの正の数で割ります。誤差のない計算では、目的関数を最小にする変数の組み合わせは変わりません。浮動小数点数で計算すると、丸めによって異なる値が同じになったり、同じ値に差が生じたりすることがあります。
+#
+# - `normalize_by_abs_max()`は、定数項を除く係数の絶対値のうち、最も大きい値で割ります。この例では3で割るので、正規化後の式は$f/3$です。
+# - `normalize_by_rms()`は、定数項を除く係数を次数ごとに分け、各グループで係数の二乗の平均を求めます。それらの平均を足した値の平方根が、全体を割る数です。この例では$W=\sqrt{(1^2+2^2)/2+3^2}=\sqrt{11.5}$です。
+#
+# $f/W$の係数を小数第3位までに丸めると、$0.295x_1+0.590x_3+0.885x_1x_3+1.474$です。先ほどの$x_1=1$、$x_3=0$で評価すると、2つの方法で得られる値はそれぞれ$6/3$と$6/W$です。
+
+# %%
+abs_max_model = model.normalize_by_abs_max()
+rms_model = model.normalize_by_rms()
+print("Original:", energy)
+print("Absolute maximum scaling:", abs_max_model.energy(assignment))
+print("RMS scaling:", rms_model.energy(assignment))
+assert math.isclose(abs_max_model.energy(assignment), energy / 3)
+assert math.isclose(rms_model.energy(assignment), energy / math.sqrt(11.5))
+
+# %% [markdown]
+# ## 目的関数をハミルトニアンで表示
+#
+# `model.hamiltonian`を使うと、目的関数を量子ビットに作用する演算子として表せます。パウリ演算子$Z_j$はスピンと同じように、ビット0に対して$+1$、ビット1に対して$-1$の値をとります。`model.variables`の順に、量子ビット0は変数ID`1`に、量子ビット1は変数ID`3`に対応します。スピンで表した目的関数の各スピン変数を、対応する$Z$演算子に置き換えると次の式になります。
+#
+# $$
+# H=7.25I-1.25Z_0-1.75Z_1+0.75Z_0Z_1.
+# $$
+#
+# 定数項は、残りの3項とは別に格納されます。ビットの組`(1, 0)`を当てはめると$7.25+1.25-1.75-0.75=6$となり、先ほど求めた値と一致します。
 
 # %%
 hamiltonian = model.hamiltonian
-
-print("Hamiltonian terms:", len(hamiltonian.terms))
-assert hamiltonian.num_qubits == model.num_variables == 2
-assert hamiltonian.is_hermitian
-assert hamiltonian.is_pairwise_commuting
-assert max(len(word.factors) for word, _ in hamiltonian.terms) == 2
+print(f"{hamiltonian.constant.real:g} I")
+for word, coefficient in hamiltonian.terms:
+    operators = " ".join(
+        f"{factor.pauli.value}{factor.index}" for factor in word.factors
+    )
+    print(f"{coefficient.real:+g} {operators}")
+assert hamiltonian.num_qubits == model.num_variables
+assert hamiltonian.is_hermitian and hamiltonian.is_pairwise_commuting
+assert hamiltonian.constant.real == spin_model.constant
 
 # %% [markdown]
-# ## 論理sampleを元のID空間へdecodeする
+# ## 測定結果と変数の対応付け
 #
-# 各backendは、まず固有のbit順をQamomileの論理source順へ正規化します。続いて`BinaryModel.decode`が各unique rowを元のIDへ戻し、同じ多項式で評価してoccurrence countを保持します。このusageページではすでに正規化された`SampleResult`を直接構築するため、simulatorの起動は不要です。
+# 4回の測定で`(1, 0)`が3回、`(0, 1)`が1回得られたとします。ビットはすでにQamomileの論理量子ビットの順に並んでいるので、各結果と回数を直接`SampleResult`に渡せます。`decode`は各ビットを元の変数IDに対応づけ、値の組み合わせごとに目的関数を評価し、それぞれの出現回数も保持します。
 
 # %%
-result = qm.SampleResult.from_counts(
-    backend="example",
-    counts={
-        (1, 0): 3,
-        (0, 1): 1,
-    },
-)
+result = qm.SampleResult.from_counts(backend="example", counts={(1, 0): 3, (0, 1): 1})
 decoded = model.decode(result)
 
 for sample in decoded.samples:
     print(sample.values, "energy =", sample.energy, "count =", sample.occurrences)
-
-assert decoded.vartype is VarType.BINARY
+print("Mean energy:", decoded.mean_energy)
 assert decoded.total_occurrences == 4
 assert decoded.mean_energy == 6.25
-assert decoded.lowest.assignment == ((1, 1), (3, 0))
-assert decoded.lowest.energy == 6.0
+assert decoded.lowest.values == assignment
+assert decoded.lowest.energy == energy
 
 # %% [markdown]
-# ## 1つのcanonical problem identityを永続化する
+# 4回の測定で得られた目的関数値の平均は$(3\times6+1\times7)/4=6.25$です。`decoded.lowest`は、*測定で得られた組み合わせの中で*目的関数値が最も小さいものを返します。ここでの値は6です。すべての組み合わせでの最小値は`(0, 0)`のときの5ですが、今回の測定では`(0, 0)`は現れませんでした。
+
+# %% [markdown]
+# ## モデルを保存・復元
 #
-# serialize形式はcanonicalかつ有界で、integrity checkを備え、Python callbackやbackend objectを含みません。したがって、同じcanonical modelは同じbyte列とSHA-256 semantic digestを持ちます。
+# `to_bytes()`は、ファイルに書き込めるバイト列を返します。`from_bytes()`は、そのバイト列が壊れていないことを確かめ、変数IDを含むモデルを復元します。変数の種類（BINARYまたはSPIN）、変数ID、同類項をまとめた後の係数、定数項が同じモデルは、SHA-256で計算した識別値も同じです。この値は`semantic_digest`で確認できます。
 
 # %%
 payload = model.to_bytes()
 restored = BinaryModel.from_bytes(payload)
-
-print("semantic digest:", model.semantic_digest)
+print("Model identifier:", restored.semantic_digest)
 assert restored == model
 assert restored.to_bytes() == payload
 assert restored.semantic_digest == model.semantic_digest
-assert len(model.semantic_digest) == 64
-
-# %% [markdown]
-# ## OMMXから`BinaryModel`を構築する
-#
-# 最後に、同じモデルをOMMX（Open Mathematical prograMming eXchange）から構築します。OMMXは数理最適化データをsoftware間・人間間で交換するためのopen data formatとSDKです。実際のapplicationではpackaged problemや数理modeling toolからinstanceを受け取ることが多いですが、ここでは例を自己完結させるためlow-level componentから作成します。
-#
-# `OMMXProblem.from_instance`は渡されたinstanceをcopyし、BINARY多項式を構築して、元の目的関数と制約を後の評価用に保持します。feasibilityや元の目的関数値が必要な場合に使います。
-
-# %%
-x_1 = ommx.v1.DecisionVariable.binary(1, name="x_1")
-x_3 = ommx.v1.DecisionVariable.binary(3, name="x_3")
-instance = ommx.v1.Instance.from_components(
-    decision_variables=[x_1, x_3],
-    objective=x_1 + 2 * x_3 + 3 * x_1 * x_3 + 5,
-    constraints=[],
-    sense=ommx.v1.Instance.MINIMIZE,
-)
-original_payload = instance.to_bytes()
-
-problem = OMMXProblem.from_instance(instance)
-evaluation = problem.evaluate(decoded)
-
-assert instance.to_bytes() == original_payload
-assert problem.model == model
-assert evaluation.total_occurrences == decoded.total_occurrences
-assert evaluation.objectives == {0: 7.0, 1: 6.0}
-assert all(evaluation.feasible.values())
-assert evaluation.best_feasible.objective == 6.0
 
 # %% [markdown]
 # ## まとめ
 #
-# 係数mappingがある場合は`from_hubo`または`from_ising`から始めます。`BinaryModel`は元の変数IDを保持し、energy評価、domain変換、Hamiltonian射影、型付きsample decode、canonical persistenceに使えます。元の制約と目的関数値も必要な場合は`OMMXProblem.from_instance`を使います。
-
-# %% [markdown]
-# ## 関連トピック
+# - バイナリ変数の式の係数からモデルを作るには`from_hubo`を、スピン変数の式なら`from_ising`を使います。変数を変換したり、目的関数を正規化したりする前に、1通りの組み合わせで`energy`を呼び、目的関数値を確かめます。
+# - `model.variables`を見ると、各量子ビットや測定結果の各位置に対応する元の変数IDが分かります。`decode`で測定結果を変数の値に戻すと、組み合わせごとの目的関数値と出現回数が得られます。
 #
-# - [QAOAでMaxCutを解く](../algorithm/qaoa_maxcut)では、graphから多項式を作りQAOAを適用します。
-# - [QAOAによるgraph partitioning](../algorithm/qaoa_graph_partition)では、OMMX instanceへQAOAを適用し、元のmodelでfeasibilityを評価します。
+# ### 関連トピック
+#
+# - [QAOAでMaxCutを解く](../algorithm/qaoa_maxcut)では、グラフから目的関数の多項式を作ります。
+# - [QAOAによるグラフ分割](../algorithm/qaoa_graph_partition)では、測定結果が元のOMMX問題の制約を満たすかを調べます。
+# - [パウリ相関符号化でMaxCutを解く](../algorithm/pce_maxcut)では、測定で得られた期待値からスピン変数の値を求めます。

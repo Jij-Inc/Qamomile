@@ -233,11 +233,14 @@ def test_numeric_controlled_circuit_still_requires_runtime_dispatch() -> None:
 
 
 @pytest.mark.parametrize("flag", [False, True])
-@pytest.mark.parametrize("endpoint", [qm.Reference(), qm.qiskit.Aer()])
+@pytest.mark.parametrize(
+    "endpoint,error_type",
+    [(qm.Reference(), qm.ExecutionError), (qm.qiskit.Aer(), qm.CapabilityError)],
+)
 def test_measured_break_rejects_path_dependent_return_in_loop_else(
-    flag: bool, endpoint: ExecutionEndpoint
+    flag: bool, endpoint: ExecutionEndpoint, error_type: type[qm.QamomileError]
 ) -> None:
-    """Mixed return and carry ABIs fail before any endpoint can return a wrong value."""
+    """Resource analysis succeeds while unsupported circuit execution fails closed."""
     source = """
 import qamomile as qm
 
@@ -254,5 +257,11 @@ def sample(flag: qm.Const[qm.Bool]) -> qm.Shot[qm.Bits[1]]:
     return qm.measure(marker)
 """
     program = qm.build_source(source).specialize("sample", flag=flag)
-    with pytest.raises(qm.CapabilityError, match="Q4211.*path-dependent.*return"):
+    metric = qm.resources.logical(program).metric(
+        qm.resources.logical_operation_count("quantum.x")
+    )
+    lower, upper = metric.numeric_enclosure()
+    assert lower is None or lower <= int(flag)
+    assert upper is None or upper >= int(flag)
+    with pytest.raises(error_type, match="Q4301.*path-dependent qcore.for else return"):
         qm.run(program, on=endpoint, shots=8, seed=7)

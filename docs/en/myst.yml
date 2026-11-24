@@ -11,6 +11,10 @@ project:
   authors:
     - name: JIJ Inc.
   github: https://github.com/Jij-Inc/Qamomile
+  bibliography:
+    - ../assets/adapt-vqe.bib
+    - ../assets/amazon-braket.bib
+    - ../assets/sdk-support.bib
   jupyter: true
   execute:
     enabled: false
@@ -37,6 +41,8 @@ project:
       file: integration/index.md
       children:
         - pattern: integration/*.ipynb
+        - file: integration/qbraid_executor.md
+          hidden: true
     - title: Release Notes
       file: release_notes/index.md
       children:
@@ -125,7 +131,7 @@ project:
 # --- End API Reference ---
 
 site:
-  template: book-theme
+  template: https://github.com/jupyter-book/myst-theme/releases/download/myst-to-react%401.4.1/book-theme.zip
   title: Qamomile Documentation
   options:
     favicon: ../assets/qamomile_logo.png

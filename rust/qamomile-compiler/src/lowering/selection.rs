@@ -15,7 +15,8 @@ use prost::Message;
 use thiserror::Error;
 
 use crate::call_graph::StaticCallGraph;
-use crate::equations::literal_conforms;
+use crate::equations::{literal_conforms, normalize_real_binding};
+use crate::numeric_values::NumericEvaluationError;
 use crate::operations::LocallyCheckedOperations;
 use crate::types::{SemanticType, Stage, TypeArena, TypeId};
 use crate::wire;
@@ -38,6 +39,12 @@ pub(crate) enum SelectionError {
     /// One supplied or defaulted value is outside its declared type.
     #[error("Q3006: Const binding '{binding}' expects {expected}")]
     InvalidBinding { binding: String, expected: String },
+    /// An accepted integer cannot be represented by its declared Real domain.
+    #[error("Q3008: cannot normalize Const binding '{binding}': {reason}")]
+    InvalidRealBinding {
+        binding: String,
+        reason: &'static str,
+    },
     /// A typed mapping literal contains two structurally equal keys.
     #[error("Q3007: Const mapping '{binding}' contains a duplicate key")]
     DuplicateMappingKey { binding: String },
@@ -123,7 +130,13 @@ pub(crate) fn materialize(
         .map(|(name, parameter)| ((*name).to_owned(), parameter.default_value.clone()))
         .collect::<BTreeMap<_, _>>();
     resolved.extend(provided);
-    verify_resolved_bindings(&resolved, &const_parameters, values, arena, &entry.symbol)?;
+    normalize_resolved_bindings(
+        &mut resolved,
+        &const_parameters,
+        values,
+        arena,
+        &entry.symbol,
+    )?;
 
     let reached = reachable(entry_index, call_graph, &entry.symbol)?;
     let mut selected = package.clone();
@@ -199,8 +212,8 @@ pub(crate) fn resolve_entrypoint<'a>(
     Ok((entry_index, entry))
 }
 
-fn verify_resolved_bindings(
-    resolved: &BTreeMap<String, Option<wire::LiteralProto>>,
+fn normalize_resolved_bindings(
+    resolved: &mut BTreeMap<String, Option<wire::LiteralProto>>,
     const_parameters: &BTreeMap<&str, &wire::ParameterProto>,
     values: &HashMap<u64, crate::types::TypeId>,
     arena: &TypeArena,
@@ -231,6 +244,15 @@ fn verify_resolved_bindings(
                     .map_or_else(|| "a valid Const value".to_owned(), format_type),
             });
         }
+        normalize_real_binding(arena, type_id, value.as_mut().expect("binding was checked"))
+            .map_err(|error| {
+                let (NumericEvaluationError::Undefined(reason)
+                | NumericEvaluationError::Limit(reason)) = error;
+                SelectionError::InvalidRealBinding {
+                    binding: name.clone(),
+                    reason,
+                }
+            })?;
         if is_mapping_type(arena, type_id) {
             verify_mapping_literal(name, value.as_ref().expect("binding was checked"))?;
         }

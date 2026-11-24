@@ -928,7 +928,7 @@ def reset_state(state: qm.Q[qm.Bool]) -> qm.Q[qm.Bool]:
     return qm.reset(state)
 
 @qm.qkernel
-def invalid() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
+def invalid() -> tuple[qm.Shot[qm.Bit], qm.Shot[qm.Bit]]:
     controls = qm.prepare(True)
     target = qm.prepare(False)
     controls, target = qm.control(reset_state, controls, target)

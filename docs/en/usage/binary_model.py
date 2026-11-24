@@ -20,17 +20,9 @@
 #
 # # How to use `BinaryModel`
 #
-# `BinaryModel` represents an unconstrained polynomial objective over BINARY
-# (0/1) or SPIN (-1/1) variables. This page starts with a coefficient mapping,
-# then shows how to evaluate assignments, change variable domains, and use the
-# model with Hamiltonians, samples, and OMMX.
-
-# %% [markdown]
-# ## Installation
-#
-# ```bash
-# pip install qamomile
-# ```
+# A `BinaryModel` represents an unconstrained polynomial objective over binary
+# (0 or 1) or spin ($-1$ or $+1$) variables. This notebook shows how to use
+# `BinaryModel`.
 
 # %%
 # Install the latest Qamomile through pip!
@@ -39,444 +31,250 @@
 # %%
 import itertools
 import math
-
-import ommx.v1
+import os
 
 import qamomile as qm
-from qamomile.optimization import BinaryModel, OMMXProblem, VarType
+from qamomile.optimization import BinaryModel, VarType
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 # %% [markdown]
-# ## Create a model from coefficients
+# ## Choose an input form
 #
-# Use `BinaryModel.from_hubo` for a BINARY polynomial. Each key is a tuple of
-# variable IDs in one term, and its value is that term's coefficient. Pass the
-# constant separately. Variable IDs need not start at zero or be consecutive.
+# ### HUBO input
 #
-# For example, construct $x_1 + 2x_3 + 3x_1x_3 + 5$:
+# For variables that take the values 0 and 1, the problem is called a HUBO
+# if any term in the simplified objective multiplies three or more distinct
+# variables. If every term contains at most two variables, it is called a QUBO.
+#
+# In both cases, build the model with `BinaryModel.from_hubo`. Pass a dictionary
+# whose keys list the variable IDs in each product and whose values are the
+# corresponding coefficients.
+#
+# For example, take $f(x_1,x_3)=x_1+2x_3+3x_1x_3+5$. With the column vector
+# $\mathbf{x}=(x_1,x_3)^{\mathsf T}$, this QUBO has the upper triangular matrix
+#
+# $$
+# Q=\begin{bmatrix}1&3\\0&2\end{bmatrix},
+# \qquad f(\mathbf{x})=\mathbf{x}^{\mathsf T}Q\mathbf{x}+5.
+# $$
+#
+# Since $x_i^2=x_i$, the diagonal entries give the coefficients of `(1,)`
+# and `(3,)`. The off-diagonal entry gives the coefficient of `(1, 3)`.
 
 # %%
-COEFFICIENTS = {
-    (1,): 1.0,
-    (3,): 2.0,
-    (1, 3): 3.0,
-}
+coefficients = {(1,): 1.0, (3,): 2.0, (1, 3): 3.0}
+constant = 5.0
+variables = (1, 3)
 
-model = BinaryModel.from_hubo(
-    COEFFICIENTS,
-    constant=5.0,
-    variables=(1, 3),
-)
-
-print("vartype:", model.vartype)
-print("constant:", model.constant)
-print("variables:", model.variables)
-print("order:", model.order)
-print("coefficients:", dict(model.coefficients))
-
+model = BinaryModel.from_hubo(coefficients, constant=constant, variables=variables)
+print("Variable IDs:", model.variables)
+print("Polynomial degree:", model.order)
 assert model.vartype is VarType.BINARY
-assert model.constant == 5.0
-assert model.variables == (1, 3)
-assert model.num_variables == 2
+assert model.variables == tuple(sorted(variables))
 assert model.order == 2
-assert model.coefficients == {
-    (1,): 1.0,
-    (1, 3): 3.0,
-    (3,): 2.0,
-}
 
 # %% [markdown]
-# The one-element keys `(1,)` and `(3,)` are linear terms; `(1, 3)` is a
-# quadratic term. `model.variables == (1, 3)` is the order used by sequence
-# assignments, Hamiltonian qubits, and decoded samples. The model keeps these
-# original variable IDs.
-
-# %% [markdown]
-# Convert a BINARY model to the equivalent SPIN model with `to_ising()`.
-# `to_binary()` performs the reverse conversion.
+# To make this a higher-order objective, add the key `(1, 3, 7)` for
+# $0.1x_1x_3x_7$. If an ID occurs more than once, it reduces to a single
+# factor. For example, `(7, 7, 2)` represents $x_7^2x_2=x_7x_2$. Its coefficient is added to
+# any coefficient for `(2, 7)`. The empty key `()` adds to the constant.
 
 # %%
-spin_equivalent = model.to_ising()
-
-print("vartype:", spin_equivalent.vartype)
-print("constant:", spin_equivalent.constant)
-print("coefficients:", dict(spin_equivalent.coefficients))
-
-assert spin_equivalent.vartype is VarType.SPIN
-assert spin_equivalent.constant == 29.0 / 4.0
-assert spin_equivalent.coefficients == {
-    (1,): -5.0 / 4.0,
-    (1, 3): 3.0 / 4.0,
-    (3,): -7.0 / 4.0,
-}
-
-# %% [markdown]
-# Binary and spin variables are related by $s=1-2x$. Substituting that relation
-# into the running example gives
-#
-# $$
-# \begin{align*}
-# x_1 + 2x_3 + 3x_1x_3 + 5
-# &= \left(\frac{1-s_1}{2}\right)
-# + 2\left(\frac{1-s_3}{2}\right)
-# + 3\left(\frac{1-s_1}{2}\right)\left(\frac{1-s_3}{2}\right)+5 \\
-# &= \frac{3}{4}s_1s_3-\frac{5}{4}s_1-\frac{7}{4}s_3+\frac{29}{4}.
-# \end{align*}
-# $$
-#
-# This matches the values printed above. The SPIN model retains variable IDs
-# `(1, 3)`.
-
-# %% [markdown]
-# ## Building a `BinaryModel` from QUBO, HUBO, or Ising
-#
-# `from_hubo` also accepts quadratic QUBO models and higher-order BINARY
-# polynomials. Use `from_ising` for SPIN polynomials. Both use tuples of
-# variable IDs as coefficient keys.
-#
-# ### Building from QUBO
-#
-# A QUBO is a BINARY polynomial of degree at most two, so `from_hubo` accepts
-# it directly. Diagonal keys reduce by the binary identity $x_i^2=x_i$.
-# Consider the QUBO matrix
-#
-# $$
-# \begin{bmatrix}
-# 1 & 0.5 & 0 \\
-# 0 & 2 & 1 \\
-# 0 & 0 & 3
-# \end{bmatrix},
-# $$
-#
-# which encodes
-# $x_0 + 2x_1 + 3x_2 + 0.5x_0x_1 + x_1x_2$.
-
-# %%
-qubo_model = BinaryModel.from_hubo(
-    {
-        (0, 0): 1.0,
-        (1, 1): 2.0,
-        (2, 2): 3.0,
-        (0, 1): 0.5,
-        (1, 2): 1.0,
-    },
-    variables=(0, 1, 2),
-)
-assert qubo_model.order == 2
-assert qubo_model.coefficients == {
-    (0,): 1.0,
-    (0, 1): 0.5,
-    (1,): 2.0,
-    (1, 2): 1.0,
-    (2,): 3.0,
-}
-
-print("vartype:", qubo_model.vartype)
-print("constant:", qubo_model.constant)
-print("coefficients:", dict(qubo_model.coefficients))
-
-# %% [markdown]
-# ### Building from HUBO
-#
-# `from_hubo` accepts cubic and higher-order products in the same coefficient
-# mapping. For example, consider
-#
-# $$
-# x_0 + 2x_1 + 3x_2 + 0.5x_0x_1 + x_1x_2 + 0.1x_0x_1x_2.
-# $$
-
-# %%
-hubo_model = BinaryModel.from_hubo(
-    {
-        (0,): 1.0,
-        (1,): 2.0,
-        (2,): 3.0,
-        (0, 1): 0.5,
-        (1, 2): 1.0,
-        (0, 1, 2): 0.1,
-    }
-)
+hubo_model = BinaryModel.from_hubo({**coefficients, (1, 3, 7): 0.1}, constant=constant)
+print("HUBO degree:", hubo_model.order)
 assert hubo_model.order == 3
-assert hubo_model.coefficients[(0, 1, 2)] == 0.1
-
-print("vartype:", hubo_model.vartype)
-print("constant:", hubo_model.constant)
-print("coefficients:", dict(hubo_model.coefficients))
+assert hubo_model.coefficients[(1, 3, 7)] == 0.1
 
 # %% [markdown]
-# ### Building from Ising
+# ### Ising model input
 #
-# `from_ising` accepts the same coefficient-key format for SPIN variables,
-# including higher-order terms.
+# Use `BinaryModel.from_ising` when the variables take the values $-1$ and
+# $+1$. The same key `(7, 7, 2)` now represents $s_7^2s_2=s_2$, since
+# $s_7^2=1$. Its coefficient combines with that of `(2,)`. In the example
+# below their sum is $3-1=2$, and the empty key `()` adds 2 to the constant.
 
 # %%
-ising_model = BinaryModel.from_ising(
-    {
-        (0,): -1.0,
-        (1,): 2.0,
-        (2,): -3.0,
-        (0, 1): 0.5,
-        (1, 2): -1.0,
-    }
-)
-assert ising_model.vartype is VarType.SPIN
-assert ising_model.order == 2
-assert ising_model.coefficients[(1, 2)] == -1.0
+terms = {(7, 7, 2): 3.0, (2,): -1.0, (): 2.0}
+ising_example = BinaryModel.from_ising(terms, variables=(2, 7))
 
-print("vartype:", ising_model.vartype)
-print("constant:", ising_model.constant)
-print("coefficients:", dict(ising_model.coefficients))
+print("Ising terms:", dict(ising_example.coefficients))
+assert ising_example.coefficients == {(2,): 2.0}
+assert ising_example.constant == 2.0
+assert ising_example.variables == (2, 7)
 
 # %% [markdown]
-# ## Normalization and energy evaluation
+# The Ising objective simplifies to $2s_2+2$. Passing `variables=(2, 7)`
+# keeps ID 7 in the model even though it disappears from the expression.
+
+# %% [markdown]
+# ## Evaluate the objective
 #
-# ### Normalization
-#
-# `BinaryModel` ships with two normalization methods,
-# `normalize_by_abs_max` and `normalize_by_rms`, and an energy evaluation
-# method, `energy`. Before looking at them, note that Rust canonicalizes
-# duplicate IDs using the selected algebra. For BINARY values, $x_i^n=x_i$.
-# For SPIN values, $s_i^2=1$, so only the parity of a repeated ID remains.
+# Return to the QUBO stored in `model`. Substituting $x_1=1$ and $x_3=0$
+# gives $1+2(0)+3(1)(0)+5=6$.
+# `energy` computes this objective value. A dictionary uses the original
+# variable IDs as keys. A tuple follows the ascending ID order in `model.variables`,
+# here `(1, 3)`.
 
 # %%
-binary_alias = BinaryModel.from_hubo(
-    {
-        (7, 7, 2): 3.0,
-        (2, 7): -1.0,
-        (): 2.0,
-    },
-    constant=0.5,
-)
-spin_alias = BinaryModel.from_ising(
-    {
-        (7, 7, 2): 3.0,
-        (2,): -1.0,
-    }
-)
-
-assert binary_alias.coefficients == {(2, 7): 2.0}
-assert binary_alias.constant == 2.5
-assert spin_alias.coefficients == {(2,): 2.0}
-assert spin_alias.constant == 0.0
+assignment = {1: 1, 3: 0}
+energy = model.energy(assignment)
+print("Objective value:", energy)
+assert energy == model.energy((1, 0)) == 6.0
 
 # %% [markdown]
-# ### Rescale coefficients without changing the minimizer
-#
-# `normalize_by_abs_max` rescales every coefficient by the largest absolute
-# value. For $x_1 + 2x_3 + 3x_1x_3 + 5$, the largest coefficient is 3, so the
-# normalized model is
-#
-# $$
-# \frac{1}{3}x_1 + \frac{2}{3}x_3 + x_1x_3 + \frac{5}{3}.
-# $$
-#
-# `normalize_by_rms` uses a degree-wise RMS scale:
-#
-# $$
-# W=\sqrt{\sum_k \frac{1}{|E_k|}\sum_{e\in E_k}w_e^2}.
-# $$
-#
-# Here there are two linear terms and one quadratic term:
-#
-# - $|E_1|=2$ and $1^2+2^2=5$,
-# - $|E_2|=1$ and $3^2=9$.
-#
-# Therefore $W=\sqrt{5/2+9}=\sqrt{11.5}\approx3.391$, and the normalized
-# objective is approximately
-#
-# $$
-# 0.295x_1+0.590x_3+0.884x_1x_3+1.475.
-# $$
-#
-# Both methods return a new immutable model. The source model, value domain,
-# variable IDs, and minimizers remain unchanged; only the energy scale changes.
-
-# %%
-normalization_model = model
-abs_max_model = normalization_model.normalize_by_abs_max()
-rms_model = normalization_model.normalize_by_rms()
-rms_factor = math.sqrt(11.5)
-
-assert normalization_model.coefficients == {(1,): 1.0, (1, 3): 3.0, (3,): 2.0}
-assert normalization_model.constant == 5.0
-assert abs_max_model.coefficients == {
-    (1,): 1.0 / 3.0,
-    (1, 3): 1.0,
-    (3,): 2.0 / 3.0,
-}
-assert abs_max_model.constant == 5.0 / 3.0
-assert rms_model.coefficients == {
-    (1,): 1.0 / rms_factor,
-    (1, 3): 3.0 / rms_factor,
-    (3,): 2.0 / rms_factor,
-}
-assert rms_model.constant == 5.0 / rms_factor
+# A BINARY model accepts only 0 and 1. For example, `model.energy((-1, 1))`
+# raises `ValueError`. Spin models also support `energy`, with each variable
+# set to −1 or +1.
 
 # %% [markdown]
-# ### Objective (energy) evaluation
+# ## Convert between binary and spin variables
 #
-# `energy` evaluates the objective function for a variable assignment. Let us
-# compute the energy of $x_1 + 2x_3 + 3x_1x_3 + 5$ at $x_1=1$, $x_3=0$:
+# Our original model uses binary variables. To express the *same objective*
+# in spins, call `model.to_ising()`. The substitution $s_i=1-2x_i$ maps
+# bit 0 to spin $+1$ and bit 1 to spin $-1$. Substituting
+# $x_i=(1-s_i)/2$ into the original polynomial gives
 #
 # $$
-# 1 + 2\cdot0 + 3\cdot1\cdot0 + 5 = 6.
+# f=\tfrac{29}{4}-\tfrac{5}{4}s_1-\tfrac{7}{4}s_3+\tfrac{3}{4}s_1s_3.
 # $$
 #
-# A mapping is written in the original problem's ID space. A sequence uses the
-# dense order shown by `model.variables`, here `(1, 3)`. Both forms cross the
-# same checked Rust evaluation boundary.
-
-# %%
-assignment = {3: 0, 1: 1}
-
-energy_from_ids = model.energy(assignment)
-energy_from_dense_order = model.energy((1, 0))
-
-print("energy:", energy_from_ids)
-assert energy_from_ids == energy_from_dense_order == 6.0
-
-# %% [markdown]
-# The value domain is part of the type and runtime contract. A BINARY model
-# rejects SPIN values instead of interpreting them as another problem.
-
-# %%
-try:
-    model.energy((-1, 1))
-except ValueError as error:
-    print("expected domain error:", error)
-else:
-    raise AssertionError("a BINARY model accepted a SPIN assignment")
-
-# %% [markdown]
-# ## Convert between BINARY and SPIN exactly
-#
-# `to_ising` applies $s_i=1-2x_i$ while preserving the original IDs and every
-# objective value. `to_binary` is its inverse. The example is small enough to
-# check all four assignments deterministically rather than relying on samples.
+# `to_binary()` reverses the substitution. We can check the objective in both
+# directions for all four assignments. Floating-point coefficients can pick up
+# rounding error during conversion, so we allow a small difference.
 
 # %%
 spin_model = model.to_ising()
-
+roundtrip_model = spin_model.to_binary()
+print("Spin constant:", spin_model.constant)
+print("Spin coefficients:", dict(spin_model.coefficients))
 assert spin_model.vartype is VarType.SPIN
-assert spin_model.variables == model.variables
-assert spin_model.to_binary() == model
+assert roundtrip_model.vartype is VarType.BINARY
+assert spin_model.variables == roundtrip_model.variables == model.variables
 
-for bits in itertools.product((0, 1), repeat=model.num_variables):
+assignments = itertools.product((0, 1), repeat=model.num_variables)
+if docs_test_mode:
+    assignments = itertools.islice(assignments, 1)
+for bits in assignments:
     spins = tuple(1 - 2 * bit for bit in bits)
-    assert spin_model.energy(spins) == model.energy(bits)
+    expected = model.energy(bits)
+    assert math.isclose(
+        spin_model.energy(spins), expected, rel_tol=1e-12, abs_tol=1e-12
+    )
+    assert math.isclose(
+        roundtrip_model.energy(bits), expected, rel_tol=1e-12, abs_tol=1e-12
+    )
 
 # %% [markdown]
-# ## Project the same objective to a Hamiltonian
+# ## Normalize the objective
 #
-# `model.hamiltonian` is an immutable, backend-neutral sum of commuting Pauli-Z
-# words. Qubit position zero corresponds to variable ID `1` and position one to
-# variable ID `3`; Python does not rebuild the coefficients.
+# Both normalization methods return a new model. For a constant-only objective,
+# the value stays the same. Otherwise, they divide the whole objective, including
+# the constant, by a positive number. In exact arithmetic the minimizing assignments
+# are the same. With floating-point coefficients, rounding can create or break ties.
+#
+# - `normalize_by_abs_max()` divides by the largest absolute value of the
+#   nonconstant coefficients. Here it is 3, giving $f/3$.
+# - `normalize_by_rms()` groups the nonconstant coefficients by degree, takes
+#   the mean of their squares in each group, then takes the square root of
+#   the sum. Here the divisor is $W=\sqrt{(1^2+2^2)/2+3^2}=\sqrt{11.5}$.
+#
+# To three decimal places, $f/W$ is
+# $0.295x_1+0.590x_3+0.885x_1x_3+1.474$. At the assignment we checked above,
+# the new scores are $6/3$ and $6/W$.
+
+# %%
+abs_max_model = model.normalize_by_abs_max()
+rms_model = model.normalize_by_rms()
+print("Original:", energy)
+print("Absolute maximum scaling:", abs_max_model.energy(assignment))
+print("RMS scaling:", rms_model.energy(assignment))
+assert math.isclose(abs_max_model.energy(assignment), energy / 3)
+assert math.isclose(rms_model.energy(assignment), energy / math.sqrt(11.5))
+
+# %% [markdown]
+# ## Display the objective as a Hamiltonian
+#
+# `model.hamiltonian` expresses the objective as an operator on qubits.
+# The Pauli operator $Z_j$ has value $+1$ on bit 0 and $-1$ on bit 1,
+# just like a spin. Qubits 0 and 1 correspond to variable IDs 1 and 3
+# in `model.variables` order. Replacing each spin in the converted objective
+# by its $Z$ operator gives
+#
+# $$
+# H=7.25I-1.25Z_0-1.75Z_1+0.75Z_0Z_1.
+# $$
+#
+# The constant is stored separately from the three nonconstant terms.
+# For bits `(1, 0)` we get $7.25+1.25-1.75-0.75=6$, as before.
 
 # %%
 hamiltonian = model.hamiltonian
-
-print("Hamiltonian terms:", len(hamiltonian.terms))
-assert hamiltonian.num_qubits == model.num_variables == 2
-assert hamiltonian.is_hermitian
-assert hamiltonian.is_pairwise_commuting
-assert max(len(word.factors) for word, _ in hamiltonian.terms) == 2
+print(f"{hamiltonian.constant.real:g} I")
+for word, coefficient in hamiltonian.terms:
+    operators = " ".join(
+        f"{factor.pauli.value}{factor.index}" for factor in word.factors
+    )
+    print(f"{coefficient.real:+g} {operators}")
+assert hamiltonian.num_qubits == model.num_variables
+assert hamiltonian.is_hermitian and hamiltonian.is_pairwise_commuting
+assert hamiltonian.constant.real == spin_model.constant
 
 # %% [markdown]
-# ## Decode logical samples in the original ID space
+# ## Map measurement results to variables
 #
-# Every backend first normalizes its native bit order to Qamomile's logical
-# source order. `BinaryModel.decode` then maps each unique row back to original
-# IDs, evaluates it with the same polynomial, and retains its occurrence count.
-# Here we construct the already-normalized `SampleResult` directly so this
-# focused usage page needs no simulator launch.
+# Suppose four measurements returned `(1, 0)` three times and `(0, 1)` once.
+# We can enter these counts directly as a `SampleResult`, with the bits already
+# in Qamomile's logical qubit order. `decode` assigns each bit to its original
+# variable ID, evaluates each distinct assignment, and keeps its count.
 
 # %%
-result = qm.SampleResult.from_counts(
-    backend="example",
-    counts={
-        (1, 0): 3,
-        (0, 1): 1,
-    },
-)
+result = qm.SampleResult.from_counts(backend="example", counts={(1, 0): 3, (0, 1): 1})
 decoded = model.decode(result)
 
 for sample in decoded.samples:
     print(sample.values, "energy =", sample.energy, "count =", sample.occurrences)
-
-assert decoded.vartype is VarType.BINARY
+print("Mean energy:", decoded.mean_energy)
 assert decoded.total_occurrences == 4
 assert decoded.mean_energy == 6.25
-assert decoded.lowest.assignment == ((1, 1), (3, 0))
-assert decoded.lowest.energy == 6.0
+assert decoded.lowest.values == assignment
+assert decoded.lowest.energy == energy
 
 # %% [markdown]
-# ## Persist one canonical problem identity
+# The mean is $(3\times6+1\times7)/4=6.25$. `decoded.lowest` selects the
+# best *observed* assignment, with energy 6. The global minimum is 5 at
+# `(0, 0)`, which did not occur in these measurements.
+
+# %% [markdown]
+# ## Save and restore the model
 #
-# The serialized form is canonical, bounded, integrity checked, and contains
-# no Python callback or backend object. Equivalent canonical models therefore
-# have the same bytes and SHA-256 semantic digest.
+# `to_bytes()` produces the bytes you can write to a file. `from_bytes()`
+# checks their integrity and restores the model, including its variable IDs.
+# Models with the same domain, variable IDs, simplified coefficients and
+# constant share a SHA-256 identifier, available as `semantic_digest`.
 
 # %%
 payload = model.to_bytes()
 restored = BinaryModel.from_bytes(payload)
-
-print("semantic digest:", model.semantic_digest)
+print("Model identifier:", restored.semantic_digest)
 assert restored == model
 assert restored.to_bytes() == payload
 assert restored.semantic_digest == model.semantic_digest
-assert len(model.semantic_digest) == 64
-
-# %% [markdown]
-# ## Building a `BinaryModel` from OMMX
-#
-# Finally, let us build the same model from OMMX (Open Mathematical prograMming
-# eXchange). OMMX is an open data format and SDK for exchanging mathematical
-# optimization data between software systems and people. In a real application
-# the instance will often come from a packaged problem or a mathematical
-# modeling tool; here we construct it from low-level components to keep the
-# example self-contained.
-#
-# `OMMXProblem.from_instance` copies the supplied instance, builds its BINARY
-# polynomial, and retains the original objective and constraints for later
-# evaluation. Use it when feasibility or original objective values matter.
-
-# %%
-x_1 = ommx.v1.DecisionVariable.binary(1, name="x_1")
-x_3 = ommx.v1.DecisionVariable.binary(3, name="x_3")
-instance = ommx.v1.Instance.from_components(
-    decision_variables=[x_1, x_3],
-    objective=x_1 + 2 * x_3 + 3 * x_1 * x_3 + 5,
-    constraints=[],
-    sense=ommx.v1.Instance.MINIMIZE,
-)
-original_payload = instance.to_bytes()
-
-problem = OMMXProblem.from_instance(instance)
-evaluation = problem.evaluate(decoded)
-
-assert instance.to_bytes() == original_payload
-assert problem.model == model
-assert evaluation.total_occurrences == decoded.total_occurrences
-assert evaluation.objectives == {0: 7.0, 1: 6.0}
-assert all(evaluation.feasible.values())
-assert evaluation.best_feasible.objective == 6.0
 
 # %% [markdown]
 # ## Summary
 #
-# Start with `from_hubo` or `from_ising` when you have a coefficient mapping.
-# `BinaryModel` retains the original variable IDs and provides energy
-# evaluation, domain conversion, Hamiltonian projection, typed sample decoding,
-# and canonical persistence. Use `OMMXProblem.from_instance` when you also need
-# the original constraints and objective values.
-
-# %% [markdown]
-# ## Related topics
+# - Use `from_hubo` for binary coefficients and `from_ising` for spin
+#   coefficients. Use `energy` to check one assignment before converting or
+#   rescaling the model.
+# - Use `model.variables` to read qubit and sample positions in the original
+#   variable IDs. `decode` gives you the observed objective values and counts.
 #
-# - [Solving MaxCut with QAOA](../algorithm/qaoa_maxcut) creates a graph-derived
-#   polynomial and applies QAOA.
-# - [QAOA for graph partitioning](../algorithm/qaoa_graph_partition) applies
-#   QAOA to an OMMX instance and evaluates feasibility in the original model.
-# - [QAOA for constrained graph partitioning](../algorithm/qaoa_graph_partition)
-#   keeps penalty energy separate from original OMMX feasibility.
-# - [Pauli Correlation Encoding for MaxCut](../algorithm/pce_maxcut) reuses the
-#   same SPIN model and typed decoded distribution with fewer qubits.
+# ### Related topics
+#
+# - [Solving MaxCut with QAOA](../algorithm/qaoa_maxcut) starts from a graph
+#   and builds its polynomial objective.
+# - [QAOA for graph partitioning](../algorithm/qaoa_graph_partition) evaluates
+#   measurements against the original OMMX constraints.
+# - [Pauli Correlation Encoding for MaxCut](../algorithm/pce_maxcut) recovers
+#   spin assignments from measured expectation values.

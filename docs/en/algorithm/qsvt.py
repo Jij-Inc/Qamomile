@@ -28,10 +28,12 @@
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install "qamomile[qiskit,visualization]"
+# # !pip install "qamomile[qiskit]" matplotlib
 
 # %%
 from __future__ import annotations
+
+import os
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -41,6 +43,9 @@ import qamomile as qm
 from qamomile.linalg import decompose_pauli_matrix
 from qamomile.qiskit import Aer, Qiskit, to_circuit
 from qamomile.stdlib import QSVTPhases, pauli_block_encoding, qsvt
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+SAMPLE_SHOTS = 1 if docs_test_mode else 32
 
 # %% [markdown]
 # ## Background
@@ -199,8 +204,7 @@ from qamomile.stdlib import QSVTPhases, pauli_block_encoding, qsvt
 #
 # In this section, we use LCU to construct a block encoding of a non-Hermitian
 # matrix and build a Qamomile quantum kernel that applies QSVT to it. We then
-# draw the quantum kernel and convert it to the Qiskit circuit used for the
-# numerical validation.
+# convert it to the Qiskit circuit used for the numerical validation.
 #
 # ### Problem setup
 #
@@ -300,14 +304,13 @@ def singular_value_transform() -> qm.Q[qm.Bits[total_width]]:
 
 
 program = singular_value_transform.specialize()
-qm.visualization.draw(program, loops="expanded", inline_depth=1)
 
 # %% [markdown]
 # ### Constructing the QSVT circuit
 #
 # Specialize the coherent state preparation and inspect its Qiskit circuit with
-# `to_circuit`. The same verified program supplies the diagram, unitary
-# check, and logical resource study. Projector rotations act directly on the
+# `to_circuit`. The same verified program supplies the unitary check and
+# logical resource study. Projector rotations act directly on the
 # signal subspace: this implementation uses two qubits without a separate
 # projector workspace qubit. The program retains the coherent state, so its
 # circuit has no final measurements to remove before the numerical check.
@@ -323,7 +326,11 @@ assert qsvt_circuit.num_qubits == total_width == 2
 # ## Result
 #
 # Extract the all-zero signal block of the complete QSVT unitary and compare it
-# with $2(A/\alpha)^\dagger(A/\alpha)-I$.
+# with $2(A/\alpha)^\dagger(A/\alpha)-I$. The formulas above write the signal
+# register first. In the circuit, the signal is qubit 0 and the system is
+# qubit 1. Qiskit's matrix labels $|b_1 b_0\rangle$ put the signal on the
+# right, so signal zero selects rows and columns 0 and 2.
+
 
 # %%
 def projected_signal_block(
@@ -350,9 +357,8 @@ actual_transform = projected_signal_block(
     qsvt_unitary, block_encoding.signal_width, block_encoding.system_width
 )
 normalized_matrix = matrix / block_encoding.normalization
-expected_transform = (
-    2.0 * normalized_matrix.conj().T @ normalized_matrix
-    - np.eye(1 << block_encoding.system_width)
+expected_transform = 2.0 * normalized_matrix.conj().T @ normalized_matrix - np.eye(
+    1 << block_encoding.system_width
 )
 np.testing.assert_allclose(actual_transform, expected_transform, rtol=0.0, atol=1e-12)
 print("QSVT projected block:\n", np.round(actual_transform, decimals=8))
@@ -365,6 +371,7 @@ print("QSVT projected block:\n", np.round(actual_transform, decimals=8))
 # Hadamard. Every shot must retain the zero signal and return system bit one.
 # Compile and execute this sampler through the current lifecycle, comparing the
 # local Aer endpoint with the same source on `Reference`.
+
 
 # %%
 @qm.qkernel
@@ -379,9 +386,9 @@ def interference_sample() -> qm.Shot[qm.Bits[total_width]]:
 endpoint = Aer(optimization_level=0, seed_transpiler=7)
 sample_program = interference_sample.specialize()
 sample_artifact = qm.compile(sample_program, to=endpoint.target)
-record = qm.run(sample_artifact, on=endpoint, shots=32, seed=7)
-reference = qm.run(sample_program, on=qm.Reference(), shots=32, seed=7)
-assert record.result.counts == reference.result.counts == {(0, 1): 32}
+record = qm.run(sample_artifact, on=endpoint, shots=SAMPLE_SHOTS, seed=7)
+reference = qm.run(sample_program, on=qm.Reference(), shots=SAMPLE_SHOTS, seed=7)
+assert record.result.counts == reference.result.counts == {(0, 1): SAMPLE_SHOTS}
 print("signal/system samples:", record.result.counts)
 
 # %% [markdown]
@@ -389,7 +396,7 @@ print("signal/system samples:", record.result.counts)
 # $1$ and $-1$, respectively, exactly as observed in the projected block.
 
 # %%
-polynomial_x = np.linspace(-1.0, 1.0, 400)
+polynomial_x = np.linspace(-1.0, 1.0, 3 if docs_test_mode else 400)
 polynomial_y = 2.0 * polynomial_x**2 - 1.0
 singular_values = np.linalg.svd(normalized_matrix, compute_uv=False)
 transformed_singular_values = 2.0 * singular_values**2 - 1.0

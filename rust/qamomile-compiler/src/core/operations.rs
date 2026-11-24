@@ -67,6 +67,7 @@ closed_string_enum! {
     /// Operations in the compiler's core dialect.
     pub(crate) enum QCoreOpcode {
         Constant => "qcore.constant",
+        CurrentShot => "qcore.current_shot",
         Reshape => "qcore.reshape",
         StageLift => "qcore.stage_lift",
         Tuple => "qcore.tuple",
@@ -967,7 +968,7 @@ const fn classical_equation_contract(opcode: ClassicalOpcode) -> &'static str {
             "classical.map_get expects one Const fixed mapping entry array and one matching key"
         }
         Project => "classical.project expects one aggregate and an in-range static position",
-        Cast => "classical.cast expects one operand and a supported Bool, Int, or Real target",
+        Cast => "classical.cast expects one operand and a supported Bit, Bool, Int, or Real target",
         Len => "classical.len expects one array, word, product, or record operand",
     }
 }
@@ -1770,12 +1771,15 @@ fn infer_cast(
     let target = string_attribute(operation, "target")?;
     let target = match target {
         "Bool" => ScalarType::Bool,
+        "Bit" => ScalarType::Bit,
         "Int" => ScalarType::Int,
         "Real" => ScalarType::Real,
         _ => return Err(EquationError::Malformed),
     };
     let source = base_scalar(arena, *operand).ok_or(EquationError::Malformed)?;
-    let allowed = if target == ScalarType::Bool {
+    let allowed = if target == ScalarType::Bit {
+        source == ScalarType::Int
+    } else if target == ScalarType::Bool {
         matches!(
             source,
             ScalarType::Bool | ScalarType::Bit | ScalarType::Int | ScalarType::Real
@@ -2192,7 +2196,7 @@ mod tests {
     fn every_closed_opcode_round_trips() {
         let operations = Opcode::all().collect::<Vec<_>>();
 
-        assert_eq!(operations.len(), 98);
+        assert_eq!(operations.len(), 99);
         for operation in operations {
             assert_eq!(Opcode::try_from(operation.as_str()), Ok(operation));
         }

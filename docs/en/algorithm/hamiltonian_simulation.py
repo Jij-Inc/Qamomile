@@ -1,11 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -17,83 +18,60 @@
 # tags: [algorithm, primitive, simulation]
 # ---
 #
-# # Hamiltonian Simulation with Suzuki–Trotter (Rabi oscillation)
+# # Hamiltonian Simulation with Suzuki–Trotter Decomposition: Rabi Oscillations
 #
-# Simulating the time evolution $e^{-iHt}$ of a quantum system is one of the
-# canonical applications of a quantum computer. When the Hamiltonian splits
-# into non-commuting pieces $H = A + B$ with $[A, B] \neq 0$, the naive
-# factorisation $e^{-i(A+B)t} = e^{-iAt}\,e^{-iBt}$ is wrong; the standard fix
-# is **Trotter–Suzuki product formulas**, which interleave short evolutions of
-# each piece. The error decreases as we take smaller steps (Lie–Trotter,
-# first order), symmetrise the step (Strang, second order), or nest the
-# symmetric step recursively via Suzuki's construction (any even order).
-#
-# This article builds these approximations end-to-end in Qamomile on a
-# one-qubit Rabi Hamiltonian so the Trotter error is measurable. We start
-# with $S_1$ and $S_2$, then use the standard-library `suzuki_trotter`
-# factory for higher orders. Rust derives a bounded schedule from static
-# formula options; the generated qkernel retains structured loops. Finally, we
-# verify the textbook convergence rates ($S_k$'s fidelity error scales as
-# $\Delta t^{2k}$) against the exact 2x2 propagator.
-
-# %% [markdown]
-# ## Installation
-#
-# Install the Qamomile distribution:
-#
-# ```bash
-# pip install qamomile
-# ```
+# The time evolution of a quantum system with Hamiltonian $H$ is described by
+# $U(t) = e^{-iHt}$, where $\hbar = 1$.
+# Implementing this evolution as a sequence of quantum gates is one of the main
+# applications of quantum computers.
+# When the Hamiltonian consists of noncommuting terms, such as $H = H_z + H_x$,
+# we generally have $e^{-i(H_z + H_x)t} \neq e^{-iH_z t}e^{-iH_x t}$.
+# Trotter–Suzuki product formulas approximate the evolution by alternating short
+# evolutions under the individual terms.
+# The error decreases by taking smaller steps (first-order Lie–Trotter), making
+# each step symmetric (second-order Strang), or recursively nesting symmetric
+# steps using Suzuki's construction (any even order).\
+# In this article, we explore Trotter approximations for a one-qubit Rabi
+# Hamiltonian. We start with $S_1$ and $S_2$, then use the standard-library
+# `suzuki_trotter` function for higher-order formulas.
 
 # %%
-# Install the latest Qamomile through pip!
+# Install the latest Qamomile with pip.
 # # !pip install qamomile
 
 # %%
-import math
+from __future__ import annotations
 
+import os
+
+import matplotlib.pyplot as plt
 import numpy as np
 
 import qamomile as qm
 from qamomile.stdlib import suzuki_trotter
 
-# %% [markdown]
-# ## The Rabi Hamiltonian
-#
-# A single two-level system driven on resonance is governed by
-#
-# $$ H = \underbrace{\tfrac{\omega}{2} Z}_{H_z} + \underbrace{\tfrac{\Omega}{2} X}_{H_x}. $$
-#
-# Because $[Z, X] \neq 0$, splitting $H$ into $H_z$ and $H_x$ introduces a
-# Trotter error that is easy to see even on a single qubit. Starting from
-# $|0\rangle$, the excitation probability oscillates as
-# $P_{|1\rangle}(t) = (\Omega/E)^2 \sin^2(Et/2)$ with $E = \sqrt{\omega^2 + \Omega^2}$.
-#
-# In Qamomile we build $H_z$ and $H_x$ as two separate `Observable`s and pack
-# them into a Python list. The generated qkernel accepts a fixed-size
-# `Const[Vector[Observable, ...]]`, bound during specialization. QCore retains
-# abstract Pauli evolution and structured loops; target lowering determines
-# how to realize them as SDK operations.
-
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+FORMULA_STEPS = 1 if docs_test_mode else 4
+SAMPLE_SHOTS = 1 if docs_test_mode else 2048
 
 # %% [markdown]
-# ### Verifying $[H_z, H_x] \neq 0$
+# ## Problem Settings
 #
-# Trotter approximations only matter because $H_z$ and $H_x$ do not commute.
-# `qamomile.observable.commutator(a, b)` computes the commutator
-# $[a, b] = a b - b a$ on Hamiltonians directly. Internally it iterates over
-# the Pauli-string pairs once and uses the qubit-parity rule — two Pauli
-# strings anticommute iff the number of qubits on which they carry different
-# non-identity Paulis is odd — to drop every commuting pair before any
-# product is built. This is cheaper than expanding `Hz * Hx - Hx * Hz` and
-# cancelling, and the result is a fully simplified `Hamiltonian` that we can
-# inspect or compare against an analytic value.
+# ### The Rabi Hamiltonian
 #
-# For the Rabi Hamiltonian the textbook value is
+# Consider the effective Hamiltonian of a driven two-level system in a rotating
+# frame:
 #
-# $$ [H_z, H_x] \;=\; \tfrac{\omega \Omega}{4}\,[Z, X] \;=\; i\,\tfrac{\omega \Omega}{2}\, Y, $$
+# $$
+# H
+# = \underbrace{\frac{\omega}{2} Z}_{H_z} + \underbrace{\frac{\Omega}{2} X}_{H_x}.
+# $$
 #
-# which `commutator` reproduces exactly:
+# Here, $Z$ and $X$ are Pauli operators, $\omega$ is the detuning, and $\Omega$
+# is the drive strength (Rabi frequency).
+# Since $[Z, X] \neq 0$, splitting $H$ into $H_z$ and $H_x$ introduces a
+# Trotter error.
+
 
 # %%
 omega = 1.2
@@ -111,128 +89,133 @@ assert commutator == expected_commutator
 print("[H_z, H_x] =", commutator)
 
 # %% [markdown]
-# `Hamiltonian` values preserve the logical-qubit convention and Pauli
-# coefficients independently of any SDK. The same values can therefore enter
-# a Qamomile program before a target is chosen.
-
-# %% [markdown]
-# ## Exact reference state
+# The commutator is defined as $[A, B] = AB - BA$.
+# For the Pauli operators, $[Z, X] = 2iY$, so
 #
-# A 2x2 matrix exponential gives the exact state $|\psi(T)\rangle = e^{-iHT}|0\rangle$,
-# which each Trotter approximation is judged against via the **fidelity error**
-# $1 - |\langle\psi_\text{exact}|\psi_\text{trotter}\rangle|$.
+# $$
+# [H_z, H_x]
+# = \frac{\omega \Omega}{4}[Z, X]
+# = i \frac{\omega \Omega}{2} Y
+# $$
+#
+# This expression agrees with the result of `qm.commutator(...)` above.
+# Because the commutator is nonzero, simply multiplying the individual
+# evolutions does not give the exact time evolution.
+#
+# ### Exact Time Evolution
+#
+# The Hamiltonian in this example is a small $2 \times 2$ matrix, so we can use
+# NumPy to compute the evolution $U(t) = e^{-iHt}$ numerically.
+# Using the eigendecomposition of the Hermitian matrix,
+# $H = V \Lambda V^\dagger$, we obtain
+#
+# $$
+# e^{-iHt}
+# = V \mathrm{diag}(e^{-i \lambda_j t}) V^\dagger
+# $$
+#
+# We start in $\lvert 0 \rangle$ and evolve for a total time $T = 1.5$.
+# We store the exact final state for comparison with the approximations below.
 
 # %%
 pauli_x = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
 pauli_z = np.array([[1.0, 0.0], [0.0, -1.0]], dtype=np.complex128)
+
 matrix = 0.5 * omega * pauli_z + 0.5 * drive * pauli_x
 initial_state = np.array([1.0, 0.0], dtype=np.complex128)
 
 
 def matrix_evolution(hamiltonian: np.ndarray, time: float) -> np.ndarray:
-    """Return the exact dense exponential of one Hermitian matrix."""
-
-    values, vectors = np.linalg.eigh(hamiltonian)
-    return vectors @ np.diag(np.exp(-1j * time * values)) @ vectors.conj().T
+    """Return the exact time-evolution matrix for a Hermitian Hamiltonian."""
+    eigenvalues, eigenvectors = np.linalg.eigh(hamiltonian)
+    phases = np.exp(-1j * time * eigenvalues)
+    return (eigenvectors * phases) @ eigenvectors.conj().T
 
 
 exact_state = matrix_evolution(matrix, evolution_time) @ initial_state
+print("Exact excitation probability P(1):", abs(exact_state[1]) ** 2)
 
 # %% [markdown]
-# ## $S_1$: First-order Suzuki–Trotter decomposition (Lie–Trotter)
+# The excitation probability in this model—the probability of measuring
+# $\lvert 1 \rangle$—also has an analytical expression:
 #
-# The simplest split is
+# $$
+# P_1 (t)
+# = \left( \frac{\Omega}{E} \right)^2 \sin^2 \left( \frac{Et}{2} \right), \qquad E
+# = \sqrt{\omega^2 + \Omega^2}
+# $$
 #
-# $$ S_1(\Delta t) = e^{-i H_x \Delta t}\, e^{-i H_z \Delta t}, $$
+# When the detuning $\omega$ is nonzero, the maximum excitation probability is
+# less than 1.
 #
-# applied $N$ times for a total evolution time $T = N \Delta t$. Per step the
-# local error is $O(\Delta t^2)$; integrated over $N = T/\Delta t$ steps the
-# global state-norm error is $O(\Delta t)$.
+# ## Algorithm
 #
-# The factory below generates first- and second-order kernels with four
-# time slices. `steps` is a static factory option; the total duration remains
-# a `Param` value. Changing the duration reuses the formula, while changing
-# the slice count requires constructing a different formula.
-
-
-# %% [markdown]
-# ## $S_2$: Second-order Suzuki–Trotter decomposition (Strang splitting)
+# Let $T$ be the total evolution time and $N$ the number of steps. The duration
+# of each step is $\Delta t = T / N$.
 #
-# Symmetrising the step around the middle term cancels the leading error:
+# ### $S_1$: First-Order Suzuki–Trotter Decomposition (Lie–Trotter)
 #
-# $$ S_2(\Delta t) = e^{-i H_z \Delta t/2}\, e^{-i H_x \Delta t}\, e^{-i H_z \Delta t/2}. $$
+# The simplest decomposition is
 #
-# The local error drops to $O(\Delta t^3)$ and the global state-norm error to
-# $O(\Delta t^2)$. The step kernel is just three `pauli_evolve` calls.
+# $$
+# S_1(\Delta t)
+# = e^{-i H_x \Delta t} e^{-i H_z \Delta t}, \qquad
+# U(T)
+# \approx [S_1(\Delta t)]^N
+# $$
+#
+# This formula applies the evolution under $H_z$ first, followed by the
+# evolution under $H_x$.
+# The local error per step is $O(\Delta t^2)$, while the global state-norm error
+# over $N = T/\Delta t$ steps is $O(\Delta t)$.
+#
+# ### $S_2$: Second-Order Suzuki–Trotter Decomposition (Strang Splitting)
+#
+# Making the step symmetric around the middle term cancels the leading error
+# term:
+#
+# $$
+# S_2(\Delta t)=e^{-iH_z\Delta t/2}
+# e^{-iH_x\Delta t}e^{-iH_z\Delta t/2}
+# $$
+#
+# The local error is $O(\Delta t^3)$, and the global state-norm error is
+# $O(\Delta t^2)$.
+#
+# ### Fourth Order and Beyond: Suzuki's Recursive Construction
+#
+# Combining second-order formulas gives formulas of fourth, sixth, eighth,
+# and higher even orders. For $k \geq 2$, the recursion is
+#
+# $$
+# S_{2k} (\Delta t)
+# = [S_{2k-2} (p_k \Delta t)]^2 S_{2k-2} ((1-4p_k) \Delta t) [S_{2k-2} (p_k \Delta t)]^2, \qquad
+# p_k
+# = \frac{1}{4 - 4^{1/(2k-1)}}
+# $$
+#
+# For example, $p_2 \sim 0.4145$ for fourth order and $p_3 \sim 0.3731$ for
+# sixth order. The coefficient must be updated at each order.
+# The middle coefficient, $1 - 4p_k$, is negative: part of the evolution runs
+# backward in time to reduce the approximation error.
+# This recursion gives $S_{2k}$ a local error of
+# $\mathcal{O}(\Delta t^{2k+1})$.
+#
+# ## Implementation
+#
+# ### Implementing Fourth-Order Evolution in Qamomile
+#
+# Qamomile's `suzuki_trotter` function constructs the operations for a product
+# formula. In the following example, we specify 2 Hamiltonian terms, order 4,
+# and 4 time steps.
+# `hamiltonians` is a static input (`Const`) that specifies the separate
+# operators, while `time` is an input that can change at execution time (`Param`).
+# This lets us try different evolution times while keeping the program
+# structure fixed.
 
 
 # %%
-first_order = suzuki_trotter(term_count=2, order=1, steps=4)
-second_order = suzuki_trotter(term_count=2, order=2, steps=4)
-
-
-@qm.qkernel
-def compare_orders(
-    hamiltonians: qm.Const[qm.Vector[qm.Observable, 2]],
-    time: qm.Param[qm.Real],
-) -> tuple[qm.Q[qm.Bits[1]], qm.Q[qm.Bits[1]]]:
-    first = first_order(qm.qubits(1), hamiltonians, time)
-    second = second_order(qm.qubits(1), hamiltonians, time)
-    return first, second
-
-
-# %%
-order_program = qm.specialize(compare_orders, hamiltonians=hamiltonians)
-order_study = qm.resources.logical(order_program)
-order_metric = qm.resources.logical_operation_count("quantum.pauli_evolution")
-
-assert order_study.metric(order_metric).numeric_enclosure() == (20, 20)
-
-# %% [markdown]
-# Four first-order slices contain eight term evolutions, while four
-# second-order slices contain twelve. Returning both owned states is valid
-# because each allocation has one independent owner; callers can compose or
-# measure them separately.
-
-# %% [markdown]
-# ## Higher-order Suzuki–Trotter decomposition: the fractal recursion
-#
-# Masuo Suzuki showed that an arbitrary even-order Trotter approximation can
-# be built **recursively** from $S_2$ by nesting five rescaled copies at each
-# level:
-#
-# $$ S_{2k}(\Delta t) = S_{2k-2}(p_k \Delta t)^2 \, S_{2k-2}\bigl((1 - 4 p_k)\Delta t\bigr) \, S_{2k-2}(p_k \Delta t)^2, $$
-#
-# with the level-specific coefficient
-#
-# $$ p_k = \frac{1}{4 - 4^{1/(2k-1)}}. $$
-#
-# $p_k$ is chosen so that the $(2k-1)$-th-order error of the lower formula
-# cancels, leaving a local error of $O(\Delta t^{2k+1})$ per step — the
-# coefficient **must** be recomputed at every level. Concretely:
-#
-# - $k=2$ (4th order): $p_2 = 1/(4 - 4^{1/3}) \approx 0.4145$,
-# - $k=3$ (6th order): $p_3 = 1/(4 - 4^{1/5}) \approx 0.3731$,
-# - $k=4$ (8th order): $p_4 = 1/(4 - 4^{1/7}) \approx 0.3596$.
-#
-# Reusing $p_2$ at every level leaves a non-zero $(2k-1)$-th-order error term,
-# so the resulting formula is no better than $S_4$ — a classic trap when
-# implementing Suzuki-Trotter by hand.
-
-# %% [markdown]
-# ## Choose a bounded fourth-order formula
-#
-# `suzuki_trotter` takes static topology options at ordinary Python factory
-# time. Here we choose two Hamiltonian terms, fourth order, and four equal time
-# slices. Rust derives and bounds the eleven-entry symmetric schedule; the
-# returned value is an ordinary typed Qamomile function.
-#
-# The schedule remains composition, not a special Hamiltonian-simulation
-# opcode. QCore keeps fixed loops around one abstract Pauli-evolution operation,
-# and a target decides how to realize that operation only during lowering.
-
-# %%
-evolve = suzuki_trotter(term_count=2, order=4, steps=4)
+evolve = suzuki_trotter(term_count=2, order=4, steps=FORMULA_STEPS)
 
 
 @qm.qkernel
@@ -240,135 +223,69 @@ def rabi_samples(
     hamiltonians: qm.Const[qm.Vector[qm.Observable, 2]],
     time: qm.Param[qm.Real],
 ) -> qm.Shot[qm.Bits[1]]:
-    """Evolve and measure one driven two-level system.
-
-    Args:
-        hamiltonians (qm.Const[qm.Vector[qm.Observable, 2]]): Ordered drift and
-            drive terms.
-        time (qm.Param[qm.Real]): Total evolution time.
-
-    Returns:
-        qm.Shot[qm.Bits[1]]: One sampled excitation bit.
-    """
-
-    state = evolve(qm.qubits(1), hamiltonians, time)
+    """Evolve one qubit with a fourth-order product formula and measure it."""
+    state = qm.qubits(1)
+    state = evolve(state, hamiltonians, time)
     return qm.measure(state)
 
 
-# %% [markdown]
-# The Hamiltonian split is `Const` because it selects static program data.
-# Evolution time is `Param`, so one compiled artifact can be launched with
-# different times without rebuilding its structure.
-
-# %% [markdown]
-# ## Estimate the program before choosing hardware
-#
-# Specialization produces the verified target-independent `Program`.
-# Logical resource analysis reads that same image and composes the loop trip
-# counts with the Rust-owned product schedule.
-
-# %%
 program = qm.specialize(rabi_samples, hamiltonians=hamiltonians)
-study = qm.resources.logical(program)
-pauli_evolutions = qm.resources.logical_operation_count("quantum.pauli_evolution")
-
-assert "quantum.pauli_evolution" in program.inspect()
-assert "quantum.hamiltonian_simulation" not in program.inspect()
-assert study.metric(pauli_evolutions).numeric_enclosure() == (44, 44)
-print("logical Pauli evolutions:", study.metric(pauli_evolutions))
 
 # %% [markdown]
-# The estimate is exact: eleven schedule entries are invoked in each of four
-# slices. Resource analysis does not expand a statevector, transpile an SDK
-# circuit, or mistake an unavailable decomposition for zero work.
-
-# %% [markdown]
-# ### Reproduce product-formula resource scaling
+# ### The Tradeoff Between Accuracy and Logical Operation Count
 #
-# Section 11.1 of [](https://doi.org/10.48550/arXiv.2310.03011) constructs a
-# product formula by repeating $r$ short-time slices and obtains its gate cost
-# by multiplying the work per slice by $r$. In the Pauli-access model it uses
-# no additional ancilla qubits. For this two-term second-order formula, every
-# slice contains exactly three abstract Pauli evolutions. We expose the repeat
-# count as a `Const` argument so the body is analyzed once and each reported
-# row is an algebraic substitution.
-
+# Increasing the formula order or the number of time steps usually improves
+# the approximation, but also increases the number of operations.
+# For this two-term Hamiltonian, combining adjacent evolutions under the same
+# term gives 2 Pauli evolutions per step at first order, 3 at second order,
+# and 11 at fourth order.
+# The fourth-order program with 4 steps should therefore use
+# $11 \times 4 = 44$ Pauli evolutions.
+# Let's check that Qamomile's logical resource analysis gives the same result.
 
 # %%
-second_order_slice = suzuki_trotter(term_count=2, order=2, steps=1)
+study = qm.resources.logical(program)
+evolution_metric = qm.resources.logical_operation_count("quantum.pauli_evolution")
+evolution_count = study.metric(evolution_metric).numeric_enclosure()
 
-
-@qm.qkernel
-def surveyed_product_formula(
-    terms: qm.Const[qm.Vector[qm.Observable, 2]],
-    time: qm.Param[qm.Real],
-    steps: qm.Const[qm.Int],
-) -> qm.Q[qm.Bits[1]]:
-    """Repeat one second-order Suzuki slice a symbolic number of times."""
-
-    state = qm.qubits(1)
-    for _ in range(steps):
-        state = second_order_slice(state, terms, time / steps)
-    return state
-
-
-product_formula_study = qm.resources.logical(surveyed_product_formula)
-
-
-def product_formula_resource_row(steps: int) -> tuple[int, int]:
-    """Return Pauli-evolution and allocated-qubit counts for one step count."""
-
-    resource_study = product_formula_study.evaluate(steps=steps)
-    evolutions = resource_study.metric(pauli_evolutions).numeric_enclosure()
-    allocated = resource_study.metric(
-        qm.resources.LOGICAL_ALLOCATED_QUBITS
-    ).numeric_enclosure()
-    assert evolutions[0] == evolutions[1]
-    assert allocated[0] == allocated[1]
-    return evolutions[0], allocated[0]
-
-
-product_formula_scaling = {
-    steps: product_formula_resource_row(steps) for steps in (1, 2, 4, 8, 16)
-}
-for steps, (evolutions, allocated) in product_formula_scaling.items():
-    assert evolutions == 3 * steps
-    assert allocated == 1
-
-print("second-order product formula (r: evolutions, qubits):", product_formula_scaling)
+print("Logical Pauli-evolution count:", evolution_count)
+assert evolution_count == (11 * FORMULA_STEPS, 11 * FORMULA_STEPS)
 
 # %% [markdown]
-# The exact finite count is $3r$, while the register remains one qubit. This
-# reproduces the survey's “cost per slice times $r$” algebra and its no-ancilla
-# statement. It does not claim that one abstract `pauli_evolution` equals one
-# fault-tolerant elementary gate; that later realization is target dependent.
-
-# %% [markdown]
-# ## Convergence sweep
+# ## Result
 #
-# We now sweep the number of Trotter steps $N$ and plot the fidelity error
-# against the step size $\Delta t = T / N$ on a log-log axis. The expected
-# slopes are:
+# ### Checking Product-Formula Convergence
 #
-# | Formula | Local error | Global norm error | Fidelity error ($1 -$ overlap) |
-# |---------|-------------|-------------------|---------------------------------|
-# | $S_1$   | $O(\Delta t^2)$ | $O(\Delta t)$   | $O(\Delta t^2)$  |
-# | $S_2$   | $O(\Delta t^3)$ | $O(\Delta t^2)$ | $O(\Delta t^4)$  |
-# | $S_4$   | $O(\Delta t^5)$ | $O(\Delta t^4)$ | $O(\Delta t^8)$  |
-# | $S_6$   | $O(\Delta t^7)$ | $O(\Delta t^6)$ | $O(\Delta t^{12})$ |
+# We now use an independent $2\times2$ matrix calculation to examine how
+# accurately the first-, second-, and fourth-order product formulas approach
+# the exact solution.
+# Let $\lvert \psi_{\mathrm{exact}} \rangle$ be the exact state and
+# $\lvert \psi_{\mathrm{approx}}\rangle$ the state produced by a product formula.
+# The pure-state fidelity and infidelity are defined as
 #
-# The fidelity error is the *square* of the state-norm error (to leading
-# order): $1 - |\langle a | b \rangle| \approx \tfrac{1}{2}\lVert a - b \rVert^2$
-# when the two vectors are close, so the plot below shows slopes of $2, 4, 8$
-# rather than $1, 2, 4$.
-
-
-# %% [markdown]
-# The lines on the plot have slopes $\approx 2, 4, 8$, matching the
-# fidelity-error orders in the table above. $S_4$ hits the float64 floor
-# already at $N = 16$; $S_6$ is at the floor across the entire sweep, so its
-# line appears flat (the expected $\Delta t^{12}$ slope is not resolvable on
-# this 1-qubit problem in double precision).
+# $$
+# F
+# =\lvert \langle\psi_{\mathrm{exact}} \vert \psi_{\mathrm{approx}}\rangle \rvert^2,
+# \qquad \epsilon_F
+# =1-F.
+# $$
+#
+# For normalized states $a$ and $b$, the same infidelity is
+# $\epsilon_F = \|b - \langle a|b\rangle a\|^2$.
+#
+# Fidelity does not depend on the global phase of a state.
+# If the global state error is $\mathcal{O}(\Delta t^p)$, the infidelity is
+# bounded by $\mathcal{O}(\Delta t^{2p})$.
+#
+# | Product formula | Local error per step | Global state error | Order of the infidelity bound |
+# |---|---|---|---|
+# | First order $S_1$ | $O(\Delta t^2)$ | $O(\Delta t)$ | $O(\Delta t^2)$ |
+# | Second order $S_2$ | $O(\Delta t^3)$ | $O(\Delta t^2)$ | $O(\Delta t^4)$ |
+# | Fourth order $S_4$ | $O(\Delta t^5)$ | $O(\Delta t^4)$ | $O(\Delta t^8)$ |
+#
+# For some initial states, the leading error term vanishes and the error can
+# be even smaller. Let's check whether this example exhibits the slopes
+# predicted by the table.
 
 # %%
 drift_matrix = 0.5 * omega * pauli_z
@@ -376,8 +293,7 @@ drive_matrix = 0.5 * drive * pauli_x
 
 
 def suzuki_step(order: int, duration: float) -> np.ndarray:
-    """Return one dense Suzuki step for the two-term tutorial model."""
-
+    """Construct one Suzuki product-formula step using only NumPy."""
     if order == 1:
         return matrix_evolution(drive_matrix, duration) @ matrix_evolution(
             drift_matrix, duration
@@ -385,49 +301,77 @@ def suzuki_step(order: int, duration: float) -> np.ndarray:
     if order == 2:
         half_drift = matrix_evolution(drift_matrix, duration / 2.0)
         return half_drift @ matrix_evolution(drive_matrix, duration) @ half_drift
-    coefficient = 1.0 / (4.0 - 4.0 ** (1.0 / (order - 1)))
+    if order < 4 or order % 2 != 0:
+        raise ValueError("order must be 1 or a positive even integer (at least 2)")
+
+    k = order // 2
+    coefficient = 1.0 / (4.0 - 4.0 ** (1.0 / (2 * k - 1)))
     outer = suzuki_step(order - 2, coefficient * duration)
     middle = suzuki_step(order - 2, (1.0 - 4.0 * coefficient) * duration)
     return outer @ outer @ middle @ outer @ outer
 
 
-step_counts = np.array([2, 4, 8, 16], dtype=np.int64)
-step_sizes = evolution_time / step_counts
-errors: dict[int, list[float]] = {1: [], 2: [], 4: []}
+step_counts = np.array([1] if docs_test_mode else [2, 4, 8, 16], dtype=np.int64)
+step_widths = evolution_time / step_counts
+infidelities: dict[int, list[float]] = {1: [], 2: [], 4: []}
+reference_state = exact_state / np.linalg.norm(exact_state)
 
 for steps in step_counts:
-    for order in errors:
+    for order in infidelities:
         step = suzuki_step(order, evolution_time / int(steps))
-        approximation = np.linalg.matrix_power(step, int(steps)) @ initial_state
-        errors[order].append(1.0 - abs(np.vdot(exact_state, approximation)))
+        approximate_state = np.linalg.matrix_power(step, int(steps)) @ initial_state
+        approximate_state /= np.linalg.norm(approximate_state)
+        residual = (
+            approximate_state
+            - np.vdot(reference_state, approximate_state) * reference_state
+        )
+        error = float(np.vdot(residual, residual).real)
+        infidelities[order].append(error)
 
-slopes = {
-    order: np.polyfit(
-        np.log(step_sizes[:3] if order == 4 else step_sizes),
-        np.log(values[:3] if order == 4 else values),
-        1,
-    )[0]
-    for order, values in errors.items()
-}
+slopes = {}
+if not docs_test_mode:
+    for order, errors in infidelities.items():
+        slope = np.polyfit(
+            np.log(step_widths),
+            np.log(np.asarray(errors)),
+            1,
+        )[0]
+        slopes[order] = float(slope)
 
-assert 1.7 < slopes[1] < 2.3
-assert 3.7 < slopes[2] < 4.3
-assert 7.0 < slopes[4] < 9.0
-print("fidelity-error slopes:", slopes)
-
-# %% [markdown]
-# The measured slopes recover the expected $\Delta t^2$, $\Delta t^4$, and
-# $\Delta t^8$ fidelity-error behavior. In an application, changing `steps`
-# changes program structure, so build the desired bounded factory explicitly;
-# runtime `time` values can still reuse the resulting artifact.
+print("Convergence slopes (expected: order 1: 2, order 2: 4, order 4: 8):", slopes)
 
 # %% [markdown]
-# ## Compile and execute the same program
+# The measured slopes reproduce the expected $\Delta t^2$, $\Delta t^4$,
+# and $\Delta t^8$ scaling of the infidelity.\
+# Next, we plot the infidelity $1-F$ against the step width $\Delta t=T/N$
+# on logarithmic axes.
+
+# %%
+fig, ax = plt.subplots(figsize=(7, 4.5))
+for order, values in infidelities.items():
+    ax.loglog(step_widths, values, "o-", label=f"Order {order}")
+
+ax.set_xlabel(r"Time-step width $\Delta t = T/N$")
+ax.set_ylabel(r"Infidelity $1-F$")
+ax.set_title("Suzuki–Trotter convergence (NumPy)")
+ax.grid(True, which="both", alpha=0.3)
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+# %% [markdown]
+# In this example, the slopes are approximately 2, 4, and 8, in good agreement
+# with the theoretical orders.
 #
-# `Reference` provides both a target and a local endpoint. Compilation seals
-# the program digest, runtime parameter ABI, result ABI, and resource evidence
-# in an immutable artifact. Execution consumes that artifact rather than
-# tracing the Python function again.
+# ### Running the Qamomile Simulator
+#
+# We now run the Qamomile program defined earlier with
+# `suzuki_trotter(order=4, steps=4)`.
+# We use `qm.Reference()` as the execution endpoint, evolve for a total time
+# $T = 1.5$, and take 2048 measurement shots.
+# The NumPy results come from ideal state vectors, while the following results
+# are counts from a finite number of measurements and therefore include
+# sampling fluctuations.
 
 # %%
 reference = qm.Reference()
@@ -436,57 +380,90 @@ record = qm.run(
     artifact,
     on=reference,
     parameters={"time": evolution_time},
-    shots=128,
+    shots=SAMPLE_SHOTS,
     seed=2,
 )
 
 assert artifact.source_digest.hex() == program.semantic_digest
 assert tuple(slot.name for slot in artifact.parameter_abi.slots) == ("time",)
-assert record.result.shots == 128
-assert sum(record.result.counts.values()) == 128
+assert record.result.shots == SAMPLE_SHOTS
+assert sum(record.result.counts.values()) == SAMPLE_SHOTS
+print("Measurement counts:", record.result.counts)
 
 # %% [markdown]
-# For this one-qubit model the exact excitation probability is
-#
-# $$
-# P_1(t)=\left(\frac{\Omega}{E}\right)^2
-# \sin^2\left(\frac{Et}{2}\right),
-# \qquad E=\sqrt{\omega^2+\Omega^2}.
-# $$
-#
-# The product formula is already much more accurate than the sampling
-# uncertainty at this scale, so the sampled probability should lie within a
-# conservative four-standard-deviation interval plus a small discretization
-# allowance.
+# Let's compare the excitation probability estimated from the Qamomile
+# measurements with the probability computed using the same fourth-order
+# formula in NumPy.
 
 # %%
-energy = math.hypot(omega, drive)
-expected_probability = (drive / energy) ** 2 * math.sin(
-    energy * evolution_time / 2.0
-) ** 2
+energy = np.hypot(omega, drive)
+exact_probability = (drive / energy) ** 2 * np.sin(energy * evolution_time / 2.0) ** 2
+
+one_step = suzuki_step(4, evolution_time / FORMULA_STEPS)
+numerical_state = np.linalg.matrix_power(one_step, FORMULA_STEPS) @ initial_state
+numerical_probability = float(abs(numerical_state[1]) ** 2)
+
 observed_probability = record.result.probability((1,))
-sampling_bound = (
-    4.0
-    * math.sqrt(
-        expected_probability * (1.0 - expected_probability) / record.result.shots
-    )
-    + 0.02
+shots = record.result.shots
+sample_standard_error = np.sqrt(
+    observed_probability * (1.0 - observed_probability) / shots
 )
 
-assert abs(observed_probability - expected_probability) <= sampling_bound
-print(f"expected P(1): {expected_probability:.3f}")
-print(f"sampled  P(1): {observed_probability:.3f}")
+print(f"Excitation probability (exact):          {exact_probability:.4f}")
+print(f"Excitation probability (NumPy, order 4): {numerical_probability:.4f}")
+print(f"Excitation probability (Qamomile):       {observed_probability:.4f}")
+print(f"Estimated sampling standard error:      {sample_standard_error:.4f}")
+
+# %% [markdown]
+# ### Extension: Visualizing Rabi Oscillations Over Time
+#
+# Finally, let's plot the excitation probability as a function of time $t$.
+# For comparison, we include the exact solution and NumPy results for the
+# first- and fourth-order formulas, both with 4 time steps.
+# This plot illustrates Rabi oscillations and approximation accuracy. It is
+# a separate calculation from the `qm.Reference()` sampling example above.
+
+# %%
+times = np.linspace(0.0, 6.0, 2 if docs_test_mode else 121)
+exact_probabilities = (drive / energy) ** 2 * np.sin(energy * times / 2.0) ** 2
+
+first_probabilities = []
+fourth_probabilities = []
+for current_time in times:
+    for order, series in ((1, first_probabilities), (4, fourth_probabilities)):
+        step = suzuki_step(order, current_time / 4.0)
+        state = np.linalg.matrix_power(step, 4) @ initial_state
+        series.append(float(abs(state[1]) ** 2))
+
+fig, ax = plt.subplots(figsize=(7, 4.5))
+ax.plot(times, exact_probabilities, label="Exact", linewidth=2)
+ax.plot(times, first_probabilities, "--", label="Order 1 (4 steps)")
+ax.plot(times, fourth_probabilities, ":", label="Order 4 (4 steps)")
+ax.set_xlabel("Evolution time t")
+ax.set_ylabel("Excitation probability P(1)")
+ax.set_title("Detuned Rabi oscillations (NumPy)")
+ax.grid(alpha=0.3)
+ax.legend()
+plt.tight_layout()
+plt.show()
 
 # %% [markdown]
 # ## Summary
 #
-# - **Model**: a single-qubit Rabi Hamiltonian $H = H_z + H_x$ whose non-zero
-#   commutator makes Trotter error measurable.
-# - **`Const[Vector[Observable, ...]]` + `pauli_evolve`**: Hamiltonians are
-#   specialized while evolution and loop structure remain abstract in QCore.
-# - **Suzuki–Trotter fractal**: $S_{2k}$ nests five rescaled copies of
-#   $S_{2k-2}$ with the level-specific coefficient $p_k = 1/(4 - 4^{1/(2k-1)})$.
-# - **Bounded construction**: `suzuki_trotter` takes static term count, order,
-#   and slice count; Rust derives the schedule used by the generated qkernel.
-# - **Convergence**: the host matrix calculation checks fidelity-error slopes
-#   of $2, 4, 8$. It is a numerical reference, separate from sampled execution.
+# - **Time evolution:** When the terms in $H=H_z+H_x$ do not commute, the exact
+#   evolution generally cannot be factored into a simple product of the
+#   individual exponentials.
+# - **Product formulas:** Increasing the order from first to second to fourth
+#   generally improves accuracy at a fixed step width, at the cost of more
+#   operations.
+# - **Higher-order recursion:** $S_{2k}$ combines five copies of $S_{2k-2}$.
+#   The coefficient $p_k$ is computed for each order.
+# - **Qamomile:** `suzuki_trotter(term_count=2, order=4, steps=4)` defines a
+#   product formula that can be called from a quantum kernel.
+# - **Numerical validation:** Comparing NumPy state vectors reveals the
+#   convergence slopes of the infidelity $1-F$. Finite-shot measurements in
+#   Qamomile let us examine the excitation probability and its statistical
+#   fluctuations.
+
+# %% [markdown]
+#

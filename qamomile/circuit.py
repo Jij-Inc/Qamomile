@@ -1,4 +1,9 @@
-"""Logical circuit-family projection for circuit-shaped QCore programs."""
+"""Logical circuit-family projection for circuit-shaped QCore programs.
+
+Rust derives and evaluates finite-angle checks from the same scalar graph used
+by circuit projection. Python retains those plans through emission and storage
+and invokes them before passing complete numeric bindings to SDK adapters.
+"""
 
 from __future__ import annotations
 
@@ -12,13 +17,16 @@ from google.protobuf.message import DecodeError
 from ._compiler_optimization import _preserve_preparation
 from ._native import compiler as native
 from .compilation import (
+    CircuitResultPostprocessingTarget,
     CircuitTarget,
+    CompiledProgram,
     LoweredProgram,
     ParameterABI,
     RealizationCapability,
     ResultABI,
     _target_optimization_stages,
 )
+from .effects import Requirement
 from .errors import ArtifactError, CapabilityError, ExecutionError, SerializationError
 from .ir import (
     FrozenMapping,
@@ -43,6 +51,22 @@ class ParameterValue:
 
     name: str
     path: tuple[int | str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class HiddenBindingValue:
+    """A compiler-owned numeric SDK slot outside the public parameter ABI.
+
+    Args:
+        index (int): Stable compiler slot identity.
+    """
+
+    index: int
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentShotValue:
+    """A native result expression requiring a checked logical shot context."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +195,8 @@ CircuitValue: TypeAlias = (
     | FrozenMapping
     | tuple["CircuitValue", ...]
     | ParameterValue
+    | HiddenBindingValue
+    | CurrentShotValue
     | LoopIndex
     | BooleanPlan
     | DeferredDefinition
@@ -225,6 +251,8 @@ class CircuitProgram:
         _native_result_route (str | None): Checked native result route.
         _native_result_postprocessing (bytes | None): Sealed native result plan.
         _native_operation_count (int | None): Verified instruction count.
+        _native_angle_validation (tuple[bytes, ...]): Native scalar plans checked
+            before concrete gate angles reach an SDK.
     """
 
     name: str
@@ -235,6 +263,7 @@ class CircuitProgram:
     parameter_abi: ParameterABI
     result_abi: ResultABI
     result_value: CircuitValue
+    _hidden_binding_count: int = field(default=0, repr=False, compare=False)
     realizations: tuple[str, ...] = ()
     optimization_stages: tuple[str, ...] = ()
     output_wires: tuple[int, ...] | None = None
@@ -252,6 +281,9 @@ class CircuitProgram:
         default=None,
         repr=False,
         compare=False,
+    )
+    _native_angle_validation: tuple[bytes, ...] = field(
+        default=(), repr=False, compare=False
     )
 
     @property
@@ -309,6 +341,97 @@ class CircuitProgram:
 
 RESULT_POSTPROCESSING_METADATA = "circuit_result_postprocessing"
 RESULT_POSTPROCESSING_FORMAT = "qamomile.result-postprocessing.protobuf.v1"
+ANGLE_VALIDATION_METADATA = "qamomile.circuit_angle_validation.v1"
+
+
+def with_circuit_angle_validation(
+    lowered: LoweredProgram, circuit: CircuitProgram
+) -> LoweredProgram:
+    """Retain native angle checks beside an emitted SDK payload.
+
+    Args:
+        lowered (LoweredProgram): Emitted payload and target metadata.
+        circuit (CircuitProgram): Native projection owning the angle checks.
+
+    Returns:
+        LoweredProgram: Payload with portable, target-neutral angle checks.
+    """
+    return replace(
+        lowered,
+        metadata=FrozenMapping.from_mapping(
+            {
+                **dict(lowered.metadata.entries),
+                ANGLE_VALIDATION_METADATA: circuit._native_angle_validation,
+            }
+        ),
+    )
+
+
+def validate_artifact_angles(
+    artifact: CompiledProgram, parameters: Mapping[str, object]
+) -> None:
+    """Validate retained circuit angles before handing an invocation to an SDK.
+
+    Args:
+        artifact (CompiledProgram): Artifact selected for this invocation.
+        parameters (Mapping[str, object]): Bound runtime parameters.
+
+    Raises:
+        ExecutionError: If required angle metadata is missing or malformed,
+            native validation is unavailable, or a concrete angle is nonfinite.
+    """
+    metadata = dict(artifact.metadata.entries)
+    if ANGLE_VALIDATION_METADATA not in metadata:
+        if Requirement.ROTATION in artifact.execution_contract.requirements:
+            raise ExecutionError(
+                "Q4483: compiled circuit has no native angle validation; "
+                "recompile it from source before execution"
+            )
+        return
+    plans = metadata[ANGLE_VALIDATION_METADATA]
+    if not isinstance(plans, tuple) or any(type(plan) is not bytes for plan in plans):
+        raise ExecutionError("Q4483: invalid native circuit angle validation metadata")
+    _validate_angle_bindings(cast(tuple[bytes, ...], plans), parameters)
+
+
+def validate_circuit_angles(
+    circuit: CircuitProgram, parameters: Mapping[str, object]
+) -> None:
+    """Validate final gate angles for a fully bound circuit projection.
+
+    Args:
+        circuit (CircuitProgram): Native projection with retained angle checks.
+        parameters (Mapping[str, object]): Complete normalized runtime bindings.
+
+    Raises:
+        ExecutionError: If native validation is unavailable, a binding is
+            missing, or a concrete angle is not finite.
+    """
+    _validate_angle_bindings(circuit._native_angle_validation, parameters)
+
+
+def _validate_angle_bindings(
+    plans: tuple[bytes, ...], parameters: Mapping[str, object]
+) -> None:
+    """Ask Rust to evaluate and check the final numeric angle expressions.
+
+    Args:
+        plans (tuple[bytes, ...]): Canonical native scalar evaluation plans.
+        parameters (Mapping[str, object]): Complete normalized runtime bindings.
+
+    Raises:
+        ExecutionError: If native validation is unavailable, a plan is invalid,
+            or an angle is not finite.
+    """
+    if not plans:
+        return
+    validate = getattr(native, "validate_circuit_angles", None)
+    if not callable(validate):
+        raise ExecutionError("Q4483: native circuit angle validation is unavailable")
+    try:
+        validate(list(plans), _native_launch_value(parameters))
+    except (ArithmeticError, TypeError, ValueError) as error:
+        raise ExecutionError(str(error)) from error
 
 
 def circuit_result_postprocessing(program: CircuitProgram) -> bytes | None:
@@ -840,6 +963,9 @@ def lower_circuit_target(
 ) -> LoweredProgram:
     """Project verified QCore once and emit one direct circuit artifact.
 
+    Circuit targets delegate their ``lower`` method here to retain the shared
+    angle checks required by execution and portable artifacts.
+
     Args:
         program (Program): Closed verified source program.
         target (CircuitTarget): Format emitter with exact capabilities.
@@ -858,6 +984,64 @@ def lower_circuit_target(
         realization_capabilities=capabilities.realization_capabilities,
         realizations=capabilities.realizations,
     )
+    return _emit_direct_circuit(program, target, logical)
+
+
+def _try_lower_reusable_circuit(
+    program: Program, target: CircuitTarget
+) -> LoweredProgram | None:
+    """Attempt to emit one reusable circuit before falling back to launch lowering.
+
+    Args:
+        program (Program): Verified source with a native candidate plan.
+        target (CircuitTarget): Target providing the configured emitter.
+
+    Returns:
+        LoweredProgram | None: Emitted circuit with validation, or None when the
+            target needs concrete launch values.
+
+    Raises:
+        ArtifactError: If the emitted payload violates the circuit ABI.
+    """
+    capabilities = target.capabilities
+    # Custom implementations can change the control flow seen by target planning.
+    if capabilities.realizations._custom:
+        return None
+    try:
+        logical = _native_circuit(
+            program,
+            semantic_id=program.semantic_digest,
+            require_reusable_bindings=True,
+            realization_capabilities=capabilities.realization_capabilities,
+            realizations=capabilities.realizations,
+        )
+        if logical.requires_result_postprocessing and not (
+            isinstance(target, CircuitResultPostprocessingTarget)
+            and target.supports_circuit_result_postprocessing is True
+        ):
+            return None
+        return _emit_direct_circuit(program, target, logical)
+    except CapabilityError:
+        return None
+
+
+def _emit_direct_circuit(
+    program: Program, target: CircuitTarget, logical: CircuitProgram
+) -> LoweredProgram:
+    """Emit a verified circuit and attach its checks and compilation stages.
+
+    Args:
+        program (Program): Source of the circuit and its optimization stages.
+        target (CircuitTarget): Emitter for the configured circuit.
+        logical (CircuitProgram): Target-configured circuit with the source ABI.
+
+    Returns:
+        LoweredProgram: Target payload with the native-derived validation plans.
+
+    Raises:
+        ArtifactError: If the target changes the verified circuit ABI.
+        CapabilityError: If the target cannot emit this circuit.
+    """
     lowered = target.lower_circuit(logical)
     if not isinstance(lowered, LoweredProgram):
         raise ArtifactError(
@@ -868,6 +1052,7 @@ def lower_circuit_target(
         or lowered.result_abi != logical.result_abi
     ):
         raise ArtifactError("Q7044: target changed a direct circuit ABI")
+    lowered = with_circuit_angle_validation(lowered, logical)
     return replace(
         lowered,
         stages=(
@@ -883,7 +1068,7 @@ def lower_circuit_target(
                     *(
                         "user asserts "
                         f"{row.implementation_symbol} implements {row.target_symbol}"
-                        for row in capabilities.realizations._custom
+                        for row in target.capabilities.realizations._custom
                     ),
                 )
             )
@@ -897,6 +1082,7 @@ def _native_circuit(
     semantic_id: str,
     realization_capabilities: frozenset[RealizationCapability],
     realizations: RealizationOptions,
+    require_reusable_bindings: bool = False,
 ) -> CircuitProgram:
     """Adopt a successful native circuit projection.
 
@@ -905,6 +1091,8 @@ def _native_circuit(
             normalization passes.
         semantic_id (str): Digest of the pre-normalized source program.
         realizations (RealizationOptions): Operation implementations.
+        require_reusable_bindings (bool): If true, require a circuit whose
+            remaining parameters can be bound without launch-time lowering.
         realization_capabilities (frozenset[RealizationCapability]): Composite instructions accepted by
             the target-neutral consumer.
 
@@ -935,6 +1123,7 @@ def _native_circuit(
             realized_payload,
             _realization_labels(realization_capabilities),
             realizations.overrides,
+            require_reusable_bindings,
         )
     except ValueError as error:
         raise CapabilityError(str(error)) from error
@@ -971,12 +1160,12 @@ def _circuit_from_native_projection(
     """Restore one public circuit from an independently verified projection.
 
     Args:
-        program: Verified source program supplying logical ABI information.
-        projection: Native bridge circuit projection.
-        semantic_id: Digest of the unspecialized semantic program.
-        parameter_abi: Complete launch parameter ABI before circuit projection.
-        conditionally_eliminated_parameters: Parameters consumed by static
-            control unless the projected circuit still references them.
+        program (Program): Verified source supplying logical ABI information.
+        projection (Any): Native bridge circuit projection.
+        semantic_id (str): Digest of the unspecialized semantic program.
+        parameter_abi (ParameterABI): Complete launch parameter ABI before projection.
+        conditionally_eliminated_parameters (frozenset[str]): Parameters consumed
+            by static control unless the projected circuit still references them.
         result_abi (ResultABI | None): Native-checked raw child transport layout,
             or None to use the source result layout.
 
@@ -1002,6 +1191,12 @@ def _circuit_from_native_projection(
         operation_count = projection.operation_count
         if type(operation_count) is not int or operation_count < 0:
             raise TypeError("native circuit has an invalid operation count")
+        raw_angle_validation = projection.angle_validation
+        if not isinstance(raw_angle_validation, list) or any(
+            type(plan) is not bytes for plan in raw_angle_validation
+        ):
+            raise TypeError("native circuit has invalid angle validation plans")
+        angle_validation = tuple(raw_angle_validation)
         raw_parameter_names = projection.parameter_names
         if not isinstance(raw_parameter_names, list) or any(
             type(name) is not str for name in raw_parameter_names
@@ -1058,6 +1253,7 @@ def _circuit_from_native_projection(
                     declared_result.type,
                     result_measurements,
                     projection.measurement_count,
+                    declared_result.per_shot,
                 )
             elif result_route == "postprocessing":
                 if result_measurements or result_postprocessing is None:
@@ -1103,6 +1299,7 @@ def _circuit_from_native_projection(
             _native_result_route=result_route,
             _native_result_postprocessing=result_postprocessing,
             _native_operation_count=operation_count,
+            _native_angle_validation=angle_validation,
             realizations=realizations,
             optimization_stages=tuple(projection.optimization_stages),
         )
@@ -1321,8 +1518,18 @@ def _native_scalar_values(projection: Any) -> tuple[CircuitValue, ...]:
 
     values: list[CircuitValue] = []
     for scalar in projection.scalars:
-        if scalar.kind == "bool":
-            value: CircuitValue = scalar.bool_value
+        if scalar.kind == "current_shot":
+            value: CircuitValue = CurrentShotValue()
+        elif scalar.kind == "hidden_binding":
+            if type(scalar.int_value) is not int or scalar.int_value < 0:
+                raise TypeError("invalid hidden numeric slot")
+            value = HiddenBindingValue(scalar.int_value)
+        elif scalar.kind == "indexed":
+            value = ClassicalExpr(
+                "classical.index", tuple(values[index] for index in scalar.operands)
+            )
+        elif scalar.kind == "bool":
+            value = scalar.bool_value
         elif scalar.kind == "int":
             value = scalar.int_value
         elif scalar.kind == "loop_index":
@@ -1676,7 +1883,17 @@ def _block_to_data(block: CircuitBlock) -> list[dict[str, object]]:
 
 
 def _value_to_data(value: CircuitValue) -> object:
-    """Convert a circuit value to canonical JSON data."""
+    """Convert a circuit inspection value to canonical JSON data.
+
+    Args:
+        value (CircuitValue): Value from the native circuit projection.
+
+    Returns:
+        object: Tagged JSON data preserving the projected value's identity.
+
+    Raises:
+        TypeError: If the value has no circuit inspection encoding.
+    """
 
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
@@ -1705,6 +1922,10 @@ def _value_to_data(value: CircuitValue) -> object:
         return {"loop_index": value.index}
     if isinstance(value, ParameterValue):
         return {"parameter": value.name, "path": list(value.path)}
+    if isinstance(value, CurrentShotValue):
+        return {"current_shot": True}
+    if isinstance(value, HiddenBindingValue):
+        return {"hidden_binding": value.index}
     if isinstance(value, ClassicalExpr):
         return {
             "expr": value.opcode,

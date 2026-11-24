@@ -33,7 +33,8 @@ pytestmark = pytest.mark.quration
 pytest.importorskip("pyqret")
 
 
-def test_quration_native_artifact_roundtrip_is_deterministic() -> None:
+@pytest.mark.parametrize("seed", [0, 7])
+def test_quration_native_artifact_roundtrip_is_deterministic(seed: int) -> None:
     """Native module time metadata cannot perturb portable artifact identity."""
     program = qm.build_source(BASIS_SOURCE).specialize("basis")
     first = qm.compile(program, to=Quration())
@@ -41,7 +42,7 @@ def test_quration_native_artifact_roundtrip_is_deterministic() -> None:
     assert serialize(first) == serialize(second)
     assert "created_at" not in json.loads(export_payload(first))["metadata"]
     restored = deserialize(serialize(first))
-    assert qm.execute(restored, on=QurationLocal(), shots=4, seed=7).counts == {
+    assert qm.execute(restored, on=QurationLocal(), shots=4, seed=seed).counts == {
         (1, 0, 0): 4
     }
     assert qm.quration.Quration is Quration
@@ -62,12 +63,13 @@ def test_quration_sdk_circuit_retains_owners() -> None:
     ]
 
 
-def test_quration_samples_bell_with_repeatable_seed() -> None:
+@pytest.mark.parametrize("seed", [0, 23])
+def test_quration_samples_bell_with_repeatable_seed(seed: int) -> None:
     """Native measurements preserve entanglement and seeded reproducibility."""
     program = qm.build_source(BELL_SOURCE).specialize("bell")
     artifact = qm.compile(program, to=Quration())
-    first = qm.execute(artifact, on=QurationLocal(), shots=32, seed=23)
-    second = qm.execute(artifact, on=QurationLocal(), shots=32, seed=23)
+    first = qm.execute(artifact, on=QurationLocal(), shots=32, seed=seed)
+    second = qm.execute(artifact, on=QurationLocal(), shots=32, seed=seed)
     assert first.counts == second.counts
     assert set(first.counts) == {(0, 0), (1, 1)}
     assert sum(first.counts.values()) == 32
@@ -181,7 +183,7 @@ def test_quration_statevector_limit_precedes_simulator_allocation() -> None:
         qm.build_source(BASIS_SOURCE).specialize("basis"), to=Quration()
     )
     with pytest.raises(qm.ExecutionError, match="Q8908"):
-        qm.execute(artifact, on=QurationLocal(max_qubits=2), shots=1)
+        qm.execute(artifact, on=QurationLocal(max_qubits=2), shots=1, seed=0)
 
 
 def test_quration_rejects_foreign_artifacts_and_missing_machine() -> None:
@@ -297,7 +299,7 @@ def test_quration_reorders_chronological_measurements_into_typed_result() -> Non
     source = """
 import qamomile as qm
 @qm.qkernel
-def sample() -> tuple[qm.Bits[3], qm.Bool]:
+def sample() -> tuple[qm.Shot[qm.Bits[3]], qm.Shot[qm.Bit]]:
     state = qm.prepare((1, 0, 0))
     first, state = qm.measure_z(state, target=0)
     state = qm.x(state, target=0)
@@ -310,7 +312,8 @@ def sample() -> tuple[qm.Bits[3], qm.Bool]:
         shots=4,
         seed=2,
     ).result
-    assert result.values == {((0, 0, 0), True): 4}
+    assert result.values == {((0, 0, 0), 1): 4}
+    assert all(type(value[1]) is int for value in result.values)
 
 
 def test_quration_zero_layer_qaoa() -> None:
@@ -319,7 +322,7 @@ def test_quration_zero_layer_qaoa() -> None:
 
     from .test_library_compatibility import exercise_zero_layer_qaoa_backend
 
-    exercise_zero_layer_qaoa_backend(QurationLocal())
+    exercise_zero_layer_qaoa_backend(QurationLocal(), seed=0)
 
 
 def test_quration_approximate_qft() -> None:
@@ -328,7 +331,7 @@ def test_quration_approximate_qft() -> None:
 
     from .test_library_compatibility import exercise_approximate_qft_backend
 
-    exercise_approximate_qft_backend(QurationLocal())
+    exercise_approximate_qft_backend(QurationLocal(), seed=0)
 
 
 def test_quration_classical_array_compatibility() -> None:
@@ -337,7 +340,7 @@ def test_quration_classical_array_compatibility() -> None:
 
     from .test_classical_array_compatibility import exercise_classical_array_backend
 
-    exercise_classical_array_backend(QurationLocal())
+    exercise_classical_array_backend(QurationLocal(), seed=0)
 
 
 def test_quration_qubit_selection() -> None:
@@ -399,3 +402,21 @@ def test_quration_sqrt() -> None:
     from .test_sqrt import exercise_sqrt_backend
 
     exercise_sqrt_backend(QurationLocal(), seed=7, parameterized=False)
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"seed": None}])
+def test_quration_rejects_unspecified_seed_before_simulation(
+    monkeypatch, kwargs
+) -> None:
+    """A fixed SDK default must not be mistaken for independent random shots."""
+    import pyqret.runtime
+
+    program = qm.build_source(BELL_SOURCE).specialize("bell")
+    artifact = qm.compile(program, to=Quration())
+
+    def forbidden_simulator(*args, **kwargs):
+        raise AssertionError("an unsupported seed must fail before simulation")
+
+    monkeypatch.setattr(pyqret.runtime, "Simulator", forbidden_simulator)
+    with pytest.raises(qm.ExecutionError, match="Q8912.*explicit integer seed"):
+        qm.execute(artifact, on=QurationLocal(), shots=32, **kwargs)

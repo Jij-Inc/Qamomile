@@ -317,6 +317,7 @@ mod tests {
                 payload: b"child".to_vec(),
                 target_fingerprint: "probe-v1".to_owned(),
                 result_abi: Some(wire::ResultAbiProto {
+                    per_shot: false,
                     r#type: Some(scalar("Unit")),
                     ..Default::default()
                 }),

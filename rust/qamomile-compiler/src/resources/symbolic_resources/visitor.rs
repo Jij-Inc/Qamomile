@@ -8,15 +8,16 @@ use crate::static_values::range_len as static_range_len;
 use crate::types::{Dimension, compare_dimensions};
 use crate::wire;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use super::{
-    BlockExit, BlockSummary, Counts, ExprId, MAX_SYMBOLIC_LOOP_INTERPRETATIONS, ScalarFact,
-    SymbolicAnalysisFact, SymbolicAnalysisKey, SymbolicAnalyzer, SymbolicCount,
-    SymbolicDimensionBindings, SymbolicFunctionContext, SymbolicResourceError,
-    SymbolicTimingFootprint, SymbolicTimingNode, SymbolicTimingRoot, ValueFact,
-    append_symbolic_timing, apply_control_footprints, attribute, bind_exact_results, bind_region,
-    bind_results, bind_unpack, bind_values, bool_attribute, bool_fact, coherent_callees,
-    first_operand, instantiate_symbolic_timing, int_fact, invariant_values,
+    BlockExit, BlockSummary, Counts, ExprId, MAX_SYMBOLIC_LOOP_INTERPRETATIONS,
+    ResourceExpressionNode, ScalarFact, SymbolicAnalysisFact, SymbolicAnalysisKey,
+    SymbolicAnalyzer, SymbolicCount, SymbolicDimensionBindings, SymbolicFunctionContext,
+    SymbolicResourceError, SymbolicTimingFootprint, SymbolicTimingNode, SymbolicTimingRoot,
+    ValueFact, append_symbolic_timing, apply_control_footprints, attribute, bind_exact_results,
+    bind_region, bind_results, bind_unpack, bind_values, bool_attribute, bool_fact,
+    coherent_callees, first_operand, instantiate_symbolic_timing, int_fact, invariant_values,
     is_structural_coherent_wrapper, join_values, mapping_string_attribute,
     mapping_string_tuple_attribute, reverse_symbolic_timing, span_identity, string_attribute,
     symbolic_adjoint_roots, symbolic_block_exit, symbolic_call_roots, symbolic_coherent_roots,
@@ -28,7 +29,7 @@ impl SymbolicAnalyzer<'_> {
         &mut self,
         function: &wire::FunctionProto,
         arguments: &[Option<ValueFact>],
-        dimension_arguments: &HashMap<Dimension, ExprId>,
+        dimension_arguments: &HashMap<Dimension, Option<ExprId>>,
     ) -> Result<BlockSummary, SymbolicResourceError> {
         self.analyze_function_mode(
             function,
@@ -43,12 +44,14 @@ impl SymbolicAnalyzer<'_> {
         &mut self,
         function: &wire::FunctionProto,
         arguments: &[Option<ValueFact>],
-        dimension_arguments: &HashMap<Dimension, ExprId>,
+        dimension_arguments: &HashMap<Dimension, Option<ExprId>>,
         mode: TransformMode,
         controls: Option<u32>,
     ) -> Result<BlockSummary, SymbolicResourceError> {
         if self.recurrences.contains(&function.symbol) {
-            return self.recursive_summary(function, arguments, mode, controls);
+            let dimensions =
+                symbolic_dimension_bindings(function, arguments, dimension_arguments, &self.arena)?;
+            return self.recursive_summary(function, arguments, &dimensions.values, mode, controls);
         }
         let mut dimensions = dimension_arguments
             .iter()
@@ -89,12 +92,13 @@ impl SymbolicAnalyzer<'_> {
         &mut self,
         function: &wire::FunctionProto,
         arguments: &[Option<ValueFact>],
-        dimension_arguments: &HashMap<Dimension, ExprId>,
+        dimension_arguments: &HashMap<Dimension, Option<ExprId>>,
         mode: TransformMode,
         controls: Option<u32>,
     ) -> Result<BlockSummary, SymbolicResourceError> {
         if function.external {
-            let dimensions = symbolic_dimension_bindings(function, arguments, dimension_arguments);
+            let dimensions =
+                symbolic_dimension_bindings(function, arguments, dimension_arguments, &self.arena)?;
             let counts = self.external_counts(function, arguments, &dimensions, mode)?;
             let timing = self.external_timing(function, &dimensions, mode, &counts)?;
             return Ok(BlockSummary {
@@ -122,7 +126,8 @@ impl SymbolicAnalyzer<'_> {
                     .ok_or_else(|| SymbolicResourceError::Missing("parameter value".to_owned()))
             })
             .collect::<Result<HashMap<_, _>, _>>()?;
-        let dimensions = symbolic_dimension_bindings(function, arguments, dimension_arguments);
+        let dimensions =
+            symbolic_dimension_bindings(function, arguments, dimension_arguments, &self.arena)?;
         let body = function.body.as_ref().ok_or_else(|| {
             SymbolicResourceError::Missing(format!("body for {:?}", function.symbol))
         })?;
@@ -381,7 +386,8 @@ impl SymbolicAnalyzer<'_> {
                         SymbolicResourceError::Missing("adjoint original opcode".to_owned())
                     })?;
                     if matches!(original, "qcore.control_call" | "qcore.select_call") {
-                        let mut nested = self.analyze_coherent_adjoint(operation, environment)?;
+                        let mut nested =
+                            self.analyze_coherent_adjoint(operation, environment, context)?;
                         let one = self.arena.literal_u128(1)?;
                         self.observe_primitive(
                             &mut nested,
@@ -538,6 +544,10 @@ impl SymbolicAnalyzer<'_> {
                     }
                     bind_results(operation, environment, None);
                 }
+                "qcore.current_shot" => {
+                    let value = self.current_shot_fact()?;
+                    bind_results(operation, environment, Some(&value));
+                }
                 opcode if opcode.starts_with("classical.") => {
                     let value = self.evaluate_classical(operation, environment, context)?;
                     bind_results(operation, environment, value.as_ref());
@@ -624,105 +634,20 @@ impl SymbolicAnalyzer<'_> {
         operation: &wire::OperationProto,
         callee: &wire::FunctionProto,
         context: SymbolicFunctionContext<'_>,
-    ) -> Result<HashMap<Dimension, ExprId>, SymbolicResourceError> {
-        let declared_types = self.operations.value_types(&callee.symbol).ok_or_else(|| {
-            SymbolicResourceError::Missing(format!("type roots for {:?}", callee.symbol))
-        })?;
-        let expected = callee
-            .parameters
-            .iter()
-            .map(|parameter| {
-                parameter
-                    .value
-                    .as_ref()
-                    .and_then(|value| declared_types.get(&value.id))
-                    .copied()
-                    .ok_or_else(|| {
-                        SymbolicResourceError::Missing(format!(
-                            "parameter type in {:?}",
-                            callee.symbol
-                        ))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let local_types = self.operations.value_types(context.owner).ok_or_else(|| {
-            SymbolicResourceError::Missing(format!("type roots for {:?}", context.owner))
-        })?;
-        let actual = operation
-            .operands
-            .iter()
-            .map(|operand| {
-                local_types.get(operand).copied().ok_or_else(|| {
-                    SymbolicResourceError::Missing(format!("operand type in {:?}", context.owner))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let inferred = crate::abi::infer_call_dimensions(self.types, &expected, &actual)
+    ) -> Result<HashMap<Dimension, Option<ExprId>>, SymbolicResourceError> {
+        let bindings = self
+            .verified_calls
+            .get(context.owner, operation, &callee.symbol)
             .ok_or_else(|| SymbolicResourceError::Missing("verified call dimensions".to_owned()))?;
-        inferred
+        let mut ordered = bindings.iter().collect::<Vec<_>>();
+        ordered.sort_unstable_by(|(left, _), (right, _)| compare_dimensions(left, right));
+        ordered
             .into_iter()
-            .filter_map(|(formal, actual)| {
-                self.resolve_dimension(&actual, context.dimensions)
-                    .transpose()
-                    .map(|resolved| resolved.map(|value| (formal, value)))
-            })
-            .collect()
-    }
-
-    pub(super) fn coherent_call_dimensions(
-        &mut self,
-        operation: &wire::OperationProto,
-        callee: &wire::FunctionProto,
-        context: SymbolicFunctionContext<'_>,
-        offset: usize,
-    ) -> Result<HashMap<Dimension, ExprId>, SymbolicResourceError> {
-        let declared_types = self.operations.value_types(&callee.symbol).ok_or_else(|| {
-            SymbolicResourceError::Missing(format!("type roots for {:?}", callee.symbol))
-        })?;
-        let expected = callee
-            .parameters
-            .iter()
-            .map(|parameter| {
-                parameter
-                    .value
-                    .as_ref()
-                    .and_then(|value| declared_types.get(&value.id))
-                    .copied()
-                    .ok_or_else(|| {
-                        SymbolicResourceError::Missing(format!(
-                            "parameter type in {:?}",
-                            callee.symbol
-                        ))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let local_types = self.operations.value_types(context.owner).ok_or_else(|| {
-            SymbolicResourceError::Missing(format!("type roots for {:?}", context.owner))
-        })?;
-        let actual = operation
-            .operands
-            .get(offset..)
-            .ok_or_else(|| SymbolicResourceError::Missing("coherent call ABI".to_owned()))?
-            .iter()
-            .map(|operand| {
-                local_types.get(operand).copied().ok_or_else(|| {
-                    SymbolicResourceError::Missing(format!(
-                        "coherent operand type in {:?}",
-                        context.owner
-                    ))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let inferred = crate::abi::infer_call_dimensions(self.types, &expected, &actual)
-            .ok_or_else(|| {
-                SymbolicResourceError::Missing("verified coherent call dimensions".to_owned())
-            })?;
-        inferred
-            .into_iter()
-            .filter_map(|(formal, actual)| {
-                self.resolve_dimension(&actual, context.dimensions)
-                    .transpose()
-                    .map(|resolved| resolved.map(|value| (formal, value)))
+            .map(|(formal, actual)| {
+                Ok((
+                    formal.clone(),
+                    self.resolve_dimension(actual, context.dimensions)?,
+                ))
             })
             .collect()
     }
@@ -732,13 +657,45 @@ impl SymbolicAnalyzer<'_> {
         dimension: &Dimension,
         bindings: &SymbolicDimensionBindings,
     ) -> Result<Option<ExprId>, SymbolicResourceError> {
-        match dimension {
-            Dimension::Fixed(value) => self.arena.literal_u128(u128::from(*value)).map(Some),
-            Dimension::Symbol { .. } if bindings.values.contains_key(dimension) => {
-                Self::dimension_width(&mut self.arena, dimension, bindings).map(Some)
-            }
-            Dimension::Symbol { .. } => Ok(None),
+        if let Some(expression) = bindings.values.get(dimension) {
+            return Ok(*expression);
         }
+        if crate::types::dimension_symbols(dimension)
+            .iter()
+            .any(|name| matches!(bindings.values.get(name), Some(None)))
+        {
+            return Ok(None);
+        }
+        if let Dimension::Symbol { scope, name } = dimension
+            && name.starts_with("slice(")
+        {
+            let extent = crate::core::slice_shape::SliceShape::parse(name)
+                .and_then(|shape| {
+                    shape.evaluate(&|name| {
+                        let dimension = Dimension::Symbol {
+                            scope: Arc::clone(scope),
+                            name: Arc::from(name),
+                        };
+                        let expression = (*bindings.values.get(&dimension)?)?;
+                        match self.arena.node(expression)? {
+                            ResourceExpressionNode::Literal {
+                                value,
+                                domain: ResourceDomain::Natural | ResourceDomain::Integer,
+                            } => value.parse::<i64>().ok(),
+                            _ => None,
+                        }
+                    })
+                })
+                .map_err(|reason| {
+                    SymbolicResourceError::Unsupported(format!(
+                        "invalid Const slice shape: {reason}"
+                    ))
+                })?;
+            return extent
+                .map(|extent| self.arena.literal_u128(u128::from(extent)))
+                .transpose();
+        }
+        Self::dimension_width(&mut self.arena, dimension, bindings).map(Some)
     }
 
     pub(super) fn analyze_if(
@@ -753,6 +710,21 @@ impl SymbolicAnalyzer<'_> {
             .and_then(|operand| environment.get(operand))
             .and_then(Option::as_ref)
             .and_then(bool_fact);
+        let predicate = operation
+            .operands
+            .first()
+            .and_then(|operand| environment.get(operand))
+            .and_then(Option::as_ref)
+            .and_then(|value| match value {
+                ValueFact::Scalar(ScalarFact::Predicate(predicate)) => Some(*predicate),
+                _ => None,
+            });
+        let shot_predicate = predicate
+            .map(|predicate| self.certified_shot_predicate(predicate))
+            .transpose()?
+            .flatten();
+        let condition = condition
+            .or_else(|| shot_predicate.and_then(|predicate| self.arena.predicate_value(predicate)));
         let captures = operation.operands.get(1..).unwrap_or_default();
         let mut branches = Vec::new();
         for region in &operation.regions {
@@ -780,23 +752,21 @@ impl SymbolicAnalyzer<'_> {
         if let Some(selected) = condition {
             return Ok(branches.remove(usize::from(!selected)));
         }
+        let retained_predicate =
+            shot_predicate.or_else(|| self.recurrences.encountered.then_some(predicate).flatten());
         if branches
             .iter()
             .any(|branch| branch.exit != BlockExit::YIELD)
         {
             let mut summary = self.analyze_non_yielding_if(&branches)?;
-            if self.recurrences.encountered
-                && branches[0].exit == branches[1].exit
-                && let Some(ValueFact::Scalar(ScalarFact::Predicate(predicate))) = operation
-                    .operands
-                    .first()
-                    .and_then(|operand| environment.get(operand))
-                    .and_then(Option::as_ref)
+            if branches[0].exit == branches[1].exit
+                && let Some(predicate) = retained_predicate
             {
                 summary.counts = Counts::conditional(
                     &branches[0].counts,
                     &branches[1].counts,
-                    *predicate,
+                    predicate,
+                    &self.unproved_composition_metrics,
                     &mut self.arena,
                 )?;
             }
@@ -809,17 +779,12 @@ impl SymbolicAnalyzer<'_> {
                 .collect::<Vec<_>>(),
             &mut self.arena,
         )?;
-        if self.recurrences.encountered
-            && let Some(ValueFact::Scalar(ScalarFact::Predicate(predicate))) = operation
-                .operands
-                .first()
-                .and_then(|operand| environment.get(operand))
-                .and_then(Option::as_ref)
-        {
+        if let Some(predicate) = retained_predicate {
             counts = Counts::conditional(
                 &branches[0].counts,
                 &branches[1].counts,
-                *predicate,
+                predicate,
+                &self.unproved_composition_metrics,
                 &mut self.arena,
             )?;
         }
@@ -1132,7 +1097,8 @@ impl SymbolicAnalyzer<'_> {
         let mut summary = self.analyze_block(body, &mut local, context)?;
         let loop_exits = BlockExit::YIELD
             .union(BlockExit::CONTINUE)
-            .union(BlockExit::BREAK);
+            .union(BlockExit::BREAK)
+            .union(BlockExit::RETURN);
         if summary.exit.without(loop_exits) != BlockExit(0) {
             return Err(SymbolicResourceError::Unsupported(format!(
                 "qcore.for body terminator {:?}",
@@ -1141,6 +1107,8 @@ impl SymbolicAnalyzer<'_> {
         }
         let adjoint_body = string_attribute(operation, "body_mode") == Some("adjoint");
         let may_break = summary.exit.contains(BlockExit::BREAK);
+        let mut may_return = summary.exit.contains(BlockExit::RETURN);
+        let may_exit = may_break || may_return;
         let path_dependent =
             summary.exit != BlockExit::YIELD && summary.exit != BlockExit::CONTINUE;
         if adjoint_body {
@@ -1154,7 +1122,7 @@ impl SymbolicAnalyzer<'_> {
                 trip_count,
             }]
         });
-        let body_counts = self.optional_counts(&summary.counts, may_break)?;
+        let body_counts = self.optional_counts(&summary.counts, may_exit)?;
         let mut counts = body_counts.repeat(
             trip_count,
             binder,
@@ -1163,6 +1131,7 @@ impl SymbolicAnalyzer<'_> {
         )?;
         let mut carries = invariant_values(carry_operands, environment, &invariants);
         let mut timing = timing;
+        let mut exit = BlockExit::YIELD;
         if !adjoint_body
             && let Some(otherwise) = operation
                 .regions
@@ -1171,19 +1140,33 @@ impl SymbolicAnalyzer<'_> {
         {
             let mut local = bind_values(otherwise, carries)?;
             let summary = self.analyze_block(otherwise, &mut local, context)?;
-            if summary.exit != BlockExit::YIELD {
+            if summary.exit.without(loop_exits) != BlockExit(0) {
                 return Err(SymbolicResourceError::Unsupported(format!(
                     "qcore.for else terminator {:?}",
                     summary.exit.as_str()
                 )));
             }
-            let otherwise_counts = self.optional_counts(&summary.counts, may_break)?;
+            let otherwise_counts = self.optional_counts(&summary.counts, may_exit)?;
             counts.then(
                 &otherwise_counts,
                 &self.error_bound_metrics,
                 &mut self.arena,
             )?;
+            may_return |= summary.exit.contains(BlockExit::RETURN);
+            // Only exits from the body belong to this loop. Its else region
+            // runs outside that loop's break/continue scope.
+            exit = summary.exit;
             if may_break {
+                exit = exit.union(BlockExit::YIELD);
+            }
+            if !exit.contains(BlockExit::YIELD) {
+                carries = if may_return {
+                    vec![None; summary.values.len()]
+                } else {
+                    summary.values
+                };
+                timing = None;
+            } else if may_exit || summary.exit != BlockExit::YIELD {
                 timing = None;
                 carries = vec![None; carry_operands.len()];
             } else {
@@ -1191,9 +1174,14 @@ impl SymbolicAnalyzer<'_> {
                 carries = summary.values;
             }
         }
+        if may_return {
+            counts.unresolved_control_flow("path-dependent qcore.for return", &self.arena);
+            timing = None;
+            exit = exit.union(BlockExit::RETURN);
+        }
         Ok(BlockSummary {
             counts,
-            exit: BlockExit::YIELD,
+            exit,
             values: carries,
             timing,
         })
@@ -1229,6 +1217,8 @@ impl SymbolicAnalyzer<'_> {
         let reverse = bool_attribute(operation, "reverse").unwrap_or(false);
         let mut broke = false;
         let mut may_break = false;
+        let mut may_return = false;
+        let mut pending_break = false;
         for position in 0..trip_count {
             let logical = if reverse {
                 trip_count - position - 1
@@ -1281,9 +1271,22 @@ impl SymbolicAnalyzer<'_> {
                 }
                 BlockExit::RETURN => {
                     if may_break {
-                        return Err(SymbolicResourceError::Unsupported(
-                            "path-dependent qcore.for return".to_owned(),
-                        ));
+                        counts.unresolved_control_flow(
+                            "path-dependent qcore.for return",
+                            &self.arena,
+                        );
+                        if !pending_break {
+                            return Ok(BlockSummary {
+                                counts,
+                                values: vec![None; summary.values.len()],
+                                timing: None,
+                                ..summary
+                            });
+                        }
+                        may_return = true;
+                        carries.fill(None);
+                        broke = true;
+                        break;
                     }
                     return Ok(BlockSummary {
                         counts,
@@ -1294,10 +1297,13 @@ impl SymbolicAnalyzer<'_> {
                 exit if exit.without(
                     BlockExit::YIELD
                         .union(BlockExit::BREAK)
-                        .union(BlockExit::CONTINUE),
+                        .union(BlockExit::CONTINUE)
+                        .union(BlockExit::RETURN),
                 ) == BlockExit(0) =>
                 {
-                    may_break |= exit.contains(BlockExit::BREAK);
+                    may_return |= exit.contains(BlockExit::RETURN);
+                    pending_break |= exit.contains(BlockExit::BREAK);
+                    may_break |= exit.contains(BlockExit::BREAK) || may_return;
                     carries.fill(None);
                     timing = None;
                 }
@@ -1324,35 +1330,52 @@ impl SymbolicAnalyzer<'_> {
             if !may_break {
                 append_symbolic_timing(&mut timing, summary.timing.clone());
             }
-            if summary.exit == BlockExit::RETURN {
-                // Return values and loop carries have different ABIs. Preserve
-                // the existing exclusion until mixed return paths model both.
-                if may_break {
-                    return Err(SymbolicResourceError::Unsupported(
-                        "path-dependent qcore.for else return".to_owned(),
-                    ));
-                }
-                return Ok(BlockSummary {
-                    counts,
-                    timing,
-                    ..summary
-                });
-            }
-            if summary.exit != BlockExit::YIELD {
+            if summary.exit.without(
+                BlockExit::YIELD
+                    .union(BlockExit::RETURN)
+                    .union(BlockExit::BREAK)
+                    .union(BlockExit::CONTINUE),
+            ) != BlockExit(0)
+            {
                 return Err(SymbolicResourceError::Unsupported(format!(
                     "qcore.for else terminator {:?}",
                     summary.exit.as_str()
                 )));
             }
-            carries = if may_break {
-                vec![None; carry_count]
-            } else {
-                summary.values
-            };
+            let mut exit = summary.exit;
+            if pending_break {
+                exit = exit.union(BlockExit::YIELD);
+            }
+            if may_return {
+                exit = exit.union(BlockExit::RETURN);
+            }
+            if may_return || (exit.contains(BlockExit::RETURN) && exit != BlockExit::RETURN) {
+                counts.unresolved_control_flow("path-dependent qcore.for return", &self.arena);
+            }
+            return Ok(BlockSummary {
+                counts,
+                exit,
+                values: if pending_break {
+                    vec![None; carry_count]
+                } else if may_return {
+                    vec![None; summary.values.len()]
+                } else {
+                    summary.values
+                },
+                timing,
+            });
+        }
+        if may_return {
+            counts.unresolved_control_flow("path-dependent qcore.for return", &self.arena);
+            timing = None;
         }
         Ok(BlockSummary {
             counts,
-            exit: BlockExit::YIELD,
+            exit: if may_return {
+                BlockExit::YIELD.union(BlockExit::RETURN)
+            } else {
+                BlockExit::YIELD
+            },
             values: carries,
             timing,
         })
@@ -1400,8 +1423,10 @@ impl SymbolicAnalyzer<'_> {
             roots
         });
         let nested_mode = context.mode.adjoint();
+        let dimension_arguments = self.call_dimensions(operation, callee, context)?;
         if callee.external {
-            let dimensions = symbolic_dimension_bindings(callee, &arguments, &HashMap::new());
+            let dimensions =
+                symbolic_dimension_bindings(callee, &arguments, &dimension_arguments, &self.arena)?;
             let mut counts = self.external_counts(callee, &arguments, &dimensions, nested_mode)?;
             self.observe_call(&mut counts, callee, nested_mode, context.controls)?;
             let timing = if let Some(roots) = roots.as_ref() {
@@ -1422,7 +1447,7 @@ impl SymbolicAnalyzer<'_> {
         let direct = self.analyze_function_mode(
             callee,
             &arguments,
-            &HashMap::new(),
+            &dimension_arguments,
             nested_mode,
             context.controls,
         )?;
@@ -1490,8 +1515,6 @@ impl SymbolicAnalyzer<'_> {
             .and_then(|(outer, inner)| outer.checked_add(inner));
         let control_footprints =
             self.symbolic_control_footprints(first, operation, environment, context, offset)?;
-        let dimension_arguments =
-            self.coherent_call_dimensions(operation, first, context, offset)?;
         let owner = self
             .functions
             .get(context.owner)
@@ -1503,30 +1526,22 @@ impl SymbolicAnalyzer<'_> {
                 .get(name)
                 .copied()
                 .ok_or_else(|| SymbolicResourceError::Missing(format!("callable {name:?}")))?;
-            let (mut nested, mut nested_timing) = if callee.external {
-                let dimensions =
-                    symbolic_dimension_bindings(callee, &arguments, &dimension_arguments);
-                let nested = self.external_counts(callee, &arguments, &dimensions, nested_mode)?;
-                let nested_timing =
-                    self.external_timing(callee, &dimensions, nested_mode, &nested)?;
-                (nested, nested_timing)
+            let dimension_arguments = self.call_dimensions(operation, callee, context)?;
+            let summary = self.analyze_function_mode(
+                callee,
+                &arguments,
+                &dimension_arguments,
+                nested_mode,
+                nested_controls,
+            )?;
+            let mut nested = summary.counts;
+            let mut nested_timing = if callee.external
+                || is_structural_coherent_wrapper(callee, &self.functions, &mut HashSet::new())
+            {
+                summary.timing
             } else {
-                let transparent =
-                    is_structural_coherent_wrapper(callee, &self.functions, &mut HashSet::new());
-                let summary = self.analyze_function_mode(
-                    callee,
-                    &arguments,
-                    &dimension_arguments,
-                    nested_mode,
-                    nested_controls,
-                )?;
-                let nested_timing = if transparent {
-                    summary.timing
-                } else {
-                    body_backed.push(callee.symbol.clone());
-                    None
-                };
-                (summary.counts, nested_timing)
+                body_backed.push(callee.symbol.clone());
+                None
             };
             if let Some(local) = nested_timing.take() {
                 let mut roots = symbolic_coherent_roots(callee, operation, owner, offset)?;
@@ -1695,6 +1710,7 @@ impl SymbolicAnalyzer<'_> {
         &mut self,
         operation: &wire::OperationProto,
         environment: &HashMap<u64, Option<ValueFact>>,
+        context: SymbolicFunctionContext<'_>,
     ) -> Result<Counts, SymbolicResourceError> {
         let original = string_attribute(operation, "original")
             .ok_or_else(|| SymbolicResourceError::Missing("coherent adjoint opcode".to_owned()))?;
@@ -1760,9 +1776,10 @@ impl SymbolicAnalyzer<'_> {
                 .get(name)
                 .copied()
                 .ok_or_else(|| SymbolicResourceError::Missing(format!("callable {name:?}")))?;
+            let dimensions = self.call_dimensions(operation, callee, context)?;
             direct.then(
                 &self
-                    .analyze_function(callee, &arguments, &HashMap::new())?
+                    .analyze_function(callee, &arguments, &dimensions)?
                     .counts,
                 &self.error_bound_metrics,
                 &mut self.arena,

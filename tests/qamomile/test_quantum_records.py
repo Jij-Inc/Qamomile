@@ -48,7 +48,7 @@ class Single(NamedTuple):
     state: qm.Q[qm.Bool]
 
 @qm.qkernel
-def unary() -> qm.Shot[qm.Bool]:
+def unary() -> qm.Shot[qm.Bit]:
     record = Single(qm.prepare(False))
     state, = record
     product = (qm.x(state),)
@@ -170,7 +170,7 @@ import qamomile as qm
 class Single(NamedTuple):
     number: qm.Int
 @qm.qkernel
-def sample(number: qm.Param[qm.Int]) -> qm.Shot[qm.Bool]:
+def sample(number: qm.Param[qm.Int]) -> qm.Shot[qm.Bit]:
     record = Single(number)
     value, = record
     product = (value + 1,)

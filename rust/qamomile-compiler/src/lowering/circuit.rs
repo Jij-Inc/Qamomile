@@ -7,6 +7,7 @@
 //! Bounded measurement-driven loop exits become scalar selects and conditional
 //! instruction blocks at projection, preserving carry values and loop-else flow.
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::shot_execution::{CircuitScalarCheck, ClosedQuantumFrontier};
@@ -48,7 +49,7 @@ use crate::static_values::{
     self, StaticScalar, StaticValue, normalize_aggregate_index, range_len as static_range_len,
     truth as static_truth,
 };
-use crate::types::{SemanticType, TypeArena, TypeId};
+use crate::types::{Dimension, ScalarType, SemanticType, TypeArena, TypeId};
 use crate::wire;
 
 const MAX_STATIC_CIRCUIT_INSTRUCTIONS: usize = 1_000_000;
@@ -185,6 +186,19 @@ impl CircuitScalarAttribute {
 /// One immutable node in the target-neutral scalar expression DAG.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum CircuitScalarNode {
+    /// Invocation-local zero-based logical index, evaluated only with checked context.
+    CurrentShot,
+    /// Adapter-only numeric binding owned by a native shot template.
+    HiddenBinding(u32),
+    /// Fixed-shape scalar selection evaluated with native index semantics.
+    Indexed {
+        /// Scalar index expression.
+        index: CircuitScalarId,
+        /// Source-ordered fixed scalar leaves.
+        elements: Box<[CircuitScalarId]>,
+        /// Verified selected scalar type.
+        scalar_type: CircuitScalarType,
+    },
     /// Exact Boolean literal.
     Bool(bool),
     /// Exact signed integer literal.
@@ -225,13 +239,25 @@ pub enum CircuitScalarNode {
 }
 
 impl CircuitScalarNode {
+    pub(crate) fn operands(&self) -> Vec<CircuitScalarId> {
+        match self {
+            Self::Apply { operands, .. } => operands.to_vec(),
+            Self::Indexed {
+                index, elements, ..
+            } => std::iter::once(*index)
+                .chain(elements.iter().copied())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
     /// Return the verified result type of this scalar node.
     #[must_use]
     pub const fn scalar_type(&self) -> CircuitScalarType {
         match self {
             Self::Bool(_) | Self::Measurement(_) => CircuitScalarType::Bool,
-            Self::Int(_) | Self::LoopIndex(_) => CircuitScalarType::Int,
-            Self::RealBits(_) => CircuitScalarType::Real,
+            Self::Int(_) | Self::LoopIndex(_) | Self::CurrentShot => CircuitScalarType::Int,
+            Self::HiddenBinding(_) | Self::RealBits(_) => CircuitScalarType::Real,
+            Self::Indexed { scalar_type, .. } => *scalar_type,
             Self::CallValue { scalar_type, .. } | Self::Parameter { scalar_type, .. } => {
                 *scalar_type
             }
@@ -276,11 +302,16 @@ pub struct StaticInstruction {
 /// One nested target-neutral instruction block.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StaticBlock {
+    scalar_checks: Box<[CircuitScalarCheck]>,
     instructions: Box<[StaticInstruction]>,
     return_value: Option<StaticCircuitValue>,
 }
 
 impl StaticBlock {
+    pub(crate) fn scalar_checks(&self) -> &[CircuitScalarCheck] {
+        &self.scalar_checks
+    }
+
     pub(crate) fn instructions_mut(&mut self) -> &mut [StaticInstruction] {
         &mut self.instructions
     }
@@ -291,6 +322,7 @@ impl StaticBlock {
     #[cfg(test)]
     pub(crate) fn test_new(instructions: Vec<StaticInstruction>) -> Self {
         Self {
+            scalar_checks: Box::new([]),
             instructions: instructions.into_boxed_slice(),
             return_value: None,
         }
@@ -302,6 +334,7 @@ impl StaticBlock {
         return_value: StaticCircuitValue,
     ) -> Self {
         Self {
+            scalar_checks: Box::new([]),
             instructions: instructions.into_boxed_slice(),
             return_value: Some(return_value),
         }
@@ -777,6 +810,36 @@ impl StaticCircuit {
         &self.scalars
     }
 
+    /// Whether launch values can stay as plain numeric parameters with fixed
+    /// paths, including inside retained gate definitions.
+    ///
+    /// Binding an exact value at launch can fold expressions that an SDK could
+    /// not emit symbolically. Such a circuit must keep its materialization path.
+    #[must_use]
+    pub(crate) fn has_reusable_parameter_bindings(&self) -> bool {
+        if !plain_parameter_bindings(self.scalars()) {
+            return false;
+        }
+        let mut visited = HashSet::new();
+        let mut blocks = vec![self.instructions()];
+        while let Some(instructions) = blocks.pop() {
+            for instruction in instructions {
+                blocks.extend(instruction.regions().iter().map(StaticBlock::instructions));
+                for parameter in instruction.parameters() {
+                    if let CircuitParameter::Definition(definition) = parameter
+                        && visited.insert(definition.identity())
+                    {
+                        if !plain_parameter_bindings(definition.scalars()) {
+                            return false;
+                        }
+                        blocks.extend(definition.retained_body());
+                    }
+                }
+            }
+        }
+        true
+    }
+
     /// Return unique launch parameter names retained by the compact scalar DAG.
     #[must_use]
     pub fn retained_parameter_names(&self) -> Vec<&str> {
@@ -814,6 +877,39 @@ impl StaticCircuit {
     /// Borrow the private result tree used by native execution.
     pub(crate) const fn runtime_result_value(&self) -> Option<&StaticCircuitValue> {
         self.result_value.as_ref()
+    }
+
+    pub(crate) fn has_ordered_template_checks(&self) -> bool {
+        self.has_nested_checks() || self.ordered_scalar_checks().next().is_some()
+    }
+
+    pub(crate) fn has_ordered_binary_checks(&self) -> bool {
+        self.ordered_scalar_checks().any(|check| {
+            self.scalars[check.root.index() as usize].scalar_type() == CircuitScalarType::Bool
+        })
+    }
+
+    fn ordered_scalar_checks(&self) -> impl Iterator<Item = &CircuitScalarCheck> {
+        self.scalar_checks.iter().filter(|check| {
+            check.instruction_index != self.instructions.len()
+                && (scalar_depends_on_measurement(check.root, &self.scalars)
+                    || scalar_depends_on_loop_index(check.root, &self.scalars))
+        })
+    }
+
+    pub(crate) fn has_nested_checks(&self) -> bool {
+        let mut pending = vec![self.instructions()];
+        while let Some(instructions) = pending.pop() {
+            for instruction in instructions {
+                for block in instruction.regions() {
+                    if !block.scalar_checks.is_empty() {
+                        return true;
+                    }
+                    pending.push(block.instructions());
+                }
+            }
+        }
+        false
     }
 
     pub(crate) fn has_terminal_checks(&self) -> bool {
@@ -957,18 +1053,11 @@ enum CircuitValue {
     Parameter {
         name: String,
         path: Box<[CircuitParameterPath]>,
-        shape: ParameterShape,
+        type_id: TypeId,
     },
     Aggregate(Box<[CircuitValue]>),
     Wires(Box<[u64]>),
     Unit,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-enum ParameterShape {
-    Array(u64),
-    Product(u64),
-    Record(Box<[String]>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -994,6 +1083,62 @@ struct ExpandedLoop {
 
 type CompletedFamilyProjection = (Vec<bool>, Vec<CircuitDispatchPredicate>, StaticCircuit);
 
+/// The dimension substitution for this invocation of a shared function body.
+struct CircuitCallFrame {
+    scope: Arc<str>,
+    dimensions: HashMap<Dimension, Dimension>,
+    result_type: wire::TypeProto,
+}
+
+impl CircuitCallFrame {
+    fn new(
+        function: &wire::FunctionProto,
+        dimensions: HashMap<Dimension, Dimension>,
+    ) -> Result<Self, StaticCircuitError> {
+        let result_type = function.result_type.clone().ok_or_else(|| {
+            StaticCircuitError::Missing(format!("result type for {:?}", function.symbol))
+        })?;
+        Ok(Self {
+            scope: Arc::from(function.symbol.as_str()),
+            dimensions,
+            result_type,
+        })
+    }
+
+    fn type_id(
+        &self,
+        types: &mut TypeArena,
+        source: &wire::TypeProto,
+    ) -> Result<TypeId, StaticCircuitError> {
+        let id = types
+            .resolve_wire_type(source, &self.scope)
+            .map_err(StaticCircuitError::Missing)?;
+        if self.dimensions.is_empty() {
+            return Ok(id);
+        }
+        types
+            .substitute_dimensions(id, &self.dimensions)
+            .map_err(StaticCircuitError::Missing)
+    }
+
+    fn wire_type<'t>(
+        &self,
+        types: &mut TypeArena,
+        source: &'t wire::TypeProto,
+    ) -> Result<Cow<'t, wire::TypeProto>, StaticCircuitError> {
+        if self.dimensions.is_empty()
+            || (source.arguments.is_empty() && source.dimensions.is_empty())
+        {
+            return Ok(Cow::Borrowed(source));
+        }
+        let id = self.type_id(types, source)?;
+        types
+            .encode_wire_type(id)
+            .map(Cow::Owned)
+            .map_err(StaticCircuitError::Missing)
+    }
+}
+
 #[derive(Clone)]
 struct StaticLowerer<'a> {
     entry_body: Option<&'a wire::BlockProto>,
@@ -1003,6 +1148,7 @@ struct StaticLowerer<'a> {
     measurement_guards: Vec<(CircuitScalarId, bool)>,
     realizations: BTreeSet<ConfiguredRealization>,
     boolean_plans: &'a phase_lifting::VerifiedBooleanLiftPlans,
+    call_dimensions: &'a crate::abi::VerifiedCallDimensions,
     lowering: LoweringConfig,
     functions: HashMap<&'a str, &'a wire::FunctionProto>,
     next_wire: u64,
@@ -1021,7 +1167,8 @@ struct StaticLowerer<'a> {
     dispatch_predicates: Vec<CircuitDispatchPredicate>,
     launch_scalars: &'a HashMap<LaunchScalarKey, StaticValue>,
     known_scalars: HashMap<CircuitScalarId, StaticValue>,
-    result_types: Vec<wire::TypeProto>,
+    parameter_types: TypeArena,
+    frames: Vec<Arc<CircuitCallFrame>>,
     expanded_loops: Vec<ExpandedLoop>,
     operation_visits: u128,
     aggregate_projection_work: usize,
@@ -1040,30 +1187,28 @@ struct LaunchScalarKey {
 }
 
 pub(crate) fn project_with_lowering(
-    package: &wire::QCorePackageProto,
-    boolean_plans: &phase_lifting::VerifiedBooleanLiftPlans,
+    checked: &crate::CheckedProgramGraph,
     lowering: LoweringConfig,
 ) -> Result<StaticCircuit, StaticCircuitError> {
-    project_with_host_decisions(package, boolean_plans, lowering, &[], &HashMap::new())
+    project_with_host_decisions(checked, lowering, &[], &HashMap::new())
         .map(|(circuit, _, _)| circuit)
 }
 
 pub(crate) fn project_with_work(
-    package: &wire::QCorePackageProto,
-    boolean_plans: &phase_lifting::VerifiedBooleanLiftPlans,
+    checked: &crate::CheckedProgramGraph,
     lowering: LoweringConfig,
 ) -> Result<(StaticCircuit, StaticCircuitWork), StaticCircuitError> {
-    project_with_host_decisions(package, boolean_plans, lowering, &[], &HashMap::new())
+    project_with_host_decisions(checked, lowering, &[], &HashMap::new())
         .map(|(circuit, _, operation_visits)| (circuit, StaticCircuitWork { operation_visits }))
 }
 
 pub(crate) fn project_at(
-    package: &wire::QCorePackageProto,
-    boolean_plans: &phase_lifting::VerifiedBooleanLiftPlans,
+    checked: &crate::CheckedProgramGraph,
     dispatch_parameter_indices: &[usize],
     bindings: &[CircuitLaunchBinding],
     lowering: LoweringConfig,
 ) -> Result<StaticCircuit, StaticCircuitError> {
+    let package = &checked.package;
     let entry = package
         .functions
         .iter()
@@ -1073,17 +1218,17 @@ pub(crate) fn project_at(
         unbound_control_parameter_indices(package, entry, dispatch_parameter_indices)?;
     let controlled_parameters = validate_dispatch_parameters(entry, &runtime_indices)?;
     let launch_scalars = validate_launch_bindings(entry, &controlled_parameters, bindings)?;
-    project_with_host_decisions(package, boolean_plans, lowering, &[], &launch_scalars)
+    project_with_host_decisions(checked, lowering, &[], &launch_scalars)
         .map(|(circuit, _, _)| circuit)
 }
 
 pub(crate) fn project_for_invocation(
-    package: &wire::QCorePackageProto,
-    boolean_plans: &phase_lifting::VerifiedBooleanLiftPlans,
+    checked: &crate::CheckedProgramGraph,
     dispatch_parameter_indices: &[usize],
     bindings: &[CircuitLaunchBinding],
     lowering: LoweringConfig,
 ) -> Result<StaticCircuit, StaticCircuitError> {
+    let package = &checked.package;
     let launch_scalars = validated_launch_scalars(package, bindings)?;
     let entry = package
         .functions
@@ -1093,7 +1238,7 @@ pub(crate) fn project_for_invocation(
     let runtime_indices =
         unbound_control_parameter_indices(package, entry, dispatch_parameter_indices)?;
     validate_dispatch_parameters(entry, &runtime_indices)?;
-    project_with_host_decisions(package, boolean_plans, lowering, &[], &launch_scalars)
+    project_with_host_decisions(checked, lowering, &[], &launch_scalars)
         .map(|(circuit, _, _)| circuit)
 }
 
@@ -1134,11 +1279,11 @@ fn validated_launch_scalars(
 }
 
 pub(crate) fn project_family(
-    package: &wire::QCorePackageProto,
-    boolean_plans: &phase_lifting::VerifiedBooleanLiftPlans,
+    checked: &crate::CheckedProgramGraph,
     dispatch_parameter_indices: &[usize],
     lowering: LoweringConfig,
 ) -> Result<StaticCircuitFamily, StaticCircuitError> {
+    let package = &checked.package;
     let entry = package
         .functions
         .iter()
@@ -1146,7 +1291,7 @@ pub(crate) fn project_family(
         .ok_or_else(|| StaticCircuitError::Missing("entrypoint".to_owned()))?;
     let mut runtime_indices =
         unbound_control_parameter_indices(package, entry, dispatch_parameter_indices)?;
-    let completed = explore_dispatch_tree(package, boolean_plans, lowering)?;
+    let completed = explore_dispatch_tree(checked, lowering)?;
     let mut predicates = Vec::<CircuitDispatchPredicate>::new();
     let mut variants = Vec::with_capacity(completed.len());
     for (decision_values, path_predicates, circuit) in completed {
@@ -1215,6 +1360,8 @@ fn validate_dispatch_parameters(
     entry: &wire::FunctionProto,
     parameter_indices: &[usize],
 ) -> Result<Vec<(usize, String)>, StaticCircuitError> {
+    let mut types = TypeArena::default();
+    let scope = types.intern_scope(&entry.symbol);
     parameter_indices
         .iter()
         .map(|parameter_index| {
@@ -1234,18 +1381,20 @@ fn validate_dispatch_parameters(
                         parameter.name
                     ))
                 })?;
-            if parameter_type.kind() != wire::type_proto::Kind::Staged
-                || parameter_type.name != "Param"
-                || (circuit_scalar_type(parameter_type).is_none()
-                    && !is_complex_scalar_type(parameter_type)
-                    && parameter_shape(parameter_type)?.is_none())
+            if parameter_type.kind() == wire::type_proto::Kind::Staged
+                && parameter_type.name == "Param"
             {
-                return Err(StaticCircuitError::Unsupported(format!(
-                    "host dispatch parameter {:?} is not a supported Param value",
-                    parameter.name
-                )));
+                let type_id = types
+                    .resolve_wire_type(parameter_type, &scope)
+                    .map_err(StaticCircuitError::Missing)?;
+                if ParameterType::of(&types, type_id)?.is_some() {
+                    return Ok((*parameter_index, parameter.name.clone()));
+                }
             }
-            Ok((*parameter_index, parameter.name.clone()))
+            Err(StaticCircuitError::Unsupported(format!(
+                "host dispatch parameter {:?} is not a supported Param value",
+                parameter.name
+            )))
         })
         .collect()
 }
@@ -1582,22 +1731,22 @@ fn launch_aggregate_error(name: &str) -> StaticCircuitError {
 }
 
 fn explore_dispatch_tree(
-    package: &wire::QCorePackageProto,
-    boolean_plans: &phase_lifting::VerifiedBooleanLiftPlans,
+    checked: &crate::CheckedProgramGraph,
     lowering: LoweringConfig,
 ) -> Result<Vec<CompletedFamilyProjection>, StaticCircuitError> {
     let mut pending = std::collections::VecDeque::from([Vec::<bool>::new()]);
     let mut completed = Vec::new();
     let mut instruction_count = 0_usize;
     while let Some(decisions) = pending.pop_front() {
-        match project_with_host_decisions(
-            package,
-            boolean_plans,
-            lowering,
-            &decisions,
-            &HashMap::new(),
-        ) {
+        match project_with_host_decisions(checked, lowering, &decisions, &HashMap::new()) {
             Ok((circuit, predicates, _)) => {
+                if decisions.is_empty() {
+                    // The configured projection resolved every potential branch.
+                    // Keep the single-circuit launch route instead of sealing a selector.
+                    return Err(StaticCircuitError::LaunchMaterialization(
+                        "a single circuit without a launch predicate".to_owned(),
+                    ));
+                }
                 instruction_count = instruction_count
                     .checked_add(circuit.operation_count())
                     .filter(|count| *count <= MAX_STATIC_CIRCUIT_INSTRUCTIONS)
@@ -1644,12 +1793,12 @@ pub(crate) fn instruction_count(instructions: &[StaticInstruction]) -> usize {
 
 #[allow(clippy::too_many_lines)]
 fn project_with_host_decisions(
-    package: &wire::QCorePackageProto,
-    boolean_plans: &phase_lifting::VerifiedBooleanLiftPlans,
+    checked: &crate::CheckedProgramGraph,
     lowering: LoweringConfig,
     host_decisions: &[bool],
     launch_scalars: &HashMap<LaunchScalarKey, StaticValue>,
 ) -> Result<(StaticCircuit, Vec<CircuitDispatchPredicate>, u128), StaticCircuitError> {
+    let package = &checked.package;
     let mut lowerer = StaticLowerer {
         entry_body: package
             .functions
@@ -1661,7 +1810,8 @@ fn project_with_host_decisions(
         scalar_checks: Vec::new(),
         measurement_guards: Vec::new(),
         realizations: BTreeSet::new(),
-        boolean_plans,
+        boolean_plans: &checked.boolean_plans,
+        call_dimensions: &checked.call_dimensions,
         lowering,
         functions: package
             .functions
@@ -1687,7 +1837,8 @@ fn project_with_host_decisions(
         dispatch_predicates: Vec::new(),
         launch_scalars,
         known_scalars: HashMap::new(),
-        result_types: Vec::new(),
+        parameter_types: TypeArena::default(),
+        frames: Vec::new(),
         expanded_loops: Vec::new(),
         operation_visits: 0,
         aggregate_projection_work: 0,
@@ -1702,6 +1853,7 @@ fn project_with_host_decisions(
         .iter()
         .map(|binding| (binding.name.as_str(), binding.value.as_ref()))
         .collect::<HashMap<_, _>>();
+    let scope = lowerer.parameter_types.intern_scope(&entry.symbol);
     let mut arguments = Vec::with_capacity(entry.parameters.len());
     for parameter in &entry.parameters {
         if parameter
@@ -1727,11 +1879,17 @@ fn project_with_host_decisions(
         {
             lowerer.literal_value(literal, parameter_type)?
         } else {
-            lowerer.parameter_value(parameter.name.clone(), Box::new([]), parameter_type)?
+            let type_id = lowerer
+                .parameter_types
+                .resolve_wire_type(parameter_type, &scope)
+                .map_err(StaticCircuitError::Missing)?;
+            lowerer.parameter_value(parameter.name.clone(), Box::new([]), type_id)?
         };
         arguments.push(value);
     }
-    let flow = lowerer.emit_function(entry, &arguments)?;
+    let mut frame = CircuitCallFrame::new(entry, HashMap::new())?;
+    lowerer.bind_integer_arguments(&mut frame, entry, &arguments)?;
+    let flow = lowerer.emit_function(entry, &arguments, frame)?;
     if flow.kind != "return" {
         return Err(StaticCircuitError::Missing(format!(
             "return terminator in {:?}",
@@ -1784,6 +1942,95 @@ fn project_with_host_decisions(
 }
 
 impl StaticLowerer<'_> {
+    fn callee_frame(
+        &self,
+        operation: &wire::OperationProto,
+        callee: &wire::FunctionProto,
+    ) -> Result<CircuitCallFrame, StaticCircuitError> {
+        let parent = self
+            .frames
+            .last()
+            .expect("calls are emitted within a function");
+        let verified = self
+            .call_dimensions
+            .get(&parent.scope, operation, &callee.symbol)
+            .ok_or_else(|| {
+                StaticCircuitError::Missing(format!(
+                    "checked call dimensions for {:?}",
+                    callee.symbol
+                ))
+            })?;
+        let dimensions = verified
+            .iter()
+            .map(|(formal, actual)| {
+                (
+                    formal.clone(),
+                    crate::types::instantiate_dimension(actual, &parent.dimensions),
+                )
+            })
+            .collect();
+        CircuitCallFrame::new(callee, dimensions)
+    }
+
+    /// Integer parameters may name dimensions used only inside the shared body.
+    fn bind_integer_arguments(
+        &self,
+        frame: &mut CircuitCallFrame,
+        function: &wire::FunctionProto,
+        arguments: &[CircuitValue],
+    ) -> Result<(), StaticCircuitError> {
+        for (parameter, argument) in function.parameters.iter().zip(arguments) {
+            if !matches!(
+                argument,
+                CircuitValue::Scalar(_) | CircuitValue::Portable(StaticValue::BigInt(_))
+            ) {
+                continue;
+            }
+            let Some(integer) = self
+                .static_value(argument)
+                .as_ref()
+                .and_then(crate::numeric_values::integer_value)
+            else {
+                continue;
+            };
+            let binder = Dimension::Symbol {
+                scope: Arc::clone(&frame.scope),
+                name: Arc::from(parameter.name.as_str()),
+            };
+            let actual = integer.to_u64();
+            match (frame.dimensions.get(&binder), actual) {
+                (Some(Dimension::Fixed(expected)), value) if value != Some(*expected) => {
+                    return Err(StaticCircuitError::Unsupported(format!(
+                        "dimension argument {:?} in {:?} disagrees with its verified width {expected}",
+                        parameter.name, function.symbol
+                    )));
+                }
+                (None, Some(width)) if width > 0 => {
+                    frame.dimensions.insert(binder, Dimension::Fixed(width));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn operation_result_type<'t>(
+        &mut self,
+        operation: &'t wire::OperationProto,
+    ) -> Result<Cow<'t, wire::TypeProto>, StaticCircuitError> {
+        let source = operation
+            .results
+            .first()
+            .and_then(|result| result.r#type.as_ref())
+            .ok_or_else(|| {
+                StaticCircuitError::Missing(format!("result type for {:?}", operation.opcode))
+            })?;
+        self.frames
+            .last()
+            .expect("operations are emitted within a function")
+            .wire_type(&mut self.parameter_types, source)
+    }
+
     fn literal_value(
         &mut self,
         literal: &wire::LiteralProto,
@@ -1855,8 +2102,9 @@ impl StaticLowerer<'_> {
         &mut self,
         name: String,
         path: Box<[CircuitParameterPath]>,
-        current_type: &wire::TypeProto,
+        type_id: TypeId,
     ) -> Result<CircuitValue, StaticCircuitError> {
+        let parameter_type = ParameterType::of(&self.parameter_types, type_id)?;
         let launch_value = self
             .launch_scalars
             .get(&LaunchScalarKey {
@@ -1864,42 +2112,56 @@ impl StaticLowerer<'_> {
                 path: path.clone(),
             })
             .cloned();
-        if let Some(scalar_type) = circuit_scalar_type(current_type) {
-            let identifier = self.intern_scalar(CircuitScalarNode::Parameter {
-                name,
-                path,
-                scalar_type,
-            })?;
-            if let Some(value) = launch_value {
-                if circuit_scalar_type_for_value(&value) != Some(scalar_type) {
+        match parameter_type {
+            Some(ParameterType::Scalar(scalar_type)) => {
+                let identifier = self.intern_scalar(CircuitScalarNode::Parameter {
+                    name,
+                    path,
+                    scalar_type,
+                })?;
+                if let Some(value) = launch_value {
+                    if circuit_scalar_type_for_value(&value) != Some(scalar_type) {
+                        return Err(StaticCircuitError::Unsupported(
+                            "launch binding scalar type disagrees with the entrypoint ABI"
+                                .to_owned(),
+                        ));
+                    }
+                    self.known_scalars.insert(identifier, value);
+                }
+                Ok(CircuitValue::Scalar(identifier))
+            }
+            Some(ParameterType::Complex) => {
+                let value = launch_value.ok_or_else(|| {
+                    StaticCircuitError::Unsupported(
+                        "Complex circuit parameters require exact launch materialization"
+                            .to_owned(),
+                    )
+                })?;
+                if !matches!(value, StaticValue::ComplexBits(_, _)) {
                     return Err(StaticCircuitError::Unsupported(
-                        "launch binding scalar type disagrees with the entrypoint ABI".to_owned(),
+                        "Complex launch value disagrees with the entrypoint ABI".to_owned(),
                     ));
                 }
-                self.known_scalars.insert(identifier, value);
+                self.static_value_to_circuit(&value)
             }
-            return Ok(CircuitValue::Scalar(identifier));
-        }
-        if is_complex_scalar_type(current_type) {
-            let value = launch_value.ok_or_else(|| {
-                StaticCircuitError::Unsupported(
-                    "Complex circuit parameters require exact launch materialization".to_owned(),
-                )
-            })?;
-            if !matches!(value, StaticValue::ComplexBits(_, _)) {
-                return Err(StaticCircuitError::Unsupported(
-                    "Complex launch value disagrees with the entrypoint ABI".to_owned(),
-                ));
+            Some(
+                ParameterType::Array(_) | ParameterType::Product(_) | ParameterType::Record(_),
+            ) => Ok(CircuitValue::Parameter {
+                name,
+                path,
+                type_id,
+            }),
+            None => {
+                let source = self
+                    .parameter_types
+                    .encode_wire_type(type_id)
+                    .map_err(StaticCircuitError::Missing)?;
+                Err(StaticCircuitError::Unsupported(format!(
+                    "circuit parameter with type {:?}",
+                    display_type(&source)
+                )))
             }
-            return self.static_value_to_circuit(&value);
         }
-        if let Some(shape) = parameter_shape(current_type)? {
-            return Ok(CircuitValue::Parameter { name, path, shape });
-        }
-        Err(StaticCircuitError::Unsupported(format!(
-            "circuit parameter with type {:?}",
-            display_type(current_type)
-        )))
     }
 
     fn intern_scalar(
@@ -1976,7 +2238,10 @@ impl StaticLowerer<'_> {
             CircuitScalarNode::RealBits(value) => {
                 Some(StaticValue::Scalar(StaticScalar::RealBits(*value)))
             }
-            CircuitScalarNode::LoopIndex(_)
+            CircuitScalarNode::CurrentShot
+            | CircuitScalarNode::HiddenBinding(_)
+            | CircuitScalarNode::Indexed { .. }
+            | CircuitScalarNode::LoopIndex(_)
             | CircuitScalarNode::Measurement(_)
             | CircuitScalarNode::CallValue { .. }
             | CircuitScalarNode::Parameter { .. }
@@ -2010,8 +2275,8 @@ impl StaticLowerer<'_> {
             CircuitValue::Parameter {
                 name,
                 path,
-                shape: ParameterShape::Array(width),
-            } => (0..*width)
+                type_id,
+            } => (0..ParameterType::array_extent(&self.parameter_types, *type_id)?)
                 .map(|index| {
                     let mut component_path = Vec::with_capacity(path.len() + 1);
                     component_path.extend_from_slice(path);
@@ -2059,7 +2324,7 @@ impl StaticLowerer<'_> {
         let CircuitValue::Parameter {
             name,
             path,
-            shape: ParameterShape::Array(width),
+            type_id,
         } = value
         else {
             return Err(StaticCircuitError::Unsupported(
@@ -2068,7 +2333,11 @@ impl StaticLowerer<'_> {
         };
         let name = name.clone();
         let path = path.clone();
-        (0..*width)
+        let width =
+            ParameterType::array_extent(&self.parameter_types, *type_id).ok_or_else(|| {
+                StaticCircuitError::Unsupported("non-static quantum.prepare data".to_owned())
+            })?;
+        (0..width)
             .map(|index| {
                 let mut component_path = Vec::with_capacity(path.len() + 1);
                 component_path.extend_from_slice(&path);
@@ -2087,8 +2356,9 @@ impl StaticLowerer<'_> {
         &mut self,
         function: &wire::FunctionProto,
         arguments: &[CircuitValue],
+        mut frame: CircuitCallFrame,
     ) -> Result<Flow, StaticCircuitError> {
-        if self.result_types.len() >= MAX_CIRCUIT_CALL_DEPTH {
+        if self.frames.len() >= MAX_CIRCUIT_CALL_DEPTH {
             return Err(StaticCircuitError::Unsupported(format!(
                 "call expansion exceeds the {MAX_CIRCUIT_CALL_DEPTH}-frame depth budget"
             )));
@@ -2105,34 +2375,36 @@ impl StaticLowerer<'_> {
                 function.symbol
             )));
         }
-        let environment = function
-            .parameters
-            .iter()
-            .zip(arguments)
-            .map(|(parameter, value)| {
-                parameter
-                    .value
+        let mut environment = HashMap::with_capacity(arguments.len());
+        for (parameter, argument) in function.parameters.iter().zip(arguments) {
+            let definition = parameter.value.as_ref().ok_or_else(|| {
+                StaticCircuitError::Missing(format!("parameter value in {:?}", function.symbol))
+            })?;
+            let mut value = argument.clone();
+            if !frame.dimensions.is_empty()
+                && let CircuitValue::Parameter { type_id, .. } = &mut value
+            {
+                let formal = definition
+                    .r#type
                     .as_ref()
-                    .map(|definition| (definition.id, value.clone()))
-                    .ok_or_else(|| {
-                        StaticCircuitError::Missing(format!(
-                            "parameter value in {:?}",
-                            function.symbol
-                        ))
-                    })
-            })
-            .collect::<Result<HashMap<_, _>, _>>()?;
+                    .ok_or_else(|| StaticCircuitError::Missing("parameter type".to_owned()))?;
+                *type_id = frame.type_id(&mut self.parameter_types, formal)?;
+            }
+            environment.insert(definition.id, value);
+        }
         let body = function.body.as_ref().ok_or_else(|| {
             StaticCircuitError::Missing(format!("body for {:?}", function.symbol))
         })?;
-        let result_type = function.result_type.clone().ok_or_else(|| {
-            StaticCircuitError::Missing(format!("result type for {:?}", function.symbol))
-        })?;
-        self.result_types.push(result_type);
+        if let Cow::Owned(concrete) =
+            frame.wire_type(&mut self.parameter_types, &frame.result_type)?
+        {
+            frame.result_type = concrete;
+        }
+        self.frames.push(Arc::new(frame));
         let outer_loops = std::mem::take(&mut self.expanded_loops);
         let result = self.emit_block(body, &environment, &[]);
         self.expanded_loops = outer_loops;
-        self.result_types.pop();
+        self.frames.pop();
         result
     }
 
@@ -2151,7 +2423,7 @@ impl StaticLowerer<'_> {
         for (definition, value) in block.arguments.iter().zip(arguments) {
             environment.insert(definition.id, value.clone());
         }
-        let entry_block = self.result_types.len() == 1
+        let entry_block = self.frames.len() == 1
             && self
                 .entry_body
                 .is_some_and(|entry| std::ptr::eq(entry, block));
@@ -2164,9 +2436,31 @@ impl StaticLowerer<'_> {
             }
             let guard = self.expanded_loops.last().map(|frame| frame.continuing);
             let start = self.instructions.len();
-            let outcome = self.emit_operation(operation, &environment)?;
+            let check_start = self.scalar_checks.len();
+            let measurement_prefix = self.next_measurement;
+            let call_prefix = self.next_call_value;
+            let conditional_guard = guard.filter(|condition| {
+                !matches!(
+                    self.scalar_node(*condition),
+                    Some(CircuitScalarNode::Bool(true))
+                )
+            });
+            if let Some(condition) = conditional_guard {
+                self.measurement_guards.push((condition, true));
+            }
+            let outcome = self.emit_operation(operation, &environment);
+            if conditional_guard.is_some() {
+                self.measurement_guards.pop();
+            }
+            let outcome = outcome?;
             if let Some(condition) = guard {
-                self.guard_instructions(start, condition)?;
+                self.guard_instructions(
+                    start,
+                    check_start,
+                    condition,
+                    measurement_prefix,
+                    call_prefix,
+                )?;
             }
             let values = match outcome {
                 OperationFlow::Values(values) => values,
@@ -2212,12 +2506,123 @@ impl StaticLowerer<'_> {
         Ok(flow)
     }
 
+    fn take_scalar_checks(
+        &mut self,
+        check_start: usize,
+        instruction_start: usize,
+    ) -> Box<[CircuitScalarCheck]> {
+        let mut checks = self.scalar_checks.split_off(check_start);
+        for check in &mut checks {
+            check.instruction_index -= instruction_start;
+        }
+        checks.into_boxed_slice()
+    }
+
+    fn take_unconsumed_gate_checks(
+        &mut self,
+        check_start: usize,
+        instruction_start: usize,
+    ) -> Box<[CircuitScalarCheck]> {
+        let mut scalar_checks = self
+            .take_scalar_checks(check_start, instruction_start)
+            .into_vec();
+        let mut roots_by_instruction = HashMap::<usize, HashSet<CircuitScalarId>>::new();
+        scalar_checks.retain(|check| {
+            let Some(instruction) = self
+                .instructions
+                .get(instruction_start + check.instruction_index)
+            else {
+                return true;
+            };
+            if QuantumOpcode::parse_name(&instruction.opcode).is_none()
+                || self
+                    .scalar_node(check.root)
+                    .is_some_and(|node| node.scalar_type() == CircuitScalarType::Bool)
+            {
+                return true;
+            }
+            let roots = roots_by_instruction
+                .entry(check.instruction_index)
+                .or_insert_with(|| {
+                    let mut pending = instruction
+                        .parameters
+                        .iter()
+                        .filter_map(|parameter| {
+                            if let CircuitParameter::Scalar(root) = parameter {
+                                Some(*root)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let mut roots = HashSet::new();
+                    while let Some(root) = pending.pop() {
+                        if roots.insert(root)
+                            && let Some(CircuitScalarNode::Apply {
+                                opcode, operands, ..
+                            }) = self.scalar_node(root)
+                            && opcode != "classical.select"
+                        {
+                            pending.extend(operands.iter().copied());
+                        }
+                    }
+                    roots
+                });
+            !roots.contains(&check.root)
+        });
+        scalar_checks.into_boxed_slice()
+    }
+
+    fn retain_unconsumed_gate_checks(&mut self, check_start: usize, instruction_start: usize) {
+        let checks = self.take_unconsumed_gate_checks(check_start, instruction_start);
+        self.scalar_checks
+            .extend(checks.into_vec().into_iter().map(|mut check| {
+                check.instruction_index += instruction_start;
+                check
+            }));
+    }
+
+    fn hoist_entry_checks(
+        &mut self,
+        checks: Box<[CircuitScalarCheck]>,
+        instruction_start: usize,
+        measurement_prefix: u64,
+        call_prefix: u64,
+    ) -> Box<[CircuitScalarCheck]> {
+        checks
+            .into_vec()
+            .into_iter()
+            .filter(|check| {
+                if check.instruction_index == 0
+                    && scalar_available_at_branch_entry(
+                        check.root,
+                        &self.scalars,
+                        measurement_prefix,
+                        call_prefix,
+                    )
+                {
+                    self.scalar_checks.push(CircuitScalarCheck {
+                        instruction_index: instruction_start,
+                        root: check.root,
+                    });
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    }
+
     fn guard_instructions(
         &mut self,
         start: usize,
+        check_start: usize,
         condition: CircuitScalarId,
+        measurement_prefix: u64,
+        call_prefix: u64,
     ) -> Result<(), StaticCircuitError> {
-        if self.instructions.len() == start
+        if (self.instructions.len() == start && self.scalar_checks.len() == check_start)
             || matches!(
                 self.scalar_node(condition),
                 Some(CircuitScalarNode::Bool(true))
@@ -2226,6 +2631,36 @@ impl StaticLowerer<'_> {
             return Ok(());
         }
         let instructions = self.instructions.split_off(start);
+        let mut scalar_checks = self.take_scalar_checks(check_start, start);
+        for check in &mut scalar_checks {
+            let node = match self
+                .scalar_node(check.root)
+                .map(CircuitScalarNode::scalar_type)
+            {
+                Some(CircuitScalarType::Bool) => CircuitScalarNode::Bool(false),
+                Some(CircuitScalarType::Int) => CircuitScalarNode::Int(0),
+                Some(CircuitScalarType::Real) => CircuitScalarNode::RealBits(0.0_f64.to_bits()),
+                None => {
+                    return Err(StaticCircuitError::Missing(
+                        "guarded scalar check".to_owned(),
+                    ));
+                }
+            };
+            let neutral = self.intern_scalar(node)?;
+            check.root = self.select_scalar(condition, check.root, neutral)?;
+        }
+        let scalar_checks =
+            self.hoist_entry_checks(scalar_checks, start, measurement_prefix, call_prefix);
+        if instructions.is_empty() && scalar_checks.is_empty() {
+            return Ok(());
+        }
+        let mut returns = Vec::new();
+        collect_runtime_returns(&instructions, &mut returns);
+        let (exit_checks, scalar_checks): (Vec<_>, Vec<_>) = scalar_checks
+            .into_vec()
+            .into_iter()
+            .partition(|check| returns.is_empty() && check.instruction_index == instructions.len());
+        let scalar_checks = scalar_checks.into_boxed_slice();
         if self.instruction_count >= MAX_STATIC_CIRCUIT_INSTRUCTIONS {
             return Err(StaticCircuitError::Unsupported(format!(
                 "more than {MAX_STATIC_CIRCUIT_INSTRUCTIONS} circuit instructions"
@@ -2240,16 +2675,23 @@ impl StaticLowerer<'_> {
             condition: Some(condition),
             regions: vec![
                 StaticBlock {
+                    scalar_checks,
                     instructions: instructions.into_boxed_slice(),
                     return_value: None,
                 },
                 StaticBlock {
+                    scalar_checks: Box::new([]),
                     instructions: Box::new([]),
                     return_value: None,
                 },
             ]
             .into_boxed_slice(),
         });
+        self.scalar_checks
+            .extend(exit_checks.into_iter().map(|mut check| {
+                check.instruction_index = self.instructions.len();
+                check
+            }));
         Ok(())
     }
 
@@ -2325,7 +2767,9 @@ impl StaticLowerer<'_> {
         for node in &scalars {
             if matches!(
                 node,
-                CircuitScalarNode::Parameter { .. } | CircuitScalarNode::LoopIndex(_)
+                CircuitScalarNode::Parameter { .. }
+                    | CircuitScalarNode::LoopIndex(_)
+                    | CircuitScalarNode::CurrentShot
             ) {
                 parameters.push(CircuitParameter::Scalar(self.intern_scalar(node.clone())?));
             }
@@ -2338,18 +2782,20 @@ impl StaticLowerer<'_> {
 
     fn emit_retained_callable(
         &mut self,
-        callee_name: &str,
         callee: &wire::FunctionProto,
         arguments: &[CircuitValue],
+        mut frame: CircuitCallFrame,
     ) -> Result<Flow, StaticCircuitError> {
+        self.bind_integer_arguments(&mut frame, callee, arguments)?;
+        let callee_name = callee.symbol.as_str();
         if !self
             .lowering
             .capabilities
             .contains(RealizationCapabilities::COHERENT_REGIONS)
         {
-            return self.emit_function(callee, arguments);
+            return self.emit_function(callee, arguments, frame);
         }
-        let cache_key = self.call_cache_key(callee_name, arguments);
+        let cache_key = self.call_cache_key(callee_name, arguments, &frame.dimensions);
         if let Some((key, wires)) = &cache_key
             && let Some(entry) = self.call_cache.get(key).cloned()
         {
@@ -2360,10 +2806,14 @@ impl StaticLowerer<'_> {
         let start_workspace = self.schoolbook_workspace.len();
         let controls = std::mem::take(&mut self.controls);
         let start = self.instructions.len();
-        let result = self.emit_function(callee, arguments);
+        let check_start = self.scalar_checks.len();
+        let result = self.emit_function(callee, arguments, frame);
         let flow = result?;
+        self.retain_unconsumed_gate_checks(check_start, start);
         if coherent_instructions(&self.instructions[start..]) {
-            if contains_structured_loop(&self.instructions[start..]) {
+            if contains_structured_loop(&self.instructions[start..])
+                || self.scalar_checks.len() != check_start
+            {
                 distribute_controls(&mut self.instructions[start..], &controls)?;
             } else if !self.instructions[start..].is_empty() {
                 let label = named_call_label(callee_name).unwrap_or_else(|| callee_name.to_owned());
@@ -2378,6 +2828,7 @@ impl StaticLowerer<'_> {
         if self.next_wire.checked_sub(start_wire)
             == u64::try_from(self.schoolbook_workspace.len() - start_workspace).ok()
             && self.next_measurement == start_measurement
+            && self.scalar_checks.len() == check_start
             && let Some((key, wires)) = cache_key
         {
             self.cache_call(key, &wires, start, &flow);
@@ -2428,7 +2879,9 @@ impl StaticLowerer<'_> {
         }
         let controls = std::mem::take(&mut self.controls);
         let start = self.instructions.len();
+        let check_start = self.scalar_checks.len();
         let result = self.emit_operation_unwrapped(operation, environment)?;
+        self.retain_unconsumed_gate_checks(check_start, start);
         if self.instructions.len() == start + 1
             && matches!(
                 self.instructions[start].opcode.as_str(),
@@ -2440,8 +2893,10 @@ impl StaticLowerer<'_> {
             )
         {
             self.instructions[start].controls = controls.clone().into_boxed_slice();
-        } else {
+        } else if self.scalar_checks.len() == check_start {
             self.retain_coherent_region(start, &operation.opcode, controls.clone())?;
+        } else {
+            distribute_controls(&mut self.instructions[start..], &controls)?;
         }
         self.controls = controls;
         Ok(result)
@@ -2473,16 +2928,13 @@ impl StaticLowerer<'_> {
                 let literal = attribute(operation, "value").ok_or_else(|| {
                     StaticCircuitError::Missing("qcore.constant value".to_owned())
                 })?;
-                let type_spec = operation
-                    .results
-                    .first()
-                    .and_then(|result| result.r#type.as_ref())
-                    .ok_or_else(|| {
-                        StaticCircuitError::Missing("qcore.constant result type".to_owned())
-                    })?;
-                let value = self.literal_value(literal, type_spec)?;
+                let type_spec = self.operation_result_type(operation)?;
+                let value = self.literal_value(literal, &type_spec)?;
                 Ok(vec![value])
             }
+            "qcore.current_shot" => Ok(vec![CircuitValue::Scalar(
+                self.intern_scalar(CircuitScalarNode::CurrentShot)?,
+            )]),
             "qcore.stage_lift" => Ok(operands),
             "qcore.reshape" => self.emit_reshape(operation, &operands),
             "tuple" | "array" | "qcore.tuple" => {
@@ -2504,7 +2956,7 @@ impl StaticLowerer<'_> {
             "qcore.select_call" => self.emit_select_call(operation, &operands),
             "classical.index" => self.emit_parameter_index(operation, &operands),
             "classical.len" if operands.len() == 1 => {
-                let length = Self::collection_extent(&operands[0]);
+                let length = self.collection_extent(&operands[0]);
                 match length {
                     Ok(length) => Ok(vec![CircuitValue::Scalar(self.intern_scalar(
                         CircuitScalarNode::Int(
@@ -2515,7 +2967,7 @@ impl StaticLowerer<'_> {
                 }
             }
             "classical.slice" => self.emit_classical_slice(operation, &operands),
-            "classical.update" => self.emit_classical_update(operation, &operands),
+            "classical.update" => self.emit_classical_update(&operands),
             "classical.project" => self.emit_parameter_project(operation, &operands),
             opcode if opcode.starts_with("classical.") => {
                 self.emit_symbolic_classical(operation, &operands)
@@ -2538,11 +2990,8 @@ impl StaticLowerer<'_> {
                 "qcore.reshape operand ABI".to_owned(),
             ));
         };
-        let target_type = operation
-            .results
-            .first()
-            .and_then(|result| result.r#type.as_ref())
-            .ok_or_else(|| StaticCircuitError::Missing("qcore.reshape result type".to_owned()))?;
+        let target = self.operation_result_type(operation)?;
+        let target_type = target.as_ref();
         let mut wires = Vec::new();
         flatten_coherent_wires(source, &mut wires)?;
         if is_top_level_quantum_type(target_type) {
@@ -2966,13 +3415,15 @@ impl StaticLowerer<'_> {
         Ok(())
     }
 
-    fn collection_extent(source: &CircuitValue) -> Result<usize, StaticCircuitError> {
+    fn collection_extent(&self, source: &CircuitValue) -> Result<usize, StaticCircuitError> {
         match source {
             CircuitValue::Aggregate(values) => Ok(values.len()),
-            CircuitValue::Parameter {
-                shape: ParameterShape::Array(extent),
-                ..
-            } => usize::try_from(*extent).map_err(|_| StaticCircuitError::Overflow),
+            CircuitValue::Parameter { type_id, .. }
+                if let Some(extent) =
+                    ParameterType::array_extent(&self.parameter_types, *type_id) =>
+            {
+                usize::try_from(extent).map_err(|_| StaticCircuitError::Overflow)
+            }
             _ => Err(StaticCircuitError::Unsupported(
                 "classical collection projection".to_owned(),
             )),
@@ -2981,7 +3432,6 @@ impl StaticLowerer<'_> {
 
     fn collection_element(
         &mut self,
-        operation: &wire::OperationProto,
         source: &CircuitValue,
         index: usize,
     ) -> Result<CircuitValue, StaticCircuitError> {
@@ -2990,40 +3440,11 @@ impl StaticLowerer<'_> {
                 .get(index)
                 .cloned()
                 .ok_or(StaticCircuitError::Overflow),
-            CircuitValue::Parameter { name, path, .. } => {
-                let result = operation.results.first().ok_or_else(|| {
-                    StaticCircuitError::Missing("collection result type".to_owned())
-                })?;
-                let mut arena = crate::types::TypeArena::default();
-                let scope = arena.intern_scope("collection_projection");
-                let root = arena
-                    .resolve_wire_type(
-                        result.r#type.as_ref().ok_or_else(|| {
-                            StaticCircuitError::Missing("collection type".to_owned())
-                        })?,
-                        &scope,
-                    )
-                    .map_err(StaticCircuitError::Missing)?;
-                let element = arena
-                    .sequence_element(root)
-                    .map_err(StaticCircuitError::Missing)?
-                    .ok_or_else(|| StaticCircuitError::Missing("collection element".to_owned()))?;
-                let mut projected = operation.clone();
-                projected.results[0].r#type = Some(
-                    arena
-                        .encode_wire_type(element)
-                        .map_err(StaticCircuitError::Missing)?,
-                );
-                let value = self.project_parameter(
-                    &projected,
-                    name,
-                    path,
-                    CircuitParameterPath::Index(index as u64),
-                )?;
-                value.into_iter().next().ok_or_else(|| {
-                    StaticCircuitError::Missing("projected collection element".to_owned())
-                })
-            }
+            CircuitValue::Parameter {
+                name,
+                path,
+                type_id,
+            } => self.project_parameter(name, path, *type_id, index),
             _ => Err(StaticCircuitError::Unsupported(
                 "classical collection projection".to_owned(),
             )),
@@ -3054,7 +3475,7 @@ impl StaticLowerer<'_> {
             }
         }
         let positions = static_values::normalize_aggregate_slice(
-            Self::collection_extent(source)?,
+            self.collection_extent(source)?,
             bounds[0].as_ref(),
             bounds[1].as_ref(),
             bounds[2].as_ref(),
@@ -3063,20 +3484,19 @@ impl StaticLowerer<'_> {
         self.charge_aggregate_projection(positions.len())?;
         let values = positions
             .iter()
-            .map(|i| self.collection_element(operation, source, *i))
+            .map(|i| self.collection_element(source, *i))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(vec![CircuitValue::Aggregate(values.into_boxed_slice())])
     }
 
     fn emit_classical_update(
         &mut self,
-        operation: &wire::OperationProto,
         operands: &[CircuitValue],
     ) -> Result<Vec<CircuitValue>, StaticCircuitError> {
         let [source, index, replacement] = operands else {
             return Err(StaticCircuitError::Missing("update operands".to_owned()));
         };
-        let extent = Self::collection_extent(source)?;
+        let extent = self.collection_extent(source)?;
         if extent > static_values::MAX_AGGREGATE_SLICE_ITEMS {
             return Err(StaticCircuitError::Unsupported(
                 "aggregate update exceeds its item budget".to_owned(),
@@ -3097,7 +3517,7 @@ impl StaticLowerer<'_> {
             values.push(if i == position {
                 replacement.clone()
             } else {
-                self.collection_element(operation, source, i)?
+                self.collection_element(source, i)?
             });
         }
         Ok(vec![CircuitValue::Aggregate(values.into_boxed_slice())])
@@ -3113,16 +3533,50 @@ impl StaticLowerer<'_> {
                 "classical.index operand ABI".to_owned(),
             ));
         };
-        let index = self
-            .static_int(selector)
-            .ok_or(StaticCircuitError::DynamicClassicalAggregateIndex)?;
+        let Some(index) = self.static_int(selector) else {
+            let index = Self::scalar_value_identifier(selector, "classical.index")?;
+            if !scalar_depends_on_current_shot(index, &self.scalars) {
+                return Err(StaticCircuitError::DynamicClassicalAggregateIndex);
+            }
+            let extent = self.collection_extent(parameter)?;
+            self.charge_aggregate_projection(extent)?;
+            let mut elements = Vec::with_capacity(extent);
+            for position in 0..extent {
+                let element = self.collection_element(parameter, position)?;
+                elements.push(Self::scalar_value_identifier(
+                    &element,
+                    "indexed scalar element",
+                )?);
+            }
+            let scalar_type = operation
+                .results
+                .first()
+                .and_then(|result| result.r#type.as_ref())
+                .and_then(circuit_scalar_type)
+                .ok_or_else(|| {
+                    StaticCircuitError::Unsupported("indexed aggregate result".into())
+                })?;
+            return Ok(vec![CircuitValue::Scalar(self.intern_scalar(
+                CircuitScalarNode::Indexed {
+                    index,
+                    elements: elements.into_boxed_slice(),
+                    scalar_type,
+                },
+            )?)]);
+        };
         match parameter {
             CircuitValue::Aggregate(values) => {
                 Ok(vec![aggregate_value_at(values, index, "classical.index")?])
             }
-            CircuitValue::Parameter { name, path, shape } => {
-                let component = parameter_component(shape, index)?;
-                self.project_parameter(operation, name, path, component)
+            CircuitValue::Parameter {
+                name,
+                path,
+                type_id,
+            } => {
+                let position = self.parameter_position(*type_id, index)?;
+                Ok(vec![
+                    self.project_parameter(name, path, *type_id, position)?,
+                ])
             }
             _ => self.emit_symbolic_classical(operation, operands),
         }
@@ -3147,40 +3601,79 @@ impl StaticLowerer<'_> {
                 position,
                 "classical.project",
             )?]),
-            CircuitValue::Parameter { name, path, shape } => {
-                let component = parameter_component(shape, position)?;
-                self.project_parameter(operation, name, path, component)
+            CircuitValue::Parameter {
+                name,
+                path,
+                type_id,
+            } => {
+                let position = self.parameter_position(*type_id, position)?;
+                Ok(vec![
+                    self.project_parameter(name, path, *type_id, position)?,
+                ])
             }
             _ => self.emit_symbolic_classical(operation, operands),
         }
     }
 
+    fn parameter_position(&self, type_id: TypeId, index: i64) -> Result<usize, StaticCircuitError> {
+        let extent = match ParameterType::of(&self.parameter_types, type_id)? {
+            Some(ParameterType::Array(extent)) => {
+                usize::try_from(extent).map_err(|_| StaticCircuitError::Overflow)?
+            }
+            Some(ParameterType::Product(extent)) => extent,
+            Some(ParameterType::Record(fields)) => fields.len(),
+            _ => {
+                return Err(StaticCircuitError::Missing(
+                    "aggregate parameter type".to_owned(),
+                ));
+            }
+        };
+        normalize_aggregate_index(extent, &BigInt::from(index)).ok_or_else(|| {
+            StaticCircuitError::InvalidSelector(format!(
+                "parameter index {index} is outside extent {extent}"
+            ))
+        })
+    }
+
     fn project_parameter(
         &mut self,
-        operation: &wire::OperationProto,
         name: &str,
         path: &[CircuitParameterPath],
-        component: CircuitParameterPath,
-    ) -> Result<Vec<CircuitValue>, StaticCircuitError> {
-        let result_type = operation
-            .results
-            .first()
-            .and_then(|result| result.r#type.as_ref())
-            .ok_or_else(|| {
-                StaticCircuitError::Missing(format!(
-                    "parameter projection result type for {:?}",
-                    operation.opcode
-                ))
-            })?;
+        type_id: TypeId,
+        position: usize,
+    ) -> Result<CircuitValue, StaticCircuitError> {
+        let types = &mut self.parameter_types;
+        let (component, element) = match ParameterType::of(types, type_id)? {
+            Some(ParameterType::Array(_)) => (
+                CircuitParameterPath::Index(position as u64),
+                types.sequence_element(type_id),
+            ),
+            Some(ParameterType::Product(_)) => (
+                CircuitParameterPath::Index(position as u64),
+                types.aggregate_element_at(type_id, position),
+            ),
+            Some(ParameterType::Record(fields)) => {
+                let (field, _) = fields
+                    .get(position)
+                    .ok_or_else(|| StaticCircuitError::Missing("record field name".to_owned()))?;
+                (
+                    CircuitParameterPath::Field(field.clone()),
+                    types.aggregate_element_at(type_id, position),
+                )
+            }
+            _ => {
+                return Err(StaticCircuitError::Missing(
+                    "aggregate parameter type".to_owned(),
+                ));
+            }
+        };
+        let element = element
+            .map_err(StaticCircuitError::Missing)?
+            .ok_or_else(|| StaticCircuitError::Missing("projected parameter element".to_owned()))?;
         let mut projected_path = Vec::with_capacity(path.len() + 1);
         projected_path.extend_from_slice(path);
         projected_path.push(component);
-        let value = self.parameter_value(
-            name.to_owned(),
-            projected_path.into_boxed_slice(),
-            result_type,
-        )?;
-        Ok(vec![value])
+        self.parameter_value(name.to_owned(), projected_path.into_boxed_slice(), element)
     }
 
     fn emit_symbolic_classical(
@@ -3216,6 +3709,8 @@ impl StaticLowerer<'_> {
         {
             let reason = if opcode == "classical.sqrt" {
                 "sqrt operands for native domain validation"
+            } else if string_attribute(operation, "target") == Some("Bit") {
+                "integer preparation for native binary validation"
             } else {
                 "Real cast operands for native numeric conversion"
             };
@@ -3254,6 +3749,7 @@ impl StaticLowerer<'_> {
             self.known_scalars.insert(identifier, value);
         }
         if result_type != CircuitScalarType::Bool
+            || (opcode == "classical.cast" && string_attribute(operation, "target") == Some("Bit"))
             || matches!(opcode, "classical.index" | "classical.map_get")
         {
             let neutral = self.intern_scalar(match result_type {
@@ -3282,10 +3778,11 @@ impl StaticLowerer<'_> {
         operation: &wire::OperationProto,
         environment: &HashMap<u64, Option<StaticValue>>,
     ) -> Result<Option<StaticValue>, StaticCircuitError> {
-        // Measurement guards belong to the native lazy evaluator; folding here
-        // could evaluate a partial expression in an untaken source branch.
+        // Successful concrete evaluation is safe even on an untaken path and
+        // keeps dependent shapes static. Leave undefined or excessive evaluations
+        // to the native lazy evaluator so their guards still control failure.
         if !self.measurement_guards.is_empty() {
-            return Ok(None);
+            return Ok(static_values::evaluate_value(operation, environment));
         }
         if operation.opcode == "classical.map_get" || requires_launch_scalar_evaluation(operation) {
             static_values::evaluate_value_checked(operation, environment).map_err(|error| {
@@ -3325,13 +3822,16 @@ impl StaticLowerer<'_> {
             .copied()
             .ok_or_else(|| StaticCircuitError::Missing(format!("callable {callee_name:?}")))?;
         let start = self.instructions.len();
-        let flow = self.emit_retained_callable(callee_name, callee, operands)?;
+        let check_start = self.scalar_checks.len();
+        let flow =
+            self.emit_retained_callable(callee, operands, self.callee_frame(operation, callee)?)?;
         if flow.kind != "return" {
             return Err(StaticCircuitError::Missing(format!(
                 "return terminator in {callee_name:?}"
             )));
         }
         let instructions = self.instructions.split_off(start);
+        let scalar_checks = self.take_scalar_checks(check_start, start);
         let mut runtime_returns = Vec::new();
         collect_runtime_returns(&instructions, &mut runtime_returns);
         if runtime_returns.is_empty() {
@@ -3350,6 +3850,7 @@ impl StaticLowerer<'_> {
                 self.instruction_count += 1;
                 let mut qubits = std::collections::BTreeSet::new();
                 collect_instruction_wires(&instructions, &mut qubits);
+
                 self.instructions.push(StaticInstruction {
                     opcode: format!("box:{label}"),
                     qubits: qubits.into_iter().collect::<Vec<_>>().into_boxed_slice(),
@@ -3357,6 +3858,7 @@ impl StaticLowerer<'_> {
                     controls: Box::new([]),
                     condition: None,
                     regions: vec![StaticBlock {
+                        scalar_checks,
                         instructions: instructions.into_boxed_slice(),
                         return_value: None,
                     }]
@@ -3364,12 +3866,16 @@ impl StaticLowerer<'_> {
                 });
                 return Ok(flow.values);
             }
+            self.scalar_checks
+                .extend(scalar_checks.into_vec().into_iter().map(|mut check| {
+                    check.instruction_index += start;
+                    check
+                }));
             self.instructions.extend(instructions);
             return Ok(flow.values);
         }
-        let result_type = callee.result_type.as_ref().ok_or_else(|| {
-            StaticCircuitError::Missing(format!("result type for {callee_name:?}"))
-        })?;
+        let result = self.operation_result_type(operation)?;
+        let result_type = result.as_ref();
         let [normal_value] = flow.values.as_slice() else {
             return Err(StaticCircuitError::Unsupported(
                 "runtime call result ABI".to_owned(),
@@ -3400,6 +3906,7 @@ impl StaticLowerer<'_> {
             controls: Box::new([]),
             condition: None,
             regions: vec![StaticBlock {
+                scalar_checks,
                 instructions: instructions.into_boxed_slice(),
                 return_value: Some(normal_result),
             }]
@@ -3487,7 +3994,7 @@ impl StaticLowerer<'_> {
             .and_then(ControlState::decode)
             .ok_or_else(|| StaticCircuitError::Missing("controlled basis state".to_owned()))?;
         let result = self.emit_controlled_callee(
-            callee_name,
+            operation,
             callee,
             &selected_controls,
             &control_state,
@@ -3520,7 +4027,7 @@ impl StaticLowerer<'_> {
             arguments.push(current);
             arguments.extend(classical.iter().cloned());
             current = self.emit_controlled_callee(
-                callee_name,
+                operation,
                 callee,
                 index,
                 &ControlState::exact_u64(
@@ -3536,12 +4043,13 @@ impl StaticLowerer<'_> {
 
     fn emit_controlled_callee(
         &mut self,
-        callee_name: &str,
+        operation: &wire::OperationProto,
         callee: &wire::FunctionProto,
         controls: &[u64],
         control_state: &ControlState,
         arguments: &[CircuitValue],
     ) -> Result<CircuitValue, StaticCircuitError> {
+        let callee_name = &callee.symbol;
         if !control_state
             .fits(u64::try_from(controls.len()).map_err(|_| StaticCircuitError::Overflow)?)
         {
@@ -3561,7 +4069,8 @@ impl StaticLowerer<'_> {
         }
         let outer_control_count = self.controls.len();
         self.controls.extend(controls.iter().copied());
-        let flow = self.emit_retained_callable(callee_name, callee, arguments);
+        let flow =
+            self.emit_retained_callable(callee, arguments, self.callee_frame(operation, callee)?);
         self.controls.truncate(outer_control_count);
         let flow = flow?;
         for wire in zero_controls.iter().rev() {
@@ -3591,6 +4100,7 @@ impl StaticLowerer<'_> {
             .get(callee_name)
             .copied()
             .ok_or_else(|| StaticCircuitError::Missing(format!("callable {callee_name:?}")))?;
+        let frame = self.callee_frame(operation, callee)?;
         let packed = operands
             .first()
             .ok_or_else(|| StaticCircuitError::Missing("adjoint packed state".to_owned()))?;
@@ -3634,7 +4144,13 @@ impl StaticLowerer<'_> {
                             "linear parameter type in {callee_name:?}"
                         ))
                     })?;
-                    pack_coherent_wires(parameter_type, &wires, &mut wire_position)
+                    pack_coherent_wires(
+                        frame
+                            .wire_type(&mut self.parameter_types, parameter_type)?
+                            .as_ref(),
+                        &wires,
+                        &mut wire_position,
+                    )
                 } else {
                     classical.next().cloned().ok_or_else(|| {
                         StaticCircuitError::Missing(format!(
@@ -3650,7 +4166,7 @@ impl StaticLowerer<'_> {
             )));
         }
         let instruction_start = self.instructions.len();
-        let flow = self.emit_retained_callable(callee_name, callee, &arguments)?;
+        let flow = self.emit_retained_callable(callee, &arguments, frame)?;
         if flow.kind != "return" || flow.values.len() != 1 {
             return Err(StaticCircuitError::Missing(format!(
                 "adjoint return ABI for {callee_name:?}"
@@ -3663,11 +4179,8 @@ impl StaticLowerer<'_> {
             .map(|instruction| self.invert_instruction(instruction))
             .collect::<Result<Vec<_>, _>>()?;
         self.instructions.extend(inverse);
-        let result_type = operation
-            .results
-            .first()
-            .and_then(|result| result.r#type.as_ref())
-            .ok_or_else(|| StaticCircuitError::Missing("adjoint result type".to_owned()))?;
+        let result = self.operation_result_type(operation)?;
+        let result_type = result.as_ref();
         if direct_quantum_adjoint && is_top_level_quantum_type(result_type) {
             return Ok(vec![packed.clone()]);
         }
@@ -3784,7 +4297,7 @@ impl StaticLowerer<'_> {
             arguments.push(target);
             arguments.extend(classical[offset - 1..].iter().cloned());
             return self.emit_controlled_adjoint_callee(
-                callee_name,
+                operation,
                 callee,
                 &selected,
                 &control_state,
@@ -3803,7 +4316,7 @@ impl StaticLowerer<'_> {
             arguments.push(target.clone());
             arguments.extend(classical.iter().cloned());
             self.emit_controlled_adjoint_callee(
-                callee_name,
+                operation,
                 callee,
                 selector,
                 &ControlState::exact_u64(
@@ -3817,12 +4330,13 @@ impl StaticLowerer<'_> {
 
     fn emit_controlled_adjoint_callee(
         &mut self,
-        callee_name: &str,
+        operation: &wire::OperationProto,
         callee: &wire::FunctionProto,
         controls: &[u64],
         control_state: &ControlState,
         arguments: &[CircuitValue],
     ) -> Result<(), StaticCircuitError> {
+        let callee_name = &callee.symbol;
         if !control_state
             .fits(u64::try_from(controls.len()).map_err(|_| StaticCircuitError::Overflow)?)
         {
@@ -3843,7 +4357,8 @@ impl StaticLowerer<'_> {
         let outer_control_count = self.controls.len();
         self.controls.extend(controls.iter().copied());
         let instruction_start = self.instructions.len();
-        let flow = self.emit_retained_callable(callee_name, callee, arguments);
+        let flow =
+            self.emit_retained_callable(callee, arguments, self.callee_frame(operation, callee)?);
         self.controls.truncate(outer_control_count);
         let flow = flow?;
         if flow.kind != "return" || flow.values.len() != 1 {
@@ -4037,12 +4552,15 @@ impl StaticLowerer<'_> {
         }
         let condition = Self::scalar_value_identifier(condition_value, "qcore.if")?;
         if scalar_depends_on_parameter(condition, &self.scalars)
+            && !scalar_depends_on_current_shot(condition, &self.scalars)
             && !scalar_depends_on_measurement(condition, &self.scalars)
         {
             let decision = self.host_dispatch_decision(condition)?;
             return self.emit_static_if(operation, operands, decision, adjoint_body);
         }
-        if !scalar_depends_on_measurement(condition, &self.scalars) {
+        if !scalar_depends_on_measurement(condition, &self.scalars)
+            && !scalar_depends_on_current_shot(condition, &self.scalars)
+        {
             return Err(StaticCircuitError::Unsupported(
                 "dynamic qcore.if condition without a device measurement".to_owned(),
             ));
@@ -4052,6 +4570,16 @@ impl StaticLowerer<'_> {
                 "measurement control inside a coherent controlled call".to_owned(),
             ));
         }
+        self.emit_dynamic_if(operation, operands, condition, adjoint_body)
+    }
+
+    fn emit_dynamic_if(
+        &mut self,
+        operation: &wire::OperationProto,
+        operands: &[CircuitValue],
+        condition: CircuitScalarId,
+        adjoint_body: bool,
+    ) -> Result<OperationFlow, StaticCircuitError> {
         let captures = operands.get(1..).unwrap_or_default();
         let mut blocks = Vec::with_capacity(operation.regions.len());
         let mut flows = Vec::with_capacity(operation.regions.len());
@@ -4076,11 +4604,19 @@ impl StaticLowerer<'_> {
         if let [when_true, when_false] = branch_loops.as_slice() {
             self.expanded_loops = self.merge_expanded_loops(condition, when_true, when_false)?;
         }
+        if scalar_depends_on_current_shot(condition, &self.scalars)
+            && blocks.iter().any(|block| !block.instructions.is_empty())
+        {
+            return Err(StaticCircuitError::Unsupported(
+                "logical index selects quantum instruction topology".into(),
+            ));
+        }
         let returning = flows.iter().filter(|flow| flow.kind == "return").count();
         if returning != 0 && returning != flows.len() {
             let result_type = self
-                .result_types
+                .frames
                 .last()
+                .map(|frame| &frame.result_type)
                 .ok_or_else(|| StaticCircuitError::Missing("function result type".to_owned()))?;
             for (block, flow) in blocks.iter_mut().zip(&flows) {
                 if flow.kind != "return" {
@@ -4098,11 +4634,12 @@ impl StaticLowerer<'_> {
             }
         }
         let outcome = self.merge_dynamic_if_flows(condition, captures, &flows, adjoint_body)?;
-        if blocks
-            .iter()
-            .all(|block| block.instructions.is_empty() && block.return_value.is_none())
-            && (flows.iter().all(|flow| flow.kind == "yield")
-                || flows.iter().all(|flow| flow.kind == "return"))
+        if blocks.iter().all(|block| {
+            block.instructions.is_empty()
+                && block.scalar_checks.is_empty()
+                && block.return_value.is_none()
+        }) && (flows.iter().all(|flow| flow.kind == "yield")
+            || flows.iter().all(|flow| flow.kind == "return"))
         {
             return Ok(outcome);
         }
@@ -4222,14 +4759,21 @@ impl StaticLowerer<'_> {
             .first()
             .ok_or_else(|| StaticCircuitError::Missing("qcore.if branch".to_owned()))?;
         let start = self.instructions.len();
+        let check_start = self.scalar_checks.len();
+        let measurement_prefix = self.next_measurement;
+        let call_prefix = self.next_call_value;
         let flow = self.emit_block(block, &HashMap::new(), captures)?;
         let instructions = if adjoint_body {
             self.take_adjoint_instructions(start)?
         } else {
             self.instructions.split_off(start)
         };
+        let scalar_checks = self.take_scalar_checks(check_start, start);
+        let scalar_checks =
+            self.hoist_entry_checks(scalar_checks, start, measurement_prefix, call_prefix);
         Ok((
             StaticBlock {
+                scalar_checks,
                 instructions: instructions.into_boxed_slice(),
                 return_value: None,
             },
@@ -4334,6 +4878,15 @@ impl StaticLowerer<'_> {
         &mut self,
         start: usize,
     ) -> Result<Vec<StaticInstruction>, StaticCircuitError> {
+        if self
+            .scalar_checks
+            .iter()
+            .any(|check| check.instruction_index > start)
+        {
+            return Err(StaticCircuitError::Unsupported(
+                "ordered classical checks inside an adjoint region".to_owned(),
+            ));
+        }
         self.instructions
             .split_off(start)
             .into_iter()
@@ -4403,13 +4956,18 @@ impl StaticLowerer<'_> {
                 + u128::from(self.next_wire);
             self.loop_projection_work = self.loop_projection_work.saturating_add(work);
             if self.loop_projection_work <= MAX_STATIC_CIRCUIT_INSTRUCTIONS as u128 {
+                // Type IDs are append-only. Move their arena through the trial so
+                // speculating on a loop only copies the existing circuit state.
+                let parameter_types = std::mem::take(&mut self.parameter_types);
                 let mut candidate = self.clone();
+                candidate.parameter_types = parameter_types;
                 if let Ok(flow) =
                     candidate.emit_native_for(body, operands, &carries, reverse, adjoint_body)
                 {
                     *self = candidate;
                     return Ok(flow);
                 }
+                self.parameter_types = candidate.parameter_types;
             }
         }
         let mut broke = false;
@@ -4491,8 +5049,22 @@ impl StaticLowerer<'_> {
                 return Ok(OperationFlow::Values(carries));
             }
             let start = self.instructions.len();
-            let flow = self.emit_block(otherwise, &HashMap::new(), &carries)?;
-            self.guard_instructions(start, running)?;
+            let check_start = self.scalar_checks.len();
+            let measurement_prefix = self.next_measurement;
+            let call_prefix = self.next_call_value;
+            let guarded = !matches!(
+                self.scalar_node(running),
+                Some(CircuitScalarNode::Bool(true))
+            );
+            if guarded {
+                self.measurement_guards.push((running, true));
+            }
+            let flow = self.emit_block(otherwise, &HashMap::new(), &carries);
+            if guarded {
+                self.measurement_guards.pop();
+            }
+            let flow = flow?;
+            self.guard_instructions(start, check_start, running, measurement_prefix, call_prefix)?;
             if flow.kind != "yield" {
                 if flow.kind == "return" {
                     if !matches!(
@@ -4616,6 +5188,8 @@ impl StaticLowerer<'_> {
         let start_measurement = self.next_measurement;
         let start_workspace = self.schoolbook_workspace.len();
         let start_scalar = self.scalars.len();
+        let check_start = self.scalar_checks.len();
+        let call_prefix = self.next_call_value;
         let flow = self.emit_static_loop_block(body, &arguments)?;
         let scratch_growth = u64::try_from(self.schoolbook_workspace.len() - start_workspace)
             .map_err(|_| StaticCircuitError::Overflow)?;
@@ -4632,6 +5206,14 @@ impl StaticLowerer<'_> {
         {
             return Err(StaticCircuitError::Unsupported(
                 "native qcore.for body must preserve its circuit carries".to_owned(),
+            ));
+        }
+        let scalar_checks = self.take_unconsumed_gate_checks(check_start, start);
+        let scalar_checks =
+            self.hoist_entry_checks(scalar_checks, start, start_measurement, call_prefix);
+        if adjoint_body && !scalar_checks.is_empty() {
+            return Err(StaticCircuitError::Unsupported(
+                "ordered classical checks inside an adjoint loop".to_owned(),
             ));
         }
         let instructions = if adjoint_body {
@@ -4660,6 +5242,7 @@ impl StaticLowerer<'_> {
             controls: Box::new([]),
             condition: None,
             regions: vec![StaticBlock {
+                scalar_checks,
                 instructions: instructions.into_boxed_slice(),
                 return_value: None,
             }]
@@ -4798,12 +5381,8 @@ impl StaticLowerer<'_> {
         for wire in wires {
             measurements.push(self.push_measurement(*wire)?);
         }
-        let result_type = operation
-            .results
-            .first()
-            .and_then(|result| result.r#type.as_ref())
-            .ok_or_else(|| StaticCircuitError::Missing("quantum.measure result type".to_owned()))?;
-        Ok(vec![pack_measurement_values(measurements, result_type)?])
+        let result_type = self.operation_result_type(operation)?;
+        Ok(vec![pack_measurement_values(measurements, &result_type)?])
     }
 
     fn emit_prepare(
@@ -4814,7 +5393,8 @@ impl StaticLowerer<'_> {
             .first()
             .ok_or_else(|| StaticCircuitError::Missing("quantum.prepare data".to_owned()))?;
         if let CircuitValue::Scalar(condition) = value
-            && scalar_depends_on_measurement(*condition, &self.scalars)
+            && (scalar_depends_on_measurement(*condition, &self.scalars)
+                || !self.measurement_guards.is_empty())
             && self.static_value(value).is_none()
             && self
                 .scalar_node(*condition)
@@ -4836,10 +5416,12 @@ impl StaticLowerer<'_> {
                 condition: Some(*condition),
                 regions: vec![
                     StaticBlock {
+                        scalar_checks: Box::new([]),
                         instructions: instructions.into_boxed_slice(),
                         return_value: None,
                     },
                     StaticBlock {
+                        scalar_checks: Box::new([]),
                         instructions: Box::new([]),
                         return_value: None,
                     },
@@ -4900,11 +5482,8 @@ impl StaticLowerer<'_> {
             measurements.push(self.push_measurement(*wire)?);
             self.push_instruction("reset", [*wire], [])?;
         }
-        let result_type = operation
-            .results
-            .first()
-            .and_then(|result| result.r#type.as_ref())
-            .and_then(|result| strip_staged_type(result))
+        let result = self.operation_result_type(operation)?;
+        let result_type = strip_staged_type(&result)
             .filter(|result| {
                 result.kind() == wire::type_proto::Kind::Product && result.arguments.len() == 2
             })
@@ -5315,7 +5894,10 @@ impl StaticLowerer<'_> {
                 [target, exponent] => Some((*target, *exponent)),
                 _ => None,
             })
-            .map_or_else(|| mod_pow_widths(operation), Ok)?;
+            .map_or_else(
+                || mod_pow_widths(self.operation_result_type(operation)?.as_ref()),
+                Ok,
+            )?;
         if state.len() != target_width + exponent_width {
             return Err(StaticCircuitError::Realization(
                 crate::RealizationError::ArithmeticWidth,
@@ -5426,7 +6008,10 @@ impl StaticLowerer<'_> {
                 [coordinates, target] => Some((*coordinates, *target)),
                 _ => None,
             })
-            .map_or_else(|| mod_multi_pow_widths(operation), Ok)?;
+            .map_or_else(
+                || mod_multi_pow_widths(self.operation_result_type(operation)?.as_ref()),
+                Ok,
+            )?;
         let coordinate_width = usize::try_from(*coordinate_width)
             .ok()
             .filter(|width| *width > 0)
@@ -5642,6 +6227,20 @@ impl StaticLowerer<'_> {
             .ok_or_else(|| StaticCircuitError::Missing("Pauli evolution time".to_owned()))?;
         let width = u64::try_from(state.len()).map_err(|_| StaticCircuitError::Overflow)?;
         let choice = self.lowering.select(RealizationFamily::PauliEvolution);
+        // Indexed launch rows must check the actual scaled rotations, not only
+        // evolution time, before any adapter submits a shot template.
+        let choice = if choice.kind() == Realization::PauliNative
+            && scalar_depends_on_current_shot(time, &self.scalars)
+        {
+            if self.lowering.has_pauli_override() {
+                return Err(StaticCircuitError::Unsupported(
+                    "shot-dependent pauli.native requires launch materialization".into(),
+                ));
+            }
+            ConfiguredRealization::exact(Realization::PauliParity)
+        } else {
+            choice
+        };
         self.realizations.insert(choice);
         if choice.kind() == Realization::PauliNative {
             validate_pauli_evolution(hamiltonian, width)
@@ -5814,10 +6413,12 @@ impl StaticLowerer<'_> {
                 condition: Some(condition),
                 regions: vec![
                     StaticBlock {
+                        scalar_checks: Box::new([]),
                         instructions: vec![when_true].into_boxed_slice(),
                         return_value: None,
                     },
                     StaticBlock {
+                        scalar_checks: Box::new([]),
                         instructions: vec![when_false].into_boxed_slice(),
                         return_value: None,
                     },
@@ -5931,7 +6532,9 @@ fn coherent_instructions(instructions: &[StaticInstruction]) -> bool {
                 || QuantumOpcode::parse_name(&instruction.opcode)
                     .is_some_and(|opcode| opcode.exact_adjoint().is_some()))
             && instruction.regions.iter().all(|block| {
-                block.return_value.is_none() && coherent_instructions(&block.instructions)
+                block.return_value.is_none()
+                    && block.scalar_checks.is_empty()
+                    && coherent_instructions(&block.instructions)
             })
     })
 }
@@ -6109,46 +6712,117 @@ fn circuit_value_depends_on_parameter(value: &CircuitValue, scalars: &[CircuitSc
     }
 }
 
+fn scalar_available_at_branch_entry(
+    root: CircuitScalarId,
+    scalars: &[CircuitScalarNode],
+    measurement_prefix: u64,
+    call_prefix: u64,
+) -> bool {
+    let mut pending = vec![root];
+    let mut visited = HashSet::new();
+    while let Some(root) = pending.pop() {
+        if !visited.insert(root) {
+            continue;
+        }
+        match scalars.get(root.index() as usize) {
+            Some(CircuitScalarNode::Apply { operands, .. }) => {
+                pending.extend(operands.iter().copied());
+            }
+            Some(CircuitScalarNode::Measurement(index)) if *index >= measurement_prefix => {
+                return false;
+            }
+            Some(CircuitScalarNode::CallValue { index, .. }) if *index >= call_prefix => {
+                return false;
+            }
+            Some(CircuitScalarNode::LoopIndex(_)) | None => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+fn scalar_dependency(
+    identifier: CircuitScalarId,
+    scalars: &[CircuitScalarNode],
+    predicate: impl Fn(&CircuitScalarNode) -> bool,
+) -> bool {
+    let mut pending = vec![identifier];
+    let mut seen = HashSet::new();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if let Some(node) = scalars.get(id.index() as usize) {
+            if predicate(node) {
+                return true;
+            }
+            pending.extend(node.operands());
+        }
+    }
+    false
+}
+
+pub(crate) fn scalar_depends_on_current_shot(
+    identifier: CircuitScalarId,
+    scalars: &[CircuitScalarNode],
+) -> bool {
+    scalar_dependency(identifier, scalars, |node| {
+        matches!(node, CircuitScalarNode::CurrentShot)
+    })
+}
+
 fn scalar_depends_on_loop_index(
     identifier: CircuitScalarId,
     scalars: &[CircuitScalarNode],
 ) -> bool {
-    match scalars.get(identifier.index() as usize) {
-        Some(CircuitScalarNode::LoopIndex(_)) => true,
-        Some(CircuitScalarNode::Apply { operands, .. }) => operands
-            .iter()
-            .any(|operand| scalar_depends_on_loop_index(*operand, scalars)),
-        _ => false,
-    }
+    scalar_dependency(identifier, scalars, |node| {
+        matches!(node, CircuitScalarNode::LoopIndex(_))
+    })
 }
 
 fn scalar_depends_on_measurement(
     identifier: CircuitScalarId,
     scalars: &[CircuitScalarNode],
 ) -> bool {
-    match usize::try_from(identifier.index())
-        .ok()
-        .and_then(|index| scalars.get(index))
-    {
-        Some(CircuitScalarNode::Measurement(_) | CircuitScalarNode::CallValue { .. }) => true,
-        Some(CircuitScalarNode::Apply { operands, .. }) => operands
-            .iter()
-            .any(|operand| scalar_depends_on_measurement(*operand, scalars)),
-        _ => false,
-    }
+    scalar_dependency(identifier, scalars, |node| {
+        matches!(
+            node,
+            CircuitScalarNode::Measurement(_) | CircuitScalarNode::CallValue { .. }
+        )
+    })
+}
+
+fn plain_parameter_bindings(scalars: &[CircuitScalarNode]) -> bool {
+    scalars.iter().all(|node| match node {
+        CircuitScalarNode::Bool(_)
+        | CircuitScalarNode::Int(_)
+        | CircuitScalarNode::RealBits(_)
+        | CircuitScalarNode::Measurement(_)
+        | CircuitScalarNode::Parameter {
+            scalar_type: CircuitScalarType::Real,
+            ..
+        } => true,
+        // Every parameter-dependent expression has a first operation consuming
+        // a parameter leaf. Measurement-only result expressions remain valid.
+        CircuitScalarNode::Apply { operands, .. } => operands.iter().all(|operand| {
+            !matches!(
+                scalars[operand.index() as usize],
+                CircuitScalarNode::Parameter { .. }
+            )
+        }),
+        CircuitScalarNode::Parameter { .. }
+        | CircuitScalarNode::Indexed { .. }
+        | CircuitScalarNode::CurrentShot
+        | CircuitScalarNode::HiddenBinding(_)
+        | CircuitScalarNode::LoopIndex(_)
+        | CircuitScalarNode::CallValue { .. } => false,
+    })
 }
 
 fn scalar_depends_on_parameter(identifier: CircuitScalarId, scalars: &[CircuitScalarNode]) -> bool {
-    match usize::try_from(identifier.index())
-        .ok()
-        .and_then(|index| scalars.get(index))
-    {
-        Some(CircuitScalarNode::Parameter { .. }) => true,
-        Some(CircuitScalarNode::Apply { operands, .. }) => operands
-            .iter()
-            .any(|operand| scalar_depends_on_parameter(*operand, scalars)),
-        _ => false,
-    }
+    scalar_dependency(identifier, scalars, |node| {
+        matches!(node, CircuitScalarNode::Parameter { .. })
+    })
 }
 
 fn compact_dispatch_predicate(
@@ -6208,9 +6882,7 @@ fn compact_retained_result_scalars(
         if std::mem::replace(&mut reachable[index], true) {
             continue;
         }
-        if let CircuitScalarNode::Apply { operands, .. } = node {
-            pending.extend(operands.iter().copied());
-        }
+        pending.extend(node.operands().iter().copied());
     }
 
     let mut remap = vec![None; source.len()];
@@ -6244,6 +6916,24 @@ fn compact_retained_result_scalars(
                     })
                     .collect::<Result<Vec<_>, _>>()?
                     .into_boxed_slice(),
+            },
+            CircuitScalarNode::Indexed {
+                index,
+                elements,
+                scalar_type,
+            } => CircuitScalarNode::Indexed {
+                index: remap[index.index() as usize]
+                    .ok_or_else(|| StaticCircuitError::Missing("indexed result selector".into()))?,
+                elements: elements
+                    .iter()
+                    .map(|element| {
+                        remap[element.index() as usize].ok_or_else(|| {
+                            StaticCircuitError::Missing("indexed result element".into())
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_boxed_slice(),
+                scalar_type: *scalar_type,
             },
             other => other.clone(),
         };
@@ -6354,6 +7044,9 @@ fn remap_instruction_scalars(
         *condition = copy_scalar_node(*condition, source, target, remap)?;
     }
     for region in &mut instruction.regions {
+        for check in &mut region.scalar_checks {
+            check.root = copy_scalar_node(check.root, source, target, remap)?;
+        }
         if let Some(result) = &mut region.return_value {
             remap_result_scalars(result, source, target, remap)?;
         }
@@ -6391,6 +7084,19 @@ fn copy_scalar_node(
                 .map(|operand| copy_scalar_node(*operand, source, target, remap))
                 .collect::<Result<Vec<_>, _>>()?
                 .into_boxed_slice(),
+        },
+        CircuitScalarNode::Indexed {
+            index,
+            elements,
+            scalar_type,
+        } => CircuitScalarNode::Indexed {
+            index: copy_scalar_node(*index, source, target, remap)?,
+            elements: elements
+                .iter()
+                .map(|element| copy_scalar_node(*element, source, target, remap))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_boxed_slice(),
+            scalar_type: *scalar_type,
         },
         other => other.clone(),
     };
@@ -6772,12 +7478,7 @@ fn runtime_results_compatible(
     }
 }
 
-fn mod_pow_widths(operation: &wire::OperationProto) -> Result<(usize, usize), StaticCircuitError> {
-    let source = operation
-        .results
-        .first()
-        .and_then(|result| result.r#type.as_ref())
-        .ok_or_else(|| StaticCircuitError::Missing("mod_pow state type".to_owned()))?;
+fn mod_pow_widths(source: &wire::TypeProto) -> Result<(usize, usize), StaticCircuitError> {
     let mut types = TypeArena::default();
     let scope = types.intern_scope("mod-pow-circuit");
     let source = types.resolve_wire_type(source, &scope).map_err(|error| {
@@ -6814,14 +7515,7 @@ fn mod_pow_widths(operation: &wire::OperationProto) -> Result<(usize, usize), St
     Ok((width(*target)?, width(*exponent)?))
 }
 
-fn mod_multi_pow_widths(
-    operation: &wire::OperationProto,
-) -> Result<(usize, usize), StaticCircuitError> {
-    let source = operation
-        .results
-        .first()
-        .and_then(|result| result.r#type.as_ref())
-        .ok_or_else(|| StaticCircuitError::Missing("mod_multi_pow state type".to_owned()))?;
+fn mod_multi_pow_widths(source: &wire::TypeProto) -> Result<(usize, usize), StaticCircuitError> {
     let mut types = TypeArena::default();
     let scope = types.intern_scope("mod-multi-pow-circuit");
     let source = types.resolve_wire_type(source, &scope).map_err(|error| {
@@ -6939,7 +7633,11 @@ fn circuit_scalar_type(source: &wire::TypeProto) -> Option<CircuitScalarType> {
     if current.kind() != Kind::Scalar {
         return None;
     }
-    match current.name.as_str() {
+    circuit_scalar_type_from_name(&current.name)
+}
+
+fn circuit_scalar_type_from_name(name: &str) -> Option<CircuitScalarType> {
+    match name {
         "Bit" | "Bool" => Some(CircuitScalarType::Bool),
         "Int" => Some(CircuitScalarType::Int),
         "Real" => Some(CircuitScalarType::Real),
@@ -6982,36 +7680,43 @@ fn product_of_quantum_arity(source: &wire::TypeProto) -> Option<usize> {
         .then_some(product.arguments.len())
 }
 
-fn parameter_shape(source: &wire::TypeProto) -> Result<Option<ParameterShape>, StaticCircuitError> {
-    use wire::dimension_proto::Value;
-    use wire::type_proto::Kind;
+enum ParameterType<'a> {
+    Scalar(CircuitScalarType),
+    Complex,
+    Array(u64),
+    Product(usize),
+    Record(&'a [(String, TypeId)]),
+}
 
-    let current = strip_staged_type(source)
-        .ok_or_else(|| StaticCircuitError::Missing("parameter type".to_owned()))?;
-    match current.kind() {
-        Kind::Array => {
-            let extent = current
-                .dimensions
-                .first()
-                .and_then(|dimension| dimension.value.as_ref())
-                .and_then(|dimension| match dimension {
-                    Value::Fixed(value) => Some(*value),
-                    Value::Symbol(_) => None,
-                })
-                .ok_or_else(|| {
-                    StaticCircuitError::Unsupported(
-                        "aggregate circuit parameters require fixed shapes".to_owned(),
-                    )
-                })?;
-            Ok(Some(ParameterShape::Array(extent)))
+impl<'a> ParameterType<'a> {
+    fn of(types: &'a TypeArena, type_id: TypeId) -> Result<Option<Self>, StaticCircuitError> {
+        let dimension = match types.get(types.strip_stage(type_id)) {
+            Some(SemanticType::Array { shape, .. }) => shape.first(),
+            Some(SemanticType::Word { width, .. }) => Some(width),
+            Some(SemanticType::Product(elements)) => {
+                return Ok(Some(Self::Product(elements.len())));
+            }
+            Some(SemanticType::Record { fields, .. }) => return Ok(Some(Self::Record(fields))),
+            Some(SemanticType::Scalar(ScalarType::Complex)) => return Ok(Some(Self::Complex)),
+            Some(SemanticType::Scalar(scalar)) => {
+                return Ok(circuit_scalar_type_from_name(scalar.as_str()).map(Self::Scalar));
+            }
+            _ => return Ok(None),
+        };
+        if let Some(Dimension::Fixed(extent)) = dimension {
+            Ok(Some(Self::Array(*extent)))
+        } else {
+            Err(StaticCircuitError::Unsupported(
+                "aggregate circuit parameters require fixed shapes".to_owned(),
+            ))
         }
-        Kind::Product => Ok(Some(ParameterShape::Product(
-            u64::try_from(current.arguments.len()).map_err(|_| StaticCircuitError::Overflow)?,
-        ))),
-        Kind::Record => Ok(Some(ParameterShape::Record(
-            current.field_names.clone().into_boxed_slice(),
-        ))),
-        _ => Ok(None),
+    }
+
+    fn array_extent(types: &'a TypeArena, type_id: TypeId) -> Option<u64> {
+        match Self::of(types, type_id).ok()? {
+            Some(Self::Array(extent)) => Some(extent),
+            _ => None,
+        }
     }
 }
 
@@ -7043,36 +7748,6 @@ fn fixed_uint_width(source: &wire::TypeProto) -> Option<u64> {
         Value::Fixed(width) if *width > 0 => Some(*width),
         Value::Fixed(_) | Value::Symbol(_) => None,
     }
-}
-
-fn parameter_component(
-    shape: &ParameterShape,
-    index: i64,
-) -> Result<CircuitParameterPath, StaticCircuitError> {
-    let extent = match shape {
-        ParameterShape::Array(extent) | ParameterShape::Product(extent) => *extent,
-        ParameterShape::Record(fields) => {
-            u64::try_from(fields.len()).map_err(|_| StaticCircuitError::Overflow)?
-        }
-    };
-    let extent_usize = usize::try_from(extent).map_err(|_| StaticCircuitError::Overflow)?;
-    let normalized =
-        normalize_aggregate_index(extent_usize, &BigInt::from(index)).ok_or_else(|| {
-            StaticCircuitError::InvalidSelector(format!(
-                "parameter index {index} is outside extent {extent}"
-            ))
-        })?;
-    if let ParameterShape::Record(fields) = shape {
-        return Ok(CircuitParameterPath::Field(
-            fields
-                .get(normalized)
-                .cloned()
-                .ok_or_else(|| StaticCircuitError::Missing("record field name".to_owned()))?,
-        ));
-    }
-    Ok(CircuitParameterPath::Index(
-        u64::try_from(normalized).map_err(|_| StaticCircuitError::Overflow)?,
-    ))
 }
 
 fn aggregate_value_at(
@@ -7215,9 +7890,279 @@ fn string_tuple_attribute<'a>(
         .collect()
 }
 
+/// Independent scalar arena retained for native numeric launch evaluation.
+pub(crate) type CircuitScalarEvaluatorPlan = StaticCircuit;
+
+struct ShotTemplateLifter {
+    arenas: Vec<CircuitScalarEvaluatorPlan>,
+    slots: Vec<super::shot_template::ShotBindingSlot>,
+    roots: HashMap<(usize, CircuitScalarId), u32>,
+    definitions: HashMap<usize, CircuitDefinition>,
+}
+impl ShotTemplateLifter {
+    // Numeric launch plans retain only slots and checks. Structured circuit-local
+    // nodes remain in their original arenas for device emission and result plans.
+    fn compact_arenas(&mut self) -> Result<(), StaticCircuitError> {
+        let mut arena_slots = vec![Vec::new(); self.arenas.len()];
+        for (index, slot) in self.slots.iter().enumerate() {
+            arena_slots[slot.arena].push(index);
+        }
+        for (arena, slots) in self.arenas.iter_mut().zip(arena_slots) {
+            let mut roots = match arena.result_value.take() {
+                Some(StaticCircuitValue::Aggregate(checks)) => checks.into_vec(),
+                Some(StaticCircuitValue::Unit) => Vec::new(),
+                _ => {
+                    return Err(StaticCircuitError::Missing(
+                        "shot template launch checks".into(),
+                    ));
+                }
+            };
+            let check_count = roots.len();
+            roots.extend(
+                slots
+                    .iter()
+                    .map(|index| StaticCircuitValue::Scalar(self.slots[*index].root)),
+            );
+            let mut result = StaticCircuitValue::Aggregate(roots.into_boxed_slice());
+            arena.scalars = compact_retained_result_scalars(&mut result, &arena.scalars)?;
+            let StaticCircuitValue::Aggregate(roots) = result else {
+                unreachable!("scalar compaction preserves result structure");
+            };
+            let mut checks = roots.into_vec();
+            for (index, root) in slots.into_iter().zip(checks.drain(check_count..)) {
+                let StaticCircuitValue::Scalar(root) = root else {
+                    unreachable!("slot compaction preserves scalar roots");
+                };
+                self.slots[index].root = root;
+            }
+            arena.result_value = Some(StaticCircuitValue::Aggregate(checks.into_boxed_slice()));
+        }
+        Ok(())
+    }
+
+    fn arena(&mut self, scalars: &[CircuitScalarNode], measurement_count: u64) -> usize {
+        let id = self.arenas.len();
+        self.arenas.push(StaticCircuit::from_result_plan(
+            measurement_count,
+            scalars.into(),
+            StaticCircuitValue::Unit,
+        ));
+        id
+    }
+    fn instructions(
+        &mut self,
+        instructions: &mut [StaticInstruction],
+        scalars: &mut Vec<CircuitScalarNode>,
+        arena: usize,
+    ) -> Result<(), StaticCircuitError> {
+        for instruction in instructions {
+            if instruction
+                .parameters
+                .iter()
+                .any(|parameter| matches!(parameter, CircuitParameter::Definition(_)))
+            {
+                instruction.parameters = instruction
+                    .parameters
+                    .iter()
+                    .filter(|parameter| !matches!(parameter, CircuitParameter::Scalar(_)))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice();
+            }
+
+            if instruction
+                .condition
+                .is_some_and(|condition| scalar_depends_on_current_shot(condition, scalars))
+            {
+                return Err(StaticCircuitError::Unsupported(
+                    "logical index changes circuit control topology".into(),
+                ));
+            }
+            for parameter in &mut instruction.parameters {
+                match parameter {
+                    CircuitParameter::Scalar(root)
+                        if scalar_depends_on_current_shot(*root, scalars) =>
+                    {
+                        if scalars[root.index() as usize].scalar_type() != CircuitScalarType::Real
+                            || scalar_depends_on_measurement(*root, scalars)
+                            || scalar_depends_on_loop_index(*root, scalars)
+                        {
+                            return Err(StaticCircuitError::Unsupported(
+                                "logical-index numeric argument is not host evaluable".into(),
+                            ));
+                        }
+                        let slot = if let Some(slot) = self.roots.get(&(arena, *root)) {
+                            *slot
+                        } else {
+                            let slot = u32::try_from(self.slots.len())
+                                .map_err(|_| StaticCircuitError::Overflow)?;
+                            self.slots
+                                .push(super::shot_template::ShotBindingSlot { arena, root: *root });
+                            self.roots.insert((arena, *root), slot);
+                            slot
+                        };
+                        let id = CircuitScalarId(
+                            u32::try_from(scalars.len())
+                                .map_err(|_| StaticCircuitError::Overflow)?,
+                        );
+                        scalars.push(CircuitScalarNode::HiddenBinding(slot));
+                        *root = id;
+                    }
+                    CircuitParameter::Definition(owner) => {
+                        if let Some(transformed) = self.definitions.get(&owner.identity()) {
+                            *owner = transformed.clone();
+                            continue;
+                        }
+                        if owner.scalars().is_empty() {
+                            continue;
+                        }
+                        let Some(body) = owner.retained_body() else {
+                            continue;
+                        };
+                        let identity = owner.identity();
+                        let mut body = body.to_vec();
+                        let mut local_scalars = owner.scalars().to_vec();
+                        let local_arena = self.arena(&local_scalars, 0);
+                        self.instructions(&mut body, &mut local_scalars, local_arena)?;
+                        let transformed = CircuitDefinition::body(
+                            owner.width(),
+                            body,
+                            local_scalars.into_boxed_slice(),
+                        );
+                        self.definitions.insert(identity, transformed.clone());
+                        *owner = transformed;
+                    }
+                    _ => {}
+                }
+            }
+            for region in &mut instruction.regions {
+                self.instructions(&mut region.instructions, scalars, arena)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn lift_shot_circuit(
+    mut circuit: StaticCircuit,
+) -> Result<
+    (
+        StaticCircuit,
+        Vec<CircuitScalarEvaluatorPlan>,
+        Vec<super::shot_template::ShotBindingSlot>,
+    ),
+    StaticCircuitError,
+> {
+    let mut lifter = ShotTemplateLifter {
+        arenas: Vec::new(),
+        slots: Vec::new(),
+        roots: HashMap::new(),
+        definitions: HashMap::new(),
+    };
+    let mut scalars = circuit.scalars.to_vec();
+    let arena = lifter.arena(&scalars, circuit.measurement_count);
+    lifter.arenas[arena].result_value = Some(StaticCircuitValue::Aggregate(
+        circuit
+            .scalar_checks
+            .iter()
+            .filter(|check| {
+                !scalar_depends_on_measurement(check.root, &scalars)
+                    && !scalar_depends_on_loop_index(check.root, &scalars)
+            })
+            .map(|check| StaticCircuitValue::Scalar(check.root))
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    ));
+    lifter.instructions(&mut circuit.instructions, &mut scalars, arena)?;
+    lifter.compact_arenas()?;
+    circuit.scalars = scalars.into_boxed_slice();
+    Ok((circuit, lifter.arenas, lifter.slots))
+}
+
+pub(crate) fn indexed_result_postprocessing(
+    circuit: &StaticCircuit,
+) -> Result<Vec<u8>, crate::ResultPostprocessingError> {
+    let mut result = circuit.clone();
+    result.result_measurements = Box::new([]);
+    crate::encode_result_postprocessing(&result)?.ok_or_else(|| {
+        crate::ResultPostprocessingError::InvalidPlan(
+            "indexed result requires runtime-local call state".into(),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shot_arenas_remap_independent_slots_and_preserve_host_checks() {
+        let mut lifter = ShotTemplateLifter {
+            arenas: Vec::new(),
+            slots: Vec::new(),
+            roots: HashMap::new(),
+            definitions: HashMap::new(),
+        };
+        for value in [0.25f64, 0.75] {
+            let arena = lifter.arena(
+                &[
+                    CircuitScalarNode::LoopIndex(0),
+                    CircuitScalarNode::CurrentShot,
+                    CircuitScalarNode::RealBits(value.to_bits()),
+                    CircuitScalarNode::Indexed {
+                        index: CircuitScalarId(1),
+                        elements: vec![CircuitScalarId(2)].into_boxed_slice(),
+                        scalar_type: CircuitScalarType::Real,
+                    },
+                ],
+                0,
+            );
+            lifter.arenas[arena].result_value = Some(StaticCircuitValue::Aggregate(
+                vec![StaticCircuitValue::Scalar(CircuitScalarId(1))].into_boxed_slice(),
+            ));
+            lifter
+                .slots
+                .push(super::super::shot_template::ShotBindingSlot {
+                    arena,
+                    root: CircuitScalarId(3),
+                });
+        }
+        lifter.compact_arenas().expect("reachable launch roots");
+        for (arena, value) in lifter.arenas.iter().zip([0.25f64, 0.75]) {
+            assert_eq!(arena.scalars().len(), 3);
+            assert!(matches!(arena.scalars()[0], CircuitScalarNode::CurrentShot));
+            assert!(
+                matches!(arena.scalars()[1], CircuitScalarNode::RealBits(bits) if bits == value.to_bits())
+            );
+            assert!(
+                matches!(arena.runtime_result_value(), Some(StaticCircuitValue::Aggregate(checks)) if matches!(checks.as_ref(), [StaticCircuitValue::Scalar(CircuitScalarId(0))]))
+            );
+        }
+        assert_eq!(lifter.slots[0].arena, 0);
+        assert_eq!(lifter.slots[1].arena, 1);
+        assert!(
+            lifter
+                .slots
+                .iter()
+                .all(|slot| slot.root == CircuitScalarId(2))
+        );
+    }
+
+    #[test]
+    fn shot_arena_projection_rejects_missing_and_non_topological_dependencies() {
+        for selector in [CircuitScalarId(1), CircuitScalarId(u32::MAX)] {
+            let source = [
+                CircuitScalarNode::Indexed {
+                    index: selector,
+                    elements: vec![CircuitScalarId(1)].into_boxed_slice(),
+                    scalar_type: CircuitScalarType::Real,
+                },
+                CircuitScalarNode::CurrentShot,
+            ];
+            let mut result = StaticCircuitValue::Scalar(CircuitScalarId(0));
+            assert!(compact_retained_result_scalars(&mut result, &source).is_err());
+        }
+    }
 
     #[test]
     fn direct_emission_selectors_share_bounds_and_alias_checks() {

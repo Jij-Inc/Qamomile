@@ -11,19 +11,19 @@ Notes on using Qamomile together with external libraries and quantum platforms.
 :::{card}
 :header: **Amazon Braket Support**
 :link: braket_support
-Compile typed measurement feedback to portable OpenQASM 3, run it locally, and keep managed devices at the endpoint boundary.
+Simulate a two-qubit circuit locally at different rotation angles and see how to submit it to quantum hardware on Amazon Braket.
 :::
 
 :::{card}
-:header: **CUDA-Q Support through Serialized Kernel Artifacts**
+:header: **CUDA-Q Support**
 :link: cudaq_support
-Compile one typed program to serialized CUDA-Q kernel data, inspect it, and execute it in an isolated `qpp-cpu` worker.
+Run circuits on the local CUDA-Q CPU simulator and check which operations it supports.
 :::
 
 :::{card}
 :header: **HUGR Support**
 :link: hugr_support
-Compile a Qamomile program to HUGR and run it locally with Selene.
+Simulate a circuit with Selene and see how to submit it to Quantinuum Helios.
 :::
 
 :::{card}
@@ -33,21 +33,21 @@ Normalize a nine-qubit LABS instance immutably, run typed QAOA once, and compare
 :::
 
 :::{card}
-:header: **qBraid Provider Execution**
-:link: qbraid_executor
-Compile typed Qamomile programs to deterministic QPY and submit them through a live qBraid endpoint.
+:header: **qBraid Support**
+:link: qbraid_support
+Prepare a two-qubit circuit and see how to submit it to IQM Emerald through qBraid.
 :::
 
 :::{card}
 :header: **Qiskit Support**
 :link: qiskit_support
-Compile one typed program to portable QPY, reuse it on Aer, and route the same source to a live BackendV2.
+Simulate circuits in Qiskit Aer and see how to submit a circuit to an IBM quantum computer.
 :::
 
 :::{card}
 :header: **QURI Parts Support**
 :link: quri_parts_support
-Compile one typed program to a portable logical circuit, inspect it, and reuse it for Qulacs sampling and expectation evaluation.
+Run circuits on Qulacs and see how to submit the same circuit to IQM Emerald with a QURI Parts sampler.
 :::
 
 ::::

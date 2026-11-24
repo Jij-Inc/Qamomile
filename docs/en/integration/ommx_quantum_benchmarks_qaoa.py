@@ -18,10 +18,6 @@
 # tags: [integration, optimization, variational]
 # ---
 #
-# ---
-# tags: [integration, optimization, variational]
-# ---
-#
 # # Using OMMX Quantum Benchmarks: Implementing and Benchmarking Quantum Algorithms with Qamomile
 #
 # This tutorial shows how to run a Qamomile quantum algorithm on a problem
@@ -30,29 +26,28 @@
 #
 # **Goal.** Build a QAOA solver in Qamomile, run it on a
 # **Low Autocorrelation Binary Sequences (LABS)** instance loaded from the
-# OMMX Quantum Benchmarks
+# [OMMX Quantum Benchmarks](https://jij-inc.github.io/OmmxQuantumBenchmarks/en/)
 # dataset, and compare the result with the classical SCIP solver
-# accessed through the `ommx-pyscipopt-adapter`.
+# accessed through the [`ommx-pyscipopt-adapter`](https://ommx-en-book.readthedocs.io/en/latest/user_guide/supported_ommx_adapters.html).
 # Because both the QAOA path and the SCIP path consume the *same*
 # `ommx.v1.Instance`, the main difference is the algorithm itself. This
 # makes the comparison direct.
 
-# %% [markdown]
-# ## Installation
-#
-# ```bash
-# pip install "qamomile[qiskit]" ommx-quantum-benchmarks ommx-pyscipopt-adapter
-# ```
-
 # %%
 # Install the additional packages used in this tutorial.
-# # !pip install "qamomile[qiskit]" ommx-quantum-benchmarks ommx-pyscipopt-adapter
+# # !pip install "qamomile[qiskit]" ommx-quantum-benchmarks ommx-pyscipopt-adapter matplotlib scipy
 
 # %%
+# ruff: noqa: F821 -- dimensions are Qamomile dependent shape binders.
+from __future__ import annotations
+
 import os
 import time
 
-# Suppress the benchmark runner's host-environment report in rendered output.
+# `ommx-quantum-benchmarks` uses `minto` internally and, by default,
+# `minto` prints a host-environment dump (Python version, virtualenv
+# path, etc.) at experiment start. Suppress it so the rendered
+# notebook outputs do not leak local-machine details.
 os.environ["MINTO_TESTING"] = "true"
 
 import matplotlib.pyplot as plt
@@ -60,20 +55,19 @@ import numpy as np
 import ommx.v1
 import ommx_pyscipopt_adapter
 from ommx_quantum_benchmarks.qoblib import Labs
+from qiskit import transpile
+from qiskit.quantum_info import SparsePauliOp
+from qiskit_aer import AerSimulator
+from qiskit_aer.primitives import EstimatorV2
 from scipy.optimize import minimize
 
 import qamomile as qm
-from qamomile.measurement import Estimator
-from qamomile.optimization import BinaryModel, QAOAExperiment
-from qamomile.qiskit import Aer, load_circuit
-from qamomile.stdlib.variational import qaoa_state
-
-docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+from qamomile.optimization import BinaryModel
 
 # %% [markdown]
 # ## What is OMMX Quantum Benchmarks?
 #
-# **OMMX** (Open Mathematical prograMming eXchange)
+# **OMMX** ([Open Mathematical prograMming eXchange](https://jij-inc.github.io/ommx/en/introduction.html))
 # is a data format for exchanging mathematical optimization problems across
 # tools. Its `ommx.v1.Instance` stores the objective, constraints, and
 # decision-variable metadata.
@@ -81,20 +75,20 @@ docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 # **OMMX Quantum Benchmarks** is a curated collection of optimization
 # benchmark instances distributed in this `ommx.v1.Instance` format. The
 # first dataset shipped is **QOBLIB** (Quantum Optimization Benchmarking
-# Library) arXiv:2504.03832, which
-# contains nine problem families used in the recent quantum-optimization
+# Library) {cite:p}`10.48550/arXiv.2504.03832`, which
+# defines ten problem families used in the recent quantum-optimization
 # literature, including LABS, Market Split, Independent Set, and
 # Steiner-tree packing.
 #
-# Because each benchmark instance is represented as an `ommx.v1.Instance`,
-# any Qamomile workflow that accepts `ommx.v1.Instance`, including
-# `QAOAConverter`, can consume these problems without writing any extra code.
-# In addition, a reference solution is provided in the `ommx.v1.Solution`
-# format and can be used to evaluate benchmark results.
+# Each benchmark instance is represented as an `ommx.v1.Instance`.
+# The LABS instance used here includes a reference solution in the
+# `ommx.v1.Solution` format.
 # The same `Instance` can also be passed to classical OMMX adapters such
 # as `ommx-pyscipopt-adapter`, so one problem definition can support both
 # quantum and classical workflows.
-#
+
+
+# %% [markdown]
 # ## Problem: Low Autocorrelation Binary Sequences (LABS)
 #
 # **LABS** asks for a binary sequence
@@ -113,224 +107,316 @@ docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 # E(\boldsymbol{s}) = \sum_{k=1}^{n-1} c_k(\boldsymbol{s})^2,
 # $$
 #
-# which we want to *minimize*. LABS is NP-hard and has long served as a
+# which we want to *minimize*. LABS has long served as a
 # stress test for both classical and quantum heuristics.
 #
 # ### Loading a LABS instance
 #
 # `Labs` exposes two models: `"integer"` (uses integer decision variables
 # for $c_k$ plus the constraints that tie them to $\boldsymbol{s}$) and
-# `"quadratic_unconstrained"` (a QUBO reformulation that introduces
+# `"quadratic_unconstrained"` (a quadratic unconstrained binary optimization (QUBO) reformulation that introduces
 # auxiliary binary variables $z_{i,k}$ encoding the products
 # $x_i x_{i+k+1}$ via a quadratic penalty). The QUBO form is the natural
 # target for QAOA, so we use it here.
-#
-# We pick `labs005`, the $n=5$ instance. The QUBO reformulation
-# uses $n + n(n-1) = 25$ binary variables (5 sequence bits
-# $x_i$ plus $n(n-1) = 20$ auxiliary $z_{i,k}$ bits). After
-# `Instance.to_qubo()` folds the penalty terms into the objective
-# and inactive variables are pruned, this becomes a 15-qubit problem:
-# small enough to simulate locally, but large enough that QAOA is
-# non-trivial.
-#
-# The bundled reference solution gives the known optimum
-# $E^\star = 2$ for $n=5$. We will compare both QAOA and SCIP
-# against this value.
-#
 
 # %%
 dataset = Labs()
-instance, reference_solution = dataset("quadratic_unconstrained", "labs005")
-original_payload = instance.to_bytes()
-
-print(f"Dataset: {dataset.name}")
-print(f"Available models: {dataset.model_names}")
-print(f"OMMX variables: {instance.num_variables}")
-print(f"OMMX constraints: {instance.num_constraints}")
-print(f"Reference objective: {reference_solution.objective}")
-
-assert instance.num_variables == 25
-assert instance.num_constraints == 0
-assert reference_solution.feasible
-assert reference_solution.objective == 2.0
+instances = dataset.available_instances["quadratic_unconstrained"]
+print(f"Dataset:           {dataset.name}")
+print(f"Available models:  {dataset.model_names}")
+print(f"Instance count:    {len(instances)}")
+print(f"First 5 instances: {instances[:5]}")
 
 # %% [markdown]
-# ## Extract an Immutable Active QUBO
-#
-# `to_qubo` is allowed to transform its receiver, so we first round-trip the
-# benchmark bytes. `BinaryModel.from_hubo` canonicalizes the resulting
-# coefficients in Rust and infers only the 15 variable IDs that occur in
-# nonzero terms. The caller-owned benchmark remains unchanged.
+# We pick `labs005`, the $n=5$ instance. The QUBO reformulation
+# declares $n + n(n-1) = 25$ binary variables (5 sequence bits
+# $x_i$ plus $n(n-1) = 20$ auxiliary $z_{i,k}$ bits). The objective
+# already contains the penalties and uses just 10 of the auxiliaries,
+# one for each pair of sequence positions. This gives a 15-qubit problem:
+# small enough to simulate locally, but large enough that QAOA is
+# non-trivial.
 
 # %%
-instance_for_qubo = ommx.v1.Instance.from_bytes(original_payload)
+instance_name = "labs005"
+instance, reference_solution = dataset("quadratic_unconstrained", instance_name)
+
+print(f"OMMX variables:    {instance.num_variables}")
+print(f"OMMX constraints:  {instance.num_constraints}")
+print(f"Reference E(s):    {reference_solution.objective}")
+print(f"Reference feasible: {reference_solution.feasible}")
+
+# %% [markdown]
+# The bundled reference solution gives the known optimum
+# $E^\star = 2$ for $n=5$. We will compare both QAOA and SCIP
+# against this value.
+
+# %% [markdown]
+# ## Algorithm: QAOA
+#
+# We build the QAOA circuit from scratch with `@qm.qkernel`, following the recipe in
+# [QAOA for MaxCut: Building the Circuit from Scratch](../algorithm/qaoa_maxcut).
+# Refer to that tutorial for the gate-by-gate derivation; here we
+# focus on the implementation.
+
+
+# %% [markdown]
+# ### Spin model from the OMMX instance
+#
+# We extract the QUBO with `Instance.to_qubo()` and express each binary
+# variable as $x_i=(1-Z_i)/2$. To normalize the energy scale, we divide
+# the resulting spin coefficients and constant by the largest absolute
+# nonconstant coefficient (10,028 for `labs005`).
+
+
+# %%
+# `Instance.to_qubo()` mutates the instance (it absorbs constraints into
+# the objective via the penalty method). Round-trip through bytes to keep
+# the caller's instance untouched.
+instance_for_qubo = ommx.v1.Instance.from_bytes(instance.to_bytes())
 qubo, qubo_constant = instance_for_qubo.to_qubo()
-model = BinaryModel.from_hubo(qubo, qubo_constant)
-
-assert instance.to_bytes() == original_payload
-assert model.num_variables == 15
-assert model.order == 2
-assert BinaryModel.from_bytes(model.to_bytes()) == model
-
-print(f"Active QAOA variables: {model.variables}")
-print(f"QAOA qubits: {model.num_variables}")
+binary_model = BinaryModel.from_hubo(qubo, qubo_constant)
+spin_model = binary_model.to_ising().normalize_by_abs_max()
+num_qubits = spin_model.num_variables
+print(f"QAOA qubits: {num_qubits}")
 
 # %% [markdown]
-# ## Build and Compile Three-Layer QAOA
+# ### Cost Hamiltonian
 #
-# `QAOAExperiment` fixes the active binary Hamiltonian and three-layer topology in a measured classical-output program for final sampling. The public `qaoa_state` building block defines the same state preparation for the energy estimator. Both use the declared `gammas` and `betas` vectors; no SDK parameter-name mapping is needed.
+# To use the exact expectation value rather than a shot estimate for the
+# optimization, we build the Ising cost Hamiltonian directly from the
+# spin-model coefficients: $Z_i$ terms for the linear part and
+# $Z_i Z_j$ terms for the quadratic part.
 
 # %%
-LAYERS = 3
-experiment = QAOAExperiment(model, layers=LAYERS)
-endpoint = Aer()
-compiled = experiment.compile(to=endpoint.target)
-study = qm.resources.logical(experiment.program)
+# Map OMMX variable IDs to consecutive qubit indices.
+qubit_index = {var: i for i, var in enumerate(spin_model.variables)}
+coefficients = spin_model.coefficients
+couplings = {
+    (qubit_index[ids[0]], qubit_index[ids[1]]): value
+    for ids, value in coefficients.items()
+    if len(ids) == 2
+}
+fields = tuple(coefficients.get((var,), 0.0) for var in spin_model.variables)
 
-assert compiled.identity.problem_digest == model.semantic_digest
-assert study.metric(
-    qm.resources.logical_operation_count("quantum.h")
-).numeric_enclosure() == (15, 15)
-assert study.metric(
-    qm.resources.logical_operation_count("quantum.rx")
-).numeric_enclosure() == (45, 45)
-assert study.metric(
-    qm.resources.logical_operation_count("quantum.pauli_evolution")
-).numeric_enclosure() == (3, 3)
-
-measured_circuit = load_circuit(compiled.artifact)
-assert measured_circuit.num_qubits == model.num_variables
-assert measured_circuit.num_parameters == 2 * LAYERS
-print(measured_circuit.draw(output="text", fold=120))
-
-# %% [markdown]
-# ## Optimize a Finite-Shot Energy Estimate
-#
-# `Estimator` prepares measurements of the active QUBO Hamiltonian. All terms are Z products and can share one QWC measurement group, so covariance is retained when scoring each shot. `ENERGY_SHOTS` is the total budget per objective evaluation.
-#
-# COBYLA works without a finite-difference gradient. Its objective is noisy, and its last value is not an independent estimate of solution quality. We use fresh samples for the selected parameters afterward. Sampling uncertainty does not bound optimization error or guarantee convergence to the benchmark optimum.
-
-# %%
-preparation = qaoa_state.specialize(
-    width=model.num_variables, layers=LAYERS, hamiltonian=model.hamiltonian
+cost_hamiltonian = SparsePauliOp.from_sparse_list(
+    [("ZZ", [i, j], value) for (i, j), value in couplings.items()]
+    + [("Z", [i], value) for i, value in enumerate(fields)]
+    + [("I", [0], spin_model.constant)],
+    num_qubits=num_qubits,
 )
-estimator = Estimator(preparation, model.hamiltonian, grouping="qwc")
-ENERGY_SHOTS = 32 if docs_test_mode else 2_048
-cost_history = []
+
+# %% [markdown]
+# ### QAOA qkernels
+#
+# The circuit uses three small Qamomile kernels. Hadamard gates prepare a
+# uniform superposition. The cost layer applies $R_{ZZ}(J_{ij}\gamma)$ and
+# $R_Z(h_i\gamma)$ using the normalized couplings and fields. These gates
+# use half their rotation angle in the exponent. The mixer applies
+# $R_X(2\beta)$ to each qubit. The sampling kernel measures the resulting
+# state in the computational basis.
 
 
-def qaoa_parameters(values):
-    """Keep aggregate parameter names from the Qamomile signature."""
-    return {
-        "gammas": tuple(float(value) for value in values[:LAYERS]),
-        "betas": tuple(float(value) for value in values[LAYERS:]),
-    }
+# %%
+@qm.qkernel
+def superposition(n: qm.Const[qm.Int]) -> qm.Q[qm.Bits[n]]:
+    q = qm.qubits(n)
+    for i in range(n):
+        q = qm.h(q, target=i)
+    return q
 
 
-def cost_function(parameters) -> float:
-    """Estimate and record one finite-shot QAOA energy."""
-    estimate = estimator.estimate(
-        on=endpoint,
-        parameters=qaoa_parameters(parameters),
-        shots=ENERGY_SHOTS,
-        seed=100 + len(cost_history),
-    )
-    assert estimate.shots == ENERGY_SHOTS
-    cost_history.append(estimate.value)
-    return estimate.value
+@qm.qkernel
+def cost_layer(
+    q: qm.Q[qm.Bits[n]],
+    n: qm.Const[qm.Int],
+    edge_count: qm.Const[qm.Int],
+    edges: qm.Const[qm.Matrix[qm.Int, edge_count, 2]],
+    quad: qm.Const[qm.Vector[qm.Real, edge_count]],
+    linear: qm.Const[qm.Vector[qm.Real, n]],
+    gamma: qm.Real,
+) -> qm.Q[qm.Bits[n]]:
+    for k in range(edge_count):
+        q = qm.rzz(q, quad[k] * gamma, left=edges[k][0], right=edges[k][1])
+    for i in range(n):
+        q = qm.rz(q, linear[i] * gamma, target=i)
+    return q
 
+
+@qm.qkernel
+def mixer_layer(
+    q: qm.Q[qm.Bits[n]], n: qm.Const[qm.Int], beta: qm.Real
+) -> qm.Q[qm.Bits[n]]:
+    for i in range(n):
+        q = qm.rx(q, 2.0 * beta, target=i)
+    return q
+
+
+@qm.qkernel
+def qaoa_state(
+    n: qm.Const[qm.Int],
+    edge_count: qm.Const[qm.Int],
+    edges: qm.Const[qm.Matrix[qm.Int, edge_count, 2]],
+    quad: qm.Const[qm.Vector[qm.Real, edge_count]],
+    linear: qm.Const[qm.Vector[qm.Real, n]],
+    layers: qm.Const[qm.Int],
+    gammas: qm.Param[qm.Vector[qm.Real, layers]],
+    betas: qm.Param[qm.Vector[qm.Real, layers]],
+) -> qm.Q[qm.Bits[n]]:
+    q = superposition(n)
+    for layer in range(layers):
+        q = cost_layer(q, n, edge_count, edges, quad, linear, gammas[layer])
+        q = mixer_layer(q, n, betas[layer])
+    return q
+
+
+@qm.qkernel
+def qaoa_sample(
+    n: qm.Const[qm.Int],
+    edge_count: qm.Const[qm.Int],
+    edges: qm.Const[qm.Matrix[qm.Int, edge_count, 2]],
+    quad: qm.Const[qm.Vector[qm.Real, edge_count]],
+    linear: qm.Const[qm.Vector[qm.Real, n]],
+    layers: qm.Const[qm.Int],
+    gammas: qm.Param[qm.Vector[qm.Real, layers]],
+    betas: qm.Param[qm.Vector[qm.Real, layers]],
+) -> qm.Shot[qm.Bits[n]]:
+    q = qaoa_state(n, edge_count, edges, quad, linear, layers, gammas, betas)
+    return qm.measure(q)
+
+
+# %% [markdown]
+# ### Compile and optimize
+#
+# We fix the problem and the number of layers ($p=3$) with `qm.specialize`
+# and compile the sampling circuit once. For the energy calculation we
+# remove the final measurements from a copy of this circuit.
+# At each set of angles, Qiskit Aer's local `EstimatorV2` computes the
+# exact expectation of the normalized Hamiltonian from the simulated state.
+# BFGS uses finite differences of these values to choose the angles.
+# The plot records one point per objective evaluation. We seed NumPy
+# to reproduce the initial angles.
+
+
+# %%
+p = 3
+fixed = {
+    "n": num_qubits,
+    "edge_count": len(couplings),
+    "edges": tuple(couplings),
+    "quad": tuple(couplings.values()),
+    "linear": fields,
+    "layers": p,
+}
+endpoint = qm.qiskit.Aer()
+sampling = qm.compile(qm.specialize(qaoa_sample, **fixed), to=endpoint.target)
+# The energy calculation uses the same gates up to the final measurements.
+state_circuit = qm.qiskit.load_circuit(sampling).remove_final_measurements(
+    inplace=False
+)
+state_circuit = transpile(state_circuit, AerSimulator(), optimization_level=0)
+estimator = EstimatorV2(
+    options={"backend_options": {"method": "statevector", "max_parallel_threads": 1}}
+)
 
 SEED = 42
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+maxiter = 1 if docs_test_mode else 50
+
 rng = np.random.default_rng(SEED)
-initial_parameters = rng.uniform(0.0, np.pi, 2 * LAYERS)
-max_iterations = 10 if docs_test_mode else 80
+initial_params = rng.uniform(0, np.pi, 2 * p)
+cost_history: list[float] = []
 
-start = time.perf_counter()
-optimization = minimize(
-    cost_function,
-    initial_parameters,
-    method="COBYLA",
-    options={"maxiter": max_iterations, "rhobeg": 0.5},
+
+def angles(params: np.ndarray) -> dict[str, tuple[float, ...]]:
+    return {"gammas": tuple(params[:p]), "betas": tuple(params[p:])}
+
+
+def cost_fn(params: np.ndarray) -> float:
+    """Return the exact expectation of the normalized cost Hamiltonian."""
+    invocation = qm.Invocation.create(parameters=angles(params))
+    circuit = qm.qiskit.bind_circuit(state_circuit, sampling, invocation)
+    result = estimator.run([(circuit, cost_hamiltonian)], precision=0.0).result()
+    energy = float(result[0].data.evs)
+    cost_history.append(energy)
+    return energy
+
+
+t0 = time.perf_counter()
+res = minimize(
+    cost_fn,
+    initial_params,
+    method="BFGS",
+    options={"maxiter": maxiter},
 )
-qaoa_optimize_time = time.perf_counter() - start
+qaoa_optimize_time = time.perf_counter() - t0
 
-print(f"Optimized expectation: {optimization.fun:+.6f}")
-print(f"Function evaluations: {optimization.nfev}")
-print(f"Wall time: {qaoa_optimize_time:.2f} s")
-
-assert len(optimization.x) == 2 * LAYERS
-assert len(cost_history) == optimization.nfev
+print(f"Optimized expectation value (normalized): {res.fun:.4f}")
+print(f"Function evaluations:                     {res.nfev}")
+print(f"Wall time:                                {qaoa_optimize_time:.2f} s")
 
 # %%
 plt.figure(figsize=(8, 4))
 plt.plot(cost_history, color="#2696EB")
-plt.xlabel("Energy evaluation")
-plt.ylabel("Sampled expectation value")
-plt.title("QAOA optimization progress (LABS, n=5)")
+plt.xlabel("Objective evaluation")
+plt.ylabel("Expectation value (normalized)")
+plt.title(f"QAOA Optimization Progress ({instance_name})")
 plt.show()
 
 # %% [markdown]
-# ## Final Sampling and OMMX Evaluation
+# ### Final sampling
 #
-# Reusing the compiled experiment, `compiled.run` samples through Qamomile
-# and its selected Aer endpoint. A separate fresh estimate reports the energy.
-# Qamomile decodes the 15 active variables in their original IDs. We then expand their
-# multiplicities into OMMX samples and evaluate them against the untouched
-# benchmark instance, so reported objectives use the published LABS meaning.
+# We run the compiled sampling circuit on local `qm.qiskit.Aer()` with
+# `qm.run`. We collect 4,096 shots at the optimized
+# angles and decode them against the original `ommx.v1.Instance`, so the
+# returned `ommx.v1.SampleSet` reports the original QUBO objective
+# directly. In this QUBO formulation, samples whose auxiliary $z$
+# variables correctly encode the products $x_i x_{i+k+1}$ incur no
+# penalty, and the objective equals the LABS energy
+# $E(\boldsymbol{s}) = \sum_k c_k^2$. Samples that violate the
+# implicit $z = x_i x_{i+k+1}$ relation incur an additive penalty.
+
 
 # %%
-FINAL_SHOTS = 1 if docs_test_mode else 4_096
-final_run = compiled.run(
-    on=endpoint,
-    **qaoa_parameters(optimization.x),
-    shots=FINAL_SHOTS,
-    seed=SEED,
-)
-decoded_samples = final_run.samples
-final_energy = estimator.estimate(
-    on=endpoint,
-    parameters=qaoa_parameters(optimization.x),
-    shots=ENERGY_SHOTS,
-    seed=1_000_000,
-)
-print(
-    f"Fresh energy estimate: {final_energy.value:+.6f} ± {final_energy.standard_error:.6f}"
-)
+def evaluate_with_ommx(
+    result: qm.SampleResult, model: BinaryModel, ommx_instance: ommx.v1.Instance
+) -> ommx.v1.SampleSet:
+    """Score each measured bitstring in the original OMMX variable order."""
+    samples = ommx.v1.Samples({})
+    next_id = 0
+    for row in model.decode(result).samples:
+        ids = list(range(next_id, next_id + row.occurrences))
+        samples.append(ids, ommx.v1.State(dict(row.assignment)))
+        next_id += row.occurrences
+    return ommx_instance.evaluate_samples(samples)
 
-ommx_samples = ommx.v1.Samples({})
-next_sample_id = 0
-for decoded_sample in decoded_samples.samples:
-    sample_ids = list(
-        range(
-            next_sample_id,
-            next_sample_id + decoded_sample.occurrences,
-        )
-    )
-    next_sample_id += decoded_sample.occurrences
-    ommx_samples.append(
-        sample_ids,
-        ommx.v1.State(
-            {variable: float(value) for variable, value in decoded_sample.assignment}
-        ),
-    )
 
-qaoa_sample_set = instance.evaluate_samples(ommx_samples)
+final_shots = 1 if docs_test_mode else 4096
+final_result = qm.run(
+    sampling, on=endpoint, parameters=angles(res.x), shots=final_shots, seed=SEED
+).result
+qaoa_sample_set = evaluate_with_ommx(final_result, binary_model, instance)
+
 qaoa_summary = qaoa_sample_set.summary
 qaoa_best = qaoa_sample_set.best_feasible
-qaoa_best_objective = int(round(qaoa_best.objective))
-reference_objective = int(round(reference_solution.objective))
+qaoa_best_E = int(round(qaoa_best.objective))
+ref_E = int(reference_solution.objective)
 
-print(f"Shots: {len(qaoa_summary)}")
-print(f"QAOA best objective: {qaoa_best_objective}")
-print(f"Reference objective: {reference_objective}")
+assert len(qaoa_summary) == final_shots
 
-assert decoded_samples.total_occurrences == FINAL_SHOTS
-assert len(qaoa_summary) == FINAL_SHOTS
-assert qaoa_best_objective >= reference_objective
+print(f"Shots:                {len(qaoa_summary)}")
+print(f"QAOA best objective:  {qaoa_best_E}")
+print(f"Reference E*:         {ref_E}")
 
 # %% [markdown]
-# QAOA returns a distribution, not one answer. The histogram shows every
-# original QUBO objective, with the benchmark optimum marked in red.
+# ### Distribution of objective values
+#
+# The histogram shows the original QUBO objective of each shot at the
+# optimized angles. The red dashed line marks the optimum $E^\star=2$.
+# The first bin also covers 6, 10 and 30, the other energies of sequences
+# with consistent auxiliaries. Count only shots with objective 2 as hits.
+# For `labs005`, any inconsistent auxiliary raises the objective to at
+# least 10,002.
+
 
 # %%
 objectives = qaoa_summary["objective"].to_numpy()
@@ -338,67 +424,98 @@ objectives = qaoa_summary["objective"].to_numpy()
 plt.figure(figsize=(8, 4))
 plt.hist(objectives, bins=40, color="#2696EB", edgecolor="white")
 plt.axvline(
-    reference_objective,
+    ref_E,
     color="red",
     linestyle="--",
-    label=rf"Reference $E^\star$ = {reference_objective}",
+    label=f"Reference $E^\\star$ = {ref_E}",
 )
 plt.xlabel("Objective value (QUBO energy)")
 plt.ylabel("Frequency")
-plt.title(f"QAOA output distribution (p={LAYERS}, shots={FINAL_SHOTS})")
+plt.title(f"QAOA Output Distribution (p={p}, shots={final_shots})")
 plt.legend()
 plt.show()
 
 # %% [markdown]
-# ## Classical Baseline: SCIP
+# ## Classical baseline: SCIP via the OMMX adapter
 #
-# The OMMX PySCIPOpt adapter solves the same immutable instance with SCIP. Its
-# objective is directly comparable with the bundled reference and the best
-# QAOA shot.
+# **SCIP** is a branch-and-bound-based MILP/QUBO solver that can find the
+# exact optimal solution. The same `ommx.v1.Instance`
+# is consumed by
+# `ommx_pyscipopt_adapter.OMMXPySCIPOptAdapter.solve`, which hands the
+# problem to SCIP via PySCIPOpt and returns an `ommx.v1.Solution`
+# evaluated against the original instance. Its `.objective` is
+# directly comparable to the original QUBO objective of each QAOA shot.
 
 # %%
-start = time.perf_counter()
+t0 = time.perf_counter()
 scip_solution = ommx_pyscipopt_adapter.OMMXPySCIPOptAdapter.solve(instance)
-scip_solve_time = time.perf_counter() - start
-scip_objective = int(round(scip_solution.objective))
+scip_solve_time = time.perf_counter() - t0
 
-print(f"SCIP objective: {scip_objective}")
-print(f"SCIP feasible: {scip_solution.feasible}")
-print(f"Wall time: {scip_solve_time:.3f} s")
-
+scip_E = int(round(scip_solution.objective))
 assert scip_solution.feasible
-assert scip_objective == reference_objective
+assert scip_solution.objective == reference_solution.objective
+print(f"SCIP objective: {scip_E}")
+print(f"SCIP feasible: {scip_solution.feasible}")
+print(f"Wall time:    {scip_solve_time:.3f} s")
 
 # %% [markdown]
-# ## Results Comparison
+# ## Results comparison
 #
-# SCIP returns one optimum; QAOA returns a distribution. We therefore report
-# QAOA's best shot and the fraction of shots that reached the published
-# optimum. Wall times are illustrative only because they cover different
-# algorithmic work.
+# SCIP returns an optimal assignment for this instance. QAOA samples a
+# distribution over bitstrings. We report QAOA's **best shot**
+# (the lowest-objective bitstring seen across all samples) and its
+# **hit rate** on the reference optimum (the fraction of shots that
+# achieved $E^\star$).
+
 
 # %%
-hit_rate = float(
-    (qaoa_summary["objective"].round().astype(int) == reference_objective).mean()
+# Hit rate: fraction of shots that achieved the reference optimum.
+hits = int((qaoa_summary["objective"] == reference_solution.objective).sum())
+hit_rate = hits / final_shots
+
+print(f"{'Solver':<22} {'QUBO':>8} {'Time (s)':>12}")
+print("-" * 46)
+print(f"{'Reference (bundled)':<22} {ref_E:>8} {'-':>12}")
+print(f"{'SCIP (classical)':<22} {scip_E:>8} {scip_solve_time:>12.3f}")
+print(f"{'QAOA (best shot)':<22} {qaoa_best_E:>8} {qaoa_optimize_time:>12.2f}")
+print()
+print(
+    f"QAOA hit rate on QUBO optimum {ref_E}: {hit_rate:.1%}  ({hits}/{final_shots} shots)"
 )
 
-print(f"{'Solver':<22} {'E(s)':>8} {'Time (s)':>12}")
-print("-" * 46)
-print(f"{'Reference (bundled)':<22} {reference_objective:>8} {'-':>12}")
-print(f"{'SCIP (classical)':<22} {scip_objective:>8} {scip_solve_time:>12.3f}")
-print(f"{'QAOA (best shot)':<22} {qaoa_best_objective:>8} {qaoa_optimize_time:>12.2f}")
-print(f"QAOA hit rate on E*={reference_objective}: {hit_rate:.1%}")
-
-assert 0.0 <= hit_rate <= 1.0
+# %% [markdown]
+# Two observations make this benchmark meaningful:
+#
+# 1. **Optimum.** Both SCIP and the best QAOA shot reach the reference
+#    optimum $E^\star = 2$, so QAOA is capable of finding the optimal
+#    sequence at $n = 5$ with only $p = 3$.
+# 2. **Hit rate.** About 4.6% of the 4,096 final measurements reached
+#    the QUBO optimum, including the auxiliary bits.
+#
+# Note that the wall-time figures are only indicative. SCIP's timing is
+# just the solver's runtime on the CPU, while the QAOA timing covers the
+# full classical-quantum optimization loop on a state-vector simulator;
+# both depend on the execution environment. A genuinely fair comparison
+# would therefore require a more careful methodology. Either way, combining
+# Qamomile with datasets like OMMX Quantum Benchmarks makes it easy to
+# compare quantum algorithms and classical solvers across a variety of
+# metrics.
 
 # %% [markdown]
 # ## Summary
 #
-# - `labs005` supplies one immutable benchmark and known optimum.
-# - Its 15 active QUBO variables feed a three-layer typed QAOA experiment.
-# - COBYLA optimizes finite-shot Qamomile energy estimates; the measured program supplies a
-#   4,096-shot output distribution.
-# - OMMX restores published objective meaning, while SCIP independently solves
-#   the same instance.
-# - Best shot, optimum hit rate, distribution, and wall times reproduce the
-#   original quantum-versus-classical benchmark UX.
+# In this tutorial we:
+#
+# 1. Loaded a LABS instance straight from the OMMX Quantum Benchmarks
+#    dataset as an `ommx.v1.Instance`.
+# 2. Extracted the QUBO with `Instance.to_qubo()`, normalized its spin
+#    coefficients, and ran a hand-written Qamomile QAOA circuit on local
+#    Qiskit Aer for both exact energy evaluation and final sampling.
+# 3. Compared the QAOA output (best shot, hit rate, sampling
+#    distribution) against SCIP via
+#    `ommx_pyscipopt_adapter.OMMXPySCIPOptAdapter.solve` on the same
+#    instance, plus the reference optimum bundled with the benchmark.
+#
+# The same circuit can be reused for other QOBLIB models available as
+# QUBOs. Integer or constrained formulations may need an encoding first.
+# The number of active binary variables determines the circuit width.

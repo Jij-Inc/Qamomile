@@ -429,6 +429,7 @@ mod tests {
 
     fn bits_abi() -> Vec<u8> {
         wire::ResultAbiProto {
+            per_shot: false,
             r#type: Some(wire::TypeProto {
                 kind: wire::type_proto::Kind::Array.into(),
                 name: "Bits".to_owned(),

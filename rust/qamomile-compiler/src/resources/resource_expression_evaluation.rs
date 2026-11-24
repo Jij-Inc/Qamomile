@@ -4077,6 +4077,15 @@ fn evaluate_contracted(
         .iter()
         .find_map(|(key, value)| (key == "name").then_some(value.as_str()));
     match name {
+        Some("qamomile.positive_dimension") => {
+            let [width] = integer_arguments(arguments)?;
+            if !width.is_positive() {
+                return Err(ResourceExpressionEvaluationError::Domain(
+                    "a type dimension must be positive".to_owned(),
+                ));
+            }
+            Ok(Some(Numeric::integer(width.clone())))
+        }
         Some("qamomile.range_trip_count") => {
             let [range_start, range_stop, range_stride] = integer_arguments(arguments)?;
             if range_stride.is_zero() {

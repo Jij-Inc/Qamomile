@@ -331,9 +331,10 @@ fn build_observables(
                 QracVariant::Qrac32 if group.len() == 1 => {
                     (QracObservable::single(Pauli::Z, start, width), 1.0)
                 }
+                // Each prime observable has expectation spin / sqrt(6), even with an unused slot.
                 QracVariant::Qrac32 => (
                     prime_observable([Pauli::Z, Pauli::X, Pauli::Y][offset], start, width)?,
-                    (2.0 * group_size(group)?).sqrt(),
+                    6.0_f64.sqrt(),
                 ),
             };
             observables[variable] = observable;
@@ -602,6 +603,40 @@ mod tests {
         );
         assert_eq!(compact.groups(), &[vec![0, 1], vec![2]]);
         assert!(compact.hamiltonian().is_hermitian());
+    }
+
+    #[test]
+    fn qrac32_pair_code_states_reproduce_source_energy() {
+        let source = model(
+            PolynomialDomain::Spin,
+            &[vec![0_u8.into()], vec![1_u8.into()]],
+            &[1.0, 2.0],
+            0.0,
+        );
+        let plan = QracPlan::new(&source, QracVariant::Qrac32).expect("3,2 plan");
+        assert_eq!(plan.groups(), &[vec![0, 1]]);
+
+        // For the even-parity code states in Teramoto et al., Eq. (32),
+        // Z' encodes the parity of the two basis bits and X' the first bit.
+        for (basis_bits, spins) in [
+            ([0, 0], [1, 1]),
+            ([0, 1], [-1, 1]),
+            ([1, 0], [-1, -1]),
+            ([1, 1], [1, -1]),
+        ] {
+            let projected = crate::project_pauli_subspace(
+                plan.hamiltonian().literal(),
+                &[basis_bits.to_vec()],
+                &[vec![2, 2]], // Z basis on both qubits
+            )
+            .expect("project onto code state");
+            let actual = projected.hamiltonian()[0].re;
+            let expected = source.energy(&spins).expect("source energy");
+            assert!(
+                (actual - expected).abs() < 1e-12,
+                "{spins:?}: {actual} vs {expected}"
+            );
+        }
     }
 
     #[test]

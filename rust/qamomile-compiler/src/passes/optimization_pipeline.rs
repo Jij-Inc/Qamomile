@@ -159,7 +159,8 @@ pub fn validate_optimization_pipeline(
 #[derive(Clone, Debug)]
 pub struct OptimizationPreparation {
     source: VerifiedProgram,
-    prepared: TargetPreparedProgram,
+    result: VerifiedProgram,
+    late: LateOptimization,
     passes: Vec<OptimizationPassIdentity>,
     receipt: Vec<u8>,
     policy: OptimizationPolicy,
@@ -274,10 +275,8 @@ impl OptimizationPreparation {
         let receipt = receipt::encode(&source, &result, &passes, policy);
         Ok(Self {
             source,
-            prepared: TargetPreparedProgram {
-                verified: result,
-                late,
-            },
+            result,
+            late,
             passes,
             receipt,
             policy: policy.clone(),
@@ -306,10 +305,18 @@ impl OptimizationPreparation {
         &self.source
     }
 
-    /// Borrow the selected target-facing result.
+    /// Borrow the selected optimization result persisted in the receipt.
     #[must_use]
-    pub const fn prepared(&self) -> &TargetPreparedProgram {
-        &self.prepared
+    pub const fn result(&self) -> &VerifiedProgram {
+        &self.result
+    }
+
+    /// Prepare the selected result for emission with its late optimization policy.
+    ///
+    /// # Errors
+    /// Returns [`crate::CompilerError`] if the pruned `QCore` fails verification.
+    pub fn prepare_for_target(&self) -> Result<TargetPreparedProgram, crate::CompilerError> {
+        TargetPreparedProgram::with_late_optimization(self.result.clone(), self.late)
     }
 
     /// Borrow the canonical portable receipt, including the verified result.

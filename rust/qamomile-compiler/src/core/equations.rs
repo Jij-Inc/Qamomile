@@ -15,6 +15,7 @@ use thiserror::Error;
 
 use crate::control_state::ControlState;
 use crate::core::slice_shape::{SliceBound, operation_bounds};
+use crate::numeric_values::{NumericEvaluationError, integer_to_real};
 use crate::operations::{LocallyCheckedOperations, PrimitiveGateSpec, primitive_gate_spec};
 use crate::types::{
     CoherentLeafWidth, Dimension, ScalarType, SemanticType, Stage, TypeArena, TypeId, WordKind,
@@ -411,6 +412,7 @@ impl<'a> FunctionVerifier<'a, '_> {
     ) -> Result<(), LocalEquationError> {
         match operation.opcode.as_str() {
             "qcore.constant" => self.verify_constant(operation, operands, results),
+            "qcore.current_shot" => self.verify_current_shot(operation, operands, results),
             "qcore.stage_lift" => self.verify_stage_lift(operation, operands, results),
             "qcore.tuple" => self.verify_tuple(operation, operands, results),
             "qcore.unpack" => self.verify_unpack(operation, operands, results),
@@ -425,6 +427,31 @@ impl<'a> FunctionVerifier<'a, '_> {
             }
             _ => Ok(()),
         }
+    }
+
+    fn verify_current_shot(
+        &self,
+        operation: &wire::OperationProto,
+        operands: &[ValueFact<'a>],
+        results: &[ValueFact<'a>],
+    ) -> Result<(), LocalEquationError> {
+        let malformed = || malformed_core("qcore.current_shot operation");
+        let [result] = results else {
+            return Err(malformed());
+        };
+        if !operands.is_empty()
+            || !operation.attributes.is_empty()
+            || !operation.regions.is_empty()
+            || result.source.region.is_some()
+            || self.arena.stage_of(result.type_id) != Some(Stage::Shot)
+            || !matches!(
+                self.arena.get(self.arena.strip_stage(result.type_id)),
+                Some(SemanticType::Scalar(ScalarType::Int))
+            )
+        {
+            return Err(malformed());
+        }
+        Ok(())
     }
 
     fn verify_constant(
@@ -728,7 +755,7 @@ impl<'a> FunctionVerifier<'a, '_> {
                     return Err(malformed());
                 };
                 if !operation.attributes.is_empty()
-                    || !is_staged(self.arena, result.type_id, Stage::Shot, payload)
+                    || !is_observation(self.arena, result.type_id, payload)
                     || result.source.region.is_some()
                 {
                     return Err(malformed());
@@ -1646,7 +1673,7 @@ fn measurement_pair(
         return false;
     }
     if let Some(payload) = payload {
-        is_staged(arena, *measurement, Stage::Shot, payload)
+        is_observation(arena, *measurement, payload)
     } else {
         let Some(SemanticType::Staged {
             stage: Stage::Shot,
@@ -1655,16 +1682,20 @@ fn measurement_pair(
         else {
             return false;
         };
-        arena.get(*inner) == Some(&SemanticType::Scalar(ScalarType::Bool))
+        arena.get(*inner) == Some(&SemanticType::Scalar(ScalarType::Bit))
     }
 }
 
-fn is_staged(arena: &TypeArena, type_id: TypeId, expected: Stage, inner: TypeId) -> bool {
-    matches!(
-        arena.get(type_id),
-        Some(SemanticType::Staged { stage, inner: actual })
-            if *stage == expected && *actual == inner
-    )
+fn is_observation(arena: &TypeArena, result: TypeId, payload: TypeId) -> bool {
+    let Some(SemanticType::Staged {
+        stage: Stage::Shot,
+        inner,
+    }) = arena.get(result)
+    else {
+        return false;
+    };
+    crate::type_relations::ObservationType::from_payload(arena, payload)
+        .is_some_and(|observation| observation.matches(arena, *inner))
 }
 
 fn is_scalar(arena: &TypeArena, type_id: TypeId, expected: ScalarType) -> bool {
@@ -1937,6 +1968,80 @@ pub(crate) fn literal_conforms(
             false
         }
     }
+}
+
+/// Normalize Real leaves of a type-checked binding before native evaluation.
+///
+/// Callers first validate the complete literal with `literal_conforms`. Only
+/// declared Real leaves are rounded to binary64; all other scalar domains and
+/// aggregate encodings are preserved. Work is bounded by the existing literal
+/// byte, node, and nesting budgets, without expanding symbolic dimensions.
+pub(crate) fn normalize_real_binding(
+    arena: &TypeArena,
+    type_id: TypeId,
+    literal: &mut wire::LiteralProto,
+) -> Result<(), NumericEvaluationError> {
+    use wire::literal_proto::Value;
+
+    match (
+        arena.get(arena.strip_stage(type_id)),
+        literal.value.as_mut(),
+    ) {
+        (Some(SemanticType::Scalar(ScalarType::Real)), Some(value)) => {
+            let real = match value {
+                Value::IntValue(value) => integer_to_real(&BigInt::from(*value))?,
+                Value::BigintValue(value) => integer_to_real(&BigInt::from_signed_bytes_be(value))?,
+                Value::RealValue(_) => return Ok(()),
+                _ => return Err(NumericEvaluationError::Undefined("invalid Real binding")),
+            };
+            *value = Value::RealValue(real);
+        }
+        (Some(SemanticType::Array { element, shape }), _) => {
+            normalize_real_array(arena, *element, shape.len(), literal)?;
+        }
+        (Some(SemanticType::Product(elements)), Some(Value::TupleValue(sequence))) => {
+            for (element, value) in elements.iter().zip(&mut sequence.values) {
+                normalize_real_binding(arena, *element, value)?;
+            }
+        }
+        (Some(SemanticType::Record { fields, .. }), Some(Value::MappingValue(mapping))) => {
+            for (name, field_type) in fields {
+                let index = mapping
+                    .entries
+                    .binary_search_by(|entry| entry.key.cmp(name))
+                    .expect("checked record has every declared field");
+                let value = mapping.entries[index]
+                    .value
+                    .as_mut()
+                    .expect("checked record field has a value");
+                normalize_real_binding(arena, *field_type, value)?;
+            }
+        }
+        (
+            Some(SemanticType::Scalar(_) | SemanticType::Word { .. } | SemanticType::Fixed { .. }),
+            _,
+        ) => {}
+        _ => return Err(NumericEvaluationError::Undefined("invalid typed binding")),
+    }
+    Ok(())
+}
+
+fn normalize_real_array(
+    arena: &TypeArena,
+    element: TypeId,
+    rank: usize,
+    literal: &mut wire::LiteralProto,
+) -> Result<(), NumericEvaluationError> {
+    if rank == 0 {
+        return normalize_real_binding(arena, element, literal);
+    }
+    let Some(wire::literal_proto::Value::TupleValue(sequence)) = literal.value.as_mut() else {
+        return Err(NumericEvaluationError::Undefined("invalid array binding"));
+    };
+    for value in &mut sequence.values {
+        normalize_real_array(arena, element, rank - 1, value)?;
+    }
+    Ok(())
 }
 
 fn scalar_literal_conforms(scalar: ScalarType, literal: &wire::LiteralProto) -> bool {
@@ -2951,7 +3056,7 @@ mod tests {
     fn measurement_channel_and_cleanup_equations_are_closed() {
         let state = qbits(2);
         let shot_bits = staged("Shot", bits(2));
-        let shot_bool = staged("Shot", scalar("Bool"));
+        let shot_bit = staged("Shot", scalar("Bit"));
         let measured = single_quantum_operation(
             "quantum.measure",
             vec![(state.clone(), Some(region(1, &[])))],
@@ -2969,7 +3074,7 @@ mod tests {
                 opcode,
                 vec![(state.clone(), Some(region(1, &[]))), (scalar("Int"), None)],
                 vec![(
-                    product(vec![shot_bool.clone(), state.clone()]),
+                    product(vec![shot_bit.clone(), state.clone()]),
                     Some(region(1, &[])),
                 )],
                 vec![attribute("keywords", strings(&["target"]))],
@@ -2980,10 +3085,7 @@ mod tests {
         let measured_bit = single_quantum_operation(
             "quantum.measure_z",
             vec![(state.clone(), Some(region(1, &[]))), (scalar("Int"), None)],
-            vec![(
-                product(vec![shot_bool, state.clone()]),
-                Some(region(1, &[])),
-            )],
+            vec![(product(vec![shot_bit, state.clone()]), Some(region(1, &[])))],
             vec![attribute("keywords", strings(&["target"]))],
         );
         assert!(measured_bit.is_ok());
@@ -2992,7 +3094,7 @@ mod tests {
             "quantum.measure_z",
             vec![(quantum(scalar("Bit")), Some(region(2, &[])))],
             vec![(
-                product(vec![staged("Shot", scalar("Bool")), quantum(scalar("Bit"))]),
+                product(vec![staged("Shot", scalar("Bit")), quantum(scalar("Bit"))]),
                 Some(region(2, &[])),
             )],
             vec![attribute("keywords", strings(&[]))],

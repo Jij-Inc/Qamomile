@@ -37,7 +37,11 @@
 # %%
 from __future__ import annotations
 
+import os
+
 import qamomile as qm
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 # %% [markdown]
 # ## Your First Resource Estimate
@@ -196,7 +200,8 @@ def ghz_state(
 symbolic_study = qm.resources.logical(ghz_state)
 
 # Compare logical gate counts and gate depths at different register widths.
-for width in (2, 4, 8):
+widths = (2,) if docs_test_mode else (2, 4, 8)
+for width in widths:
     estimate = symbolic_study.evaluate(width=width)
     width_gates = estimate.metric(qm.resources.LOGICAL_GATES)
     width_depth = estimate.metric(qm.resources.LOGICAL_GATE_DEPTH)

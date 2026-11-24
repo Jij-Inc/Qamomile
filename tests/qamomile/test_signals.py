@@ -48,7 +48,7 @@ def exercise_signals_backend(*, endpoint: object) -> None:
         assert isinstance(artifact, qm.CompiledProgram)
         for parameters, expected in launches:
             result = qm.execute(
-                artifact, on=endpoint, parameters=parameters, shots=4, seed=0
+                artifact, on=endpoint, parameters=parameters, shots=4, seed=None
             )
             assert result.counts == {expected: 4}
     assert (
@@ -58,7 +58,7 @@ def exercise_signals_backend(*, endpoint: object) -> None:
             on=endpoint,
             parameters={"angle": math.pi},
             shots=4,
-            seed=0,
+            seed=None,
         ).value
         == -1.0
     )
@@ -68,7 +68,7 @@ def exercise_signals_backend(*, endpoint: object) -> None:
             qm.Z(0),
             on=endpoint,
             shots=4,
-            seed=0,
+            seed=None,
         ).value
         == 1.0
     )

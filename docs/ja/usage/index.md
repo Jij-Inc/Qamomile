@@ -11,7 +11,7 @@ Qamomileの機能やAPIの使い方を目的別に紹介します。
 :::{card}
 :header: **不変なBinary・Spinモデル**
 :link: binary_model
-任意ID、energy、Hamiltonian、decode、persistence、OMMX評価を1つのRust実装モデルで扱います。
+多項式の係数からモデルを作り、変数に値を代入して目的関数を評価し、測定結果を元の変数IDに対応づけます。
 :::
 
 :::{card}

@@ -144,11 +144,12 @@ def deserialize(
         decode_type(encoded.result_abi.type),
         tuple(encoded.result_abi.source_order),
         encoded.result_abi.native_width,
+        encoded.result_abi.per_shot,
     )
     _validate_execution_interface(
         resources, parameters, result, FrozenMapping(tuple(sorted(metadata_entries)))
     )
-    return CompiledProgram(
+    artifact = CompiledProgram(
         payload=_restore_payload(
             encoded.format, bytes(encoded.payload), payload_loader
         ),
@@ -159,6 +160,10 @@ def deserialize(
         execution_contract=contract,
         metadata=FrozenMapping(tuple(sorted(metadata_entries))),
     )
+    restore_native_plan = getattr(artifact.payload, "restore_native_plan", None)
+    if callable(restore_native_plan):
+        restore_native_plan(artifact)
+    return artifact
 
 
 def _seal_artifact(package: wire.ArtifactProto) -> bytes:

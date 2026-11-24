@@ -217,7 +217,7 @@ def test_axis_measurements_preserve_kraus_operators_and_repeatability(axis):
     """Retained Pauli measurement is non-destructive and keeps its ABI bit."""
     program, circuit, _ = _inspect(f"""
 @qm.qkernel
-def state() -> tuple[qm.Bool, qm.Bool]:
+def state() -> tuple[qm.Bit, qm.Bit]:
     state = qm.ry(qm.qubits(1), 0.7)
     first, state = qm.measure_{axis}(state)
     second, state = qm.measure_{axis}(state)
@@ -624,6 +624,104 @@ def state(angle: qm.Param[qm.Real]) -> qm.Q[qm.Bits[1]]:
         _operator(portable.assign_parameters({next(iter(portable.parameters)): 0.37})),
         atol=2e-12,
     )
+
+
+def test_binding_a_loaded_loop_preserves_the_executable_and_other_bindings():
+    """Each binding of a loop containing a parameterized call keeps its own angle."""
+    from qiskit_aer import AerSimulator
+
+    program = qm.build_source("""
+import qamomile as qm
+
+@qm.qkernel
+def rotate(state: qm.Q[qm.Bits[1]], a: qm.Param[qm.Real]) -> qm.Q[qm.Bits[1]]:
+    return qm.ry(state, a)
+
+@qm.qkernel
+def sample(a: qm.Param[qm.Real]) -> qm.Shot[qm.Bits[1]]:
+    state = qm.qubits(1)
+    for _ in range(2):
+        state = rotate(state, a)
+    return qm.measure(state)
+""").specialize("sample")
+    endpoint = Aer()
+    artifact = qm.compile(program, to=endpoint.target)
+    circuit = load_circuit(artifact)
+    [loop] = circuit.get_instructions("for_loop")
+    [call] = loop.operation.blocks[0]
+    assert call.operation.label and call.operation.is_parameterized()
+    zero = qm.qiskit.bind_circuit(
+        circuit, artifact, qm.Invocation.create(parameters={"a": 0.0})
+    )
+
+    for angle, bit in [(np.pi / 2, 1), (0.0, 0), (np.pi / 2, 1)]:
+        result = qm.run(
+            artifact, on=endpoint, parameters={"a": angle}, shots=128
+        ).result
+        assert result.counts == {(bit,): 128}
+
+    another = load_circuit(artifact)
+    another.assign_parameters([0.0], inplace=True)
+    half_pi = qm.qiskit.bind_circuit(
+        circuit, artifact, qm.Invocation.create(parameters={"a": np.pi / 2})
+    )
+    simulator = AerSimulator(max_parallel_threads=1)
+    compiled = transpile(
+        [zero, half_pi], simulator, optimization_level=0, num_processes=1
+    )
+    samples = simulator.run(compiled, shots=128).result()
+    assert samples.get_counts(zero) == {"0": 128}
+    assert samples.get_counts(half_pi) == {"1": 128}
+
+
+@pytest.mark.parametrize("restore", [False, True], ids=["fresh", "qpy"])
+def test_binding_nested_feedback_preserves_its_condition_and_angles(restore):
+    """The measured bit selects a loop of rotations before and after QPY export."""
+    from qiskit_aer import AerSimulator
+
+    program = qm.build_source("""
+import qamomile as qm
+
+@qm.qkernel
+def rotate(state: qm.Q[qm.Bits[2]], a: qm.Param[qm.Real]) -> qm.Q[qm.Bits[2]]:
+    return qm.ry(state, a, target=1)
+
+@qm.qkernel
+def rotate_twice(state: qm.Q[qm.Bits[2]], a: qm.Param[qm.Real]) -> qm.Q[qm.Bits[2]]:
+    for _ in range(2):
+        state = rotate(state, a)
+    return state
+
+@qm.qkernel
+def sample(a: qm.Param[qm.Real]) -> qm.Shot[qm.Bits[2]]:
+    state = qm.qubits(2)
+    for _ in range(2):
+        state = qm.x(state, target=0)
+        flag, state = qm.measure_z(state, 0)
+        if flag:
+            state = rotate_twice(state, a)
+    return qm.measure(state)
+""").specialize("sample")
+    endpoint = Aer()
+    artifact = qm.compile(program, to=endpoint.target)
+    if restore:
+        artifact = deserialize(serialize(artifact))
+    circuit = load_circuit(artifact)
+    branch = circuit.get_instructions("if_else")[0].operation.blocks[0]
+    assert branch.count_ops()["for_loop"] == 1
+
+    parameters = {"a": np.pi / 2}
+    bound = qm.qiskit.bind_circuit(
+        circuit, artifact, qm.Invocation.create(parameters=parameters)
+    )
+    simulator = AerSimulator(max_parallel_threads=1)
+    compiled = transpile(bound, simulator, optimization_level=0)
+    counts = simulator.run(compiled, shots=8).result().get_counts()
+    assert qm.qiskit.decode_counts(artifact, counts, parameters, bound.num_clbits) == {
+        (0, 1): 8
+    }
+    result = qm.run(artifact, on=endpoint, parameters={"a": 0.0}, shots=8).result
+    assert result.counts == {(0, 0): 8}
 
 
 @pytest.mark.parametrize("bits", range(8))

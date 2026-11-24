@@ -42,11 +42,13 @@ def exercise_qsvt_filter_backend(*, endpoint: object) -> None:
     """Execute shared sampling and expectation witnesses on a local target."""
     artifact = qm.compile(_probe, to=endpoint.target)
     assert isinstance(artifact, qm.CompiledProgram)
-    result = qm.execute(artifact, on=endpoint, shots=64, seed=0)
+    result = qm.execute(artifact, on=endpoint, shots=64, seed=None)
     assert set(result.values) == {(True, (1,)), (False, (0,))}
     assert result.values[(True, (1,))] / result.shots == pytest.approx(0.5, abs=0.2)
     assert (
-        qm.expectation(lower_energy_state, qm.Z(3), on=endpoint, shots=4, seed=0).value
+        qm.expectation(
+            lower_energy_state, qm.Z(3), on=endpoint, shots=4, seed=None
+        ).value
         == -1.0
     )
     assert (
@@ -55,7 +57,7 @@ def exercise_qsvt_filter_backend(*, endpoint: object) -> None:
             qm.Z(0) * qm.Z(1) * qm.Z(2),
             on=endpoint,
             shots=4,
-            seed=0,
+            seed=None,
         ).value
         == 1.0
     )

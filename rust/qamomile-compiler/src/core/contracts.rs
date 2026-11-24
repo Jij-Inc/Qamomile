@@ -26,9 +26,16 @@ pub struct CallableContract {
     effects: EffectSet,
     capabilities: CapabilitySet,
     requirements: RequirementSet,
+    per_shot: bool,
 }
 
 impl CallableContract {
+    /// Return whether the callable retains one execution per logical shot.
+    #[must_use]
+    pub const fn is_per_shot(self) -> bool {
+        self.per_shot
+    }
+
     /// Return the reconstructed denotational kind.
     #[must_use]
     pub const fn kind(self) -> CallableKind {
@@ -153,6 +160,7 @@ pub(crate) fn derive_with_work(
         effects: EffectSet::EMPTY,
         capabilities: CapabilitySet::EMPTY,
         requirements: RequirementSet::EMPTY,
+        per_shot: false,
     };
     let mut contracts = vec![placeholder; call_graph.function_count()];
     let context = DerivationContext {
@@ -325,6 +333,20 @@ fn derive_one(
     Ok(CallableContract {
         kind,
         effects,
+        per_shot: context.arena.contains_stage(result_type, Stage::Shot)
+            || value_types
+                .values()
+                .any(|type_id| context.arena.contains_stage(*type_id, Stage::Shot))
+            || context
+                .call_graph
+                .sites_for_caller(function_index)
+                .is_some_and(|sites| {
+                    sites.iter().any(|site| {
+                        site.callees()
+                            .iter()
+                            .any(|callee| known[*callee].is_per_shot())
+                    })
+                }),
         capabilities: if coherent {
             capabilities_for(kind)
         } else {
@@ -351,6 +373,9 @@ fn external_contract(
         effects,
         capabilities: capabilities_for(kind),
         requirements,
+        per_shot: value_types
+            .values()
+            .any(|type_id| arena.contains_stage(*type_id, Stage::Shot)),
     })
 }
 
@@ -386,6 +411,17 @@ fn close_calls(
                 require_transformation(site.flavor(), callee_name, contract)?;
             }
             if site.flavor() == CallFlavor::BooleanLift {
+                if validate
+                    && contract
+                        .requirements()
+                        .contains(Requirement::LogicalShotContext)
+                {
+                    return Err(ContractError::InvalidBooleanPredicate {
+                        predicate: format!(
+                            "{callee_name}: logical shot context is not supported by Boolean lifting"
+                        ),
+                    });
+                }
                 continue;
             }
             if site.flavor() == CallFlavor::HistoryAdjoint {
@@ -699,7 +735,7 @@ pub(crate) fn launch_selector_ids(operation: &wire::OperationProto) -> Vec<u64> 
 pub(crate) fn requires_launch_scalar_evaluation(operation: &wire::OperationProto) -> bool {
     operation.opcode == "classical.sqrt"
         || (operation.opcode == "classical.cast"
-            && string_attribute(operation, "target") == Some("Real"))
+            && matches!(string_attribute(operation, "target"), Some("Real" | "Bit")))
 }
 
 fn dynamic_classical_index_ids(operation: &wire::OperationProto) -> Vec<u64> {

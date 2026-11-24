@@ -7,9 +7,34 @@ from ..errors import CapabilityError, Diagnostic, SerializationError, Verificati
 from ..ir import Module, PortableValue, SourceSpan
 from ..proto import hir_pb2 as hir_wire, qcore_pb2 as qcore_wire
 from ..serialization import SCHEMA_MAJOR, SCHEMA_MINOR, encode_literal, encode_type
+from ..types import TypeSpec
 from .hir import HIRBlock, HIRExpression, HIRFunction, HIRModule, HIRStatement
 
 _HIR_KIND = "qamomile.hir"
+
+
+def infer_preparation_result_type(operand: HIRExpression) -> TypeSpec:
+    """Infer preparation using the original source operand in native HIR.
+
+    Args:
+        operand (HIRExpression): Source expression before constant lowering.
+
+    Returns:
+        TypeSpec: Checked quantum preparation type.
+
+    Raises:
+        TypeError: If native inference is unavailable.
+        ValueError: If the operand cannot be prepared.
+        RuntimeError: If the native result is malformed.
+    """
+    from ..types import _decode_native_type
+
+    infer = getattr(native, "infer_preparation_result_type", None)
+    if not callable(infer):
+        raise TypeError("Q4511: native preparation type inference is unavailable")
+    encoded = hir_wire.HIRExpressionProto()
+    _encode_expression(operand, encoded)
+    return _decode_native_type(infer(encoded.SerializeToString(deterministic=True)))
 
 
 def encode_hir(module: HIRModule) -> bytes:

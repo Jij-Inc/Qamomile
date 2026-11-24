@@ -50,7 +50,6 @@
 # # !pip install "qamomile[qiskit]"
 
 # %%
-import math
 import os
 
 import qamomile as qm
@@ -120,7 +119,7 @@ endpoint = Aer()
 record = qm.run(
     biased_coin,
     on=endpoint,
-    parameters={"theta": math.pi / 4},
+    parameters={"theta": qm.pi / 4},
     shots=sample_shots,
     seed=7,
 )
@@ -135,7 +134,7 @@ assert sum(result.counts.values()) == sample_shots
 # %% [markdown]
 # 各部分の役割を確認しましょう。
 #
-# - **`parameters={"theta": math.pi / 4}`** は、今回の実行で使う回転角をπ/4ラジアンに指定します。
+# - **`parameters={"theta": qm.pi / 4}`** は、今回の実行で使う回転角をπ/4ラジアンに指定します。
 #
 # - **`shots=sample_shots`** は、計算を繰り返す回数を指定します。`sample_shots`が256の場合、この例では1ビットの測定結果が256回分得られます。
 #
@@ -194,7 +193,7 @@ artifact = qm.compile(biased_coin, to=endpoint.target)
 compiled_record = qm.run(
     artifact,
     on=endpoint,
-    parameters={"theta": math.pi / 4},
+    parameters={"theta": qm.pi / 4},
     shots=sample_shots,
     seed=7,
 )

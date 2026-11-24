@@ -78,7 +78,7 @@ def test_const_bound_param_slice_iteration_on_local_sdk(
         on=endpoint,
         parameters={"angles": (0.0, math.pi)},
         shots=16,
-        seed=0 if backend == "braket" else 29,
+        seed=None if backend == "braket" else 29,
     ).result.values == {(1,): 16}
 
 

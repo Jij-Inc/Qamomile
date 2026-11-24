@@ -352,18 +352,8 @@ fn rewrite_block(
     )
 }
 
-fn rewrite_block_with_work(
-    source: &wire::BlockProto,
-    known: &mut HashMap<u64, Option<StaticValue>>,
-    initial_remap: &HashMap<u64, u64>,
-    inline: bool,
-    defer_partial: bool,
-    work: &mut SpecializationWork,
-) -> Result<wire::BlockProto, SpecializationError> {
-    rewrite_block_with_ids(source, known, initial_remap, inline, defer_partial, work)
-}
 #[allow(clippy::too_many_lines)]
-fn rewrite_block_with_ids(
+fn rewrite_block_with_work(
     source: &wire::BlockProto,
     known: &mut HashMap<u64, Option<StaticValue>>,
     initial_remap: &HashMap<u64, u64>,
@@ -562,7 +552,7 @@ fn rewrite_block_with_ids(
                 }
             }
             let rewritten =
-                rewrite_block_with_ids(region, known, &nested_remap, true, defer_partial, work)?;
+                rewrite_block_with_work(region, known, &nested_remap, true, defer_partial, work)?;
             operations.extend(rewritten.operations);
             let terminator = rewritten
                 .terminator
@@ -586,7 +576,7 @@ fn rewrite_block_with_ids(
         for region in &mut operation.regions {
             for nested in &mut region.blocks {
                 *nested =
-                    rewrite_block_with_ids(nested, known, &HashMap::new(), false, true, work)?;
+                    rewrite_block_with_work(nested, known, &HashMap::new(), false, true, work)?;
             }
         }
         operations.push(operation);

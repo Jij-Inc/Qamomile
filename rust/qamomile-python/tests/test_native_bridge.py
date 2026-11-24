@@ -522,11 +522,7 @@ def test_native_bridge_converts_qsp_wx_phases() -> None:
     )
 
     assert converted == pytest.approx(expected, abs=1e-15, rel=0.0)
-    assert native.convert_qsp_wx_phases([0.25]) == pytest.approx(
-        [0.25 - math.pi / 2.0],
-        abs=1e-15,
-        rel=0.0,
-    )
+    assert native.convert_qsp_wx_phases([0.25]) == [0.25]
     with pytest.raises(ValueError, match="Q7621"):
         native.convert_qsp_wx_phases([])
     with pytest.raises(ValueError, match="Q7623"):
@@ -2088,11 +2084,79 @@ def sample(enabled: qm.Param[qm.Bool]) -> qm.Shot[qm.Bits[1]]:
     assert direct.route == "direct"
     assert family.route == "circuit_family"
     assert family.materialized == ["host_dispatch"]
+    assert family.reusable_circuit_requirements is None
     assert materialized.route == "launch_materialized"
     assert unsupported.route == "unsupported"
     assert unsupported.unsupported == ["host_dispatch"]
     with pytest.raises(ValueError, match="Q6303.*rotation"):
         native.plan_target_lowering(program.to_bytes(), required, ["rotation"], False)
+
+
+@pytest.mark.parametrize(
+    ("expression", "reusable"), [("angle", True), ("angle % 2.0", False)]
+)
+def test_fixed_index_reuse_checks_the_configured_circuit(
+    expression: str, reusable: bool
+) -> None:
+    """A deferred gate definition must retain the same binding proof as its inline body."""
+
+    program = qm.build_source(
+        f"""
+import qamomile as qm
+@qm.qkernel
+def rotate(row: qm.Param[qm.Vector[qm.Real, 2]]) -> qm.Q[qm.Bits[1]]:
+    angle = row[len(row) - 1]
+    return qm.ry(qm.qubits(1), {expression})
+@qm.qkernel
+def sample(row: qm.Param[qm.Vector[qm.Real, 2]]) -> qm.Shot[qm.Bits[1]]:
+    return qm.measure(rotate(row))
+"""
+    ).specialize("sample")
+    payload = program.to_bytes()
+    shape = ["host_dispatch", "dynamic_classical_index"]
+    required = native.inspect_program(payload).entry_requirements
+    supported = [item for item in required if item not in shape]
+    candidate = native.plan_target_lowering(payload, supported, shape, True)
+    assert candidate.reusable_circuit_requirements == supported
+    assert (
+        native.plan_target_lowering(
+            payload, supported, [], True
+        ).reusable_circuit_requirements
+        is None
+    )
+
+    for capabilities in ([], ["coherent_regions", "named_call"]):
+        assert native.inspect_static_circuit(payload, capabilities).parameter_names == [
+            "row"
+        ]
+        if reusable:
+            assert native.inspect_static_circuit(
+                payload, capabilities, require_reusable_bindings=True
+            ).parameter_names == ["row"]
+        else:
+            with pytest.raises(ValueError, match="Q4306"):
+                native.inspect_static_circuit(
+                    payload, capabilities, require_reusable_bindings=True
+                )
+
+
+def test_reusable_projection_preserves_eliminated_launch_controls() -> None:
+    """The direct SDK interface must not acquire a slot previously consumed at launch."""
+    program = qm.build_source("""
+import qamomile as qm
+@qm.qkernel
+def sample(row: qm.Param[qm.Vector[qm.Real, 2]]) -> qm.Shot[qm.Bits[1]]:
+    state = qm.qubits(1)
+    if len(row) == 2:
+        state = qm.x(state)
+    return qm.measure(state)
+""").specialize("sample")
+    payload = program.to_bytes()
+    assert native.inspect_static_circuit(payload).parameter_names == []
+    with pytest.raises(
+        ValueError, match='Q4306.*eliminated launch control parameter "row"'
+    ):
+        native.inspect_static_circuit(payload, require_reusable_bindings=True)
 
 
 def test_native_bridge_derives_artifact_abis_without_python() -> None:
@@ -3996,7 +4060,7 @@ def sample(enabled: qm.Param[qm.Bool]) -> qm.Shot[qm.Bool]:
         state = qm.x(state)
     bit, state = qm.measure_z(state, 0)
     qm.discard(state)
-    return bit == enabled
+    return bool(bit) == enabled
 """
     program = qm.build_source(
         source,
@@ -4259,6 +4323,7 @@ def sample() -> qm.Bits[1]:
         _payload: bytes,
         _realization_capabilities: list[str],
         _lowering: tuple[str, ...],
+        _require_reusable_bindings: bool,
     ) -> object:
         """Return one representative native semantic rejection."""
 
@@ -4902,7 +4967,7 @@ import qamomile as qm
 def sample() -> qm.Bits[1]:
     state = qm.qubits(1)
     observed, state = qm.measure_z(state, 0)
-    if observed == False:
+    if bool(observed) == False:
         state = qm.x(state)
     return qm.measure(state)
 """
@@ -4918,13 +4983,20 @@ def sample() -> qm.Bits[1]:
         for index, scalar in enumerate(native_projection.scalars)
         if scalar.kind == "apply"
     ]
-    assert len(apply_indices) == 1
+    assert len(apply_indices) == 2
     assert _native_scalar_data(
         native_projection,
-        apply_indices[0],
+        apply_indices[-1],
     ) == {
         "expr": "classical.compare_chain",
-        "operands": [{"measurement": 0}, False],
+        "operands": [
+            {
+                "expr": "classical.cast",
+                "operands": [{"measurement": 0}],
+                "attributes": {"target": "Bool"},
+            },
+            False,
+        ],
         "attributes": {"operators": ["eq"]},
     }
 
@@ -5296,7 +5368,7 @@ def flipped(state: qm.Q[qm.Bits[1]]) -> qm.Q[qm.Bits[1]]:
     return qm.x(state)
 
 @qm.qkernel
-def sample() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bits[1]]]:
+def sample() -> tuple[qm.Shot[qm.Bit], qm.Shot[qm.Bits[1]]]:
     index = qm.prepare(True)
     target = qm.qubits(1)
     index, target = qm.multiplex(index, (unchanged, flipped), target)

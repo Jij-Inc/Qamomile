@@ -36,13 +36,17 @@ class PauliReadout:
 
 @dataclass(frozen=True, slots=True)
 class PauliMeasurementGroup:
-    """One inspected shared-measurement basis, allocation, and variance."""
+    """One inspected shared-measurement basis, allocation, and variance.
+
+    The seed is None when randomness was delegated to the endpoint; otherwise
+    it records the explicit stream derived for this group, including zero.
+    """
 
     basis: PauliWord | None
     term_indices: tuple[int, ...]
     variance: float | None
     shots: int
-    seed: int
+    seed: int | None
     readouts: tuple[PauliReadout, ...] = ()
     diagonalizing_gates: int = 0
     strategy: Literal["independent", "qwc", "commuting"] = "qwc"
@@ -84,7 +88,7 @@ def expectation(
     on: ExecutionEndpoint,
     parameters: Mapping[str, object] | None = None,
     shots: int = 1_000,
-    seed: int = 0,
+    seed: int | None = None,
     grouping: Literal["independent", "qwc", "commuting"] = "independent",
     **bindings: object,
 ) -> ExpectationResult:
@@ -97,7 +101,7 @@ def expectation(
         on (ExecutionEndpoint): Execution endpoint.
         parameters (Mapping[str, object] | None): Runtime Param bindings.
         shots (int): Total budget across all measurement groups, for every strategy.
-        seed (int): Portable seed; zero uses endpoint-default randomness.
+        seed (int | None): Unsigned base seed, or None for endpoint randomness.
         grouping (str): Independent, QWC, or generally commuting measurements.
         **bindings (object): Const bindings for the state preparation.
 

@@ -42,6 +42,7 @@ class Requirement(enum.StrEnum):
 
     CLASSICAL_COMPUTE = "classical_compute"
     PARAMETERIZED_EXECUTION = "parameterized_execution"
+    LOGICAL_SHOT_CONTEXT = "logical_shot_context"
     QUANTUM = "quantum"
     MEASUREMENT = "measurement"
     MID_CIRCUIT_MEASUREMENT = "mid_circuit_measurement"

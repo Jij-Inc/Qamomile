@@ -191,6 +191,24 @@ pub fn validate_pauli_evolution(
     validated_observable(payload, state_width).map(|_| ())
 }
 
+/// Return only effective angle multipliers, without expanding Pauli gates.
+/// The enclosing static circuit already owns Hermiticity and commutation checks.
+pub(crate) fn pauli_evolution_angle_scales(
+    payload: &[u8],
+) -> Result<Vec<f64>, PauliEvolutionError> {
+    let observable = Observable::decode(payload)?;
+    Ok((observable.constant.re != 0.0)
+        .then_some(-observable.constant.re)
+        .into_iter()
+        .chain(
+            observable
+                .terms
+                .values()
+                .map(|coefficient| 2.0 * coefficient.re),
+        )
+        .collect())
+}
+
 fn validated_observable(
     payload: &[u8],
     state_width: u64,

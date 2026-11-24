@@ -2,6 +2,420 @@ use super::*;
 use crate::resource_rules::RuleRelation;
 
 #[test]
+fn path_dependent_returns_keep_only_proven_zero_resource_components_exact() {
+    let mut arena = ExpressionArena::default();
+    let mut counts = Counts::zero(&mut arena).expect("zero counts");
+    let one = arena.literal_u128(1).expect("custom cost");
+    let custom = SymbolicCount::from_rule(
+        "test.classical-cost.v1",
+        RuleRelation::Equality,
+        one,
+        &mut arena,
+    )
+    .expect("custom rule");
+    counts.extra_metrics.insert("test.cost".into(), custom);
+    let negative = arena.literal_i64(-1).expect("signed custom cost");
+    counts.extra_metrics.insert(
+        "test.signed-cost".into(),
+        SymbolicCount::exact_value(negative),
+    );
+    counts.unresolved_control_flow("path-dependent qcore.for return", &arena);
+    assert!(counts.work.exact);
+    assert!(arena.is_literal(counts.work.lower, "0"));
+    let cost = &counts.extra_metrics["test.cost"];
+    assert!(!cost.exact);
+    assert!(cost.upper.is_none());
+    assert_eq!(cost.unknown.as_ref(), ["path-dependent qcore.for return"]);
+    assert_eq!(cost.rule_identities.as_ref(), ["test.classical-cost.v1"]);
+    let signed = &counts.extra_metrics["test.signed-cost"];
+    assert_eq!(signed.lower, negative);
+    assert!(signed.upper.is_none());
+    assert!(!signed.exact);
+}
+
+fn with_test_analyzer(run: impl FnOnce(&mut SymbolicAnalyzer<'_>)) {
+    let package = wire::QCorePackageProto::default();
+    let mut types = TypeArena::default();
+    let operations =
+        crate::operations::validate_program_operations_with_types(&package, &mut types)
+            .expect("empty operation roots");
+    let graph = crate::call_graph::build(&package).expect("empty call graph");
+    let mut analyzer = SymbolicAnalyzer {
+        functions: HashMap::new(),
+        arena: ExpressionArena::default(),
+        current_shot: None,
+        shot_predicates: shot_predicates::ShotPredicates::default(),
+        rules: HashMap::new(),
+        error_bound_metrics: BTreeSet::new(),
+        unproved_composition_metrics: BTreeMap::new(),
+        facts: Vec::new(),
+        fact_keys: HashSet::new(),
+        timing_aliases: HashMap::new(),
+        types: &types,
+        operations: &operations,
+        verified_calls: &crate::abi::VerifiedCallDimensions::default(),
+        analysis_cache: HashMap::new(),
+        recurrences: recurrences::RecurrenceAnalysis::new(&graph, &package),
+        while_contexts: 0,
+        while_functions: HashSet::new(),
+        operation_visits: 0,
+        observation: None,
+    };
+    run(&mut analyzer);
+}
+
+fn test_block(kind: &str, operands: Vec<u64>) -> wire::BlockProto {
+    wire::BlockProto {
+        terminator: Some(wire::TerminatorProto {
+            kind: kind.into(),
+            operands,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn test_value(id: u64) -> wire::ValueProto {
+    wire::ValueProto {
+        id,
+        ..Default::default()
+    }
+}
+
+fn for_return_operation() -> wire::OperationProto {
+    let conditional = wire::OperationProto {
+        opcode: "qcore.if".into(),
+        operands: vec![4, 4],
+        regions: vec![
+            wire::RegionProto {
+                blocks: vec![wire::BlockProto {
+                    arguments: vec![test_value(9)],
+                    ..test_block("return", vec![9])
+                }],
+            },
+            wire::RegionProto {
+                blocks: vec![wire::BlockProto {
+                    arguments: vec![test_value(10)],
+                    ..test_block("yield", Vec::new())
+                }],
+            },
+        ],
+        ..Default::default()
+    };
+    wire::OperationProto {
+        opcode: "qcore.for".into(),
+        operands: vec![0, 1, 2, 6],
+        results: vec![test_value(7)],
+        regions: vec![
+            wire::RegionProto {
+                blocks: vec![wire::BlockProto {
+                    arguments: vec![test_value(3), test_value(4)],
+                    operations: vec![conditional],
+                    ..test_block("yield", vec![4])
+                }],
+            },
+            wire::RegionProto {
+                blocks: vec![wire::BlockProto {
+                    arguments: vec![test_value(8)],
+                    ..test_block("yield", vec![8])
+                }],
+            },
+        ],
+        ..Default::default()
+    }
+}
+
+fn for_environment(
+    analyzer: &mut SymbolicAnalyzer<'_>,
+    exact_upper: Option<i64>,
+) -> HashMap<u64, Option<ValueFact>> {
+    let mut environment = HashMap::new();
+    for (id, value) in [(0, 0), (1, 2), (2, 1)] {
+        let value = if id == 1 {
+            exact_upper.unwrap_or(value)
+        } else {
+            value
+        };
+        let expression = if id == 1 && exact_upper.is_none() {
+            analyzer
+                .arena
+                .symbol("test", "n", ResourceDomain::Integer, "const", &[])
+                .expect("symbolic bound")
+        } else {
+            analyzer.arena.literal_i64(value).expect("bound")
+        };
+        environment.insert(
+            id,
+            Some(ValueFact::Scalar(ScalarFact::Int {
+                expression,
+                exact: if id == 1 { exact_upper } else { Some(value) },
+            })),
+        );
+    }
+    environment.insert(6, Some(ValueFact::Scalar(ScalarFact::Bool(None))));
+    environment
+}
+
+#[test]
+fn for_else_exits_keep_the_enclosing_loops_carry_shape() {
+    with_test_analyzer(|analyzer| {
+        let dimensions = SymbolicDimensionBindings {
+            values: HashMap::new(),
+        };
+        let context = SymbolicFunctionContext {
+            owner: "test.loop_else",
+            dimensions: &dimensions,
+            mode: crate::resource_rules::TransformMode::Direct,
+            controls: Some(0),
+        };
+        for (kind, expected) in [
+            ("break", BlockExit::BREAK),
+            ("continue", BlockExit::CONTINUE),
+        ] {
+            for exact_upper in [Some(0), Some(2), None] {
+                let mut operation = for_return_operation();
+                operation.regions[0].blocks[0].operations.clear();
+                operation.regions[1].blocks[0].terminator = test_block(kind, vec![8, 8]).terminator;
+                let environment = for_environment(analyzer, exact_upper);
+                let summary = analyzer
+                    .analyze_for(&operation, &environment, context)
+                    .expect("else exits belong to the enclosing loop");
+                assert_eq!(summary.exit, expected);
+                assert_eq!(summary.values.len(), 2);
+                assert!(summary.counts.work.exact);
+                assert!(analyzer.arena.is_literal(summary.counts.work.lower, "0"));
+            }
+        }
+    });
+}
+
+#[test]
+fn a_definite_interpreted_for_else_return_preserves_timing() {
+    with_test_analyzer(|analyzer| {
+        let mut operation = for_return_operation();
+        operation.regions[0].blocks[0].operations.clear();
+        operation.regions[1].blocks[0].terminator = test_block("return", vec![8]).terminator;
+        let environment = for_environment(analyzer, Some(2));
+        let dimensions = SymbolicDimensionBindings {
+            values: HashMap::new(),
+        };
+        let summary = analyzer
+            .analyze_for(
+                &operation,
+                &environment,
+                SymbolicFunctionContext {
+                    owner: "test.loop_else",
+                    dimensions: &dimensions,
+                    mode: crate::resource_rules::TransformMode::Direct,
+                    controls: Some(0),
+                },
+            )
+            .expect("an unconditional normal-exit return remains exact");
+        assert_eq!(summary.exit, BlockExit::RETURN);
+        assert_eq!(summary.values, vec![environment[&6].clone()]);
+        assert_eq!(summary.timing, Some(Vec::new()));
+        assert!(summary.counts.work.exact);
+    });
+}
+
+#[test]
+fn conditional_for_else_exits_retain_inner_fallthrough_values() {
+    with_test_analyzer(|analyzer| {
+        let dimensions = SymbolicDimensionBindings {
+            values: HashMap::new(),
+        };
+        let context = SymbolicFunctionContext {
+            owner: "test.loop_else",
+            dimensions: &dimensions,
+            mode: crate::resource_rules::TransformMode::Direct,
+            controls: Some(0),
+        };
+        for (kind, escaped) in [
+            ("break", BlockExit::BREAK),
+            ("continue", BlockExit::CONTINUE),
+        ] {
+            for exact_upper in [Some(0), Some(2), None] {
+                let mut operation = for_return_operation();
+                let mut conditional = operation.regions[0].blocks[0].operations.remove(0);
+                conditional.operands = vec![8, 8];
+                conditional.regions[0].blocks[0].terminator =
+                    test_block(kind, vec![9, 9]).terminator;
+                operation.regions[1].blocks[0].operations.push(conditional);
+                let environment = for_environment(analyzer, exact_upper);
+                let summary = analyzer
+                    .analyze_for(&operation, &environment, context)
+                    .expect("conditional else exits preserve normal completion");
+                assert_eq!(summary.exit, BlockExit::YIELD.union(escaped));
+                assert_eq!(summary.values, vec![None]);
+                assert!(summary.counts.work.exact);
+                assert!(analyzer.arena.is_literal(summary.counts.work.lower, "0"));
+                assert!(summary.timing.is_none());
+            }
+        }
+    });
+}
+
+#[test]
+fn inner_body_breaks_and_else_exits_keep_distinct_targets() {
+    with_test_analyzer(|analyzer| {
+        let dimensions = SymbolicDimensionBindings {
+            values: HashMap::new(),
+        };
+        let context = SymbolicFunctionContext {
+            owner: "test.loop_else",
+            dimensions: &dimensions,
+            mode: crate::resource_rules::TransformMode::Direct,
+            controls: Some(0),
+        };
+        for (kind, escaped) in [
+            ("break", BlockExit::BREAK),
+            ("continue", BlockExit::CONTINUE),
+        ] {
+            for exact_upper in [Some(2), None] {
+                let mut operation = for_return_operation();
+                operation.regions[0].blocks[0].operations[0].regions[0].blocks[0].terminator =
+                    test_block("break", vec![9]).terminator;
+                operation.regions[1].blocks[0].terminator = test_block(kind, vec![8, 8]).terminator;
+                let environment = for_environment(analyzer, exact_upper);
+                let summary = analyzer
+                    .analyze_for(&operation, &environment, context)
+                    .expect("body breaks bypass the outward else exit");
+                assert_eq!(summary.exit, BlockExit::YIELD.union(escaped));
+                assert_eq!(summary.values, vec![None]);
+                assert!(summary.counts.work.exact);
+            }
+        }
+    });
+}
+
+#[test]
+fn for_body_returns_preserve_fallthrough_and_zero_costs() {
+    with_test_analyzer(|analyzer| {
+        let operation = for_return_operation();
+        let dimensions = SymbolicDimensionBindings {
+            values: HashMap::new(),
+        };
+        let context = SymbolicFunctionContext {
+            owner: "test.loop_return",
+            dimensions: &dimensions,
+            mode: crate::resource_rules::TransformMode::Direct,
+            controls: Some(0),
+        };
+        for exact_upper in [Some(2), None] {
+            let environment = for_environment(analyzer, exact_upper);
+            let summary = analyzer
+                .analyze_for(&operation, &environment, context)
+                .expect("path-dependent return remains analyzable");
+            assert_eq!(summary.exit, BlockExit::YIELD.union(BlockExit::RETURN));
+            assert_eq!(summary.values, vec![None]);
+            assert!(summary.counts.work.exact);
+            assert!(analyzer.arena.is_literal(summary.counts.work.lower, "0"));
+            assert!(summary.counts.work.unknown.is_empty());
+            assert!(summary.timing.is_none());
+
+            let mut returning_else = operation.clone();
+            returning_else.regions[1].blocks[0].terminator =
+                test_block("return", vec![8]).terminator;
+            let summary = analyzer
+                .analyze_for(&returning_else, &environment, context)
+                .expect("both normal completion and early exits return");
+            assert_eq!(summary.exit, BlockExit::RETURN);
+            assert_eq!(summary.values, vec![None]);
+            assert!(summary.counts.work.exact);
+        }
+    });
+}
+
+fn test_constant(id: u64, value: wire::literal_proto::Value) -> wire::OperationProto {
+    wire::OperationProto {
+        opcode: "qcore.constant".into(),
+        results: vec![test_value(id)],
+        attributes: vec![wire::AttributeProto {
+            name: "value".into(),
+            value: Some(wire::LiteralProto { value: Some(value) }),
+        }],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_later_iteration_return_does_not_erase_an_earlier_return_value() {
+    with_test_analyzer(|analyzer| {
+        let mut operation = for_return_operation();
+        let body = &mut operation.regions[0].blocks[0];
+        let early_branch = &mut body.operations[0].regions[0].blocks[0];
+        early_branch.operations = vec![test_constant(
+            23,
+            wire::literal_proto::Value::BoolValue(true),
+        )];
+        early_branch.terminator = test_block("return", vec![23]).terminator;
+        let compare = wire::OperationProto {
+            opcode: "classical.compare_chain".into(),
+            operands: vec![3, 20],
+            results: vec![test_value(21)],
+            attributes: vec![wire::AttributeProto {
+                name: "operators".into(),
+                value: Some(wire::LiteralProto {
+                    value: Some(wire::literal_proto::Value::TupleValue(
+                        wire::literal_proto::Sequence {
+                            values: vec![wire::LiteralProto {
+                                value: Some(wire::literal_proto::Value::StringValue("eq".into())),
+                            }],
+                        },
+                    )),
+                }),
+            }],
+            ..Default::default()
+        };
+        let final_return = wire::OperationProto {
+            opcode: "qcore.if".into(),
+            operands: vec![21],
+            regions: vec![
+                wire::RegionProto {
+                    blocks: vec![wire::BlockProto {
+                        operations: vec![test_constant(
+                            22,
+                            wire::literal_proto::Value::BoolValue(false),
+                        )],
+                        ..test_block("return", vec![22])
+                    }],
+                },
+                wire::RegionProto {
+                    blocks: vec![test_block("yield", Vec::new())],
+                },
+            ],
+            ..Default::default()
+        };
+        body.operations.splice(
+            0..0,
+            [
+                test_constant(20, wire::literal_proto::Value::IntValue(1)),
+                compare,
+                final_return,
+            ],
+        );
+        let environment = for_environment(analyzer, Some(2));
+        let dimensions = SymbolicDimensionBindings {
+            values: HashMap::new(),
+        };
+        let summary = analyzer
+            .analyze_for(
+                &operation,
+                &environment,
+                SymbolicFunctionContext {
+                    owner: "test.loop_return",
+                    dimensions: &dimensions,
+                    mode: crate::resource_rules::TransformMode::Direct,
+                    controls: Some(0),
+                },
+            )
+            .expect("both return values remain possible");
+        assert_eq!(summary.exit, BlockExit::RETURN);
+        assert_eq!(summary.values, vec![None]);
+    });
+}
+
+#[test]
 fn small_permutation_resource_bound_is_bounded_before_expansion() {
     assert_eq!(small_permutation_step_bound(1).expect("one bit"), 1);
     assert_eq!(small_permutation_step_bound(2).expect("two bits"), 27);

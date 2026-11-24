@@ -848,6 +848,31 @@ def shared(n: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[n]]:
     )
 
 
+@pytest.mark.parametrize(("width", "expected"), [("n - 1", 3), ("n * n + 1", 17)])
+def test_broadcast_in_helper_uses_callers_width_expression(
+    width: str, expected: int
+) -> None:
+    """An implicit child width remains a function of the entrypoint's scalar."""
+
+    source = f"""
+import qamomile as qm
+
+@qm.qkernel
+def flip(state: qm.Q[qm.Bits[k]]) -> qm.Q[qm.Bits[k]]:
+    return qm.x(state)
+
+@qm.qkernel
+def sample(n: qm.Const[qm.Int], state: qm.Q[qm.Bits[{width}]]) -> qm.Shot[qm.Bits[{width}]]:
+    return qm.measure(flip(state))
+"""
+    study = qm.resources.logical(qm.build_source(source)["sample"])
+    gates = study.metric(qm.resources.LOGICAL_GATES).expression
+    assert gates.evaluate({"n": 4}).numeric() == expected
+    if width == "n - 1":
+        with pytest.raises(ValueError, match="a type dimension must be positive"):
+            gates.evaluate({"n": 1})
+
+
 def test_symbolic_dependency_algebra_composes_calls_inside_lane_maps() -> None:
     """Callable bodies and affine loops share one compact dependency algebra."""
 
@@ -955,7 +980,7 @@ def test_resources_bound_an_optional_post_return_continuation() -> None:
 import qamomile as qm
 
 @qm.qkernel
-def choose() -> qm.Shot[qm.Bool]:
+def choose() -> qm.Shot[qm.Bit]:
     candidate = qm.measure(qm.prepare(False))
     if candidate:
         return candidate
@@ -3535,3 +3560,32 @@ def algorithm() -> qm.Shot[qm.Bits[1]]:
         "without a finite upper endpoint" in reason
         for reason in depth.unknown_contributors
     )
+
+
+def test_early_loop_returns_preserve_all_possible_caller_costs():
+    """A later return does not erase a gate used after an earlier return."""
+    program = qm.build_source("""
+import qamomile as qm
+@qm.qkernel
+def choose(bit: qm.Shot[qm.Bool]) -> qm.Shot[qm.Bool]:
+    for step in range(2):
+        if step == 1:
+            return False
+        if bit:
+            return True
+    return False
+@qm.qkernel
+def kernel() -> qm.Shot[qm.Bit]:
+    state = qm.prepare(False)
+    if choose(qm.get_current_shot() == 0):
+        state = qm.x(state)
+    return qm.measure(state)
+""").specialize("kernel")
+    metric = qm.resources.logical(program).metric(
+        qm.resources.logical_operation_count("quantum.x")
+    )
+    lower, upper = metric.numeric_enclosure()
+    assert lower is None or lower <= 0
+    assert upper is None or upper >= 1
+    observed = qm.run(program, on=qm.Reference(), shots=2).result
+    assert observed.values == {0: 1, 1: 1}

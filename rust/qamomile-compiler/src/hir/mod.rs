@@ -2,6 +2,8 @@
 
 mod finite_dependency_sets;
 mod function_results;
+mod preparation;
+pub use preparation::infer_preparation_result_type;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -4805,6 +4807,7 @@ fn lower_ordinary_expression(
         "array" if !arena.is_quantum(type_id) => "array",
         "record" | "tuple" => "qcore.tuple",
         "qcore.reshape" => "qcore.reshape",
+        "qcore.current_shot" => "qcore.current_shot",
         "call" => "qcore.call",
         "adjoint_call" => "qcore.adjoint_call",
         "phase_by" => "qcore.phase_by",
@@ -4820,6 +4823,21 @@ fn lower_ordinary_expression(
             )));
         }
     };
+    let prepared_operand = if opcode == "quantum.prepare" {
+        preparation::lower_integer_operand(
+            arena,
+            &operands[0],
+            scope,
+            next_id,
+            operations,
+            expression.span.as_ref(),
+        )?
+    } else {
+        None
+    };
+    let operands = prepared_operand
+        .as_ref()
+        .map_or(operands, std::slice::from_ref);
     let region = lower_result_region(
         expression,
         opcode,
@@ -6291,6 +6309,24 @@ fn validate_block<'a>(
             blocks.extend(&statement.regions);
         }
     }
+    validate_expressions(
+        expressions,
+        Some(declarations),
+        scope,
+        arena,
+        literals,
+        work,
+    )
+}
+
+fn validate_expressions<'a>(
+    mut expressions: Vec<&'a wire::HirExpressionProto>,
+    declarations: Option<&HashMap<&str, &wire::HirFunctionProto>>,
+    scope: &Arc<str>,
+    arena: &mut TypeArena,
+    literals: &mut Vec<&'a wire::LiteralProto>,
+    work: &mut HirValidationWork,
+) -> Result<(), HirError> {
     while let Some(expression) = expressions.pop() {
         work.expression_count = work.expression_count.saturating_add(1);
         work.charge_semantic_nodes(1);
@@ -6309,6 +6345,28 @@ fn validate_block<'a>(
                 scope,
             )
             .map_err(HirError::InvalidSemanticType)?;
+        if expression.opcode == "quantum.prepare" {
+            let [operand] = expression.operands.as_slice() else {
+                return Err(HirError::InvalidStructure(
+                    "quantum.prepare expects one operand".to_owned(),
+                ));
+            };
+            let expected = preparation::infer_preparation_result(arena, operand, scope)?;
+            let actual = arena
+                .resolve_wire_type(
+                    expression
+                        .r#type
+                        .as_ref()
+                        .expect("expression type validated"),
+                    scope,
+                )
+                .map_err(HirError::InvalidSemanticType)?;
+            if actual != expected || !expression.attributes.is_empty() {
+                return Err(HirError::InvalidStructure(
+                    "quantum.prepare result differs from source preparation type".to_owned(),
+                ));
+            }
+        }
         validate_attributes(&expression.attributes, literals, work)?;
         validate_evaluation_order_shape(expression)?;
         if expression.opcode == "function_ref" {
@@ -6337,7 +6395,7 @@ fn validate_block<'a>(
 
 fn validate_function_reference(
     expression: &wire::HirExpressionProto,
-    declarations: &HashMap<&str, &wire::HirFunctionProto>,
+    declarations: Option<&HashMap<&str, &wire::HirFunctionProto>>,
 ) -> Result<(), HirError> {
     let callee = match expression.attributes.as_slice() {
         [attribute] if attribute.name == "callee" => attribute
@@ -6355,6 +6413,19 @@ fn validate_function_reference(
     .ok_or_else(|| {
         HirError::InvalidStructure("function_ref has an invalid callee attribute".to_owned())
     })?;
+    if !expression.operands.is_empty()
+        || expression
+            .r#type
+            .as_ref()
+            .is_none_or(|value| value.kind != wire::type_proto::Kind::Function as i32)
+    {
+        return Err(HirError::InvalidStructure(
+            "function_ref requires a function type and no operands".to_owned(),
+        ));
+    }
+    let Some(declarations) = declarations else {
+        return Ok(());
+    };
     let declaration = declarations.get(callee).ok_or_else(|| {
         HirError::InvalidStructure(format!("function_ref names unknown declaration {callee:?}"))
     })?;
@@ -6852,7 +6923,7 @@ mod persistence_tests {
         let declarations = HashMap::from([(declaration.symbol.as_str(), &declaration)]);
 
         assert!(matches!(
-            validate_function_reference(&reference, &declarations),
+            validate_function_reference(&reference, Some(&declarations)),
             Err(HirError::InvalidStructure(reason))
                 if reason.contains("type disagrees")
         ));

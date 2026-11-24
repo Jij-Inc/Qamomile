@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 
 import qamomile as qm
@@ -513,8 +514,8 @@ def test_quri_parts_executes_indexed_aggregate_control() -> None:
     )
 
 
-@pytest.mark.parametrize("seed", [0, 1, 2, 42])
-def test_quri_parts_artifact_executes_and_round_trips(seed: int) -> None:
+@pytest.mark.parametrize("seed", [None, 0, 1, 2, 42])
+def test_quri_parts_artifact_executes_and_round_trips(seed: int | None) -> None:
     """Portable circuit bytes materialize and sample through seeded Qulacs."""
 
     from qamomile.quri_parts import Qulacs, QuriParts, load_logical_circuit
@@ -616,7 +617,7 @@ def test_quri_parts_live_sampler_reuses_the_portable_artifact() -> None:
         on=endpoint,
         parameters={"theta": math.pi},
         shots=8,
-        seed=0,
+        seed=None,
     )
 
     assert result.backend == "quri-parts.sampler.vector"
@@ -624,7 +625,8 @@ def test_quri_parts_live_sampler_reuses_the_portable_artifact() -> None:
     assert result.worker_pid is None
 
 
-def test_quri_parts_live_sampler_rejects_nonportable_seed() -> None:
+@pytest.mark.parametrize("seed", [0, 1])
+def test_quri_parts_live_sampler_rejects_nonportable_seed(seed: int) -> None:
     """Live samplers fail closed when asked for a portable seed contract."""
 
     from quri_parts.qulacs.sampler import create_qulacs_vector_sampler
@@ -634,20 +636,58 @@ def test_quri_parts_live_sampler_rejects_nonportable_seed() -> None:
     endpoint = QuriPartsSampler(create_qulacs_vector_sampler())
     program = qm.build_source(BASIS_SOURCE).specialize("basis")
 
-    with pytest.raises(qm.ExecutionError, match="use seed=0"):
-        qm.run(program, on=endpoint, shots=4, seed=1)
+    with pytest.raises(qm.ExecutionError, match="use seed=None"):
+        qm.run(program, on=endpoint, shots=4, seed=seed)
 
 
-def test_quri_parts_live_sampler_rejects_fractional_counts() -> None:
-    """Sampler injection accepts observations rather than probability weights."""
+def test_quri_parts_live_sampler_accepts_numpy_integer_counts() -> None:
+    """Signed and unsigned NumPy integers decode to source-ordered counts."""
 
     from qamomile.quri_parts import QuriPartsSampler
 
-    endpoint = QuriPartsSampler(lambda circuit, shots: {0: float(shots)})
+    counts = {
+        np.int64(0): np.int64(0),
+        np.int64(1): np.int64(2),
+        2: np.int64(1),
+        np.uint64(7): np.uint64(1),
+    }
+    endpoint = QuriPartsSampler(lambda circuit, shots: counts)
     program = qm.build_source(BASIS_SOURCE).specialize("basis")
 
-    with pytest.raises(qm.ExecutionError, match="nonnegative integers"):
-        qm.run(program, on=endpoint, shots=4, seed=0)
+    result = qm.run(program, on=endpoint, shots=4, seed=None).result
+
+    assert result.counts == {(1, 0, 0): 2, (0, 1, 0): 1, (1, 1, 1): 1}
+    assert all(type(value) is int for value in result.counts.values())
+
+
+@pytest.mark.parametrize(
+    ("basis", "count"),
+    [
+        (True, 4),
+        (0, False),
+        (np.bool_(True), 4),
+        (0, np.bool_(False)),
+        (1.0, 4),
+        (0, 4.0),
+        (np.timedelta64(1, "D"), 4),
+        (0, np.timedelta64(4, "ns")),
+        (np.int64(-1), 4),
+        (np.uint64(8), 4),
+        (0, np.int64(-1)),
+    ],
+)
+def test_quri_parts_live_sampler_rejects_invalid_counts(
+    basis: object, count: object
+) -> None:
+    """Malformed basis states and frequencies raise the sampler count error."""
+
+    from qamomile.quri_parts import QuriPartsSampler
+
+    endpoint = QuriPartsSampler(lambda circuit, shots: {basis: count})
+    program = qm.build_source(BASIS_SOURCE).specialize("basis")
+
+    with pytest.raises(qm.ExecutionError, match="Q8720.*nonnegative integers"):
+        qm.run(program, on=endpoint, shots=4, seed=None)
 
 
 @pytest.mark.parametrize(
@@ -985,3 +1025,27 @@ def test_quri_parts_sqrt() -> None:
     from .test_sqrt import exercise_sqrt_backend
 
     exercise_sqrt_backend(Qulacs(), seed=7)
+
+
+@pytest.mark.parametrize("seed", [None, 0])
+def test_qulacs_preserves_unspecified_and_explicit_zero_seeds(
+    monkeypatch: pytest.MonkeyPatch, seed: int | None
+) -> None:
+    """Qulacs omits only an unspecified sampling seed."""
+    import qulacs
+
+    from qamomile.quri_parts import Qulacs
+
+    seen = []
+    original = qulacs.QuantumState
+
+    class ObservedState(original):
+        def sampling(self, *args):
+            seen.append(args)
+            return super().sampling(*args)
+
+    monkeypatch.setattr(qulacs, "QuantumState", ObservedState)
+    program = qm.build_source(BASIS_SOURCE).specialize("basis")
+    result = qm.run(program, on=Qulacs(), shots=8, seed=seed).result
+    assert result.counts == {(1, 0, 0): 8}
+    assert seen == ([(8,)] if seed is None else [(8, 0)])

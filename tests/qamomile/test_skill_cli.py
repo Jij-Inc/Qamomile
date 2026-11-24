@@ -393,6 +393,7 @@ def test_skill_metadata_and_relative_links() -> None:
         ("references/quantum/reuse.md", "sample_recursive", {"rounds": 3}, {}, {(1,)}),
         ("references/quantum/arithmetic.md", "sum_sample", {}, {}, {(1, 1, 0, 1)}),
         ("references/quantum/flow.md", "sqrt_rotation", {}, {}, {(1,)}),
+        ("references/quantum/flow.md", "prepare_input", {}, {"initial": 1}, {(1,)}),
         pytest.param(
             "references/quantum/flow.md",
             "integer_rotation",
@@ -453,7 +454,8 @@ def test_skill_flow_and_library_examples(tmp_path: Path) -> None:
             record = qm.run(
                 namespace["repeat_once"], on=qm.Reference(), shots=8, seed=7
             )
-            assert dict(record.result.values) == {True: 8}
+            assert dict(record.result.values) == {1: 8}
+            assert type(next(iter(record.result.values))) is int
             record = qm.run(
                 qm.specialize(
                     namespace["sliced_rotation"],
@@ -486,6 +488,26 @@ def test_skill_flow_and_library_examples(tmp_path: Path) -> None:
             assert record.result.counts == {(1, 0, 1): 8}
             assert namespace["initial_run"].samples.total_occurrences == 8
             assert namespace["initial_run"].invocation.values() == {}
+
+
+@pytest.mark.parametrize("backend", ["reference", "qiskit"])
+def test_skill_logical_shot_example(tmp_path: Path, backend: str) -> None:
+    """The shipped logical-index examples execute on each documented local route."""
+    if backend == "qiskit":
+        pytest.importorskip("qiskit_aer")
+    blocks = re.findall(
+        r"```python\n(.*?)```",
+        _skills.read_reference("references/quantum/current-shot.md"),
+        re.DOTALL,
+    )
+    source = blocks[0] if backend == "reference" else "\n\n".join(blocks)
+    path = tmp_path / "current_shot_example.py"
+    path.write_text(source, encoding="utf-8")
+    namespace = runpy.run_path(str(path))
+    assert namespace["first_result"].values == {True: 1, False: 4}
+    if backend == "qiskit":
+        assert namespace["qiskit_result"].values == {1: 3, 0: 2}
+        assert all(type(value) is int for value in namespace["qiskit_result"].values)
 
 
 def test_skill_selected_qubits_and_chain_depth_examples(tmp_path: Path) -> None:
@@ -548,12 +570,50 @@ def test_skill_keyed_parameters_and_exact_gas_examples(tmp_path: Path) -> None:
         namespace = runpy.run_path(str(path))
         if marker == "keyed_angles":
             assert namespace["keyed_result"].counts == {(1,): 8}
+            assert namespace["unseeded_result"].counts == {(1,): 8}
         else:
             assert namespace["exact_gas_run"].samples.lowest.assignment == (
                 (4, 0),
                 (9, 0),
             )
             assert namespace["exact_gas_run"].samples.lowest.occurrences == 8
+
+
+def test_skill_ibm_runtime_dry_run_example(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shipped cloud dry-run example returns validation and usage, not counts."""
+    pytest.importorskip("qiskit")
+    from .test_qiskit_dry_run import _runtime_harness
+
+    harness = _runtime_harness(monkeypatch)
+    program = qm.build_source("""
+import qamomile as qm
+
+@qm.qkernel
+def bell() -> qm.Shot[qm.Bits[2]]:
+    state = qm.h(qm.qubits(2), target=0)
+    state = qm.cx(state, control=0, target=1)
+    return qm.measure(state)
+""").specialize("bell")
+    blocks = re.findall(
+        r"```python\n(.*?)```",
+        _skills.read_reference("references/execution.md"),
+        re.DOTALL,
+    )
+    example = next(block for block in blocks if "preview = IBMRuntime(" in block)
+    namespace = {"qm": qm, "program": program, "backend": harness.backend}
+    exec(example, namespace)
+
+    report = namespace["report"]
+    assert isinstance(report, qm.ValidationResult)
+    assert report.status is qm.JobStatus.COMPLETED
+    assert not hasattr(report, "counts")
+    assert namespace["details"]["dry_run"] is True
+    assert namespace["details"]["usage"] == {
+        "estimated_quantum_seconds": 1.5,
+        "estimated_resource_units": 0.025,
+    }
+    assert namespace["checked"].invocation.shots == 128
+    assert len(harness.submissions) == 1
 
 
 @pytest.mark.braket
@@ -669,3 +729,17 @@ def test_packaged_while_resource_example(tmp_path: Path) -> None:
     candidate = tmp_path / "while_resources.py"
     candidate.write_text("import qamomile as qm\n" + block, encoding="utf-8")
     runpy.run_path(str(candidate))
+
+
+def test_packaged_shot_resource_example(tmp_path: Path) -> None:
+    """The shipped shot formulas and complementary counts use native analysis."""
+    blocks = re.findall(
+        r"```python\n(.*?)```",
+        _skills.read_reference("references/resources.md"),
+        re.DOTALL,
+    )
+    block = next(block for block in blocks if "def shot_resource_loop(" in block)
+    candidate = tmp_path / "shot_resources.py"
+    candidate.write_text(block, encoding="utf-8")
+    namespace = runpy.run_path(str(candidate))
+    assert namespace["shot_study"] == namespace["restored_shot_study"]

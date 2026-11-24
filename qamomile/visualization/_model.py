@@ -40,7 +40,7 @@ class DisplayNode:
         inputs (tuple[int, ...]): Ordered incoming display value IDs.
         outputs (tuple[int, ...]): Ordered outgoing display value IDs.
         children (tuple[DisplayNode, ...]): Nested regions and operations.
-        line (int | None): Original source line, if available.
+        line (int | None): Line in the compiled source unit, if available.
     """
 
     kind: str

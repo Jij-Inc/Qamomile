@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import operator
 from collections import Counter
 from collections.abc import Mapping
+from numbers import Integral
 from typing import Any
 
 from qamomile.circuit import (
@@ -98,9 +100,12 @@ def _execute_local(
     measurements = executable.measurements
     state = qulacs.QuantumState(executable.width)
     circuit.update_quantum_state(state)
-    native: Counter[int] = Counter(
-        state.sampling(invocation.shots, _qulacs_seed(invocation.seed))
+    samples = (
+        state.sampling(invocation.shots)
+        if invocation.seed is None
+        else state.sampling(invocation.shots, _qulacs_seed(invocation.seed))
     )
+    native: Counter[int] = Counter(samples)
     logical = _decode_native_counts(
         artifact,
         invocation,
@@ -134,7 +139,20 @@ def _decode_native_counts(
     measurements: Mapping[int, int],
     native: object,
 ) -> dict[tuple[int, ...], int]:
-    """Validate native basis counts and decode Qamomile result order."""
+    """Validate native basis counts and decode them in Qamomile result order.
+
+    Args:
+        artifact (CompiledProgram): Compiled circuit with the logical result layout.
+        invocation (Invocation): Runtime bindings used for result postprocessing.
+        measurements (Mapping[int, int]): Measurement indices mapped to qubit indices.
+        native (object): Sampler output mapping basis integers to integer frequencies.
+
+    Returns:
+        dict[tuple[int, ...], int]: Counts keyed by source-ordered result bits.
+
+    Raises:
+        ExecutionError: If the sampler output or the circuit's result layout is invalid.
+    """
 
     if not isinstance(native, Mapping):
         raise ExecutionError("Q8719: QURI Parts sampler must return a count mapping")
@@ -144,18 +162,25 @@ def _decode_native_counts(
     if not isinstance(width, int):
         raise ExecutionError("Q8703: invalid QURI Parts logical circuit width")
     counts: dict[int, int] = {}
-    for basis, count in native.items():
+    invalid_counts_message = (
+        "Q8720: QURI Parts sampler counts must map valid basis states "
+        "to nonnegative integers"
+    )
+    for native_basis, native_count in native.items():
         if (
-            type(basis) is not int
-            or basis < 0
-            or basis >= 1 << width
-            or type(count) is not int
-            or count < 0
+            isinstance(native_basis, bool)
+            or not isinstance(native_basis, Integral)
+            or isinstance(native_count, bool)
+            or not isinstance(native_count, Integral)
         ):
-            raise ExecutionError(
-                "Q8720: QURI Parts sampler counts must map valid basis states "
-                "to nonnegative integers"
-            )
+            raise ExecutionError(invalid_counts_message)
+        try:
+            basis = operator.index(native_basis)
+            count = operator.index(native_count)
+        except TypeError as error:
+            raise ExecutionError(invalid_counts_message) from error
+        if not 0 <= basis < 1 << width or count < 0:
+            raise ExecutionError(invalid_counts_message)
         if count:
             counts[basis] = counts.get(basis, 0) + count
     plan = dict(artifact.metadata.entries).get(RESULT_POSTPROCESSING_METADATA)
@@ -171,7 +196,7 @@ def _decode_native_counts(
                 raise ExecutionError(
                     "Q8706: result ABI names an absent measurement"
                 ) from error
-            logical[bits] = logical.get(bits, 0) + int(count)
+            logical[bits] = logical.get(bits, 0) + count
     else:
         if not isinstance(plan, bytes):
             raise ExecutionError("Q8715: invalid QURI Parts result metadata")
@@ -182,7 +207,7 @@ def _decode_native_counts(
                     (basis >> measurements[index]) & 1
                     for index in range(len(measurements))
                 )
-                raw[bits] = raw.get(bits, 0) + int(count)
+                raw[bits] = raw.get(bits, 0) + count
         except KeyError as error:
             raise ExecutionError("Q8706: result names an absent measurement") from error
         logical = postprocess_circuit_counts(

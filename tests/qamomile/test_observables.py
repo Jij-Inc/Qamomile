@@ -751,22 +751,25 @@ def test_expectation_seed_planning_fails_closed(
         qm.expectation(state, qm.X(0), on=qm.Reference(), shots=1)
 
 
-def test_expectation_seed_plan_is_portable_and_preserves_unseeded_execution() -> None:
-    """Rust derives distinct 32-bit streams or the endpoint-default sentinel."""
+@pytest.mark.parametrize("seed", [0, 2, (1 << 64) - 1])
+def test_expectation_seed_plan_is_portable_and_preserves_unseeded_execution(
+    seed,
+) -> None:
+    """Rust derives distinct streams for every integer and preserves absent seeds."""
 
     expectation_module = importlib.import_module("qamomile._measurement_plan")
 
     observable = sum((qm.Z(i) for i in range(4)), qm.zero_observable(4))
     seeded = expectation_module._native_qwc_expectation_plan(
-        observable, shots=4, seed=2, independent=True
+        observable, shots=4, seed=seed, independent=True
     )
     seeds = tuple(group.seed for group in seeded)
     assert len(set(seeds)) == 4
     assert all(0 <= seed <= (1 << 32) - 1 for seed in seeds)
     unseeded = expectation_module._native_qwc_expectation_plan(
-        observable, shots=4, seed=0, independent=True
+        observable, shots=4, seed=None, independent=True
     )
-    assert tuple(group.seed for group in unseeded) == (0, 0, 0, 0)
+    assert tuple(group.seed for group in unseeded) == (None, None, None, None)
 
 
 def test_expectation_fails_closed_without_native_measurement(

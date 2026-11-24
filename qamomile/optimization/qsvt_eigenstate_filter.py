@@ -269,17 +269,21 @@ class QSVTEigenstateFilterExperiment(Generic[_Domain]):
         )
 
     def run(
-        self, *, on: ExecutionEndpoint, shots: int, seed: int = 0
+        self, *, on: ExecutionEndpoint, shots: int, seed: int | None = None
     ) -> QSVTFilterRun[_Domain]:
         """Compile, execute, and decode this threshold.
 
         Args:
             on (ExecutionEndpoint): Compatible execution endpoint.
             shots (int): Positive observation count.
-            seed (int): Endpoint sampling seed, default zero.
+            seed (int | None): Unsigned 64-bit endpoint seed, including zero.
+                None leaves randomness to the endpoint.
 
         Returns:
             QSVTFilterRun: Full execution and conditional problem samples.
+
+        Raises:
+            ExecutionError: If the seed is invalid or unsupported by the endpoint.
         """
         return self.compile(to=on.target).run(on=on, shots=shots, seed=seed)
 
@@ -316,20 +320,22 @@ class CompiledQSVTEigenstateFilterExperiment(Generic[_Domain]):
         return self.experiment.identity
 
     def run(
-        self, *, on: ExecutionEndpoint, shots: int, seed: int = 0
+        self, *, on: ExecutionEndpoint, shots: int, seed: int | None = None
     ) -> QSVTFilterRun[_Domain]:
         """Execute the retained artifact and preserve its success denominator.
 
         Args:
             on (ExecutionEndpoint): Endpoint for the compiled target.
             shots (int): Positive observation count.
-            seed (int): Endpoint sampling seed, default zero.
+            seed (int | None): Unsigned 64-bit endpoint seed, including zero.
+                None leaves randomness to the endpoint.
 
         Returns:
             QSVTFilterRun: Execution, native success estimate, and decoded samples.
 
         Raises:
             TypeError: If the probe unexpectedly returns a nonsampling result.
+            ExecutionError: If the seed is invalid or unsupported by the endpoint.
         """
         execution = qm.run(self.artifact, on=on, shots=shots, seed=seed)
         if not isinstance(execution.result, SampleResult):

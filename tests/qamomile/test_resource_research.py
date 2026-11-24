@@ -406,7 +406,7 @@ def test_research_source_executes_across_targets(backend):
     for kernel in (phase_sample, amplitude_sample):
         artifact = qm.compile(qm.specialize(kernel, precision=3), to=endpoint.target)
         result = qm.execute(
-            artifact, on=endpoint, shots=4, seed=0 if backend == "braket" else 2
+            artifact, on=endpoint, shots=4, seed=None if backend == "braket" else 2
         )
         if backend == "braket" and kernel is amplitude_sample:
             # Exact SDK probabilities make the known failure deterministic;

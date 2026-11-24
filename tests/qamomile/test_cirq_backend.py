@@ -164,6 +164,42 @@ def test_cirq_executes_derived_results_and_aggregate_parameters() -> None:
     exercise_dynamic_classical_index_backend(endpoint=endpoint, seed=2)
 
 
+@pytest.mark.parametrize(
+    ("angle", "expected_format", "offset"),
+    [
+        ("last", "cirq.json.v1", 0.0),
+        ("last % 10.0", "qamomile.launch-materializer.v1", 10.0),
+    ],
+    ids=["symbolic-angle", "modulo-at-launch"],
+)
+def test_cirq_prepares_last_angle_when_its_expression_can_be_emitted(
+    angle: str, expected_format: str, offset: float
+) -> None:
+    """A retained angle can be reused, while Cirq needs concrete values for modulo."""
+    from qamomile.cirq import CirqSimulator
+
+    source = f"""
+import qamomile as qm
+@qm.qkernel
+def rotate(row: qm.Param[qm.Vector[qm.Real, 2]]) -> qm.Q[qm.Bits[1]]:
+    last = row[len(row) - 1]
+    return qm.ry(qm.qubits(1), {angle})
+@qm.qkernel
+def sample(row: qm.Param[qm.Vector[qm.Real, 2]]) -> qm.Shot[qm.Bits[1]]:
+    return qm.measure(rotate(row))
+"""
+    endpoint = CirqSimulator()
+    artifact = qm.compile(
+        qm.build_source(source).specialize("sample"), to=endpoint.target
+    )
+    assert artifact.format == expected_format
+    for row, bit in (((offset, offset + np.pi), 1), ((offset + np.pi, offset), 0)):
+        result = qm.execute(
+            artifact, on=endpoint, parameters={"row": row}, shots=8, seed=2
+        )
+        assert result.counts == {(bit,): 8}
+
+
 def test_cirq_executes_boolean_lifts_and_expectation_plans() -> None:
     """Cirq executes one shared sampling and grouped expectation witness."""
 
@@ -560,7 +596,7 @@ def test_cirq_google_qvm_automatically_routes_and_executes() -> None:
 
     endpoint = CirqSampler.from_google_qvm(processor_id="willow_pink")
     program = qm.build_source(BASIS_SOURCE).specialize("basis")
-    record = qm.run(program, on=endpoint, shots=4, seed=0)
+    record = qm.run(program, on=endpoint, shots=4, seed=None)
 
     assert "cirq-routing" in record.artifact.report.stages
     assert record.result.counts == {(1, 0, 0): 4}
@@ -588,7 +624,7 @@ def test_cirq_google_qvm_snapshots_and_restores_native_jobs() -> None:
     endpoint = CirqSampler.from_google_qvm(processor_id="willow_pink")
     program = qm.build_source(BASIS_SOURCE).specialize("basis")
     artifact = qm.compile(program, to=endpoint.target)
-    job = qm.submit(artifact, on=endpoint, shots=4, seed=0)
+    job = qm.submit(artifact, on=endpoint, shots=4, seed=None)
     snapshot = job.snapshot()
     restored = endpoint.restore(snapshot, artifact=artifact)
 
@@ -754,3 +790,39 @@ def test_cirq_sqrt() -> None:
     from .test_sqrt import exercise_sqrt_backend
 
     exercise_sqrt_backend(CirqSimulator(), seed=7)
+
+
+@pytest.mark.parametrize("seed", [None, 0])
+def test_cirq_preserves_unspecified_and_explicit_zero_seeds(
+    monkeypatch: pytest.MonkeyPatch, seed: int | None
+) -> None:
+    """Cirq receives None and zero distinctly and executes both requests."""
+    import cirq
+
+    from qamomile.cirq import CirqSimulator
+
+    seen = []
+    original = cirq.Simulator
+
+    def observed_simulator(*args, **kwargs):
+        seen.append(kwargs.get("seed"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cirq, "Simulator", observed_simulator)
+    program = qm.build_source(BASIS_SOURCE).specialize("basis")
+    result = qm.run(program, on=CirqSimulator(), shots=8, seed=seed).result
+    assert result.counts == {(1, 0, 0): 8}
+    assert seen == [seed]
+
+
+@pytest.mark.parametrize("seed", [0, 1])
+def test_cirq_sampler_rejects_explicit_seeds(seed: int) -> None:
+    """Live sampler policy rejects explicit zero before sampler execution."""
+    import cirq
+
+    from qamomile.cirq import CirqSampler
+
+    endpoint = CirqSampler(cirq.Simulator())
+    program = qm.build_source(BASIS_SOURCE).specialize("basis")
+    with pytest.raises(qm.ExecutionError, match="Q8831"):
+        qm.run(program, on=endpoint, shots=4, seed=seed)

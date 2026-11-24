@@ -187,6 +187,10 @@ def load_circuit(artifact: CompiledProgram) -> Any:
 class QurationLocal:
     """Execute Quration artifacts in the PyQret full-quantum simulator.
 
+    Execution requires an explicit integer seed, including zero. PyQret has no
+    unspecified-seed mode; using its fixed default separately for every shot
+    would repeat one random draw instead of sampling independent outcomes.
+
     Args:
         max_qubits (int): Statevector allocation limit, default 20.
         rotation_precision (float): Compilation tolerance for source inputs.
@@ -270,8 +274,15 @@ def _sample(
         SampleResult: Source-ordered logical counts.
 
     Raises:
-        ExecutionError: If metadata, allocation limits or SDK output are invalid.
+        ExecutionError: If the seed is unspecified, or metadata, allocation
+            limits, or SDK output are invalid.
     """
+    seed = invocation.seed
+    if seed is None:
+        raise ExecutionError(
+            "Q8912: QurationLocal requires an explicit integer seed; "
+            "PyQret does not support unspecified-seed execution"
+        )
     from pyqret.runtime import Simulator, SimulatorConfig
 
     metadata = dict(artifact.metadata.entries)
@@ -288,7 +299,7 @@ def _sample(
     circuit = artifact.execution_payload(QurationExecutable).circuit
     raw: Counter[tuple[int, ...]] = Counter()
     for shot in range(invocation.shots):
-        config = SimulatorConfig(seed=(invocation.seed + shot) % (1 << 64))
+        config = SimulatorConfig(seed=(seed + shot) % (1 << 64))
         result = Simulator(config, circuit).run()
         bits = result.get("c", [])
         if len(bits) != measured or any(type(bit) is not bool for bit in bits):

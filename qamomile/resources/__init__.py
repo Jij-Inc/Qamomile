@@ -11,6 +11,13 @@ projections without solving equations or requiring SymPy. Scheduling and livenes
 recurrences remain separate analyses with explicit unknown contributors. Observed
 execution metrics distinguish logical samples from completed physical segment
 shots and submissions; they do not replace the source resource algebra.
+
+Current-shot resource estimates describe one trial with a shared nonnegative
+symbol named ``shot``. Supported shot-dependent loops retain their numeric
+relation, and bounded native predicate analysis preserves complementary branch
+costs through aggregation. Analysis substitution does not add a launch parameter
+or sum resources over all shots. Unsupported proofs retain bounds or unknowns.
+Unproved custom span or peak composition with a signed domain is refused.
 """
 
 from .analysis import logical

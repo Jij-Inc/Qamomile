@@ -60,6 +60,26 @@ def _device(counts: Mapping[str, object] | None = None) -> tuple[MagicMock, Magi
     return device, job
 
 
+def test_installed_qbraid_supports_qiskit_circuit_transport() -> None:
+    """The optional dependencies preserve Qiskit wrapping and QASM3 conversion."""
+    qbraid = pytest.importorskip("qbraid")
+    from qbraid.programs import load_program
+    from qbraid.transpiler import transpile
+    from qiskit import QuantumCircuit
+
+    assert callable(qbraid.QbraidProvider)
+    circuit = QuantumCircuit(2, 2)
+    circuit.x(0)
+    circuit.measure([0, 1], [0, 1])
+    wrapped = load_program(circuit)
+    assert wrapped.num_qubits == wrapped.num_clbits == 2
+    assert wrapped.program == circuit
+
+    qasm = transpile(circuit, "qasm3")
+    assert qasm.startswith("OPENQASM 3")
+    assert transpile(qasm, "qiskit") == circuit
+
+
 def test_qbraid_executes_qpy_with_typed_source_order() -> None:
     """One QPY artifact binds parameters and decodes asymmetric qBraid counts."""
 
@@ -78,7 +98,7 @@ def test_qbraid_executes_qpy_with_typed_source_order() -> None:
         on=endpoint,
         parameters={"theta": math.pi},
         shots=4,
-        seed=0,
+        seed=None,
     )
 
     assert record.artifact is artifact
@@ -109,7 +129,7 @@ def test_qbraid_measures_unsigned_integer_registers() -> None:
         on=endpoint,
         parameters={"value": 6},
         shots=4,
-        seed=0,
+        seed=None,
     ).result
 
     assert result.counts == {(1, 1, 0): 4}
@@ -130,7 +150,7 @@ def test_qbraid_executes_specialized_immutable_mapping() -> None:
         },
     )
 
-    result = qm.run(program, on=endpoint, shots=4, seed=0).result
+    result = qm.run(program, on=endpoint, shots=4, seed=None).result
 
     assert result.counts == {(1, 0): 4}
 
@@ -161,7 +181,8 @@ def test_qbraid_maps_provider_status(native: str, portable: JobStatus) -> None:
     assert job.status is portable
 
 
-def test_qbraid_rejects_nonportable_seed_before_submission() -> None:
+@pytest.mark.parametrize("seed", [0, 1])
+def test_qbraid_rejects_nonportable_seed_before_submission(seed: int) -> None:
     """Provider seed ambiguity fails before a remote side effect."""
 
     device, _ = _device()
@@ -174,7 +195,7 @@ def test_qbraid_rejects_nonportable_seed_before_submission() -> None:
             on=endpoint,
             parameters={"theta": 0.0},
             shots=1,
-            seed=1,
+            seed=seed,
         )
 
     device.run.assert_not_called()

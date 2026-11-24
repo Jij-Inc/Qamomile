@@ -108,12 +108,20 @@ class OptimizationRun(Generic[_Domain]):
     samples: DecodedSamples[_Domain]
 
     def __post_init__(self) -> None:
-        """Reject execution records for a different experiment program."""
+        """Require sampled execution of the retained experiment program.
+
+        Raises:
+            TypeError: If the identity, execution, samples, or result has an
+                incompatible type.
+            ValueError: If the execution belongs to a different experiment.
+        """
 
         if not isinstance(self.identity, OptimizationExperimentIdentity):
             raise TypeError("optimization run identity is invalid")
         if not isinstance(self.execution, RunRecord):
             raise TypeError("optimization run execution must be a RunRecord")
+        if not isinstance(self.execution.result, SampleResult):
+            raise TypeError("optimization run execution must contain sampling results")
         if not isinstance(self.samples, DecodedSamples):
             raise TypeError("optimization run samples must be DecodedSamples")
         if self.execution.artifact.source_digest.hex() != self.identity.program_digest:
@@ -203,23 +211,25 @@ class QAOAExperiment(Generic[_Domain]):
         gammas: Sequence[float],
         betas: Sequence[float],
         shots: int,
-        seed: int = 0,
+        seed: int | None = None,
     ) -> OptimizationRun[_Domain]:
         """Compile, execute, and decode one variational coordinate.
 
         Args:
-            on: Backend-neutral execution endpoint.
-            gammas: One cost angle per static layer.
-            betas: One mixer angle per static layer.
-            shots: Number of observations requested from the endpoint.
-            seed: Optional endpoint seed.
+            on (ExecutionEndpoint): Backend-neutral execution endpoint.
+            gammas (Sequence[float]): One cost angle per static layer.
+            betas (Sequence[float]): One mixer angle per static layer.
+            shots (int): Number of observations requested from the endpoint.
+            seed (int | None): Unsigned 64-bit endpoint seed, including zero.
+                None leaves randomness to the endpoint.
 
         Returns:
-            The complete compilation record and model-domain sample set.
+            OptimizationRun[_Domain]: Complete compilation record and samples.
 
         Raises:
             TypeError: If an angle vector is not a real numeric sequence.
             ValueError: If an angle vector has the wrong length or is non-finite.
+            ExecutionError: If the seed is invalid or unsupported by the endpoint.
         """
 
         gamma_values = _angles("gammas", gammas, self.layers)
@@ -260,9 +270,27 @@ class CompiledQAOAExperiment(Generic[_Domain]):
         gammas: Sequence[float],
         betas: Sequence[float],
         shots: int,
-        seed: int = 0,
+        seed: int | None = None,
     ) -> OptimizationRun[_Domain]:
-        """Execute one coordinate without recompiling the experiment."""
+        """Execute one coordinate without recompiling the experiment.
+
+        Args:
+            on (ExecutionEndpoint): Endpoint compatible with the artifact.
+            gammas (Sequence[float]): One cost angle per static layer.
+            betas (Sequence[float]): One mixer angle per static layer.
+            shots (int): Positive number of observations.
+            seed (int | None): Unsigned 64-bit endpoint seed, including zero.
+                None leaves randomness to the endpoint.
+
+        Returns:
+            OptimizationRun[_Domain]: Execution and model-domain samples.
+
+        Raises:
+            TypeError: If an angle vector is not a real numeric sequence or the
+                program returns a non-sampling result.
+            ValueError: If an angle vector has the wrong length or is non-finite.
+            ExecutionError: If the seed is invalid or unsupported by the endpoint.
+        """
 
         return self._run_normalized(
             on=on,
@@ -279,7 +307,7 @@ class CompiledQAOAExperiment(Generic[_Domain]):
         gammas: tuple[float, ...],
         betas: tuple[float, ...],
         shots: int,
-        seed: int,
+        seed: int | None,
     ) -> OptimizationRun[_Domain]:
         """Execute coordinates through the compiled program's parameter ABI.
 
@@ -288,13 +316,15 @@ class CompiledQAOAExperiment(Generic[_Domain]):
             gammas (tuple[float, ...]): One validated cost angle per layer.
             betas (tuple[float, ...]): One validated mixer angle per layer.
             shots (int): Number of observations.
-            seed (int): Endpoint random seed.
+            seed (int | None): Unsigned 64-bit endpoint seed, including zero.
+                None leaves randomness to the endpoint.
 
         Returns:
             OptimizationRun[_Domain]: Identified execution and decoded samples.
 
         Raises:
             TypeError: If the program returns a non-sampling result.
+            ExecutionError: If the seed is invalid or unsupported by the endpoint.
         """
 
         coordinates = {"gammas": gammas, "betas": betas}

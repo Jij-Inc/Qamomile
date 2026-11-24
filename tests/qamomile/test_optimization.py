@@ -564,7 +564,8 @@ def test_model_hamiltonian_drives_plain_qaoa_and_decodes_the_result() -> None:
     }
 
 
-def test_qaoa_experiment_closes_topology_and_returns_decoded_execution() -> None:
+@pytest.mark.parametrize("seed", (None, 0, 3))
+def test_qaoa_experiment_closes_topology_and_returns_decoded_execution(seed) -> None:
     """The high-level lifecycle remains ordinary body-derived composition."""
 
     model = BinaryModel.from_hubo({(4,): -1.0, (4, 9): 0.5})
@@ -578,7 +579,7 @@ def test_qaoa_experiment_closes_topology_and_returns_decoded_execution() -> None
         gammas=(0.0, 0.0),
         betas=(0.0, 0.0),
         shots=6,
-        seed=3,
+        seed=seed,
     )
 
     assert "quantum.qaoa" not in experiment.program.inspect()
@@ -597,6 +598,7 @@ def test_qaoa_experiment_closes_topology_and_returns_decoded_execution() -> None
     }
     assert run.samples.vartype is VarType.BINARY
     assert run.samples.total_occurrences == 6
+    assert run.invocation.seed == seed
     with pytest.raises(TypeError, match="process-local"):
         pickle.dumps(compiled)
     restored = deserialize(serialize(compiled.artifact))
@@ -1587,7 +1589,8 @@ def test_fqaoa_experiment_closes_geometry_and_retains_runtime_coordinates() -> N
     ).numeric_enclosure() == (2, 2)
 
 
-def test_fqaoa_run_preserves_particles_and_decodes_original_sparse_ids() -> None:
+@pytest.mark.parametrize("seed", (None, 0, 9))
+def test_fqaoa_run_preserves_particles_and_decodes_original_sparse_ids(seed) -> None:
     """Physical cyclic mode order is inverted before typed model decoding."""
 
     experiment = FQAOAExperiment.from_instance(
@@ -1604,7 +1607,7 @@ def test_fqaoa_run_preserves_particles_and_decodes_original_sparse_ids() -> None
         betas=(0.0,),
         hopping=0.0,
         shots=12,
-        seed=9,
+        seed=seed,
     )
 
     assert experiment.variable_order == (40, 20, 7, 3)
@@ -1617,6 +1620,7 @@ def test_fqaoa_run_preserves_particles_and_decodes_original_sparse_ids() -> None
         "betas": (0.0,),
     }
     assert run.samples.total_occurrences == 12
+    assert run.invocation.seed == seed
     assert all(
         sum(value for _, value in sample.assignment) == 2
         for sample in run.samples.samples

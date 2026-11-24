@@ -80,18 +80,13 @@ impl VerifiedResourceAnalysisRequest {
         })?;
         let observation = symbolic_resources::ResourceObservation::new(expanded, basis, lowering);
         let mut counts = symbolic_resources::symbolic_observed_counts(
-            &local.checked.package,
-            &local.checked.type_arena,
-            &local.checked.operations,
+            &local.checked,
             self.rules(),
             Some(&observation),
         )?;
         if let Some(basis) = basis
-            && let Ok(circuit) = crate::lowering::circuit::project_with_lowering(
-                &local.checked.package,
-                &local.checked.boolean_plans,
-                lowering,
-            )
+            && let Ok(circuit) =
+                crate::lowering::circuit::project_with_lowering(&local.checked, lowering)
             && let Ok(schedule) = timing::schedule_portable_circuit(&circuit, basis)
         {
             counts.refine_portable_fixed_graph(schedule.gate_count(), schedule.makespan())?;
@@ -215,17 +210,13 @@ impl VerifiedResourceAnalysisRequest {
         match &self.program {
             VerifiedResourceProgram::Closed(program) => {
                 symbolic_resources::symbolic_logical_counts_with_rules(
-                    &program.local.checked.package,
-                    &program.local.checked.type_arena,
-                    &program.local.checked.operations,
+                    &program.local.checked,
                     self.rules(),
                 )
             }
             VerifiedResourceProgram::Family(family) => {
                 symbolic_resources::symbolic_logical_counts_with_rules(
-                    &family.local.checked.package,
-                    &family.local.checked.type_arena,
-                    &family.local.checked.operations,
+                    &family.local.checked,
                     self.rules(),
                 )
             }

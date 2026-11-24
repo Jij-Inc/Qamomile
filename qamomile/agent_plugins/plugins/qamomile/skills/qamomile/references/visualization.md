@@ -28,10 +28,15 @@ Time runs left to right, including nested helpers and loop iterations. Solid
 buses retain quantum types and widths; dashed wires carry classical values.
 `vN` identifies one dataflow value within a view, not a physical qubit number.
 Branches show exclusive alternatives and explicit result bindings.
+The line numbers refer to the compiled source unit. For a decorated kernel,
+look up the line in `kernel.source_text`, which includes linked helpers.
 
 Choose `loops="folded"` for the interface only, `"body"` for one symbolic body,
-or `"expanded"` for known normally yielding iterations. Expansion rejects
-unknown ranges and early exits rather than assuming an execution path.
+or `"expanded"` for known normally yielding iterations. A `while` body view
+shows the condition, the values carried into the next check and the normal
+exit. Its expanded view shows each condition check, including the last false
+one. If a measurement determines the repeat count, use the body view. Explicit
+structured expansion reports why a condition or early exit prevents unrolling.
 Use `classical="expanded"` to expose native classical operations, and
 `inline_depth=0` to keep helper calls boxed. `Q[UInt[n]]` and fixed-point
 registers retain their numeric interpretations on typed buses.
@@ -46,8 +51,9 @@ circuit.save("circuit.svg")
 HTML exports include loop/classical controls, horizontal scrolling, Fit, and
 100% display. `to_svg()` returns the selected static view. Concrete qubit lanes
 require a specialized `Program`, expanded loops, and support in the existing
-native circuit projection; they do not provide a fallback for unsupported
-lowering. Large displays have bounded traversal, canvas, and output sizes;
+native circuit projection. This view can show the concrete gate sequence when
+circuit lowering resolves a loop count that the structured view cannot prove.
+Large displays have bounded traversal, canvas, and output sizes;
 fold loops or reduce call expansion when a diagram exceeds those bounds.
 
 Individual qubit views support more than 64 lanes. `max_nodes` (default 2048,

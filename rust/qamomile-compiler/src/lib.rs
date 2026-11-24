@@ -50,6 +50,11 @@
 //! expressions never replace or erase a source numeric conversion. Unrelated
 //! scalar parameters remain symbolic, and measurement guards preserve lazy
 //! per-shot evaluation.
+//!
+//! Static circuit adapters share native finite-angle preflight plans. These
+//! preserve ordinary binary64 Real values until quantum angle consumption,
+//! evaluate retained loop coordinates within bounded work, and require a native
+//! runtime route for measurement-dependent numeric angles.
 
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -112,6 +117,9 @@ pub use circuit::{
 };
 pub use cleanup_synthesis::CleanupSynthesisError;
 pub use contracts::CallableContract;
+pub use core::shot_context::{
+    CurrentShotError, CurrentShotPolicy, LogicalShotIndex, MAX_INDEXED_SHOTS,
+};
 pub use core::visualization::{
     AlgorithmDisplay, DisplayKind, DisplayNode, DisplayValue, LoopDisplay, MAX_VISUALIZATION_ITEMS,
     VisualizationError,
@@ -145,7 +153,7 @@ pub use fqaoa::{
 pub use grover::{GroverPlanError, MAX_GROVER_QUBITS, grover_iteration_count};
 pub use hir::{
     HirError, HirHeader, HirLoweringError, HirNormalizationWork, HirSsaLoweringWork,
-    HirValidationWork,
+    HirValidationWork, infer_preparation_result_type,
 };
 pub use launch_materializer::{
     LaunchMaterializerError, LaunchMaterializerPayload, MAX_LAUNCH_MATERIALIZER_BYTES,
@@ -164,6 +172,9 @@ pub use local_search::{
 pub use lookup::{
     LookupError, MAX_LOOKUP_FLIPS, MAX_LOOKUP_ROWS, MAX_LOOKUP_WIDTH, SparseLookupPlan,
     XorLookupPlan, plan_sparse_lookup, plan_xor_lookup,
+};
+pub use lowering::angle_validation::{
+    CircuitAngleValidationError, project_circuit_angle_validation, validate_circuit_angles,
 };
 pub use lowering::arithmetic::{
     ArithmeticGate, ArithmeticPlan, ArithmeticStep, MAX_ARITHMETIC_SELECTORS, MAX_ARITHMETIC_STEPS,
@@ -189,6 +200,9 @@ pub use lowering::shot_execution::{
     ShotExecutionError, ShotExecutionRecipe, ShotExecutionRequest, ShotExecutionState,
     ShotSeedPolicy, inspect_shot_execution_recipe, seal_shot_execution_recipe,
     shot_segment_result_abi, validate_shot_segment_interface,
+};
+pub use lowering::shot_template::{
+    ShotCircuitPlan, ShotCircuitTemplate, ShotLaunchRows, ShotTemplateError,
 };
 pub use math::signal_algebra::{
     MAX_SIGNAL_BRANCHES, MAX_SIGNAL_DEPTH, MAX_SIGNAL_NODES, SignalContract, SignalError,
@@ -312,7 +326,8 @@ pub use result_codec::{
 };
 pub use result_postprocessing::{
     ResultPostprocessingError, StaticCircuitResultProjection, StaticCircuitResultRoute,
-    encode_result_postprocessing, postprocess_static_counts, project_result_postprocessing,
+    encode_result_postprocessing, postprocess_indexed_counts, postprocess_static_counts,
+    postprocess_unmeasured_indexed_counts, project_result_postprocessing,
 };
 pub use runtime::{
     InvocationBindingError, MAX_SCALAR_PARAMETER_PATH_COMPONENTS, MAX_SCALAR_PARAMETERS,
@@ -356,8 +371,8 @@ pub use type_relations::{
     FunctionArgumentBindingError, PortableDimension, StaticDimensionCandidate,
     TypeAdmissibilityProjection, TypeDimensionBinding, TypeRelationError, TypeShapeProjection,
     bind_declared_function_arguments, common_type_stage, infer_declared_function_application,
-    infer_function_application, infer_literal_type, infer_type_dimensions,
-    inspect_type_admissibility, inspect_type_shape, literal_conforms_type,
+    infer_function_application, infer_literal_type, infer_measurement_observation_type,
+    infer_type_dimensions, inspect_type_admissibility, inspect_type_shape, literal_conforms_type,
     substitute_type_dimensions, type_is_assignable, type_symbolic_dimensions,
     types_are_local_peers,
 };
@@ -518,7 +533,7 @@ pub struct VerifiedProgram {
     cleanup: cleanup::VerifiedCleanupFacts,
 }
 
-/// Transient verified program whose selected optimization pipeline has run.
+/// Transient verified program after optimization selection and capture pruning.
 ///
 /// This typestate is deliberately not persistent: target adapters consume it
 /// directly, while standard, inserted, or replacement optimizers all produce
@@ -640,6 +655,7 @@ struct CheckedProgramGraph {
     operations: operations::LocallyCheckedOperations,
     equations: equations::LocalEquationFacts,
     call_graph: call_graph::StaticCallGraph,
+    call_dimensions: abi::VerifiedCallDimensions,
     boolean_plans: phase_lifting::VerifiedBooleanLiftPlans,
     contracts: contracts::ProgramContracts,
 }
@@ -709,6 +725,7 @@ impl LocallyCheckedProgram {
             operations,
             equations,
             call_graph,
+            call_dimensions,
             boolean_plans,
             contracts,
             verification_work,
@@ -735,6 +752,7 @@ impl LocallyCheckedProgram {
                     operations,
                     equations,
                     call_graph,
+                    call_dimensions,
                     boolean_plans,
                     contracts,
                 }),
@@ -895,12 +913,10 @@ impl VerifiedProgram {
         passes::optimization_pipeline::validate_result(self, result)
     }
 
-    /// Run the standard pipeline and produce the sole target-facing typestate.
+    /// Run standard optimization and prune captures before target lowering.
     ///
-    /// A separately shipped optimizer may instead return a fully verified
-    /// program and wrap it with [`TargetPreparedProgram::from_verified`]. It
-    /// can compose after this method through [`TargetPreparedProgram::into_verified`]
-    /// or before it by passing its verified result to this method.
+    /// A separately shipped optimizer can compose with [`Self::optimize_standard`]
+    /// and then prepare its verified result using [`TargetPreparedProgram::from_verified`].
     ///
     /// # Errors
     ///
@@ -910,7 +926,7 @@ impl VerifiedProgram {
         &self,
     ) -> Result<(TargetPreparedProgram, StandardOptimizationWork), StandardOptimizationError> {
         let (verified, work) = self.optimize_standard()?;
-        Ok((TargetPreparedProgram::from_verified(verified), work))
+        Ok((TargetPreparedProgram::from_verified(verified)?, work))
     }
 
     fn prepare_for_target(&self) -> Result<TargetPreparedProgram, StandardOptimizationError> {
@@ -995,7 +1011,24 @@ impl VerifiedProgram {
             &self.local.checked.package,
             &self.local.checked.type_arena,
             &self.local.checked.operations,
-            contract.requirements().contains(Requirement::Measurement),
+            contract.requirements().contains(Requirement::Measurement)
+                || contract.is_per_shot()
+                || contract
+                    .requirements()
+                    .contains(Requirement::LogicalShotContext),
+        )
+    }
+
+    /// Derive the result layout for one value evaluation without bit packing.
+    ///
+    /// # Errors
+    /// Returns [`ArtifactAbiError`] if the verified entrypoint types are absent.
+    pub fn value_abi(&self) -> Result<DerivedArtifactAbi, ArtifactAbiError> {
+        artifact_abi::derive(
+            &self.local.checked.package,
+            &self.local.checked.type_arena,
+            &self.local.checked.operations,
+            false,
         )
     }
 
@@ -1009,6 +1042,13 @@ impl VerifiedProgram {
     /// parameter type is unexpectedly absent. Consumers validate supported
     /// runtime stages at their own projection boundary.
     pub fn entry_unbound_control_parameters(&self) -> Result<Vec<usize>, StaticCircuitError> {
+        self.entry_with_unbound_controls()
+            .map(|(_, controls)| controls)
+    }
+
+    fn entry_with_unbound_controls(
+        &self,
+    ) -> Result<(&wire::FunctionProto, Vec<usize>), StaticCircuitError> {
         let package = &self.local.checked.package;
         let entry = package
             .functions
@@ -1018,7 +1058,38 @@ impl VerifiedProgram {
         let indices = self
             .callable_control_parameters(&package.entrypoint)
             .ok_or_else(|| StaticCircuitError::Missing("entrypoint control contract".to_owned()))?;
-        circuit::unbound_control_parameter_indices(package, entry, indices)
+        Ok((
+            entry,
+            circuit::unbound_control_parameter_indices(package, entry, indices)?,
+        ))
+    }
+
+    /// Check that an unbound target projection can replace launch materialization.
+    ///
+    /// Control parameters folded out of the circuit during preparation would
+    /// otherwise be sent to the SDK as unused inputs in the full direct ABI.
+    fn validate_reusable_circuit_bindings(
+        &self,
+        circuit: &StaticCircuit,
+    ) -> Result<(), StaticCircuitError> {
+        if !circuit.has_reusable_parameter_bindings() {
+            return Err(StaticCircuitError::LaunchMaterialization(
+                "symbolic expressions outside reusable parameter bindings".to_owned(),
+            ));
+        }
+        let (entry, controls) = self.entry_with_unbound_controls()?;
+        let retained: std::collections::HashSet<_> =
+            circuit.retained_parameter_names().into_iter().collect();
+        if let Some(name) = controls
+            .iter()
+            .map(|index| entry.parameters[*index].name.as_str())
+            .find(|name| !retained.contains(name))
+        {
+            return Err(StaticCircuitError::LaunchMaterialization(format!(
+                "eliminated launch control parameter {name:?}"
+            )));
+        }
+        Ok(())
     }
 
     /// Plan a closed target capability profile against this entrypoint.
@@ -1064,11 +1135,7 @@ impl VerifiedProgram {
     /// program requires symbolic loops, dynamic control, unsupported scalar
     /// domains, or external bodies without native resource rules.
     pub fn exact_logical_counts(&self) -> Result<ExactLogicalCounts, ExactResourceError> {
-        resources::analysis::exact_logical_counts(
-            &self.local.checked.package,
-            &self.local.checked.type_arena,
-            &self.local.checked.operations,
-        )
+        resources::analysis::exact_logical_counts(&self.local.checked)
     }
 
     /// Derive a closed symbolic enclosure of logical operation counts.
@@ -1078,11 +1145,7 @@ impl VerifiedProgram {
     /// Returns [`SymbolicResourceError`] when the verified program uses a
     /// construct whose finite logical cost cannot yet be represented.
     pub fn symbolic_logical_counts(&self) -> Result<SymbolicLogicalCounts, SymbolicResourceError> {
-        symbolic_resources::symbolic_logical_counts(
-            &self.local.checked.package,
-            &self.local.checked.type_arena,
-            &self.local.checked.operations,
-        )
+        symbolic_resources::symbolic_logical_counts(&self.local.checked)
     }
 
     /// Project the verified static subset into a target-neutral circuit.
@@ -1135,9 +1198,9 @@ impl VerifiedProgram {
     ///
     /// # Errors
     ///
-    /// Returns [`StaticCircuitError`] when a control-dependent launch
-    /// parameter is not scalar, the decision tree exceeds its finite work
-    /// budget, or one selected program is not circuit-shaped.
+    /// Returns [`StaticCircuitError`] when projection leaves no launch
+    /// predicate, a control-dependent parameter is not scalar, the tree
+    /// exceeds its work budget, or a selected program is not circuit-shaped.
     pub fn static_circuit_family(&self) -> Result<StaticCircuitFamily, StaticCircuitError> {
         self.static_circuit_family_with_lowering(LoweringConfig::EMPTY)
     }
@@ -1274,36 +1337,45 @@ impl VerifiedProgram {
 }
 
 impl TargetPreparedProgram {
-    /// Lower callable adjoints without decoding or optimizing the source again.
+    /// Lower callable adjoints in the prepared `QCore` program.
     ///
     /// # Errors
-    ///
-    /// Returns [`AdjointLoweringError`] for unsupported transforms or invalid
-    /// target output, preserving the ordinary target rechecking boundary.
+    /// Returns [`AdjointLoweringError`] for unsupported transforms or invalid output.
     pub fn lower_adjoint_calls(&self) -> Result<TargetLoweredProgram, AdjointLoweringError> {
         passes::adjoint_lowering::lower_adjoint_calls(&self.verified)
     }
 
-    /// Promote a fully verified optimizer result to the target-facing boundary.
+    /// Prepare a fully verified optimizer result for target lowering.
     ///
-    /// Optimization is not a semantic requirement, so replacement pipelines
-    /// need no privileged constructor. Complete `QCore` verification remains
-    /// the only authority required before this transient promotion.
-    #[must_use]
-    pub const fn from_verified(verified: VerifiedProgram) -> Self {
-        Self {
+    /// This removes unused Const captures from measured conditionals and nested branches. It applies
+    /// equally to a default, empty, or replacement optimization pipeline.
+    ///
+    /// # Errors
+    /// Returns [`CompilerError`] if the pruned graph fails verification.
+    pub fn from_verified(verified: VerifiedProgram) -> Result<Self, CompilerError> {
+        Self::with_late_optimization(
             verified,
-            late: passes::optimization_pipeline::LateOptimization::NONE,
-        }
+            passes::optimization_pipeline::LateOptimization::NONE,
+        )
     }
 
-    /// Borrow the fully verified program produced by the selected pipeline.
+    fn with_late_optimization(
+        verified: VerifiedProgram,
+        late: passes::optimization_pipeline::LateOptimization,
+    ) -> Result<Self, CompilerError> {
+        Ok(Self {
+            verified: passes::conditional_captures::prepare(verified)?,
+            late,
+        })
+    }
+
+    /// Borrow the verified `QCore` prepared for target lowering.
     #[must_use]
     pub const fn as_verified(&self) -> &VerifiedProgram {
         &self.verified
     }
 
-    /// Recover the verified result for insertion of another optimizer pass.
+    /// Recover the verified `QCore` prepared for target lowering.
     #[must_use]
     pub fn into_verified(self) -> VerifiedProgram {
         self.verified
@@ -1325,6 +1397,24 @@ impl TargetPreparedProgram {
         self.static_circuit_with_lowering(LoweringConfig::EMPTY)
     }
 
+    /// Select a reusable indexed circuit or a bounded program recipe.
+    ///
+    /// # Errors
+    /// Returns [`ShotTemplateError`] when projection or template validation fails.
+    pub fn indexed_circuit_plan(
+        &self,
+        capabilities: LoweringConfig,
+    ) -> Result<ShotCircuitPlan, ShotTemplateError> {
+        let abi = self
+            .verified
+            .artifact_abi()
+            .map_err(|error| ShotTemplateError::Invalid(error.to_string()))?;
+        lowering::shot_template::project(
+            self.static_circuit_with_lowering(capabilities),
+            abi.sampled_width(),
+        )
+    }
+
     /// Project the prepared program for one transient realization set.
     ///
     /// # Errors
@@ -1336,8 +1426,7 @@ impl TargetPreparedProgram {
         capabilities: LoweringConfig,
     ) -> Result<StaticCircuit, StaticCircuitError> {
         circuit::project_with_lowering(
-            &self.verified.local.checked.package,
-            &self.verified.local.checked.boolean_plans,
+            &self.verified.local.checked,
             self.late.lowering(capabilities),
         )
         .and_then(|circuit| self.late.finish(circuit))
@@ -1353,11 +1442,29 @@ impl TargetPreparedProgram {
         &self,
     ) -> Result<(StaticCircuit, StaticCircuitWork), StaticCircuitError> {
         circuit::project_with_work(
-            &self.verified.local.checked.package,
-            &self.verified.local.checked.boolean_plans,
+            &self.verified.local.checked,
             self.late.lowering(LoweringConfig::EMPTY),
         )
         .and_then(|(circuit, work)| self.late.finish(circuit).map(|circuit| (circuit, work)))
+    }
+
+    /// Project a single circuit with the launch interface of its source program.
+    ///
+    /// The source owns the control bindings that materialization may remove
+    /// from the SDK invocation, including controls folded during preparation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StaticCircuitError`] for unsupported projection or if the
+    /// source still requires exact launch values to preserve its binding behavior.
+    pub fn reusable_static_circuit_with_lowering(
+        &self,
+        source: &VerifiedProgram,
+        capabilities: LoweringConfig,
+    ) -> Result<StaticCircuit, StaticCircuitError> {
+        let circuit = self.static_circuit_with_lowering(capabilities)?;
+        source.validate_reusable_circuit_bindings(&circuit)?;
+        Ok(circuit)
     }
 
     /// Lower the prepared program into a finite static-circuit family.
@@ -1385,8 +1492,7 @@ impl TargetPreparedProgram {
             .callable_control_parameters(&self.verified.local.header.entrypoint)
             .ok_or_else(|| StaticCircuitError::Missing("entrypoint control contract".to_owned()))?;
         circuit::project_family(
-            &self.verified.local.checked.package,
-            &self.verified.local.checked.boolean_plans,
+            &self.verified.local.checked,
             indices,
             self.late.lowering(capabilities),
         )
@@ -1422,8 +1528,7 @@ impl TargetPreparedProgram {
             .callable_control_parameters(&self.verified.local.header.entrypoint)
             .ok_or_else(|| StaticCircuitError::Missing("entrypoint control contract".to_owned()))?;
         circuit::project_at(
-            &self.verified.local.checked.package,
-            &self.verified.local.checked.boolean_plans,
+            &self.verified.local.checked,
             indices,
             bindings,
             self.late.lowering(capabilities),
@@ -1446,8 +1551,7 @@ impl TargetPreparedProgram {
             .callable_control_parameters(&self.verified.local.header.entrypoint)
             .ok_or_else(|| StaticCircuitError::Missing("entrypoint control contract".to_owned()))?;
         circuit::project_for_invocation(
-            &self.verified.local.checked.package,
-            &self.verified.local.checked.boolean_plans,
+            &self.verified.local.checked,
             indices,
             bindings,
             self.late.lowering(LoweringConfig::EMPTY),
@@ -1468,6 +1572,18 @@ impl TargetPreparedProgram {
         circuit::validate_launch_parameters(&self.verified.local.checked.package, bindings)
     }
 
+    fn bind_reference_shot(&self, index: u64, shots: u64) -> Result<Self, ReferenceValueError> {
+        // Binding a shot index preserves the prepared conditional interfaces.
+        let verified = self
+            .verified
+            .bind_current_shot(index, shots)
+            .map_err(|error| ReferenceValueError::Invalid(error.to_string()))?;
+        Ok(Self {
+            verified,
+            late: passes::optimization_pipeline::LateOptimization::NONE,
+        })
+    }
+
     /// Evaluate one prepared non-sampled Reference invocation.
     ///
     /// # Errors
@@ -1479,17 +1595,47 @@ impl TargetPreparedProgram {
         bindings: &[CircuitLaunchBinding],
         seed: u64,
     ) -> Result<Vec<u8>, ReferenceValueError> {
-        match evaluation::evaluate(&self.verified.local.checked.package, bindings) {
+        if self
+            .verified
+            .callable_contract(&self.verified.header().entrypoint)
+            .is_some_and(|contract| {
+                contract
+                    .requirements()
+                    .contains(Requirement::LogicalShotContext)
+            })
+        {
+            return self
+                .bind_reference_shot(0, 1)?
+                .reference_value_for_invocation(bindings, indexed_reference_seed(seed, 0));
+        }
+        let value = match evaluation::evaluate(&self.verified.local.checked.package, bindings) {
             Ok(value) => Ok(value),
             Err(ReferenceValueError::Unsupported(_)) => {
                 let circuit = self
                     .static_circuit_for_invocation(bindings)
                     .map_err(|error| reference_circuit_error(&error))?;
-                simulation::evaluate_static_circuit(&circuit, bindings, seed)
-                    .map_err(|error| reference_simulation_error(&error))
+                if circuit.runtime_result_value().is_none() {
+                    let samples = simulation::sample_static_circuit(&circuit, bindings, 1, seed)
+                        .map_err(|error| reference_simulation_error(&error))?;
+                    let abi = self
+                        .verified
+                        .artifact_abi()
+                        .map_err(|error| ReferenceValueError::Invalid(error.to_string()))?;
+                    result_codec::decode_result_value(abi.result_abi(), &samples.entries()[0].0)
+                        .map_err(|error| ReferenceValueError::Invalid(error.to_string()))
+                } else {
+                    simulation::evaluate_static_circuit(&circuit, bindings, seed)
+                        .map_err(|error| reference_simulation_error(&error))
+                }
             }
             Err(error) => Err(error),
-        }
+        }?;
+        let abi = self
+            .verified
+            .value_abi()
+            .map_err(|error| ReferenceValueError::Invalid(error.to_string()))?;
+        result_codec::normalize_result_value(abi.result_abi(), &value)
+            .map_err(|error| ReferenceValueError::Invalid(error.to_string()))
     }
 
     /// Execute one prepared invocation through the native Reference runtime.
@@ -1511,7 +1657,47 @@ impl TargetPreparedProgram {
             .verified
             .artifact_abi()
             .map_err(|error| ReferenceValueError::Invalid(error.to_string()))?;
-        if abi.sampled_width() == 0 {
+        if self
+            .verified
+            .callable_contract(&self.verified.header().entrypoint)
+            .is_some_and(|contract| {
+                contract
+                    .requirements()
+                    .contains(Requirement::LogicalShotContext)
+            })
+        {
+            self.verified
+                .check_indexed_invocation(shots)
+                .map_err(|_| ReferenceValueError::WorkBudgetExceeded)?;
+            if (self.verified.header().operation_count as u128)
+                .saturating_add(u128::from(abi.sampled_width()))
+                .saturating_mul(u128::from(shots))
+                > core::shot_context::MAX_INDEXED_WORK
+            {
+                return Err(ReferenceValueError::WorkBudgetExceeded);
+            }
+            let mut counts = std::collections::BTreeMap::<Box<[u8]>, u64>::new();
+            let mut simulation_budget = simulation::SimulationBudget::new();
+            for index in 0..shots {
+                let prepared = self.bind_reference_shot(index, shots)?;
+                prepared
+                    .validate_launch_parameters(bindings)
+                    .map_err(|error| reference_circuit_error(&error))?;
+                let circuit = prepared
+                    .static_circuit_for_invocation(bindings)
+                    .map_err(|error| reference_circuit_error(&error))?;
+                let sample = simulation_budget
+                    .sample(&circuit, bindings, 1, indexed_reference_seed(seed, index))
+                    .map_err(|error| reference_simulation_error(&error))?;
+                for (bits, count) in sample.entries() {
+                    *counts.entry(bits.clone()).or_default() += count;
+                }
+            }
+            return Ok(ReferenceExecution::Samples(
+                StaticSampleCounts::from_entries(counts),
+            ));
+        }
+        if !abi.is_per_shot() {
             let value = self.reference_value_for_invocation(bindings, seed)?;
             result_codec::validate_result_value(abi.result_abi(), &value)
                 .map_err(|error| ReferenceValueError::Invalid(error.to_string()))?;
@@ -1526,6 +1712,13 @@ impl TargetPreparedProgram {
             .map(ReferenceExecution::Samples)
             .map_err(|error| reference_simulation_error(&error))
     }
+}
+
+fn indexed_reference_seed(seed: u64, index: u64) -> u64 {
+    let mut derived = seed.wrapping_add(index.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    derived = (derived ^ (derived >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    derived = (derived ^ (derived >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    derived ^ (derived >> 31)
 }
 
 fn reference_circuit_error(error: &StaticCircuitError) -> ReferenceValueError {
@@ -1619,11 +1812,7 @@ impl VerifiedProgramFamily {
     /// Returns [`SymbolicResourceError`] when finite logical cost cannot be
     /// represented by the native expression algebra.
     pub fn symbolic_logical_counts(&self) -> Result<SymbolicLogicalCounts, SymbolicResourceError> {
-        symbolic_resources::symbolic_logical_counts(
-            &self.local.checked.package,
-            &self.local.checked.type_arena,
-            &self.local.checked.operations,
-        )
+        symbolic_resources::symbolic_logical_counts(&self.local.checked)
     }
 }
 
@@ -2184,6 +2373,7 @@ struct DecodedArtifact {
     operations: operations::LocallyCheckedOperations,
     equations: equations::LocalEquationFacts,
     call_graph: call_graph::StaticCallGraph,
+    call_dimensions: abi::VerifiedCallDimensions,
     boolean_plans: phase_lifting::VerifiedBooleanLiftPlans,
     contracts: contracts::ProgramContracts,
     verification_work: QCoreVerificationWork,
@@ -2303,7 +2493,7 @@ fn decode_qcore_artifact(
             | ArtifactBoundary::Specialization
             | ArtifactBoundary::FullyBoundSpecialization
     );
-    abi::verify_calls_with_work(
+    let call_dimensions = abi::verify_calls_with_work(
         &package,
         &type_arena,
         &operations,
@@ -2358,6 +2548,7 @@ fn decode_qcore_artifact(
         operations,
         equations,
         call_graph,
+        call_dimensions,
         boolean_plans,
         contracts,
         verification_work,
@@ -2821,6 +3012,149 @@ mod tests {
     }
 
     #[test]
+    fn indexed_source_preflight_checks_count_and_work_boundaries() {
+        let indexed_program = |operations: u64| {
+            let mut package =
+                wire::QCorePackageProto::decode(encoded_program().as_slice()).unwrap();
+            let function = &mut package.functions[0];
+            function.parameters.clear();
+            function.result_type = Some(staged("Shot", scalar("Bool")));
+            function.body = Some(wire::BlockProto {
+                operations: (1..operations)
+                    .map(|id| wire::OperationProto {
+                        opcode: "qcore.current_shot".into(),
+                        results: vec![value(id, staged("Shot", scalar("Int")))],
+                        span: Some(span()),
+                        ..Default::default()
+                    })
+                    .chain(std::iter::once(wire::OperationProto {
+                        opcode: "qcore.constant".into(),
+                        attributes: vec![attribute(
+                            "value",
+                            wire::literal_proto::Value::BoolValue(true),
+                        )],
+                        results: vec![value(operations, staged("Shot", scalar("Bool")))],
+                        span: Some(span()),
+                        ..Default::default()
+                    }))
+                    .collect(),
+                terminator: Some(wire::TerminatorProto {
+                    kind: "return".into(),
+                    operands: vec![operations],
+                    span: Some(span()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            VerifiedProgram::from_bytes(&reseal(package)).unwrap()
+        };
+        let program = indexed_program(2);
+        let restored = VerifiedProgram::from_bytes(program.canonical_bytes()).unwrap();
+        for program in [&program, &restored] {
+            assert!(program.check_indexed_invocation(10_000_000).is_ok());
+            assert!(program.check_indexed_invocation(10_000_001).is_err());
+            assert!(program.bind_current_shot(10_000_000, 10_000_001).is_err());
+            assert!(program.check_indexed_invocation(0).is_err());
+            let bound = program.bind_current_shot(9_999_999, 10_000_000).unwrap();
+            let last = &bound.local.checked.package.functions[0]
+                .body
+                .as_ref()
+                .unwrap()
+                .operations[0];
+            assert_eq!(last.opcode, "qcore.constant");
+            assert_eq!(
+                last.attributes[0].value.as_ref().unwrap().value,
+                Some(wire::literal_proto::Value::IntValue(9_999_999))
+            );
+        }
+        let work_limited = indexed_program(128);
+        assert!(work_limited.check_indexed_invocation(1_000_000).is_ok());
+        assert!(matches!(
+            work_limited.check_indexed_invocation(1_000_001),
+            Err(CurrentShotError::Invalid(reason)) if reason.contains("native work budget")
+        ));
+        let excessive = indexed_program(129);
+        assert!(excessive.check_indexed_invocation(1_000_000).is_err());
+        assert!(excessive.bind_current_shot(999_999, 1_000_000).is_err());
+        assert!(matches!(
+            TargetPreparedProgram::from_verified(excessive)
+                .unwrap()
+                .execute_reference(&[], 1_000_000, 0),
+            Err(ReferenceValueError::WorkBudgetExceeded)
+        ));
+    }
+
+    #[test]
+    fn indexed_reference_bounds_aggregate_encoded_result_work_before_execution() {
+        let mut package = wire::QCorePackageProto::decode(encoded_program().as_slice()).unwrap();
+        let word = staged(
+            "Shot",
+            wire::TypeProto {
+                kind: wire::type_proto::Kind::Array.into(),
+                name: "UInt".into(),
+                arguments: vec![scalar("Bit")],
+                dimensions: vec![wire::DimensionProto {
+                    value: Some(wire::dimension_proto::Value::Fixed(65_536)),
+                }],
+                ..Default::default()
+            },
+        );
+        let function = &mut package.functions[0];
+        function.parameters.clear();
+        function.result_type = Some(word.clone());
+        function.body = Some(wire::BlockProto {
+            operations: vec![
+                wire::OperationProto {
+                    opcode: "qcore.current_shot".into(),
+                    results: vec![value(1, staged("Shot", scalar("Int")))],
+                    span: Some(span()),
+                    ..Default::default()
+                },
+                wire::OperationProto {
+                    opcode: "qcore.constant".into(),
+                    attributes: vec![attribute("value", wire::literal_proto::Value::IntValue(0))],
+                    results: vec![value(2, word)],
+                    span: Some(span()),
+                    ..Default::default()
+                },
+            ],
+            terminator: Some(wire::TerminatorProto {
+                kind: "return".into(),
+                operands: vec![2],
+                span: Some(span()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let program = VerifiedProgram::from_bytes(&reseal(package)).unwrap();
+        assert!(program.check_indexed_invocation(4096).is_ok());
+        assert_eq!(program.artifact_abi().unwrap().sampled_width(), 65_536);
+        assert!(matches!(
+            TargetPreparedProgram::from_verified(program)
+                .unwrap()
+                .execute_reference(&[], 4096, 0),
+            Err(ReferenceValueError::WorkBudgetExceeded)
+        ));
+    }
+
+    #[test]
+    fn indexed_source_preflight_bounds_processed_bytes_before_source_cloning() {
+        let mut package = wire::QCorePackageProto::decode(encoded_program().as_slice()).unwrap();
+        package.module_name = "x".repeat(budget::MAX_STRING_BYTES);
+        let program = VerifiedProgram::from_bytes(&reseal(package)).unwrap();
+        assert_eq!(program.header().operation_count, 0);
+        assert!(program.check_indexed_invocation(4096).is_ok());
+        assert!(matches!(
+            program.check_indexed_invocation(1_000_000),
+            Err(CurrentShotError::Invalid(reason)) if reason.contains("native source byte budget")
+        ));
+        assert!(matches!(
+            program.bind_current_shot(999_999, 1_000_000),
+            Err(CurrentShotError::Invalid(reason)) if reason.contains("native source byte budget")
+        ));
+    }
+
+    #[test]
     fn seals_and_inspects_one_canonical_qcore_envelope() {
         let expected = encoded_program();
         let mut package = wire::QCorePackageProto::decode(expected.as_slice()).expect("program");
@@ -3149,7 +3483,7 @@ mod tests {
     #[test]
     fn target_prepared_typestate_composes_verified_optimizer_results() {
         let program = VerifiedProgram::from_bytes(&encoded_program()).expect("valid program");
-        let replacement = TargetPreparedProgram::from_verified(program.clone());
+        let replacement = TargetPreparedProgram::from_verified(program.clone()).unwrap();
 
         assert_eq!(replacement.canonical_bytes(), program.canonical_bytes());
         assert_eq!(
@@ -3186,7 +3520,7 @@ mod tests {
             source.canonical_bytes()
         );
         assert_eq!(
-            restored.prepared().canonical_bytes(),
+            restored.result().canonical_bytes(),
             source.canonical_bytes()
         );
         assert_eq!(

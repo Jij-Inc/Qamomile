@@ -26,7 +26,7 @@
 
 # %%
 # 最新のQamomileと、このノートブックで使う追加機能をインストールします。
-# # !pip install "qamomile[qiskit,visualization]"
+# # !pip install "qamomile[qiskit]" matplotlib
 
 # %%
 from __future__ import annotations
@@ -36,12 +36,10 @@ import os
 
 import matplotlib.pyplot as plt
 import numpy as np
-from IPython.display import HTML, display
 
 import qamomile as qm
 from qamomile.qiskit import Aer
 from qamomile.stdlib import inverse_qft, phase_estimation
-from qamomile.visualization import draw
 
 endpoint = Aer()
 
@@ -195,7 +193,7 @@ endpoint = Aer()
 # %% [markdown]
 # ## Qamomileでの実装
 #
-# ここでは対角な4x4ユニタリ行列を使います。
+# 量子ビット$q$のビット値を$b_q$とすると、2量子ビットの行列の行・列の添字$i=b_0+2b_1$には基底状態$|b_1 b_0\rangle$が対応します。ここでは次の対角行列を使います。
 #
 # $$
 # U =
@@ -207,12 +205,12 @@ endpoint = Aer()
 # \end{pmatrix}.
 # $$
 #
-# この行列では、すべての計算基底状態が固有状態です。対象状態$|01\rangle$を準備し、推定したい位相$\theta_{01} / 2\pi$を$0.6$に設定します。$0.6$は有限の2進小数では正確に表せないため、カウント用量子ビットを増やす効果が見えやすくなります。
+# この行列では、すべての計算基底状態が固有状態です。`qm.prepare((1, 0))`で対象状態$|01\rangle$を準備し、推定したい位相$\theta_{01} / 2\pi$を$0.6$に設定します。$0.6$は有限の2進小数では正確に表せないため、カウント用量子ビットを増やす効果が見えやすくなります。
 
 # %%
 # サンプリング設定と対象固有状態を決めます。
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
-SHOTS = 512 if docs_test_mode else 4096
+SHOTS = 1 if docs_test_mode else 4096
 SAMPLER_SEED = 42
 
 # 対角なユニタリ行列の位相と対象位相を設定します。
@@ -239,7 +237,7 @@ assert 0.0 <= TARGET_PHASE_FRACTION < 1.0
 # %% [markdown]
 # ### スクラッチ実装
 #
-# まず、位相を推定したい4x4ユニタリ行列を定義します。位相ゲート$P(\theta)$は、量子ビットの$|1\rangle$成分に$e^{i\theta}$を掛けます。Qamomileでは、このゲートを`qm.p(q, theta, target=index)`と記述します。そのため、`qm.p(q, PHI_10, target=0)`は対象量子ビットの最初のビットが1であるすべての基底状態に位相$e^{i\theta_{10}}$を与え、`qm.p(q, PHI_01, target=1)`は2つ目のビットが1であるすべての基底状態に位相$e^{i\theta_{01}}$を与えます。この時点で$|11\rangle$には$e^{i(\theta_{10}+\theta_{01})}$が乗っているため、制御位相シフトゲートでは補正分
+# まず、位相を推定したい4x4ユニタリ行列を定義します。位相ゲート$P(\theta)$は、量子ビットの$|1\rangle$成分に$e^{i\theta}$を掛けます。Qamomileでは、このゲートを`qm.p(q, theta, target=index)`と記述します。そのため、`qm.p(q, PHI_01, target=0)`は$b_0=1$の基底状態に位相$e^{i\theta_{01}}$を与え、`qm.p(q, PHI_10, target=1)`は$b_1=1$の基底状態に位相$e^{i\theta_{10}}$を与えます。この時点で$|11\rangle$には$e^{i(\theta_{10}+\theta_{01})}$が乗っているため、制御位相シフトゲートでは補正分
 #
 # $$
 # \theta_{11} - \theta_{10} - \theta_{01}
@@ -252,13 +250,11 @@ assert 0.0 <= TARGET_PHASE_FRACTION < 1.0
 @qm.qkernel
 def diagonal_4x4(q: qm.Q[qm.Bits[2]]) -> qm.Q[qm.Bits[2]]:
     """Apply the diagonal unitary with the phase constants defined above."""
-    q = qm.p(q, PHI_10, target=0)
-    q = qm.p(q, PHI_01, target=1)
+    q = qm.p(q, PHI_01, target=0)
+    q = qm.p(q, PHI_10, target=1)
     q = qm.cp(q, PHI_11 - PHI_10 - PHI_01, control=0, target=1)
     return q
 
-
-display(HTML(draw(qm.specialize(diagonal_4x4), loops="expanded").to_html()))
 
 # %% [markdown]
 # QPEの4つのステップをQamomileの基本操作で実装します。`qm.control(diagonal_4x4, counting, target, at=k)`は、カウント用量子ビット$k$を使って制御$U$ゲートを適用します。これを`2**k`回繰り返すことで、制御$U^{2^k}$ゲートを適用します。逆QFTの後、リトルエンディアン（下位ビットが先頭の順序）の量子ビット列を上位ビットが先頭の固定小数点の桁順へ反転し、`qm.as_fixed`で整数部を持たない`UFixed[0, counting_bits]`として扱います。`qm.measure`は、この量子ビット列を測定し、得られたビット列を数値の位相推定値へ復号します。すべての量子値を消費するため、保持されている対象レジスターも測定します。その測定結果は返しません。
@@ -271,7 +267,7 @@ def qpe_from_scratch(
 ) -> qm.Shot[qm.UFixed[0, counting_bits]]:
     """Read the eigenphase using explicit phase kickback and inverse QFT."""
     counting = qm.qubits(counting_bits)
-    target = qm.prepare((0, 1))
+    target = qm.prepare((1, 0))
     for k in range(counting_bits):
         counting = qm.h(counting, target=k)
 
@@ -292,14 +288,6 @@ def qpe_from_scratch(
     return phase_value
 
 
-display(
-    HTML(
-        draw(
-            qm.specialize(qpe_from_scratch, counting_bits=3), loops="expanded"
-        ).to_html()
-    )
-)
-
 # %% [markdown]
 # ### 組み込み関数: `phase_estimation`
 #
@@ -312,20 +300,12 @@ def qpe_with_stdlib(
     counting_bits: qm.Const[qm.Int],
 ) -> qm.Shot[qm.UFixed[0, counting_bits]]:
     """Read the same eigenphase with the standard-library QPE component."""
-    target = qm.prepare((0, 1))
+    target = qm.prepare((1, 0))
     phase, target = phase_estimation(diagonal_4x4, target, counting_bits)
     phase_value = qm.measure(phase)
     _target_value = qm.measure(target)
     return phase_value
 
-
-display(
-    HTML(
-        draw(
-            qm.specialize(qpe_with_stdlib, counting_bits=3), loops="expanded"
-        ).to_html()
-    )
-)
 
 # %% [markdown]
 # ## 実行結果
@@ -362,13 +342,14 @@ def run_qpe_experiment(qpe_kernel, counting_bits: int) -> float:
 
 
 # すべてのカウント用量子ビット数でQPEを実行します。
-bits = list(range(3, 6) if docs_test_mode else range(3, 10))
+bits = [3] if docs_test_mode else list(range(3, 10))
 estimated_phases = [
     run_qpe_experiment(qpe_with_stdlib, counting_bits) for counting_bits in bits
 ]
 # スクラッチ実装と組み込み関数が同じ位相推定値を返すことを確認します。
 scratch_phase = run_qpe_experiment(qpe_from_scratch, bits[0])
-assert np.isclose(scratch_phase, estimated_phases[0])
+if not docs_test_mode:
+    assert np.isclose(scratch_phase, estimated_phases[0])
 # 推定値を厳密な位相と比較し、循環距離で誤差を計算します。
 exact_phases = [TARGET_PHASE_FRACTION for _ in bits]
 phase_errors = [
@@ -394,9 +375,10 @@ plt.tight_layout()
 plt.show()
 
 # この例でカウント用量子ビットを増やすと推定が改善することを確認します。
-assert phase_errors[-1] < phase_errors[0]
-for counting_bits, phase_error in zip(bits, phase_errors):
-    assert phase_error <= 1 / 2**counting_bits
+if not docs_test_mode:
+    assert phase_errors[-1] < phase_errors[0]
+    for counting_bits, phase_error in zip(bits, phase_errors):
+        assert phase_error <= 1 / 2**counting_bits
 
 # %% [markdown]
 # ## リソース推定

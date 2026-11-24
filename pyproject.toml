@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=77.0", "setuptools-scm>=8", "setuptools-rust>=1.13,<2"]
+requires = ["setuptools>=84.1.0", "setuptools-scm>=8", "setuptools-rust>=1.13,<2"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -54,6 +54,10 @@ disable_error_code = ["metaclass"]
 module = "qamomile.proto.target_profile_pb2"
 disable_error_code = ["metaclass"]
 
+[[tool.mypy.overrides]]
+module = "qamomile.proto.result_postprocessing_pb2"
+disable_error_code = ["metaclass"]
+
 [tool.ruff]
 extend-exclude = ["*_pb2.py", "*_pb2.pyi", "_qamomile_native.pyi"]
 
@@ -66,7 +70,7 @@ combine-as-imports = true
 
 [project.optional-dependencies]
 qir = [
-    "pyqir>=0.11.1,<0.12",
+    "pyqir>=0.12.8,<0.13",
 ]
 visualization = [
     "cairosvg>=2.8,<3",
@@ -80,7 +84,7 @@ sparse = [
 qiskit = [
     "qiskit>=2.3.0,<3",
     "qiskit-aer>=0.17.2",
-    "qiskit-ibm-runtime>=0.40,<1",
+    "qiskit-ibm-runtime>=0.51,<1",
 ]
 cudaq-cu12 = [
     "cuda-quantum-cu12>=0.14,<0.15; sys_platform == 'linux'",
@@ -98,9 +102,10 @@ quri_parts = [
 ]
 hugr = [
     "hugr>=0.16,<0.17",
-    "qnexus>=0.49,<0.50",
-    "selene-hugr-qis-compiler>=0.3.2,<0.4",
-    "selene-sim>=0.3.2,<0.4",
+    "qnexus>=0.51.1,<0.52",
+    "pytket>=2.18.5,<3",
+    "selene-hugr-qis-compiler==0.2.11",
+    "selene-sim==0.2.17",
     "tket-exts>=0.12,<0.13",
 ]
 guppy = [
@@ -110,7 +115,11 @@ braket = [
     "amazon-braket-sdk>=1.125,<2",
 ]
 qbraid = [
-    "qbraid[qiskit]>=0.12,<0.13",
+    # Circuit transport does not use qBraid's IBM Runtime provider.
+    "qbraid>=0.12,<0.13",
+    "qiskit>=2.3.0,<3",
+    "qiskit-qasm3-import>=0.5.1",
+    "packaging>=20.0",
 ]
 cirq = [
     "cirq-core>=1.6,<1.7",
@@ -131,13 +140,6 @@ cache-keys = [
     { file = "qamomile/_qamomile_native.pyi" },
     { git = { commit = true, tags = true } },
 ]
-conflicts = [
-    [
-        { extra = "hugr" },
-        { extra = "guppy" },
-    ],
-]
-
 [dependency-groups]
 # CI selects a focused group with --no-default-groups; dev remains the full
 # local environment, including the executable documentation dependencies.
@@ -189,6 +191,7 @@ dev = [
 ]
 docs = [
     { include-group = "dev" },
+    "kagglehub>=1.0.2",
     # Keep engine constraints aligned with project.optional-dependencies.
     "quri-parts-core>=0.21.1",
     "quri-parts-circuit>=0.21.1",

@@ -1,11 +1,12 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -17,382 +18,210 @@
 # tags: [algorithm, encoding, primitive]
 # ---
 #
-# ---
-# tags: [algorithm, encoding, primitive]
-# ---
-#
 # # Möttönen Amplitude Encoding
 #
-# This notebook prepares real and complex amplitude vectors with Qamomile's
-# explicit Möttönen construction, verifies the resulting states and gate counts,
-# and shows when to choose the method-specific API instead of generic amplitude
-# encoding.
-#
-# ## Background
-#
-# **Amplitude encoding** prepares an $n$-qubit state from a unit-norm complex
-# vector $a \in \mathbb{C}^{2^n}$:
-#
-# $$
-# |0\rangle^{\otimes n}
-# \longmapsto
-# |\psi\rangle
-# = \sum_{i=0}^{2^n - 1} a_i |i\rangle.
-# $$
-#
-# Möttönen amplitude encoding is one algorithm that realizes this
-# state-preparation map. The current stdlib exposes one portable
-# `amplitude_encoding(...)` implementation, and that name means the explicit
-# Möttönen/Gray-walk construction described here. Target adapters do not
-# silently replace it with an unrelated native state-preparation method.
-#
-# The explicit implementation follows the uniformly controlled rotation
-# construction of Möttönen, Vartiainen, Bergholm, and Salomaa
-# {cite:p}`10.48550/arXiv.quant-ph/0407010`. The paper treats the more general
-# arbitrary-state transformation $|a\rangle \to |b\rangle$; Qamomile implements
-# the state-preparation half with the input fixed to $|0\rangle^{\otimes n}$.
-#
-# :::{note}
-# If the input qubits are not in $|0\rangle^{\otimes n}$, neither API
-# generally guarantees the output state.
-# :::
-
-# %% [markdown]
-# ## Installation
-#
-# Install the Qamomile distribution:
-#
-# ```bash
-# pip install qamomile
-# ```
+# Prepare two-qubit states from positive real, signed real, and complex amplitude vectors using the Möttönen method. Compare two ways to prepare the same inputs: passing precomputed angles or passing the amplitudes directly. We compare the measurement probabilities and gate counts of the two circuits.
 
 # %%
 # Install the latest Qamomile through pip!
 # # !pip install qamomile
 
 # %%
-import math
+import os
 
 import qamomile as qm
-from qamomile.stdlib import amplitude_angles, amplitude_encoding_from_angles
+from qamomile.stdlib import amplitude_angles, amplitude_encoding, amplitude_encoding_from_angles
+
+SAMPLE_SHOTS = 1 if os.environ.get("QAMOMILE_DOCS_TEST") == "1" else 128
 
 # %% [markdown]
+# ## Background
+#
+# Amplitude encoding normalizes a nonzero vector $a\in\mathbb{C}^{2^n}$ of length $2^n$ and maps it to an $n$-qubit quantum state. Writing $\tilde a_i=a_i/\|a\|_2$, we have
+#
+# $$
+# |0\rangle^{\otimes n}\longmapsto
+# |\psi(a)\rangle=\sum_{i=0}^{2^n-1}\tilde a_i|i\rangle,
+# \qquad \sum_i|\tilde a_i|^2=1.
+# $$
+#
+# The original paper uses uniformly controlled rotations to transform an arbitrary initial state into a chosen target state {cite:p}`10.48550/arXiv.quant-ph/0407010`. Here we compute the rotation angles for a register that starts in the all-zero state. Applying the same circuit to a different initial state generally produces a different final state.
+#
 # ## Problem Settings
 #
-# We use two qubits and compare the prepared statevector with three normalized
-# targets:
+# We use two qubits (four amplitudes) to prepare states from three types of unnormalized input vector:
 #
-# - a positive real vector $(1, 2, 3, 4)$,
-# - a signed real vector $(1, -1, 1, -1)$, and
-# - a complex vector $(1, 1+i, 1-i, 2i)$.
+# - Positive real vector: $(1,2,3,4)$, with norm $\sqrt{30}$.
+# - Signed real vector: $(1,-1,1,-1)$, with norm $2$.
+# - Complex vector: $(1,1+i,1-i,2i)$, with norm $3$.
 #
-# State fidelity is phase-invariant, so it verifies the intended physical state
-# even if an engine chooses a different global phase.
+# In each case, the amplitudes of the prepared state are the input values divided by the vector's norm.
+#
+# We take qubit $0$ to be the least significant bit and write the state corresponding to index $i=b_0+2b_1$ as $|b_1b_0\rangle$. Qamomile's measurement bitstrings are ordered as $(b_0,b_1)$. For example, $(1,0)$ corresponds to index 1, or $|01\rangle$.
 
 # %%
-positive_amplitudes = (1.0, 2.0, 3.0, 4.0)
-signed_amplitudes = (1.0, -1.0, 1.0, -1.0)
+input_vectors = {
+    "positive": (1.0, 2.0, 3.0, 4.0),
+    "signed": (1.0, -1.0, 1.0, -1.0),
+    "complex": (1.0, 1.0 + 1.0j, 1.0 - 1.0j, 2.0j),
+}
 
 # %% [markdown]
 # ## Algorithm
 #
-# The Möttönen state-preparation construction has two cascades:
+# Möttönen state preparation consists of two types of rotation:
 #
-# 1. Uniformly controlled $R_y$ rotations distribute the magnitudes $|a_i|$
-#    across computational-basis states. For real vectors, signed rotation angles
-#    also encode negative amplitudes.
-# 2. Uniformly controlled $R_z$ rotations restore relative phases. Qamomile
-#    omits this cascade when every amplitude has zero imaginary part.
+# 1. Uniformly controlled $R_y$ rotations distribute the required amplitude magnitudes across computational-basis states.
+# 2. Uniformly controlled $R_z$ rotations introduce relative phases, including the $\pi$ phase difference between positive and negative real amplitudes. Qamomile's fixed-input `amplitude_encoding` omits this phase-rotation sequence when all computed $R_z$ angles are zero.
 #
-# Each uniformly controlled rotation is decomposed into elementary rotations and
-# `CNOT` gates with the Gray-code construction. For Qamomile's
-# $|0\rangle^{\otimes n} \to |\psi\rangle$ specialization, the resulting counts
-# are:
+# Uniformly controlled rotations are decomposed into a gate sequence based on Gray codes. For a fixed-input state-preparation circuit constructed with `amplitude_encoding`, the logical gate counts depend on the computed $R_z$ angles:
 #
-# | Input | Rotations | `CNOT` gates |
+# | Circuit type | Total $R_y$ / $R_z$ rotations | `CX` gates |
 # |---|---:|---:|
-# | Real | $2^n - 1$ | $2^n - 2$ |
-# | Complex | $2(2^n - 1)$ | $2(2^n - 2)$ |
+# | All $R_z$ angles are zero ($R_y$ only) | $2^n-1$ | $2^n-2$ |
+# | At least one $R_z$ angle is nonzero ($R_y$ and $R_z$) | $2(2^n-1)$ | $2(2^n-2)$ |
 #
-# A $k$-controlled uniformly controlled rotation costs $2^k$ elementary
-# rotations and $2^k$ `CNOT` gates. Summing the stages for
-# $k = 0, 1, \ldots, n-1$ gives the formulas above; the uncontrolled stage is
-# `CNOT`-free. The larger counts quoted in the paper's abstract apply to the
-# full arbitrary-input transformation $|a\rangle \to |b\rangle$, rather than the
-# state-preparation half implemented here. Qamomile also retains the plain
-# per-stage decomposition instead of applying inter-cascade `CNOT`
-# cancellation.
+# A phase shared by all nonzero amplitudes is retained separately as a global phase. A fixed-input circuit can omit the $R_z$ sequence even for negative amplitudes if all computed $R_z$ angles are zero.
 #
-# ### Derive reusable coordinates
+# In the two-qubit $R_y$ sequence, the first stage rotates qubit 1 once. The next stage rotates qubit 0 through an angle selected by the value of qubit 1. This stage uses two rotations and two `CX` gates, giving three rotations and two `CX` gates in total.
 #
-# We prepare the two-qubit complex vector
-#
-# $$
-# (1,\;1+i,\;1-i,\;2i).
-# $$
-#
-# Its squared norm is nine, so the computational-basis probabilities are
-# $(1,2,2,4)/9$. `amplitude_angles` accepts the unnormalized vector and returns
-# an immutable value containing three $R_y$ angles, three $R_z$ angles, and one
-# retained global phase.
-
-# %%
-amplitudes = (
-    1.0 + 0.0j,
-    1.0 + 1.0j,
-    1.0 - 1.0j,
-    0.0 + 2.0j,
-)
-coordinates = amplitude_angles(amplitudes)
-
-assert coordinates.width == 2
-assert len(coordinates.ry) == 3
-assert len(coordinates.rz) == 3
-assert all(math.isfinite(value) for value in coordinates.ry)
-assert all(math.isfinite(value) for value in coordinates.rz)
-assert math.isfinite(coordinates.phase)
-print(coordinates)
-
-# %% [markdown]
-# Coordinate synthesis is host-side preprocessing over finite classical data.
-# It crosses one required Rust boundary and does not create a Python numerical
-# fallback. Invalid length, nonfinite input, the zero vector, or an excessive
-# width fails before QCore construction.
+# In general, a stage with $k\ge1$ control qubits has $2^k$ possible control bitstrings. This decomposition uses $2^k$ rotations and $2^k$ `CX` gates at that stage. Summing over the $n$ stages, including the first uncontrolled rotation, gives $2^n-1$ rotations and $2^n-2$ `CX` gates.
 
 # %% [markdown]
 # ## Implementation
 #
-# ### Compile once with runtime-rebindable angles
+# ### Pass Angles to `amplitude_encoding_from_angles`
 #
-# `amplitude_encoding_from_angles(2)` fixes only the two-qubit topology. The
-# coordinates remain aggregate runtime parameters, so one artifact can prepare
-# many vectors without recompilation. Their shapes are part of the function
-# type and the generated launch ABI.
+# This circuit starts two qubits in the all-zero state. At run time it takes three $R_y$ angles, three $R_z$ angles, and a global phase. Compile the circuit once. When running it, use `amplitude_angles` to compute the angles for the current input.
 
 # %%
-encode = amplitude_encoding_from_angles(2)
+encode_angles = amplitude_encoding_from_angles(2)
 
 
 @qm.qkernel
-def prepared_state(
-    ry_angles: qm.Param[qm.Vector[qm.Real, 3]],
-    rz_angles: qm.Param[qm.Vector[qm.Real, 3]],
-    phase: qm.Param[qm.Real],
-) -> qm.Q[qm.Bits[2]]:
-    """Prepare one two-qubit state from Möttönen coordinates.
-
-    Args:
-        ry_angles (qm.Param[qm.Vector[qm.Real, 3]]): Magnitude-cascade angles.
-        rz_angles (qm.Param[qm.Vector[qm.Real, 3]]): Relative-phase angles.
-        phase (qm.Param[qm.Real]): Retained global phase.
-
-    Returns:
-        qm.Q[qm.Bits[2]]: Prepared two-qubit state.
-    """
-
-    return encode(qm.qubits(2), ry_angles, rz_angles, phase)
-
-
-@qm.qkernel
-def prepared_samples(
+def samples_from_angles(
     ry_angles: qm.Param[qm.Vector[qm.Real, 3]],
     rz_angles: qm.Param[qm.Vector[qm.Real, 3]],
     phase: qm.Param[qm.Real],
 ) -> qm.Shot[qm.Bits[2]]:
-    """Measure the reusable two-qubit preparation.
-
-    Args:
-        ry_angles (qm.Param[qm.Vector[qm.Real, 3]]): Magnitude-cascade angles.
-        rz_angles (qm.Param[qm.Vector[qm.Real, 3]]): Relative-phase angles.
-        phase (qm.Param[qm.Real]): Retained global phase.
-
-    Returns:
-        qm.Shot[qm.Bits[2]]: Sampled computational-basis state.
-    """
-
-    return qm.measure(prepared_state(ry_angles, rz_angles, phase))
+    """Prepare and measure two qubits using the supplied rotation angles."""
+    state = encode_angles(qm.qubits(2), ry_angles, rz_angles, phase)
+    return qm.measure(state)
 
 
-# %% [markdown]
-# For a vector fixed at compile time, `amplitude_encoding(amplitudes)` returns a
-# closed unary transform instead. Both forms use the same Rust coordinates and
-# ordinary gate vocabulary; choose the runtime form only when artifact reuse is
-# useful.
-
-# %% [markdown]
-# ### Build kernels for resource checks
-#
-# The verified program contains no amplitude-preparation opcode. Resource
-# analysis composes its ordinary rotations and controlled operations directly.
-
-# %%
-program = qm.specialize(prepared_samples)
-study = qm.resources.logical(program)
-inspection = program.inspect()
-
-assert "quantum.amplitude" not in inspection
-assert study.metric(qm.resources.LOGICAL_ROTATION_GATES).numeric_enclosure() == (
-    6,
-    6,
-)
-assert study.metric(
-    qm.resources.logical_operation_count("quantum.cx")
-).numeric_enclosure() == (4, 4)
-
-# %% [markdown]
-# A general $n$-qubit complex preparation uses $2(2^n-1)$ rotations and
-# $2(2^n-2)$ `CX` gates in this decomposition. The exponential cost is visible
-# in the estimate rather than hidden behind a backend-native instruction.
-
-# %% [markdown]
-# ## Result
-#
-# ### State magnitudes
-#
-# Compilation seals the three aggregate parameter slots. `bindings()` produces
-# exactly the matching launch mapping, including the global phase.
-
-# %%
 reference = qm.Reference()
-artifact = qm.compile(program, to=reference)
-parameters = coordinates.bindings()
-record = qm.run(
-    artifact,
-    on=reference,
-    parameters=parameters,
-    shots=128,
-    seed=2,
-)
-
-assert tuple(slot.name for slot in artifact.parameter_abi.slots) == (
-    "ry_angles",
-    "rz_angles",
-    "phase",
-)
-assert record.result.shots == 128
-assert sum(record.result.counts.values()) == 128
-
-expected_probabilities = {
-    (0, 0): 1.0 / 9.0,
-    (1, 0): 2.0 / 9.0,
-    (0, 1): 2.0 / 9.0,
-    (1, 1): 4.0 / 9.0,
-}
-for bits, expected in expected_probabilities.items():
-    sampling_bound = 5.0 * math.sqrt(expected * (1.0 - expected) / record.result.shots)
-    assert abs(record.result.probability(bits) - expected) <= sampling_bound
-
-observed_probabilities = {
-    bits: record.result.probability(bits) for bits in expected_probabilities
-}
-print("sampled probabilities:", observed_probabilities)
+angle_program = qm.specialize(samples_from_angles)
+angle_artifact = qm.compile(angle_program, to=reference)
 
 # %% [markdown]
-# ### Runtime rebinding
+# ### Pass Amplitudes Directly to `amplitude_encoding`
 #
-# The same artifact can prepare all three targets because only the six
-# rotation angles and global phase change. Structure, result ABI, and target
-# payload stay fixed.
+# Given an amplitude vector, `amplitude_encoding` computes the Möttönen rotation angles. Define one measurement circuit for positive real amplitudes, one for real amplitudes of both signs, and one for complex amplitudes.
 
 # %%
-for trial_amplitudes in (
-    positive_amplitudes,
-    signed_amplitudes,
-    amplitudes,
-):
-    trial_coordinates = amplitude_angles(trial_amplitudes)
-    trial_record = qm.run(
-        artifact,
-        on=reference,
-        parameters=trial_coordinates.bindings(),
-        shots=128,
-        seed=3,
+prepare_positive = amplitude_encoding(input_vectors["positive"])
+
+
+@qm.qkernel
+def sample_positive() -> qm.Shot[qm.Bits[2]]:
+    qubits = qm.qubits(2)
+    state = prepare_positive(qubits)
+    return qm.measure(state)
+
+
+# %%
+prepare_signed = amplitude_encoding(input_vectors["signed"])
+
+
+@qm.qkernel
+def sample_signed() -> qm.Shot[qm.Bits[2]]:
+    qubits = qm.qubits(2)
+    state = prepare_signed(qubits)
+    return qm.measure(state)
+
+
+# %%
+prepare_complex = amplitude_encoding(input_vectors["complex"])
+
+
+@qm.qkernel
+def sample_complex() -> qm.Shot[qm.Bits[2]]:
+    qubits = qm.qubits(2)
+    state = prepare_complex(qubits)
+    return qm.measure(state)
+
+
+# %%
+fixed_programs = {
+    "positive": qm.specialize(sample_positive),
+    "signed": qm.specialize(sample_signed),
+    "complex": qm.specialize(sample_complex),
+}
+
+# %% [markdown]
+# ## Results
+#
+# Measure each input with both circuits and compare the probability of each computational basis state $|b_1b_0\rangle$. In the table, `ideal` is the theoretical probability $|a_i|^2 / \sum_j |a_j|^2$. The `from_angles` and `fixed` columns are the observed frequencies for the circuit with runtime angles and the circuit with fixed amplitudes, respectively.
+
+# %%
+bitstrings = ((0, 0), (1, 0), (0, 1), (1, 1))
+
+
+def ideal_probabilities(amplitudes):
+    """Return the normalized squared magnitudes in basis-index order."""
+    scale = max(max(abs(value.real), abs(value.imag)) for value in amplitudes)
+    weights = [abs(value / scale) ** 2 for value in amplitudes]
+    total = sum(weights)
+    return tuple(weight / total for weight in weights)
+
+
+def sample_probabilities(program, *, seed, parameters=None):
+    """Run the sampling circuit and return probabilities in the same order."""
+    result = qm.run(
+        program, on=reference, parameters=parameters, shots=SAMPLE_SHOTS, seed=seed
+    ).result
+    assert sum(result.counts.values()) == SAMPLE_SHOTS
+    return tuple(result.probability(bits) for bits in bitstrings)
+
+
+for name, amplitudes in input_vectors.items():
+    ideal = ideal_probabilities(amplitudes)
+    from_angles = sample_probabilities(
+        angle_artifact, parameters=amplitude_angles(amplitudes).bindings(), seed=2
     )
-    norm = sum(abs(value) ** 2 for value in trial_amplitudes)
-    for index, value in enumerate(trial_amplitudes):
-        bits = (index & 1, (index >> 1) & 1)
-        expected = abs(value) ** 2 / norm
-        bound = 5.0 * math.sqrt(expected * (1.0 - expected) / trial_record.result.shots)
-        assert abs(trial_record.result.probability(bits) - expected) <= bound
+    fixed = sample_probabilities(fixed_programs[name], seed=3)
+
+    print(f"\n{name}")
+    print("basis   ideal   from_angles   fixed")
+    for i in range(len(ideal)):
+        print(f"|{i:02b}>   {ideal[i]:.3f}   {from_angles[i]:11.3f}   {fixed[i]:.3f}")
 
 # %% [markdown]
-# Sampling checks magnitudes. Sign and complex phase require an interference
-# witness, which is why the next section evaluates observables as well.
-
-# %% [markdown]
-# ## Verify relative phase
+# The ideal probabilities are $(1,4,9,16)/30$ for the positive vector, $(1,1,1,1)/4$ for the signed vector, and $(1,2,2,4)/9$ for the complex vector. Both methods predict the same probabilities for each input. The observed frequencies fluctuate with finite sampling. This measurement checks the magnitudes of the amplitudes.
 #
-# Computational-basis probabilities cannot distinguish complex phases. The
-# observable $Y_0X_1$ has exact expectation $8/9$ for this vector, so it gives a
-# phase-sensitive witness using the same `prepared_state` implementation.
+# Now compare the rotation and `CX` gate counts for the same three inputs.
 
 # %%
-phase_witness = qm.expectation(
-    prepared_state,
-    qm.Y(0) * qm.X(1),
-    on=reference,
-    parameters=parameters,
-    shots=64,
-    seed=2,
-)
-expected_phase_witness = 8.0 / 9.0
-phase_sampling_bound = 5.0 * math.sqrt(
-    (1.0 - expected_phase_witness**2) / phase_witness.shots
-)
+def gate_counts(program):
+    """Return the rotation and CX counts for this two-qubit circuit."""
+    study = qm.resources.logical(program)
+    rotations = study.metric(qm.resources.LOGICAL_ROTATION_GATES).numeric_enclosure()
+    cx_metric = qm.resources.logical_operation_count("quantum.cx")
+    cx = study.metric(cx_metric).numeric_enclosure()
+    assert rotations[0] == rotations[1] and cx[0] == cx[1]
+    return rotations[0], cx[0]
 
-assert abs(phase_witness.value - expected_phase_witness) <= phase_sampling_bound
-print(f"<Y0 X1>: {phase_witness.value:.3f}")
 
-# %%
-positive_coordinates = amplitude_angles(positive_amplitudes)
-signed_coordinates = amplitude_angles(signed_amplitudes)
-positive_witness = qm.expectation(
-    prepared_state,
-    qm.Z(0),
-    on=reference,
-    parameters=positive_coordinates.bindings(),
-    shots=64,
-    seed=4,
-)
-signed_witness = qm.expectation(
-    prepared_state,
-    qm.X(0),
-    on=reference,
-    parameters=signed_coordinates.bindings(),
-    shots=64,
-    seed=4,
-)
-
-assert abs(positive_witness.value + 1.0 / 3.0) <= 5.0 * math.sqrt(
-    (1.0 - (1.0 / 3.0) ** 2) / positive_witness.shots
-)
-assert abs(signed_witness.value + 1.0) <= 0.1
+reusable_counts = gate_counts(angle_program)
+print("input      from_angles (rot, CX)   fixed (rot, CX)")
+for name, program in fixed_programs.items():
+    print(f"{name:10} {str(reusable_counts):23} {gate_counts(program)}")
 
 # %% [markdown]
-# For $(1,2,3,4)$, $\langle Z_0\rangle=-1/3$. For
-# $(1,-1,1,-1)$, $\langle X_0\rangle=-1$, which proves that the negative signs
-# survive even though computational-basis probabilities cannot see them.
-
-# %% [markdown]
-# ## Fixed amplitudes versus reusable angles
+# The circuit with runtime angles uses six rotations and four `CX` gates for every input. Among these examples, only the positive vector lets the fixed-input circuit omit the $R_z$ rotations, reducing the counts to three rotations and two `CX` gates.
 #
-# `amplitude_encoding(amplitudes)` computes and closes the coordinates at
-# Python factory time. Use it when the target vector is part of program
-# structure. `amplitude_encoding_from_angles(width)` fixes only the topology and
-# leaves typed angle vectors in the runtime ABI, as this page does. Both are the
-# same Möttönen synthesis and therefore have the same gate-count formulas.
-
-# %% [markdown]
 # ## Summary
 #
-# - Rust owns normalization, exact-phase coordinates, Gray-walk topology, and
-#   width budgets.
-# - Aggregate `Param[Vector[Real, 3]]` annotations make the reusable ABI typed.
-# - The program is ordinary `RY`, `RZ`, `CX`, and global-phase composition.
-# - The same source supports exact logical resources, compilation, sampling,
-#   and phase-sensitive expectation values.
-# - One artifact is rebound across positive, signed-real, and complex targets.
-# - All executable evidence stays at two qubits; wider scaling is symbolic.
+# To reuse one circuit across inputs, pass the angles from `amplitude_angles` to the circuit built with `amplitude_encoding_from_angles`. This quantum kernel takes the rotation angles as runtime parameters, so the circuit includes the $R_z$ gates even when all their angles are zero.
 #
-# Next, [Multidimensional QFT](multidimensional_qft.ipynb) composes state
-# preparation with independent Fourier transforms along two logical axes.
+# For a fixed input, you can pass the amplitudes directly to `amplitude_encoding`. If all the computed $R_z$ angles are zero, the circuit omits those rotations and uses fewer gates.

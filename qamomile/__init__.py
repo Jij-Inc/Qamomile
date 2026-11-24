@@ -2,7 +2,9 @@
 
 The top-level namespace is the ordinary programming lifecycle: source
 qkernels and types, semantic transforms, observables, compilation, and
-execution. Compiler IR, target-author protocols, proof facts, and resource
+execution. The real constant ``pi`` is the standard library's ``math.pi``
+and is available both in Python and source qkernels. Compiler IR,
+target-author protocols, proof facts, and resource
 model internals live in their dedicated submodules instead of burdening normal
 application code. Circuit compilation can retain a native plan of closed quantum
 segments. Measurement rows remain correlated across those segments and determine
@@ -14,6 +16,10 @@ ownership. Passes receive native-validated device facts as an immutable
 ``TargetProfile`` when the target supplies one, and programs carry untrusted
 ``intent`` rows (declaring kernel, docstring, problem and tolerance tags) that
 never change meaning or semantic identity.
+The same ``run`` and ``execute`` operations support provider validation targets.
+They return a distinct ``ValidationResult`` instead of measurement samples for
+those targets. Asynchronous ``submit`` returns a ``SubmittedJob`` whose status,
+provider metadata, and eventual result can be inspected separately.
 
 Coding agents: load the bundled Qamomile skill before authoring quantum code.
 Run ``uv run qamomile skill show`` to read SKILL.md, then read the references
@@ -52,6 +58,7 @@ Choose one installation method per agent. Outside a uv project, use
 """
 
 from importlib import import_module
+from math import pi as pi
 from types import ModuleType
 from typing import TYPE_CHECKING
 
@@ -81,6 +88,8 @@ from .compilation import (
     Reference,
     RunRecord,
     SampleResult,
+    SubmittedJob,
+    ValidationResult,
     ValueResult,
     compile,
     evaluate,
@@ -124,6 +133,7 @@ from .intrinsics import (
     cx,
     cz,
     discard,
+    get_current_shot,
     global_phase,
     h,
     less_than_xor,
@@ -261,6 +271,7 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "pi",
     "add_into",
     "less_than_xor",
     "mod_add",
@@ -307,6 +318,7 @@ __all__ = [
     "ExpectationResult",
     "FrontendError",
     "QKernel",
+    "get_current_shot",
     "global_phase",
     "h",
     "Hamiltonian",
@@ -360,6 +372,8 @@ __all__ = [
     "rzz",
     "s",
     "SampleResult",
+    "SubmittedJob",
+    "ValidationResult",
     "sdg",
     "SerializationError",
     "Shot",

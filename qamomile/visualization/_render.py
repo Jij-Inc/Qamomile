@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 
 from qamomile.circuit import (
     CircuitBlock,
+    CircuitInstruction,
     CircuitProgram,
     CircuitValue,
     ClassicalExpr,
@@ -25,6 +27,8 @@ _MAX_HTML_BYTES = 16_000_000
 _QUANTUM = "#246b83"
 _CLASSICAL = "#92601f"
 _BORDER = "#ccd9de"
+_TIME_AXIS_WIDTH = 52
+_SPECIALIZATION_DIGEST = re.compile(r"\[#([0-9a-f]{12})[0-9a-f]{52}\]")
 
 
 class _SvgParts(list[str]):
@@ -54,6 +58,23 @@ class _SvgParts(list[str]):
         super().append(part)
 
 
+def _abbreviate(label: str, limit: int) -> str:
+    """Keep both ends of a bounded label, including final parameter indices.
+
+    Args:
+        label (str): Text to show.
+        limit (int): Positive maximum number of visible characters.
+
+    Returns:
+        str: Original text or a middle-ellipsized label.
+    """
+    if len(label) <= limit:
+        return label
+    split = limit // 2
+    suffix_length = limit - split - 1
+    return label[:split] + "…" + label[len(label) - suffix_length :]
+
+
 def _text(
     x: float,
     y: float,
@@ -62,6 +83,7 @@ def _text(
     limit: int = 55,
     size: int = 12,
     anchor: str = "start",
+    compact_call: bool = False,
 ) -> str:
     """Place bounded text with an accessible, escaped full label.
 
@@ -72,6 +94,8 @@ def _text(
         limit (int): Maximum visible characters; defaults to 55.
         size (int): Font size in SVG units; defaults to 12.
         anchor (str): Text alignment; defaults to start.
+        compact_call (bool): Abbreviate compiler-generated call identifiers
+            visually while preserving the complete identifier in the tooltip.
 
     Returns:
         str: Escaped SVG text and title.
@@ -87,7 +111,8 @@ def _text(
         else "�"
         for character in label
     )
-    visible = label if len(label) <= limit else label[: limit - 1] + "…"
+    visible = _SPECIALIZATION_DIGEST.sub(r"[#\1…]", label) if compact_call else label
+    visible = _abbreviate(visible, limit)
     return (
         f'<text x="{x}" y="{y}" font-size="{size}" text-anchor="{anchor}">'
         f"<title>{html.escape(label)}</title>{html.escape(visible)}</text>"
@@ -267,9 +292,14 @@ class _Layout:
         x2, y2 = end
         bend = min(22, max(0, (x2 - x1) / 3))
         if track is None:
-            middle = (x1 + x2) / 2
-            path = f"M{x1},{y1} C{middle},{y1} {middle},{y2} {x2},{y2}"
-            label_x, label_y = middle, min(y1, y2)
+            # Give each input its own horizontal run for its label. Two
+            # crossing curves share a midpoint, but end at different pins.
+            arrival = x1 + bend * 2 if annotation else x2
+            middle = (x1 + arrival) / 2
+            path = f"M{x1},{y1} C{middle},{y1} {middle},{y2} {arrival},{y2} L{x2},{y2}"
+            label_x, label_y = (
+                ((arrival + x2) / 2, y2) if annotation else (middle, (y1 + y2) / 2)
+            )
         else:
             path = (
                 f"M{x1},{y1} L{x1 + bend},{y1} L{x1 + bend},{track} "
@@ -339,9 +369,17 @@ class _Layout:
         if node.kind == "exit":
             outputs = inputs  # Exit bindings, not newly produced SSA values.
         width = 132.0
+        if node.kind == "call":
+            caption = _SPECIALIZATION_DIGEST.sub(r"[#\1…]", node.label)
+            width = max(width, 28.0 + 12 * min(len(caption), 256))
+        elif node.kind == "classical" and not node.children:
+            width = max(width, 28.0 + 12 * min(len(node.label), 90))
         parts = _SvgParts()
         children: _Scene | None = None
         result_ids: tuple[int, ...] = ()
+        symbolic_body = next(
+            (child for child in node.children if child.opcode == "loop.body"), None
+        )
         if node.children:
             if node.kind == "branch":
                 alternatives = []
@@ -378,33 +416,39 @@ class _Layout:
                     result_ids = node.outputs
                 elif node.kind == "call":
                     result_ids = node.children[-1].inputs
-                elif node.kind == "loop" and all(
-                    child.opcode != "loop.body" for child in node.children
-                ):
+                elif node.kind == "loop" and symbolic_body is None:
                     result_ids = node.children[-1].outputs
                 desired = tuple(
                     source
                     for source, target in zip(result_ids, node.outputs)
                     if target in outputs
                 )
-                retained: tuple[int, ...] = ()
-                if node.kind == "loop" and not result_ids:
-                    # Body and normal-completion values are separate native
-                    # interfaces. Keep relevant body yields without aliasing
-                    # them to the unknown final carries entering else.
-                    body, final = node.children[0], node.children[-1]
-                    retained = tuple(
-                        source
-                        for source, target in zip(body.outputs, node.outputs)
-                        if target in outputs
-                    )
+                # Each while check consumes its predicate, even when the
+                # value is neither a loop result nor a data input to the body.
+                retained = [
+                    child.outputs[0]
+                    for child in node.children
+                    if child.opcode == "while.condition"
+                ]
+                if symbolic_body is not None:
+                    final = node.children[-1]
+                    if node.opcode == "qcore.while":
+                        retained.extend(symbolic_body.outputs)
+                    else:
+                        retained.extend(
+                            source
+                            for source, target in zip(
+                                symbolic_body.outputs, node.outputs
+                            )
+                            if target in outputs
+                        )
                     desired = tuple(
                         source
                         for source, target in zip(final.outputs, node.outputs)
                         if target in outputs
                     )
                 children = self.scope(
-                    node.children, node.inputs, desired, retained=retained
+                    node.children, node.inputs, desired, retained=tuple(retained)
                 )
             used = {i for i, _, _ in children.inputs}
             control_count = (
@@ -417,7 +461,7 @@ class _Layout:
                     if j < control_count or i in used
                 )
             )
-            width = children.width + 120
+            width = max(width, children.width + 120)
         height = max(
             children.height + 124 if children else 0,
             76 + 44 * max(len(inputs), len(outputs), 1),
@@ -450,16 +494,29 @@ class _Layout:
             in {"loop", "branch", "region", "iteration", "call", "classical"}
             else node.opcode.split(".")[-1]
         )
+        title_limit = (
+            256 if node.kind == "call" else max(8, min(90, int((width - 28) / 7)))
+        )
         parts.append(
-            _text(14, 23, title, limit=max(8, min(90, int((width - 28) / 7))), size=12)
+            _text(
+                14,
+                23,
+                title,
+                limit=title_limit,
+                size=12,
+                compact_call=node.kind == "call",
+            )
         )
         subtitle = (
             "Exclusive alternatives"
             if node.kind == "branch"
-            else f"{node.kind.upper()}"
-            + (f" · line {node.line}" if node.line is not None else "")
+            else "after 0+ iterations"
+            if node.opcode == "while.exit_state"
+            else node.kind.upper()
         )
         parts.append(_text(14, 41, subtitle, limit=35, size=9))
+        if node.line is not None:
+            parts.append(_text(14, 54, f"compiled source line {node.line}", size=8))
         if not children:
             literals = [
                 self.display.values[i].label for i in node.inputs if i not in inputs
@@ -520,11 +577,11 @@ class _Layout:
             if node.kind == "loop":
                 note = (
                     "One symbolic body; loop results include zero iterations and exits."
-                    if any(child.opcode == "loop.body" for child in node.children)
-                    else "Iterations carry yields left → right; else follows normal completion."
+                    if symbolic_body is not None
+                    else "Iterations carry yields from left to right; else follows normal completion."
                 )
                 parts.append(_text(14, height - 14, note, limit=105, size=10))
-                if not result_ids:
+                if symbolic_body is not None:
                     # This is a control summary, not an SSA identity edge: zero
                     # iterations or an early exit can bypass the displayed yield.
                     for identifier, x, y in out_pins:
@@ -704,11 +761,41 @@ class _Layout:
             parts.append(_place(scene, xx, yy))
         for identifier, x, y in in_pins:
             parts.append(self.pin(identifier, x, y))
-            value = self.display.values[identifier]
-            parts.append(_text(x + 8, y - 12, value.label, limit=20, size=10))
         for identifier, x, y in out_pins:
             parts.append(self.pin(identifier, x, y))
         return _Scene(width, height, "".join(parts), in_pins, tuple(out_pins))
+
+
+def _time_axis(x: float, y: float) -> str:
+    """Draw the time-axis label with a right arrow that needs no font glyph.
+
+    Args:
+        x (float): Left edge of the label in SVG units.
+        y (float): Text baseline in SVG units.
+
+    Returns:
+        str: An accessible SVG group containing the caption and arrow.
+    """
+    return (
+        f'<g transform="translate({x},{y})" role="img"><title>Time runs left to right</title>'
+        + _text(0, 0, "Time")
+        + '<path d="M30,-4 H42 M38,-8 L42,-4 L38,0" fill="none" stroke="#22343d" '
+        'stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/></g>'
+    )
+
+
+def _heading_width(title: str, legend: str, legend_inset: float = 0) -> float:
+    """Reserve horizontal space for the two lines above a diagram.
+
+    Args:
+        title (str): Diagram name displayed in 16-unit type, up to 130 characters.
+        legend (str): Explanation displayed in 11-unit type.
+        legend_inset (float): Space before the legend, in SVG units. Defaults to zero.
+
+    Returns:
+        float: Header width including both 24-unit margins.
+    """
+    return 48.0 + max(min(len(title), 130) * 16, legend_inset + len(legend) * 7)
 
 
 def _svg_document(width: float, height: float, content: str, label: str) -> str:
@@ -753,19 +840,19 @@ def render_svg(display: Display, classical: str) -> str:
     layout.collect_literals(display.nodes)
     scene = layout.scope(display.nodes, display.inputs)
     parts = _SvgParts()
+    legend = "solid: quantum bus / width · dashed: classical dependency · select a wire to follow its uses"
     parts.append(_text(24, 28, display.entrypoint, limit=130, size=16))
-    parts.append(
-        _text(
-            24,
-            49,
-            "Time → · solid: quantum bus / width · dashed: classical dependency · select a wire to follow its uses",
-            limit=140,
-            size=11,
-        )
-    )
+    parts.append(_time_axis(24, 49))
+    parts.append(_text(24 + _TIME_AXIS_WIDTH, 49, legend, limit=140, size=11))
     parts.append(_place(scene, 24, 76))
     return _svg_document(
-        scene.width + 48, scene.height + 100, "".join(parts), display.entrypoint
+        max(
+            scene.width + 48,
+            _heading_width(display.entrypoint, legend, _TIME_AXIS_WIDTH),
+        ),
+        scene.height + 100,
+        "".join(parts),
+        display.entrypoint,
     )
 
 
@@ -788,18 +875,40 @@ def _parameter_label(value: CircuitValue | ScalarParameter, depth: int = 0) -> s
     if isinstance(value, MeasurementBit):
         return f"m{value.index}"
     if isinstance(value, ClassicalExpr):
-        operands = ", ".join(
-            _parameter_label(item, depth + 1) for item in value.operands[:4]
-        )
-        return f"{value.opcode.split('.')[-1]}({operands})"[:120]
+        name = value.opcode.split(".")[-1]
+        operands = [_parameter_label(item, depth + 1) for item in value.operands[:4]]
+        if name == "compare_chain" and operands:
+            operators = dict(value.attributes.entries)["operators"]
+            assert isinstance(operators, tuple)
+            symbols = {
+                "eq": "==",
+                "ne": "!=",
+                "lt": "<",
+                "le": "<=",
+                "gt": ">",
+                "ge": ">=",
+                "in": "in",
+                "not_in": "not in",
+            }
+            terms = [operands[0]]
+            for operator, operand in zip(operators, operands[1:]):
+                terms.extend((symbols[str(operator)], operand))
+            if len(value.operands) > len(operands):
+                terms.append("…")
+            return "(" + _abbreviate(" ".join(terms), 120) + ")"
+        infix = {"add": "+", "sub": "-", "mul": "*", "truediv": "/"}
+        if name in infix and len(operands) == 2:
+            return _abbreviate(f"({operands[0]} {infix[name]} {operands[1]})", 120)
+        if len(value.operands) > len(operands):
+            operands.append("…")
+        return _abbreviate(f"{name}({', '.join(operands)})", 120)
     if isinstance(value, tuple):
-        return (
-            "("
-            + ", ".join(_parameter_label(item, depth + 1) for item in value[:4])
-            + ")"
-        )
+        items = [_parameter_label(item, depth + 1) for item in value[:4]]
+        if len(value) > len(items):
+            items.append("…")
+        return "(" + _abbreviate(", ".join(items), 120) + ")"
     if value is None or isinstance(value, (bool, int, float, complex, str)):
-        return str(value)[:120]
+        return _abbreviate(str(value), 120)
     return type(value).__name__
 
 
@@ -850,6 +959,78 @@ def _condition_bits(value: CircuitValue | ScalarParameter, depth: int = 0) -> se
 
 
 @dataclass
+class _MeasurementWires:
+    """Route bit identities between local measurements, branches and conditions.
+
+    Attributes:
+        tracks (dict[int, float]): Horizontal routing height for each used bit.
+        sources (dict[int, tuple[float, float, float]]): Measurement or child
+            output pins with the x coordinate where their wire can turn.
+        incoming (dict[int, float]): Left-boundary pins for measurements upstream.
+        edges (_SvgParts): Classical edges drawn above the branch backgrounds.
+    """
+
+    tracks: dict[int, float]
+    sources: dict[int, tuple[float, float, float]] = field(default_factory=dict)
+    incoming: dict[int, float] = field(default_factory=dict)
+    edges: _SvgParts = field(default_factory=_SvgParts)
+
+    def connect(
+        self, bit: int, x: float, y: float, *, condition: bool, inset: float = 8
+    ) -> None:
+        """Connect an actual measurement or block input to a local destination.
+
+        Args:
+            bit (int): Circuit measurement identifier.
+            x (float): Destination pin's horizontal coordinate.
+            y (float): Destination pin's vertical coordinate.
+            condition (bool): Whether the destination is a predicate terminal.
+            inset (float): Horizontal clearance before the destination.
+        """
+        track = self.tracks[bit]
+        if bit in self.sources:
+            sx, sy, turn = self.sources[bit]
+            path = f"M{sx},{sy} H{turn} V{track}"
+        else:
+            self.incoming[bit] = track
+            path = f"M0,{track}"
+        path += f" H{x - inset} V{y} H{x}"
+        attr = "data-condition-bit" if condition else "data-routed-bit"
+        self.edges.append(
+            f'<g {attr}="m{bit}"><title>m{bit}</title><path d="{path}" fill="none" '
+            f'stroke="{_CLASSICAL}" stroke-dasharray="4 3"/>'
+        )
+        if condition:
+            self.edges.append(
+                f'<circle cx="{x}" cy="{y}" r="3" fill="#fff" stroke="{_CLASSICAL}"/>'
+            )
+        self.edges.append("</g>")
+
+
+@dataclass
+class _CircuitSlot:
+    """Sized instruction and branch geometry on the horizontal time axis.
+
+    Attributes:
+        instruction (CircuitInstruction): Native instruction and ordered wires.
+        width (float): Horizontal space including all labels and branches.
+        regions (list[_Scene]): Child alternatives with their measurement pins.
+        bits (set[int]): Measurement bits consumed by this instruction's predicate.
+        predicate (str): Visible condition expression.
+        annotation (str): Parameter or measurement labels.
+        inset (float): Space for wires connecting to child input pins.
+    """
+
+    instruction: CircuitInstruction
+    width: float
+    regions: list[_Scene]
+    bits: set[int]
+    predicate: str
+    annotation: str
+    inset: float
+
+
+@dataclass
 class _CircuitLayout:
     """Place native concrete instructions and exclusive regions on one time axis.
 
@@ -865,13 +1046,22 @@ class _CircuitLayout:
     visits: int = 0
     routing_work: int = 0
 
-    def block(self, block: CircuitBlock, caption: str, depth: int = 0) -> _Scene:
+    def block(
+        self,
+        block: CircuitBlock,
+        caption: str | None = None,
+        depth: int = 0,
+        downstream: set[int] | None = None,
+    ) -> _Scene:
         """Draw a native block, anchoring alternatives at their parent instruction.
 
         Args:
             block (CircuitBlock): Already lowered native instructions.
-            caption (str): Scope caption, including exclusive alternative labels.
+            caption (str | None): Scope caption for a nested block. The root
+                block displays the time axis when omitted.
             depth (int): Regional nesting depth; defaults to zero.
+            downstream (set[int] | None): Bits needed after this block. The
+                returned scene exposes only those measurements as output pins.
 
         Returns:
             _Scene: Horizontal circuit geometry in local coordinates.
@@ -882,17 +1072,21 @@ class _CircuitLayout:
         if depth > 32:
             raise CapabilityError("Q7401: concrete view exceeds its nesting limit")
         slots = []
-        xx = 70.0
+        width = 100.0
         lane_height = max(1, self.circuit.width) * 40 + 100.0
         # Each block draws every lane through its instruction slots. Bound that
         # product before constructing SVG fragments, including nested regions.
         self.routing_work += self.circuit.width * (len(block.instructions) + 1)
+        self.routing_work += len(downstream) if downstream else 0
         if self.routing_work > 1_000_000:
             raise CapabilityError("Q7401: concrete routing exceeds its work limit")
         if lane_height > 100_000:
             raise CapabilityError("Q7401: concrete canvas exceeds its layout limit")
-        height = lane_height
-        for instruction in block.instructions:
+        branch_height = 0.0
+        used_bits: set[int] = set()
+        outgoing: set[int] = set()
+        needed = set(downstream or ())
+        for instruction in reversed(block.instructions):
             self.visits += 1
             if self.visits > self.limit:
                 raise CapabilityError("Q7401: concrete view exceeds its output limit")
@@ -904,44 +1098,91 @@ class _CircuitLayout:
                     if name == "if"
                     else f"{name} · region {i}",
                     depth + 1,
+                    needed,
                 )
                 for i, region in enumerate(instruction.regions)
             ]
-            slot_width = (
-                max((region.width for region in regions), default=0) + 140
-                if regions
-                else 108.0
+            if name == "measure":
+                annotation = ", ".join(f"m{bit}" for bit in instruction.parameters)
+            else:
+                annotation = ", ".join(
+                    _parameter_label(value) for value in instruction.parameters[:3]
+                )
+            condition = instruction.condition
+            predicate = "" if condition is None else "if " + _parameter_label(condition)
+            bits = set() if condition is None else _condition_bits(condition)
+            used_bits.update(bits)
+            produced_bits = {bit for region in regions for bit, _, _ in region.outputs}
+            if name == "measure":
+                produced_bits.update(
+                    bit for bit in instruction.parameters if isinstance(bit, int)
+                )
+            if downstream:
+                outgoing.update(downstream.intersection(produced_bits))
+            needed.difference_update(produced_bits)
+            for region in regions:
+                inputs = {bit for bit, _, _ in region.inputs}
+                used_bits.update(inputs)
+                needed.update(inputs)
+            needed.update(bits)
+            inset = max(60.0, max((len(r.inputs) for r in regions), default=0) * 8 + 16)
+            clearance = max(80.0, 24 + 8 * len(produced_bits))
+            slot_width = max(
+                108.0,
+                24 + 10 * min(96, len(annotation)),
+                24 + 12 * min(96, len(predicate)),
+                max(
+                    (region.width + inset + clearance for region in regions), default=0
+                ),
             )
-            slots.append((instruction, xx, slot_width, regions))
-            xx += slot_width
-            height = max(
-                height, lane_height + sum(region.height + 30 for region in regions)
+            slots.append(
+                _CircuitSlot(
+                    instruction, slot_width, regions, bits, predicate, annotation, inset
+                )
             )
-            if xx > 100_000 or height > 100_000:
+            width += slot_width
+            branch_height = max(
+                branch_height, sum(region.height + 30 for region in regions)
+            )
+            if width > 100_000 or lane_height + branch_height > 100_000:
                 raise CapabilityError("Q7401: concrete canvas exceeds its layout limit")
-        width = max(250.0, xx + 30)
+        slots.reverse()
+        used_bits.update(outgoing)
+        tracks = {
+            bit: lane_height - 18 + 14 * index
+            for index, bit in enumerate(sorted(used_bits))
+        }
+        lane_height += max(0, len(tracks) - 1) * 14
+        height = lane_height + branch_height
+        if height > 100_000:
+            raise CapabilityError("Q7401: concrete canvas exceeds its layout limit")
+        classical = _MeasurementWires(tracks)
+        width = max(250.0, width)
         parts = _SvgParts()
-        parts.append(_text(14, 22, caption, limit=80))
+        parts.append(
+            _time_axis(14, 22) if caption is None else _text(14, 22, caption, limit=80)
+        )
         for qubit in range(self.circuit.width):
             yy = 68 + qubit * 40
-            parts.append(_text(14, yy + 4, f"q{qubit}", size=11))
-            previous = 50.0
-            for _, left, slot_width, regions in slots:
-                if regions:
+            parts.append(_text(14, yy - 7 if depth else yy + 4, f"q{qubit}", size=11))
+            previous = 0.0 if depth else 50.0
+            left = 70.0
+            for slot in slots:
+                if slot.regions:
                     parts.append(_line(previous, yy, left, yy))
-                    previous = left + slot_width
+                    previous = left + slot.width
+                left += slot.width
             parts.append(_line(previous, yy, width - 10, yy))
-        measured: dict[int, tuple[float, float]] = {}
-        for instruction, left, slot_width, regions in slots:
+        left = 70.0
+        for slot in slots:
+            instruction = slot.instruction
+            slot_width = slot.width
+            regions = slot.regions
             name = instruction.opcode.split(".")[-1]
-            if instruction.condition is not None:
-                for bit in sorted(_condition_bits(instruction.condition)):
-                    if bit in measured:
-                        sx, sy = measured[bit]
-                        track = lane_height - 18
-                        parts.append(
-                            f'<g data-condition-bit="m{bit}"><title>m{bit} feeds this condition</title><path d="M{sx},{sy} L{sx + 8},{track} L{left - 8},{track} L{left - 8},48 L{left},48" fill="none" stroke="{_CLASSICAL}" stroke-dasharray="4 3"/><circle cx="{left}" cy="48" r="3" fill="#fff" stroke="{_CLASSICAL}"/></g>'
-                        )
+            for bit in sorted(slot.bits):
+                classical.connect(
+                    bit, left, 48 if regions else lane_height - 12, condition=True
+                )
             parts.append(
                 f'<g data-gate="{html.escape(name, quote=True)}" data-direction="left-to-right" data-x="{left}">'
             )
@@ -961,29 +1202,45 @@ class _CircuitLayout:
                     _text(
                         left + 12,
                         48,
-                        "if " + _parameter_label(instruction.condition)
-                        if instruction.condition is not None
-                        else name,
-                        limit=55,
+                        slot.predicate or name,
+                        limit=96,
                     )
                 )
                 ry = lane_height
+                produced = {}
+                entry = left + slot.inset
+                rejoin = entry + max(region.width for region in regions) - 10
                 for region in regions:
+                    end = entry + region.width - 10
                     for qubit in range(self.circuit.width):
                         yy = 68 + qubit * 40
-                        parts.append(_line(left, yy, left + 60, ry + yy))
+                        parts.append(_line(left, yy, entry, ry + yy))
+                        if end < rejoin:
+                            parts.append(_line(end, ry + yy, rejoin, ry + yy))
                         parts.append(
                             _line(
-                                left + 60 + region.width - 10,
+                                rejoin,
                                 ry + yy,
                                 left + slot_width,
                                 yy,
                             )
                         )
-                    parts.append(_place(region, left + 60, ry))
+                    parts.append(_place(region, entry, ry))
+                    for index, (bit, x, y) in enumerate(region.inputs):
+                        classical.connect(
+                            bit,
+                            entry + x,
+                            ry + y,
+                            condition=False,
+                            inset=8 * (index + 1),
+                        )
+                    for bit, x, y in region.outputs:
+                        turn = rejoin + 16 + 8 * len(produced)
+                        produced[bit] = (entry + x, ry + y, turn)
                     ry += region.height + 30
+                classical.sources.update(produced)
             else:
-                xx = left + 54
+                xx = left + slot_width / 2
                 qubits = (*instruction.controls, *instruction.qubits)
                 if qubits:
                     parts.append(
@@ -995,18 +1252,12 @@ class _CircuitLayout:
                     controls = (*controls, *targets[:-1])
                     targets = targets[-1:]
                     glyph = {"cx": "x", "ccx": "x", "cz": "z", "cp": "p"}[name]
-                parameters = ", ".join(
-                    _parameter_label(value) for value in instruction.parameters[:3]
-                )
                 if name == "measure":
                     for bit, qubit in zip(instruction.parameters, instruction.qubits):
                         if isinstance(bit, int):
-                            measured[bit] = (xx, 68 + qubit * 40)
-                    parameters = ", ".join(
-                        f"m{value}" for value in instruction.parameters
-                    )
+                            classical.sources[bit] = (xx, 68 + qubit * 40 + 13, xx)
                 parts.append(
-                    _text(xx, 46, parameters, limit=15, size=10, anchor="middle")
+                    _text(xx, 46, slot.annotation, limit=96, size=10, anchor="middle")
                 )
                 for qubit in controls:
                     parts.append(
@@ -1025,23 +1276,31 @@ class _CircuitLayout:
                         parts.append(
                             _text(xx, yy + 4, glyph, limit=8, size=11, anchor="middle")
                         )
-                if not qubits:
-                    parts.append(
-                        _text(xx, lane_height - 28, name, limit=12, anchor="middle")
-                    )
+                if not targets:
+                    parts.append(_text(xx, 30, name, limit=24, anchor="middle"))
                 if instruction.condition is not None:
                     parts.append(
                         _text(
                             xx,
                             lane_height - 10,
-                            "if " + _parameter_label(instruction.condition),
-                            limit=15,
+                            slot.predicate,
+                            limit=96,
                             size=10,
                             anchor="middle",
                         )
                     )
             parts.append("</g>")
-        return _Scene(width, height, "".join(parts))
+            left += slot.width
+        for bit in sorted(outgoing):
+            classical.connect(bit, width, tracks[bit], condition=False)
+        parts.append("".join(classical.edges))
+        return _Scene(
+            width,
+            height,
+            "".join(parts),
+            tuple((bit, 0.0, y) for bit, y in classical.incoming.items()),
+            tuple((bit, width, tracks[bit]) for bit in sorted(outgoing)),
+        )
 
 
 def render_circuit(circuit: CircuitProgram, limit: int) -> str:
@@ -1057,23 +1316,18 @@ def render_circuit(circuit: CircuitProgram, limit: int) -> str:
     Raises:
         CapabilityError: If an instruction, canvas, or output bound is exceeded.
     """
-    scene = _CircuitLayout(circuit, limit).block(circuit.body, "Time →")
+    scene = _CircuitLayout(circuit, limit).block(circuit.body)
     parts = _SvgParts()
-    parts.append(
-        _text(24, 28, circuit.name + " · concrete qubit view", limit=130, size=16)
-    )
-    parts.append(
-        _text(
-            24,
-            46,
-            "mN identifies a measurement bit; it does not show an observed outcome.",
-            limit=100,
-            size=11,
-        )
-    )
+    title = circuit.name + " · concrete qubit view"
+    legend = "mN identifies a measurement bit; it does not show an observed outcome."
+    parts.append(_text(24, 28, title, limit=130, size=16))
+    parts.append(_text(24, 46, legend, limit=100, size=11))
     parts.append(_place(scene, 20, 62))
     return _svg_document(
-        scene.width + 40, scene.height + 80, "".join(parts), circuit.name
+        max(scene.width + 40, _heading_width(title, legend)),
+        scene.height + 80,
+        "".join(parts),
+        circuit.name,
     )
 
 
@@ -1104,11 +1358,11 @@ def render_html(
     identifier = "qamomile-" + uuid.uuid4().hex
     initial = f"{loops}:{classical}"
     footer = (
-        "Time runs left → right. Alternatives share an instruction position; scroll horizontally or use Fit to inspect the whole circuit."
+        "Time runs left to right. Alternatives share an instruction position; scroll horizontally or use Fit to inspect the whole circuit."
         if wires == "qubits"
         else unavailable.get(
             "expanded",
-            "Time runs left → right. Select a wire to follow its uses. Scroll horizontally or use Fit; branch alternatives are exclusive.",
+            "Time runs left to right. Select a wire to follow its uses. Scroll horizontally or use Fit; branch alternatives are exclusive.",
         )
     )
     payload = json.dumps(variants).replace("<", "\\u003c")

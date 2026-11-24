@@ -218,6 +218,7 @@ pub(crate) struct CircuitProjection {
     #[pyo3(get)]
     result_route: String,
     result_postprocessing: Option<Vec<u8>>,
+    angle_validation: Vec<Vec<u8>>,
 }
 
 /// One launch parameter defining a finite native dispatch family.
@@ -307,6 +308,15 @@ impl CircuitResultValue {
 #[cfg_attr(feature = "stub-gen", pyo3_stub_gen::derive::gen_stub_pymethods)]
 #[pymethods]
 impl CircuitProjection {
+    /// Return reusable native finite-angle checks for SDK launch.
+    #[getter]
+    fn angle_validation<'py>(&self, py: Python<'py>) -> Vec<Bound<'py, PyBytes>> {
+        self.angle_validation
+            .iter()
+            .map(|plan| PyBytes::new(py, plan))
+            .collect()
+    }
+
     #[getter]
     fn result_postprocessing<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
         self.result_postprocessing
@@ -325,10 +335,11 @@ impl CircuitFamilyProjection {
 }
 
 /// Project an independently verified static program into logical instructions.
+/// Reuse mode rejects scalar operations that still require exact launch values.
 #[cfg_attr(feature = "stub-gen", pyo3_stub_gen::derive::gen_stub_pyfunction)]
 #[cfg_attr(not(feature = "stub-gen"), pyo3_stub_gen_derive::remove_gen_stub)]
 #[pyfunction]
-#[pyo3(signature = (payload, realization_capabilities=None, lowering=None))]
+#[pyo3(signature = (payload, realization_capabilities=None, lowering=None, require_reusable_bindings=false))]
 #[allow(clippy::needless_pass_by_value)] // PyO3 extracts the optional labels by value.
 fn inspect_static_circuit(
     #[gen_stub(override_type(type_repr = "bytes | VerifiedProgramHandle"))] payload: &Bound<
@@ -337,6 +348,7 @@ fn inspect_static_circuit(
     >,
     realization_capabilities: Option<Vec<String>>,
     lowering: Option<Vec<String>>,
+    require_reusable_bindings: bool,
 ) -> PyResult<CircuitProjection> {
     let owner = program_owner(payload)?;
     let program = &owner.verified;
@@ -345,10 +357,13 @@ fn inspect_static_circuit(
         .artifact_abi()
         .map_err(|error| PyValueError::new_err(error.to_string()))?
         .sampled_width();
-    let circuit = owner
-        .prepared()?
-        .static_circuit_with_lowering(capabilities)
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let prepared = owner.prepared()?;
+    let circuit = if require_reusable_bindings {
+        prepared.reusable_static_circuit_with_lowering(program, capabilities)
+    } else {
+        prepared.static_circuit_with_lowering(capabilities)
+    }
+    .map_err(|error| PyValueError::new_err(error.to_string()))?;
     circuit_projection(&circuit, sampled_width)
 }
 
@@ -462,6 +477,8 @@ pub(crate) fn circuit_projection(
     let result_route = result.route().as_str().to_owned();
     let result_postprocessing = result.into_postprocessing();
     Ok(CircuitProjection {
+        angle_validation: qamomile_compiler::project_circuit_angle_validation(circuit)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?,
         optimization_stages: circuit.optimization_stages().to_vec(),
         realizations: circuit
             .realizations()
@@ -492,6 +509,20 @@ pub(crate) fn circuit_projection(
         result_route,
         result_postprocessing,
     })
+}
+
+/// Validate consumed quantum angles through the shared native scalar evaluator.
+#[cfg_attr(feature = "stub-gen", pyo3_stub_gen::derive::gen_stub_pyfunction)]
+#[cfg_attr(not(feature = "stub-gen"), pyo3_stub_gen_derive::remove_gen_stub)]
+#[pyfunction]
+#[allow(clippy::needless_pass_by_value)] // PyO3 extracts the encoded plans by value.
+fn validate_circuit_angles(
+    #[gen_stub(override_type(type_repr = "list[bytes]"))] plans: Vec<Vec<u8>>,
+    bindings: &Bound<'_, PyDict>,
+) -> PyResult<()> {
+    let bindings = circuit_launch_bindings(bindings)?;
+    qamomile_compiler::validate_circuit_angles(&plans, &bindings)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 fn circuit_result_value(value: NativeStaticCircuitResultValue) -> CircuitResultValue {
@@ -684,6 +715,9 @@ fn circuit_scalar(node: &CircuitScalarNode) -> CircuitScalar {
         return circuit_apply_scalar(scalar_type, opcode, attributes, operands);
     }
     let kind = match node {
+        CircuitScalarNode::CurrentShot => "current_shot",
+        CircuitScalarNode::HiddenBinding(_) => "hidden_binding",
+        CircuitScalarNode::Indexed { .. } => "indexed",
         CircuitScalarNode::Bool(_) => "bool",
         CircuitScalarNode::Int(_) => "int",
         CircuitScalarNode::RealBits(_) => "real",
@@ -708,11 +742,21 @@ fn circuit_scalar(node: &CircuitScalarNode) -> CircuitScalar {
         operands: Vec::new(),
     };
     match node {
+        CircuitScalarNode::CurrentShot => {}
+        CircuitScalarNode::HiddenBinding(index) | CircuitScalarNode::LoopIndex(index) => {
+            scalar.int_value = Some(i64::from(*index));
+        }
+        CircuitScalarNode::Indexed {
+            index, elements, ..
+        } => {
+            scalar.operands = std::iter::once(index.index())
+                .chain(elements.iter().map(|element| element.index()))
+                .collect();
+        }
         CircuitScalarNode::Bool(value) => scalar.bool_value = Some(*value),
         CircuitScalarNode::Int(value) => scalar.int_value = Some(*value),
         CircuitScalarNode::RealBits(value) => scalar.real_value = Some(f64::from_bits(*value)),
         CircuitScalarNode::Measurement(index) => scalar.measurement_index = Some(*index),
-        CircuitScalarNode::LoopIndex(index) => scalar.int_value = Some(i64::from(*index)),
         CircuitScalarNode::CallValue { index, .. } => scalar.call_index = Some(*index),
         CircuitScalarNode::Parameter { name, path, .. } => {
             scalar.name = Some(name.clone());
@@ -810,5 +854,6 @@ pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(inspect_static_circuit_at, module)?)?;
     module.add_function(wrap_pyfunction!(inspect_static_circuit_family, module)?)?;
+    module.add_function(wrap_pyfunction!(validate_circuit_angles, module)?)?;
     Ok(())
 }

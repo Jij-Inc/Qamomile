@@ -6,8 +6,9 @@ use prost::Message;
 use thiserror::Error;
 
 use crate::budget;
-use crate::equations::literal_conforms;
+use crate::equations::{literal_conforms, normalize_real_binding};
 use crate::literals::validate_literal_references;
+use crate::numeric_values::NumericEvaluationError;
 use crate::types::{Dimension, ScalarType, SemanticType, TypeArena, TypeId};
 use crate::wire;
 
@@ -157,7 +158,8 @@ struct CheckedParameterAbi {
 ///
 /// The returned payload is a canonical `LiteralProto` mapping. Defaults are
 /// materialized in Rust, and every value is checked through the same semantic
-/// type arena and literal relation used by native program verification.
+/// type arena and literal relation used by native program verification. Integer
+/// inputs at declared Real leaves are rounded to binary64 before evaluation.
 ///
 /// # Errors
 ///
@@ -227,9 +229,20 @@ fn bind_checked_invocation(
                 name: slot.name.clone(),
             });
         }
+        let mut value = value.clone();
+        normalize_real_binding(&checked.arena, checked_slot.type_id, &mut value).map_err(
+            |error| {
+                let (NumericEvaluationError::Undefined(reason)
+                | NumericEvaluationError::Limit(reason)) = error;
+                InvocationBindingError::InvalidValues(format!(
+                    "parameter {:?}: {reason}",
+                    slot.name
+                ))
+            },
+        )?;
         resolved.push(wire::literal_proto::Entry {
             key: slot.name.clone(),
-            value: Some(value.clone()),
+            value: Some(value),
         });
     }
     resolved.sort_by(|left, right| left.key.cmp(&right.key));
@@ -1163,6 +1176,166 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn normalizes_only_real_leaves_in_supplied_and_default_aggregates() {
+        use wire::literal_proto::Value::{BoolValue, IntValue, RealValue};
+
+        let original = mapping_literal(vec![
+            (
+                "alpha",
+                sequence(vec![
+                    literal(IntValue(9_007_199_254_740_993)),
+                    sequence(vec![sequence(vec![
+                        literal(IntValue(-2)),
+                        literal(IntValue(3)),
+                    ])]),
+                ]),
+            ),
+            ("zeta", literal(BoolValue(true))),
+        ]);
+        let expected = mapping(vec![(
+            "options",
+            mapping_literal(vec![
+                (
+                    "alpha",
+                    sequence(vec![
+                        literal(IntValue(9_007_199_254_740_993)),
+                        sequence(vec![sequence(vec![
+                            literal(RealValue(-2.0)),
+                            literal(RealValue(3.0)),
+                        ])]),
+                    ]),
+                ),
+                ("zeta", literal(BoolValue(true))),
+            ]),
+        )]);
+        let encoded_abi = wire::ParameterAbiProto {
+            slots: vec![wire::ParameterSlotProto {
+                name: "options".to_owned(),
+                r#type: Some(param(record(
+                    "Options",
+                    vec![
+                        ("zeta", scalar("Bool")),
+                        (
+                            "alpha",
+                            product(vec![scalar("Int"), array(scalar("Real"), &[1, 2])]),
+                        ),
+                    ],
+                ))),
+                default_value: Some(original.clone()),
+                has_default: true,
+            }],
+        }
+        .encode_to_vec();
+
+        for supplied in [mapping(Vec::new()), mapping(vec![("options", original)])] {
+            let bound = bind_invocation(&encoded_abi, &supplied).expect("typed integer inputs");
+            assert_eq!(bound, expected);
+            assert_eq!(
+                bind_invocation(&encoded_abi, &bound).expect("normalized inputs bind again"),
+                expected
+            );
+            let leaves = bind_scalar_parameters(&encoded_abi, &supplied)
+                .expect("normalized scalar SDK bindings");
+            let values = leaves
+                .iter()
+                .map(|binding| {
+                    wire::LiteralProto::decode(binding.literal()).expect("scalar literal")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                values,
+                vec![
+                    literal(BoolValue(true)),
+                    literal(IntValue(9_007_199_254_740_993)),
+                    literal(RealValue(-2.0)),
+                    literal(RealValue(3.0)),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn real_binding_rounds_integer_inputs_to_binary64() {
+        use num_bigint::BigInt;
+        use wire::literal_proto::Value::{BigintValue, IntValue, RealValue};
+
+        let large = BigInt::from(1) << 100_usize;
+        let encoded_abi = parameter_abi(vec![("value", scalar("Real"))]);
+        for (input, expected) in [
+            (IntValue(9_007_199_254_740_993), 9_007_199_254_740_992.0),
+            (IntValue(9_007_199_254_740_995), 9_007_199_254_740_996.0),
+            (IntValue(-9_007_199_254_740_993), -9_007_199_254_740_992.0),
+            (BigintValue(large.to_signed_bytes_be()), 2.0_f64.powi(100)),
+            (
+                BigintValue((-large).to_signed_bytes_be()),
+                -2.0_f64.powi(100),
+            ),
+        ] {
+            let supplied = mapping(vec![("value", literal(input))]);
+            assert_eq!(
+                bind_invocation(&encoded_abi, &supplied).expect("finite integer promotion"),
+                mapping(vec![("value", literal(RealValue(expected)))])
+            );
+        }
+    }
+
+    #[test]
+    fn real_binding_rejects_integer_overflow_for_supplied_and_default_values() {
+        use num_bigint::BigInt;
+
+        let overflow = BigInt::from(1) << 1024_usize;
+        for value in [overflow.clone(), -overflow] {
+            let value = literal(wire::literal_proto::Value::BigintValue(
+                value.to_signed_bytes_be(),
+            ));
+            let encoded_abi = wire::ParameterAbiProto {
+                slots: vec![wire::ParameterSlotProto {
+                    name: "value".to_owned(),
+                    r#type: Some(param(scalar("Real"))),
+                    default_value: Some(value.clone()),
+                    has_default: true,
+                }],
+            }
+            .encode_to_vec();
+            for supplied in [mapping(Vec::new()), mapping(vec![("value", value)])] {
+                assert!(matches!(
+                    bind_invocation(&encoded_abi, &supplied),
+                    Err(InvocationBindingError::InvalidValues(reason))
+                        if reason.contains("integer is too large to convert to binary64")
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn real_binding_still_rejects_boolean_leaves_and_wrong_shapes() {
+        use wire::literal_proto::Value::{BoolValue, IntValue, RealValue};
+
+        let encoded_abi = parameter_abi(vec![("angles", array(scalar("Real"), &[2]))]);
+        for value in [
+            sequence(vec![literal(BoolValue(true)), literal(IntValue(1))]),
+            sequence(vec![literal(IntValue(1))]),
+            sequence(vec![
+                literal(IntValue(1)),
+                literal(IntValue(2)),
+                literal(IntValue(3)),
+            ]),
+            sequence(vec![
+                sequence(vec![literal(IntValue(1))]),
+                literal(IntValue(2)),
+            ]),
+            literal(RealValue(1.0)),
+        ] {
+            assert_eq!(
+                bind_invocation(&encoded_abi, &mapping(vec![("angles", value)])),
+                Err(InvocationBindingError::TypeMismatch {
+                    name: "angles".to_owned(),
+                })
+            );
+        }
     }
 
     #[test]

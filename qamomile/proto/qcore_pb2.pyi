@@ -277,14 +277,16 @@ class ParameterABIProto(_message.Message):
     def __init__(self, slots: _Optional[_Iterable[_Union[ParameterSlotProto, _Mapping]]] = ...) -> None: ...
 
 class ResultABIProto(_message.Message):
-    __slots__ = ("type", "source_order", "native_width")
+    __slots__ = ("type", "source_order", "native_width", "per_shot")
     TYPE_FIELD_NUMBER: _ClassVar[int]
     SOURCE_ORDER_FIELD_NUMBER: _ClassVar[int]
     NATIVE_WIDTH_FIELD_NUMBER: _ClassVar[int]
+    PER_SHOT_FIELD_NUMBER: _ClassVar[int]
     type: TypeProto
     source_order: _containers.RepeatedScalarFieldContainer[int]
     native_width: int
-    def __init__(self, type: _Optional[_Union[TypeProto, _Mapping]] = ..., source_order: _Optional[_Iterable[int]] = ..., native_width: _Optional[int] = ...) -> None: ...
+    per_shot: bool
+    def __init__(self, type: _Optional[_Union[TypeProto, _Mapping]] = ..., source_order: _Optional[_Iterable[int]] = ..., native_width: _Optional[int] = ..., per_shot: bool = ...) -> None: ...
 
 class CompilationReportProto(_message.Message):
     __slots__ = ("stages", "assumptions", "warnings", "resource_study")

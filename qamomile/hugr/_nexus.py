@@ -25,7 +25,7 @@ from qamomile.compilation import (
 )
 from qamomile.errors import ExecutionError
 
-from ._execution import load_package
+from ._execution import _decode_result_row, load_package
 from ._profile import CAPABILITIES, FORMAT
 from ._target import Hugr
 
@@ -141,9 +141,13 @@ class Helios:
 
     @property
     def target(self) -> Hugr:
-        """Return the HUGR target with ordered QSystem result records."""
+        """Return the HUGR target with named Boolean result records.
 
-        return Hugr(record_results=True)
+        Returns:
+            Hugr: Target using the common source-ordered result contract.
+        """
+
+        return Hugr(current_shot_origin=None)
 
     @property
     def capabilities(self) -> CapabilitySnapshot:
@@ -162,8 +166,9 @@ class Helios:
         """Upload and asynchronously submit one closed HUGR artifact.
 
         Args:
-            artifact: Result-instrumented HUGR package for :attr:`target`.
-            invocation: Rust-normalized shots and portable seed policy.
+            artifact (CompiledProgram): HUGR package with named result records
+                for :attr:`target`.
+            invocation (Invocation): Rust-normalized shots and portable seed policy.
 
         Returns:
             Job: Remote Nexus job with cancellation and snapshot support.
@@ -177,15 +182,13 @@ class Helios:
                 f"Q8640: Helios accepts {FORMAT!r}, got {artifact.format!r}"
             )
         metadata = dict(artifact.metadata.entries)
-        if metadata.get("record_results") is not True:
-            raise ExecutionError(
-                "Q8641: Helios requires a HUGR target with result recording"
-            )
+        if metadata.get("result_measurements") != "named-records":
+            raise ExecutionError("Q8641: Helios requires named Boolean result records")
         if invocation.parameters.entries:
             raise ExecutionError("Q8642: Helios received unresolved parameters")
-        if invocation.seed != 0:
+        if invocation.seed is not None:
             raise ExecutionError(
-                "Q8643: Helios does not provide a portable seed contract; use seed=0"
+                "Q8643: Helios does not provide a portable seed contract; use seed=None"
             )
         client = self.client
         assert client is not None
@@ -451,7 +454,19 @@ def _decode_qsystem_counts(
     shots: int,
     width: int,
 ) -> dict[tuple[int, ...], int]:
-    """Decode ordered ``qamomile`` result tags into source-ordered counts."""
+    """Normalize named QSystem Boolean records into source-ordered counts.
+
+    Args:
+        raw (object): Downloaded Nexus QSystem result with per-shot records.
+        shots (int): Expected number of invocation shots.
+        width (int): Logical width from the native-derived result ABI.
+
+    Returns:
+        dict[tuple[int, ...], int]: Source-ordered logical bit counts.
+
+    Raises:
+        ExecutionError: If shot count, tags, or Boolean values are invalid.
+    """
 
     native_shots = getattr(raw, "results", None)
     if not isinstance(native_shots, list) or len(native_shots) != shots:
@@ -463,12 +478,18 @@ def _decode_qsystem_counts(
         collate = getattr(shot, "collate_tags", None)
         if not callable(collate):
             raise ExecutionError("Q8646: Nexus returned an invalid QSystem shot")
-        values = collate().get("qamomile")
-        if not isinstance(values, list) or len(values) != width:
-            raise ExecutionError("Q8646: Nexus result width disagrees with ResultABI")
-        bits = tuple(int(value) for value in values)
-        if any(bit not in {0, 1} for bit in bits):
-            raise ExecutionError("Q8646: Nexus result contains a non-bit value")
+        tagged = collate()
+        if not isinstance(tagged, Mapping) or any(
+            not isinstance(values, list) for values in tagged.values()
+        ):
+            raise ExecutionError("Q8646: Nexus returned invalid QSystem tags")
+        try:
+            bits = _decode_result_row(
+                ((tag, value) for tag, values in tagged.items() for value in values),
+                width=width,
+            )
+        except ValueError as error:
+            raise ExecutionError(f"Q8646: invalid Nexus result row: {error}") from error
         counts[bits] += 1
     return dict(counts)
 

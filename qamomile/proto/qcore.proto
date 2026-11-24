@@ -176,6 +176,7 @@ message ResultABIProto {
   TypeProto type = 1;
   repeated uint32 source_order = 2;
   uint32 native_width = 3;
+  bool per_shot = 4;
 }
 
 message CompilationReportProto {

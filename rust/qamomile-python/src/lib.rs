@@ -14,6 +14,7 @@ mod algorithms_api;
 mod circuit_api;
 mod compiler_api;
 mod conversion;
+mod current_shot_api;
 mod observables_api;
 mod optimization_api;
 mod persistence_api;
@@ -75,6 +76,7 @@ fn _qamomile_native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     types_api::register(module)?;
     visualization_api::register(module)?;
     compiler_api::register(module)?;
+    current_shot_api::register(module)?;
     resources_api::register(module)?;
     circuit_api::register(module)?;
     shot_execution_api::register(module)?;

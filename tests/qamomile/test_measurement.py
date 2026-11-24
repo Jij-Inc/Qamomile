@@ -154,7 +154,7 @@ def state() -> qm.Q[qm.Bits[1]]:
     if module_name == "qamomile.braket":
         with pytest.raises(qm.ExecutionError, match="Q8414"):
             estimator.estimate(on=endpoint, shots=96, seed=2)
-        seed = 0
+        seed = None
     result = estimator.estimate(on=endpoint, shots=96, seed=seed)
     assert result.value == pytest.approx(1.0, abs=0.02)
     assert result.shots == 96
@@ -365,3 +365,81 @@ def state() -> qm.Q[qm.Bits[1]]:
     assert result.method == "sampling"
     assert result.shots == 128
     assert abs(result.value) < 0.4
+
+
+@pytest.mark.parametrize("grouping", ["independent", "qwc", "commuting"])
+@pytest.mark.parametrize("seed", [None, 0, (1 << 64) - 1])
+def test_estimator_optional_seed_is_preserved_in_group_results(grouping, seed):
+    """Absent seeds stay absent, while explicit zero produces reproducible groups."""
+    estimator = Estimator(
+        qm.build_source(SOURCE)["state"], qm.X(0) + qm.Z(0), n=1, grouping=grouping
+    )
+    result = estimator.estimate(
+        on=qm.Reference(), parameters={"theta": 0.0}, shots=64, seed=seed
+    )
+    assert result.shots == 64
+    seeds = tuple(group.seed for group in result.groups)
+    if seed is None:
+        assert seeds == (None, None)
+    else:
+        assert all(type(group_seed) is int for group_seed in seeds)
+        assert len(set(seeds)) == len(seeds)
+        assert result == estimator.estimate(
+            on=qm.Reference(), parameters={"theta": 0.0}, shots=64, seed=seed
+        )
+
+
+@pytest.mark.parametrize("seed", [-1, 1 << 64, True, False, 1.5, "0"])
+def test_estimator_rejects_invalid_seed_before_endpoint_execution(seed):
+    """Optional seeds retain strict unsigned integer validation."""
+    estimator = Estimator(qm.build_source(SOURCE)["bell"], qm.Z(0))
+    with pytest.raises(qm.ExecutionError, match="Q8138"):
+        estimator.estimate(on=qm.Reference(), shots=4, seed=seed)
+
+
+@pytest.mark.parametrize("grouping", ["independent", "qwc", "commuting"])
+@pytest.mark.parametrize("seed, projected_seed", [(None, 0), (0, None)])
+def test_estimator_rejects_native_seed_policy_mismatch(
+    monkeypatch, grouping, seed, projected_seed
+):
+    """A stale native planner cannot substitute integer zero for an absent seed."""
+    module = importlib.import_module("qamomile._measurement_plan")
+    name = f"plan_{grouping}_pauli_expectation"
+    planner = getattr(module.native, name)
+
+    def wrong_seed(*args):
+        return [(*row[:-1], projected_seed) for row in planner(*args)]
+
+    monkeypatch.setattr(module.native, name, wrong_seed)
+    estimator = Estimator(qm.build_source(SOURCE)["bell"], qm.Z(0), grouping=grouping)
+    with pytest.raises(qm.ExecutionError, match="Q7310"):
+        estimator.estimate(on=qm.Reference(), shots=4, seed=seed)
+
+
+@pytest.mark.parametrize("seed", [None, 0])
+def test_aer_native_estimator_preserves_exact_group_seed(monkeypatch, seed):
+    """Aer receives zero unchanged instead of replacing it with its default."""
+    from dataclasses import replace
+
+    from qiskit.primitives import BackendEstimatorV2
+
+    from qamomile.qiskit import Aer
+
+    estimator = Estimator(
+        qm.build_source(SOURCE)["bell"], qm.Z(0), grouping="independent"
+    )
+    plan = tuple(replace(group, seed=seed) for group in estimator._plan(4, seed))
+    options = []
+    original = BackendEstimatorV2.__init__
+
+    def capture(self, **kwargs):
+        options.append(kwargs["options"]["seed_simulator"])
+        original(self, **kwargs)
+
+    monkeypatch.setattr(BackendEstimatorV2, "__init__", capture)
+    execute = Aer()._prepare_estimation(
+        estimator.source, estimator.observable, plan, {}
+    )
+    assert execute is not None
+    assert execute().shots == 4
+    assert options == [seed]

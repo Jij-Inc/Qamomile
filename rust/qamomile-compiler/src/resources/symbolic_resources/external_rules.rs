@@ -295,7 +295,7 @@ impl SymbolicAnalyzer<'_> {
                 int_fact(value.as_ref()).map(|fact| {
                     (
                         (function.symbol.clone(), parameter.name.clone()),
-                        fact.expression,
+                        Some(fact.expression),
                     )
                 })
             })
@@ -385,7 +385,7 @@ impl SymbolicAnalyzer<'_> {
         node: &crate::resource_rules::ExpressionNode,
         arguments: Vec<ExprId>,
         predicates: &[ExprId],
-        substitutions: &HashMap<(String, String), ExprId>,
+        substitutions: &HashMap<(String, String), Option<ExprId>>,
     ) -> Result<ExprId, SymbolicResourceError> {
         if node.unit != "1" {
             return Err(SymbolicResourceError::Unsupported(
@@ -470,7 +470,7 @@ impl SymbolicAnalyzer<'_> {
     pub(super) fn import_rule_symbol(
         &mut self,
         node: &crate::resource_rules::ExpressionNode,
-        substitutions: &HashMap<(String, String), ExprId>,
+        substitutions: &HashMap<(String, String), Option<ExprId>>,
     ) -> Result<ExprId, SymbolicResourceError> {
         let symbol = node.symbol.as_ref().ok_or_else(|| {
             SymbolicResourceError::Missing("resource-rule symbol declaration".to_owned())
@@ -479,6 +479,7 @@ impl SymbolicAnalyzer<'_> {
             .get(&(symbol.scope.clone(), symbol.name.clone()))
             .copied()
         {
+            let substitution = substitution.ok_or_else(super::unresolved_slice_dimension)?;
             if node.domain == ResourceDomain::Natural
                 && self
                     .arena

@@ -26,7 +26,7 @@ def terminal_return(value: qm.Param[qm.Real]) -> qm.Shot[qm.Real]:
     else:
         return 2.0
 @qm.qkernel
-def discarded(check: qm.Const[qm.Bool], value: qm.Param[qm.Real]) -> qm.Shot[qm.Bool]:
+def discarded(check: qm.Const[qm.Bool], value: qm.Param[qm.Real]) -> qm.Shot[qm.Bit]:
     a = qm.measure(qm.prepare(check))
     if a:
         f = 1.0 / value
@@ -34,34 +34,34 @@ def discarded(check: qm.Const[qm.Bool], value: qm.Param[qm.Real]) -> qm.Shot[qm.
         f = 2.0
     return a
 @qm.qkernel
-def independent() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
+def independent() -> tuple[qm.Shot[qm.Bit], qm.Shot[qm.Bit]]:
     a = qm.measure(qm.h(qm.prepare(False)))
     b = qm.prepare(False)
     if a:
         b = qm.x(b)
     return (a, qm.measure(b))
 @qm.qkernel
-def fresh() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
+def fresh() -> tuple[qm.Shot[qm.Bit], qm.Shot[qm.Bit]]:
     a = qm.measure(qm.h(qm.prepare(False)))
     b = qm.measure(qm.h(qm.prepare(False)))
     return (a, b)
 @qm.qkernel
-def angle() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
+def angle() -> tuple[qm.Shot[qm.Bit], qm.Shot[qm.Bit]]:
     a = qm.measure(qm.h(qm.prepare(False)))
     f = 3.141592653589793 if a else 0.0
     b = qm.ry(qm.prepare(False), f)
     return (a, qm.measure(b))
 @qm.qkernel
-def prepare_bit() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
+def prepare_bit() -> tuple[qm.Shot[qm.Bit], qm.Shot[qm.Bit]]:
     a = qm.measure(qm.h(qm.prepare(False)))
     return (a, qm.measure(qm.prepare(a)))
 @qm.qkernel
-def scaled(scale: qm.Param[qm.Real]) -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
+def scaled(scale: qm.Param[qm.Real]) -> tuple[qm.Shot[qm.Bit], qm.Shot[qm.Bit]]:
     a = qm.measure(qm.h(qm.prepare(False)))
     f = 3.141592653589793 * scale if a else 0.0
     return (a, qm.measure(qm.ry(qm.prepare(False), f)))
 @qm.qkernel
-def checked(value: qm.Param[qm.Real]) -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Real], qm.Shot[qm.Bool]]:
+def checked(value: qm.Param[qm.Real]) -> tuple[qm.Shot[qm.Bit], qm.Shot[qm.Real], qm.Shot[qm.Bit]]:
     a = qm.measure(qm.prepare(True))
     if a:
         f = 1.0 / value
@@ -70,7 +70,7 @@ def checked(value: qm.Param[qm.Real]) -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Real
     b = qm.prepare(a)
     return (a, f, qm.measure(b))
 @qm.qkernel
-def guarded_sqrt(value: qm.Param[qm.Real]) -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Real], qm.Shot[qm.Bool]]:
+def guarded_sqrt(value: qm.Param[qm.Real]) -> tuple[qm.Shot[qm.Bit], qm.Shot[qm.Real], qm.Shot[qm.Bit]]:
     a = qm.measure(qm.prepare(False))
     if a:
         f = qm.sqrt(value)
@@ -78,15 +78,15 @@ def guarded_sqrt(value: qm.Param[qm.Real]) -> tuple[qm.Shot[qm.Bool], qm.Shot[qm
         f = 2.0
     return (a, f, qm.measure(qm.prepare(a)))
 @qm.qkernel
-def skipped() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
+def skipped() -> tuple[qm.Shot[qm.Bit], qm.Shot[qm.Bool]]:
     a = qm.measure(qm.prepare(False))
     if a:
-        b = qm.measure(qm.prepare(True))
+        b = bool(qm.measure(qm.prepare(True)))
     else:
         b = False
     return (a, b)
 @qm.qkernel
-def branched_measurements() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
+def branched_measurements() -> tuple[qm.Shot[qm.Bit], qm.Shot[qm.Bit]]:
     a = qm.measure(qm.h(qm.prepare(False)))
     if a:
         b = qm.measure(qm.prepare(True))
@@ -94,23 +94,23 @@ def branched_measurements() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
         b = qm.measure(qm.prepare(False))
     return (a, b)
 @qm.qkernel
-def completion_only() -> qm.Shot[qm.Bool]:
+def completion_only() -> qm.Shot[qm.Bit]:
     a = qm.measure(qm.h(qm.prepare(False)))
     if a:
-        b = qm.measure(qm.prepare(True))
+        b = bool(qm.measure(qm.prepare(True)))
     else:
         q = qm.x(qm.prepare(False))
         qm.discard(q)
         b = False
     return a
 @qm.qkernel
-def live_angle() -> qm.Shot[qm.Bool]:
+def live_angle() -> qm.Shot[qm.Bit]:
     b = qm.prepare(False)
     a = qm.measure(qm.h(qm.prepare(False)))
     f = 3.141592653589793 if a else 0.0
     return qm.measure(qm.ry(b, f))
 @qm.qkernel
-def live_arithmetic() -> qm.Shot[qm.Bool]:
+def live_arithmetic() -> qm.Shot[qm.Bit]:
     b = qm.prepare(False)
     a = qm.measure(qm.h(qm.prepare(False)))
     f = 1.0 + (3.0 if a else 0.0)
@@ -126,7 +126,7 @@ def future_join() -> qm.Shot[qm.Bits[2]]:
     joined = qm.cx(joined, 0, 1)
     return qm.measure(joined)
 @qm.qkernel
-def early_preparation() -> qm.Shot[qm.Bool]:
+def early_preparation() -> qm.Shot[qm.Bit]:
     b = qm.prepare(False)
     a = qm.measure(qm.h(qm.prepare(False)))
     if a:
@@ -414,7 +414,8 @@ def test_closed_plan_uses_existing_backend_transport(backend):
 
 
 @pytest.mark.usefixtures("qiskit_available")
-def test_timeout_retains_child_and_seeded_occurrences_are_distinct():
+@pytest.mark.parametrize("seed", [None, 0, 7])
+def test_timeout_retains_child_and_seeded_occurrences_are_distinct(seed):
     """Retrieval retries neither resubmit completed work nor restart a stream."""
     from qamomile.compilation import JobStatus
     from qamomile.qiskit import Aer
@@ -468,7 +469,7 @@ def test_timeout_retains_child_and_seeded_occurrences_are_distinct():
 
     endpoint = Counting()
     artifact = qm.compile(program("independent"), to=endpoint.target)
-    job = qm.submit(artifact, on=endpoint, shots=64)
+    job = qm.submit(artifact, on=endpoint, shots=64, seed=seed)
     assert len(endpoint.seeds) == 1
     with pytest.raises(qm.ExecutionError, match="in-flight"):
         job.snapshot()
@@ -477,10 +478,15 @@ def test_timeout_retains_child_and_seeded_occurrences_are_distinct():
     assert len(endpoint.seeds) == 1
     result = job.result()
     assert result.shots == 64
-    assert len(endpoint.seeds) == len(set(endpoint.seeds)) == 3
-    assert endpoint.seeds[0] == 0
-    repeated = qm.execute(artifact, on=endpoint.delegate, shots=64)
-    assert repeated.counts == result.counts
+    assert len(endpoint.seeds) == 3
+    if seed is None:
+        assert endpoint.seeds == [None, None, None]
+    else:
+        assert len(set(endpoint.seeds)) == 3
+    assert endpoint.seeds[0] == seed
+    if seed is not None:
+        repeated = qm.execute(artifact, on=endpoint.delegate, shots=64, seed=seed)
+        assert repeated.counts == result.counts
     completed = qm.ExecutionSnapshot.from_bytes(job.snapshot().to_bytes())
     assert completed.result.execution_statistics == result.execution_statistics
     job.cancel()

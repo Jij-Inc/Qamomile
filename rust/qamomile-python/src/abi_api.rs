@@ -23,19 +23,23 @@ pub(super) type FourPythonBytes<'py> = (
 /// Derive canonical persistent artifact ABIs from one verified program.
 #[cfg_attr(feature = "stub-gen", pyo3_stub_gen::derive::gen_stub_pyfunction)]
 #[cfg_attr(not(feature = "stub-gen"), pyo3_stub_gen_derive::remove_gen_stub)]
-#[pyfunction]
+#[pyfunction(signature = (payload, single_value = false))]
 fn derive_artifact_abi<'py>(
     py: Python<'py>,
     #[gen_stub(override_type(type_repr = "bytes | VerifiedProgramHandle"))] payload: &Bound<
         '_,
         PyAny,
     >,
+    single_value: bool,
 ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
     let owner = program_owner(payload)?;
     let program = &owner.verified;
-    let abi = program
-        .artifact_abi()
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let abi = if single_value {
+        program.value_abi()
+    } else {
+        program.artifact_abi()
+    }
+    .map_err(|error| PyValueError::new_err(error.to_string()))?;
     Ok((
         PyBytes::new(py, abi.parameter_abi()),
         PyBytes::new(py, abi.result_abi()),

@@ -19,7 +19,7 @@ class _MeasurementGroupPlan:
     basis: PauliWord | None
     term_indices: tuple[int, ...]
     shots: int
-    seed: int
+    seed: int | None
     readouts: tuple[PauliReadout, ...] = ()
     diagonalizing_gates: int = 0
     strategy: Literal["independent", "qwc", "commuting"] = "qwc"
@@ -29,7 +29,7 @@ def _native_qwc_expectation_plan(
     observable: Hamiltonian,
     *,
     shots: int,
-    seed: int,
+    seed: int | None,
     independent: bool = False,
 ) -> tuple[_MeasurementGroupPlan, ...]:
     """Project one canonical Rust local-basis grouping and total-shot allocation.
@@ -37,7 +37,7 @@ def _native_qwc_expectation_plan(
     Args:
         observable (Hamiltonian): Canonical Hermitian Pauli sum.
         shots (int): Total device-shot budget.
-        seed (int): Unsigned base seed, with zero preserving endpoint randomness.
+        seed (int | None): Unsigned base seed, or None for endpoint randomness.
         independent (bool): Use one group per term instead of shared local bases.
 
     Returns:
@@ -61,7 +61,7 @@ def _native_qwc_expectation_plan(
         projection = planner(observable._native_literal, str(shots), seed)
     except (OverflowError, TypeError) as error:
         raise ExecutionError(
-            "Q8138: seed must be an unsigned 64-bit integer"
+            "Q8138: seed must be None or an unsigned 64-bit integer"
         ) from error
     except ValueError as error:
         raise ExecutionError(str(error)) from error
@@ -71,7 +71,7 @@ def _native_qwc_expectation_plan(
         groups: list[_MeasurementGroupPlan] = []
         observed_terms: list[int] = []
         observed_shots = 0
-        observed_seeds: list[int] = []
+        observed_seeds: list[int | None] = []
         for row in projection:
             if not isinstance(row, tuple) or len(row) != 4:
                 raise TypeError
@@ -84,8 +84,11 @@ def _native_qwc_expectation_plan(
                 or (independent and len(raw_terms) != 1)
                 or not isinstance(raw_shots, str)
                 or not raw_shots.isdecimal()
-                or type(raw_seed) is not int
-                or not 0 <= raw_seed < 1 << 32
+                or (
+                    raw_seed is not None
+                    and (type(raw_seed) is not int or not 0 <= raw_seed < 1 << 32)
+                )
+                or (seed is None) != (raw_seed is None)
             ):
                 raise TypeError
             factors = tuple(
@@ -126,9 +129,7 @@ def _native_qwc_expectation_plan(
             raise TypeError
         if observable.terms and observed_shots != shots:
             raise TypeError
-        if seed == 0 and any(observed_seeds):
-            raise TypeError
-        if seed != 0 and len(set(observed_seeds)) != len(observed_seeds):
+        if seed is not None and len(set(observed_seeds)) != len(observed_seeds):
             raise TypeError
         return tuple(groups)
     except (TypeError, ValueError) as error:
@@ -139,14 +140,14 @@ def _native_commuting_expectation_plan(
     observable: Hamiltonian,
     *,
     shots: int,
-    seed: int,
+    seed: int | None,
 ) -> tuple[_MeasurementGroupPlan, ...]:
     """Project one canonical Rust general-commuting measurement plan.
 
     Args:
         observable (Hamiltonian): Canonical Hermitian Pauli sum.
         shots (int): Total device-shot budget.
-        seed (int): Unsigned base seed; zero preserves endpoint randomness.
+        seed (int | None): Unsigned base seed, or None for endpoint randomness.
 
     Returns:
         tuple[_MeasurementGroupPlan, ...]: Checked groups and signed readouts.
@@ -166,7 +167,7 @@ def _native_commuting_expectation_plan(
         projection = planner(observable._native_literal, str(shots), seed)
     except (OverflowError, TypeError) as error:
         raise ExecutionError(
-            "Q8138: seed must be an unsigned 64-bit integer"
+            "Q8138: seed must be None or an unsigned 64-bit integer"
         ) from error
     except ValueError as error:
         raise ExecutionError(str(error)) from error
@@ -176,7 +177,7 @@ def _native_commuting_expectation_plan(
         groups: list[_MeasurementGroupPlan] = []
         observed_terms: list[int] = []
         observed_shots = 0
-        observed_seeds: list[int] = []
+        observed_seeds: list[int | None] = []
         for row in projection:
             if not isinstance(row, tuple) or len(row) != 5:
                 raise TypeError
@@ -190,8 +191,11 @@ def _native_commuting_expectation_plan(
                 or not 0 <= gate_count <= gate_limit
                 or not isinstance(raw_shots, str)
                 or not raw_shots.isdecimal()
-                or type(raw_seed) is not int
-                or not 0 <= raw_seed < 1 << 32
+                or (
+                    raw_seed is not None
+                    and (type(raw_seed) is not int or not 0 <= raw_seed < 1 << 32)
+                )
+                or (seed is None) != (raw_seed is None)
             ):
                 raise TypeError
             term_indices = tuple(raw_terms)
@@ -245,9 +249,7 @@ def _native_commuting_expectation_plan(
             raise TypeError
         if observable.terms and observed_shots != shots:
             raise TypeError
-        if seed == 0 and any(observed_seeds):
-            raise TypeError
-        if seed != 0 and len(set(observed_seeds)) != len(observed_seeds):
+        if seed is not None and len(set(observed_seeds)) != len(observed_seeds):
             raise TypeError
         return tuple(groups)
     except (TypeError, ValueError) as error:

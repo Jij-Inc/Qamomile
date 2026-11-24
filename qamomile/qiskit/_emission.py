@@ -15,6 +15,7 @@ from qamomile.circuit import (
     CircuitValue,
     ClassicalExpr,
     DeferredDefinition,
+    HiddenBindingValue,
     LoopIndex,
     MeasurementBit,
     ParameterValue,
@@ -24,24 +25,24 @@ from qamomile.errors import CapabilityError
 from qamomile.observable import Hamiltonian
 
 
-class _EmissionParameters(dict[ParameterValue | LoopIndex, Any]):
+class _EmissionParameters(dict[ParameterValue | LoopIndex | HiddenBindingValue, Any]):
     """Own scalar bindings and the bounded, per-emission definition cache.
 
     Args:
-        values (dict[ParameterValue | LoopIndex, Any]): SDK scalar bindings.
+        values (dict[ParameterValue | LoopIndex | HiddenBindingValue, Any]): SDK scalar bindings.
         gates (dict[Any, Any] | None): Shared definitions
             for nested loop scopes within this compilation only.
     """
 
     def __init__(
         self,
-        values: dict[ParameterValue | LoopIndex, Any],
+        values: dict[ParameterValue | LoopIndex | HiddenBindingValue, Any],
         gates: dict[Any, Any] | None = None,
     ) -> None:
         """Initialize one emission scope without retaining process-global state.
 
         Args:
-            values (dict[ParameterValue | LoopIndex, Any]): Scalar bindings.
+            values (dict[ParameterValue | LoopIndex | HiddenBindingValue, Any]): Scalar bindings.
             gates (dict[Any, Any] | None): Existing cache.
         """
         super().__init__(values)
@@ -69,7 +70,7 @@ def emit_circuit(program: CircuitProgram) -> Any:
         program.measurement_count,
         name=program.name,
     )
-    parameters: dict[ParameterValue | LoopIndex, Any] = {
+    parameters: dict[ParameterValue | LoopIndex | HiddenBindingValue, Any] = {
         leaf.value: Parameter(
             f"p{index}",
             uuid=uuid.UUID(
@@ -83,6 +84,15 @@ def emit_circuit(program: CircuitProgram) -> Any:
         )
         for index, leaf in enumerate(scalar_parameters(program.parameter_abi))
     }
+    for index in range(program._hidden_binding_count):
+        parameters[HiddenBindingValue(index)] = Parameter(
+            f"_qamomile_shot_{index}",
+            uuid=uuid.UUID(
+                bytes=hashlib.sha256(
+                    f"qamomile:{program.semantic_id}:hidden-shot:{index}".encode()
+                ).digest()[:16]
+            ),
+        )
     _emit_block(circuit, program.body, _EmissionParameters(parameters))
     return circuit
 
@@ -90,14 +100,14 @@ def emit_circuit(program: CircuitProgram) -> Any:
 def _emit_block(
     circuit: Any,
     block: CircuitBlock,
-    parameters: dict[ParameterValue | LoopIndex, Any],
+    parameters: dict[ParameterValue | LoopIndex | HiddenBindingValue, Any],
 ) -> None:
     """Emit one structured circuit block into Qiskit.
 
     Args:
         circuit (Any): Destination SDK circuit.
         block (CircuitBlock): Verified ordered instructions.
-        parameters (dict[ParameterValue | LoopIndex, Any]): Scoped SDK bindings.
+        parameters (dict[ParameterValue | LoopIndex | HiddenBindingValue, Any]): Scoped SDK bindings.
 
     Raises:
         CapabilityError: If a contained instruction cannot be emitted.
@@ -110,14 +120,14 @@ def _emit_block(
 def _emit_instruction(
     circuit: Any,
     instruction: CircuitInstruction,
-    parameters: dict[ParameterValue | LoopIndex, Any],
+    parameters: dict[ParameterValue | LoopIndex | HiddenBindingValue, Any],
 ) -> None:
     """Emit one target-neutral circuit instruction into Qiskit.
 
     Args:
         circuit (Any): Destination SDK circuit.
         instruction (CircuitInstruction): Verified instruction and operand layout.
-        parameters (dict[ParameterValue | LoopIndex, Any]): Scoped SDK bindings.
+        parameters (dict[ParameterValue | LoopIndex | HiddenBindingValue, Any]): Scoped SDK bindings.
 
     Raises:
         CapabilityError: If the instruction is malformed or unsupported.
@@ -360,7 +370,7 @@ def _emit_addition(circuit: Any, instruction: CircuitInstruction) -> None:
 def _emit_pauli_evolution(
     circuit: Any,
     instruction: CircuitInstruction,
-    parameters: dict[ParameterValue | LoopIndex, Any],
+    parameters: dict[ParameterValue | LoopIndex | HiddenBindingValue, Any],
 ) -> None:
     """Emit one abstract QCore evolution as Qiskit's native composite gate.
 
@@ -368,7 +378,7 @@ def _emit_pauli_evolution(
         circuit (Any): Qiskit circuit receiving the operation.
         instruction (CircuitInstruction): Verified evolution containing one Hamiltonian
             and one time expression.
-        parameters (dict[ParameterValue | LoopIndex, Any]): Runtime SDK parameter mapping.
+        parameters (dict[ParameterValue | LoopIndex | HiddenBindingValue, Any]): Runtime SDK parameter mapping.
 
     Raises:
         CapabilityError: If the native projection is malformed.
@@ -445,14 +455,14 @@ def _remap_block(block: CircuitBlock, wires: dict[int, int]) -> CircuitBlock:
 def _emit_named_box(
     circuit: Any,
     instruction: CircuitInstruction,
-    parameters: dict[ParameterValue | LoopIndex, Any],
+    parameters: dict[ParameterValue | LoopIndex | HiddenBindingValue, Any],
 ) -> None:
     """Emit a verified body on exactly its operands, with lazy SDK modifiers.
 
     Args:
         circuit (Any): Destination Qiskit circuit.
         instruction (CircuitInstruction): Coherent region with ordered operands.
-        parameters (dict[ParameterValue | LoopIndex, Any]): SDK scalar parameter bindings.
+        parameters (dict[ParameterValue | LoopIndex | HiddenBindingValue, Any]): SDK scalar parameter bindings.
 
     Raises:
         CapabilityError: If the region is malformed or cannot become a gate.
@@ -514,14 +524,14 @@ def _emit_named_box(
 def _emit_deferred_definition(
     circuit: Any,
     instruction: CircuitInstruction,
-    parameters: dict[ParameterValue | LoopIndex, Any],
+    parameters: dict[ParameterValue | LoopIndex | HiddenBindingValue, Any],
 ) -> None:
     """Attach a shared compiler definition without requesting its gate body.
 
     Args:
         circuit (Any): Destination SDK circuit.
         instruction (CircuitInstruction): Checked local definition and operands.
-        parameters (dict[ParameterValue | LoopIndex, Any]): Current scalar scope.
+        parameters (dict[ParameterValue | LoopIndex | HiddenBindingValue, Any]): Current scalar scope.
     """
     from ._deferred import DeferredGate
 
@@ -529,7 +539,7 @@ def _emit_deferred_definition(
     scope = {
         value: parameters[value]
         for value in definition.scalars
-        if isinstance(value, (ParameterValue, LoopIndex))
+        if isinstance(value, (ParameterValue, LoopIndex, HiddenBindingValue))
     }
     label = instruction.opcode.removeprefix("inverse:").removeprefix("box:")
     key = (definition.identity, tuple(scope.items()))
@@ -554,14 +564,14 @@ def _emit_deferred_definition(
 def _emit_for(
     circuit: Any,
     instruction: CircuitInstruction,
-    parameters: dict[ParameterValue | LoopIndex, Any],
+    parameters: dict[ParameterValue | LoopIndex | HiddenBindingValue, Any],
 ) -> None:
     """Emit a structured loop with an optional scoped SDK index parameter.
 
     Args:
         circuit (Any): Qiskit circuit receiving the loop.
         instruction (CircuitInstruction): Verified target-neutral loop instruction.
-        parameters (dict[ParameterValue | LoopIndex, Any]): Scoped SDK bindings.
+        parameters (dict[ParameterValue | LoopIndex | HiddenBindingValue, Any]): Scoped SDK bindings.
 
     Raises:
         CapabilityError: If the native-loop projection is malformed.
@@ -598,14 +608,14 @@ def _emit_for(
 def _emit_controlled_instruction(
     circuit: Any,
     instruction: CircuitInstruction,
-    parameters: dict[ParameterValue | LoopIndex, Any],
+    parameters: dict[ParameterValue | LoopIndex | HiddenBindingValue, Any],
 ) -> None:
     """Emit an exact outer control without eagerly synthesizing its definition.
 
     Args:
         circuit (Any): Destination SDK circuit.
         instruction (CircuitInstruction): Unitary gate with positive controls.
-        parameters (dict[ParameterValue | LoopIndex, Any]): Scoped SDK bindings.
+        parameters (dict[ParameterValue | LoopIndex | HiddenBindingValue, Any]): Scoped SDK bindings.
 
     Raises:
         CapabilityError: If the opcode has no controlled SDK representation.
@@ -692,14 +702,14 @@ def _append_controlled_gate(circuit: Any, gate: Any, qubits: tuple[int, ...]) ->
 def _emit_condition(
     circuit: Any,
     value: CircuitValue,
-    parameters: dict[ParameterValue | LoopIndex, Any],
+    parameters: dict[ParameterValue | LoopIndex | HiddenBindingValue, Any],
 ) -> Any:
     """Lower a Boolean measurement expression to Qiskit's classical AST.
 
     Args:
         circuit (Any): SDK circuit owning the measurement bits.
         value (CircuitValue): Verified Boolean condition.
-        parameters (dict[ParameterValue | LoopIndex, Any]): Scoped SDK bindings.
+        parameters (dict[ParameterValue | LoopIndex | HiddenBindingValue, Any]): Scoped SDK bindings.
 
     Returns:
         Any: Exact SDK Boolean expression, including XOR and Boolean selection.
@@ -767,13 +777,14 @@ def _emit_condition(
 
 
 def _emit_value(
-    value: CircuitValue, parameters: dict[ParameterValue | LoopIndex, Any]
+    value: CircuitValue,
+    parameters: dict[ParameterValue | LoopIndex | HiddenBindingValue, Any],
 ) -> Any:
     """Lower a circuit-family scalar to a Qiskit parameter expression.
 
     Args:
         value (CircuitValue): Verified scalar expression to emit.
-        parameters (dict[ParameterValue | LoopIndex, Any]): Qiskit parameters keyed by
+        parameters (dict[ParameterValue | LoopIndex | HiddenBindingValue, Any]): Qiskit parameters keyed by
             their target-neutral ABI leaves.
 
     Returns:
@@ -786,7 +797,7 @@ def _emit_value(
 
     if value is None or isinstance(value, (bool, int, float)):
         return value
-    if isinstance(value, (ParameterValue, LoopIndex)):
+    if isinstance(value, (ParameterValue, LoopIndex, HiddenBindingValue)):
         return parameters[value]
     if isinstance(value, ClassicalExpr):
         operands = tuple(_emit_value(item, parameters) for item in value.operands)

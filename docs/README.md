@@ -11,7 +11,7 @@ The Python tools and native compiler are installed from `uv.lock`:
 
 ```bash
 node --version
-uv sync --frozen --group docs
+uv sync --frozen --group docs --extra hugr
 uv run --no-sync python -c "import qamomile, qamomile._qamomile_native, jupytext"
 UV_NO_SYNC=1 ./docs/build.sh build-en
 UV_NO_SYNC=1 ./docs/build.sh serve-en
@@ -23,11 +23,14 @@ Open `http://localhost:8000`; stop the server with Ctrl+C. For Japanese, replace
 and execution. The `build-*` commands use committed outputs and do not execute
 notebooks, so they are suitable for an initial preview or prose-only changes.
 The first build needs network access to download the Jupyter Book theme.
+Both language configurations pin the same stable theme release. Update it
+together with Jupyter Book in `uv.lock`, then check both language builds,
+including the tag pages that are hidden from the sidebar.
 
 `UV_NO_SYNC=1` keeps the prepared docs environment for every `uv run` inside
 the script. A later plain `uv sync` can remove docs-only dependencies; repeat
-`uv sync --frozen --group docs` to restore them. After editing Rust, use
-`uv sync --frozen --group docs --reinstall-package qamomile` before
+`uv sync --frozen --group docs --extra hugr` to restore them. After editing Rust, use
+`uv sync --frozen --group docs --extra hugr --reinstall-package qamomile` before
 running notebook examples.
 
 For one runnable page, edit its Jupytext `.py` source, mirror executable changes
@@ -123,10 +126,10 @@ independent goals, split it into two pages.
 
 Authoring templates live in [docs/skeletons/](skeletons/). They are
 intentionally outside [docs/en/](en/) and [docs/ja/](ja/), so they are not
-rendered, synced, or executed by the
-docs build. Page shape and section-specific outlines live in the skeletons
-themselves. See [docs/skeletons/README.md](skeletons/README.md) before creating a new
-notebook-style page.
+rendered, synced, or executed by the docs build. The [skeleton guide](skeletons/README.md#available-skeletons)
+lists English and Japanese templates for each article type. In the
+`integration/` section, choose SDK/IR support for a feature-by-feature
+guide and integration for a workflow that connects Qamomile to another tool or service.
 
 ### Notebook Execution Strategy
 
@@ -140,12 +143,9 @@ ReadTheDocs builds with `execute.enabled: false`, assuming that executed `.ipynb
 
 > **Important — do NOT set `QAMOMILE_DOCS_TEST` when executing docs**
 >
-> Several tutorials (e.g. `algorithm/qaoa_graph_partition.py`,
-> `algorithm/qaoa_maxcut.py`, `algorithm/vqe_for_hydrogen.py`,
-> `tutorial/06_classical_flow_patterns.py`) read the
-> `QAMOMILE_DOCS_TEST` environment variable and switch to a **reduced
-> workload** (fewer optimizer iterations, fewer shots) when it equals
-> `"1"`. This flag exists only so that
+> Every runnable article reads the `QAMOMILE_DOCS_TEST` environment variable
+> and switches to a **minimal workload** when it equals `"1"`. This flag
+> exists only so that
 > [tests/docs/test_tutorials.py](../tests/docs/test_tutorials.py)
 > can run quickly in CI — it is **not** the configuration we want to
 > ship in the rendered docs.
@@ -161,11 +161,18 @@ ReadTheDocs builds with `execute.enabled: false`, assuming that executed `.ipynb
 > equal to `"1"`) so the notebooks run with the full settings and produce
 > the high-quality outputs intended for readers.
 >
-> CI settings are execution-path smoke settings rather than statistical or
-> optimization-quality settings. One-shot sampling, minimum optimizer budgets,
-> representative cases, and synthetic input data are acceptable under the flag
-> as long as the same transpile/execute/decode or forward/backward path reaches
-> completion. Normal notebook execution must retain the reader-facing settings.
+> CI checks that the example completes and preserves result types, shapes, and
+> counts. Use one shot, the minimum optimizer budget, one representative case,
+> and synthetic input data where the APIs permit them. Keep statistical
+> accuracy, convergence, and solution-quality assertions in normal execution.
+> An empty post-selected sample set is valid in smoke execution. Preserve the
+> compile, execute, and decode paths, or the forward and backward passes, with
+> their smallest valid inputs. Normal execution retains reader-facing settings.
+>
+> SciPy raises COBYLA's `maxiter` to at least `number_of_parameters + 2`.
+> Test mode also sets `f_target` to positive infinity so the optimizer stops
+> after its first objective evaluation. Keep at least two shots per measurement
+> group when the example displays a finite standard error.
 
 ## Directory Guide
 
@@ -193,7 +200,7 @@ Use the prerequisites and preview sequence in [Quick start](#quick-start).
 To restore or update the prepared documentation environment:
 
 ```bash
-uv sync --frozen --group docs
+uv sync --frozen --group docs --extra hugr
 ```
 
 The `docs` group includes the regular development tools and the
@@ -232,10 +239,10 @@ setup.
 
 ### Creating a new page
 
-1. **Start from the closest skeleton** in [docs/skeletons/](skeletons/) and copy it
-   into both `en/` and `ja/` under the matching section. Follow
-   [docs/skeletons/README.md](skeletons/README.md) for the page shape, tag placement, and
-   authoring conventions.
+1. **Choose the English and Japanese templates** for the article type in the
+   [skeleton guide](skeletons/README.md). Use the same article filename in the
+   matching `en/` and `ja/` sections and translate the English article using the
+   Japanese template.
 
 2. **Update the section landing page** by adding a bullet/link in
    the matching `<section>/index.md`. Section index pages are
@@ -248,11 +255,13 @@ setup.
    `myst.yml`: [en](en/myst.yml), [ja](ja/myst.yml)); use
    `01_`, `02_`, … prefixes if you need a curated order.
 
-3. **You don't need to touch `myst.yml`** ([en](en/myst.yml) /
+3. **Check navigation and bibliography settings** in `myst.yml` ([en](en/myst.yml) /
    [ja](ja/myst.yml)). The toc uses
    `pattern: <section>/*.ipynb`, so any new `.ipynb` you drop into
    the section is auto-discovered. (Per-tag pages and the per-tag
-   listing are similarly discovered via `pattern: tags/*.md`.)
+   listing are similarly discovered via `pattern: tags/*.md`.) If the page
+   introduces a new bibliography file, register it under `project.bibliography`
+   in both language configurations.
 
 4. **Check docs-test coverage.** Pages under
    `tutorial/`, `algorithm/`, `usage/`, and `integration/` are already
@@ -448,7 +457,7 @@ notes (`release_notes/`) are intentionally out of scope and never tagged.
 Ensure documentation dependencies are installed in the active environment:
 
 ```bash
-uv sync --frozen --group docs
+uv sync --frozen --group docs --extra hugr
 ```
 
 ### Port 8000 already in use

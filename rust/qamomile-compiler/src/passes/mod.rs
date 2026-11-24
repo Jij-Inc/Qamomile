@@ -4,6 +4,7 @@ pub(crate) mod adjoint_lowering;
 pub(crate) mod classical_cse;
 pub(crate) mod cleanup;
 pub(crate) mod cleanup_synthesis;
+pub(crate) mod conditional_captures;
 pub(crate) mod evaluation;
 pub(crate) mod gate_rewrite;
 pub(crate) mod optimization_pipeline;

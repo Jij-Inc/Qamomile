@@ -39,8 +39,8 @@ successor explicitly:
 from typing import NamedTuple
 
 class Pair(NamedTuple):
-    first: qm.Q[qm.Bool]
-    second: qm.Q[qm.Bool]
+    first: qm.Q[qm.Bit]
+    second: qm.Q[qm.Bit]
 
 @qm.qkernel
 def flip_first(pair: Pair) -> Pair:
@@ -49,8 +49,8 @@ def flip_first(pair: Pair) -> Pair:
     return Pair(first, second)
 
 @qm.qkernel
-def sample_pair() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
-    pair = Pair(qm.prepare(False), qm.prepare(True))
+def sample_pair() -> tuple[qm.Shot[qm.Bit], qm.Shot[qm.Bit]]:
+    pair = Pair(qm.prepare(0), qm.prepare(1))
     first, second = flip_first(pair)
     return qm.measure(first), qm.measure(second)
 ```

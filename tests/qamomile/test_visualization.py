@@ -550,6 +550,42 @@ def huge(width: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[width]]:
     assert draw(program).to_svg()
 
 
+@pytest.mark.parametrize(
+    ("wires", "x", "y"), [("registers", 24, 49), ("qubits", 34, 84)]
+)
+def test_exported_png_shows_right_pointing_time_arrow(
+    wires, x, y, tmp_path, static_export
+):
+    """The time marker has a shaft on the left and an arrowhead on the right."""
+    from PIL import Image
+
+    program = qm.build_source("""
+import qamomile as qm
+@qm.qkernel
+def sample() -> qm.Shot[qm.Bit]:
+    return qm.measure(qm.prepare(False))
+""").specialize("sample")
+    path = draw(program, loops="expanded", wires=wires).save(
+        tmp_path / "time.png", scale=4
+    )
+    with Image.open(path) as image:
+        marker = image.crop(((x + 29) * 4, (y - 10) * 4, (x + 44) * 4, (y + 2) * 4))
+    ink = marker.convert("L").point(lambda lightness: 255 if lightness < 180 else 0)
+    bounds = ink.getbbox()
+    assert bounds is not None
+    ink = ink.crop(bounds)
+    width, height = ink.size
+    assert width >= 32 and height >= 20
+
+    shaft = ink.crop((width // 10, 0, 3 * width // 10, height)).getbbox()
+    wings = ink.crop((width // 2, 0, 7 * width // 8, height)).getbbox()
+    tip = ink.crop((24 * width // 25, 0, width, height)).getbbox()
+    assert shaft and wings and tip
+    assert shaft[1] >= height // 4 and shaft[3] <= 3 * height // 4
+    assert wings[1] < height // 4 and wings[3] > 3 * height // 4
+    assert tip[1] >= height // 4 and tip[3] <= 3 * height // 4
+
+
 @pytest.mark.parametrize("concrete", [False, True])
 def test_png_and_vector_pdf_exports(loop_program, tmp_path, concrete, static_export):
     """Both views export nonempty PNG pixels and a vector PDF at the SVG size."""

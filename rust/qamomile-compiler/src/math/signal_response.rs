@@ -275,14 +275,11 @@ pub fn signal_response_plan(
     } else {
         contract
     };
-    let phases = if spec.degree() == 0 {
-        certificate.qsp_phases()
-    } else {
-        certificate.projector_phases()
-    }
-    .iter()
-    .map(|p| (2.0 * p, -p))
-    .collect();
+    let phases = certificate
+        .projector_phases()
+        .iter()
+        .map(|p| (2.0 * p, -p))
+        .collect();
     Ok(SignalResponsePlan {
         contract,
         phases,

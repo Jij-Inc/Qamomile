@@ -119,3 +119,64 @@ immutable, and assumptions survive serialization. Additive fixed-body costs can
 be exact functions of the count. State-dependent costs, varying nested counts,
 and exit-dependent allocation/liveness can remain unknown. Peak qubits and depth
 follow their own composition rules rather than blindly multiplying by the count.
+
+## Per-shot costs
+
+`qm.get_current_shot()` becomes one nonnegative resource symbol named `shot`.
+Repeated reads, helper calls and loop bodies share its identity. For a body
+containing one X gate, `range(shot)` costs `shot` gates and `range(shot % 2)`
+costs `shot % 2` gates. These formulas describe one trial, not an automatic sum
+over every shot in an execution request.
+
+```python
+import qamomile as qm
+
+
+@qm.qkernel
+def shot_resource_loop() -> qm.Shot[qm.Bit]:
+    state = qm.prepare(0)
+    for _ in range(qm.get_current_shot() % 2):
+        state = qm.x(state)
+    return qm.measure(state)
+
+
+@qm.qkernel
+def complementary_shot_cost() -> qm.Shot[qm.Bit]:
+    index = qm.get_current_shot()
+    state = qm.prepare(0)
+    if index % 2 == 0:
+        state = qm.x(state)
+    if index % 2 != 0:
+        state = qm.z(state)
+    return qm.measure(state)
+
+
+shot_study = qm.resources.logical(shot_resource_loop)
+shot_gates = shot_study.metric(qm.resources.LOGICAL_GATES)
+assert shot_gates.evaluate({"shot": 5}).numeric_enclosure() == (1, 1)
+assert shot_gates.evaluate({"shot": 6}).numeric_enclosure() == (0, 0)
+
+complementary_study = qm.resources.logical(complementary_shot_cost)
+assert complementary_study.metric(qm.resources.LOGICAL_GATES).numeric_enclosure() == (1, 1)
+restored_shot_study = qm.resources.ResourceStudy.from_bytes(shot_study.to_bytes())
+assert restored_shot_study == shot_study
+```
+
+The total in the second example is exactly one. Individual X and Z counts can
+remain in `[0, 1]`. Rust keeps supported condition and negation relationships
+until their costs are combined. Unproved relationships and measurement-dependent
+conditions keep conservative bounds or unknown contributors. Predicate proof
+work is bounded, and exceeding that budget can produce a named unknown.
+
+`evaluate({"shot": ...})` substitutes an analysis value. It does not alter
+the kernel's arguments, executable, runtime shot limits or number of trials.
+A source parameter also named `shot` has a separate scoped identity. When both
+occur, use their qualified identities for expression substitution. A while-loop
+whose iteration count is unproved keeps its separate iteration symbol, even
+when its body cost also depends on `shot`.
+
+Custom dependency-span and peak-liveness rules without a supported composition
+proof remain conservative in a study that reads the shot context. Natural and
+Probability metrics become named unknowns. Signed-domain versions are rejected
+with Q4211 because a sound lower bound is unavailable. This also applies when
+the custom metric's own formula does not mention `shot`.

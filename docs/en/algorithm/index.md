@@ -33,6 +33,12 @@ Prepare a quantum state from classical amplitudes and verify its measurement pro
 :::
 
 :::{card}
+:header: **Quantum Fourier Transform (QFT)**
+:link: qft
+Implement QFT from scratch and with the built-in `qft`, then compare their frequency estimates and examine the required gate count.
+:::
+
+:::{card}
 :header: **Option Pricing with Quantum Amplitude Estimation**
 :link: option_pricing
 Encode an asset distribution and payoff, estimate the expected payoff, and calculate a discounted option price.
@@ -47,7 +53,13 @@ Apply a reusable QFT to each logical axis of a quantum register.
 :::{card}
 :header: **Pauli Correlation Encoding**
 :link: pce_maxcut
-Encode a four-variable MaxCut problem with two qubits and recover a partition from estimated Pauli correlations.
+Encode a 20-variable MaxCut problem with three qubits and recover a partition from estimated Pauli correlations.
+:::
+
+:::{card}
+:header: **Portfolio Optimization with Pauli Correlation Encoding**
+:link: portfolio_PCE
+Recursively partition a correlation graph of 30 assets with PCE, select one asset per cluster, and compare the portfolio with an equal-weight baseline.
 :::
 
 :::{card}
@@ -59,7 +71,7 @@ Formulate a constrained problem with JijModeling and OMMX, run QAOA, and check f
 :::{card}
 :header: **QAOA for MaxCut**
 :link: qaoa_maxcut
-Build QAOA from reusable functions and decode a cut of a four-vertex cycle.
+This example implements the Quantum Approximate Optimization Algorithm (QAOA) with Qamomile. It presents two approaches to MaxCut: building the circuit from scratch and using the built-in `qaoa_state`.
 :::
 
 :::{card}
@@ -71,7 +83,7 @@ Build a real-polynomial eigenstate filter, estimate its success probability, and
 :::{card}
 :header: **Quantum-Enhanced Markov Chain Monte Carlo**
 :link: qe_mcmc
-Use a quantum time-evolution circuit to propose classical samples and verify detailed balance.
+This example implements Quantum-enhanced MCMC (QeMCMC) with Qamomile. It runs QeMCMC to sample from the Boltzmann distribution of an Ising model and compares the results with classical MCMC.
 :::
 
 :::{card}
@@ -111,9 +123,15 @@ Construct the Steane code and use its syndrome to correct a Pauli error.
 :::
 
 :::{card}
-:header: **VQE for the Hydrogen Molecule**
+:header: **VQE for the Hydrogen Molecule: Energy Estimation and Variational Optimization**
 :link: vqe_for_hydrogen
-Build a molecular Hamiltonian and optimize a two-qubit trial state to estimate its ground-state energy.
+Build a four-qubit molecular Hamiltonian, estimate energies with `Estimator`, and optimize a trial state across H–H distances.
+:::
+
+:::{card}
+:header: **ADAPT-VQE**
+:link: adapt_vqe
+Improved version of VQE that constructs the ansatz by adaptively adding operators.
 :::
 
 ::::

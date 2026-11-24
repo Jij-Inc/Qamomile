@@ -194,7 +194,7 @@ def test_param_real_cast_in_unselected_shot_branch(backend):
     """An untaken measured branch never converts its overflowing integer."""
     source = """import qamomile as qm
 @qm.qkernel
-def sample(n: qm.Param[qm.Int]) -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Real], qm.Shot[qm.Bool]]:
+def sample(n: qm.Param[qm.Int]) -> tuple[qm.Shot[qm.Bit], qm.Shot[qm.Real], qm.Shot[qm.Bit]]:
     selected = qm.measure(qm.prepare(False))
     if selected:
         result = float(n)

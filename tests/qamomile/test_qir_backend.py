@@ -78,7 +78,7 @@ def test_qir_bell_module_is_base_profile_and_llvm_verified() -> None:
     assert '!"qir_major_version", i32 1' in ir
     assert '!"dynamic_qubit_management", i1 false' in ir
     assert '!"dynamic_result_management", i1 false' in ir
-    assert '"irreversible"' in ir and "%Result* writeonly" in ir
+    assert '"irreversible"' in ir and "ptr writeonly" in ir
     entry = next(
         function for function in module.functions if pyqir.is_entry_point(function)
     )
@@ -416,7 +416,7 @@ def sample() -> qm.Bits[{controls + 1}]:
         )
         opcode = {"cnot": "cx"}.get(opcode, opcode)
         args = [
-            arg.value if isinstance(arg, pyqir.FloatConstant) else pyqir.qubit_id(arg)
+            arg.value if isinstance(arg, pyqir.FloatConstant) else pyqir.ptr_id(arg)
             for arg in instruction.args
         ]
         getattr(circuit, opcode)(*args)

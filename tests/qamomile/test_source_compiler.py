@@ -1400,7 +1400,7 @@ def overridden() -> Settings:
             "without a default follows a field with a default",
         ),
         (
-            "value: qm.Int = DEFAULT",
+            "value: qm.Int = UNKNOWN_DEFAULT",
             "default for record field 'value' is not a portable literal",
         ),
         ("enabled: qm.Bool = 1", "expected Bool, got Int"),
@@ -1811,6 +1811,75 @@ def test_function_factory_closes_dimensions_used_only_by_annotations() -> None:
     )
 
 
+def test_dependent_parameter_annotations_shadow_outer_capture_names() -> None:
+    """A dependent parameter dimension stays symbolic despite an outer value."""
+
+    width = 1
+
+    @qm.qkernel
+    def identity(
+        width: qm.Const[qm.Int],
+        values: qm.Param[qm.Vector[qm.Real, width]],
+    ) -> qm.Param[qm.Vector[qm.Real, width]]:
+        return values
+
+    assert qm.evaluate(identity.specialize(width=1), values=(3.0,)) == (3.0,)
+    assert qm.evaluate(identity.specialize(width=2), values=(3.0, 4.0)) == (3.0, 4.0)
+
+
+def test_dependent_parameter_defaults_keep_outer_capture_scope() -> None:
+    """Defaults read outer values while dependent annotations use parameters."""
+
+    width = 1
+
+    @qm.qkernel
+    def identity(
+        width: qm.Const[qm.Int] = width,
+        *,
+        values: qm.Param[qm.Vector[qm.Real, width]],
+    ) -> qm.Param[qm.Vector[qm.Real, width]]:
+        return values
+
+    assert qm.evaluate(identity.specialize(), values=(3.0,)) == (3.0,)
+    assert qm.evaluate(identity.specialize(width=2), values=(3.0, 4.0)) == (3.0, 4.0)
+
+
+@pytest.mark.parametrize("defaulted", [False, True])
+def test_dependent_source_parameter_names_shadow_module_constants(
+    defaulted: bool,
+    tmp_path,
+) -> None:
+    """Source and file builds distinguish dimension parameters from defaults."""
+
+    default = " = width" if defaulted else ""
+    source = f"""
+import qamomile as qm
+
+width = 1
+
+@qm.qkernel
+def identity(
+    width: qm.Const[qm.Int]{default},
+    *,
+    values: qm.Param[qm.Vector[qm.Real, width]],
+) -> qm.Param[qm.Vector[qm.Real, width]]:
+    return values
+"""
+    path = tmp_path / "dependent_parameter_scope.py"
+    path.write_text(source, encoding="utf-8")
+
+    for module in (qm.build_source(source), qm.build(path)):
+        default_program = (
+            module.specialize("identity")
+            if defaulted
+            else module.specialize("identity", width=1)
+        )
+        assert qm.evaluate(default_program, values=(3.0,)) == (3.0,)
+        assert qm.evaluate(
+            module.specialize("identity", width=2), values=(3.0, 4.0)
+        ) == (3.0, 4.0)
+
+
 def test_function_factory_rejects_an_opaque_capture_eagerly() -> None:
     """Closure conversion admits data, not arbitrary live Python objects."""
 
@@ -1963,7 +2032,7 @@ def test_basis_measurement_requires_a_target_for_multi_qubit_state() -> None:
 import qamomile as qm
 
 @qm.qkernel
-def invalid() -> qm.Shot[qm.Bool]:
+def invalid() -> qm.Shot[qm.Bit]:
     bit, state = qm.measure_x(qm.qubits(2))
     qm.discard(state)
     return bit
@@ -2854,11 +2923,11 @@ def test_call_stage_preserves_callee_availability_and_aggregate_bounds() -> None
 import qamomile as qm
 
 @qm.qkernel
-def observe() -> qm.Shot[qm.Bool]:
+def observe() -> qm.Shot[qm.Bit]:
     return qm.measure(qm.prepare(True))
 
 @qm.qkernel
-def forward() -> qm.Shot[qm.Bool]:
+def forward() -> qm.Shot[qm.Bit]:
     return observe()
 """
     entry = qm.build_source(source).function("forward")
@@ -2868,7 +2937,7 @@ def forward() -> qm.Shot[qm.Bool]:
         if operation.opcode == "qcore.call"
     )
 
-    assert call.results[0].type == qm.Shot[qm.Bool]
+    assert call.results[0].type == qm.Shot[qm.Bit]
     assert is_type_assignable(
         tuple[qm.Int, qm.Int],
         tuple[qm.Shot[qm.Int], qm.Param[qm.Int]],
@@ -3177,6 +3246,80 @@ def main() -> tuple[qm.Shot[qm.Bits[1]], qm.Shot[qm.Bits[2]]]:
     assert result.values == {((1,), (1, 0)): 3}
 
 
+@pytest.mark.parametrize("entry", ["nested", "inline"])
+def test_specialized_matrix_row_rotation(entry: str) -> None:
+    """Moving a rotation into a child kernel preserves the measured bits."""
+
+    source = """
+import qamomile as qm
+
+@qm.qkernel
+def prepare(n: qm.Const[qm.Int], angles: qm.Param[qm.Matrix[qm.Real, 1, n]]) -> qm.Q[qm.Bits[n]]:
+    return qm.ry(qm.qubits(n), angles[0][0], target=0)
+
+@qm.qkernel
+def nested(n: qm.Const[qm.Int], angles: qm.Param[qm.Matrix[qm.Real, 1, n]]) -> qm.Shot[qm.Bits[n]]:
+    return qm.measure(prepare(n, angles))
+
+@qm.qkernel
+def inline(n: qm.Const[qm.Int], angles: qm.Param[qm.Matrix[qm.Real, 1, n]]) -> qm.Shot[qm.Bits[n]]:
+    return qm.measure(qm.ry(qm.qubits(n), angles[0][0], target=0))
+"""
+    program = qm.build_source(source).specialize(entry, n=2)
+    result = qm.run(
+        program, on=qm.Reference(), parameters={"angles": [[qm.pi, 0.0]]}, shots=4
+    ).result
+
+    assert result.counts == {(1, 0): 4}
+
+
+def test_matrix_row_width_is_resolved_for_each_call() -> None:
+    """Matrix operands determine each child's row bounds and parameter paths."""
+
+    source = """
+import qamomile as qm
+
+@qm.qkernel
+def prepare(
+    angles: qm.Param[qm.Matrix[qm.Real, 2, n]], column: qm.Const[qm.Int]
+) -> qm.Q[qm.Bits[2]]:
+    state = qm.ry(qm.qubits(2), angles[0][column], target=0)
+    return qm.ry(state, angles[1][0], target=1)
+
+@qm.qkernel
+def main(
+    short: qm.Param[qm.Matrix[qm.Real, 2, 2]],
+    long: qm.Param[qm.Matrix[qm.Real, 2, 3]],
+    column: qm.Const[qm.Int],
+) -> qm.Shot[qm.Bits[4]]:
+    left = prepare(short, column)
+    right = prepare(long, column)
+    return qm.measure(qm.concat(left, right))
+"""
+    module = qm.build_source(source)
+    parameters = {
+        "short": [[0.0, qm.pi], [0.0, 0.0]],
+        "long": [[0.0, 0.0, qm.pi], [qm.pi, 0.0, 0.0]],
+    }
+    result = qm.run(
+        module.specialize("main", column=-1),
+        on=qm.Reference(),
+        parameters=parameters,
+        shots=4,
+    ).result
+    assert result.counts == {(1, 0, 1, 1): 4}
+
+    with pytest.raises(
+        qm.ExecutionError, match=r"Q4303: .*index 2 is outside extent 2"
+    ):
+        qm.run(
+            module.specialize("main", column=2),
+            on=qm.Reference(),
+            parameters=parameters,
+            shots=1,
+        )
+
+
 def test_dependent_shape_names_are_alpha_equivalent_across_calls() -> None:
     """A caller and callee need not coordinate dependent-binder spelling."""
 
@@ -3194,6 +3337,86 @@ def caller(state: qm.Q[qm.Bits[width]]) -> qm.Q[qm.Bits[width]]:
     function = qm.build_source(source).function("caller")
 
     assert str(function.result_type) == "Q[Bits[width]]"
+
+
+def test_forwarded_matrix_rows_share_call_dimensions_with_resource_analysis() -> None:
+    """One generic loop has the same trip count in resources and in the circuit."""
+    from qamomile._native import compiler as native
+    from qamomile.circuit import lower_to_circuit
+
+    source = """
+import qamomile as qm
+
+@qm.qkernel
+def rotate(angles: qm.Param[qm.Matrix[qm.Real, 1, inner]]) -> qm.Q[qm.Bits[1]]:
+    state = qm.qubits(1)
+    row = angles[0]
+    for i in range(len(row)):
+        state = qm.ry(state, row[i])
+    return state
+
+@qm.qkernel
+def forward(angles: qm.Param[qm.Matrix[qm.Real, 1, middle]]) -> qm.Q[qm.Bits[1]]:
+    return rotate(angles)
+
+@qm.qkernel
+def pair(
+    a: qm.Const[qm.Int], b: qm.Const[qm.Int],
+    short: qm.Param[qm.Matrix[qm.Real, 1, a]], long: qm.Param[qm.Matrix[qm.Real, 1, b]],
+) -> qm.Shot[qm.Bits[2]]:
+    left = forward(short)
+    right = forward(long)
+    return qm.measure(qm.concat(left, right))
+"""
+    module = qm.build_source(source)
+    symbolic = qm.resources.logical(module["pair"])
+    rotations = qm.resources.LOGICAL_ROTATION_GATES
+    assert symbolic.evaluate(a=2, b=3).metric(rotations).numeric_enclosure() == (5, 5)
+    assert symbolic.evaluate(a=4, b=2).metric(rotations).numeric_enclosure() == (6, 6)
+
+    program = module.specialize("pair", a=2, b=3)
+    restored = qm.Program.from_bytes(program.to_bytes())
+    helpers = tuple(f for f in restored.functions if f.symbol != restored.entrypoint)
+    assert helpers == (module.function("forward"), module.function("rotate"))
+    assert (
+        native.inspect_exact_logical_counts(restored.to_bytes()).opcodes["quantum.ry"]
+        == 5
+    )
+    assert qm.resources.logical(restored).metric(rotations).numeric_enclosure() == (
+        5,
+        5,
+    )
+    circuit = lower_to_circuit(restored)
+    assert sum(op.opcode == "ry" for op in circuit.body.instructions) == 5
+    parameters = {"short": [[0.0, qm.pi]], "long": [[qm.pi, 0.0, qm.pi]]}
+    assert qm.run(
+        restored, on=qm.Reference(), parameters=parameters, shots=4
+    ).result.counts == {(1, 0): 4}
+
+
+def test_adjoint_uses_each_callers_width_to_separate_registers() -> None:
+    """The inverse splits a packed register pair at each call's word boundary."""
+    source = """
+import qamomile as qm
+
+@qm.qkernel
+def turn(pair: tuple[qm.Q[qm.Bits[n]], qm.Q[qm.Bits[1]]]) -> tuple[qm.Q[qm.Bits[n]], qm.Q[qm.Bits[1]]]:
+    word, flag = pair
+    return qm.x(word, target=0), qm.x(flag)
+
+@qm.qkernel
+def inverse(pair: tuple[qm.Q[qm.Bits[m]], qm.Q[qm.Bits[1]]]) -> tuple[qm.Q[qm.Bits[m]], qm.Q[qm.Bits[1]]]:
+    return qm.adjoint(turn, pair)
+
+@qm.qkernel
+def sample() -> qm.Shot[qm.Bits[7]]:
+    short, left_flag = inverse((qm.qubits(2), qm.qubits(1)))
+    long, right_flag = inverse((qm.qubits(3), qm.qubits(1)))
+    return qm.measure(qm.concat(short, left_flag, long, right_flag))
+"""
+    program = qm.build_source(source).specialize("sample")
+    result = qm.run(program, on=qm.Reference(), shots=4).result
+    assert result.counts == {(1, 0, 1, 1, 0, 0, 1): 4}
 
 
 def test_affine_dimensions_infer_and_persist_canonically() -> None:
@@ -3745,3 +3968,47 @@ def flip() -> qm.Bits[1]:
         if name == "doc"
     ]
     assert doc == "x" * 4000
+
+
+def test_computed_dimension_argument_must_match_the_called_register() -> None:
+    """A computed Const can match a fixed register only for some invocations."""
+
+    from qamomile import _qamomile_native as native, resources
+    from qamomile.circuit import lower_to_circuit
+
+    source = """
+import qamomile as qm
+
+@qm.qkernel
+def flip(n: qm.Const[qm.Int], state: qm.Q[qm.Bits[n]]) -> qm.Q[qm.Bits[n]]:
+    return qm.x(state, target=0)
+
+@qm.qkernel
+def forward(m: qm.Const[qm.Int], state: qm.Q[qm.Bits[3]]) -> qm.Q[qm.Bits[3]]:
+    return flip(m + 1, state)
+
+@qm.qkernel
+def main(m: qm.Const[qm.Int]) -> qm.Shot[qm.Bits[3]]:
+    return qm.measure(forward(m, qm.qubits(3)))
+"""
+    module = qm.build_source(source)
+    valid = module.specialize("main", m=2)
+    assert qm.run(valid, on=qm.Reference(), shots=2).result.counts == {(1, 0, 0): 2}
+    assert (
+        native.inspect_exact_logical_counts(valid.to_bytes()).opcodes["quantum.x"] == 1
+    )
+    assert (
+        resources.logical(valid).metric(resources.LOGICAL_GATES).expression.numeric()
+        == 1
+    )
+
+    conflict = module.specialize("main", m=1)
+    with pytest.raises(
+        qm.CapabilityError,
+        match=r"dimension argument .*disagrees with its verified width",
+    ):
+        lower_to_circuit(conflict)
+    with pytest.raises(ValueError, match="disagrees with its verified width"):
+        native.inspect_exact_logical_counts(conflict.to_bytes())
+    with pytest.raises(qm.QamomileError, match="disagrees with its verified width"):
+        resources.logical(conflict)

@@ -5,13 +5,19 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import importlib.util
+import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 from importlib import metadata
 from pathlib import Path
+from typing import NoReturn
+
+_LOCALIZATION_ROOT = Path(__file__).resolve().parent.parent / "docs-localization"
 
 _CHILD_RUNNER = """
 import runpy
@@ -54,7 +60,7 @@ class _StripDocstrings(ast.NodeTransformer):
     visit_ClassDef = _visit_body
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     """Stop installed-documentation verification.
 
     Args:
@@ -185,6 +191,9 @@ def verify_import_boundary(repository_root: Path, expected_version: str) -> None
 def executable_ast(path: Path) -> str:
     """Return a stable executable AST with translated docstrings removed.
 
+    An empty Python 3.12 type_params field is omitted to match Python 3.11's
+    AST shape. Actual type parameters remain part of the comparison.
+
     Args:
         path: Jupytext Python source to inspect.
 
@@ -197,8 +206,58 @@ def executable_ast(path: Path) -> str:
 
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     stripped = _StripDocstrings().visit(tree)
+    for node in ast.walk(stripped):
+        if getattr(node, "type_params", None) == []:
+            del node.type_params
     ast.fix_missing_locations(stripped)
     return ast.dump(stripped, include_attributes=False)
+
+
+def localized_program_pair(docs_root: Path, english: Path) -> tuple[str, str] | None:
+    """Read a reviewed pair of complete executable-AST digests.
+
+    Records retain known source-language differences without normalizing executable
+    strings, argument values, or statement order. Updating either program needs
+    a newly reviewed record.
+
+    Args:
+        docs_root: Documentation root containing the English sources.
+        english: Canonical English page to look up.
+
+    Returns:
+        Expected English and Japanese SHA256 digests, or None for strict parity.
+
+    Raises:
+        SystemExit: If a present localization record is malformed.
+    """
+
+    relative = english.relative_to(docs_root / "en").with_suffix(".json")
+    path = _LOCALIZATION_ROOT / relative
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as error:
+        fail(f"invalid localization record {relative}: {error}")
+    expected = {
+        "source_pr",
+        "source_sha",
+        "english_ast_sha256",
+        "japanese_ast_sha256",
+    }
+    if (
+        not isinstance(record, dict)
+        or set(record) != expected
+        or any(not isinstance(value, str) for value in record.values())
+        or re.fullmatch(r"[\w.-]+/[\w.-]+#[1-9][0-9]*", record["source_pr"]) is None
+        or re.fullmatch(r"[0-9a-f]{40}", record["source_sha"]) is None
+        or any(
+            re.fullmatch(r"[0-9a-f]{64}", record[key]) is None
+            for key in ("english_ast_sha256", "japanese_ast_sha256")
+        )
+    ):
+        fail(f"invalid localization record {relative}")
+    return record["english_ast_sha256"], record["japanese_ast_sha256"]
 
 
 def discover_pages(docs_root: Path) -> tuple[Path, ...]:
@@ -235,19 +294,31 @@ def discover_pages(docs_root: Path) -> tuple[Path, ...]:
 
 
 def verify_bilingual_programs(docs_root: Path, pages: tuple[Path, ...]) -> None:
-    """Require English and Japanese pages to share one executable program.
+    """Require strict parity or an exact reviewed pair of localized programs.
 
     Args:
         docs_root: Bilingual documentation root.
         pages: Canonical English source pages to compare.
 
     Raises:
-        SystemExit: If translated executable code differs from English.
+        SystemExit: If programs differ without matching their reviewed record.
     """
 
     for english in pages:
         japanese = docs_root / "ja" / english.parent.name / english.name
-        if executable_ast(english) != executable_ast(japanese):
+        programs = (executable_ast(english), executable_ast(japanese))
+        accepted = localized_program_pair(docs_root, english)
+        if accepted is not None:
+            actual = tuple(
+                hashlib.sha256(program.encode("utf-8")).hexdigest()
+                for program in programs
+            )
+            if actual != accepted:
+                fail(
+                    "localized executable drift in "
+                    f"{english.relative_to(docs_root)}; review both language programs"
+                )
+        elif programs[0] != programs[1]:
             fail(
                 f"English/Japanese executable drift in {english.relative_to(docs_root)}"
             )
@@ -291,7 +362,7 @@ def execute_pages(docs_root: Path, pages: tuple[Path, ...]) -> None:
 
     Args:
         docs_root: Documentation root used for concise diagnostics.
-        pages: Canonical English pages to execute sequentially.
+        pages: Verified English pages; reviewed localized pairs run both languages.
 
     Raises:
         SystemExit: If a page times out or exits unsuccessfully.
@@ -300,6 +371,15 @@ def execute_pages(docs_root: Path, pages: tuple[Path, ...]) -> None:
     environment = dict(os.environ)
     environment["MPLBACKEND"] = "Agg"
     environment["QAMOMILE_DOCS_TEST"] = "1"
+    pages = tuple(
+        candidate
+        for page in pages
+        for candidate in (
+            (page, docs_root / "ja" / page.parent.name / page.name)
+            if localized_program_pair(docs_root, page) is not None
+            else (page,)
+        )
+    )
     with tempfile.TemporaryDirectory(prefix="qamomile-installed-docs-") as workdir:
         matplotlib_config = Path(workdir) / "matplotlib"
         matplotlib_config.mkdir()

@@ -11,7 +11,7 @@ use crate::budget;
 use crate::equations::literal_conforms;
 use crate::literals::validate_literal_references;
 use crate::sample_counts::SampleCountSummary;
-use crate::types::{Dimension, ScalarType, SemanticType, Stage, TypeArena, TypeId, WordKind};
+use crate::types::{Dimension, ScalarType, SemanticType, TypeArena, TypeId, WordKind};
 use crate::wire;
 
 const MAX_RESULT_ABI_BYTES: usize = 16 * 1024 * 1024;
@@ -116,6 +116,11 @@ pub fn decode_sample_values(
 }
 
 impl CheckedResultAbi {
+    /// Return the checked number of encoded bits in one logical result row.
+    pub(crate) const fn logical_width(&self) -> usize {
+        self.logical_width
+    }
+
     fn decode_bits(&self, bits: &[u8]) -> Result<Vec<u8>, ResultCodecError> {
         Ok(self.decode_literal_bits(bits)?.encode_to_vec())
     }
@@ -167,6 +172,77 @@ pub fn validate_result_value(result_abi: &[u8], value: &[u8]) -> Result<(), Resu
     literal_conforms(&abi.types, abi.result_type, &value)
         .then_some(())
         .ok_or(ResultCodecError::InvalidValue)
+}
+
+/// Normalize binary carriers while preserving the declared value shape.
+pub(crate) fn normalize_result_value(
+    result_abi: &[u8],
+    value: &[u8],
+) -> Result<Vec<u8>, ResultCodecError> {
+    use wire::literal_proto::Value;
+
+    let abi = checked_result_abi(result_abi)?;
+    let mut value = decode_literal(value)?;
+    if !literal_conforms(&abi.types, abi.result_type, &value) {
+        return Err(ResultCodecError::InvalidValue);
+    }
+    let mut pending = vec![(abi.result_type, 0, &mut value)];
+    while let Some((type_id, array_rank, value)) = pending.pop() {
+        if array_rank > 0 {
+            if let Some(Value::TupleValue(sequence)) = value.value.as_mut() {
+                pending.extend(
+                    sequence
+                        .values
+                        .iter_mut()
+                        .map(|value| (type_id, array_rank - 1, value)),
+                );
+            }
+            continue;
+        }
+        match abi.types.get(abi.types.strip_stage(type_id)) {
+            Some(SemanticType::Scalar(ScalarType::Bit)) => {
+                value.value = Some(Value::IntValue(i64::from(literal_bit(value)?)));
+            }
+            Some(SemanticType::Word {
+                kind: WordKind::Bits,
+                ..
+            }) => {
+                if let Some(Value::TupleValue(sequence)) = value.value.as_mut() {
+                    for bit in &mut sequence.values {
+                        bit.value = Some(Value::IntValue(i64::from(literal_bit(bit)?)));
+                    }
+                }
+            }
+            Some(SemanticType::Product(elements)) => {
+                if let Some(Value::TupleValue(sequence)) = value.value.as_mut() {
+                    pending.extend(
+                        elements
+                            .iter()
+                            .zip(&mut sequence.values)
+                            .map(|(ty, value)| (*ty, 0, value)),
+                    );
+                }
+            }
+            Some(SemanticType::Record { fields, .. }) => {
+                if let Some(Value::MappingValue(mapping)) = value.value.as_mut() {
+                    let fields = fields
+                        .iter()
+                        .map(|(name, ty)| (name.as_str(), *ty))
+                        .collect::<HashMap<_, _>>();
+                    for entry in &mut mapping.entries {
+                        if let Some(value) = entry.value.as_mut() {
+                            pending.push((fields[entry.key.as_str()], 0, value));
+                        }
+                    }
+                }
+            }
+            Some(SemanticType::Array { element, shape }) => {
+                pending.push((*element, shape.len(), value));
+            }
+            _ => {}
+        }
+    }
+    Ok(value.encode_to_vec())
 }
 
 /// Decode one SDK-native textual bit row into source order.
@@ -279,12 +355,8 @@ fn decode_abi(payload: &[u8]) -> Result<CheckedResultAbi, ResultCodecError> {
         .sampled_width(result_type)
         .map_err(ResultCodecError::InvalidAbi)?;
     let expected_width = sampled_width.and_then(|width| usize::try_from(width).ok());
-    let invalid_sample_shape = if logical_width == 0 {
-        arena.contains_stage(result_type, Stage::Shot)
-            && expected_width.is_some_and(|expected_width| expected_width != 0)
-    } else {
-        expected_width != Some(logical_width)
-    };
+    let invalid_sample_shape =
+        (value.per_shot || logical_width != 0) && expected_width != Some(logical_width);
     if invalid_sample_shape {
         return Err(ResultCodecError::InvalidAbi(
             "result type disagrees with its logical sample width".to_owned(),
@@ -367,6 +439,9 @@ fn decode_leaf(
     use wire::literal_proto::Value;
 
     match types.get(type_id) {
+        Some(SemanticType::Scalar(ScalarType::Unit)) => Ok(wire::LiteralProto {
+            value: Some(Value::UnitValue(true)),
+        }),
         Some(SemanticType::Scalar(ScalarType::Real)) => {
             let raw = take_bits(bits, offset, 64)?
                 .iter()
@@ -501,6 +576,13 @@ fn encode_leaf(
     use wire::literal_proto::Value;
 
     match types.get(type_id) {
+        Some(SemanticType::Scalar(ScalarType::Unit)) => {
+            if matches!(value.value, Some(Value::UnitValue(true))) {
+                Ok(())
+            } else {
+                Err(ResultCodecError::InvalidValue)
+            }
+        }
         Some(SemanticType::Scalar(ScalarType::Real)) => {
             let Some(Value::RealValue(value)) = value.value else {
                 return Err(ResultCodecError::InvalidValue);
@@ -785,6 +867,7 @@ mod tests {
 
     fn abi(type_spec: wire::TypeProto, width: u32) -> Vec<u8> {
         wire::ResultAbiProto {
+            per_shot: false,
             r#type: Some(type_spec),
             source_order: (0..width).collect(),
             native_width: width,
@@ -966,6 +1049,67 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_binary_value_carriers_in_records_products_words_and_arrays() {
+        use wire::literal_proto::Value;
+
+        let array = wire::TypeProto {
+            kind: wire::type_proto::Kind::Array.into(),
+            name: "Array".into(),
+            arguments: vec![scalar("Bit")],
+            dimensions: vec![dimension(1), dimension(2)],
+            ..Default::default()
+        };
+        let result_type = wire::TypeProto {
+            kind: wire::type_proto::Kind::Record.into(),
+            name: "Answer".into(),
+            arguments: vec![wire::TypeProto {
+                kind: wire::type_proto::Kind::Product.into(),
+                arguments: vec![
+                    staged("Shot", scalar("Bit")),
+                    scalar("Bool"),
+                    scalar("Int"),
+                    word(1),
+                    array,
+                ],
+                ..Default::default()
+            }],
+            field_names: vec!["values".into()],
+            ..Default::default()
+        };
+        let literal = |value| wire::LiteralProto { value: Some(value) };
+        let value = |bit: Value| {
+            mapping_literal(vec![wire::literal_proto::Entry {
+                key: "values".into(),
+                value: Some(tuple_literal(vec![
+                    literal(bit.clone()),
+                    literal(Value::BoolValue(true)),
+                    literal(Value::IntValue(7)),
+                    tuple_literal(vec![literal(bit.clone())]),
+                    tuple_literal(vec![tuple_literal(vec![
+                        literal(bit.clone()),
+                        literal(bit.clone()),
+                    ])]),
+                ])),
+            }])
+            .encode_to_vec()
+        };
+        let result_abi = abi(result_type, 0);
+        let normalized = value(Value::IntValue(1));
+        assert_eq!(
+            normalize_result_value(&result_abi, &value(Value::BoolValue(true))),
+            Ok(normalized.clone())
+        );
+        assert_eq!(
+            normalize_result_value(&result_abi, &normalized),
+            Ok(normalized)
+        );
+        assert_eq!(
+            normalize_result_value(&result_abi, &value(Value::IntValue(2))),
+            Err(ResultCodecError::InvalidValue)
+        );
+    }
+
+    #[test]
     fn distinguishes_value_routes_from_fixed_sample_schemas() {
         let integer = wire::LiteralProto {
             value: Some(wire::literal_proto::Value::IntValue(7)),
@@ -984,8 +1128,12 @@ mod tests {
             validate_result_value(&abi(scalar("Bool"), 0), &boolean),
             Ok(())
         );
+        let mut sampled = wire::ResultAbiProto::decode(abi(staged("Shot", word(2)), 0).as_slice())
+            .expect("value result ABI");
+        assert!(checked_result_abi(&sampled.encode_to_vec()).is_ok());
+        sampled.per_shot = true;
         assert!(matches!(
-            checked_result_abi(&abi(staged("Shot", word(2)), 0)),
+            checked_result_abi(&sampled.encode_to_vec()),
             Err(ResultCodecError::InvalidAbi(message))
                 if message.contains("logical sample width")
         ));
@@ -1086,6 +1234,7 @@ mod tests {
     #[test]
     fn rejects_source_indices_outside_the_native_result() {
         let malformed = wire::ResultAbiProto {
+            per_shot: false,
             r#type: Some(scalar("Bit")),
             source_order: vec![1],
             native_width: 1,
@@ -1102,6 +1251,7 @@ mod tests {
     #[test]
     fn decodes_sdk_text_rows_through_the_result_abi() {
         let result_abi = wire::ResultAbiProto {
+            per_shot: false,
             r#type: Some(word(2)),
             source_order: vec![2, 0],
             native_width: 3,

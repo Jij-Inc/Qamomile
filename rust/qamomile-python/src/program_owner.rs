@@ -68,13 +68,8 @@ impl VerifiedModuleHandle {
 /// Verified `QCore` with either lazy standard or explicitly selected preparation.
 pub(crate) struct ProgramOwner {
     pub(crate) verified: VerifiedProgram,
-    preparation: Preparation,
-}
-
-/// Mutually exclusive preparation modes; an explicit pipeline never runs defaults.
-enum Preparation {
-    Standard(OnceLock<Result<TargetPreparedProgram, StandardOptimizationError>>),
-    Selected(Box<OptimizationPreparation>),
+    prepared: OnceLock<Result<TargetPreparedProgram, StandardOptimizationError>>,
+    optimization: Option<Box<OptimizationPreparation>>,
 }
 
 impl ProgramOwner {
@@ -88,25 +83,23 @@ impl ProgramOwner {
     fn standard(verified: VerifiedProgram) -> Self {
         Self {
             verified,
-            preparation: Preparation::Standard(OnceLock::new()),
+            prepared: OnceLock::new(),
+            optimization: None,
         }
     }
 
     pub(crate) fn prepared(&self) -> PyResult<&TargetPreparedProgram> {
-        match &self.preparation {
-            Preparation::Selected(optimization) => Ok(optimization.prepared()),
-            Preparation::Standard(cache) => cache
-                .get_or_init(|| self.verified.prepare_standard().map(|(program, _)| program))
-                .as_ref()
-                .map_err(value_error),
-        }
+        self.prepared
+            .get_or_init(|| match self.optimization() {
+                Some(optimization) => optimization.prepare_for_target().map_err(Into::into),
+                None => self.verified.prepare_standard().map(|(program, _)| program),
+            })
+            .as_ref()
+            .map_err(value_error)
     }
 
     fn optimization(&self) -> Option<&OptimizationPreparation> {
-        match &self.preparation {
-            Preparation::Selected(optimization) => Some(optimization),
-            Preparation::Standard(_) => None,
-        }
+        self.optimization.as_deref()
     }
 }
 
@@ -134,6 +127,23 @@ impl VerifiedProgramHandle {
     /// Export the current verified `QCore`, excluding its source association.
     fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         PyBytes::new(py, self.owner.verified.canonical_bytes())
+    }
+
+    /// Check host-indexed invocation limits without rewriting source.
+    fn check_indexed_invocation(&self, shots: u64) -> PyResult<()> {
+        self.owner
+            .verified
+            .check_indexed_invocation(shots)
+            .map_err(value_error)
+    }
+
+    /// Bind a checked logical index while retaining the source Shot stage.
+    fn bind_current_shot(&self, index: u64, shots: u64) -> PyResult<Self> {
+        self.owner
+            .verified
+            .bind_current_shot(index, shots)
+            .map(Self::standard)
+            .map_err(value_error)
     }
 
     /// Reuse dominance-local classical CSE on the selected program.
@@ -301,8 +311,9 @@ impl VerifiedProgramHandle {
     fn from_optimization(optimization: OptimizationPreparation) -> Self {
         Self {
             owner: Arc::new(ProgramOwner {
-                verified: optimization.prepared().as_verified().clone(),
-                preparation: Preparation::Selected(Box::new(optimization)),
+                verified: optimization.result().clone(),
+                prepared: OnceLock::new(),
+                optimization: Some(Box::new(optimization)),
             }),
         }
     }

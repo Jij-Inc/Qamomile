@@ -17,12 +17,80 @@ impl ExpressionArena {
         &mut self,
         node: ResourceExpressionNode,
     ) -> Result<ExprId, SymbolicResourceError> {
+        if let ResourceExpressionNode::Symbol { scope, name, .. } = &node {
+            self.reserve_symbol_identity(scope, name)?;
+        }
         if let Some(identifier) = self.ids.get(&node) {
             return Ok(*identifier);
         }
         let identifier = ResourceExpressionId::from_index(self.nodes.len())?;
         self.nodes.push(node.clone());
         self.ids.insert(node, identifier);
+        Ok(identifier)
+    }
+
+    fn reserve_symbol_identity(
+        &mut self,
+        scope: &str,
+        name: &str,
+    ) -> Result<(), SymbolicResourceError> {
+        if name != "shot" {
+            return Ok(());
+        }
+        self.shot_scopes.insert(scope.to_owned());
+        let Some(shot) = self.private_shot else {
+            return Ok(());
+        };
+        let Some(ResourceExpressionNode::Symbol {
+            scope: shot_scope, ..
+        }) = self.node(shot)
+        else {
+            unreachable!("the private shot handle always identifies a symbol");
+        };
+        if shot_scope != scope {
+            return Ok(());
+        }
+        self.relocate_current_shot_identity(shot)
+    }
+
+    fn relocate_current_shot_identity(
+        &mut self,
+        shot: ExprId,
+    ) -> Result<(), SymbolicResourceError> {
+        let new_scope = self.unused_shot_scope()?;
+        let index = shot.index().ok_or(SymbolicResourceError::Overflow)?;
+        let mut replacement = self.nodes[index].clone();
+        let ResourceExpressionNode::Symbol { scope, .. } = &mut replacement else {
+            unreachable!("the private shot handle always identifies a symbol");
+        };
+        *scope = new_scope;
+        self.ids.remove(&self.nodes[index]);
+        self.nodes[index] = replacement.clone();
+        self.ids.insert(replacement, shot);
+        Ok(())
+    }
+
+    fn unused_shot_scope(&mut self) -> Result<String, SymbolicResourceError> {
+        loop {
+            let scope = format!("qamomile.current_shot.{}", self.next_shot_scope);
+            self.next_shot_scope = self
+                .next_shot_scope
+                .checked_add(1)
+                .ok_or(SymbolicResourceError::Overflow)?;
+            if self.shot_scopes.insert(scope.clone()) {
+                return Ok(scope);
+            }
+        }
+    }
+
+    pub(super) fn current_shot(&mut self) -> Result<ExprId, SymbolicResourceError> {
+        if let Some(identifier) = self.private_shot {
+            return Ok(identifier);
+        }
+        let scope = self.unused_shot_scope()?;
+        let identifier =
+            self.symbol(&scope, "shot", ResourceDomain::Natural, "current_shot", &[])?;
+        self.private_shot = Some(identifier);
         Ok(identifier)
     }
 
@@ -452,6 +520,26 @@ impl ExpressionArena {
         {
             return self.naturalize_nonnegative(*stop);
         }
+        let domain = if name == "qamomile.modulo"
+            && let [numerator, denominator] = arguments.as_slice()
+            && self.node(*numerator).is_some_and(|node| {
+                matches!(
+                    node.domain(),
+                    ResourceDomain::Natural | ResourceDomain::Integer
+                )
+            })
+            && self.node(*denominator).is_some_and(|node| {
+                matches!(
+                    node.domain(),
+                    ResourceDomain::Natural | ResourceDomain::Integer
+                )
+            })
+            && self.is_positive(*denominator)
+        {
+            ResourceDomain::Natural
+        } else {
+            domain
+        };
         self.intern(ResourceExpressionNode::Contracted {
             name: name.to_owned(),
             domain,

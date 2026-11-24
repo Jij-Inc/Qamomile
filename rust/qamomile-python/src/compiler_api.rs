@@ -239,6 +239,8 @@ struct TargetLoweringPlanProjection {
     unsupported: Vec<String>,
     #[pyo3(get)]
     route: String,
+    #[pyo3(get)]
+    reusable_circuit_requirements: Option<Vec<String>>,
 }
 
 /// Inspect an integrity-checked canonical `Module` payload.
@@ -615,6 +617,7 @@ fn plan_target_lowering(
         materialized: labels(plan.materialized()),
         unsupported: labels(plan.unsupported()),
         route: plan.route().as_str().to_owned(),
+        reusable_circuit_requirements: plan.reusable_circuit_requirements().map(labels),
     })
 }
 

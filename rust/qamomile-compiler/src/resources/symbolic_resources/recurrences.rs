@@ -3,11 +3,12 @@
 use super::{
     BlockExit, BlockSummary, Counts, ExprId, ExpressionArena, MetricComposition,
     ResourceExpressionNode, ResourcePredicateKind, ScalarFact, SymbolicAnalyzer, SymbolicCount,
-    SymbolicResourceError, ValueFact, external_depth_metrics, external_family_metrics, int_fact,
-    scalar_type, statically_reachable_quantum_opcodes,
+    SymbolicDimensionBindings, SymbolicResourceError, ValueFact, external_depth_metrics,
+    external_family_metrics, int_fact, scalar_type, statically_reachable_quantum_opcodes,
 };
 use crate::call_graph::StaticCallGraph;
 use crate::resource_rules::{Domain as ResourceDomain, TransformMode};
+use crate::types::{Dimension, compare_dimensions};
 use crate::wire;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -33,6 +34,7 @@ impl RecurrenceKey {
 pub(super) struct RecurrenceRequest {
     parameters: Vec<ExprId>,
     arguments: Vec<Option<ValueFact>>,
+    dimensions: HashMap<Dimension, Option<ExprId>>,
     counts: Option<Counts>,
     condition: ExprId,
 }
@@ -118,76 +120,6 @@ impl RecurrenceAnalysis {
     }
 }
 
-impl Counts {
-    /// Visit additive coordinates only; scheduling and liveness are separate algebras.
-    fn map_additive(
-        &mut self,
-        mut map: impl FnMut(&str, &mut SymbolicCount) -> Result<(), SymbolicResourceError>,
-    ) -> Result<(), SymbolicResourceError> {
-        map("work", &mut self.work)?;
-        map("cleanup_work", &mut self.cleanup_work)?;
-        for (name, value) in &mut self.opcodes {
-            map(&format!("opcode:{name}"), value)?;
-        }
-        for (name, value) in &mut self.extra_metrics {
-            map(&format!("metric:{name}"), value)?;
-        }
-        if let Some(families) = &mut self.families {
-            for (name, value) in families {
-                map(&format!("family:{name}"), value)?;
-            }
-        }
-        if let Some(value) = &mut self.measurements {
-            map("measurements", value)?;
-        }
-        if let Some(value) = &mut self.resets {
-            map("resets", value)?;
-        }
-        Ok(())
-    }
-
-    fn additive(&self) -> Result<BTreeMap<String, SymbolicCount>, SymbolicResourceError> {
-        let mut counts = self.clone();
-        let mut result = BTreeMap::new();
-        counts.map_additive(|name, count| {
-            result.insert(name.to_owned(), count.clone());
-            Ok(())
-        })?;
-        Ok(result)
-    }
-
-    pub(super) fn conditional(
-        left: &Self,
-        right: &Self,
-        predicate: ExprId,
-        arena: &mut ExpressionArena,
-    ) -> Result<Self, SymbolicResourceError> {
-        let mut result = Self::branch(&[left.clone(), right.clone()], arena)?;
-        let left = left.additive()?;
-        let right = right.additive()?;
-        let zero = SymbolicCount::exact_value(arena.literal_u128(0)?);
-        result.map_additive(|name, count| {
-            let left = left.get(name).unwrap_or(&zero);
-            let right = right.get(name).unwrap_or(&zero);
-            count.lower = arena.piecewise(
-                &[predicate],
-                &[left.lower, right.lower],
-                ResourceDomain::Natural,
-            )?;
-            count.upper = left
-                .upper
-                .zip(right.upper)
-                .map(|(left, right)| {
-                    arena.piecewise(&[predicate], &[left, right], ResourceDomain::Natural)
-                })
-                .transpose()?;
-            count.exact = left.exact && right.exact;
-            Ok(())
-        })?;
-        Ok(result)
-    }
-}
-
 impl SymbolicAnalyzer<'_> {
     pub(super) fn guard_continuation(
         &mut self,
@@ -197,7 +129,13 @@ impl SymbolicAnalyzer<'_> {
     ) -> Result<Counts, SymbolicResourceError> {
         if let Some(predicate) = predicate {
             let zero = Counts::zero(&mut self.arena)?;
-            Counts::conditional(counts, &zero, predicate, &mut self.arena)
+            Counts::conditional(
+                counts,
+                &zero,
+                predicate,
+                &self.unproved_composition_metrics,
+                &mut self.arena,
+            )
         } else {
             self.optional_counts(counts, optional)
         }
@@ -255,6 +193,7 @@ impl SymbolicAnalyzer<'_> {
         &mut self,
         function: &wire::FunctionProto,
         arguments: &[Option<ValueFact>],
+        dimensions: &HashMap<Dimension, Option<ExprId>>,
         mode: TransformMode,
         controls: Option<u32>,
     ) -> Result<BlockSummary, SymbolicResourceError> {
@@ -308,6 +247,50 @@ impl SymbolicAnalyzer<'_> {
                 exact: None,
             })));
         }
+        // An implicit quantum width is a recurrence argument just as an explicit
+        // Const integer is. Its value can differ at each call to the same equation.
+        let parameter_types = self
+            .operations
+            .value_types(&function.symbol)
+            .ok_or_else(|| {
+                SymbolicResourceError::Missing("recursive parameter types".to_owned())
+            })?;
+        let parameter_names: HashSet<_> = function
+            .parameters
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        let mut implicit: Vec<_> = self.types.symbolic_dimensions_in(
+            function.parameters.iter().filter_map(|p| parameter_types.get(&p.value.as_ref()?.id).copied()),
+        ).into_iter().filter(|dimension| {
+            matches!(dimension, Dimension::Symbol { name, .. } if !parameter_names.contains(name.as_ref()))
+        }).collect();
+        implicit.sort_unstable_by(compare_dimensions);
+        let mut formal_dimensions = HashMap::new();
+        for dimension in implicit {
+            let Dimension::Symbol { name, .. } = &dimension else {
+                continue;
+            };
+            let operand = if let Some(operand) = dimensions.get(&dimension) {
+                operand.ok_or_else(super::unresolved_slice_dimension)?
+            } else {
+                Self::dimension_width(
+                    &mut self.arena,
+                    &dimension,
+                    &SymbolicDimensionBindings::default(),
+                )?
+            };
+            operands.push(operand);
+            let formal = self.arena.symbol(
+                &format!("resource.recurrence.{}", key.identity("parameters")),
+                name,
+                ResourceDomain::Natural,
+                "recurrence_parameter",
+                &[],
+            )?;
+            formals.push(formal);
+            formal_dimensions.insert(dimension, Some(formal));
+        }
         let mut counts = Counts::zero(&mut self.arena)?;
         // A recursive call contributes every reachable additive coordinate, including
         // zero families. This preserves the termination condition even for zero cost.
@@ -344,7 +327,7 @@ impl SymbolicAnalyzer<'_> {
                 .insert(rule.metric.identifier.clone(), count);
         }
         if let Some(reason) = reason {
-            counts.map_additive(|_, count| {
+            counts.map_conditional_counts(|_, count| {
                 *count = SymbolicCount::unresolved(reason.clone(), &mut self.arena)?;
                 Ok(())
             })?;
@@ -377,12 +360,13 @@ impl SymbolicAnalyzer<'_> {
                     RecurrenceRequest {
                         parameters: formals,
                         arguments: formal_arguments,
+                        dimensions: formal_dimensions,
                         counts: None,
                         condition,
                     },
                 );
             }
-            counts.map_additive(|name, count| {
+            counts.map_conditional_counts(|name, count| {
                 if !count.exact {
                     return Ok(());
                 }
@@ -425,7 +409,7 @@ impl SymbolicAnalyzer<'_> {
             let mut summary = self.analyze_function_mode_uncached(
                 function,
                 &request.arguments,
-                &HashMap::new(),
+                &request.dimensions,
                 key.mode,
                 key.controls,
             )?;
@@ -441,7 +425,7 @@ impl SymbolicAnalyzer<'_> {
                 .counts
                 .as_ref()
                 .expect("extracted equation")
-                .additive()?
+                .conditional_counts()?
             {
                 self.recurrences.definitions.insert(
                     key.identity(&metric),
@@ -488,7 +472,7 @@ impl SymbolicAnalyzer<'_> {
         if self.recurrences.requests.is_empty() {
             return Ok(());
         }
-        counts.map_additive(|_, count| self.close_recurrence_count(count))
+        counts.map_conditional_counts(|_, count| self.close_recurrence_count(count))
     }
 
     fn close_recurrence_count(

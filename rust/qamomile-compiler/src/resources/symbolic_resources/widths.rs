@@ -16,7 +16,7 @@ use super::{
     ValueFact, attribute, bind_exact_results, bind_region, bind_results, bind_unpack, bind_values,
     first_operand, int_fact, is_coherent_external, merge_optional_symbolic, scalar_type,
     span_identity, string_attribute, symbolic_depth_families, symbolic_dimension_bindings,
-    symbolic_timing_selectors, symbolic_unit_durations,
+    symbolic_timing_selectors, symbolic_unit_durations, unresolved_slice_dimension,
 };
 
 impl SymbolicAnalyzer<'_> {
@@ -49,12 +49,13 @@ impl SymbolicAnalyzer<'_> {
         &mut self,
         function: &wire::FunctionProto,
         arguments: &[Option<ValueFact>],
-        dimension_arguments: &HashMap<Dimension, ExprId>,
+        dimension_arguments: &HashMap<Dimension, Option<ExprId>>,
     ) -> Result<Option<SymbolicCount>, SymbolicResourceError> {
         if arguments.len() != function.parameters.len() {
             return Ok(None);
         }
-        let dimensions = symbolic_dimension_bindings(function, arguments, dimension_arguments);
+        let dimensions =
+            symbolic_dimension_bindings(function, arguments, dimension_arguments, &self.arena)?;
         if function.external {
             if let Some(rule) = self.external_rule_count(
                 function,
@@ -190,7 +191,8 @@ impl SymbolicAnalyzer<'_> {
         else {
             return Ok(None);
         };
-        let dimensions = symbolic_dimension_bindings(callee, &arguments, &dimension_arguments);
+        let dimensions =
+            symbolic_dimension_bindings(callee, &arguments, &dimension_arguments, &self.arena)?;
         let Some(input_width) = self.input_width(callee, &dimensions)? else {
             return Ok(None);
         };
@@ -410,6 +412,10 @@ impl SymbolicAnalyzer<'_> {
         context: SymbolicFunctionContext<'_>,
     ) -> Result<(), SymbolicResourceError> {
         match operation.opcode.as_str() {
+            "qcore.current_shot" => {
+                let value = self.current_shot_fact()?;
+                bind_results(operation, environment, Some(&value));
+            }
             "qcore.constant" => {
                 let value = attribute(operation, "value")
                     .map(|literal| self.literal_fact(literal))
@@ -462,12 +468,13 @@ impl SymbolicAnalyzer<'_> {
         &mut self,
         function: &wire::FunctionProto,
         arguments: &[Option<ValueFact>],
-        dimension_arguments: &HashMap<Dimension, ExprId>,
+        dimension_arguments: &HashMap<Dimension, Option<ExprId>>,
     ) -> Result<Option<SymbolicCount>, SymbolicResourceError> {
         if arguments.len() != function.parameters.len() {
             return Ok(None);
         }
-        let dimensions = symbolic_dimension_bindings(function, arguments, dimension_arguments);
+        let dimensions =
+            symbolic_dimension_bindings(function, arguments, dimension_arguments, &self.arena)?;
         if function.external {
             if let Some(rule) = self.external_rule_count(
                 function,
@@ -530,6 +537,10 @@ impl SymbolicAnalyzer<'_> {
         let mut allocated = Some(zero);
         for operation in &block.operations {
             match operation.opcode.as_str() {
+                "qcore.current_shot" => {
+                    let value = self.current_shot_fact()?;
+                    bind_results(operation, environment, Some(&value));
+                }
                 "qcore.constant" => {
                     let value = attribute(operation, "value")
                         .map(|literal| self.literal_fact(literal))
@@ -816,22 +827,16 @@ impl SymbolicAnalyzer<'_> {
                 let width = match leaf {
                     CoherentLeafWidth::Bit => self.arena.literal_u128(1)?,
                     CoherentLeafWidth::Word(dimension) => {
-                        Self::mod_pow_dimension_width(&mut self.arena, dimension, dimensions)?
+                        Self::dimension_width(&mut self.arena, dimension, dimensions)?
                     }
                     CoherentLeafWidth::Fixed {
                         integer_bits,
                         fractional_bits,
                     } => {
-                        let integer = Self::mod_pow_dimension_width(
-                            &mut self.arena,
-                            integer_bits,
-                            dimensions,
-                        )?;
-                        let fractional = Self::mod_pow_dimension_width(
-                            &mut self.arena,
-                            fractional_bits,
-                            dimensions,
-                        )?;
+                        let integer =
+                            Self::dimension_width(&mut self.arena, integer_bits, dimensions)?;
+                        let fractional =
+                            Self::dimension_width(&mut self.arena, fractional_bits, dimensions)?;
                         self.arena.add([integer, fractional])?
                     }
                 };
@@ -961,28 +966,6 @@ impl SymbolicAnalyzer<'_> {
         }
     }
 
-    pub(super) fn mod_pow_dimension_width(
-        arena: &mut ExpressionArena,
-        dimension: &Dimension,
-        bindings: &SymbolicDimensionBindings,
-    ) -> Result<ExprId, SymbolicResourceError> {
-        let Some(expression) = bindings.values.get(dimension).copied() else {
-            return Self::dimension_width(arena, dimension, bindings);
-        };
-        if arena
-            .node(expression)
-            .is_some_and(|node| node.domain() == ResourceDomain::Natural)
-        {
-            Ok(expression)
-        } else {
-            arena.contracted(
-                "qamomile.positive_dimension",
-                ResourceDomain::Natural,
-                [expression],
-            )
-        }
-    }
-
     pub(super) fn coherent_width(
         &mut self,
         type_id: TypeId,
@@ -1095,70 +1078,56 @@ impl SymbolicAnalyzer<'_> {
         dimension: &Dimension,
         bindings: &SymbolicDimensionBindings,
     ) -> Result<ExprId, SymbolicResourceError> {
-        match dimension {
-            Dimension::Fixed(value) => arena.literal_u128(u128::from(*value)),
-            Dimension::Symbol { .. } if bindings.values.contains_key(dimension) => {
-                let expression = bindings.values[dimension];
-                match arena.node(expression).cloned() {
-                    Some(node) if node.domain() == ResourceDomain::Natural => Ok(expression),
-                    _ => arena.contracted(
-                        "qamomile.positive_dimension",
-                        ResourceDomain::Natural,
-                        [expression],
-                    ),
-                }
+        let (scope, name) = match dimension {
+            Dimension::Fixed(width) => return arena.literal_u128(u128::from(*width)),
+            Dimension::Symbol { scope, name } => (scope, name),
+        };
+        let expression = if let Some(bound) = bindings.values.get(dimension) {
+            (*bound).ok_or_else(unresolved_slice_dimension)?
+        } else if let Ok(polynomial) = PolynomialDimension::parse(name) {
+            let mut terms = Vec::with_capacity(polynomial.terms.len() + 1);
+            if polynomial.constant != 0 {
+                terms.push(arena.literal_i64(polynomial.constant)?);
             }
-            Dimension::Symbol { scope, name } => {
-                if let Ok(polynomial) = PolynomialDimension::parse(name)
-                    && polynomial.constant >= 0
-                    && polynomial
-                        .terms
-                        .values()
-                        .all(|coefficient| *coefficient > 0)
-                {
-                    let mut terms = Vec::with_capacity(polynomial.terms.len() + 1);
-                    if polynomial.constant > 0 {
-                        terms.push(
-                            arena.literal_u128(u128::from(polynomial.constant.unsigned_abs()))?,
-                        );
-                    }
-                    for (monomial, coefficient) in polynomial.terms {
-                        let mut factors = Vec::with_capacity(monomial.len() + 1);
-                        if coefficient != 1 {
-                            factors
-                                .push(arena.literal_u128(u128::from(coefficient.unsigned_abs()))?);
-                        }
-                        for symbol_name in monomial {
-                            let symbol = Dimension::Symbol {
-                                scope: Arc::clone(scope),
-                                name: Arc::from(symbol_name.as_str()),
-                            };
-                            if let Some(bound) = bindings.values.get(&symbol).copied() {
-                                factors.push(bound);
-                            } else {
-                                let constraint = format!("{symbol_name} >= 1");
-                                factors.push(arena.symbol(
-                                    scope,
-                                    &symbol_name,
-                                    ResourceDomain::Natural,
-                                    "type_dimension",
-                                    &[constraint.as_str()],
-                                )?);
-                            }
-                        }
-                        terms.push(arena.multiply(factors)?);
-                    }
-                    return arena.add(terms);
+            for (monomial, coefficient) in polynomial.terms {
+                let mut factors = Vec::with_capacity(monomial.len() + 1);
+                if coefficient != 1 {
+                    factors.push(arena.literal_i64(coefficient)?);
                 }
-                let constraint = format!("{name} >= 1");
-                arena.symbol(
-                    scope,
-                    name,
-                    ResourceDomain::Natural,
-                    "type_dimension",
-                    &[constraint.as_str()],
-                )
+                for symbol_name in monomial {
+                    let symbol = Dimension::Symbol {
+                        scope: Arc::clone(scope),
+                        name: Arc::from(symbol_name.as_str()),
+                    };
+                    let factor = match bindings.values.get(&symbol) {
+                        Some(bound) => bound.ok_or_else(unresolved_slice_dimension)?,
+                        None => arena.symbol(
+                            scope,
+                            &symbol_name,
+                            ResourceDomain::Natural,
+                            "type_dimension",
+                            &[&format!("{symbol_name} >= 1")],
+                        )?,
+                    };
+                    factors.push(factor);
+                }
+                terms.push(arena.multiply(factors)?);
             }
+            arena.add(terms)?
+        } else {
+            return Err(unresolved_slice_dimension());
+        };
+        if arena
+            .node(expression)
+            .is_some_and(|node| node.domain() == ResourceDomain::Natural)
+        {
+            Ok(expression)
+        } else {
+            arena.contracted(
+                "qamomile.positive_dimension",
+                ResourceDomain::Natural,
+                [expression],
+            )
         }
     }
 

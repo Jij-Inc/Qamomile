@@ -1860,7 +1860,7 @@ def steane_code_samples(
 def exercise_classification_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
     cases: tuple[
         tuple[tuple[float, float], tuple[float, float], tuple[int, int]], ...
     ] = (_CLASSIFICATION_CASES[1],),
@@ -1869,7 +1869,7 @@ def exercise_classification_backend(
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
         cases: Feature pairs and expected bit strings to execute.
     """
 
@@ -1889,7 +1889,7 @@ def exercise_classification_backend(
 def exercise_static_classification_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
     cases: tuple[
         tuple[tuple[float, float], tuple[float, float], tuple[int, int]], ...
     ] = (_CLASSIFICATION_CASES[1],),
@@ -1898,7 +1898,7 @@ def exercise_static_classification_backend(
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
         cases: Feature pairs and expected bit strings to execute.
     """
 
@@ -1918,13 +1918,13 @@ def exercise_static_classification_backend(
 def exercise_hydrogen_vqe_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Estimate the documented hydrogen energy through one backend.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     result = qm.expectation(
@@ -1947,13 +1947,13 @@ def exercise_hydrogen_vqe_backend(
 def exercise_static_hydrogen_vqe_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Estimate a closed hydrogen trial state on a static-only target.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     result = qm.expectation(
@@ -1976,13 +1976,13 @@ def exercise_static_hydrogen_vqe_backend(
 def exercise_qsci_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Sample the documented QSCI input through one backend.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     result = qm.run(
@@ -2002,13 +2002,13 @@ def exercise_qsci_backend(
 def exercise_static_qsci_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Sample a closed QSCI input through one static-only backend.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     result = qm.run(
@@ -2028,13 +2028,13 @@ def exercise_static_qsci_backend(
 def exercise_rabi_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute documented Rabi simulation through one backend.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     result = qm.run(
@@ -2052,13 +2052,13 @@ def exercise_rabi_backend(
 def exercise_static_rabi_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute closed documented Rabi simulation on a static-only target.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     result = qm.run(
@@ -2103,13 +2103,13 @@ def _rabi_excitation_probability() -> float:
 def exercise_mottonen_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute documented runtime Möttönen preparation on one backend.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     parameters = _MOTTONEN_COORDINATES.bindings()
@@ -2135,13 +2135,13 @@ def exercise_mottonen_backend(
 def exercise_static_mottonen_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute documented static Möttönen preparation on one backend.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     samples = qm.run(
@@ -2197,13 +2197,13 @@ def _assert_mottonen_result(
 def exercise_multidimensional_qft_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute documented runtime two-axis QFT on one backend.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     result = qm.run(
@@ -2220,13 +2220,13 @@ def exercise_multidimensional_qft_backend(
 def exercise_static_multidimensional_qft_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute documented static two-axis QFT on one backend.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     result = qm.run(
@@ -2242,13 +2242,13 @@ def exercise_static_multidimensional_qft_backend(
 def exercise_documented_windowed_qpe_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute the documented Kaiser-windowed QPE on one backend.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     result = qm.run(
@@ -2266,13 +2266,13 @@ def exercise_documented_windowed_qpe_backend(
 def exercise_documented_reversible_arithmetic_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute the documented compare-swap and register product.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     sorted_result = qm.run(
@@ -2297,13 +2297,13 @@ def exercise_documented_reversible_arithmetic_backend(
 def exercise_documented_gf2_arithmetic_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute the documented GF(2^3) polynomial product.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     result = qm.run(
@@ -2320,13 +2320,13 @@ def exercise_documented_gf2_arithmetic_backend(
 def exercise_documented_phase_gradient_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute phase-gradient QVR and Hamming-weight phasing.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     qvr_result = qm.run(
@@ -2351,13 +2351,13 @@ def exercise_documented_phase_gradient_backend(
 def exercise_documented_fault_tolerant_data_loading_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute clean select-swap QROAM and one alias branch.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     qroam_result = qm.run(
@@ -2387,13 +2387,13 @@ def exercise_documented_fault_tolerant_data_loading_backend(
 def exercise_documented_reversible_indexing_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute basis permutation and triangular contiguous indexing.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     permutation_result = qm.run(
@@ -2418,13 +2418,13 @@ def exercise_documented_reversible_indexing_backend(
 def exercise_documented_reversible_trigonometry_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute bounded reversible arcsine and arctangent maps.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     arcsin_result = qm.run(
@@ -2449,13 +2449,13 @@ def exercise_documented_reversible_trigonometry_backend(
 def exercise_documented_kikuchi_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute sorted-set and bounded Kikuchi-oracle witnesses.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     duplicate_result = qm.run(
@@ -2488,13 +2488,13 @@ def exercise_documented_kikuchi_backend(
 def exercise_documented_guided_hamiltonian_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute the exact high-eigenspace guided-phase witness.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     result = qm.run(
@@ -2512,13 +2512,13 @@ def exercise_documented_guided_hamiltonian_backend(
 def exercise_documented_elliptic_curve_dlog_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute the bounded elliptic-curve hidden-subgroup witness.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     result = qm.run(
@@ -2537,13 +2537,13 @@ def exercise_documented_elliptic_curve_dlog_backend(
 def exercise_documented_factorized_chemistry_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute SF, DF, THC, first-quantized, and projectile witnesses.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     sf_result = qm.run(
@@ -2618,13 +2618,13 @@ def _assert_multidimensional_qft_result(
 def exercise_pce_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Evaluate and decode the documented runtime PCE state.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     estimates = tuple(
@@ -2634,7 +2634,7 @@ def exercise_pce_backend(
             on=endpoint,
             parameters={"angles": _PCE_ANGLES},
             shots=_EXPECTATION_SHOTS,
-            seed=0 if seed == 0 else seed + index,
+            seed=None if seed is None else seed + index,
         )
         for index, observable in enumerate(_PCE_ENCODING.observables)
     )
@@ -2644,13 +2644,13 @@ def exercise_pce_backend(
 def exercise_static_pce_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Evaluate and decode the statically closed documented PCE state.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     estimates = tuple(
@@ -2660,7 +2660,7 @@ def exercise_static_pce_backend(
             on=endpoint,
             **{"angles": _PCE_ANGLES},
             shots=_EXPECTATION_SHOTS,
-            seed=0 if seed == 0 else seed + index,
+            seed=None if seed is None else seed + index,
         )
         for index, observable in enumerate(_PCE_ENCODING.observables)
     )
@@ -2693,13 +2693,13 @@ def _assert_pce_results(
 def exercise_hqnn_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute documented runtime Hybrid QNN inference on one backend.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     result = qm.run(
@@ -2716,13 +2716,13 @@ def exercise_hqnn_backend(
 def exercise_static_hqnn_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute documented static Hybrid QNN inference on one backend.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     result = qm.run(
@@ -2784,13 +2784,13 @@ def _assert_hqnn_result(result: object, endpoint: ExecutionEndpoint) -> None:
 def exercise_option_pricing_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute runtime option pricing and one Grover amplification step.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     parameters = _option_pricing_parameters()
@@ -2817,13 +2817,13 @@ def exercise_option_pricing_backend(
 def exercise_static_option_pricing_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute the same option-pricing experiment with closed data.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     baseline = qm.run(
@@ -2897,13 +2897,13 @@ def _assert_option_pricing_results(
 def exercise_qemcmc_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute one runtime quantum-enhanced MCMC proposal on a backend.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     result = qm.run(
@@ -2924,13 +2924,13 @@ def exercise_qemcmc_backend(
 def exercise_static_qemcmc_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute the same closed quantum-enhanced MCMC proposal.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
     """
 
     result = qm.run(
@@ -2947,14 +2947,14 @@ def exercise_static_qemcmc_backend(
 def exercise_bit_flip_code_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
     error_positions: tuple[int, ...] = (1,),
 ) -> None:
     """Execute the runtime-parametric bit-flip code on one backend.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
         error_positions: Data-qubit positions to exercise.
     """
 
@@ -2973,14 +2973,14 @@ def exercise_bit_flip_code_backend(
 def exercise_static_bit_flip_code_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
     error_positions: tuple[int, ...] = (1,),
 ) -> None:
     """Execute the closed bit-flip code on one static-only backend.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
         error_positions: Data-qubit positions to exercise.
     """
 
@@ -3023,14 +3023,14 @@ def _assert_bit_flip_code_result(
 def exercise_steane_code_backend(
     *,
     endpoint: ExecutionEndpoint,
-    seed: int = 0,
+    seed: int | None = None,
     cases: tuple[tuple[int, int], ...] = ((2, 3),),
 ) -> None:
     """Execute bounded coherent Steane correction through one backend.
 
     Args:
         endpoint (ExecutionEndpoint): Backend endpoint under test.
-        seed (int): Deterministic sampling seed.
+        seed (int | None): Explicit sampling seed or endpoint-default randomness.
         cases (tuple[tuple[int, int], ...]): Pauli selectors and data positions.
     """
 

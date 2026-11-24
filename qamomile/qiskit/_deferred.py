@@ -8,7 +8,12 @@ from typing import Any
 
 from qiskit.circuit import Gate
 
-from qamomile.circuit import DeferredDefinition, LoopIndex, ParameterValue
+from qamomile.circuit import (
+    DeferredDefinition,
+    HiddenBindingValue,
+    LoopIndex,
+    ParameterValue,
+)
 
 
 class DeferredGate(Gate):
@@ -17,21 +22,21 @@ class DeferredGate(Gate):
     Args:
         label (str): Display label; never used to infer operation semantics.
         definition (DeferredDefinition): Checked native definition owner.
-        scope (dict[ParameterValue | LoopIndex, Any]): Current SDK bindings.
+        scope (dict[ParameterValue | LoopIndex | HiddenBindingValue, Any]): Current SDK bindings.
     """
 
     def __init__(
         self,
         label: str,
         definition: DeferredDefinition,
-        scope: dict[ParameterValue | LoopIndex, Any],
+        scope: dict[ParameterValue | LoopIndex | HiddenBindingValue, Any],
     ) -> None:
         """Initialize an unsynthesized gate with explicit free parameters.
 
         Args:
             label (str): Display label.
             definition (DeferredDefinition): Native local definition.
-            scope (dict[ParameterValue | LoopIndex, Any]): Scalar binding scope.
+            scope (dict[ParameterValue | LoopIndex | HiddenBindingValue, Any]): Scalar binding scope.
         """
         symbols = sorted(
             {symbol for value in scope.values() for symbol in value.parameters},

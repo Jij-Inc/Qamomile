@@ -27,7 +27,13 @@
 # # !pip install qamomile
 
 # %%
+import os
+
 import qamomile as qm
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 64
+deterministic_shots = 1 if docs_test_mode else 16
 
 # %% [markdown]
 # ## 1. ヘルパーQKernelを定義する
@@ -77,14 +83,14 @@ helper_program = qm.specialize(ghz_with_helper)
 helper_result = qm.run(
     helper_program,
     on=qm.Reference(),
-    shots=64,
+    shots=sample_shots,
     seed=7,
 ).result
 
 expected_outcomes = {(0, 0, 0, 0), (1, 1, 1, 1)}
 
-assert helper_result.shots == 64
-assert sum(helper_result.counts.values()) == 64
+assert helper_result.shots == sample_shots
+assert sum(helper_result.counts.values()) == sample_shots
 assert set(helper_result.counts) <= expected_outcomes
 
 print("Helper QKernel counts:", helper_result.counts)
@@ -126,10 +132,12 @@ def flip_twice() -> qm.Shot[qm.Bits[1]]:
 
 
 # %%
-twice_result = qm.run(flip_twice, on=qm.Reference(), shots=16, seed=7).result
+twice_result = qm.run(
+    flip_twice, on=qm.Reference(), shots=deterministic_shots, seed=7
+).result
 
-assert twice_result.shots == 16
-assert twice_result.counts == {(0,): 16}
+assert twice_result.shots == deterministic_shots
+assert twice_result.counts == {(0,): deterministic_shots}
 
 print("Two applications of X:", twice_result.counts)
 
@@ -146,14 +154,16 @@ print("Two applications of X:", twice_result.counts)
 # %%
 from qamomile.qiskit import Aer  # noqa: E402 -- Optional SDK import.
 
-qiskit_result = qm.run(helper_program, on=Aer(), shots=64, seed=7).result
-qiskit_twice_result = qm.run(flip_twice, on=Aer(), shots=16, seed=7).result
+qiskit_result = qm.run(helper_program, on=Aer(), shots=sample_shots, seed=7).result
+qiskit_twice_result = qm.run(
+    flip_twice, on=Aer(), shots=deterministic_shots, seed=7
+).result
 
-assert qiskit_result.shots == 64
-assert sum(qiskit_result.counts.values()) == 64
+assert qiskit_result.shots == sample_shots
+assert sum(qiskit_result.counts.values()) == sample_shots
 assert set(qiskit_result.counts) <= expected_outcomes
-assert qiskit_twice_result.shots == 16
-assert qiskit_twice_result.counts == {(0,): 16}
+assert qiskit_twice_result.shots == deterministic_shots
+assert qiskit_twice_result.counts == {(0,): deterministic_shots}
 
 print("Qiskit GHZ counts:", qiskit_result.counts)
 print("Qiskit X twice counts:", qiskit_twice_result.counts)

@@ -15,74 +15,86 @@
 
 # %% [markdown]
 # ---
-# tags: [integration, optimization, variational]
+# tags: [integration]
 # ---
 #
 # # Qiskit Support
 #
-# This page shows how to use Qamomile's Qiskit integration through a concrete
-# optimization problem. Qiskit support is optional; install the `qiskit` extra
-# to use the `Qiskit` target, local `Aer`, and live `QiskitBackend` endpoints.
-# We use QAOA optimization for a small MaxCut instance, compile one Qamomile
-# qkernel to a QuantumCircuit, and run sampling and expectation-value evaluation on Qiskit.
-# Along the way, we also examine advanced Qiskit features and IBM Quantum
-# execution through the same artifact and result contracts.
+# Run a two-qubit circuit on the local Aer simulator and see how to submit it to IBM quantum hardware through [Qiskit](https://www.ibm.com/quantum/qiskit) {cite:p}`qiskit-en`.
 #
-# Qamomile keeps Qiskit at the realization boundary. QCore remains the only
-# persistent program semantics; a Qiskit `QuantumCircuit` is a temporary
-# inspection or provider object, never a second source representation.
+# :::{note}
+# In this guide, “supported” means you can use the feature through Qamomile. Qiskit and individual devices may offer different capabilities.
+# :::
 
 # %% [markdown]
-# ## Installation
+# ## Setup
+#
+# Install Qamomile with Qiskit support. The local examples run without an IBM Quantum account.
 #
 # ```bash
 # pip install "qamomile[qiskit]"
 # ```
+#
+# For the hardware example, configure your IBM Quantum account and run these imports in your notebook.
+#
+# ```python
+# from qiskit_ibm_runtime import QiskitRuntimeService
+#
+# from qamomile.qiskit import IBMRuntime
+# ```
 
 # %%
-# Install the latest Qamomile and its Qiskit integration through pip!
-# # !pip install "qamomile[qiskit]"
+# # %pip install "qamomile[qiskit]"
 
 # %%
 import math
 import os
 
-import matplotlib.pyplot as plt
-import networkx as nx
-import numpy as np
-from qiskit.providers.basic_provider import BasicSimulator
-from qiskit_aer import AerSimulator
-from qiskit_aer.noise import NoiseModel, depolarizing_error
-from scipy.optimize import minimize
-
 import qamomile as qm
-from qamomile.optimization import BinaryModel, QAOAExperiment
-from qamomile.persistence import deserialize, serialize
-from qamomile.qiskit import Aer, Qiskit, QiskitBackend, load_circuit, to_circuit
-from qamomile.stdlib import qaoa_state, qft
+from qamomile.qiskit import Aer
 
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+shots = 1 if docs_test_mode else 32
+local = Aer()
 
 # %% [markdown]
-# ## Author one runtime-parametric source program
+# ## What you can do with Qiskit
 #
-# The program rotates the first qubit, entangles the second, and returns a typed
-# two-bit sample. `theta` remains a runtime parameter after compilation, so one
-# compiled circuit can serve several invocations.
+# ✅ means supported, ✗ means unsupported, and “Device-dependent” means support varies by device.
+#
+# | Feature | `Aer` | `IBMRuntime` |
+# | --- | :---: | :---: |
+# | Supply a rotation angle at run time | ✅ | ✅ |
+# | Discard a qubit without measuring it (`qm.discard`) | ✅ | ✅ |
+# | Measure a qubit mid-circuit (`qm.measure_z`, `qm.measure_x`, `qm.measure_y`) | ✅ | Device-dependent |
+# | Branch within the same circuit on a mid-circuit measurement result (`if`) | ✅ | Device-dependent |
+# | Use a mid-circuit measurement result to set a `while` condition or a `for` loop's range in the same circuit | ✗ | ✗ |
+# | Reset and reuse a qubit mid-circuit (`qm.reset`) | ✅ | Device-dependent |
+# | Select a classical array element using an index derived from a mid-circuit measurement | ✗ | ✗ |
+# | Read the current shot number inside the circuit (`qm.get_current_shot`) | ✅ | ✅ |
+#
+# Aer can measure in the X, Y, and Z bases. On IBM hardware, Qamomile checks the device's instructions for mid-circuit measurement, branching, and reset. Neither endpoint can use a measured value as a `while` condition or as a `for` bound. Both expose `qm.get_current_shot()` through Qamomile's numbering of shots, starting at 0.
+
+# %% [markdown]
+# ## Local simulation
+#
+# ### Supply a rotation angle at run time
+#
+# Rotate the first qubit by `theta` radians. Apply a CNOT gate. The only measurements are at the end, on both qubits. Declaring `theta` as `qm.Param` lets you supply its value at each run.
 
 
 # %%
 @qm.qkernel
-def entangled_sample(
+def parameterized_bell(
     theta: qm.Param[qm.Real],
 ) -> qm.Shot[qm.Bits[2]]:  # type: ignore[valid-type]
-    """Measure one runtime-parametric two-qubit entangled state.
+    """Prepare and measure a parameterized Bell-like state.
 
     Args:
-        theta (qm.Param[qm.Real]): First-qubit Y-rotation angle in radians.
+        theta (qm.Param[qm.Real]): Rotation angle in radians.
 
     Returns:
-        qm.Shot[qm.Bits[2]]: Bits in Qamomile source order.
+        qm.Shot[qm.Bits[2]]: Two measured output bits.
     """
 
     state = qm.qubits(2)
@@ -91,465 +103,169 @@ def entangled_sample(
     return qm.measure(state)
 
 
-program = entangled_sample.specialize()
-study = qm.resources.logical(program)
-
-assert study.metric(qm.resources.LOGICAL_GATES).numeric_enclosure() == (2, 2)
-assert study.metric(qm.resources.LOGICAL_PEAK_QUBITS).numeric_enclosure() == (2, 2)
-
 # %% [markdown]
-# ## Compile once and retain the executable
-#
-# `qm.compile` returns a process-local `CompiledProgram` containing the Qiskit QuantumCircuit,
-# its SDK lifetime owners, and compiler-derived ABI and resource facts. Ordinary
-# execution does not export or restore it. The optional `serialize`/`deserialize`
-# calls below demonstrate saving through `qamomile.persistence`; loading creates
-# a new executable owner. Compare compilation identities, not Python objects.
+# Compile the circuit once for the local simulator. Run it with two values of `theta`, using `shots` runs per angle.
 
 # %%
-target = Qiskit()
-artifact = qm.compile(program, to=target)
-restored = deserialize(serialize(artifact))
+bell_program = qm.specialize(parameterized_bell)
+bell_artifact = qm.compile(bell_program, to=local.target)
 
-assert artifact.format == "qiskit.qpy.v1"
-assert restored.execution_identity == artifact.execution_identity
-assert artifact.execution_identity == qm.compile(program, to=target).execution_identity
-assert tuple(slot.name for slot in artifact.parameter_abi.slots) == ("theta",)
-assert artifact.result_abi.width == 2
-
-# %% [markdown]
-# `load_circuit` is an explicit adapter inspection helper. It reconstructs a
-# copy of the retained Qiskit circuit without changing the artifact or becoming an alternate
-# execution path. Qamomile parameters stay unbound until invocation. The circuit
-# projection uses compact positional names such as `p0`; the sealed parameter
-# ABI retains the user-facing `theta` name and owns that mapping.
-
-# %%
-circuit = load_circuit(restored)
-
-print(circuit.draw(output="text", fold=80))
-print("Qiskit operations:", dict(circuit.count_ops()))
-
-assert circuit.num_qubits == 2
-assert circuit.num_clbits == 2
-assert circuit.num_parameters == 1
-assert {str(parameter) for parameter in circuit.parameters} == {"p0"}
-assert circuit.count_ops()["measure"] == 2
+for theta, expected_bits in [(0.0, (0, 0)), (math.pi, (1, 1))]:
+    result = qm.run(
+        bell_artifact, on=local, parameters={"theta": theta}, shots=shots
+    ).result
+    counts = result.counts
+    print(f"theta = {theta:.3f}", counts)
+    assert counts == {expected_bits: shots}
 
 # %% [markdown]
-# ## Reuse the artifact on isolated Aer
-#
-# Passing an artifact to `qm.run` never invokes the compiler again. The Aer
-# endpoint binds the canonical `theta` value, executes a bound circuit in the calling process,
-# normalizes Qiskit's native bit order once, and returns the same typed
-# `SampleResult` used by every Qamomile endpoint.
-
-# %%
-endpoint = Aer()
-smoke_endpoint = qm.Reference() if docs_test_mode else endpoint
-cases = ((0.0, (0, 0)), (math.pi, (1, 1)))
-
-for theta, expected in cases:
-    record = qm.run(
-        program if docs_test_mode else restored,
-        on=smoke_endpoint,
-        parameters={"theta": theta},
-        shots=8,
-        seed=7,
-    )
-    print(f"theta={theta:.6f} -> {record.result.counts}")
-    if not docs_test_mode:
-        assert record.artifact is restored
-    assert record.result.counts == {expected: 8}
-    assert record.result.values == {expected: 8}
+# `counts` maps each pair of measured bits to its frequency. Both bits are 0 at zero radians and 1 at $\pi$ radians on every shot.
 
 # %% [markdown]
-# ## The MaxCut problem
+# ### Discard a qubit without measuring it (`qm.discard`)
 #
-# We use the same small five-node graph from the
-# [QAOA for MaxCut tutorial](../algorithm/qaoa_maxcut.ipynb) so the focus stays
-# on the Qiskit integration. Maximizing
-# $\sum_{(i,j)\in E}(1-s_i s_j)/2$ is equivalent, up to a constant, to
-# minimizing the antiferromagnetic Ising Hamiltonian
-# $H_C=\sum_{(i,j)\in E}s_i s_j$. For unweighted MaxCut every edge has the same
-# coupling and there are no linear terms, so those coefficients are passed
-# directly to `BinaryModel.from_ising`.
-#
-# ## Building the QAOA ansatz
-#
-# The recipe is the same as in the MaxCut tutorial: prepare a uniform
-# superposition, alternate cost and mixer layers three times, and measure in
-# the computational basis. `QAOAExperiment` closes that immutable spin model
-# and topology into one typed program, while `gammas` and `betas` remain runtime
-# parameters. Documentation tests reduce only the layer and execution budgets.
-
-# %%
-MAXCUT_EDGES = ((0, 1), (0, 2), (1, 2), (1, 3), (2, 3), (3, 4))
-graph = nx.Graph()
-graph.add_edges_from(MAXCUT_EDGES)
-positions = nx.spring_layout(graph, seed=42)
-nx.draw(graph, positions, with_labels=True, node_color="white", edgecolors="black")
-plt.title("Five-node MaxCut instance")
-plt.show()
-
-maxcut_model = BinaryModel.from_ising(
-    {edge: 0.5 for edge in MAXCUT_EDGES},
-    constant=-len(MAXCUT_EDGES) / 2.0,
-    variables=range(5),
-)
-LAYERS = 1 if docs_test_mode else 3
-qaoa_experiment = QAOAExperiment(maxcut_model, layers=LAYERS)
-optimization_endpoint = QiskitBackend(
-    AerSimulator(
-        max_parallel_threads=1,
-        max_parallel_experiments=1,
-        max_parallel_shots=1,
-    )
-)
-qaoa_endpoint = optimization_endpoint
-compiled_qaoa = qaoa_experiment.compile(to=qaoa_endpoint.target)
-optimization_qaoa = qaoa_experiment.compile(to=optimization_endpoint.target)
-
-OBJECTIVE_SHOTS = 8 if docs_test_mode else 2_000
-OPTIMIZER_ITERATIONS = 4 if docs_test_mode else 100
-rng = np.random.default_rng(42)
-initial_parameters = rng.uniform(-math.pi / 2.0, math.pi / 2.0, 2 * LAYERS)
-objective_history: list[float] = []
-
-
-def cost_function(parameters: np.ndarray) -> float:
-    """Return sampled mean MaxCut energy for one QAOA coordinate vector."""
-
-    run = optimization_qaoa.run(
-        on=optimization_endpoint,
-        gammas=tuple(float(value) for value in parameters[:LAYERS]),
-        betas=tuple(float(value) for value in parameters[LAYERS:]),
-        shots=OBJECTIVE_SHOTS,
-        seed=0,
-    )
-    objective_history.append(run.samples.mean_energy)
-    return run.samples.mean_energy
-
-
-optimization = minimize(
-    cost_function,
-    initial_parameters,
-    method="COBYLA",
-    options={"maxiter": OPTIMIZER_ITERATIONS},
-)
-optimized_gammas = tuple(float(value) for value in optimization.x[:LAYERS])
-optimized_betas = tuple(float(value) for value in optimization.x[LAYERS:])
-
-FINAL_SHOTS = 32 if docs_test_mode else 2_000
-best_qaoa_run = compiled_qaoa.run(
-    on=qaoa_endpoint,
-    gammas=optimized_gammas,
-    betas=optimized_betas,
-    shots=FINAL_SHOTS,
-    seed=0,
-)
-best_qaoa_sample = best_qaoa_run.samples.lowest
-
-print("QAOA objective history:", objective_history)
-print("optimized gammas:", optimized_gammas)
-print("optimized betas:", optimized_betas)
-print("best observed MaxCut sample:", best_qaoa_sample)
-assert best_qaoa_run.samples.total_occurrences == FINAL_SHOTS
-assert best_qaoa_sample.energy <= -4.0
-
-# %% [markdown]
-# ### Expectation values from the optimized state
-#
-# The sampling objective above is an occurrence-weighted energy estimate. The
-# same optimized coordinates can also enter Qamomile's observable expectation
-# path. This restores the main tutorial's explicit estimator workflow while
-# keeping Qiskit only at the realization boundary.
+# Suppose you only need to know whether two bits differ. A CNOT gate writes their parity into the first qubit. It holds 0 if the bits match and 1 if they differ. Use `qm.split_at()` to separate the qubits, release the second with `qm.discard()`, and measure the first. Here the input is `(1, 1)`, so the result is 0.
 
 
 # %%
 @qm.qkernel
-def qaoa_energy_state(
-    hamiltonian: qm.Const[qm.Observable],
-    gammas: qm.Param[qm.Vector[qm.Real, 3]],  # type: ignore[valid-type]
-    betas: qm.Param[qm.Vector[qm.Real, 3]],  # type: ignore[valid-type]
-) -> qm.Q[qm.Bits[5]]:  # type: ignore[valid-type]
-    """Prepare a fixed three-layer state for expectation estimation."""
+def parity_only() -> qm.Shot[qm.Bits[1]]:  # type: ignore[valid-type]
+    """Return the parity of two bits and discard the unused qubit."""
+    state = qm.prepare((1, 1))
+    state = qm.cx(state, control=1, target=0)
+    parity, unused = qm.split_at(state, 1)
+    qm.discard(unused)
+    return qm.measure(parity)
 
-    return qaoa_state(5, 3, hamiltonian, gammas, betas)
 
-
-expectation_gammas = optimized_gammas + (0.0,) * (3 - LAYERS)
-expectation_betas = optimized_betas + (0.0,) * (3 - LAYERS)
-energy_estimate = qm.expectation(
-    qaoa_energy_state,
-    maxcut_model.hamiltonian,
-    on=qaoa_endpoint,
-    hamiltonian=maxcut_model.hamiltonian,
-    parameters={"gammas": expectation_gammas, "betas": expectation_betas},
-    shots=8 if docs_test_mode else 256,
-    seed=0,
-    grouping="qwc",
-)
-
-print("optimized expectation:", energy_estimate.value)
-assert math.isfinite(energy_estimate.value)
+parity_counts = qm.run(parity_only, on=local, shots=shots).result.counts
+print(parity_counts)
+assert parity_counts == {(0,): shots}
 
 # %% [markdown]
-# ### Reuse the optimized program with an Aer noise model
+# ### Measure a qubit mid-circuit (`qm.measure_z`, `qm.measure_x`, `qm.measure_y`)
 #
-# A live `QiskitBackend` can wrap an `AerSimulator` configured with SDK-native
-# noise. We compile the same QAOA program to that backend snapshot, bind the
-# same optimized coordinates, and compare sampled mean energies. Noise remains
-# endpoint configuration rather than QCore semantics.
-
-# %%
-noise_model = NoiseModel()
-noise_model.add_all_qubit_quantum_error(
-    depolarizing_error(0.01, 1),
-    ["h", "rx", "rz"],
-)
-noise_model.add_all_qubit_quantum_error(
-    depolarizing_error(0.02, 2),
-    ["rzz"],
-)
-noisy_endpoint = QiskitBackend(
-    AerSimulator(
-        noise_model=noise_model,
-        max_parallel_threads=1,
-        max_parallel_experiments=1,
-        max_parallel_shots=1,
-    )
-)
-noisy_qaoa = qaoa_experiment.compile(to=noisy_endpoint.target)
-noisy_run = noisy_qaoa.run(
-    on=noisy_endpoint,
-    gammas=optimized_gammas,
-    betas=optimized_betas,
-    shots=16 if docs_test_mode else 2_000,
-    seed=0,
-)
-
-print("clean mean energy:", best_qaoa_run.samples.mean_energy)
-print("noisy mean energy:", noisy_run.samples.mean_energy)
-assert math.isfinite(noisy_run.samples.mean_energy)
-
-# %% [markdown]
-# `DecodedSamples.mean_energy` is the sampled expectation value of the cost
-# Hamiltonian. COBYLA minimizes the same scalar by reusing `compiled_qaoa`;
-# neither the Qamomile program nor the compiled circuit is rebuilt between
-# coordinates. Native Qiskit primitives or provider estimators remain
-# available after loading the circuit, while `qm.expectation` provides the
-# backend-neutral route when a state-returning source is preferred.
-
-# %% [markdown]
-# ## Advanced Qiskit features
-#
-# ### Classical control flow and runtime expressions
-#
-# A measurement-dependent Python branch remains part of QCore until the Qiskit
-# emitter converts it to a native `if_else` region. The private feedback bit is
-# not exposed in the declared two-bit result.
+# Prepare a qubit in state 1 and measure it with `qm.measure_z(state, target=0)`. The function returns both the measured bit and the qubit. Apply an X gate to that qubit and measure it again. The two measurements give `(1, 0)` on every shot.
 
 
 # %%
 @qm.qkernel
-def feedback_sample() -> qm.Shot[qm.Bits[2]]:  # type: ignore[valid-type]
+def measure_then_flip() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
+    """Measure the same qubit before and after a flip."""
+    state = qm.prepare((1,))
+    before, state = qm.measure_z(state, target=0)
+    state = qm.x(state, target=0)
+    return bool(before), bool(qm.measure(state)[0])
+
+
+measurement_counts = qm.run(measure_then_flip, on=local, shots=shots).result.counts
+print(measurement_counts)
+assert measurement_counts == {(1, 0): shots}
+
+# %% [markdown]
+# ### Branch within the same circuit on a mid-circuit measurement result (`if`)
+#
+# Prepare the first qubit so that measuring it can give either 0 or 1. `measure_z` returns that bit (`flag`) and the state after measurement. If `flag` is 1, flip the second qubit. It started at 0, so the two bits will agree at the end.
+
+
+# %%
+@qm.qkernel
+def correlated_feedback() -> qm.Shot[qm.Bits[2]]:  # type: ignore[valid-type]
     """Correlate two output bits through measurement feedback.
 
     Returns:
-        qm.Shot[qm.Bits[2]]: Two equal source-ordered bits.
+        qm.Shot[qm.Bits[2]]: Two equal bits in Qamomile source order.
     """
 
-    state = qm.h(qm.qubits(2), target=0)
-    flag, state = qm.measure_z(state, 0)
+    state = qm.qubits(2)
+    state = qm.h(state, target=0)
+    flag, state = qm.measure_z(state, target=0)
     if flag:
         state = qm.x(state, target=1)
-    else:
-        state = qm.z(state, target=1)
     return qm.measure(state)
 
 
-feedback_artifact = qm.compile(feedback_sample, to=qaoa_endpoint.target)
-feedback_circuit = load_circuit(feedback_artifact)
-feedback_result = qm.run(
-    feedback_artifact,
-    on=qaoa_endpoint,
-    shots=32,
-    seed=0,
-).result
-
-assert "if_else" in feedback_circuit.count_ops()
-assert set(feedback_result.counts) == {(0, 0), (1, 1)}
+counts = qm.run(correlated_feedback, on=local, shots=shots).result.counts
+print(counts)
+assert set(counts) <= {(0, 0), (1, 1)}
+assert sum(counts.values()) == shots
 
 # %% [markdown]
-# A structural `for` loop that does not use its induction value can likewise
-# remain one native `for_loop`. Qiskit owns this realization choice; the QCore
-# source still carries an ordinary verified `qcore.for`.
+# The count for each outcome can vary between runs.
+
+# %% [markdown]
+# ### Reset and reuse a qubit mid-circuit (`qm.reset`)
+#
+# The first three qubits hold `010`. Use a fourth qubit to check whether each neighboring pair differs. Two CNOT gates flip this auxiliary qubit once for each 1 in the pair. Starting from 0, it therefore reads 1 for `01`. Reset it to 0 and repeat the check for `10`. Both checks give 1.
 
 
 # %%
 @qm.qkernel
-def repeated_h(
-    repetitions: qm.Const[qm.Int],
-) -> qm.Shot[qm.Bits[1]]:  # type: ignore[valid-type]
-    """Apply Hadamard repeatedly through one structural loop.
+def check_neighbors() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
+    """Use one auxiliary qubit to compare two neighboring pairs."""
+    state = qm.prepare((0, 1, 0, 0))
+    state = qm.cx(state, control=0, target=3)
+    state = qm.cx(state, control=1, target=3)
+    left, state = qm.measure_z(state, target=3)
 
-    Args:
-        repetitions: Compile-time loop trip count.
+    data, probe = qm.split_at(state, 3)
+    probe = qm.reset(probe)
+    state = qm.concat(data, probe)
 
-    Returns:
-        qm.Shot[qm.Bits[1]]: One measured output bit.
-    """
-
-    state = qm.qubits(1)
-    for _ in range(repetitions):
-        state = qm.h(state, target=0)
-    return qm.measure(state)
+    state = qm.cx(state, control=1, target=3)
+    state = qm.cx(state, control=2, target=3)
+    right, state = qm.measure_z(state, target=3)
+    qm.discard(state)
+    return bool(left), bool(right)
 
 
-for_artifact = qm.compile(qm.specialize(repeated_h, repetitions=3), to=target)
-for_circuit = load_circuit(for_artifact)
-for_result = qm.run(for_artifact, on=Aer(), shots=16, seed=1).result
-
-print("structural-loop Qiskit operations:", dict(for_circuit.count_ops()))
-assert for_circuit.count_ops().get("for_loop", 0) == 1
-assert for_result.shots == 16
-
+checks = qm.run(check_neighbors, on=local, shots=shots).result.counts
+print(checks)
+assert checks == {(1, 1): shots}
 
 # %% [markdown]
-# ### Pauli evolution realization
+# ### Read the current shot number inside the circuit (`qm.get_current_shot`)
 #
-# The QAOA cost layer stays one abstract commuting-Pauli evolution in QCore.
-# Qiskit preserves each complete cost layer as one native
-# `PauliEvolutionGate` in the retained circuit, including its runtime angle. Aer expands the
-# gate's verified exact fallback schedule only at execution. Helper definitions
-# and loops may enclose these operations, so top-level counts are not a flattened
-# count of all Pauli evolution gates.
+# Return whether the current shot number is 0. The first shot returns 1 and each remaining shot returns 0. With 32 shots, the counts are 1 and 31 respectively.
+
 
 # %%
-native_qaoa_artifact = qaoa_experiment.compile(to=target).artifact
-qaoa_circuit = load_circuit(native_qaoa_artifact)
-print("QAOA Qiskit operations:", dict(qaoa_circuit.count_ops()))
-assert qaoa_circuit.num_qubits == native_qaoa_artifact.result_abi.width
-assert len(qaoa_circuit.parameters) == 2 * LAYERS
-
-# %% [markdown]
-# ### QFT realization
-#
-# A named composite preserves the verified standard-library QFT body as one
-# labeled SDK gate. Calling the ordinary qkernel emits that same little-endian
-# `h`/`cp`/`swap` body directly. A name such as `qft` does not establish a
-# mathematical contract and cannot authorize substitution with `QFTGate`.
-# Native arithmetic and Pauli choices instead use compiler-verified semantic
-# operations and explicit target capabilities.
-
-# %%
-boxed_qft = qm.composite_gate(qft, name="qft")
-
-
 @qm.qkernel
-def qft_sample() -> qm.Shot[qm.Bits[3]]:  # type: ignore[valid-type]
-    """Measure the boxed three-qubit QFT of the zero state.
-
-    Returns:
-        qm.Shot[qm.Bits[3]]: Three source-ordered output bits.
-    """
-
-    return qm.measure(boxed_qft(qm.qubits(3), 3))
+def first_shot() -> qm.Shot[qm.Bool]:
+    """Return whether this is the first shot."""
+    return qm.get_current_shot() == 0
 
 
-@qm.qkernel
-def decomposed_qft_sample() -> qm.Shot[qm.Bits[3]]:  # type: ignore[valid-type]
-    """Measure the portable three-qubit QFT fallback body.
-
-    Returns:
-        qm.Shot[qm.Bits[3]]: Three source-ordered output bits.
-    """
-
-    return qm.measure(qft(qm.qubits(3), 3))
-
-
-qft_artifact = qm.compile(qft_sample, to=target)
-qft_circuit = load_circuit(qft_artifact)
-decomposed_qft_circuit = to_circuit(decomposed_qft_sample, target=target)
-boxed_qft_operations = qft_circuit.count_ops()
-from qiskit import transpile
-
-expanded_qft = transpile(
-    decomposed_qft_circuit, basis_gates=["h", "cp", "swap"], optimization_level=0
-)
-decomposed_qft_operations = expanded_qft.count_ops()
-qft_result = qm.run(qft_artifact, on=Aer(), shots=8, seed=0).result
-
-print("boxed QFT operations:", dict(boxed_qft_operations))
-print("decomposed QFT operations:", dict(decomposed_qft_operations))
-assert sum(row.operation.name != "measure" for row in qft_circuit.data) == 1
-assert decomposed_qft_operations.get("h", 0) == 3
-assert decomposed_qft_operations.get("cp", 0) == 3
-assert decomposed_qft_operations.get("swap", 0) == 1
-assert qft_result.shots == 8
+shot_counts = qm.run(first_shot, on=local, shots=shots).result.counts
+print(shot_counts)
+assert shot_counts[(1,)] == 1
+assert shot_counts.get((0,), 0) == shots - 1
 
 # %% [markdown]
-# ## Use the same source with a live BackendV2 adapter
+# ## Hardware execution
 #
-# `QiskitBackend` owns a live SDK object only at the endpoint boundary. Its
-# `target` snapshots backend capabilities for routing and fingerprinting; the
-# object itself never enters QCore or serialized artifact data. Real providers
-# use the same adapter. This local example uses Qiskit's lightweight
-# `BasicSimulator` and deliberately leaves `seed=0`, because live backends do not
-# promise a portable seed contract.
-
-# %%
-live_endpoint = QiskitBackend(BasicSimulator())
-live_record = qm.run(
-    program,
-    on=live_endpoint,
-    parameters={"theta": math.pi},
-    shots=4,
-    seed=0,
-)
-
-print("live backend:", live_record.result.backend)
-print("routed stages:", live_record.artifact.report.stages)
-
-assert live_record.result.counts == {(1, 1): 4}
-assert "qiskit-routing" in live_record.artifact.report.stages
-assert live_record.artifact.target_fingerprint == live_endpoint.target.fingerprint
-
-# %% [markdown]
-# ## Run on IBM Quantum hardware
-#
-# A provider backend uses the same live adapter. Credentials and queueing stay
-# outside artifacts, so this cost-bearing example is intentionally not run by
-# the documentation build:
+# If your IBM Quantum account has access to `ibm_fez`, submit the same `bell_program` to that processor. Use `job.job_id` to identify the submission and `job.result()` to wait for the counts.
 #
 # ```python
-# from qiskit_ibm_runtime import QiskitRuntimeService
-#
-# service = QiskitRuntimeService()
-# backend = service.least_busy(operational=True, simulator=False)
-# hardware = QiskitBackend(backend)
-# hardware_artifact = qm.compile(qaoa_experiment.program, to=hardware.target)
-# job = qm.submit(
-#     hardware_artifact,
-#     on=hardware,
-#     parameters={"gammas": optimized_gammas, "betas": optimized_betas},
-#     shots=1_000,
-#     seed=0,
-# )
-# print(job.job_id, job.status)
+# backend = QiskitRuntimeService().backend("ibm_fez")
+# endpoint = IBMRuntime(backend=backend)
+# artifact = qm.compile(bell_program, to=endpoint.target)
+# job = qm.submit(artifact, on=endpoint, parameters={"theta": math.pi}, shots=100)
+# print(job.job_id)
+# print(job.result().counts)
 # ```
-
-# %% [markdown]
-# ## Summary
 #
-# - QCore is the sole persistent meaning of the typed source program.
-# - `Qiskit` changes only realization by retaining SDK operations in a QuantumCircuit.
-# - One compiled artifact accepts multiple runtime parameter values on `Aer`.
-# - `QiskitBackend` keeps provider objects, routing, and native jobs at the
-#   endpoint boundary while preserving the common Qamomile result ABI.
-# - The page also executes the original five-node, three-layer continuous
-#   MaxCut optimization, native dynamic `for_loop` / `if_else`,
-#   native `PauliEvolutionGate`, boxed-versus-decomposed QFT inspection, and a
-#   live BackendV2 route. Documentation tests reduce only layers, shots, and
-#   optimizer iterations.
+# ### Dry run
+#
+# To validate before hardware submission, create `backend` and `artifact` as above, then use `dry_run=True`. This checks the workload and estimates usage without consuming quantum processing unit (QPU) time.
+#
+# ```python
+# preview = IBMRuntime(backend=backend, dry_run=True)
+# report = qm.execute(
+#     artifact, on=preview, parameters={"theta": math.pi}, shots=100
+# )
+# print(report.status)
+# print(report.metadata()["usage"])
+# ```
+#
+# The result is a `ValidationResult` report, not measurement counts; unfinished usage estimates are `None`. IBM dry runs require a Flex, Premium, or On-Prem plan and support job or Batch mode, not Session mode.

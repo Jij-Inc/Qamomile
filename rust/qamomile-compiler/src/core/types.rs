@@ -797,6 +797,7 @@ impl TypeArena {
                 self.sum_sampled_widths(fields.iter().map(|(_, field_type)| *field_type), shot)
             }
             Some(SemanticType::Scalar(ScalarType::Real)) if shot => Ok(Some(64)),
+            Some(SemanticType::Scalar(ScalarType::Unit)) => Ok(Some(0)),
             _ => Ok(None),
         }
     }

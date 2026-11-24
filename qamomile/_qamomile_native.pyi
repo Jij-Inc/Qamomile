@@ -76,6 +76,9 @@ __all__ = [
     "MetricSymbolicCount",
     "ModularMultiplicationPlan",
     "ModuleHeader",
+    "NativeCurrentShotPolicy",
+    "NativeShotCircuitTemplate",
+    "NativeShotLaunchRows",
     "OpcodeSymbolicCount",
     "PauliCorrelationPlan",
     "ProgramHeader",
@@ -123,6 +126,7 @@ __all__ = [
     "bind_declared_function_arguments",
     "bind_invocation",
     "bind_scalar_parameters",
+    "check_current_shot_invocation",
     "common_type_stage",
     "configure_realization",
     "construct_resource_expression",
@@ -130,6 +134,7 @@ __all__ = [
     "construct_resource_predicate",
     "construct_resource_symbol",
     "convert_qsp_wx_phases",
+    "current_shot_policy",
     "cyclic_gray_control_schedule",
     "decode_native_result_bitstring",
     "decode_result_value",
@@ -149,6 +154,8 @@ __all__ = [
     "infer_declared_function_application",
     "infer_function_application",
     "infer_literal_type",
+    "infer_measurement_observation_type",
+    "infer_preparation_result_type",
     "inspect_artifact",
     "inspect_artifact_family_payload",
     "inspect_circuit_family_selector",
@@ -158,6 +165,7 @@ __all__ = [
     "inspect_hir_normalization_work",
     "inspect_hir_ssa_lowering_work",
     "inspect_hir_validation_work",
+    "inspect_indexed_circuit",
     "inspect_launch_materializer_artifact",
     "inspect_launch_materializer_payload",
     "inspect_module",
@@ -275,6 +283,7 @@ __all__ = [
     "type_symbolic_dimensions",
     "uniformly_controlled_rotation_coordinates",
     "unify_type_dimensions",
+    "validate_circuit_angles",
     "validate_circuit_selectors",
     "validate_decoded_samples",
     "validate_estimator_source",
@@ -522,6 +531,11 @@ class CircuitProjection:
     def result_value(self) -> typing.Optional[CircuitResultValue]: ...
     @property
     def result_route(self) -> builtins.str: ...
+    @property
+    def angle_validation(self) -> builtins.list[bytes]:
+        r"""
+        Return reusable native finite-angle checks for SDK launch.
+        """
     @property
     def result_postprocessing(self) -> typing.Optional[bytes]: ...
 
@@ -908,6 +922,80 @@ class ModuleHeader:
     def contracts(self) -> builtins.list[FunctionContractProjection]: ...
 
 @typing.final
+class NativeCurrentShotPolicy:
+    r"""
+    Immutable endpoint normalization and exact target integer limits.
+    """
+    @property
+    def origin(self) -> builtins.int: ...
+    @property
+    def integer_min(self) -> builtins.int: ...
+    @property
+    def integer_max(self) -> builtins.int: ...
+    @property
+    def max_shots(self) -> builtins.int: ...
+
+@typing.final
+class NativeShotCircuitTemplate:
+    r"""
+    Immutable native owner of one fixed-topology numeric launch plan.
+    """
+    @property
+    def projection(self) -> CircuitProjection:
+        r"""
+        Borrow the compiler-certified SDK emission view once at compilation.
+        """
+    @property
+    def slot_count(self) -> builtins.int:
+        r"""
+        Return compiler numeric slot count independently of SDK parameter order.
+        """
+    def check_invocation(self, shots: builtins.int) -> None:
+        r"""
+        Check invocation work and numeric storage without allocating rows.
+        """
+    def bind_rows(self, bindings: dict, shots: builtins.int) -> NativeShotLaunchRows:
+        r"""
+        Evaluate all rows through native checked numeric semantics.
+        """
+    def postprocess(self, indexed_rows: typing.Sequence[tuple[builtins.int, typing.Sequence[builtins.int], builtins.int]], bindings: dict, shots: builtins.int, result_abi: bytes) -> list[tuple[bytes, int]]:
+        r"""
+        Validate complete logical coordinates before native result evaluation.
+        """
+    def postprocess_unmeasured(self, bindings: dict, shots: builtins.int, result_abi: bytes) -> list[tuple[bytes, int]]:
+        r"""
+        Evaluate every unmeasured coordinate without allocating empty input rows.
+        """
+    def to_bytes(self, parameter_abi: bytes, result_abi: bytes, target_fingerprint: builtins.str, source_digest: builtins.str) -> bytes:
+        r"""
+        Seal native scalar plans with enclosing artifact identities.
+        """
+    @staticmethod
+    def from_bytes(payload: bytes, parameter_abi: bytes, result_abi: bytes, target_fingerprint: builtins.str, source_digest: builtins.str) -> NativeShotCircuitTemplate:
+        r"""
+        Restore a persisted native evaluator after matching enclosing identities.
+        """
+
+@typing.final
+class NativeShotLaunchRows:
+    r"""
+    Immutable checked row sequence with no retained per-shot Python objects.
+    """
+    @property
+    def slot_count(self) -> builtins.int:
+        r"""
+        Return the uniform compiler slot count without visiting rows.
+        """
+    def __len__(self) -> builtins.int:
+        r"""
+        Return the checked number of logical rows.
+        """
+    def __getitem__(self, index: builtins.int) -> builtins.list[builtins.float]:
+        r"""
+        Materialize only the requested SDK row, supporting negative indices.
+        """
+
+@typing.final
 class OpcodeSymbolicCount:
     r"""
     One opcode and its symbolic count enclosure.
@@ -1255,11 +1343,11 @@ class ReferenceProgramHandle:
         r"""
         Verify a portable program once before retaining its typed native state.
         """
-    def execute(self, bindings: dict, shots: builtins.int, seed: builtins.int) -> ReferenceExecutionProjection:
+    def execute(self, bindings: dict, shots: builtins.int, seed: typing.Optional[builtins.int], single_value: builtins.bool = ...) -> ReferenceExecutionProjection:
         r"""
         Execute with fresh invocation and quantum state, borrowing the program.
         """
-    def execute_batch(self, bindings: list, shots: builtins.int, base_seed: builtins.int) -> builtins.list[ReferenceExecutionProjection]:
+    def execute_batch(self, bindings: list, shots: builtins.int, base_seed: typing.Optional[builtins.int] = None) -> builtins.list[ReferenceExecutionProjection]:
         r"""
         Execute a bounded batch without restoring the program again.
         """
@@ -1339,7 +1427,7 @@ class ShotExecutionHandle:
     def physical_shots(self) -> builtins.int: ...
     @property
     def submissions(self) -> builtins.int: ...
-    def __new__(cls, payload: bytes | VerifiedProgramHandle, bindings: dict, shots: builtins.int, seed: builtins.int, realization_capabilities: typing.Optional[typing.Sequence[builtins.str]] = None, lowering: typing.Optional[typing.Sequence[builtins.str]] = None, seeded_execution: builtins.bool = ...) -> ShotExecutionHandle: ...
+    def __new__(cls, payload: bytes | VerifiedProgramHandle, bindings: dict, shots: builtins.int, seed: typing.Optional[builtins.int], realization_capabilities: typing.Optional[typing.Sequence[builtins.str]] = None, lowering: typing.Optional[typing.Sequence[builtins.str]] = None) -> ShotExecutionHandle: ...
     def next_request(self) -> typing.Optional[ShotExecutionRequest]: ...
     def accept(self, counts: typing.Sequence[tuple[typing.Sequence[builtins.int], builtins.int]]) -> None: ...
     def finish(self) -> builtins.list[tuple[builtins.list[builtins.int], builtins.int]]: ...
@@ -1351,7 +1439,7 @@ class ShotExecutionRequest:
     @property
     def shots(self) -> builtins.int: ...
     @property
-    def seed(self) -> builtins.int: ...
+    def seed(self) -> typing.Optional[builtins.int]: ...
     @property
     def result_abi(self) -> bytes: ...
     @property
@@ -1802,6 +1890,8 @@ class TargetLoweringPlanProjection:
     def unsupported(self) -> builtins.list[builtins.str]: ...
     @property
     def route(self) -> builtins.str: ...
+    @property
+    def reusable_circuit_requirements(self) -> typing.Optional[builtins.list[builtins.str]]: ...
 
 @typing.final
 class VerifiedModuleHandle:
@@ -1842,6 +1932,14 @@ class VerifiedProgramHandle:
     def to_bytes(self) -> bytes:
         r"""
         Export the current verified `QCore`, excluding its source association.
+        """
+    def check_indexed_invocation(self, shots: builtins.int) -> None:
+        r"""
+        Check host-indexed invocation limits without rewriting source.
+        """
+    def bind_current_shot(self, index: builtins.int, shots: builtins.int) -> VerifiedProgramHandle:
+        r"""
+        Bind a checked logical index while retaining the source Shot stage.
         """
     def eliminate_common_expressions(self, max_work: builtins.int = ...) -> VerifiedProgramHandle:
         r"""
@@ -2012,6 +2110,11 @@ def bind_scalar_parameters(parameter_abi: bytes, supplied_values: bytes) -> buil
     Bind portable invocation values into ordered scalar SDK inputs.
     """
 
+def check_current_shot_invocation(origin: builtins.int, shots: builtins.int) -> None:
+    r"""
+    Reject an unsupported native repetition count before submission.
+    """
+
 def common_type_stage(sources: typing.Sequence[typing.Sequence[builtins.int]]) -> typing.Optional[builtins.str]:
     r"""
     Return the latest outer availability stage in one canonical type row.
@@ -2045,6 +2148,11 @@ def construct_resource_symbol(scope: builtins.str, name: builtins.str, domain: b
 def convert_qsp_wx_phases(phases: typing.Sequence[builtins.float]) -> builtins.list[builtins.float]:
     r"""
     Convert finite QSP `Wx` phases into canonical projector coordinates.
+    """
+
+def current_shot_policy(origin: builtins.int) -> NativeCurrentShotPolicy:
+    r"""
+    Validate one explicit native origin and expose its checked numeric policy.
     """
 
 def cyclic_gray_control_schedule(width: builtins.int) -> builtins.list[builtins.int]:
@@ -2082,7 +2190,7 @@ def dense_matrix_entry_budget() -> builtins.int:
     Return the compiler-owned dense-matrix transfer budget.
     """
 
-def derive_artifact_abi(payload: bytes | VerifiedProgramHandle) -> tuple[bytes, bytes]:
+def derive_artifact_abi(payload: bytes | VerifiedProgramHandle, single_value: builtins.bool = ...) -> tuple[bytes, bytes]:
     r"""
     Derive canonical persistent artifact ABIs from one verified program.
     """
@@ -2097,7 +2205,7 @@ def evaluate_classical(opcode: builtins.str, operands: typing.Sequence[typing.Se
     Evaluate one verified pure-classical operation over portable literals.
     """
 
-def evaluate_reference_value_at(payload: bytes, bindings: dict, seed: builtins.int = ...) -> bytes:
+def evaluate_reference_value_at(payload: bytes, bindings: dict, seed: typing.Optional[builtins.int] = None) -> bytes:
     r"""
     Evaluate one supported non-sampled Reference value invocation in Rust.
     """
@@ -2107,12 +2215,12 @@ def evaluate_resource_expression(payload: bytes) -> ResourceExpressionEvaluation
     Evaluate one canonical standalone resource-expression graph in Rust.
     """
 
-def execute_reference_at(payload: bytes | ReferenceProgramHandle, bindings: dict, shots: builtins.int, seed: builtins.int) -> ReferenceExecutionProjection:
+def execute_reference_at(payload: bytes | ReferenceProgramHandle, bindings: dict, shots: builtins.int, seed: typing.Optional[builtins.int], single_value: builtins.bool = ...) -> ReferenceExecutionProjection:
     r"""
     Execute one sampled, classical, or hybrid Reference invocation in Rust.
     """
 
-def execute_reference_batch_at(payload: bytes | ReferenceProgramHandle, bindings: list, shots: builtins.int, base_seed: builtins.int) -> builtins.list[ReferenceExecutionProjection]:
+def execute_reference_batch_at(payload: bytes | ReferenceProgramHandle, bindings: list, shots: builtins.int, base_seed: typing.Optional[builtins.int] = None) -> builtins.list[ReferenceExecutionProjection]:
     r"""
     Execute an ordered batch through one restored Reference program.
     """
@@ -2140,6 +2248,16 @@ def infer_function_application(function_type: bytes, argument_types: typing.Sequ
 def infer_literal_type(literal_source: bytes) -> typing.Optional[bytes]:
     r"""
     Infer one source literal's unique semantic introduction type.
+    """
+
+def infer_measurement_observation_type(source: bytes) -> bytes:
+    r"""
+    Infer the observation type of a coherent payload.
+    """
+
+def infer_preparation_result_type(source: bytes) -> bytes:
+    r"""
+    Infer preparation from an original source HIR operand.
     """
 
 def inspect_artifact(payload: bytes) -> tuple[int, int, str, str, bytes]:
@@ -2185,6 +2303,11 @@ def inspect_hir_ssa_lowering_work(payload: bytes) -> HirSsaLoweringWorkProjectio
 def inspect_hir_validation_work(payload: bytes) -> HirValidationWorkProjection:
     r"""
     Inspect one typed-HIR image and return transient native validation work.
+    """
+
+def inspect_indexed_circuit(payload: bytes | VerifiedProgramHandle, realization_capabilities: typing.Optional[typing.Sequence[builtins.str]] = None, lowering: typing.Optional[typing.Sequence[builtins.str]] = None) -> typing.Optional[NativeShotCircuitTemplate]:
+    r"""
+    Select a native fixed-topology plan, or retain the checked source recipe.
     """
 
 def inspect_launch_materializer_artifact(artifact: bytes, target_format: builtins.str, materialized_requirements: typing.Sequence[builtins.str]) -> LaunchMaterializerPayloadProjection:
@@ -2259,9 +2382,10 @@ def inspect_standard_optimization_operation_visits(payload: bytes) -> builtins.i
     Return bounded operation visits made by standard `QCore` optimization.
     """
 
-def inspect_static_circuit(payload: bytes | VerifiedProgramHandle, realization_capabilities: typing.Optional[typing.Sequence[builtins.str]] = None, lowering: typing.Optional[typing.Sequence[builtins.str]] = None) -> CircuitProjection:
+def inspect_static_circuit(payload: bytes | VerifiedProgramHandle, realization_capabilities: typing.Optional[typing.Sequence[builtins.str]] = None, lowering: typing.Optional[typing.Sequence[builtins.str]] = None, require_reusable_bindings: builtins.bool = ...) -> CircuitProjection:
     r"""
     Project an independently verified static program into logical instructions.
+    Reuse mode rejects scalar operations that still require exact launch values.
     """
 
 def inspect_static_circuit_at(payload: bytes | VerifiedProgramHandle, bindings: dict, realization_capabilities: typing.Optional[typing.Sequence[builtins.str]] = None, lowering: typing.Optional[typing.Sequence[builtins.str]] = None) -> CircuitProjection:
@@ -2438,7 +2562,7 @@ def plan_boolean_lifts(payload: bytes | VerifiedProgramHandle) -> builtins.list[
     Return every referenced exact Boolean lift plan after one program decode.
     """
 
-def plan_commuting_pauli_expectation(observable: bytes, total_shots: builtins.str, base_seed: builtins.int) -> builtins.list[tuple[builtins.list[builtins.int], builtins.list[tuple[builtins.int, builtins.list[builtins.int], builtins.bool]], builtins.int, builtins.str, builtins.int]]:
+def plan_commuting_pauli_expectation(observable: bytes, total_shots: builtins.str, base_seed: typing.Optional[builtins.int] = None) -> builtins.list[tuple[builtins.list[builtins.int], builtins.list[tuple[builtins.int, builtins.list[builtins.int], builtins.bool]], builtins.int, builtins.str, typing.Optional[builtins.int]]]:
     r"""
     Plan deterministic generally commuting groups and exact shot allocation.
     """
@@ -2448,7 +2572,7 @@ def plan_ekera_hastad(generator: builtins.str, modulus: builtins.str, parameter_
     Derive one native Ekerå–Håstad coordinate plan.
     """
 
-def plan_independent_pauli_expectation(observable: bytes, total_shots: builtins.str, base_seed: builtins.int) -> builtins.list[tuple[builtins.list[tuple[builtins.int, builtins.str]], builtins.list[builtins.int], builtins.str, builtins.int]]:
+def plan_independent_pauli_expectation(observable: bytes, total_shots: builtins.str, base_seed: typing.Optional[builtins.int] = None) -> builtins.list[tuple[builtins.list[tuple[builtins.int, builtins.str]], builtins.list[builtins.int], builtins.str, typing.Optional[builtins.int]]]:
     r"""
     Plan independent terms with a total shot budget.
     """
@@ -2478,7 +2602,7 @@ def plan_pauli_realization(payload: bytes, state_width: builtins.int, lowering: 
     Select and generate one exact Pauli schedule for a non-native consumer.
     """
 
-def plan_qwc_pauli_expectation(observable: bytes, total_shots: builtins.str, base_seed: builtins.int) -> builtins.list[tuple[builtins.list[tuple[builtins.int, builtins.str]], builtins.list[builtins.int], builtins.str, builtins.int]]:
+def plan_qwc_pauli_expectation(observable: bytes, total_shots: builtins.str, base_seed: typing.Optional[builtins.int] = None) -> builtins.list[tuple[builtins.list[tuple[builtins.int, builtins.str]], builtins.list[builtins.int], builtins.str, typing.Optional[builtins.int]]]:
     r"""
     Plan deterministic QWC groups and one exact total-shot allocation.
     """
@@ -2577,7 +2701,7 @@ def retag_resource_expression_unit(payload: bytes, unit: builtins.str) -> bytes:
     Attach one nominal unit to a standalone resource-expression root in Rust.
     """
 
-def sample_static_circuit_at(payload: bytes, bindings: dict, shots: builtins.int, seed: builtins.int) -> list[tuple[bytes, int]]:
+def sample_static_circuit_at(payload: bytes, bindings: dict, shots: builtins.int, seed: typing.Optional[builtins.int] = None) -> list[tuple[bytes, int]]:
     r"""
     Materialize and sample one verified static-circuit invocation in Rust.
     """
@@ -2713,6 +2837,11 @@ def uniformly_controlled_rotation_coordinates(branch_angles: typing.Sequence[bui
 def unify_type_dimensions(expected: typing.Sequence[typing.Sequence[builtins.int]], actual: typing.Sequence[typing.Sequence[builtins.int]], initial: typing.Sequence[tuple[builtins.str, typing.Optional[builtins.int], typing.Optional[builtins.str]]]) -> typing.Optional[builtins.list[tuple[builtins.str, typing.Optional[builtins.int], typing.Optional[builtins.str]]]]:
     r"""
     Infer dependent dimensions through the native logical type relation.
+    """
+
+def validate_circuit_angles(plans: list[bytes], bindings: dict) -> None:
+    r"""
+    Validate consumed quantum angles through the shared native scalar evaluator.
     """
 
 def validate_circuit_selectors(opcode: builtins.str, width: builtins.int, selectors: typing.Sequence[builtins.int]) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import assert_type
 
 import numpy as np
@@ -160,8 +161,25 @@ def _check_program_lifecycle(source: str) -> None:
     artifact = qm.compile(study, to=endpoint)
     assert_type(artifact, qm.CompiledProgram)
 
+    job = qm.submit(artifact, on=endpoint)
+    assert_type(job, qm.SubmittedJob)
+    assert_type(job.metadata(), Mapping[str, object])
+
     record = qm.run(program, on=endpoint)
     assert_type(record, qm.RunRecord)
     assert_type(record.invocation, qm.Invocation)
-    assert_type(record.result, qm.ValueResult | qm.SampleResult)
+    assert_type(record.result, qm.ValueResult | qm.SampleResult | qm.ValidationResult)
     assert_type(record.resources, qm.resources.ResourceStudy)
+
+
+def _check_validation_result() -> None:
+    """Provider reports are typed separately from sampled and source values."""
+    report = qm.ValidationResult.from_metadata(
+        backend="test.validation",
+        status=qm.JobStatus.COMPLETED,
+        metadata={"estimated_quantum_seconds": None},
+    )
+    assert_type(report, qm.ValidationResult)
+    assert_type(report.backend, str)
+    assert_type(report.status, qm.JobStatus)
+    assert_type(report.metadata(), Mapping[str, object])

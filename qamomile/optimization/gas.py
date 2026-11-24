@@ -516,14 +516,15 @@ class GASExperiment:
         *,
         on: ExecutionEndpoint,
         shots: int,
-        seed: int = 0,
+        seed: int | None = None,
     ) -> OptimizationRun[BinaryDomain]:
         """Compile, execute, and decode this fixed search experiment.
 
         Args:
             on (ExecutionEndpoint): Backend-neutral execution endpoint.
             shots (int): Positive number of observations.
-            seed (int): Optional deterministic local-endpoint seed.
+            seed (int | None): Unsigned 64-bit endpoint seed, including zero.
+                None leaves randomness to the endpoint.
 
         Returns:
             OptimizationRun[BinaryDomain]: Execution and decoded distribution.
@@ -531,6 +532,7 @@ class GASExperiment:
         Raises:
             TypeError: If the endpoint or launch values are invalid.
             ValueError: If the endpoint cannot run the compiled program.
+            ExecutionError: If the seed is invalid or unsupported by the endpoint.
         """
 
         return self.compile(to=on.target).run(on=on, shots=shots, seed=seed)
@@ -575,14 +577,15 @@ class CompiledGASExperiment:
         *,
         on: ExecutionEndpoint,
         shots: int,
-        seed: int = 0,
+        seed: int | None = None,
     ) -> OptimizationRun[BinaryDomain]:
         """Execute and decode the compiled search program.
 
         Args:
             on (ExecutionEndpoint): Endpoint compatible with the artifact.
             shots (int): Positive number of observations.
-            seed (int): Optional deterministic local-endpoint seed.
+            seed (int | None): Unsigned 64-bit endpoint seed, including zero.
+                None leaves randomness to the endpoint.
 
         Returns:
             OptimizationRun[BinaryDomain]: Execution and original-model
@@ -591,6 +594,7 @@ class CompiledGASExperiment:
         Raises:
             TypeError: If the target result is not a sample distribution.
             ValueError: If endpoint capabilities or launch values are invalid.
+            ExecutionError: If the seed is invalid or unsupported by the endpoint.
         """
 
         execution = run_program(

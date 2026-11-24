@@ -88,7 +88,7 @@ def test_repeated_execution_needs_no_artifact_serialization(
                 on=endpoint,
                 parameters={} if static else {"theta": theta},
                 shots=4,
-                seed=0,
+                seed=0 if static else None,
             )
             assert result.counts == {(int(static or theta != 0.0),): 4}
     # Persistence remains available, but is never invoked by the above launches.
@@ -98,7 +98,7 @@ def test_repeated_execution_needs_no_artifact_serialization(
         on=endpoint,
         parameters={} if static else {"theta": math.pi},
         shots=4,
-        seed=0,
+        seed=0 if static else None,
     ).counts == {(1,): 4}
 
 

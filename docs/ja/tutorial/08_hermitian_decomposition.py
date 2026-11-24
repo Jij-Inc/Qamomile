@@ -42,12 +42,17 @@
 # 最後に、興味がある方向けの発展例として、時間発展の近似精度も確認します。
 
 # %%
+import os
+
 import numpy as np
 from qiskit.quantum_info import Statevector
 
 import qamomile as qm
 from qamomile.qiskit import to_circuit
 from qamomile.stdlib import suzuki_trotter
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+sample_shots = 1 if docs_test_mode else 128
 
 # %% [markdown]
 # ## 1. NumPy でエルミート行列を作成
@@ -64,8 +69,7 @@ from qamomile.stdlib import suzuki_trotter
 # この2サイトのハミルトニアンは、$4\times4$ の行列で表されます。
 # この行列の構築には `np.kron(A, B)` を使います。
 # この関数は、テンソル積 $A \otimes B$ の行列表現であるクロネッカー積を計算します。\
-# Qamomileでは、計算基底を $\lvert q_1 q_0 \rangle$ の順で表し、$\lvert 00\rangle, \lvert 01\rangle, \lvert 10\rangle, \lvert 11\rangle$ の順に並べます。
-# ここで $q_i$ は量子ビット $i$ に対応するビットです。
+# `HermitianMatrix`では、量子ビット$j$に対応するビットを$b_j$とすると、行と列の添字$i=b_0+2b_1$は計算基底$\lvert b_1 b_0\rangle$に対応します。添字0から3の順に並べると、$\lvert 00\rangle, \lvert 01\rangle, \lvert 10\rangle, \lvert 11\rangle$です。
 # そのため、`np.kron(identity, pauli_x)` は量子ビット 0 への X 演算に、`np.kron(pauli_x, identity)` は量子ビット 1 への X 演算に対応します。
 
 # %%
@@ -136,7 +140,7 @@ assert hamiltonian == expected
 # %%
 interaction = -qm.Z(0) * qm.Z(1)
 transverse_field = hamiltonian - interaction
-evolve = suzuki_trotter(term_count=2, order=2, steps=2)
+evolve = suzuki_trotter(term_count=2, order=2, steps=1 if docs_test_mode else 2)
 
 
 # %% [markdown]
@@ -194,18 +198,18 @@ result = qm.run(
     program,
     on=qm.Reference(),
     parameters={"time": 0.8},
-    shots=128,
+    shots=sample_shots,
     seed=7,
 ).result
 
 print("Number of shots:", result.shots)
 print("Measurement counts:", result.counts)
 
-assert result.shots == 128
-assert sum(result.counts.values()) == 128
+assert result.shots == sample_shots
+assert sum(result.counts.values()) == sample_shots
 
 # %% [markdown]
-# `result.counts` には、観測された各ビット列と、その出現回数が格納されています。
+# `result.counts`には、測定結果のタプル$(b_0,b_1)$とその出現回数が入ります。例えば、キー`(1, 0)`は$\lvert 01\rangle$を表し、先ほどの行列では添字1に対応します。
 # このようにして、NumPy 行列から変換したハミルトニアンを用いて、量子回路の測定結果を得ることができました。
 #
 # ## 5. 時間発展の近似精度を調べる
@@ -226,27 +230,28 @@ assert sum(result.counts.values()) == 128
 # すなわち、$F$ の値が 1 に近いほど、2 つの状態がよく一致していることになります。
 
 # %%
-unitary_circuit = to_circuit(
-    ising_state,
-    hamiltonians=(interaction, transverse_field),
-    parameters={"time": 0.8},
-)
-approximate_state = np.asarray(Statevector.from_instruction(unitary_circuit).data)
+if not docs_test_mode:
+    unitary_circuit = to_circuit(
+        ising_state,
+        hamiltonians=(interaction, transverse_field),
+        parameters={"time": 0.8},
+    )
+    approximate_state = np.asarray(Statevector.from_instruction(unitary_circuit).data)
 
-# |q1 q0> の順で表すと、初期状態は |0+> = (|00> + |01>) / sqrt(2) です。
-initial_state = np.zeros(4, dtype=np.complex128)
-initial_state[0] = 1.0 / np.sqrt(2.0)
-initial_state[1] = 1.0 / np.sqrt(2.0)
+    # 量子ビット0にHを適用すると |0+> = (|00> + |01>) / sqrt(2) となり、添字0と1に振幅を持ちます。
+    initial_state = np.zeros(4, dtype=np.complex128)
+    initial_state[0] = 1.0 / np.sqrt(2.0)
+    initial_state[1] = 1.0 / np.sqrt(2.0)
 
-eigenvalues, eigenvectors = np.linalg.eigh(matrix)
-exact_unitary = (
-    eigenvectors @ np.diag(np.exp(-1j * 0.8 * eigenvalues)) @ eigenvectors.conj().T
-)
-exact_state = exact_unitary @ initial_state
+    eigenvalues, eigenvectors = np.linalg.eigh(matrix)
+    exact_unitary = (
+        eigenvectors @ np.diag(np.exp(-1j * 0.8 * eigenvalues)) @ eigenvectors.conj().T
+    )
+    exact_state = exact_unitary @ initial_state
 
-fidelity = float(abs(np.vdot(exact_state, approximate_state)) ** 2)
-print(f"State fidelity: {fidelity:.6f}")
-assert fidelity > 0.99
+    fidelity = float(abs(np.vdot(exact_state, approximate_state)) ** 2)
+    print(f"State fidelity: {fidelity:.6f}")
+    assert fidelity > 0.99
 
 # %% [markdown]
 # ## 6. まとめ

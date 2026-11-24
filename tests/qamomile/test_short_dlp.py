@@ -106,7 +106,7 @@ def test_short_dlp_source_across_targets(short_dlp_module, backend):
         artifact = qm.compile(program, to=target)
         assert serialize(artifact)
         result = qm.execute(
-            artifact, on=endpoint, shots=4, seed=0 if backend == "braket" else 9
+            artifact, on=endpoint, shots=4, seed=None if backend == "braket" else 9
         )
         expected = {
             ((1 << (2 * m)) * t // order, ((-secret * t) % order) * (1 << m) // order)

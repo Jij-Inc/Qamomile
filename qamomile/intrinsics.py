@@ -49,6 +49,26 @@ def sqrt(_value: object) -> Any:
     return _source_only("sqrt")
 
 
+def get_current_shot() -> Any:
+    """Read the zero-based logical shot index of the current invocation.
+
+    Every trajectory in an invocation of ``shots=N`` has one index in
+    ``0..N-1``. Repeated reads, helper calls, and loop iterations in that
+    trajectory return the same index. A new invocation starts at zero.
+    This read does not measure a quantum state or draw randomness.
+
+    Returns:
+        Any: Source-only ``Shot[Int]`` logical index. Use a Boolean predicate
+            or selection to produce a finite sampled result. Returning the
+            unbounded integer directly has no sampled result encoding.
+
+    Raises:
+        RuntimeError: If called directly from host Python.
+    """
+
+    return _source_only("get_current_shot")
+
+
 def qubits(_size: object) -> Any:
     """Allocate a clean logical quantum state in Qamomile source."""
 
@@ -56,7 +76,21 @@ def qubits(_size: object) -> Any:
 
 
 def prepare(_value: object) -> Any:
-    """Prepare classical logical data as an owned quantum value."""
+    """Prepare classical logical data as an owned quantum value.
+
+    Args:
+        _value (object): Logical bit data or an Int value equal to zero or one.
+            Integer values are checked when available, including at launch or
+            per shot. Real values are unsupported.
+
+    Returns:
+        Any: ``Q[Bit]`` for integer values, ``Q[Bool]`` for Boolean
+        data, and ``Q[Bits[N]]`` for a nonempty sequence of binary literals.
+        Existing logical word inputs retain their quantum payload type.
+
+    Raises:
+        RuntimeError: If called from host Python instead of Qamomile source.
+    """
 
     return _source_only("prepare")
 
@@ -246,7 +280,19 @@ def swap(_state: _Owned, **_selection: object) -> _Owned:
 
 
 def measure(_state: object) -> Any:
-    """Consume a quantum value and produce a shot-time logical value."""
+    """Consume a quantum value and return its shot-time observation.
+
+    Args:
+        _state (object): Owned quantum state to measure.
+
+    Returns:
+        Any: Shot-staged observation. Bool and Bit leaves become Bit and decode
+        as exact Python integers zero or one. Products retain their structure,
+        Bits retain their tuple width, and UInt and UFixed retain numeric values.
+
+    Raises:
+        RuntimeError: If called from host Python instead of Qamomile source.
+    """
 
     return _source_only("measure")
 
@@ -260,7 +306,7 @@ def measure_z(_state: object, **_selection: object) -> Any:
             state has exactly one coherent lane.
 
     Returns:
-        Any: Pair containing ``Shot[Bool]`` and the successor quantum state.
+        Any: Pair containing ``Shot[Bit]`` and the successor quantum state.
 
     Raises:
         RuntimeError: If called from host Python instead of Qamomile source.
@@ -278,7 +324,7 @@ def measure_x(_state: object, **_selection: object) -> Any:
             state has exactly one coherent lane.
 
     Returns:
-        Any: Pair containing ``Shot[Bool]`` and the successor quantum state.
+        Any: Pair containing ``Shot[Bit]`` and the successor quantum state.
 
     Raises:
         RuntimeError: If called from host Python instead of Qamomile source.
@@ -296,7 +342,7 @@ def measure_y(_state: object, **_selection: object) -> Any:
             state has exactly one coherent lane.
 
     Returns:
-        Any: Pair containing ``Shot[Bool]`` and the successor quantum state.
+        Any: Pair containing ``Shot[Bit]`` and the successor quantum state.
 
     Raises:
         RuntimeError: If called from host Python instead of Qamomile source.
@@ -306,7 +352,18 @@ def measure_y(_state: object, **_selection: object) -> Any:
 
 
 def measure_reset(_state: object) -> Any:
-    """Measure an owned state and return both the result and a clean state."""
+    """Measure an owned state and return its observation and reset state.
+
+    Args:
+        _state (object): Owned quantum state to measure and reset.
+
+    Returns:
+        Any: Pair of the same observation type as ``measure`` and a clean
+        quantum state preserving the original logical type.
+
+    Raises:
+        RuntimeError: If called from host Python instead of Qamomile source.
+    """
 
     return _source_only("measure_reset")
 

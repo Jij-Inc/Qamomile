@@ -88,7 +88,7 @@ def test_complete_flow_preserves_source_and_restores_without_callbacks():
     assert artifact.source_digest.hex() == source.specialize(n=1).semantic_digest
     for candidate in (artifact, deserialize(serialize(artifact))):
         assert qm.execute(
-            candidate, on=endpoint, parameters={"theta": 0.0}, shots=8, seed=0
+            candidate, on=endpoint, parameters={"theta": 0.0}, shots=8, seed=None
         ).counts == {(1,): 8}
 
 

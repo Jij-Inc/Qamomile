@@ -544,6 +544,10 @@ impl LoweringConfig {
         self.minimum_addition_selectors && self.addition.is_none()
     }
 
+    pub(crate) const fn has_pauli_override(self) -> bool {
+        self.pauli.is_some()
+    }
+
     /// Decode at most one override per semantic family.
     ///
     /// # Errors

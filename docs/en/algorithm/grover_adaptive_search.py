@@ -19,27 +19,42 @@
 #
 # # Grover Adaptive Search for Combinatorial Polynomial Binary Optimization
 #
-# Grover Adaptive Search (GAS) minimizes a polynomial objective over binary
-# variables by repeatedly asking one question of a Grover oracle — *which $x$
-# satisfy $f(x) < y$?* — and lowering the threshold $y$ whenever a better
-# solution is found {cite:p}`10.22331/q-2021-04-08-428`.
+# In this tutorial, we solve a small **portfolio selection** problem with
+# Grover Adaptive Search (GAS): for each of nine assets we decide whether to buy
+# it, so that a cost that combines risk and expected return is as small as
+# possible. The cost is a polynomial of binary variables, and there is no
+# constraint.
 #
-# This page solves an unconstrained **portfolio selection** problem with
-# Qamomile's immutable `BinaryModel` and `GASExperiment`.
+# GAS finds the minimum of such a cost by repeating one step
+# ([Gilliam, Woerner and Gonciulea, Quantum 5, 428 (2021)](https://doi.org/10.22331/q-2021-04-08-428)).
+# It keeps a threshold $y$, the lowest cost found so far. It repeatedly uses
+# Grover's search algorithm to ask which assignments have a cost below $y$.
+# When a measurement returns an assignment with a cost below $y$, that cost
+# becomes the new threshold. A classical loop repeats this until the
+# threshold stops improving.
 #
-# The tutorial is built on the following structure:
+# The tutorial follows these steps:
 #
-# 1. Formulate the polynomial objective as a `BinaryModel`.
-# 2. Create the nine-asset instance with concrete data.
-# 3. Use `GASExperiment` to build the Grover circuit for the current threshold.
-# 4. Sample it, keep the best candidate, and repeat until a stopping criterion
-#    is reached. GAS is a hybrid loop, not a single circuit.
+# 1. Write the cost as a `BinaryModel`, and find the exact minimum by trying
+#    every assignment.
+# 2. Build the circuit of one round, for a fixed threshold, with Qamomile's
+#    `GASExperiment`.
+# 3. Run one round and compare its samples with what Grover's algorithm
+#    predicts.
+# 4. Write the classical loop that lowers the threshold, and compare its result
+#    with the exact minimum.
+#
+# **Prerequisites**: Grover's algorithm and [how to use `BinaryModel`](../usage/binary_model.ipynb).
+
+# %% [markdown]
+# ## Installation
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install "qamomile[qiskit]"
+# # !pip install qamomile
 
 # %%
+import functools
 import itertools
 import math
 import os
@@ -48,66 +63,47 @@ import numpy as np
 
 import qamomile as qm
 from qamomile.optimization import BinaryModel, GASExperiment
-from qamomile.qiskit import Aer
-from qamomile.stdlib import grover_iteration_count
 
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 # %% [markdown]
-# ## Background
-#
-# Grover search takes an oracle that distinguishes target states by reversing
-# their phase and uses amplitude amplification to raise their measurement
-# probability. That solves a decision problem: a fixed condition says which
-# states qualify, not which one is best.
-#
-# GAS turns it into minimization by changing this condition. It distinguishes
-# the quantum states corresponding to candidates with $f(x) < y$ by reversing
-# their phase and samples candidates. If a candidate has a lower objective
-# value than the current threshold, the classical layer updates $y$ to that
-# value. This process repeats, with the quantum circuit answering one fixed
-# question at a time and the classical layer updating the threshold.
-
-
-# %% [markdown]
 # ## Problem Settings
 #
-# In this tutorial, we apply GAS to a portfolio selection problem.
+# ### Problem Definition
 #
-# Given $n$ assets (stocks, bonds, etc.), we decide for each one whether to buy
-# it — a binary choice. We want to maximize returns while minimizing risk. The
-# tension is:
+# We decide for each of $n$ assets whether to buy it: $x_i = 1$ if we buy asset
+# $i$, and $x_i = 0$ if we do not. An *assignment*
+# $\boldsymbol{x} = (x_0, \dots, x_{n-1})$ describes one portfolio. The vector
+# $\boldsymbol{\mu}$ holds the expected returns of the assets, and the matrix
+# $\Sigma$ is the covariance matrix of their returns. We look for the
+# assignment with the smallest *cost*
 #
-# - $\mu$ tells us how profitable each asset is expected to be
-# - $\Sigma$ tells us how assets move together (correlated assets amplify risk)
-# - $q$ controls how much we care about risk vs. return
+# $$
+# f(\boldsymbol{x}) = q\,\boldsymbol{x}^{\mathsf T}\Sigma\,\boldsymbol{x} - \boldsymbol{\mu}^{\mathsf T}\boldsymbol{x}
+# $$
 #
-# We need to pick the best subset of assets so that the portfolio earns as much
-# as possible without taking on too much correlated risk.
-#
-# \begin{equation}
-# \min_{x\in \lbrace 0 , 1 \rbrace^n} \big( q x^T \Sigma x - \mu^T x \big)
-# \end{equation}
-
-
-# %% [markdown]
-# The instance below has 9 assets:
-#
-# | Name    | Expected Return | Variance   |
-# |---------|-----------------|------------|
-# | Asset 1 | 22              | 12         |
-# | Asset 2 | 4               | 15         |
-# | Asset 3 | 19              | 10         |
-# | Asset 4 | 3               | 18         |
-# | Asset 5 | 23              | 14         |
-# | Asset 6 | 2               | 20         |
-# | Asset 7 | 5               | 11         |
-# | Asset 8 | 25              | 16         |
-# | Asset 9 | 3               | 13         |
-
+# The first term is the variance of the return of the portfolio, a measure of
+# its risk, weighted by the *risk aversion* $q \ge 0$, which quantifies how
+# strongly risk is penalized relative to expected return. The second term is
+# its expected return. There is no constraint: each of the $2^n$ assignments is
+# allowed.
 
 # %% [markdown]
-# The coefficient table below produces the same immutable binary model directly.
+# ### Problem Instance
+#
+# The instance has $n = 9$ assets and $q = 1$. The arrays `expected_returns`
+# and `covariance` in the code below hold $\boldsymbol{\mu}$ and $\Sigma$.
+#
+# `BinaryModel.from_hubo` takes a polynomial in the binary variables as a
+# dictionary with one entry per term. The key is the tuple of the indices of
+# the variables that are multiplied in the term, and the value is the
+# coefficient of the term. Our cost has one term for each asset,
+# $(q\,\Sigma_{ii} - \mu_i)\,x_i$, and one term for each pair $i < j$,
+# $2q\,\Sigma_{ij}\,x_i x_j$, since $x_i^2 = x_i$ and $\Sigma$ is symmetric.
+# For example, the term of asset 0 is $(12 - 22)\,x_0 = -10\,x_0$, with the
+# entry `(0,): -10.0`, and the term of assets 0 and 1 is
+# $2 \times (-3)\,x_0 x_1 = -6\,x_0 x_1$, with the entry `(0, 1): -6.0`.
+# `BinaryModel` calls the cost of an assignment its *energy*.
 
 # %%
 expected_returns = np.array([22, 4, 19, 3, 23, 2, 5, 25, 3], dtype=int)
@@ -125,330 +121,318 @@ covariance = np.array(
     ],
     dtype=int,
 )
-risk_aversion = 1
+RISK_AVERSION = 1
+
+NUM_ASSETS = 3 if docs_test_mode else 9
 
 
 def portfolio_model(num_assets: int) -> BinaryModel:
-    terms: dict[tuple[int, ...], float] = {}
-    for left in range(num_assets):
-        terms[(left,)] = float(
-            risk_aversion * covariance[left, left] - expected_returns[left]
-        )
-        for right in range(left + 1, num_assets):
-            coefficient = float(2 * risk_aversion * covariance[left, right])
-            if coefficient:
-                terms[(left, right)] = coefficient
+    """Build the cost of the first `num_assets` assets as a `BinaryModel`."""
+    terms = {}
+    for i in range(num_assets):
+        # x_i * x_i = x_i, so the variance of asset i joins its linear term.
+        terms[(i,)] = float(RISK_AVERSION * covariance[i, i] - expected_returns[i])
+        for j in range(i + 1, num_assets):
+            # The matrix is symmetric: the pairs (i, j) and (j, i) give the factor 2.
+            coefficient = float(2 * RISK_AVERSION * covariance[i, j])
+            if coefficient != 0:
+                terms[(i, j)] = coefficient
     return BinaryModel.from_hubo(terms, variables=tuple(range(num_assets)))
 
 
-full_model = portfolio_model(9)
-MODEL_ASSETS = 3 if docs_test_mode else 9
-model = portfolio_model(MODEL_ASSETS)
+model = portfolio_model(NUM_ASSETS)
 
-assert full_model.num_variables == 9
-assert model.num_variables == MODEL_ASSETS
+print(f"Number of assets: {model.num_variables}")
+assert model.num_variables == NUM_ASSETS
 
-energies = {
-    bits: model.energy(bits)
-    for bits in itertools.product((0, 1), repeat=model.num_variables)
+# %% [markdown]
+# ### Exact Solution (Brute Force)
+#
+# With 9 assets there are only $2^9 = 512$ assignments, so we can compute the
+# cost of every one of them. This gives the exact minimum, which we use as the
+# reference for the result of GAS. `model.energy(bits)` returns the cost of an
+# assignment.
+
+# %%
+# Compute the cost of every assignment.
+costs = {
+    bits: model.energy(bits) for bits in itertools.product((0, 1), repeat=NUM_ASSETS)
 }
-optimal_bits, optimal_energy = min(energies.items(), key=lambda item: item[1])
 
-print("exact optimum:", optimal_bits, optimal_energy)
-assert optimal_bits == ((1, 0, 1) if docs_test_mode else (1, 0, 0, 0, 1, 0, 0, 1, 0))
-assert optimal_energy == (-11.0 if docs_test_mode else -28.0)
+# Find the smallest cost and every assignment that reaches it.
+min_cost = min(costs.values())
+optimal_assignments = [bits for bits, cost in costs.items() if cost == min_cost]
 
-full_energies = {
-    bits: full_model.energy(bits)
-    for bits in itertools.product((0, 1), repeat=full_model.num_variables)
-}
-full_optimal_bits, full_optimal_energy = min(
-    full_energies.items(), key=lambda item: item[1]
-)
-print("nine-asset exact optimum:", full_optimal_bits, full_optimal_energy)
-assert full_optimal_bits == (1, 0, 0, 0, 1, 0, 0, 1, 0)
-assert full_optimal_energy == -28.0
+print(f"Number of assignments: {len(costs)}")
+print(f"Smallest cost: {min_cost}")
+for bits in optimal_assignments:
+    print(f"Optimal assignment: {bits}")
+print(f"Largest cost: {max(costs.values())}")
+
+if not docs_test_mode:
+    assert min_cost == -28.0
+    assert optimal_assignments == [(1, 0, 0, 0, 1, 0, 0, 1, 0)]
+
+# %% [markdown]
+# Only the portfolio with assets 0, 4 and 7 reaches the smallest cost $-28$.
+# Its variance is $12 + 14 + 16 + 2 \times (-2 + 2 + 0) = 42$ and the
+# expected return is $22 + 23 + 25 = 70$, so the cost is $42 - 70 = -28$. The
+# costs range from $-28$ to $94$. Buying nothing, the all-zero assignment, has
+# the cost 0.
 
 # %% [markdown]
 # ## Algorithm
 #
-# GAS starts by setting the threshold $y$ to the objective value of a candidate
-# solution and uses Grover search to find candidates with lower objective values.
-# Candidates obtained from the quantum circuit are evaluated classically, and
-# the threshold is updated whenever a better candidate is found. This process
-# repeats until the stopping condition is met. Here $y$ is a threshold on the
-# objective value, not a candidate solution.
-# GAS reverses the phase of the quantum states corresponding to candidates
-# that satisfy $f(x) < y$, distinguishing them from the other candidates.
-# The Grover ansatz is built from three components:
-#
-# - $A_y$, the preparation operator. It associates each input with $f(x) - y$
-#   by building the quantum dictionary state $\sum_x \ket{x, f(x) - y}$.
-#   The circuit implementation uses the QFT-based method given in
-#   {cite:p}`10.22331/q-2021-04-08-428`. Because the register holds $f(x) - y$
-#   in two's complement, candidates satisfying the condition can be identified
-#   by a Most Significant Bit (MSB) of $1$.
-# - $O_y$, the phase oracle. It reverses the phase of candidates satisfying
-#   $f(x) < y$. The MSB indicates whether the encoded value $f(x) - y$ is
-#   negative, so this can be implemented with a single $Z$ gate on that MSB.
-# - $D$, the diffusion operator, which amplifies the amplitude of the states
-#   distinguished by their reversed phase. It is a single multi-controlled-$Z$
-#   sandwiched between $X$ layers.
-#
-# One iteration applies $O_y$, then $A_y^\dagger$, $D$, $A_y$. The phase flip on
-# its own leaves every measurement probability unchanged; the reflection
-# $A_y D A_y^\dagger$ is what converts it into amplitude. Measuring the input
-# register returns a candidate, which the classical layer evaluates. It updates
-# $y$ to the candidate's objective value only if that value is lower than the
-# current threshold.
-#
-# The remaining question is how many times to apply the Grover operator. GAS
-# answers it by sampling the iteration count from a range that grows slowly
-# whenever a round brings no improvement.
-
+# GAS is Grover's algorithm with a moving target. It keeps a threshold $y$, the
+# cost of the best assignment found so far, and uses Grover's algorithm to find
+# an assignment with $f(\boldsymbol{x}) < y$. When it finds one, the cost of
+# that assignment becomes the new threshold. This section assumes familiarity
+# with Grover's algorithm and describes what GAS adds to it.
 
 # %% [markdown]
-# ## Build one fixed-threshold round
+# ### What GAS Uses from Grover's Algorithm
 #
-# Suppose the current classical candidate has energy $-10$. The next oracle must
-# therefore mark assignments with $f(x) < -10$. In documentation-test mode,
-# only the three-asset optimum qualifies. Normal execution uses the original
-# nine-asset problem and the same fixed-threshold round.
+# Suppose that $M$ of the $N = 2^n$ assignments satisfy a condition. Grover's
+# algorithm starts from the uniform superposition and repeats one *iteration*:
+# an *oracle* that changes the sign of the amplitude of every assignment that
+# satisfies the condition, and then a reflection about the start state. After
+# $r$ iterations, a measurement returns such an assignment with probability
 #
-# `GASExperiment` is a host-side experiment boundary, not a second quantum
-# decorator. It closes the model and threshold into a verified `Program`.
-# Its circuit uses ordinary Qamomile composition and reversible integer
-# arithmetic; there is no GAS-specific IR operation or backend implementation.
+# $$
+# P_r = \sin^2\big((2r+1)\,\theta\big), \qquad \sin^2\theta = M/N
+# $$
+#
+# ([Boyer, Brassard, Høyer and Tapp, arXiv:quant-ph/9605034](https://doi.org/10.48550/arXiv.quant-ph/9605034)).
+# The probability rises and then falls again as $r$ increases, so the best
+# number of iterations depends on $M$.
+
+# %% [markdown]
+# ### The Oracle for $f(\boldsymbol{x}) < y$
+#
+# The circuit has two registers: $n$ *decision qubits* for the assignment, and
+# a *value register* that holds a whole number in two's complement. A
+# preparation $A_y$ puts the decision qubits into the uniform superposition and
+# writes $f(\boldsymbol{x}) - y$ into the value register
+# ([Gilliam, Woerner and Gonciulea, Quantum 5, 428 (2021)](https://doi.org/10.22331/q-2021-04-08-428)):
+#
+# $$
+# A_y\,|0\rangle = \frac{1}{\sqrt{N}} \sum_{\boldsymbol{x}} |\boldsymbol{x}\rangle\,|f(\boldsymbol{x}) - y\rangle
+# $$
+#
+# In two's complement the leading qubit of the value register is 1 exactly for
+# the negative numbers, that is, exactly when $f(\boldsymbol{x}) < y$. So the
+# oracle is a single $Z$ gate on that qubit. In place of the reflection about
+# the start state, the circuit applies $A_y D_0 A_y^\dagger$. Here $D_0$
+# multiplies the amplitude by $-1$ when all decision qubits are in the state
+# $|0\rangle$, and does nothing otherwise. The product equals the reflection up
+# to a factor $-1$, which changes no probability.
+#
+# The value register must be wide enough to hold every $f(\boldsymbol{x}) - y$.
+# Otherwise a value wraps around and gets the wrong sign. `GASExperiment`
+# chooses the width from the coefficients.
+
+# %% [markdown]
+# ### The Adaptive Loop
+#
+# One *round* runs the circuit with the current threshold and a number $r$ of
+# iterations, and measures the decision qubits. The classical loop is:
+#
+# 1. Start from an assignment $\boldsymbol{x}$ and set
+#    $y = f(\boldsymbol{x})$.
+# 2. Draw $r$, apply $r$ Grover iterations with the threshold $y$, and then
+#    measure the decision qubits.
+# 3. If the resulting assignment has a cost below $y$, it becomes the new
+#    $\boldsymbol{x}$, and its cost the new $y$.
+# 4. Repeat from step 2. Stop after a set number of consecutive rounds
+#    without a lower cost.
+#
+# The number $M$ of assignments below the threshold is unknown and changes with
+# $y$, so no fixed $r$ fits. Following Gilliam et al., the loop draws $r$
+# uniformly from $0, \dots, \lceil k \rceil - 1$, starting with $k = 1$. A
+# round without improvement multiplies $k$ by a factor $\lambda > 1$, and an
+# improvement sets it back to 1. At the minimum no assignment satisfies the
+# condition and no round can improve, so the loop stops after a fixed number of
+# rounds in a row without improvement. The result is the best assignment seen,
+# without a proof that it is optimal.
+
+# %% [markdown]
+# ## Implementation with Qamomile
+#
+# ### Build One Round
+#
+# `GASExperiment` builds the program of one round from the model, a threshold
+# and a number of iterations: the preparation $A_y$, then the oracle and the
+# reflection `iterations` times, and a measurement. Here we set the threshold
+# to $y = 0$ and use one iteration. Buying nothing costs $f(0, \dots, 0) = 0$,
+# so this round searches for a portfolio that is better than buying nothing.
 
 # %%
-threshold = -10.0
-experiment = GASExperiment(
-    model,
-    threshold=threshold,
-    iterations=1,
-)
+# The cost of buying nothing.
+threshold = 0.0
+experiment = GASExperiment(model, threshold=threshold, iterations=1)
 
-print("output bits:", experiment.resolved_output_bits)
-print("program digest:", experiment.program.semantic_digest)
+print(f"Decision qubits: {model.num_variables}")
+print(f"Value register qubits: {experiment.resolved_output_bits}")
 
-inspection = experiment.program.inspect()
-assert "quantum.gas" not in inspection
-assert "qcore.control_call" in inspection
+# Count the qubits of the whole program without running it.
+study = qm.resources.logical(experiment.program)
+num_qubits, _ = study.metric(qm.resources.LOGICAL_PEAK_QUBITS).numeric_enclosure()
+print(f"Qubits of one round: {num_qubits}")
 
 # %% [markdown]
-# ### Reproduce amplitude-amplification scaling
+# One round uses 18 qubits: 9 decision qubits and 9 in the value register.
+# `qm.resources.logical` reads this number from the program without running it
+# (see [Resource Estimation](../tutorial/04_resource_estimation.ipynb)). The
+# number of iterations does not change it.
 #
-# Section 14.1 of [](https://doi.org/10.48550/arXiv.2310.03011) gives
-# $m=O(a^{-1})$ Grover iterations for initial success amplitude $a$. With one
-# marked item among $N=2^n$, $a=N^{-1/2}$ and therefore $m=O(\sqrt N)$.
-# Qamomile's bounded planner returns the usual
-# $\lfloor(\pi/4)\sqrt{2^n}\rfloor$ count without a floating-point overflow.
-
-# %%
-grover_plans = {width: grover_iteration_count(width) for width in range(2, 11)}
-for width, iterations in grover_plans.items():
-    assert iterations == math.floor((math.pi / 4.0) * math.sqrt(2**width))
-
-print("Grover plans (n: iterations):", grover_plans)
+# :::{note}
+# The coefficients here are integers, so the value register holds every
+# $f(\boldsymbol{x}) - y$ exactly. For real coefficients, `GASExperiment`
+# quantizes the model and the threshold together and exposes the result as
+# `effective_model` and `quantization_scale`.
+# :::
 
 # %% [markdown]
-# For a fixed GAS threshold, the full state preparation, oracle, inverse, and
-# reflection body is repeated once per Grover iteration. The compiler derives
-# exact semantic work from that body. Gate-family upper bounds are intentionally
-# left open because controlled coherent-arithmetic transforms do not yet have a
-# complete logical gate profile. `GASExperiment` deliberately exposes a closed
-# program, so two endpoint studies determine the affine intercept and slope;
-# the remaining displayed rows are arithmetic, not repeated compiler analyses.
-
-# %%
-gas_endpoint_studies = tuple(
-    qm.resources.logical(
-        GASExperiment(model, threshold=threshold, iterations=iterations).program
-    )
-    for iterations in (0, 1)
-)
-gas_endpoint_work = tuple(
-    study.metric(qm.resources.LOGICAL_WORK).numeric_enclosure()
-    for study in gas_endpoint_studies
-)
-gas_endpoint_gate_bounds = tuple(
-    study.metric(qm.resources.LOGICAL_GATES).numeric_enclosure()
-    for study in gas_endpoint_studies
-)
-
-assert all(lower == upper for lower, upper in gas_endpoint_work)
-assert all(upper is None for _, upper in gas_endpoint_gate_bounds)
-work_base = gas_endpoint_work[0][0]
-work_step = gas_endpoint_work[1][0] - work_base
-gate_base = gas_endpoint_gate_bounds[0][0]
-gate_step = gas_endpoint_gate_bounds[1][0] - gate_base
-gas_work = tuple(
-    (work_base + iterations * work_step, work_base + iterations * work_step)
-    for iterations in range(4)
-)
-gas_gate_bounds = tuple(
-    (gate_base + iterations * gate_step, None) for iterations in range(4)
-)
-
-print("GAS semantic work for 0..3 iterations:", gas_work)
-print("GAS logical-gate bounds for 0..3 iterations:", gas_gate_bounds)
-
-# %% [markdown]
-# The loop structure gives an affine cost in $m$ for this concrete Grover body;
-# the two studies supply its finite coefficients. Composing it with
-# $m=\Theta(\sqrt N)$ reproduces the survey's
-# query scaling. The partial gate enclosures are also useful evidence: Qamomile
-# reports the missing transform profile by name instead of silently treating it
-# as zero or as an exact target gate count.
-
-# %% [markdown]
-# Integer coefficients are encoded exactly. For real coefficients,
-# `GASExperiment` quantizes the complete model and threshold together and
-# exposes both `effective_model` and `quantization_scale`. Set
-# `approximate_real_coefficients=False` to reject noninteger arithmetic instead.
-# `output_bits` is normally inferred from a safe two's-complement bound; an
-# explicitly undersized register is rejected rather than silently wrapping.
-
-# %% [markdown]
-# ## Compile once and sample
+# ### Compile and Run
 #
-# The experiment follows the same lifecycle as the rest of Qamomile. Compile
-# its closed program for the endpoint target, then reuse the compiled artifact.
-# Documentation tests use the built-in reference endpoint. Normal execution
-# follows the original tutorial through local Qiskit Aer.
+# `qm.Reference()`, Qamomile's built-in simulator, takes the place of a quantum
+# computer here. We compile the program for this engine and run one *shot*: the
+# circuit is prepared and measured once, which gives one assignment.
 
 # %%
-endpoint = qm.Reference() if docs_test_mode else Aer()
+endpoint = qm.Reference()
+
 compiled = experiment.compile(to=endpoint.target)
-shots = 32 if docs_test_mode else 256
-run = compiled.run(on=endpoint, shots=shots, seed=7)
+run = compiled.run(on=endpoint, shots=1, seed=7)
 
-for sample in run.samples.samples:
-    print(sample.assignment, sample.energy, sample.occurrences)
-
-best = run.samples.lowest
-assert best.assignment == tuple(enumerate(optimal_bits))
-assert best.energy == optimal_energy
-if docs_test_mode:
-    assert best.occurrences > shots * 0.75
-assert run.execution.artifact is compiled.artifact
-assert run.identity == compiled.identity == experiment.identity
+sample = run.samples.lowest
+bits = tuple(bit for _, bit in sample.assignment)
+print(f"Measured assignment: {bits}")
+print(f"Cost: {sample.energy}")
 
 # %% [markdown]
-# `run.samples` is a typed `DecodedSamples` value. It preserves original
-# variable IDs, objective values, and multiplicities; backend adapters do not
-# reinterpret the optimization model.
-#
-# To see the amplification rather than only its final answer, compare the same
-# threshold with zero Grover iterations. That program prepares the uniform
-# decision superposition but performs no amplification.
-
-# %%
-baseline = GASExperiment(model, threshold=threshold, iterations=0).run(
-    on=endpoint,
-    shots=shots,
-    seed=7,
-)
-
-baseline_optimum_count = next(
-    (
-        sample.occurrences
-        for sample in baseline.samples.samples
-        if sample.assignment == best.assignment
-    ),
-    0,
-)
-
-print("uniform optimum count:", baseline_optimum_count)
-print("amplified optimum count:", best.occurrences)
-assert best.occurrences > baseline_optimum_count
+# `run.samples` holds the measured assignments. With one shot it holds one
+# sample, which `run.samples.lowest` returns. Its `assignment` pairs each
+# variable with its value, and its `energy` is the cost of the assignment.
 
 # %% [markdown]
-# ## The adaptive outer loop
+# ## Result
 #
-# GAS is adaptive because the host chooses a new threshold after each sampled
-# round. A typical loop performs these steps:
+# ### One Round at a Fixed Threshold
 #
-# 1. evaluate the current classical candidate and use its energy as `threshold`;
-# 2. choose a bounded Grover iteration count;
-# 3. create and compile the corresponding immutable `GASExperiment`;
-# 4. sample it, inspect `run.samples.lowest`, and lower the threshold only when
-#    the candidate improves it.
-#
-# Threshold and iteration count change circuit structure, so they are explicit
-# experiment configuration rather than launch-time `Param` values. Within one
-# round, the resulting artifact is reusable and retains an exact problem/program
-# identity.
-
+# At $y = 0$, 104 of the 512 assignments have a cost below the threshold. We
+# repeat the round 256 times, one shot each, for 0, 1 and 2 iterations, and
+# compare the share of rounds below the threshold with $P_r$. The threshold and
+# the number of iterations change the circuit, so each pair needs its own
+# compiled program. `compiled_round` builds each of them once and reuses it.
 
 # %%
-def adaptive_search(
-    binary_model: BinaryModel,
-    *,
-    initial_threshold: float,
-    max_rounds: int,
-    shots_per_round: int,
-) -> tuple[tuple[tuple[int, int], ...], float, tuple[float, ...]]:
-    threshold = initial_threshold
-    best_assignment = tuple((index, 0) for index in range(binary_model.num_variables))
-    history = [threshold]
-
-    for round_index in range(max_rounds):
-        round_experiment = GASExperiment(
-            binary_model,
-            threshold=threshold,
-            iterations=1,
-        )
-        round_result = round_experiment.run(
-            on=endpoint,
-            shots=shots_per_round,
-            seed=11 + round_index,
-        )
-        candidate = round_result.samples.lowest
-        if candidate.energy < threshold:
-            threshold = candidate.energy
-            best_assignment = candidate.assignment
-        history.append(threshold)
-        if threshold == optimal_energy:
-            break
-
-    return best_assignment, threshold, tuple(history)
+NUM_ROUNDS = 4 if docs_test_mode else 256
 
 
-adaptive_assignment, adaptive_energy, threshold_history = adaptive_search(
-    model,
-    initial_threshold=0.0,
-    max_rounds=4,
-    shots_per_round=shots,
-)
+@functools.cache
+def compiled_round(threshold: float, iterations: int):
+    """Compile the round for one threshold and one number of iterations."""
+    round_experiment = GASExperiment(model, threshold=threshold, iterations=iterations)
+    return round_experiment.compile(to=endpoint.target)
 
-print("threshold history:", threshold_history)
-assert adaptive_assignment == tuple(enumerate(optimal_bits))
-assert adaptive_energy == optimal_energy
-assert all(
-    next_threshold <= current_threshold
-    for current_threshold, next_threshold in zip(
-        threshold_history,
-        threshold_history[1:],
+
+def run_round(threshold: float, iterations: int, seed: int):
+    """Run one round with one shot and return the measured assignment and its cost."""
+    run = compiled_round(threshold, iterations).run(on=endpoint, shots=1, seed=seed)
+    sample = run.samples.lowest
+    return tuple(bit for _, bit in sample.assignment), sample.energy
+
+
+num_marked = sum(cost < threshold for cost in costs.values())
+theta = math.asin(math.sqrt(num_marked / len(costs)))
+
+for iterations in range(3):
+    measured = [run_round(threshold, iterations, seed)[1] for seed in range(NUM_ROUNDS)]
+    below = sum(cost < threshold for cost in measured)
+    predicted = math.sin((2 * iterations + 1) * theta) ** 2
+    print(
+        f"r = {iterations}: {below} of {NUM_ROUNDS} rounds below the threshold, "
+        f"share {below / NUM_ROUNDS:.3f}, predicted {predicted:.3f}"
     )
-)
+    if not docs_test_mode:
+        assert abs(below / NUM_ROUNDS - predicted) < 0.1
 
 # %% [markdown]
-# The executable search reaches the exact optimum and records a monotonically
-# non-increasing threshold history. Normal execution uses the original
-# nine-asset formulation throughout; documentation tests reduce only the model
-# width and execution budget.
+# With no iteration, the round picks an assignment at random, and the share of
+# rounds below the threshold is 0.215. One iteration raises the share to 0.965,
+# and a second iteration lowers it to 0.559, as $P_r$ predicts. The best number
+# of iterations depends on how many assignments lie below the threshold, which
+# the loop does not know.
+
+# %% [markdown]
+# ### Run the Adaptive Loop
+#
+# We now run the loop of the Algorithm section. Each round is one call of
+# `run_round`. The loop starts from buying nothing, draws the number of
+# iterations at random, and stops after `MAX_FAILURES` rounds in a row without
+# improvement.
+
+# %%
+GROWTH = 1.2  # The factor lambda of the range after a round without improvement.
+MAX_FAILURES = 2 if docs_test_mode else 20
+
+
+def adaptive_search(seed: int):
+    """Run the adaptive loop and return the best assignment, its cost and the history."""
+    rng = np.random.default_rng(seed)
+    best_bits = (0,) * NUM_ASSETS  # Start from buying nothing.
+    threshold = model.energy(best_bits)
+    k, failures, rounds = 1.0, 0, 0
+    history = []
+
+    while failures < MAX_FAILURES:
+        rounds += 1
+        # Draw the number of iterations uniformly from 0, ..., ceil(k) - 1.
+        iterations = int(rng.integers(math.ceil(k)))
+        bits, cost = run_round(threshold, iterations, seed=int(rng.integers(2**31)))
+        if cost < threshold:
+            best_bits, threshold = bits, cost
+            history.append((rounds, iterations, threshold))
+            k, failures = 1.0, 0
+        else:
+            k *= GROWTH
+            failures += 1
+
+    return best_bits, threshold, history, rounds
+
+
+best_bits, best_cost, history, num_rounds = adaptive_search(seed=0)
+
+for round_number, iterations, new_threshold in history:
+    print(f"Round {round_number}: r = {iterations}, new threshold {new_threshold}")
+print(f"Stopped after {num_rounds} rounds")
+print(f"Best assignment: {best_bits}, cost {best_cost}")
+
+assert best_cost == model.energy(best_bits)
+if not docs_test_mode:
+    assert best_cost == min_cost
+
+# %% [markdown]
+# The threshold falls from 0 to $-4$, $-11$, $-13$, $-16$, $-24$, $-25$ and
+# finally $-28$ in round 50. The next 20 rounds find no improvement, which ends
+# the loop at round 70. The result is the only optimal assignment. The loop
+# does not use the exact minimum, and we only compare with it at the end.
+# A run can also stop above the minimum: with `MAX_FAILURES = 20`, a
+# calculation with $P_r$ gives the minimum in about 997 of 1,000 runs of this
+# instance.
 
 # %% [markdown]
 # ## Summary
 #
-# In this notebook, we:
+# In this tutorial, we solved a portfolio selection problem with Grover
+# Adaptive Search:
 #
-# - Solved an unconstrained portfolio problem with Grover Adaptive Search,
-#   where the quantum circuit answers "which $x$ satisfy $f(x) < y$?" and a
-#   classical loop updates the threshold $y$ when a better candidate is found.
-# - Used `GASExperiment` for the quantum part of GAS: `compile()` builds the
-#   Grover circuit for the current threshold and number of Grover iterations,
-#   and `run()` decodes sampled bitstrings in the original variable order.
-# - Ran GAS on a portfolio selection problem and verified that the resulting
-#   objective value matched the optimum obtained by brute-force search.
+# 1. We wrote the cost as a `BinaryModel` and found the exact minimum by trying
+#    every assignment.
+# 2. We built one round for a fixed threshold with `GASExperiment`, and saw
+#    that the share of rounds below the threshold follows
+#    $\sin^2((2r+1)\,\theta)$.
+# 3. We ran the adaptive loop, which lowers the threshold after every
+#    improvement and draws the number of iterations at random, and it reached
+#    the exact minimum.

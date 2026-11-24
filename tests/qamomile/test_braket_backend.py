@@ -168,6 +168,27 @@ def test_braket_materializes_dynamic_classical_index_at_launch() -> None:
     exercise_dynamic_classical_index_backend(endpoint=BraketLocal())
 
 
+def test_braket_accepts_unused_nan_in_shape_only_parameter() -> None:
+    """The branch uses the vector's length, so its entries need no SDK bindings."""
+    from qamomile.braket import BraketLocal
+
+    program = qm.build_source("""
+import qamomile as qm
+@qm.qkernel
+def sample(row: qm.Param[qm.Vector[qm.Real, 2]]) -> qm.Shot[qm.Bits[1]]:
+    state = qm.qubits(1)
+    if len(row) == 2:
+        state = qm.x(state)
+    return qm.measure(state)
+""").specialize("sample")
+    endpoint = BraketLocal()
+    artifact = qm.compile(program, to=endpoint.target)
+    result = qm.execute(
+        artifact, on=endpoint, parameters={"row": (float("nan"), 0.0)}, shots=4
+    )
+    assert result.counts == {(1,): 4}
+
+
 def test_braket_executes_launch_bound_structural_math() -> None:
     """Braket receives the loop after Rust evaluates structural math."""
 
@@ -203,7 +224,7 @@ def test_braket_executes_rust_lowered_host_dispatch_family() -> None:
             on=endpoint,
             parameters={"limit": limit},
             shots=8,
-            seed=0,
+            seed=None,
         )
         assert result.counts == {(expected,): 8}
 
@@ -227,7 +248,7 @@ def test_braket_materializes_a_launch_dependent_loop() -> None:
             on=endpoint,
             parameters={"rounds": rounds},
             shots=8,
-            seed=0,
+            seed=None,
         )
         assert result.counts == {(expected,): 8}
 
@@ -237,7 +258,7 @@ def test_braket_executes_documented_quantum_kernel_classification() -> None:
 
     from qamomile.braket import BraketLocal
 
-    exercise_classification_backend(endpoint=BraketLocal(), seed=0)
+    exercise_classification_backend(endpoint=BraketLocal(), seed=None)
 
 
 def test_braket_executes_documented_hydrogen_vqe() -> None:
@@ -245,7 +266,7 @@ def test_braket_executes_documented_hydrogen_vqe() -> None:
 
     from qamomile.braket import BraketLocal
 
-    exercise_hydrogen_vqe_backend(endpoint=BraketLocal(), seed=0)
+    exercise_hydrogen_vqe_backend(endpoint=BraketLocal(), seed=None)
 
 
 def test_braket_executes_documented_qsci_sampling() -> None:
@@ -253,7 +274,7 @@ def test_braket_executes_documented_qsci_sampling() -> None:
 
     from qamomile.braket import BraketLocal
 
-    exercise_qsci_backend(endpoint=BraketLocal(), seed=0)
+    exercise_qsci_backend(endpoint=BraketLocal(), seed=None)
 
 
 def test_braket_executes_documented_hamiltonian_simulation() -> None:
@@ -261,7 +282,7 @@ def test_braket_executes_documented_hamiltonian_simulation() -> None:
 
     from qamomile.braket import BraketLocal
 
-    exercise_rabi_backend(endpoint=BraketLocal(), seed=0)
+    exercise_rabi_backend(endpoint=BraketLocal(), seed=None)
 
 
 def test_braket_executes_documented_mottonen_encoding() -> None:
@@ -269,7 +290,7 @@ def test_braket_executes_documented_mottonen_encoding() -> None:
 
     from qamomile.braket import BraketLocal
 
-    exercise_mottonen_backend(endpoint=BraketLocal(), seed=0)
+    exercise_mottonen_backend(endpoint=BraketLocal(), seed=None)
 
 
 def test_braket_executes_documented_multidimensional_qft() -> None:
@@ -277,7 +298,7 @@ def test_braket_executes_documented_multidimensional_qft() -> None:
 
     from qamomile.braket import BraketLocal
 
-    exercise_multidimensional_qft_backend(endpoint=BraketLocal(), seed=0)
+    exercise_multidimensional_qft_backend(endpoint=BraketLocal(), seed=None)
 
 
 def test_braket_executes_documented_hybrid_qnn() -> None:
@@ -285,7 +306,7 @@ def test_braket_executes_documented_hybrid_qnn() -> None:
 
     from qamomile.braket import BraketLocal
 
-    exercise_hqnn_backend(endpoint=BraketLocal(), seed=0)
+    exercise_hqnn_backend(endpoint=BraketLocal(), seed=None)
 
 
 def test_braket_executes_documented_option_pricing() -> None:
@@ -293,7 +314,7 @@ def test_braket_executes_documented_option_pricing() -> None:
 
     from qamomile.braket import BraketLocal
 
-    exercise_option_pricing_backend(endpoint=BraketLocal(), seed=0)
+    exercise_option_pricing_backend(endpoint=BraketLocal(), seed=None)
 
 
 def test_braket_executes_documented_pce() -> None:
@@ -301,7 +322,7 @@ def test_braket_executes_documented_pce() -> None:
 
     from qamomile.braket import BraketLocal
 
-    exercise_pce_backend(endpoint=BraketLocal(), seed=0)
+    exercise_pce_backend(endpoint=BraketLocal(), seed=None)
 
 
 def test_braket_executes_documented_qemcmc() -> None:
@@ -309,7 +330,7 @@ def test_braket_executes_documented_qemcmc() -> None:
 
     from qamomile.braket import BraketLocal
 
-    exercise_qemcmc_backend(endpoint=BraketLocal(), seed=0)
+    exercise_qemcmc_backend(endpoint=BraketLocal(), seed=None)
 
 
 def test_braket_executes_documented_bit_flip_code() -> None:
@@ -317,7 +338,7 @@ def test_braket_executes_documented_bit_flip_code() -> None:
 
     from qamomile.braket import BraketLocal
 
-    exercise_bit_flip_code_backend(endpoint=BraketLocal(), seed=0)
+    exercise_bit_flip_code_backend(endpoint=BraketLocal(), seed=None)
 
 
 def test_braket_executes_documented_steane_code() -> None:
@@ -325,7 +346,7 @@ def test_braket_executes_documented_steane_code() -> None:
 
     from qamomile.braket import BraketLocal
 
-    exercise_steane_code_backend(endpoint=BraketLocal(), seed=0)
+    exercise_steane_code_backend(endpoint=BraketLocal(), seed=None)
 
 
 def test_braket_executes_variational_composition() -> None:
@@ -341,7 +362,7 @@ def test_braket_executes_grover_adaptive_search() -> None:
 
     from qamomile.braket import BraketLocal
 
-    exercise_gas_backend(endpoint=BraketLocal(), seed=0)
+    exercise_gas_backend(endpoint=BraketLocal(), seed=None)
 
 
 def test_braket_executes_product_formula_composition() -> None:
@@ -357,7 +378,7 @@ def test_braket_executes_uniformly_controlled_rotation() -> None:
 
     from qamomile.braket import BraketLocal
 
-    exercise_uniformly_controlled_backend(endpoint=BraketLocal())
+    exercise_uniformly_controlled_backend(endpoint=BraketLocal(), seed=None)
 
 
 def test_braket_executes_coherent_xor_lookup() -> None:
@@ -529,7 +550,7 @@ def test_braket_executes_compiler_derived_selected_adjoint() -> None:
         "selected_adjoint_roundtrip"
     )
     assert qm.run(program, on=BraketLocal(), shots=4).result.counts == {(1, 0): 4}
-    exercise_normalized_model_backend(endpoint=BraketLocal(), seed=0)
+    exercise_normalized_model_backend(endpoint=BraketLocal(), seed=None)
 
 
 def test_braket_executes_indexed_aggregate_control() -> None:
@@ -651,7 +672,7 @@ def test_braket_executes_shor_order_finding() -> None:
 
     from qamomile.braket import BraketLocal
 
-    exercise_shor_order_finding_backend(endpoint=BraketLocal(), seed=0)
+    exercise_shor_order_finding_backend(endpoint=BraketLocal(), seed=None)
 
 
 def test_braket_executes_regev_factoring_sample() -> None:
@@ -659,7 +680,7 @@ def test_braket_executes_regev_factoring_sample() -> None:
 
     from qamomile.braket import BraketLocal
 
-    exercise_regev_factoring_backend(endpoint=BraketLocal(), seed=0)
+    exercise_regev_factoring_backend(endpoint=BraketLocal(), seed=None)
 
 
 def test_braket_executes_multi_exponentiation_callable_realization() -> None:
@@ -671,7 +692,7 @@ def test_braket_executes_multi_exponentiation_callable_realization() -> None:
         {multi_exponentiation_baseline: multi_exponentiation_product_tree}
     )
     exercise_multi_exponentiation_realization_backend(
-        endpoint=BraketLocal(realizations=options), seed=0
+        endpoint=BraketLocal(realizations=options), seed=None
     )
 
 
@@ -680,7 +701,7 @@ def test_braket_executes_first_class_multi_exponentiation() -> None:
 
     from qamomile.braket import BraketLocal
 
-    exercise_first_class_multi_exponentiation_backend(endpoint=BraketLocal(), seed=0)
+    exercise_first_class_multi_exponentiation_backend(endpoint=BraketLocal(), seed=None)
 
 
 def test_braket_executes_register_modulus_arithmetic() -> None:
@@ -688,7 +709,7 @@ def test_braket_executes_register_modulus_arithmetic() -> None:
 
     from qamomile.braket import BraketLocal
 
-    exercise_register_modulus_backend(endpoint=BraketLocal(), seed=0)
+    exercise_register_modulus_backend(endpoint=BraketLocal(), seed=None)
 
 
 def test_braket_executes_functional_qsvt() -> None:
@@ -787,6 +808,7 @@ def test_braket_executes_nondestructive_pauli_measurements() -> None:
     result = qm.run(program, on=BraketLocal(), shots=4).result
 
     assert result.values == {(1, 1, 0, 0, 0, 0, (1,), (0,), (0,)): 4}
+    assert all(type(bit) is int for row in result.values for bit in row[:6])
 
 
 def test_braket_executes_measurement_feedback() -> None:
@@ -875,7 +897,8 @@ def test_braket_preserves_private_trailing_measurement_width(segmented: bool) ->
     assert result.counts == {(0,): 4}
 
 
-def test_braket_rejects_an_unavailable_seed_contract() -> None:
+@pytest.mark.parametrize("seed", [0, 9])
+def test_braket_rejects_an_unavailable_seed_contract(seed: int) -> None:
     """The local endpoint never silently drops a requested random seed."""
 
     from qamomile.braket import Braket, BraketLocal
@@ -884,7 +907,7 @@ def test_braket_rejects_an_unavailable_seed_contract() -> None:
     artifact = qm.compile(program, to=Braket())
 
     with pytest.raises(qm.ExecutionError, match="Q8414"):
-        qm.execute(artifact, on=BraketLocal(), shots=1, seed=9)
+        qm.execute(artifact, on=BraketLocal(), shots=1, seed=seed)
 
 
 def test_braket_executes_typed_product_result() -> None:
@@ -938,7 +961,7 @@ def test_braket_zero_layer_qaoa() -> None:
 
     from .test_library_compatibility import exercise_zero_layer_qaoa_backend
 
-    exercise_zero_layer_qaoa_backend(BraketLocal(), seed=0)
+    exercise_zero_layer_qaoa_backend(BraketLocal(), seed=None)
 
 
 def test_braket_approximate_qft() -> None:
@@ -947,7 +970,7 @@ def test_braket_approximate_qft() -> None:
 
     from .test_library_compatibility import exercise_approximate_qft_backend
 
-    exercise_approximate_qft_backend(BraketLocal(), seed=0)
+    exercise_approximate_qft_backend(BraketLocal(), seed=None)
 
 
 def test_braket_classical_array_compatibility() -> None:
@@ -956,7 +979,7 @@ def test_braket_classical_array_compatibility() -> None:
 
     from .test_classical_array_compatibility import exercise_classical_array_backend
 
-    exercise_classical_array_backend(BraketLocal(), seed=0)
+    exercise_classical_array_backend(BraketLocal(), seed=None)
 
 
 def test_braket_qubit_selection() -> None:
@@ -965,7 +988,7 @@ def test_braket_qubit_selection() -> None:
 
     from .test_qubit_selection import exercise_qubit_selection_backend
 
-    exercise_qubit_selection_backend(BraketLocal(), seed=0)
+    exercise_qubit_selection_backend(BraketLocal(), seed=None)
 
 
 def test_braket_keyed_parameters() -> None:
@@ -974,7 +997,7 @@ def test_braket_keyed_parameters() -> None:
 
     from .test_parameter_map import exercise_parameter_map_backend
 
-    exercise_parameter_map_backend(BraketLocal(), seed=0)
+    exercise_parameter_map_backend(BraketLocal(), seed=None)
 
 
 def test_braket_quantum_records() -> None:
@@ -983,7 +1006,7 @@ def test_braket_quantum_records() -> None:
 
     from .test_quantum_records import exercise_quantum_record_backend
 
-    exercise_quantum_record_backend(BraketLocal(), seed=0)
+    exercise_quantum_record_backend(BraketLocal(), seed=None)
 
 
 def test_braket_recursion() -> None:
@@ -992,7 +1015,7 @@ def test_braket_recursion() -> None:
 
     from .test_recursion import exercise_recursive_backend
 
-    exercise_recursive_backend(BraketLocal(), seed=0)
+    exercise_recursive_backend(BraketLocal(), seed=None)
 
 
 def test_braket_sqrt() -> None:
@@ -1001,4 +1024,37 @@ def test_braket_sqrt() -> None:
 
     from .test_sqrt import exercise_sqrt_backend
 
-    exercise_sqrt_backend(BraketLocal(), seed=0)
+    exercise_sqrt_backend(BraketLocal(), seed=None)
+
+
+def test_braket_accepts_unspecified_seed_for_multiple_measurement_groups() -> None:
+    """Unseeded measurement groups remain executable on BraketLocal."""
+    from qamomile.braket import BraketLocal
+    from qamomile.measurement import Estimator
+
+    state = qm.build_source("""
+import qamomile as qm
+@qm.qkernel
+def zero() -> qm.Q[qm.Bits[1]]:
+    return qm.qubits(1)
+""").specialize("zero")
+    result = Estimator(state, qm.X(0) + qm.Z(0), grouping="independent").estimate(
+        on=BraketLocal(), shots=16, seed=None
+    )
+    assert result.groups is not None
+    assert len(result.groups) == 2
+    assert all(group.seed is None for group in result.groups)
+    assert result.shots == 16
+
+
+@pytest.mark.parametrize("seed", [0, 9])
+def test_braket_device_rejects_explicit_seeds_before_submission(seed: int) -> None:
+    """Managed devices reject all explicit seeds without provider side effects."""
+    from qamomile.braket import BraketDevice
+
+    native = _FakeBraketDevice()
+    endpoint = BraketDevice(native)
+    program = qm.build_source(BASIS_SOURCE).specialize("basis")
+    with pytest.raises(qm.ExecutionError, match="Q8417"):
+        qm.run(program, on=endpoint, shots=4, seed=seed)
+    assert native.launch is None

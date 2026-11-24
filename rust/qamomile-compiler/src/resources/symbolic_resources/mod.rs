@@ -8,12 +8,24 @@
 //! without expanding loops beyond the bounded interpretation budget.
 //! Proven adjacent-lane chains retain compact per-lane completion times rather
 //! than materializing their qubits or imposing an artificial global barrier.
+//! One private natural `shot` symbol represents the current logical trial across
+//! helper calls and loop bodies. It is independent of program parameters and
+//! execution shot limits. Certified total shot predicates retain piecewise costs
+//! through composition; bounded Boolean cofactoring publishes their enclosures.
+//! Unsupported predicates keep ordinary branch bounds, and exhausted proofs or
+//! partial unguarded costs retain named unknowns rather than exact claims.
+//! In analyses that read the shot context, custom dependency-span and peak
+//! metrics without dedicated composition publish nonnegative unknowns. Signed
+//! domains are rejected because no lower endpoint is proved. This applies even
+//! when algebra removes the shot dependency; error bounds and the portable
+//! ancilla peak retain their existing specialized composition.
 
 mod count_algebra;
 mod expression_arena;
 mod external_rules;
 mod observation;
 mod recurrences;
+mod shot_predicates;
 mod timing;
 mod timing_chain;
 mod values;
@@ -1277,6 +1289,9 @@ pub enum SymbolicResourceError {
 struct ExpressionArena {
     nodes: Vec<ResourceExpressionNode>,
     ids: HashMap<ResourceExpressionNode, ExprId>,
+    shot_scopes: HashSet<String>,
+    private_shot: Option<ExprId>,
+    next_shot_scope: usize,
 }
 
 #[derive(Clone, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
@@ -1826,13 +1841,17 @@ impl ParametricDependencyScheduler {
 struct SymbolicAnalyzer<'a> {
     functions: HashMap<&'a str, &'a wire::FunctionProto>,
     arena: ExpressionArena,
+    current_shot: Option<shot_predicates::CurrentShot>,
+    shot_predicates: shot_predicates::ShotPredicates,
     rules: HashMap<(&'a str, TransformMode, &'a str), &'a ResourceRuleContract>,
     error_bound_metrics: BTreeSet<String>,
+    unproved_composition_metrics: BTreeMap<String, ResourceDomain>,
     facts: Vec<SymbolicAnalysisFact>,
     fact_keys: HashSet<(String, String, String)>,
     timing_aliases: HashMap<SymbolicTimingRoot, SymbolicTimingRoot>,
     types: &'a TypeArena,
     operations: &'a LocallyCheckedOperations,
+    verified_calls: &'a crate::abi::VerifiedCallDimensions,
     analysis_cache: HashMap<SymbolicAnalysisKey, BlockSummary>,
     recurrences: recurrences::RecurrenceAnalysis,
     while_contexts: usize,
@@ -1845,13 +1864,14 @@ struct SymbolicAnalyzer<'a> {
 struct SymbolicAnalysisKey {
     symbol: String,
     arguments: Box<[Option<ValueFact>]>,
-    dimensions: Box<[(Dimension, ExprId)]>,
+    dimensions: Box<[(Dimension, Option<ExprId>)]>,
     mode: TransformMode,
     controls: Option<u32>,
 }
 
+#[derive(Default)]
 struct SymbolicDimensionBindings {
-    values: HashMap<Dimension, ExprId>,
+    values: HashMap<Dimension, Option<ExprId>>,
 }
 
 #[derive(Clone, Copy)]
@@ -1864,20 +1884,16 @@ struct SymbolicFunctionContext<'a> {
 
 /// Derive finite symbolic logical counts for one verified package.
 pub(crate) fn symbolic_logical_counts(
-    package: &wire::QCorePackageProto,
-    types: &TypeArena,
-    operations: &LocallyCheckedOperations,
+    checked: &crate::CheckedProgramGraph,
 ) -> Result<SymbolicLogicalCounts, SymbolicResourceError> {
-    symbolic_logical_counts_with_rules(package, types, operations, &[])
+    symbolic_logical_counts_with_rules(checked, &[])
 }
 
 pub(crate) fn symbolic_logical_counts_with_rules<'a>(
-    package: &'a wire::QCorePackageProto,
-    types: &'a TypeArena,
-    operations: &'a LocallyCheckedOperations,
+    checked: &'a crate::CheckedProgramGraph,
     rules: &'a [ResourceRuleContract],
 ) -> Result<SymbolicLogicalCounts, SymbolicResourceError> {
-    symbolic_observed_counts(package, types, operations, rules, None)
+    symbolic_observed_counts(checked, rules, None)
 }
 
 #[expect(
@@ -1885,14 +1901,12 @@ pub(crate) fn symbolic_logical_counts_with_rules<'a>(
     reason = "Keep analyzer initialization and final projection together"
 )]
 pub(crate) fn symbolic_observed_counts<'a>(
-    package: &'a wire::QCorePackageProto,
-    types: &'a TypeArena,
-    operations: &'a LocallyCheckedOperations,
+    checked: &'a crate::CheckedProgramGraph,
     rules: &'a [ResourceRuleContract],
     observation: Option<&'a ResourceObservation>,
 ) -> Result<SymbolicLogicalCounts, SymbolicResourceError> {
-    let graph = crate::call_graph::build(package)
-        .map_err(|error| SymbolicResourceError::Missing(error.to_string()))?;
+    let package = &checked.package;
+    let graph = &checked.call_graph;
     let indexed_rules = rules
         .iter()
         .flat_map(|rule| {
@@ -1916,6 +1930,8 @@ pub(crate) fn symbolic_observed_counts<'a>(
                 .map(|rule| rule.metric.identifier.clone()),
         )
         .collect();
+    let unproved_composition_metrics =
+        shot_predicates::unproved_metric_compositions(rules.iter().map(|rule| &rule.metric))?;
     let mut analyzer = SymbolicAnalyzer {
         functions: package
             .functions
@@ -1923,17 +1939,21 @@ pub(crate) fn symbolic_observed_counts<'a>(
             .map(|function| (function.symbol.as_str(), function))
             .collect(),
         arena: ExpressionArena::default(),
+        current_shot: None,
+        shot_predicates: shot_predicates::ShotPredicates::default(),
         rules: indexed_rules,
         error_bound_metrics,
+        unproved_composition_metrics,
         facts: Vec::new(),
         fact_keys: HashSet::new(),
         timing_aliases: HashMap::new(),
-        types,
-        operations,
+        types: &checked.type_arena,
+        operations: &checked.operations,
+        verified_calls: &checked.call_dimensions,
         analysis_cache: HashMap::new(),
-        recurrences: recurrences::RecurrenceAnalysis::new(&graph, package),
+        recurrences: recurrences::RecurrenceAnalysis::new(graph, package),
         while_contexts: 0,
-        while_functions: while_function_closure(package, &graph),
+        while_functions: while_function_closure(package, graph),
         operation_visits: 0,
         observation,
     };
@@ -1961,7 +1981,8 @@ pub(crate) fn symbolic_observed_counts<'a>(
         };
         arguments.push(argument);
     }
-    let dimensions = symbolic_dimension_bindings(entry, &arguments, &HashMap::new());
+    let dimensions =
+        symbolic_dimension_bindings(entry, &arguments, &HashMap::new(), &analyzer.arena)?;
     let input_qubits = analyzer.input_width(entry, &dimensions)?;
     let mut summary = analyzer.analyze_function(entry, &arguments, &HashMap::new())?;
     if entry.external {
@@ -2004,10 +2025,9 @@ pub(crate) fn symbolic_observed_counts<'a>(
         &analyzer.functions,
         &mut analyzer.arena,
     )?;
-    let expressions = analyzer.arena.into_projected_nodes();
-    Ok(SymbolicLogicalCounts {
+    let mut result = SymbolicLogicalCounts {
         analysis_operation_visits: analyzer.operation_visits,
-        expressions,
+        expressions: Box::new([]),
         facts,
         work: summary.counts.work,
         dependency_span,
@@ -2022,7 +2042,14 @@ pub(crate) fn symbolic_observed_counts<'a>(
         peak_qubits,
         depths,
         cleanup_work: summary.counts.cleanup_work,
-    })
+    };
+    analyzer.shot_predicates.project(
+        &mut result,
+        &analyzer.unproved_composition_metrics,
+        &mut analyzer.arena,
+    )?;
+    result.expressions = analyzer.arena.into_projected_nodes();
+    Ok(result)
 }
 
 fn final_symbolic_depths(
@@ -2219,27 +2246,42 @@ fn scalar_expression(value: &ValueFact) -> Option<(ExprId, bool)> {
 fn symbolic_dimension_bindings(
     function: &wire::FunctionProto,
     arguments: &[Option<ValueFact>],
-    inherited: &HashMap<Dimension, ExprId>,
-) -> SymbolicDimensionBindings {
+    inherited: &HashMap<Dimension, Option<ExprId>>,
+    arena: &ExpressionArena,
+) -> Result<SymbolicDimensionBindings, SymbolicResourceError> {
     let mut values = inherited.clone();
-    values.extend(
-        function
-            .parameters
-            .iter()
-            .zip(arguments)
-            .filter_map(|(parameter, value)| {
-                int_fact(value.as_ref()).map(|fact| {
-                    (
-                        Dimension::Symbol {
-                            scope: Arc::from(function.symbol.as_str()),
-                            name: Arc::from(parameter.name.as_str()),
-                        },
-                        fact.expression,
-                    )
-                })
-            }),
-    );
-    SymbolicDimensionBindings { values }
+    for (parameter, value) in function.parameters.iter().zip(arguments) {
+        let Some(fact) = int_fact(value.as_ref()) else {
+            continue;
+        };
+        let key = Dimension::Symbol {
+            scope: Arc::from(function.symbol.as_str()),
+            name: Arc::from(parameter.name.as_str()),
+        };
+        if let Some(checked) = inherited.get(&key) {
+            if let Some(expected) = checked
+                .and_then(|extent| arena.integer_value(extent))
+                .and_then(|n| u64::try_from(n).ok())
+                && let Some(scalar) = value
+                    .as_ref()
+                    .and_then(|value| exact_static_value(value, arena))
+                    .as_ref()
+                    .and_then(crate::numeric_values::integer_value)
+                && scalar != BigInt::from(expected)
+            {
+                return Err(SymbolicResourceError::Unsupported(
+                    super::dimension_conflict(&parameter.name, expected),
+                ));
+            }
+        } else {
+            values.insert(key, Some(fact.expression));
+        }
+    }
+    Ok(SymbolicDimensionBindings { values })
+}
+
+fn unresolved_slice_dimension() -> SymbolicResourceError {
+    SymbolicResourceError::Unsupported("the call's slice extent needs concrete bounds".to_owned())
 }
 
 fn bool_fact(value: &ValueFact) -> Option<bool> {

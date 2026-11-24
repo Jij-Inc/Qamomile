@@ -6,7 +6,8 @@ pub(crate) const MAX_MESSAGE_NODES: usize = 1_000_000;
 pub(crate) const MAX_NESTING: usize = 256;
 pub(crate) const MAX_STRING_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_BYTES_FIELD: usize = 64 * 1024 * 1024;
-/// Maximum revisited nodes when closing one recursive semantic component.
+/// Shared compiler safeguard for revisited nodes in semantic closure or target preparation.
+/// This bounds compiler traversal work, independently of provider execution capacity.
 pub(crate) const MAX_RECURSIVE_ANALYSIS_WORK: u128 = 10_000_000;
 
 /// Failure detected without allocating decoded Protobuf message vectors.
@@ -33,6 +34,9 @@ enum Schema {
     ParameterSlot,
     ResultAbi,
     ResultPostprocessing,
+    ShotTemplate,
+    ShotBindingSlot,
+    ResultIndexed,
     ResultScalar,
     ResultParameter,
     ResultPath,
@@ -118,6 +122,24 @@ const DEFAULT_LIMITS: ScanLimits = ScanLimits {
     bytes_field: MAX_BYTES_FIELD,
 };
 
+#[derive(Default)]
+struct ScanUsage {
+    nodes: usize,
+    work: u128,
+}
+
+impl ScanUsage {
+    fn charge_nodes(&mut self, count: usize, limit: usize) -> Result<(), PreflightError> {
+        charge_with_limit(&mut self.nodes, count, limit).map_err(PreflightError::Budget)?;
+        self.work = self.work.saturating_add(count as u128);
+        Ok(())
+    }
+
+    fn charge_bytes(&mut self, count: usize) {
+        self.work = self.work.saturating_add(count as u128);
+    }
+}
+
 /// Preflight the reachable `QCorePackageProto` schema before Prost decoding.
 ///
 /// The scanner borrows length-delimited fields directly from `payload` and
@@ -125,14 +147,14 @@ const DEFAULT_LIMITS: ScanLimits = ScanLimits {
 /// therefore charged before Prost can allocate its decoded vector. The result
 /// is the exact number of wire values charged by the scan.
 pub(crate) fn preflight_with_work(payload: &[u8]) -> Result<usize, PreflightError> {
-    let mut nodes = 0_usize;
+    let mut nodes = ScanUsage::default();
     scan_message(Schema::Package, payload, 0, &mut nodes, DEFAULT_LIMITS)?;
-    Ok(nodes)
+    Ok(nodes.nodes)
 }
 
 /// Preflight one portable artifact before Prost decoding.
 pub(crate) fn preflight_artifact(payload: &[u8]) -> Result<(), PreflightError> {
-    let mut nodes = 0_usize;
+    let mut nodes = ScanUsage::default();
     scan_message(Schema::Artifact, payload, 0, &mut nodes, DEFAULT_LIMITS)
 }
 
@@ -143,7 +165,7 @@ pub(crate) fn preflight_execution_snapshot(
     max_nesting: usize,
     max_string_bytes: usize,
 ) -> Result<(), PreflightError> {
-    let mut nodes = 0_usize;
+    let mut nodes = ScanUsage::default();
     scan_message(
         Schema::ExecutionSnapshot,
         payload,
@@ -160,7 +182,7 @@ pub(crate) fn preflight_execution_snapshot(
 
 /// Preflight one canonical optimization-problem artifact before Prost decoding.
 pub(crate) fn preflight_optimization_problem(payload: &[u8]) -> Result<(), PreflightError> {
-    let mut nodes = 0_usize;
+    let mut nodes = ScanUsage::default();
     scan_message(
         Schema::OptimizationProblem,
         payload,
@@ -172,14 +194,25 @@ pub(crate) fn preflight_optimization_problem(payload: &[u8]) -> Result<(), Prefl
 
 /// Preflight the private typed-HIR request schema before Prost decoding.
 pub(crate) fn preflight_hir_with_work(payload: &[u8]) -> Result<usize, PreflightError> {
-    let mut nodes = 0_usize;
+    let mut nodes = ScanUsage::default();
     scan_message(Schema::HirPackage, payload, 0, &mut nodes, DEFAULT_LIMITS)?;
-    Ok(nodes)
+    Ok(nodes.nodes)
+}
+
+pub(crate) fn preflight_hir_expression(payload: &[u8]) -> Result<(), PreflightError> {
+    let mut nodes = ScanUsage::default();
+    scan_message(
+        Schema::HirExpression,
+        payload,
+        0,
+        &mut nodes,
+        DEFAULT_LIMITS,
+    )
 }
 
 /// Preflight one symbolic resource-analysis request before Prost allocation.
 pub(crate) fn preflight_resource_analysis_request(payload: &[u8]) -> Result<(), PreflightError> {
-    let mut nodes = 0_usize;
+    let mut nodes = ScanUsage::default();
     scan_message(
         Schema::ResourceAnalysisRequest,
         payload,
@@ -191,7 +224,7 @@ pub(crate) fn preflight_resource_analysis_request(payload: &[u8]) -> Result<(), 
 
 /// Preflight one persisted resource study before Protobuf allocation.
 pub(crate) fn preflight_resource_study(payload: &[u8]) -> Result<(), PreflightError> {
-    let mut nodes = 0_usize;
+    let mut nodes = ScanUsage::default();
     scan_message(
         Schema::ResourceStudy,
         payload,
@@ -203,31 +236,43 @@ pub(crate) fn preflight_resource_study(payload: &[u8]) -> Result<(), PreflightEr
 
 /// Preflight a standalone artifact parameter ABI before Prost allocation.
 pub(crate) fn preflight_parameter_abi(payload: &[u8]) -> Result<(), PreflightError> {
-    let mut nodes = 0_usize;
+    let mut nodes = ScanUsage::default();
     scan_message(Schema::ParameterAbi, payload, 0, &mut nodes, DEFAULT_LIMITS)
 }
 
 /// Preflight a standalone artifact result ABI before Prost allocation.
 pub(crate) fn preflight_result_abi(payload: &[u8]) -> Result<(), PreflightError> {
-    let mut nodes = 0_usize;
+    let mut nodes = ScanUsage::default();
     scan_message(Schema::ResultAbi, payload, 0, &mut nodes, DEFAULT_LIMITS)
 }
 
-/// Preflight a standalone circuit-result plan before Prost allocation.
-pub(crate) fn preflight_result_postprocessing(payload: &[u8]) -> Result<(), PreflightError> {
-    let mut nodes = 0_usize;
+/// Preflight a result plan and return conservative per-row reconstruction work.
+///
+/// Message nodes, repeated references, and copied string/byte contents all count
+/// toward work, independently of the unchanged structural decode limits.
+pub(crate) fn preflight_result_postprocessing_with_work(
+    payload: &[u8],
+) -> Result<u128, PreflightError> {
+    let mut nodes = ScanUsage::default();
     scan_message(
         Schema::ResultPostprocessing,
         payload,
         0,
         &mut nodes,
         DEFAULT_LIMITS,
-    )
+    )?;
+    Ok(nodes.work)
+}
+
+/// Preflight a native shot template and every embedded scalar plan before decoding.
+pub(crate) fn preflight_shot_template(payload: &[u8]) -> Result<(), PreflightError> {
+    let mut nodes = ScanUsage::default();
+    scan_message(Schema::ShotTemplate, payload, 0, &mut nodes, DEFAULT_LIMITS)
 }
 
 /// Preflight a standalone circuit-family selector before Prost allocation.
 pub(crate) fn preflight_circuit_family_selection(payload: &[u8]) -> Result<(), PreflightError> {
-    let mut nodes = 0_usize;
+    let mut nodes = ScanUsage::default();
     scan_message(
         Schema::FamilySelection,
         payload,
@@ -239,13 +284,13 @@ pub(crate) fn preflight_circuit_family_selection(payload: &[u8]) -> Result<(), P
 
 /// Preflight one standalone portable literal before Prost allocation.
 pub(crate) fn preflight_literal(payload: &[u8]) -> Result<(), PreflightError> {
-    let mut nodes = 0_usize;
+    let mut nodes = ScanUsage::default();
     scan_message(Schema::Literal, payload, 0, &mut nodes, DEFAULT_LIMITS)
 }
 
 /// Preflight one standalone semantic type before Prost allocation.
 pub(crate) fn preflight_type(payload: &[u8]) -> Result<(), PreflightError> {
-    let mut nodes = 0_usize;
+    let mut nodes = ScanUsage::default();
     scan_message(Schema::Type, payload, 0, &mut nodes, DEFAULT_LIMITS)
 }
 
@@ -253,10 +298,10 @@ fn scan_message(
     schema: Schema,
     payload: &[u8],
     depth: usize,
-    nodes: &mut usize,
+    nodes: &mut ScanUsage,
     limits: ScanLimits,
 ) -> Result<(), PreflightError> {
-    charge_with_limit(nodes, 1, limits.nodes).map_err(PreflightError::Budget)?;
+    nodes.charge_nodes(1, limits.nodes)?;
     if depth > limits.nesting {
         return Err(PreflightError::Budget(
             "QCore package exceeds the nesting limit".to_owned(),
@@ -288,7 +333,7 @@ fn scan_known_field(
     payload: &[u8],
     cursor: &mut usize,
     depth: usize,
-    nodes: &mut usize,
+    nodes: &mut ScanUsage,
     limits: ScanLimits,
 ) -> Result<(), PreflightError> {
     match field {
@@ -298,7 +343,7 @@ fn scan_known_field(
         } if wire_type == 0 => {
             read_varint(payload, cursor)?;
             if repeated {
-                charge_with_limit(nodes, 1, limits.nodes).map_err(PreflightError::Budget)?;
+                nodes.charge_nodes(1, limits.nodes)?;
             }
         }
         Field::Varint {
@@ -309,7 +354,7 @@ fn scan_known_field(
             let mut packed_cursor = 0_usize;
             while packed_cursor < packed.len() {
                 read_varint(packed, &mut packed_cursor)?;
-                charge_with_limit(nodes, 1, limits.nodes).map_err(PreflightError::Budget)?;
+                nodes.charge_nodes(1, limits.nodes)?;
             }
         }
         Field::Fixed64 if wire_type == 1 => advance(payload, cursor, 8)?,
@@ -320,8 +365,9 @@ fn scan_known_field(
                     "QCore string exceeds the size limit".to_owned(),
                 ));
             }
+            nodes.charge_bytes(value.len());
             if repeated {
-                charge_with_limit(nodes, 1, limits.nodes).map_err(PreflightError::Budget)?;
+                nodes.charge_nodes(1, limits.nodes)?;
             }
         }
         Field::Bytes if wire_type == 2 => {
@@ -331,11 +377,12 @@ fn scan_known_field(
                     "QCore byte field exceeds the size limit".to_owned(),
                 ));
             }
+            nodes.charge_bytes(value.len());
         }
         Field::Message { schema, repeated } if wire_type == 2 => {
             let child = take_length_delimited(payload, cursor)?;
             if repeated {
-                charge_with_limit(nodes, 1, limits.nodes).map_err(PreflightError::Budget)?;
+                nodes.charge_nodes(1, limits.nodes)?;
             }
             scan_message(schema, child, depth.saturating_add(1), nodes, limits)?;
         }
@@ -413,7 +460,18 @@ fn schema_field(schema: Schema, number: u32) -> Option<Field> {
         (Schema::ResultPostprocessing, 1..=3) => Some(scalar()),
         (Schema::ResultPostprocessing, 4) => Some(repeated_message(Schema::ResultScalar)),
         (Schema::ResultPostprocessing, 5) => Some(message(Schema::ResultValue)),
-        (Schema::ResultScalar, 1 | 2 | 4) => Some(scalar()),
+        (Schema::ShotTemplate, 1) => Some(scalar()),
+        (Schema::ShotTemplate, 2) => Some(repeated_message(Schema::ResultPostprocessing)),
+        (Schema::ShotTemplate, 3) => Some(repeated_message(Schema::ShotBindingSlot)),
+        (Schema::ShotTemplate, 4) => Some(message(Schema::ResultPostprocessing)),
+        (Schema::ShotTemplate, 5) => Some(message(Schema::ParameterAbi)),
+        (Schema::ShotTemplate, 6) => Some(message(Schema::ResultAbi)),
+        (Schema::ShotTemplate, 7 | 8) => Some(string()),
+        (Schema::ShotBindingSlot, 1 | 2) => Some(scalar()),
+        (Schema::ResultIndexed, 1 | 3) => Some(scalar()),
+        (Schema::ResultIndexed, 2) => Some(repeated_scalar()),
+        (Schema::ResultScalar, 1 | 2 | 4 | 7) => Some(scalar()),
+        (Schema::ResultScalar, 8) => Some(message(Schema::ResultIndexed)),
         (Schema::ResultScalar, 3) => Some(Field::Fixed64),
         (Schema::ResultScalar, 5) => Some(message(Schema::ResultParameter)),
         (Schema::ResultScalar, 6) => Some(message(Schema::ResultApply)),

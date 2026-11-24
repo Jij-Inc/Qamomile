@@ -6,6 +6,7 @@ import math
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
+from importlib.metadata import version
 from types import ModuleType
 
 from qamomile.compilation import (
@@ -15,11 +16,13 @@ from qamomile.compilation import (
     Job,
     SampleResult,
 )
+from qamomile.effects import Requirement
 from qamomile.errors import ExecutionError
 from qamomile.local_execution import launch_local_sample
 from qamomile.lowering import RealizationOptions
 
-from ._profile import CAPABILITIES, FORMAT
+from ._execution import _decode_result_row
+from ._profile import FORMAT
 from ._target import Hugr
 
 
@@ -89,7 +92,7 @@ class Selene:
             Hugr: HUGR target using this endpoint's realization choices.
         """
 
-        return Hugr(record_results=True, realizations=self.realizations)
+        return Hugr(realizations=self.realizations, current_shot_origin=0)
 
     @property
     def capabilities(self) -> CapabilitySnapshot:
@@ -101,7 +104,7 @@ class Selene:
 
         return CapabilitySnapshot(
             FORMAT,
-            CAPABILITIES,
+            self.target.capabilities.requirements,
             realizations=self.realizations,
         )
 
@@ -118,17 +121,29 @@ class Selene:
 
         Raises:
             ExecutionError: If the artifact lacks result records, retains
-                parameters, or produces an invalid Selene result stream.
+                parameters, uses an uncertified current-shot convention or runtime,
+                or produces an invalid Selene result stream.
             ImportError: If the optional Selene runtime is unavailable.
         """
 
         metadata = dict(artifact.metadata.entries)
-        if metadata.get("record_results") is not True:
-            raise ExecutionError(
-                "Q8690: Selene requires a HUGR target with result recording"
-            )
+        if metadata.get("result_measurements") != "named-records":
+            raise ExecutionError("Q8690: Selene requires named Boolean result records")
         if invocation.parameters.entries:
             raise ExecutionError("Q8691: Selene received unresolved parameters")
+        if Requirement.LOGICAL_SHOT_CONTEXT in artifact.execution_contract.requirements:
+            from qamomile._native import compiler as native
+
+            if metadata.get("current_shot_origin") != 0:
+                raise ExecutionError(
+                    "Q8694: Selene artifact has a different counter convention"
+                )
+            native.check_current_shot_invocation(0, invocation.shots)
+            if version("selene-sim") not in {"0.2.17", "0.3.2"}:
+                raise ExecutionError(
+                    "Q8694: logical current-shot execution is certified for "
+                    "Selene 0.2.17 and 0.3.2"
+                )
         return launch_local_sample(
             artifact,
             invocation,
@@ -155,7 +170,7 @@ def _execute_local(
 
     Args:
         artifact (CompiledProgram): Sealed HUGR package and source ResultABI.
-        invocation (Invocation): Validated shot count and deterministic seed.
+        invocation (Invocation): Validated shot count and optional execution seed.
         timeout (float): Overall Selene execution timeout in seconds.
         n_processes (int): Maximum Selene shot-worker process count.
 
@@ -176,8 +191,12 @@ def _execute_local(
         runner = executable.runner(selene)
         native_shots = runner.run_shots(
             selene.Quest(),
-            n_qubits=artifact.report.literal_int("qamomile.circuit.virtual_qubits"),
+            n_qubits=max(
+                1, artifact.report.literal_int("qamomile.circuit.virtual_qubits")
+            ),
             n_shots=invocation.shots,
+            shot_offset=0,
+            shot_increment=1,
             random_seed=invocation.seed,
             timeout=timeout,
             n_processes=n_processes,
@@ -219,7 +238,7 @@ def _decode_result_counts(
     shots: int,
     width: int,
 ) -> dict[tuple[int, ...], int]:
-    """Decode ordered ``qamomile`` tags from Selene's result stream.
+    """Decode source-positioned Boolean tags from Selene's result stream.
 
     Args:
         native_shots (Iterable[Iterable[tuple[str, object]]]): Per-shot tagged
@@ -240,19 +259,13 @@ def _decode_result_counts(
     try:
         for native_shot in native_shots:
             observed_shots += 1
-            values = [value for tag, value in native_shot if tag == "qamomile"]
-            if len(values) != width:
+            try:
+                bits = _decode_result_row(native_shot, width=width)
+            except ValueError as error:
                 raise ExecutionError(
-                    "Q8692: Selene result width disagrees with ResultABI"
-                )
-            bits: list[int] = []
-            for value in values:
-                if not isinstance(value, (bool, int)) or int(value) not in {0, 1}:
-                    raise ExecutionError(
-                        "Q8692: Selene result contains a non-bit value"
-                    )
-                bits.append(int(value))
-            counts[tuple(bits)] += 1
+                    f"Q8692: invalid Selene result row: {error}"
+                ) from error
+            counts[bits] += 1
     except ExecutionError:
         raise
     except Exception as error:

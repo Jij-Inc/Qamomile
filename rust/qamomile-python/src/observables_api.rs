@@ -78,14 +78,14 @@ fn prepare_commuting_pauli_measurement<'py>(
     Ok(PyBytes::new(py, &transformed))
 }
 
-type PauliMeasurementGroupProjection = (Vec<(u64, String)>, Vec<usize>, String, u64);
+type PauliMeasurementGroupProjection = (Vec<(u64, String)>, Vec<usize>, String, Option<u64>);
 type CommutingPauliReadoutProjection = (usize, Vec<u64>, bool);
 type CommutingPauliMeasurementGroupProjection = (
     Vec<usize>,
     Vec<CommutingPauliReadoutProjection>,
     usize,
     String,
-    u64,
+    Option<u64>,
 );
 /// Validate the source and ABI boundary of one live executable artifact.
 #[cfg_attr(feature = "stub-gen", pyo3_stub_gen::derive::gen_stub_pyfunction)]
@@ -121,12 +121,12 @@ fn validate_estimator_source(
 /// Plan independent terms with a total shot budget.
 #[cfg_attr(feature = "stub-gen", pyo3_stub_gen::derive::gen_stub_pyfunction)]
 #[cfg_attr(not(feature = "stub-gen"), pyo3_stub_gen_derive::remove_gen_stub)]
-#[pyfunction]
+#[pyfunction(signature = (observable, total_shots, base_seed=None))]
 fn plan_independent_pauli_expectation(
     py: Python<'_>,
     #[gen_stub(override_type(type_repr = "bytes"))] observable: &[u8],
     total_shots: &str,
-    base_seed: u64,
+    base_seed: Option<u64>,
 ) -> PyResult<Vec<PauliMeasurementGroupProjection>> {
     let total_shots =
         parse_unsigned_decimal(total_shots, "Q7311: expectation shots must be positive")?;
@@ -160,12 +160,12 @@ fn plan_independent_pauli_expectation(
 /// Plan deterministic QWC groups and one exact total-shot allocation.
 #[cfg_attr(feature = "stub-gen", pyo3_stub_gen::derive::gen_stub_pyfunction)]
 #[cfg_attr(not(feature = "stub-gen"), pyo3_stub_gen_derive::remove_gen_stub)]
-#[pyfunction]
+#[pyfunction(signature = (observable, total_shots, base_seed=None))]
 fn plan_qwc_pauli_expectation(
     py: Python<'_>,
     #[gen_stub(override_type(type_repr = "bytes"))] observable: &[u8],
     total_shots: &str,
-    base_seed: u64,
+    base_seed: Option<u64>,
 ) -> PyResult<Vec<PauliMeasurementGroupProjection>> {
     let total_shots =
         parse_unsigned_decimal(total_shots, "Q7311: expectation shots must be positive")?;
@@ -193,12 +193,12 @@ fn plan_qwc_pauli_expectation(
 /// Plan deterministic generally commuting groups and exact shot allocation.
 #[cfg_attr(feature = "stub-gen", pyo3_stub_gen::derive::gen_stub_pyfunction)]
 #[cfg_attr(not(feature = "stub-gen"), pyo3_stub_gen_derive::remove_gen_stub)]
-#[pyfunction]
+#[pyfunction(signature = (observable, total_shots, base_seed=None))]
 fn plan_commuting_pauli_expectation(
     py: Python<'_>,
     #[gen_stub(override_type(type_repr = "bytes"))] observable: &[u8],
     total_shots: &str,
-    base_seed: u64,
+    base_seed: Option<u64>,
 ) -> PyResult<Vec<CommutingPauliMeasurementGroupProjection>> {
     let total_shots =
         parse_unsigned_decimal(total_shots, "Q7311: expectation shots must be positive")?;

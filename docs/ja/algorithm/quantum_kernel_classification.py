@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.5
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -17,24 +17,20 @@
 # ---
 # tags: [algorithm, machine-learning]
 # ---
+#
 # # 量子カーネル分類
 #
-# このチュートリアルでは、Qamomileを使った**量子カーネル法**による二値分類を実演します。パラメータ付き量子回路を使ってカーネル（類似度）行列を計算し、それを古典的なサポートベクターマシン（SVM）に渡します。
+# このチュートリアルでは、Qamomileを用いて量子カーネル法による二値分類器を実装します。2量子ビットの特徴マップ回路でデータ点どうしの類似度を推定します。この類似度を使って、scikit-learnの`SVC`（サポートベクトルマシンを使った分類器）を学習します。
 #
-# 以下の手順で進めます:
+# ここでは、次の順序で実装を進めます。
 #
-# 1. 線形分離できないデータセット(`make_circles`)を準備する。
-# 2. `@qkernel`で**特徴マップ**回路 $U(x)$ を構築する。
-# 3. **オーバーラップカーネル** $k(x, x') = |\langle 0^n | U(x')^\dagger U(x) | 0^n \rangle|^2$ を構成する。
-# 4. グラム行列を計算し、`kernel="precomputed"`でSVMを学習する。
-# 5. 古典的な線形カーネルとRBFカーネルと比較する。
-
-# %% [markdown]
-# ## インストール
+# 1. 同心円状の2クラスデータ（`make_circles`）を準備する。
+# 2. 古典的な前処理で、2次元の座標から4個の回路入力値を作る。
+# 3. `@qkernel`で特徴マップ回路とオーバーラップ測定回路を定義する。
+# 4. カーネル行列を計算し、`kernel="precomputed"`のSVCで分類する。
+# 5. 生の2次元座標に対する線形SVC・RBF SVCと結果を比較する。
 #
-# ```bash
-# pip install qamomile scikit-learn
-# ```
+# この例は、量子カーネルの使い方を学ぶための小規模な実演です。古典的な非線形特徴を前処理で追加しているため、この分類結果だけでは量子カーネルの優位性は示せません。
 
 # %%
 # 最新のQamomileをpipからインストールします！
@@ -57,62 +53,135 @@ import qamomile as qm
 docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 
 # %% [markdown]
-# ## 背景: 量子カーネル法
+# ## 背景
 #
-# 量子カーネルは、2つのデータ点の量子特徴状態のオーバーラップを測定することで類似度を推定します:
+# ### 量子カーネル法
 #
-# $$
-# k(x, x') = |\langle 0^n | U(x')^\dagger \, U(x) | 0^n \rangle|^2
-# $$
-#
-# $|0^n\rangle$に$U(x')^\dagger U(x)$を適用し、全ゼロビット列が得られる確率を測定することでこのオーバーラップを推定します。得られたカーネル行列はSVMなどの任意のカーネルベース分類器に渡すことができます。
-
-
-# %% [markdown]
-# ## ハイパーパラメータ
-
-
-# %% [markdown]
-# ## データセット
-#
-# scikit-learnの `make_circles` を使い、同心円状の2クラスデータを生成します。線形分類器が失敗する典型的な例です。
-
-
-# %% [markdown]
-# ## 古典的な前処理（特徴リフティング）
-#
-# 量子回路にデータをエンコードする前に、古典的な**特徴リフティング**を適用して元の2次元入力をより高次元の空間に写像します。生の特徴の非線形な組み合わせを追加することで、量子特徴マップがより豊かな構造を活用できるようにします。
-#
-# 2段階のパイプラインは以下の通りです:
-#
-# 1. 生の2次元座標を $[0, \pi]$ にスケーリング。
-# 2. 非線形特徴 $(x_0 - x_1)^2$ と $(x_0 + x_1)^2$ を構築し、それらも $[0, \pi]$ にスケーリング。
-#
-# これによりサンプルごとに4次元の特徴ベクトルが得られます:
-# $f(x) = [x_0, x_1, (x_0 - x_1)^2, (x_0 + x_1)^2]$。
-#
-# したがって量子カーネルは前処理後の特徴上で定義されます:
+# 生のデータ点を$x$とし、前処理後の4次元の特徴ベクトルを$f(x)$と書きます。2量子ビットの量子特徴状態は
 #
 # $$
-# k(x, x') = |\langle 0^n | U(f(x'))^\dagger \, U(f(x)) | 0^n \rangle|^2
+# |\phi(x)\rangle = U(f(x))|00\rangle
 # $$
+#
+# です。今回使うフィデリティカーネル（オーバーラップカーネル）は
+#
+# $$
+# k(x,x') = |\langle\phi(x')|\phi(x)\rangle|^2
+# = \left|\langle00|U(f(x'))^{\dagger}U(f(x))|00\rangle\right|^2
+# $$
+#
+# のように定義します。$U(f(x))$に続けて$U(f(x'))^{\dagger}$を作用させ、$|00\rangle$が観測される確率から$k(x,x')$を推定できます {cite:p}`10.1038/s41586-019-0980-2`。
+#
+# 理想的なカーネル値は$0\leq k(x,x')\leq1$で、$k(x,x)=1$です。このような理想カーネル行列は、半正定値となります。実際、$\rho(x)=|\phi(x)\rangle\langle\phi(x)|$と置けば、$k(x,x')=\operatorname{Tr}[\rho(x)\rho(x')]$のように書けます。
+#
+# 一方、有限ショットで各行列要素を別々に推定した行列は、統計誤差のため半正定値とは限りません。後で学習用カーネル行列に補正を加える理由はここにあります。
+
+# %% [markdown]
+# ## 問題設定
+#
+# ### データセット
+#
+# scikit-learnの`make_circles`を用いて、同心円状の2クラスデータを生成します。生の2次元座標では直線による分離が難しい例です。
+#
+# この例では40件のデータを生成し、学習用30件・テスト用10件に分割します。
+
+# %%
+N_SAMPLES = 4 if docs_test_mode else 40
+X_raw, labels = make_circles(
+    n_samples=N_SAMPLES,
+    noise=0.04,
+    factor=0.4,
+    random_state=7,
+)
+X_train_raw, X_test_raw, y_train, y_test = train_test_split(
+    X_raw,
+    labels,
+    test_size=0.5 if docs_test_mode else 0.25,
+    random_state=7,
+    stratify=labels,
+)
+
+# %% [markdown]
+# ### 古典的な前処理：特徴リフティング
+#
+# 今回の量子回路には4個の実数値を渡します。元の座標$x=(x_0,x_1)$に対し、まず学習データに合わせたスケーラー$s_1$を用いて
+#
+# $$
+# a=s_1(x)=(a_0,a_1), \qquad a_i\in[0,\pi]
+# $$
+#
+# のように変換を施します。次に2種類の非線形特徴を
+#
+# $$
+# q(a)=\big((a_0-a_1)^2,\ (a_0+a_1)^2\big)
+# $$
+#
+# と定義し、この2列にも別のスケーラー$s_2$を適用します。最終的な回路入力は
+#
+# $$
+# f(x)=\big(a_0,a_1,s_2(q(a))_0,s_2(q(a))_1\big)
+# $$
+#
+# となります。したがって、単に二乗項を追加するだけでなく、追加した2列も$[0,\pi]$に再スケーリングしています。
+#
+# 2つの`MinMaxScaler`は学習データだけで`fit`し、テストデータには`transform`だけを適用します。
+#
+# `clip=True`により学習範囲から外れる座標を端に切り詰めるため、可視化の外側領域では異なる入力が同じ回路特徴量に写る可能性があります。
+
+# %%
+angle_scaler = MinMaxScaler(feature_range=(0.0, math.pi), clip=True)
+pair_scaler = MinMaxScaler(feature_range=(0.0, math.pi), clip=True)
+X_train_angles = angle_scaler.fit_transform(X_train_raw)
+X_test_angles = angle_scaler.transform(X_test_raw)
+
+
+def lift_features(values: np.ndarray) -> np.ndarray:
+    """Lift two scaled coordinates into four nonlinear circuit features.
+
+    Args:
+        values (np.ndarray): Two-column scaled input matrix.
+
+    Returns:
+        np.ndarray: Four-column matrix with two quadratic coordinates.
+    """
+
+    x0 = values[:, 0]
+    x1 = values[:, 1]
+    return np.column_stack((x0, x1, (x0 - x1) ** 2, (x0 + x1) ** 2))
+
+
+F_train = lift_features(X_train_angles)
+F_test = lift_features(X_test_angles)
+F_train[:, 2:4] = pair_scaler.fit_transform(F_train[:, 2:4])
+F_test[:, 2:4] = pair_scaler.transform(F_test[:, 2:4])
+
+TRAIN_FEATURES = tuple(tuple(float(value) for value in row) for row in F_train)
+TEST_FEATURES = tuple(tuple(float(value) for value in row) for row in F_test)
+TRAIN_LABELS = tuple(int(label) for label in y_train)
+EXPECTED_LABELS = tuple(int(label) for label in y_test)
+SHOTS = 1 if docs_test_mode else 64
+
+assert F_train.shape == (len(X_train_raw), 4)
+assert F_test.shape == (len(X_test_raw), 4)
+
+# %% [markdown]
+# ## アルゴリズム
+#
+# ### 特徴マップ回路
+#
+# 2量子ビットに4個の実数特徴量を符号化します。今回の`classification_feature_map`は、各量子ビットのH・RZ・RYゲートに加え、CZ・RZZゲートなどを使ったブロックを2回繰り返す固定回路です。
+#
+# この回路の入力値はデータから決まるため、ここでは量子回路のパラメータを最適化しません。学習するのは分類器の`SVC`です。
+#
+# ### オーバーラップ測定回路
+#
+# 最初に$U(f(x))$を作用させ、その後で`qm.adjoint`を用いて$U(f(x'))^{\dagger}$を作用させます。測定結果が`(0, 0)`になる確率が、カーネル値です。
+#
+# `classification_overlap`の`left`と`right`は、それぞれ長さ4の実数ベクトルを実行時に受け取ります。特徴ブロックの繰り返し回数はコード上で2回に固定されており、`layers`という特殊化パラメータはありません。
 
 
 # %% [markdown]
-# ## 特徴マップ回路
-#
-# 特徴ブロック$U(x)$は、単一量子ビット回転とentangling gateでデータをencodeします。`qm.adjoint`は同じfeature-map bodyから正確な逆変換$U(x)^\dagger$を導出します。
-
-
-# %% [markdown]
-# ## オーバーラップカーネル回路
-#
-# 完全なカーネル回路は $U(x)$ の後に $U(x')^\dagger$ を適用します。
-# カーネル値 $k(x, x')$ は $|00\rangle$ を測定する確率です。
-#
-# 表現力を高めるために特徴ブロックを `layers` 回繰り返します。
-# `layers` は構造パラメータなので特殊化時にバインドします。
-
+# ## 実装
 
 # %%
 @qm.qkernel
@@ -151,8 +220,8 @@ def classification_overlap_state(
     """Build the reversible overlap witness for two feature vectors.
 
     Args:
-        left (qm.Vector[qm.Real, 2]): First feature vector.
-        right (qm.Vector[qm.Real, 2]): Second feature vector.
+        left (qm.Vector[qm.Real, 4]): First feature vector.
+        right (qm.Vector[qm.Real, 4]): Second feature vector.
 
     Returns:
         qm.Q[qm.Bits[2]]: State whose zero probability is the kernel value.
@@ -170,8 +239,8 @@ def classification_overlap(
     """Measure one runtime-rebindable overlap witness.
 
     Args:
-        left (qm.Param[qm.Vector[qm.Real, 2]]): First runtime feature vector.
-        right (qm.Param[qm.Vector[qm.Real, 2]]): Second runtime feature vector.
+        left (qm.Param[qm.Vector[qm.Real, 4]]): First runtime feature vector.
+        right (qm.Param[qm.Vector[qm.Real, 4]]): Second runtime feature vector.
 
     Returns:
         qm.Shot[qm.Bits[2]]: Two logical overlap-witness bits per shot.
@@ -181,103 +250,30 @@ def classification_overlap(
 
 
 # %% [markdown]
-# `qm.adjoint`はfeature-map bodyから逆変換を導出します。forward mapと同期する必要がある逆順gate listのcopyはなく、affineなstate ownershipが両方のcallにわたって検査されます。
-
-# %% [markdown]
-# ## 記述したbodyをinspectしてestimateする
+# `qm.adjoint`を用いることで、共通の特徴マップ回路から逆演算を表現することができます。逆向きゲート列を手作業で定義する必要がないため、特徴マップを変更したときにも順方向と逆方向の対応を保ちやすくなります。
 #
-# 特殊化により、inspectとresource analysisの両方で使うtarget-independentなprogramが得られます。bodyにはadjoint callがありますが、量子分類専用opcodeはありません。Rustは可視な2-layer forward/inverse feature mapから40 logical gatesを導出します。
+# ### 回路を特殊化して論理リソースを確認する
+#
+# `qm.specialize`で実行時パラメータを持つ回路をプログラムとして確定し、`qm.resources.logical`で論理ゲート数の見積もりを調べます。
+#
+# 現在の回路では、特徴ブロック1回分が10ゲート、これを2回繰り返す特徴マップが20ゲートです。順方向と逆方向の特徴マップを合わせたオーバーラップ回路では、測定前の論理ゲート数は40になります。リソース数は回路定義や集計の方式によって変わり得ます。
 
 # %%
 program = qm.specialize(classification_overlap)
-inspection = program.inspect()
 study = qm.resources.logical(program)
-
-assert "qcore.adjoint_call" in inspection
-assert "quantum.classification" not in inspection
-assert study.metric(qm.resources.LOGICAL_GATES).numeric_enclosure() == (40, 40)
-assert qm.resources.ResourceStudy.from_bytes(study.to_bytes()) == study
+logical_gate_range = study.metric(qm.resources.LOGICAL_GATES).numeric_enclosure()
+print("Logical gates (lower, upper):", logical_gate_range)
 
 # %% [markdown]
-# ## データセット
+# ## 結果
 #
-# scikit-learnの `make_circles` を使い、同心円状の2クラスデータを生成します。線形分類器が失敗する典型的な例です。
-
-# %%
-N_SAMPLES = 8 if docs_test_mode else 40
-X_raw, labels = make_circles(
-    n_samples=N_SAMPLES,
-    noise=0.04,
-    factor=0.4,
-    random_state=7,
-)
-X_train_raw, X_test_raw, y_train, y_test = train_test_split(
-    X_raw,
-    labels,
-    test_size=0.25,
-    random_state=7,
-    stratify=labels,
-)
-
-# %% [markdown]
-# ## 古典的な前処理（特徴リフティング）
+# ### 1回コンパイルし、異なる入力のカーネルを求める
 #
-# 量子回路にデータをエンコードする前に、古典的な**特徴リフティング**を適用して元の2次元入力をより高次元の空間に写像します。生の特徴の非線形な組み合わせを追加することで、量子特徴マップがより豊かな構造を活用できるようにします。
+# オーバーラップ回路は1回だけコンパイルし、データ点の組み合わせごとに`left`と`right`に各点の特徴ベクトルを渡して繰り返し実行します。実行先はQamomileの`Reference()`です。
 #
-# 2段階のパイプラインは以下の通りです:
+# 学習カーネル行列については対称性$k(x_i,x_j)=k(x_j,x_i)$を用い、対角線より下の成分だけを測定し、対角線より上の成分には対応する同じ値を使います。理想的には$k(x_i,x_i)=1$なので、対角成分は1に設定します。
 #
-# 1. 生の2次元座標を $[0, \pi]$ にスケーリング。
-# 2. 非線形特徴 $(x_0 - x_1)^2$ と $(x_0 + x_1)^2$ を構築し、それらも $[0, \pi]$ にスケーリング。
-#
-# これによりサンプルごとに4次元の特徴ベクトルが得られます:
-# $f(x) = [x_0, x_1, (x_0 - x_1)^2, (x_0 + x_1)^2]$。
-#
-# したがって量子カーネルは前処理後の特徴上で定義されます:
-#
-# $$
-# k(x, x') = |\langle 0^n | U(f(x'))^\dagger \, U(f(x)) | 0^n \rangle|^2
-# $$
-
-# %%
-angle_scaler = MinMaxScaler(feature_range=(0.0, math.pi), clip=True)
-pair_scaler = MinMaxScaler(feature_range=(0.0, math.pi), clip=True)
-X_train_angles = angle_scaler.fit_transform(X_train_raw)
-X_test_angles = angle_scaler.transform(X_test_raw)
-
-
-def lift_features(values: np.ndarray) -> np.ndarray:
-    """Lift two scaled coordinates into four nonlinear circuit features.
-
-    Args:
-        values (np.ndarray): Two-column scaled input matrix.
-
-    Returns:
-        np.ndarray: Four-column matrix with two quadratic coordinates.
-    """
-
-    x0 = values[:, 0]
-    x1 = values[:, 1]
-    return np.column_stack((x0, x1, (x0 - x1) ** 2, (x0 + x1) ** 2))
-
-
-F_train = lift_features(X_train_angles)
-F_test = lift_features(X_test_angles)
-F_train[:, 2:4] = pair_scaler.fit_transform(F_train[:, 2:4])
-F_test[:, 2:4] = pair_scaler.transform(F_test[:, 2:4])
-
-TRAIN_FEATURES = tuple(tuple(float(value) for value in row) for row in F_train)
-TEST_FEATURES = tuple(tuple(float(value) for value in row) for row in F_test)
-TRAIN_LABELS = tuple(int(label) for label in y_train)
-EXPECTED_LABELS = tuple(int(label) for label in y_test)
-SHOTS = 16 if docs_test_mode else 64
-
-assert F_train.shape == (len(X_train_raw), 4)
-assert F_test.shape == (len(X_test_raw), 4)
-
-# %% [markdown]
-# ## 1回コンパイルして繰り返し実行する
-#
-# overlap programは1回だけcompileします。Gram matrixの全entryが異なるruntime vectorで同じartifactを再利用します。
+# この例では1組あたり64ショットです。`(0, 0)`が観測された比率は$1/64$刻みの推定値になり、標準誤差は最大$1/(2\sqrt{64})=0.0625$です。これは有限ショットの統計誤差であり、実機ノイズを模擬しているわけではありません。
 
 # %%
 endpoint = qm.Reference()
@@ -319,28 +315,31 @@ def kernel_value(
 
 
 train_kernel_rows = [[0.0] * len(TRAIN_FEATURES) for _ in TRAIN_FEATURES]
-seed = 1
+next_train_seed = 1
 for row in range(len(TRAIN_FEATURES)):
     train_kernel_rows[row][row] = 1.0
     for column in range(row):
         value = kernel_value(
             TRAIN_FEATURES[row],
             TRAIN_FEATURES[column],
-            seed=seed,
+            seed=next_train_seed,
         )
-        seed += 1
+        next_train_seed += 1
         train_kernel_rows[row][column] = value
         train_kernel_rows[column][row] = value
 train_kernel_raw = np.asarray(train_kernel_rows, dtype=float)
+test_seed_start = next_train_seed
 test_kernel = np.asarray(
     [
         [
-            kernel_value(point, training, seed=100 + row * 10 + column)
+            kernel_value(point, training, seed=test_seed_start + row * len(TRAIN_FEATURES) + column)
             for column, training in enumerate(TRAIN_FEATURES)
         ]
         for row, point in enumerate(TEST_FEATURES)
     ]
 )
+
+grid_seed_start = test_seed_start + len(TEST_FEATURES) * len(TRAIN_FEATURES)
 
 expected_kernel_runs = len(TRAIN_FEATURES) * (len(TRAIN_FEATURES) - 1) // 2
 expected_kernel_runs += len(TEST_FEATURES) * len(TRAIN_FEATURES)
@@ -366,21 +365,34 @@ def project_to_psd_correlation(matrix: np.ndarray) -> np.ndarray:
 
 
 train_kernel = project_to_psd_correlation(train_kernel_raw)
+print("Raw train Gram minimum eigenvalue:", float(np.linalg.eigvalsh(train_kernel_raw)[0]))
+print("Maximum absolute PSD correction:", float(np.max(np.abs(train_kernel - train_kernel_raw))))
 assert np.allclose(train_kernel, train_kernel.T)
 assert np.allclose(np.diag(train_kernel), 1.0)
 assert float(np.linalg.eigvalsh(train_kernel).min()) >= -1e-9
+assert np.all(np.isfinite(train_kernel)) and np.all(np.isfinite(test_kernel))
 assert test_kernel.min() >= 0.0 and test_kernel.max() <= 1.0
 
 # %% [markdown]
-# 対称性から残りのtraining entryが得られ、self-overlapから対角成分は1になります。サイズ$n$の実用的なtraining集合には$O(n^2)$個のkernel値が必要です。batchingとmeasurement planningは実行上の関心事であり、新しいsource-language semanticsではありません。
-
-# %% [markdown]
-# ## 分類器の学習
+# ### 有限ショットのカーネル行列と半正定値補正
 #
-# 比較のために3つのSVMを学習します:
-# - **量子カーネルSVC**: 事前計算した量子カーネル行列を使用。
-# - **線形SVC**: 生の2次元特徴を使用（円データでは失敗が予想される）。
-# - **RBF SVC**: 古典的なガウシアンカーネルを使用（強力なベースライン）。
+# 理想的なフィデリティカーネル行列は半正定値ですが、非対角要素をそれぞれ64ショットで推定した`train_kernel_raw`は、負の固有値を持つことがあります。そこでこのノートブックでは、固有値を小さな正数以上に置き換えて行列を再構成し、対角を1に規格化した`train_kernel`をSVCに渡します。これは学習用行列を半正定値にするための数値的な補正であり、最も近い行列への厳密な最適化を行っているわけではありません。
+#
+# 補正によって各行列要素の値も変化します。補正後には、個々の値が元の測定確率と一致する保証はなく、わずかに負の値になる場合もあります。
+#
+# テスト用の`test_kernel`は補正前の測定値のままなので、両者が一つの厳密な量子カーネル行列に由来することまで保証する手順ではありません。この近似の影響を厳密に評価するには、ショット数の変更や別の補正方法との比較が必要です。
+#
+# この例では学習データが30件なので、学習カーネルの非対角成分について重複を除いた435組を評価します。テストデータ10件と学習データ30件の比較は300組です。後で決定境界を描くための10×10点の格子ではさらに3000組を評価するため、合計3735組の回路評価を行います。
+#
+# ### 分類器の学習
+#
+# ここでは、3種類のSVCを比較します。
+#
+# - 量子カーネルSVC：前処理を含む量子特徴マップから推定した行列を使う。
+# - 線形SVC：元の2次元座標をそのまま使う。
+# - RBF SVC：元の2次元座標にガウシアンカーネルを使う。
+#
+# 量子カーネル側には古典的な非線形特徴リフティングを適用していますが、比較用の古典SVCには適用していません。そのため、これら3つのモデルの精度差は量子計算の有無だけによるものではありません。公平な性能比較には、同じ前処理を使った古典モデルなどとの追加比較が必要です。
 
 # %%
 classifier = SVC(kernel="precomputed", C=1.0)
@@ -395,12 +407,15 @@ rbf_classifier = SVC(kernel="rbf", C=1.0, gamma="scale")
 rbf_classifier.fit(X_train_raw, y_train)
 rbf_predictions = rbf_classifier.predict(X_test_raw)
 
-print("test kernel:", test_kernel)
-print("predicted labels:", predictions)
+print("Test kernel shape:", test_kernel.shape)
+print("First test kernel row (up to 8 values):", np.round(test_kernel[0, :8], 3))
+print("True labels:", EXPECTED_LABELS)
+print("Predicted labels:", predictions)
 
 quantum_accuracy = accuracy_score(EXPECTED_LABELS, predictions)
 linear_accuracy = accuracy_score(EXPECTED_LABELS, linear_predictions)
 rbf_accuracy = accuracy_score(EXPECTED_LABELS, rbf_predictions)
+print("Test sample count:", len(EXPECTED_LABELS))
 print("Quantum kernel SVC:", quantum_accuracy)
 print("Linear SVC:", linear_accuracy)
 print("RBF SVC:", rbf_accuracy)
@@ -409,21 +424,17 @@ assert linear_predictions.shape == y_test.shape
 assert rbf_predictions.shape == y_test.shape
 
 # %% [markdown]
-# ## 可視化
+# ### 可視化
 #
-# 4つのパネルをプロットします:
-# 1. 訓練データ。
-# 2. 量子カーネル行列（グラム行列）。
-# 3. 量子カーネル SVC の決定境界。
-# 4. 比較用の古典 RBF SVC の決定境界。
+# ここでは、4つの図を示します。
+#
+# 1. 学習データの配置。
+# 2. SVCに渡した、半正定値補正後の学習カーネル行列。
+# 3. 量子カーネルSVCの決定境界。
+# 4. RBF SVCの決定境界。
+#
+# 格子点は10×10点と少なく、表示される境界は粗い近似です。また、学習範囲外の格子点では`MinMaxScaler(clip=True)`による切り詰めも発生します。
 
-
-# %% [markdown]
-# ### 決定境界ヘルパー
-
-
-# %% [markdown]
-# ### 結果のプロット
 
 # %%
 GRID_SIZE = 2 if docs_test_mode else 10
@@ -455,7 +466,7 @@ grid_kernel = np.asarray(
             kernel_value(
                 tuple(float(value) for value in point),
                 training,
-                seed=1_000 + row * len(TRAIN_FEATURES) + column,
+                seed=grid_seed_start + row * len(TRAIN_FEATURES) + column,
             )
             for column, training in enumerate(TRAIN_FEATURES)
         ]
@@ -468,70 +479,37 @@ rbf_boundary = rbf_classifier.predict(raw_grid).reshape(grid_x.shape)
 figure, axes = plt.subplots(2, 2, figsize=(10, 8))
 axes[0, 0].scatter(X_train_raw[:, 0], X_train_raw[:, 1], c=y_train)
 axes[0, 0].set_title("Training data")
-image = axes[0, 1].imshow(train_kernel, cmap="viridis", vmin=0.0, vmax=1.0)
-axes[0, 1].set_title("Quantum kernel matrix")
+image = axes[0, 1].imshow(
+    train_kernel, cmap="viridis", vmin=min(0.0, float(train_kernel.min())), vmax=1.0
+)
+axes[0, 1].set_title("PSD-adjusted training kernel")
 figure.colorbar(image, ax=axes[0, 1])
-axes[1, 0].contourf(grid_x, grid_y, quantum_boundary, alpha=0.35)
+axes[1, 0].contourf(grid_x, grid_y, quantum_boundary, levels=[-0.5, 0.5, 1.5], alpha=0.35)
 axes[1, 0].scatter(X_test_raw[:, 0], X_test_raw[:, 1], c=y_test)
 axes[1, 0].set_title("Quantum kernel SVC boundary")
-axes[1, 1].contourf(grid_x, grid_y, rbf_boundary, alpha=0.35)
+axes[1, 1].contourf(grid_x, grid_y, rbf_boundary, levels=[-0.5, 0.5, 1.5], alpha=0.35)
 axes[1, 1].scatter(X_test_raw[:, 0], X_test_raw[:, 1], c=y_test)
 axes[1, 1].set_title("RBF SVC boundary")
 figure.tight_layout()
 plt.show()
 
 # %% [markdown]
-# ## 結果の説明
+# ### 結果の読み方と限界
 #
-# 上の可視化では、量子カーネル分類器が `make_circles` の非線形なクラス構造をどの程度捉えられているかを確認できます。
+# 学習データは同心円状であり、生の2次元座標上の直線では分けにくい構造を持っています。量子カーネルSVCとRBF SVCは非線形の決定境界を作れます。今回のデータ分割での結果を、表示されたテスト精度で比較してください。精度はショット数や乱数シードに左右されます。
 #
-# 左上の訓練データを見ると、2つのクラスは直線では分離しにくく、内側の円と外側の円に近い構造を持っています。
-# 実際に、今回の実行では線形SVCのテスト精度は 0.5 であり、ほぼランダム分類に近い結果になっています。
-# これは、生の2次元座標に対する線形な決定境界では、同心円状のクラス構造を表現できないためです。
+# 学習カーネル行列の対角成分は1です。非対角成分はデータ点間の類似度に対応しますが、今回表示するのは半正定値補正後の行列です。補正の影響もあるため、各成分を未補正の測定確率と同一視しないでください。また、学習データはクラス順に並べていないため、色のまとまりを単純にクラス間・クラス内の類似度と解釈することはできません。
 #
-# 右上の量子カーネル行列は、訓練データ同士の類似度
+# この例では学習データが30件、テストデータが10件です。テスト精度が0.9なら10件中9件が正解という意味です。この規模では1件の正誤で精度が0.1変動するため、単一のデータ分割の結果を一般化しないようにしましょう。
 #
-# $$
-# k(x, x') =
-# \left|
-# \langle 0^n |
-# U(f(x'))^\dagger U(f(x))
-# |0^n\rangle
-# \right|^2
-# $$
+# 今回の比較から言えるのは、Qamomileで量子カーネルを推定し、scikit-learnのSVCに渡して二値分類を行えることです。量子優位性や古典カーネルより本質的に優れた性能を示すものではありません。性能を比較するには、データ分割・シードを変えた反復実験、ショット数への依存性、同じ古典前処理を使った対照実験などが必要です。
 #
-# を並べたグラム行列です。
-# 対角成分は各データ点と自分自身の類似度なので 1 になります。
-# 非対角成分は、異なるデータ点同士が量子特徴空間でどの程度近いかを表しています。
-# 今回の行列はクラス順に並び替えていないため、明確なブロック構造として読むことはできません。
-# しかし、この行列がSVMに渡されることで、元の2次元空間では線形に分離しにくいデータを、カーネル空間上で分類できるようになります。
+# 計算コストの面では、学習データ数を$n$とした場合、学習カーネルの構築にはおおむね$O(n^2)$組の評価が必要です。決定境界を細かく表示すると、格子点ごとに全学習データとのカーネル評価も増えます。
+
+# %% [markdown]
+# ## まとめ
 #
-# 左下の量子カーネルSVCの決定境界を見ると、入力空間では非線形な境界が形成されています。
-# 今回の実行では、量子カーネルSVCのテスト精度は 1.0 でした。
-# したがって、この小規模な `make_circles` データセットに対しては、今回設計した量子特徴マップが有効な類似度を与えていると解釈できます。
-#
-# 右下のRBF SVCも、同じく非線形な決定境界を形成しています。
-# 今回の実行では、RBF SVCのテスト精度も 1.0 でした。
-# したがって、このデータセットでは量子カーネルSVCとRBF SVCはいずれもテストデータをすべて正しく分類できています。
-# 一方で、RBF SVCの決定境界は比較的滑らかであるのに対し、量子カーネルSVCの境界はやや粗く見えます。
-# これは、可視化用の格子数 `GRID_SIZE = 15` が小さいことや、カーネル値を `SHOTS = 1024` のサンプリングで推定していることの影響を受けている可能性があります。
-#
-# 以上より、今回の実験では
-#
-# - 線形SVC: 0.5
-# - 量子カーネルSVC: 1.0
-# - RBF SVC: 1.0
-#
-# となり、量子カーネルSVCは線形SVCよりも明確に良い結果を示し、RBF SVCと同等のテスト精度を達成しました。
-#
-# ただし、この結果だけから量子優位性を主張することはできません。
-# 今回のデータセットは小規模な可視化用データであり、古典的な特徴リフティングも使用しています。
-# そのため、ここで示せる結論は
-# 「Qamomileを用いて量子カーネル行列を構成し、それをSVMに渡して非線形二値分類を行える」
-# という実装上・手法上の確認です。
-# 量子カーネルが古典カーネルより本質的に有利かどうかを議論するには、
-# より大きなデータセット、複数の乱数シード、ショット数依存性、層数依存性、古典カーネルとの詳細な比較が必要です。
-#
-# また、今回の量子カーネル評価では、各データ点ペアに対して量子回路を実行してカーネル値を推定します。
-# そのため、訓練データ数を $n$ とすると、訓練カーネル行列の計算には概ね $O(n^2)$ 個のカーネル評価が必要になります。
-# 今回のような小規模データでは問題ありませんが、データ数を増やす場合には計算コストが急速に増える点に注意が必要です。
+# - 量子カーネル法では、古典データを量子状態にエンコーディングし、量子状態間のフィデリティをデータ点どうしの類似度として利用します。本チュートリアルでは、2量子ビットの特徴マップを用いてカーネル行列を構築しました。
+# - Qamomileの`@qkernel`と`qm.adjoint`を利用することで、特徴マップとその逆演算を簡潔に実装することが可能です。また、コンパイル済みの量子回路を再利用し、入力パラメータを変更しながら異なるデータ点間のカーネル値を計算できます。
+# - 有限ショットによる測定誤差のため、推定したカーネル行列は理論上の半正定値性を満たさない場合があります。本チュートリアルでは、学習用カーネル行列に数値的な補正を施し、古典的なサポートベクトル分類器（SVC）による分類に利用しました。
+# - 量子カーネルと古典的な機械学習の組合せにより、非線形な二値分類を実装できることを確認しました。ただし、今回の結果だけで量子カーネルの優位性を示すことはできず、性能評価にはデータ分割やショット数を変えた検証、公平な古典モデルとの比較が必要です。

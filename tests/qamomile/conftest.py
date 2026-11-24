@@ -69,6 +69,8 @@ _FAST_SDK_BACKEND_SEMANTICS = frozenset(
         "approximate_qft",
         "classical_array_compatibility",
         "qubit_selection",
+        "live_sampler_accepts_numpy_integer_counts",
+        "live_sampler_rejects_invalid_counts",
         "ibm_runtime_rejects_nonportable_seed",
         "ibm_runtime_measures_unsigned_integer_registers",
         "ibm_runtime_submit_snapshot_cancel_and_restore",
@@ -95,7 +97,14 @@ _FAST_HUGR_TESTS = frozenset(
         "test_hugr_measures_unsigned_integer_registers",
         "test_helios_submit_snapshot_cancel_and_restore",
         "test_helios_measures_unsigned_integer_registers",
+        "test_helios_rejects_invalid_named_result_records",
+        "test_hugr_direct_boolean_records_share_all_execution_profiles",
+        "test_hugr_requires_named_result_records_at_execution",
         "test_hugr_preserves_and_executes_measurement_control",
+        "test_hugr_omits_unused_const_integer_branch_ports",
+        "test_hugr_reuses_const_forwarded_by_nested_branches",
+        "test_hugr_forwards_const_tuple_across_feedback",
+        "test_hugr_prunes_forwarding_through_nested_const_condition",
         "test_hugr_preserves_binary64_boolean_semantics",
         "test_hugr_rejects_a_library_type_over_its_port_budget",
         "test_hugr_rejects_a_static_library_loop_over_its_work_budget",
@@ -109,7 +118,6 @@ _FAST_HUGR_TESTS = frozenset(
         "test_selene_executes_shots_across_processes",
         "test_selene_fails_closed_without_the_optional_runtime",
         "test_selene_rejects_invalid_options",
-        "test_selene_requires_result_instrumentation",
     }
 )
 _MAX_BACKEND_TEST_QUBITS = 10
@@ -457,7 +465,7 @@ def phase_sample() -> qm.Shot[qm.Bits[4]]:
 """
 
 
-def exercise_boolean_lift_backend(*, endpoint: object, seed: int = 0) -> None:
+def exercise_boolean_lift_backend(*, endpoint: object, seed: int | None = None) -> None:
     """Execute Boolean lifts and grouped expectation through one shared artifact."""
 
     import qamomile as qm
@@ -484,7 +492,9 @@ def exercise_boolean_lift_backend(*, endpoint: object, seed: int = 0) -> None:
     assert len(estimate.groups) == 1
 
 
-def exercise_derived_result_backend(*, endpoint: object, seed: int = 0) -> None:
+def exercise_derived_result_backend(
+    *, endpoint: object, seed: int | None = None
+) -> None:
     """Require one backend to execute a derived measurement result."""
 
     import qamomile as qm
@@ -499,7 +509,9 @@ def exercise_derived_result_backend(*, endpoint: object, seed: int = 0) -> None:
     assert result.values == {1: 4}
 
 
-def exercise_broadcast_gate_backend(*, endpoint: object, seed: int = 0) -> None:
+def exercise_broadcast_gate_backend(
+    *, endpoint: object, seed: int | None = None
+) -> None:
     """Require omitted unary selectors to apply independently to every lane."""
 
     import qamomile as qm
@@ -512,7 +524,9 @@ def exercise_broadcast_gate_backend(*, endpoint: object, seed: int = 0) -> None:
     assert result.counts == {(1, 1, 1): 4}
 
 
-def exercise_uint_measurement_backend(*, endpoint: object, seed: int = 0) -> None:
+def exercise_uint_measurement_backend(
+    *, endpoint: object, seed: int | None = None
+) -> None:
     """Require integer input and typed integer output for one UInt register."""
 
     import qamomile as qm
@@ -557,7 +571,7 @@ def dynamic_target(target: qm.Param[qm.Int]) -> qm.Shot[qm.Bits[2]]:
 
 
 def exercise_dynamic_qubit_selection_backend(
-    *, endpoint: object, seed: int = 0
+    *, endpoint: object, seed: int | None = None
 ) -> None:
     """Require one backend to materialize a launch-time wire selector."""
 
@@ -606,7 +620,7 @@ def dynamic_angle(
 
 
 def exercise_dynamic_classical_index_backend(
-    *, endpoint: object, seed: int = 0
+    *, endpoint: object, seed: int | None = None
 ) -> None:
     """Require launch-time aggregate indexing without expanding its values."""
 
@@ -727,7 +741,9 @@ def multi_owner_dispatch(
 """
 
 
-def exercise_collection_loops_backend(*, endpoint: object, seed: int = 0) -> None:
+def exercise_collection_loops_backend(
+    *, endpoint: object, seed: int | None = None
+) -> None:
     """Execute collection loops and immutable mapping through one endpoint."""
 
     import qamomile as qm
@@ -746,7 +762,9 @@ def exercise_collection_loops_backend(*, endpoint: object, seed: int = 0) -> Non
     assert qm.run(mapped, on=endpoint, shots=4, seed=seed).result.counts == {(1, 0): 4}
 
 
-def exercise_structural_math_backend(*, endpoint: object, seed: int = 0) -> None:
+def exercise_structural_math_backend(
+    *, endpoint: object, seed: int | None = None
+) -> None:
     """Execute one launch-bound structural-math program on a backend endpoint."""
 
     import qamomile as qm
@@ -766,7 +784,7 @@ def exercise_structural_math_backend(*, endpoint: object, seed: int = 0) -> None
 def exercise_multi_owner_dispatch_backend(
     *,
     endpoint: object,
-    seed: int = 0,
+    seed: int | None = None,
 ) -> None:
     """Execute one multi-owner host-dispatch program on a backend endpoint."""
 
@@ -930,12 +948,12 @@ import qamomile as qm
 
 @qm.qkernel
 def measure_axes() -> tuple[
-    qm.Shot[qm.Bool],
-    qm.Shot[qm.Bool],
-    qm.Shot[qm.Bool],
-    qm.Shot[qm.Bool],
-    qm.Shot[qm.Bool],
-    qm.Shot[qm.Bool],
+    qm.Shot[qm.Bit],
+    qm.Shot[qm.Bit],
+    qm.Shot[qm.Bit],
+    qm.Shot[qm.Bit],
+    qm.Shot[qm.Bit],
+    qm.Shot[qm.Bit],
     qm.Shot[qm.Bits[1]],
     qm.Shot[qm.Bits[1]],
     qm.Shot[qm.Bits[1]],
@@ -1126,7 +1144,7 @@ def flipped(state: qm.Q[qm.Bits[1]]) -> qm.Q[qm.Bits[1]]:
     return qm.x(state)
 
 @qm.qkernel
-def callable_transforms() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bits[1]]]:
+def callable_transforms() -> tuple[qm.Shot[qm.Bit], qm.Shot[qm.Bits[1]]]:
     index = qm.prepare(True)
     target = qm.qubits(1)
     index, target = qm.multiplex(index, (unchanged, flipped), target)
@@ -1194,7 +1212,7 @@ def scalar_phase(state: qm.Q[qm.Bits[1]], angle: qm.Real) -> qm.Q[qm.Bits[1]]:
     return qm.global_phase(state, angle)
 
 @qm.qkernel
-def controlled_phase() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bits[1]]]:
+def controlled_phase() -> tuple[qm.Shot[qm.Bit], qm.Shot[qm.Bits[1]]]:
     control = qm.prepare(False)
     control = qm.h(control)
     target = qm.qubits(1)
@@ -1235,7 +1253,9 @@ def normalized_model_sample(
 """
 
 
-def exercise_normalized_model_backend(*, endpoint: object, seed: int = 0) -> None:
+def exercise_normalized_model_backend(
+    *, endpoint: object, seed: int | None = None
+) -> None:
     """Compile and execute one natively normalized model on a backend.
 
     Args:
@@ -1293,7 +1313,9 @@ def plus_state() -> qm.Q[qm.Bits[2]]:
 """
 
 
-def exercise_symbolic_observable_backend(*, endpoint: object, seed: int = 0) -> None:
+def exercise_symbolic_observable_backend(
+    *, endpoint: object, seed: int | None = None
+) -> None:
     """Build and execute one symbolic Observable recipe on a backend.
 
     Args:

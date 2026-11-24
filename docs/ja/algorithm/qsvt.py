@@ -24,10 +24,12 @@
 
 # %%
 # Install the latest Qamomile through pip!
-# # !pip install "qamomile[qiskit,visualization]"
+# # !pip install "qamomile[qiskit]" matplotlib
 
 # %%
 from __future__ import annotations
+
+import os
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -37,6 +39,9 @@ import qamomile as qm
 from qamomile.linalg import decompose_pauli_matrix
 from qamomile.qiskit import Aer, Qiskit, to_circuit
 from qamomile.stdlib import QSVTPhases, pauli_block_encoding, qsvt
+
+docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
+SAMPLE_SHOTS = 1 if docs_test_mode else 32
 
 # %% [markdown]
 # ## 背景
@@ -152,7 +157,7 @@ from qamomile.stdlib import QSVTPhases, pauli_block_encoding, qsvt
 # %% [markdown]
 # ## Qamomileの実装
 #
-# このセクションでは、LCUを使って非エルミート行列のブロックエンコーディングを構築し、それにQSVTを適用する量子カーネルをQamomileで作成します。その後、量子カーネルを描画し、数値検証に用いるQiskit回路へ変換します。
+# このセクションでは、LCUを使って非エルミート行列のブロックエンコーディングを構築し、それにQSVTを適用する量子カーネルをQamomileで作成します。その後、量子カーネルを数値検証に用いるQiskit回路へ変換します。
 #
 # ### 問題設定
 #
@@ -226,12 +231,11 @@ def singular_value_transform() -> qm.Q[qm.Bits[total_width]]:
 
 
 program = singular_value_transform.specialize()
-qm.visualization.draw(program, loops="expanded", inline_depth=1)
 
 # %% [markdown]
 # ### QSVT回路の構築
 #
-# コヒーレントな状態準備を特殊化し、`to_circuit`でQiskit回路を確認します。同じ検証済みプログラムを、回路描画、ユニタリの検証、論理リソースの解析に使います。射影位相回転は信号部分空間に直接作用するため、この実装は独立した射影用の補助量子ビットを追加せず、2量子ビットを使います。プログラムはコヒーレントな状態を保持するので、数値検証の前に削除する最終測定はありません。実行するためのコンパイルには古典的な結果が必要です。後述の測定を含む呼び出し側で、この境界を満たします。
+# コヒーレントな状態準備を特殊化し、`to_circuit`でQiskit回路を確認します。同じ検証済みプログラムを、ユニタリの検証と論理リソースの解析に使います。射影位相回転は信号部分空間に直接作用するため、この実装は独立した射影用の補助量子ビットを追加せず、2量子ビットを使います。プログラムはコヒーレントな状態を保持するので、数値検証の前に削除する最終測定はありません。実行するためのコンパイルには古典的な結果が必要です。後述の測定を含む呼び出し側で、この境界を満たします。
 
 # %%
 target = Qiskit(optimization_level=0, seed_transpiler=7)
@@ -241,7 +245,8 @@ assert qsvt_circuit.num_qubits == total_width == 2
 # %% [markdown]
 # ## 実行結果
 #
-# QSVTユニタリ全体から信号レジスタの全量子ビットが0であるブロックを取り出し、$2(A/\alpha)^\dagger(A/\alpha)-I$と比較します。
+# QSVTユニタリ全体から信号レジスタの全量子ビットが0であるブロックを取り出し、$2(A/\alpha)^\dagger(A/\alpha)-I$と比較します。上の数式では信号レジスタを左に書きました。この回路の信号は量子ビット0、系は量子ビット1なので、Qiskitの行列では基底状態を$|b_1 b_0\rangle$と書くと信号ビットは右に来ます。信号が0の行と列の添字は0と2です。
+
 
 # %%
 def projected_signal_block(
@@ -268,9 +273,8 @@ actual_transform = projected_signal_block(
     qsvt_unitary, block_encoding.signal_width, block_encoding.system_width
 )
 normalized_matrix = matrix / block_encoding.normalization
-expected_transform = (
-    2.0 * normalized_matrix.conj().T @ normalized_matrix
-    - np.eye(1 << block_encoding.system_width)
+expected_transform = 2.0 * normalized_matrix.conj().T @ normalized_matrix - np.eye(
+    1 << block_encoding.system_width
 )
 np.testing.assert_allclose(actual_transform, expected_transform, rtol=0.0, atol=1e-12)
 print("QSVT projected block:\n", np.round(actual_transform, decimals=8))
@@ -279,6 +283,7 @@ print("QSVT projected block:\n", np.round(actual_transform, decimals=8))
 # ### 同じ変換を実行する
 #
 # この例の射影変換は$\operatorname{diag}(-1,1)$です。系を$|+\rangle$に準備して変換を適用し、2回目のHadamardで相対位相を読み出します。すべてのショットで信号はゼロ、系のビットは1になるはずです。現行のライフサイクルでこのサンプラーをコンパイルして実行し、ローカルのAerと同じソースを使う`Reference`を比較します。
+
 
 # %%
 @qm.qkernel
@@ -293,16 +298,16 @@ def interference_sample() -> qm.Shot[qm.Bits[total_width]]:
 endpoint = Aer(optimization_level=0, seed_transpiler=7)
 sample_program = interference_sample.specialize()
 sample_artifact = qm.compile(sample_program, to=endpoint.target)
-record = qm.run(sample_artifact, on=endpoint, shots=32, seed=7)
-reference = qm.run(sample_program, on=qm.Reference(), shots=32, seed=7)
-assert record.result.counts == reference.result.counts == {(0, 1): 32}
+record = qm.run(sample_artifact, on=endpoint, shots=SAMPLE_SHOTS, seed=7)
+reference = qm.run(sample_program, on=qm.Reference(), shots=SAMPLE_SHOTS, seed=7)
+assert record.result.counts == reference.result.counts == {(0, 1): SAMPLE_SHOTS}
 print("signal/system samples:", record.result.counts)
 
 # %% [markdown]
 # $A$の2つの特異値は$1$と$0$です。この多項式はそれぞれを$1$と$-1$へ写し、射影したブロックで得られた結果と一致します。
 
 # %%
-polynomial_x = np.linspace(-1.0, 1.0, 400)
+polynomial_x = np.linspace(-1.0, 1.0, 3 if docs_test_mode else 400)
 polynomial_y = 2.0 * polynomial_x**2 - 1.0
 singular_values = np.linalg.svd(normalized_matrix, compute_uv=False)
 transformed_singular_values = 2.0 * singular_values**2 - 1.0

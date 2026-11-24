@@ -25,7 +25,7 @@ def qft(state: qm.Q[qm.Bits[n]], size: qm.Const[qm.Int]) -> qm.Q[qm.Bits[n]]:  #
         state = qm.h(state, target=target)
         for delta in range(target):
             control = target - 1 - delta
-            angle = 3.141592653589793 / (2 ** (target - control))
+            angle = qm.pi / (2 ** (target - control))
             state = qm.cp(state, angle, control=control, target=target)
     for left in range(size // 2):
         state = qm.swap(state, left=left, right=size - left - 1)
@@ -62,7 +62,7 @@ def approximate_qft(
         for delta in range(target):
             control = target - 1 - delta
             if target - control <= max_distance:
-                angle = 3.141592653589793 / (2 ** (target - control))
+                angle = qm.pi / (2 ** (target - control))
                 state = qm.cp(state, angle, control=control, target=target)
     for left in range(size // 2):
         state = qm.swap(state, left=left, right=size - left - 1)

@@ -12,11 +12,11 @@ SOURCE = """
 import qamomile as qm
 
 @qm.qkernel
-def score(bit: qm.Shot[qm.Bool]) -> qm.Shot[qm.Real]:
+def score(bit: qm.Shot[qm.Bit]) -> qm.Shot[qm.Real]:
     return -1.0 if bit else 1.0
 
 @qm.qkernel
-def sample(theta: qm.Param[qm.Real]) -> tuple[qm.Shot[qm.Real], tuple[qm.Shot[qm.Real], qm.Shot[qm.Bool]]]:
+def sample(theta: qm.Param[qm.Real]) -> tuple[qm.Shot[qm.Real], tuple[qm.Shot[qm.Real], qm.Shot[qm.Bit]]]:
     angle = theta / 4.0
     q = qm.prepare(False)
     for outer in range(2):
@@ -27,7 +27,7 @@ def sample(theta: qm.Param[qm.Real]) -> tuple[qm.Shot[qm.Real], tuple[qm.Shot[qm
     return e, (e * e, bit)
 
 @qm.qkernel
-def feedback() -> tuple[qm.Shot[qm.Bool], qm.Shot[qm.Bool]]:
+def feedback() -> tuple[qm.Shot[qm.Bit], qm.Shot[qm.Bit]]:
     q = qm.h(qm.prepare(False))
     first, q = qm.measure_z(q, 0)
     if first:

@@ -53,6 +53,7 @@ pub struct TargetLoweringPlan {
     materialized: RequirementSet,
     unsupported: RequirementSet,
     route: TargetLoweringRoute,
+    reusable_circuit_requirements: Option<RequirementSet>,
 }
 
 impl TargetLoweringPlan {
@@ -62,7 +63,9 @@ impl TargetLoweringPlan {
         self.capabilities
     }
 
-    /// Return missing requirements discharged by the selected launch route.
+    /// Return requirements closed or checked by the selected launch route.
+    /// Logical shot context remains an execution requirement after its domain
+    /// is checked against one exact invocation.
     #[must_use]
     pub const fn materialized(self) -> RequirementSet {
         self.materialized
@@ -78,6 +81,13 @@ impl TargetLoweringPlan {
     #[must_use]
     pub const fn route(self) -> TargetLoweringRoute {
         self.route
+    }
+
+    /// Requirements for a single circuit if the configured projection retains
+    /// reusable parameter bindings and the target can emit it.
+    #[must_use]
+    pub const fn reusable_circuit_requirements(self) -> Option<RequirementSet> {
+        self.reusable_circuit_requirements
     }
 }
 
@@ -155,14 +165,27 @@ pub(crate) fn plan_lowering(
     program.validate_execution_entry()?;
     let mut capabilities = plan(program, supported_labels)?;
     let mut segmented = false;
+    let mut reusable_circuit_requirements = None;
     if circuit_family && let Ok(circuit) = program.static_circuit() {
         let (required, split) = circuit.shot_placement(capabilities.required);
         capabilities.required = required;
         capabilities.missing = required.difference(capabilities.supported);
-        if split {
+        if split || circuit.has_nested_checks() || circuit.has_ordered_binary_checks() {
             circuit.validate_shot_checks()?;
         }
         segmented = split;
+        let shape_requirements = RequirementSet::only(Requirement::HostDispatch)
+            .with(Requirement::DynamicClassicalIndex);
+        if !split
+            && !required.contains(Requirement::LogicalShotContext)
+            && !capabilities.missing.is_empty()
+            && capabilities
+                .missing
+                .difference(shape_requirements)
+                .is_empty()
+        {
+            reusable_circuit_requirements = Some(required.difference(capabilities.missing));
+        }
     }
     let promised = parse_requirements(materialized_labels)?;
     let allowed = launch_closable_requirements(circuit_family);
@@ -173,14 +196,24 @@ pub(crate) fn plan_lowering(
     }
     let missing = capabilities.missing();
     let unsupported = missing.difference(promised);
-    let materialized = missing.difference(unsupported);
+    let mut materialized = missing.difference(unsupported);
+    if !circuit_family
+        && promised.contains(Requirement::LogicalShotContext)
+        && capabilities
+            .required
+            .contains(Requirement::LogicalShotContext)
+    {
+        materialized = materialized.with(Requirement::LogicalShotContext);
+    }
     let route = if !unsupported.is_empty() {
         TargetLoweringRoute::Unsupported
     } else if segmented {
         TargetLoweringRoute::ShotExecution
-    } else if circuit_family && missing.contains(Requirement::HostDispatch) {
+    } else if circuit_family && missing == RequirementSet::only(Requirement::HostDispatch) {
+        // Selecting a child discharges host dispatch only. Other missing
+        // capabilities still require exact launch values.
         TargetLoweringRoute::CircuitFamily
-    } else if !missing.is_empty() {
+    } else if !materialized.is_empty() {
         TargetLoweringRoute::LaunchMaterialized
     } else {
         TargetLoweringRoute::Direct
@@ -190,6 +223,8 @@ pub(crate) fn plan_lowering(
         materialized,
         unsupported,
         route,
+        reusable_circuit_requirements: reusable_circuit_requirements
+            .filter(|_| unsupported.is_empty()),
     })
 }
 
@@ -210,7 +245,8 @@ const fn launch_closable_requirements(circuit_family: bool) -> RequirementSet {
     let requirements = RequirementSet::EMPTY
         .with(Requirement::HostDispatch)
         .with(Requirement::DynamicClassicalIndex)
-        .with(Requirement::DynamicQubitSelection);
+        .with(Requirement::DynamicQubitSelection)
+        .with(Requirement::LogicalShotContext);
     if circuit_family {
         requirements
     } else {
