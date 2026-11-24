@@ -120,7 +120,7 @@ def matrix_evolution(hamiltonian: np.ndarray, time: float) -> np.ndarray:
     return (eigenvectors * phases) @ eigenvectors.conj().T
 
 exact_state = matrix_evolution(matrix, evolution_time) @ initial_state
-print("厳密な励起確率 P(1):", abs(exact_state[1]) ** 2)
+print("Exact excitation probability P(1):", abs(exact_state[1]) ** 2)
 
 # %% [markdown]
 # このモデルの励起確率 (状態 $\lvert 1 \rangle$ を測定する確率) は
@@ -221,7 +221,7 @@ study = qm.resources.logical(program)
 evolution_metric = qm.resources.logical_operation_count("quantum.pauli_evolution")
 evolution_count = study.metric(evolution_metric).numeric_enclosure()
 
-print("論理的な Pauli 時間発展の回数:", evolution_count)
+print("Logical Pauli-evolution count:", evolution_count)
 assert evolution_count == (11 * FORMULA_STEPS, 11 * FORMULA_STEPS)
 
 # %% [markdown]
@@ -267,7 +267,7 @@ def suzuki_step(order: int, duration: float) -> np.ndarray:
         half_drift = matrix_evolution(drift_matrix, duration / 2.0)
         return half_drift @ matrix_evolution(drive_matrix, duration) @ half_drift
     if order < 4 or order % 2 != 0:
-        raise ValueError("order は 1 または正の偶数（2以上）にしてください")
+        raise ValueError("order must be 1 or a positive even integer (at least 2)")
 
     k = order // 2
     coefficient = 1.0 / (4.0 - 4.0 ** (1.0 / (2 * k - 1)))
@@ -302,7 +302,7 @@ if not docs_test_mode:
         )[0]
         slopes[order] = float(slope)
 
-print("収束の傾き（期待値は1次:2、2次:4、4次:8）:", slopes)
+print("Convergence slopes (expected: order 1: 2, order 2: 4, order 4: 8):", slopes)
 
 # %% [markdown]
 # 測定された傾きが、期待される $\Delta t^2$、$\Delta t^4$、$\Delta t^8$ の フィデリティ誤差の振る舞いを再現していることがわかります。\
@@ -346,7 +346,7 @@ assert artifact.source_digest.hex() == program.semantic_digest
 assert tuple(slot.name for slot in artifact.parameter_abi.slots) == ("time",)
 assert record.result.shots == SAMPLE_SHOTS
 assert sum(record.result.counts.values()) == SAMPLE_SHOTS
-print("測定結果:", record.result.counts)
+print("Measurement counts:", record.result.counts)
 
 # %% [markdown]
 # Qamomile の測定結果から得た励起確率、そして同じ 4 次公式を NumPy で計算した励起確率と比較してみましょう。
@@ -363,10 +363,10 @@ observed_probability = record.result.probability((1,))
 shots = record.result.shots
 sample_standard_error = np.sqrt(observed_probability * (1.0 - observed_probability) / shots)
 
-print(f"励起確率（厳密解）:       {exact_probability:.4f}")
-print(f"励起確率（NumPy・4次）:  {numerical_probability:.4f}")
-print(f"励起確率（Qamomile測定）:{observed_probability:.4f}")
-print(f"測定の標準誤差の目安:   {sample_standard_error:.4f}")
+print(f"Excitation probability (exact):          {exact_probability:.4f}")
+print(f"Excitation probability (NumPy, order 4): {numerical_probability:.4f}")
+print(f"Excitation probability (Qamomile):       {observed_probability:.4f}")
+print(f"Estimated sampling standard error:      {sample_standard_error:.4f}")
 
 # %% [markdown]
 # ### 発展: ラビ振動の時間依存性を可視化する

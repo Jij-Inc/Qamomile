@@ -95,7 +95,7 @@ is_docs_path() {
 
   case "${path}" in
     # Read the Docs controls the documentation build and published output.
-    docs/* | .readthedocs.yaml)
+    docs/* | .github/docs-localization/* | .readthedocs.yaml)
       return 0
       ;;
     *.ipynb)

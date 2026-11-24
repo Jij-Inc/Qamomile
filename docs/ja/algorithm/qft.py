@@ -276,8 +276,8 @@ endpoint = qm.Reference()
 shots = 512
 results = {}
 for implementation, kernel in {
-    "スクラッチ実装": qft_frequency_estimator_from_scratch,
-    "組み込みqft": qft_frequency_estimator_with_stdlib,
+    "from scratch": qft_frequency_estimator_from_scratch,
+    "built-in qft": qft_frequency_estimator_with_stdlib,
 }.items():
     implementation_program = qm.specialize(kernel, **EXAMPLE_INPUTS)
     implementation_artifact = qm.compile(implementation_program, to=endpoint)
@@ -298,14 +298,14 @@ indices = np.arange(dimension)
 bar_width = 0.4
 ax.bar(
     indices - bar_width / 2,
-    probabilities_by_implementation["スクラッチ実装"],
+    probabilities_by_implementation["from scratch"],
     width=bar_width,
     color="#2696EB",
     label="from scratch",
 )
 ax.bar(
     indices + bar_width / 2,
-    probabilities_by_implementation["組み込みqft"],
+    probabilities_by_implementation["built-in qft"],
     width=bar_width,
     color="#FF6B6B",
     label="built-in qft",
@@ -333,8 +333,8 @@ assert all(
     for outcome in result.counts
 )
 assert np.allclose(
-    probabilities_by_implementation["スクラッチ実装"],
-    probabilities_by_implementation["組み込みqft"],
+    probabilities_by_implementation["from scratch"],
+    probabilities_by_implementation["built-in qft"],
     rtol=0.0,
     atol=0.0,
 )
@@ -386,12 +386,12 @@ resource_metrics = {
 counts_4 = {
     name: exact_count(estimate_4, metric) for name, metric in resource_metrics.items()
 }
-print("量子ビット数:", counts_4["qubits"])
-print("総ゲート数:", counts_4["total"])
-print("単一量子ビットゲート数:", counts_4["single_qubit"])
-print("2量子ビットゲート数:", counts_4["two_qubit"])
-print("回転ゲート数:", counts_4["rotation_gates"])
-print("クリフォードゲート数:", counts_4["clifford_gates"])
+print("qubits:", counts_4["qubits"])
+print("total gates:", counts_4["total"])
+print("single-qubit gates:", counts_4["single_qubit"])
+print("two-qubit gates:", counts_4["two_qubit"])
+print("rotation gates:", counts_4["rotation_gates"])
+print("Clifford gates:", counts_4["clifford_gates"])
 
 assert counts_4["qubits"] == 4
 assert counts_4["total"] == 12

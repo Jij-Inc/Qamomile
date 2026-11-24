@@ -114,9 +114,12 @@ independent goals, split it into two pages.
 - **Docs as tests**: every runnable notebook should include assertions for the
   important shapes, counts, or result properties. Keep runtime small enough for
   [tests/docs/test_tutorials.py](../tests/docs/test_tutorials.py).
-- **Execute English pages in CI**: docs tests use the English page as the
-  canonical runtime check. Changes to shared executable code, CI settings, and
-  assertions must be mirrored in the Japanese counterpart.
+- **Keep bilingual examples in sync.** The docs tests compare the executable
+  code in each English and Japanese pair and run the English page. Comments
+  and docstrings can be translated. Keep executable strings such as error
+  messages, plot labels, and dictionary keys in English in both versions.
+  For pages with an existing [localization record](../.github/docs-localization/),
+  the tests check each program against its recorded digest and run both pages.
 - **No manual References section**: use MyST cross-references, citations, or
   external links instead of hand-maintaining a References section.
 - **Use MyST notes for remarks**: tips, notes, and remarks should use
@@ -367,8 +370,7 @@ Update each of the following:
    "docs/en/<new>/**/*.py",
    "docs/en/<new>/**/*.ipynb",
    ```
-   English pages are the canonical execution checks; mirror executable source
-   changes into Japanese pages rather than adding duplicate CI executions.
+   The English patterns also select Japanese pages with a localization record.
    Prefer adding the directory pattern and then skipping only the
    specific credentialed or side-effecting pages via `SKIP_TUTORIALS`.
 8. **Update the `Directory Guide` section of this README** to

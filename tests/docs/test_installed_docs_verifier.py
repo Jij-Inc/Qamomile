@@ -1,4 +1,4 @@
-"""Unit tests for installed-wheel documentation verification."""
+"""Check bilingual documentation and the installed-wheel release verifier."""
 
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 pytestmark = pytest.mark.docs
-SCRIPT = Path(__file__).parents[2] / ".github" / "scripts" / "verify-installed-docs.py"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = PROJECT_ROOT / ".github" / "scripts" / "verify-installed-docs.py"
 
 
 def _load_verifier() -> ModuleType:
@@ -27,6 +28,15 @@ def _load_verifier() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_repository_bilingual_programs(subtests: pytest.Subtests) -> None:
+    """Apply the release parity check to the documentation in this checkout."""
+    verifier = _load_verifier()
+    docs_root = PROJECT_ROOT / "docs"
+    for page in verifier.discover_pages(docs_root):
+        with subtests.test(page=page.relative_to(docs_root).as_posix()):
+            verifier.verify_bilingual_programs(docs_root, (page,))
 
 
 def test_installed_docs_reject_repository_import_origin(tmp_path: Path) -> None:

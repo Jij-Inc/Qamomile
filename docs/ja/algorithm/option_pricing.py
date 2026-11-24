@@ -111,7 +111,7 @@ docs_test_mode = os.environ.get("QAMOMILE_DOCS_TEST") == "1"
 n_qubits = 4
 S0, K, r, sigma, T = 2.0, 1.9, 0.05, 0.4, 40 / 365
 if not (sigma > 0 and T > 0):
-    raise ValueError("この例では sigma と T に正の値を指定してください。")
+    raise ValueError("Use positive values for sigma and T in this example.")
 
 mu  = (r - 0.5 * sigma**2) * T
 std = sigma * np.sqrt(T)
@@ -129,11 +129,11 @@ amps  = np.sqrt(probs)   # Möttönen エンコード用の振幅 √p_i
 
 c     = 0.25             # スケーリングパラメータ
 if not 0 < c <= 1:
-    raise ValueError("c は 0 < c <= 1 の範囲で指定してください。")
+    raise ValueError("Choose c such that 0 < c <= 1.")
 
 F_max = float(S_max - K)
 if F_max <= 0:
-    raise ValueError("格子上の受取額はすべて0です。この例では K < S_max を指定してください。")
+    raise ValueError("The payoff is zero at every grid point. Choose K < S_max in this example.")
 
 # ── 目標振幅角 ──
 payoff       = np.maximum(S_grid - K, 0.0)
@@ -151,11 +151,11 @@ P1_exact  = float(np.sum(probs * np.sin(alpha_target)**2))
 E_ftilde  = 2 * exact_E_f / F_max - 1
 P1_approx = c * E_ftilde + 0.5
 
-print(f"期待ペイオフ(数値積分):     {exact_E_f:.6f}")
-print(f"フェアバリュー(参照値):     {exact_fair:.6f}")
-print(f"P1 厳密値:                 {P1_exact:.6f}")
-print(f"P1 近似値(線形近似):        {P1_approx:.6f}")
-print(f"P1 近似誤差:               {abs(P1_exact - P1_approx):.6f}")
+print(f"Expected payoff (numerical integration): {exact_E_f:.6f}")
+print(f"Fair value (reference):                 {exact_fair:.6f}")
+print(f"Exact P1:                               {P1_exact:.6f}")
+print(f"Approximate P1 (linear approximation):  {P1_approx:.6f}")
+print(f"P1 approximation error:                 {abs(P1_exact - P1_approx):.6f}")
 
 
 # %% [markdown]
@@ -182,7 +182,7 @@ print(f"Ry({first_ry:.4f}) → CNOT → Ry({second_ry:.4f}) → CNOT")
 
 # 格子全体では、価格ビットが制御ビット、最後のビットが標的のペイオフ量子ビット。
 apply_payoff = uniformly_controlled_ry(price_rotation_angles)
-print(f"UCR-Y ゲート数: {2 * len(price_rotation_angles)} (Ry + CNOT)")
+print(f"Number of UCR-Y gates: {2 * len(price_rotation_angles)} (Ry + CNOT)")
 
 
 # %% [markdown]
@@ -226,10 +226,10 @@ ones_k0 = res_k0.counts.get((1,), 0)
 P1_k0 = ones_k0 / num_shots
 
 print(f"\n[Qamomile k=0]")
-print(f"P1 測定値:              {P1_k0:.4f}")
-print(f"P1 厳密値(参照):     {P1_exact:.4f}")
-print(f"P1 近似値:          {P1_approx:.4f}")
-print("→ 測定値が厳密値に近ければペイオフ回路は正しく動いています")
+print(f"Measured P1:             {P1_k0:.4f}")
+print(f"Exact P1 (reference):    {P1_exact:.4f}")
+print(f"Approximate P1:          {P1_approx:.4f}")
+print("-> The payoff circuit works correctly when the measurement is close to the exact value.")
 
 
 # %% [markdown]
@@ -302,7 +302,7 @@ for k in k_list:
     N_list.append(shots_per_k)
     P1_k  = ones / shots_per_k
     P1_th = np.sin((2*k + 1) * theta_a_theory)**2
-    print(f"k={k:2d}: P1 測定={P1_k:.4f}  理論値(厳密)={P1_th:.4f}")
+    print(f"k={k:2d}: measured P1={P1_k:.4f}, theoretical (exact) P1={P1_th:.4f}")
 
 
 # %% [markdown]
@@ -335,12 +335,12 @@ E_ftilde_hat = (a_hat - 0.5) / c
 E_f_hat      = (E_ftilde_hat + 1) * F_max / 2
 fair_hat     = np.exp(-r * T) * E_f_hat
 
-print(f"\n===== 推定結果 =====")
-print(f"推定 P1:          {a_hat:.6f}  "
-      f"(厳密値 {P1_exact:.6f}, 近似値 {P1_approx:.6f})")
-print(f"推定 E[f(S)]:     {E_f_hat:.6f}  (参照値 {exact_E_f:.6f})")
-print(f"推定フェアバリュー: {fair_hat:.6f}  (参照値 {exact_fair:.6f})")
-print(f"絶対誤差:          {abs(fair_hat - exact_fair):.6f}")
+print(f"\n===== Estimation results =====")
+print(f"Estimated P1:          {a_hat:.6f}  "
+      f"(exact {P1_exact:.6f}, approximation {P1_approx:.6f})")
+print(f"Estimated E[f(S)]:     {E_f_hat:.6f}  (reference {exact_E_f:.6f})")
+print(f"Estimated fair value:  {fair_hat:.6f}  (reference {exact_fair:.6f})")
+print(f"Absolute error:        {abs(fair_hat - exact_fair):.6f}")
 
 # %% [markdown]
 # 量子回路により推定して得た値 `E[f(S)]` が参照値と異なっているのは
@@ -357,9 +357,9 @@ statistical_error = total_error - approximation_error
 error_magnitude_sum = abs(approximation_error) + abs(statistical_error)
 approximation_share = abs(approximation_error) / error_magnitude_sum
 
-print(f"近似誤差: {approximation_error:.6f}")
-print(f"統計誤差: {statistical_error:.6f}")
-print(f"誤差の絶対値に占める近似誤差の割合: {approximation_share:.1%}")
+print(f"Approximation error: {approximation_error:.6f}")
+print(f"Statistical error:   {statistical_error:.6f}")
+print(f"Approximation share of total error magnitude: {approximation_share:.1%}")
 
 # %% [markdown]
 # この例では、誤差の大半が近似によるものであることがわかります。残りの部分は統計誤差です。これは量子振幅推定部分の測定回数を増やすことで、減少させることができます。しかし測定回数を増やすと計算実行時間が増大するため、注意が必要です。

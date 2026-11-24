@@ -18,6 +18,7 @@ except ImportError:
     NBCLIENT_AVAILABLE = False
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
+LOCALIZATION_RECORDS = Path(".github/docs-localization")
 
 # Tutorials that require credentials or remote side effects and are skipped in CI.
 SKIP_TUTORIALS: dict[str, str] = {}
@@ -55,7 +56,7 @@ SUBPROCESS_TUTORIALS = frozenset({"cudaq_support"})
 
 
 def discover_tutorial_files() -> list[Path]:
-    """Discover runnable documentation pages.
+    """Discover English pages and Japanese programs with a localization record.
 
     Returns:
         list[Path]: Runnable Python or unpaired notebook documentation paths.
@@ -72,6 +73,10 @@ def discover_tutorial_files() -> list[Path]:
             if f.suffix == ".ipynb" and f.with_suffix(".py").exists():
                 continue
             tutorial_files.append(f)
+            relative = f.relative_to(PROJECT_ROOT / "docs/en")
+            record = PROJECT_ROOT / LOCALIZATION_RECORDS / relative.with_suffix(".json")
+            if f.suffix == ".py" and record.is_file():
+                tutorial_files.append(PROJECT_ROOT / "docs/ja" / relative)
     return sorted(tutorial_files)
 
 
@@ -82,8 +87,8 @@ def select_tutorial_files(
 
     A changed paired notebook selects its Python authoring source because the
     Python file is the canonical executable used by documentation tests. A
-    changed Japanese page selects the corresponding English executable. CI
-    does not use this helper; it executes every English page.
+    change to either language or the localization record selects every runnable
+    language for that page. CI runs the full set.
 
     Args:
         tutorial_files (list[Path]): All runnable documentation files in the
@@ -97,26 +102,19 @@ def select_tutorial_files(
     if changed_files is None:
         return sorted(tutorial_files)
 
-    files_by_changed_path: dict[str, Path] = {}
+    changes = set(changed_files)
+    selected_files = []
     for tutorial_file in tutorial_files:
-        relative_path = tutorial_file.relative_to(PROJECT_ROOT).as_posix()
-        files_by_changed_path[relative_path] = tutorial_file
-        paired_suffix = ".ipynb" if tutorial_file.suffix == ".py" else ".py"
-        paired_path = Path(relative_path).with_suffix(paired_suffix).as_posix()
-        files_by_changed_path[paired_path] = tutorial_file
-        if relative_path.startswith("docs/en/"):
-            japanese_path = relative_path.replace("docs/en/", "docs/ja/", 1)
-            files_by_changed_path[japanese_path] = tutorial_file
-            paired_japanese_path = (
-                Path(japanese_path).with_suffix(paired_suffix).as_posix()
-            )
-            files_by_changed_path[paired_japanese_path] = tutorial_file
-
-    selected_files = {
-        files_by_changed_path[changed_file]
-        for changed_file in changed_files
-        if changed_file in files_by_changed_path
-    }
+        localized_page = tutorial_file.relative_to(PROJECT_ROOT / "docs")
+        page = Path(*localized_page.parts[1:])
+        paths = {
+            (directory / page.with_suffix(suffix)).as_posix()
+            for directory in (Path("docs/en"), Path("docs/ja"))
+            for suffix in (".py", ".ipynb")
+        }
+        paths.add((LOCALIZATION_RECORDS / page.with_suffix(".json")).as_posix())
+        if changes.intersection(paths):
+            selected_files.append(tutorial_file)
     return sorted(selected_files)
 
 

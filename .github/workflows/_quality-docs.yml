@@ -52,7 +52,7 @@ jobs:
           uv run --frozen --no-default-groups --group docs --extra hugr python -c
           "import braket.circuits, braket.devices, cudaq, hugr, quri_parts, quri_parts.qulacs, selene_sim, tket_exts"
 
-      - name: Run documentation tests
+      - name: Check bilingual examples and run documentation tests
         run: >-
           uv run --frozen --no-default-groups --group docs --extra hugr
           pytest -m docs tests/docs -v --durations=10

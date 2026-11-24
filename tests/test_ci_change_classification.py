@@ -123,6 +123,7 @@ def _classify(repository: Path, base: str, head: str) -> dict[str, str]:
         ("qamomile/example.py", "true", "false"),
         ("tests/test_example.py", "true", "false"),
         ("docs/en/tutorial/example.py", "false", "true"),
+        (".github/docs-localization/algorithm/example.json", "false", "true"),
         ("unknown-input.txt", "true", "false"),
         ("LIMITATIONS.md", "false", "false"),
     ],
