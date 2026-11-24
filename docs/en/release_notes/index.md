@@ -4,6 +4,7 @@ slug: release-notes
 
 # Release Notes
 
+- [v0.16.0](v0_16_0) — Migrating kernels, measurements, and resource estimates from v0.15.2. Changes since RC1 cover single-bit results, random seeds, and IBM Runtime dry runs.
 - [v0.16.0 RC1](v0_16_0_rc1) — Rust compiler core, revised execution and resource APIs, expanded stdlib, Cirq integration, and direct QIR output
 - [v0.15.2](v0_15_2) — QSVT eigenstate filtering, Quantinuum H2 execution through Nexus, and shot-dependent HUGR programs
 - [v0.15.1](v0_15_1) — Grover Adaptive Search circuits, IBM Quantum hardware and HUGR execution, unsigned integer measurement with `QInt`, and job restoration including local results
