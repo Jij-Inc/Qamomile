@@ -184,6 +184,7 @@ ReadTheDocs builds with `execute.enabled: false`, assuming that executed `.ipynb
 | [docs/en/](en/) | English documentation source. |
 | [docs/ja/](ja/) | Japanese documentation source mirroring `docs/en/`. |
 | [docs/en/tutorial/](en/tutorial/) / [docs/ja/tutorial/](ja/tutorial/) | New-user tutorials for learning Qamomile workflows. |
+| [docs/en/hands-on/](en/hands-on/) / [docs/ja/hands-on/](ja/hands-on/) | Hands-on notebooks on quantum circuits, resource estimation, and optimization. |
 | [docs/en/algorithm/](en/algorithm/) / [docs/ja/algorithm/](ja/algorithm/) | Algorithm walkthroughs implemented with Qamomile. |
 | [docs/en/usage/](en/usage/) / [docs/ja/usage/](ja/usage/) | Focused usage notes for Qamomile features and API patterns. |
 | [docs/en/integration/](en/integration/) / [docs/ja/integration/](ja/integration/) | Integration guides for external SDKs, services, or packages. |
@@ -267,7 +268,7 @@ setup.
    in both language configurations.
 
 4. **Check docs-test coverage.** Pages under
-   `tutorial/`, `algorithm/`, `usage/`, and `integration/` are already
+   `tutorial/`, `hands-on/`, `algorithm/`, `usage/`, and `integration/` are already
    discovered by [tests/docs/test_tutorials.py](../tests/docs/test_tutorials.py)'s
    `TUTORIAL_PATTERNS`.
    If a page cannot run in CI because it needs credentials or remote
@@ -305,10 +306,8 @@ setup.
 
 ### Adding a new section directory
 
-The four sections currently registered (`tutorial/`, `algorithm/`,
-`usage/`, `integration/`) live at the top level under
-`docs/<lang>/`. Adding a new one — at the same level — is supported
-and only needs config changes.
+Article sections live at the top level under `docs/<lang>/`. Add a sibling
+section by registering it in the build and navigation configuration.
 
 #### Adding a sibling section (e.g. a new `theory/`)
 
@@ -335,7 +334,7 @@ Update each of the following:
    - [First Article Title](first_article) — short description
    ```
 3. **Register the section in [docs/scripts/build_doc_tags.py](scripts/build_doc_tags.py)**:
-   - Append `"<new>"` to `SECTIONS`.
+   - Map `"<new>"` to its required tag in `SECTIONS`.
    - Add `"<new>"` to `ALLOWED_TAGS` as the section tag only when the user has
      explicitly requested that taxonomy change. Adding a section does not by
      itself authorize adding a tag.
@@ -386,8 +385,8 @@ does not need touching.
 
 ### Tags
 
-Articles under `{tutorial,algorithm,usage,integration}/` (in both
-`en/` and `ja/`) are tag-filterable. Tags are declared in each article's
+Articles under `{tutorial,hands-on,algorithm,usage,integration}/` are
+tag-filterable in both English and Japanese. Tags are declared in each article's
 jupytext frontmatter as shown in the skeletons.
 
 Tags are language-agnostic (same string for `en` and `ja`). The build

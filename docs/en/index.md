@@ -127,6 +127,12 @@ Install Qamomile and add Qiskit, Cirq, QURI Parts, CUDA-Q, Braket, or HUGR only 
 Learn typed functions, functional quantum values, parameters, resources, execution, and target compilation.
 :::
 
+:::{card}
+:header: **Hands-on**
+:link: hands-on/index.md
+Work through five notebooks on quantum circuits, resource estimation, and optimization.
+:::
+
 ::::
 
 ---

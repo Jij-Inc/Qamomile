@@ -127,6 +127,12 @@ Qamomileをインストールし、Qiskit、Cirq、QURI Parts、CUDA-Q、Braket�
 型付き関数、関数型の量子値、パラメータ、リソース、実行、target向けトランスパイルを順に学べます。
 :::
 
+:::{card}
+:header: **ハンズオン**
+:link: hands-on/index.md
+量子回路、リソース推定、最適化を5本のノートブックで学びます。
+:::
+
 ::::
 
 ---

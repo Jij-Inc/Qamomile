@@ -27,6 +27,10 @@ project:
       file: tutorial/index.md
       children:
         - pattern: tutorial/*.ipynb
+    - title: ハンズオン
+      file: hands-on/index.md
+      children:
+        - pattern: hands-on/*.ipynb
     - title: アルゴリズム
       file: algorithm/index.md
       children:

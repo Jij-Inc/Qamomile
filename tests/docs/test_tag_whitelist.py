@@ -107,6 +107,8 @@ def test_article_tags_satisfy_invariants(py_path: Path, section: str) -> None:
     """
     article = _btags._load_article(py_path, section)
 
+    section_tag = _btags.SECTIONS[section]
+
     # Invariant 1: tags: frontmatter is mandatory.
     # ``_load_article`` returns None when the .py has no frontmatter or
     # the frontmatter has an empty / missing ``tags:`` list. Both cases
@@ -114,17 +116,14 @@ def test_article_tags_satisfy_invariants(py_path: Path, section: str) -> None:
     assert article is not None, (
         f"{py_path.relative_to(PROJECT_ROOT)} is missing the `tags:` "
         f"frontmatter (or it is empty). Every article must declare at "
-        f"least its section tag ({section!r})."
+        f"least its section tag ({section_tag!r})."
     )
 
     # Invariant 2: the section tag must be present.
-    # We surface the article's containing directory through the chip
-    # cloud / per-tag page UX, so the article must carry the matching
-    # tag — otherwise it would not appear under tags/<section>.md.
-    assert section in article.tags, (
+    assert section_tag in article.tags, (
         f"{py_path.relative_to(PROJECT_ROOT)} does not carry its section "
-        f"tag {section!r}. Articles under docs/<lang>/{section}/ must "
-        f"include {section!r} in their `tags:` list (alongside any "
+        f"tag {section_tag!r}. Articles under docs/<lang>/{section}/ must "
+        f"include {section_tag!r} in their `tags:` list (alongside any "
         f"topical tags)."
     )
 

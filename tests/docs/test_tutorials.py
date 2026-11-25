@@ -26,6 +26,8 @@ SKIP_TUTORIALS: dict[str, str] = {}
 TUTORIAL_PATTERNS = [
     "docs/en/tutorial/**/*.py",
     "docs/en/tutorial/**/*.ipynb",
+    "docs/en/hands-on/**/*.py",
+    "docs/en/hands-on/**/*.ipynb",
     "docs/en/algorithm/**/*.py",
     "docs/en/algorithm/**/*.ipynb",
     "docs/en/usage/**/*.py",

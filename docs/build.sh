@@ -47,13 +47,13 @@ cd "$(dirname "$0")"
 LANGS=(en ja)
 # Sections whose .py sources are synced to .ipynb. This includes integration
 # because jupytext sync only rewrites cell sources and does not execute code.
-SYNC_DIRS=(tutorial algorithm usage integration)
+SYNC_DIRS=(tutorial hands-on algorithm usage integration)
 # Sections whose notebooks are executed by bulk execute/sync-build targets.
 # integration is excluded because some pages currently require credentials;
 # docs tests cover integration pages with file-level skips for credentialed
 # notebooks.
 # release_notes is excluded because it is markdown-only; nothing to sync or execute.
-TARGET_DIRS=(tutorial algorithm usage)
+TARGET_DIRS=(tutorial hands-on algorithm usage)
 
 # Color output
 RED='\033[0;31m'
